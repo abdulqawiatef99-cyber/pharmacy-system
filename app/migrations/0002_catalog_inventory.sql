@@ -101,6 +101,8 @@ CREATE TABLE batches (
     batch_no         TEXT NOT NULL DEFAULT '',
     expiry_date      TEXT,
     expiry_precision TEXT CHECK (expiry_precision IN ('day','month')),
+    public_price     INTEGER,      -- piasters per pack printed on THIS batch (Egyptian price
+                                   -- rises: old batches keep their old legal price)
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (org_id, item_id, batch_no, expiry_date)
 );

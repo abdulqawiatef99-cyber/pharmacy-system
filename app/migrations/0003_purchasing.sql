@@ -30,9 +30,10 @@ CREATE TABLE purchase_invoices (
     extraction_method TEXT,            -- 'structured','pdf_text','ai_vision','manual'
     extraction_model  TEXT,
     declared_total    INTEGER,         -- piasters, as printed (net payable)
-    declared_discount INTEGER,
-    declared_tax      INTEGER,
+    extra_discount    INTEGER NOT NULL DEFAULT 0,  -- invoice-level discount NOT already in lines
+    extra_tax         INTEGER NOT NULL DEFAULT 0,  -- invoice-level tax NOT already in lines
     computed_total    INTEGER,
+    acknowledged_issues TEXT NOT NULL DEFAULT '[]', -- JSON [{code, reason, by, at}]
     content_hash      TEXT,            -- normalized lines fingerprint (duplicate detection)
     raw_extraction    TEXT,            -- original extracted JSON, never edited
     notes             TEXT,
