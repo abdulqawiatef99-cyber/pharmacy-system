@@ -48,6 +48,8 @@ class Database:
         self.path = str(path)
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        self._all: list[sqlite3.Connection] = []
+        self._all_lock = threading.Lock()
 
     # -- connections ---------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
@@ -67,13 +69,20 @@ class Database:
         if c is None:
             c = self._connect()
             self._local.conn = c
+            with self._all_lock:
+                self._all.append(c)
         return c
 
     def close(self) -> None:
-        c = getattr(self._local, "conn", None)
-        if c is not None:
-            c.close()
-            self._local.conn = None
+        """Close every connection opened by any thread (server shutdown / tests)."""
+        with self._all_lock:
+            for c in self._all:
+                try:
+                    c.close()
+                except sqlite3.Error:
+                    pass
+            self._all.clear()
+        self._local = threading.local()
 
     # -- queries -------------------------------------------------------------
     def one(self, sql: str, params: tuple | dict = ()) -> sqlite3.Row | None:
