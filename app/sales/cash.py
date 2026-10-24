@@ -71,14 +71,24 @@ class CashDrawer:
             raise NotFound("الشيفت غير موجود")
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
-        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(on_credit),0) cr, count(*) n"
+        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t,"
+                           " coalesce(sum(on_credit),0) cr, count(*) n"
                            " FROM sales WHERE shift_id=? AND status='completed'", (shift_id,))
+        by_channel = [dict(r) for r in self.db.all(
+            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
+            " JOIN sales s ON s.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
+            " WHERE s.shift_id=? AND s.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
+        with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d JOIN sales s"
+                                   " ON s.id=d.sale_id WHERE s.org_id=? AND s.branch_id=? AND d.status IN"
+                                   " ('out','delivered')", (ctx.org_id, s["branch_id"]))["c"]
         expected = s["opening_cash"] + sum(by_kind.values())
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
-               else s["expected_cash"], "card_total": card["c"], "credit_total": card["cr"], "sales_count": card["n"]}
+               else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
+               "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier}
         if not ctx.can("cash.see_expected"):
             # blind count: the person closing the drawer must not know the target number
-            for k in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total"):
+            for k in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
+                      "by_channel"):
                 out.pop(k, None)
             out["blind"] = True
         return out

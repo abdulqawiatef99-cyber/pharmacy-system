@@ -163,8 +163,9 @@ def receipt_lines(org_name: str, sale: dict, when: str) -> list[tuple[str, str, 
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
     out.append(("total", "المطلوب", m(sale["total"])))
-    for key, label in (("paid_cash", "نقدي"), ("paid_card", "فيزا"), ("on_credit", "آجل")):
-        if sale[key]:
+    for key, label in (("delivery_fee", "رسوم التوصيل"), ("paid_cash", "نقدي"), ("paid_card", "فيزا"),
+                       ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
+        if sale.get(key):
             out.append(("row", label, m(sale[key])))
     out.append(("small", "شكرًا لزيارتكم", ""))
     return out

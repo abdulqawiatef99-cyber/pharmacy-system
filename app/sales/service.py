@@ -249,9 +249,14 @@ class Sales:
         for l in self.db.all("SELECT * FROM sale_lines WHERE sale_id=? ORDER BY line_no", (sid,)):
             l = dict(l)
             item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
-            l["item"] = {"name": item["name_en"] or item["name_ar"], "strength": item["strength_norm"],
+            cat = self.db.one("SELECT name, mark, no_return FROM categories WHERE id=?",
+                              (item["category_id"],)) if item.get("category_id") else None
+            l["item"] = {"name": item["name_en"] or item["name_ar"], "name_en": item["name_en"],
+                         "name_ar": item["name_ar"], "strength": item["strength_norm"],
                          "form": item["dosage_form"], "pack_size": item["pack_size"],
-                         "base_unit": item["base_unit_name"], "active_ingredient": item["active_ingredient"]}
+                         "base_unit": item["base_unit_name"], "pack_unit": item["pack_unit_name"],
+                         "active_ingredient": item["active_ingredient"],
+                         "mark": cat["mark"] if cat else None, "no_return": bool(cat["no_return"]) if cat else False}
             if s["status"] == "draft":
                 try:
                     plan = self._plan(ctx, s, l, item)
@@ -277,7 +282,13 @@ class Sales:
             lines.append(l)
         s["lines"] = lines
         if s["status"] == "draft":
-            s["subtotal"], s["discount_total"], s["total"] = subtotal, discount, subtotal - discount
+            s["subtotal"], s["discount_total"] = subtotal, discount
+            s["total"] = subtotal - discount + (s["delivery_fee"] or 0)
+        d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
+        s["delivery"] = dict(d) if d else None
+        s["payments"] = [dict(r) for r in self.db.all(
+            "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
+            " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
         if s["customer_id"]:
             c = self.db.one("SELECT id, name, phone, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
@@ -300,7 +311,7 @@ class Sales:
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
-                 confirm_below_cost: bool = False) -> dict:
+                 confirm_below_cost: bool = False, payments: list[dict] | None = None) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -312,9 +323,18 @@ class Sales:
                 out = self.get(ctx, sid)
                 out["replayed"] = True
                 return out
-        if min(paid_cash, paid_card, on_credit) < 0:
-            raise ValidationFailed("مبالغ الدفع لا تكون بالسالب")
+        if payments is None:          # older screens: three amounts
+            payments = [{"method": m, "amount": a} for m, a in
+                        (("cash", paid_cash), ("card", paid_card), ("credit", on_credit)) if a]
+            if min(paid_cash, paid_card, on_credit) < 0:
+                raise ValidationFailed("مبالغ الدفع لا تكون بالسالب")
+        payments = self._check_payments(ctx, payments)
+        paid_cash = sum(p["amount"] for p in payments if p["method"] == "cash")
+        paid_card = sum(p["amount"] for p in payments if p["method"] == "card")
+        paid_transfer = sum(p["amount"] for p in payments if p["method"] == "transfer")
+        on_credit = sum(p["amount"] for p in payments if p["method"] == "credit")
         preview = self.get(ctx, sid)
+        delivery = preview["kind"] == "delivery"
         if preview["status"] != "draft":
             raise Conflict("الفاتورة مكتملة أو ملغاة", code="not_draft")
         if version is not None and preview["version"] != version:
@@ -325,9 +345,11 @@ class Sales:
         if bad:
             raise Conflict("فيه أصناف غير متاحة أو بدون سعر", code="line_problems",
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
-        if paid_cash and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
+        if paid_cash and not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
             raise Conflict("الخزنة مقفولة — افتح شيفت قبل البيع النقدي", code="no_open_shift")
-        if paid_cash + paid_card + on_credit != preview["total"]:
+        if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
+            raise ValidationFailed("فاتورة التوصيل محتاجة العنوان أو رقم الموبايل", code="delivery_details")
+        if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"]})
         if on_credit:
@@ -377,24 +399,35 @@ class Sales:
                 if not confirm_below_cost:
                     raise Conflict("الخصم بينزّل السعر تحت التكلفة — البيع ده بخسارة", code="below_cost_confirm",
                                    details={"lines": below_cost})
+            total += s["delivery_fee"] or 0
             if total != preview["total"]:
                 raise Conflict("السعر اتغير أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
-            shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
-                or cash.open_shift_id(self.db, ctx, s["branch_id"])
+            if delivery:              # the courier carries the cash until he hands it in
+                shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
+                self.db.execute("UPDATE sale_deliveries SET status='out', cash_due=?, out_at=? WHERE sale_id=?",
+                                (paid_cash, _now(), sid))
+            else:
+                shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
+                    or cash.open_shift_id(self.db, ctx, s["branch_id"])
             self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
+            for p in payments:
+                self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount)"
+                                " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
+                                                          p.get("channel_id"), p["amount"]))
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
-                            " total=?, paid_cash=?, paid_card=?, on_credit=?, completed_at=?,"
+                            " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
                             (no, preview["subtotal"], preview["discount_total"], total, paid_cash,
-                             paid_card, on_credit, _now(), request_id, sid))
+                             paid_card, paid_transfer, on_credit, _now(), request_id, sid))
             if on_credit:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], on_credit, sid, ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
                          after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
-                                "credit": on_credit, "below_cost": below_cost or None})
+                                "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
+                                "below_cost": below_cost or None})
             disc_lines = [l for l in preview["lines"] if l["discount_bp"]]
             if disc_lines:
                 names = "، ".join(f"{l['item']['name']} {l['discount_bp'] / 100:g}%" for l in disc_lines[:4])
@@ -414,6 +447,155 @@ class Sales:
         self.db.execute("UPDATE branch_counters SET next_no=next_no+1 WHERE org_id=? AND branch_id=? AND kind=?",
                         (ctx.org_id, branch_id, kind))
         return n
+
+    # ------------------------------------------------------------ payments
+    def _check_payments(self, ctx: Context, payments) -> list[dict]:
+        if not isinstance(payments, list) or not payments or len(payments) > 6:
+            raise ValidationFailed("طريقة الدفع غير صحيحة")
+        channels = {r["id"]: dict(r) for r in self.db.all(
+            "SELECT * FROM payment_channels WHERE org_id=? AND is_active=1", (ctx.org_id,))}
+        out = []
+        for p in payments:
+            if not isinstance(p, dict):
+                raise ValidationFailed("طريقة الدفع غير صحيحة")
+            m, amount, ch = p.get("method"), p.get("amount"), p.get("channel_id") or None
+            if m not in ("cash", "card", "transfer", "credit") or not isinstance(amount, int) or amount < 0:
+                raise ValidationFailed("طريقة الدفع غير صحيحة")
+            if amount == 0:
+                continue
+            if m in ("card", "transfer"):
+                kinds = [c for c in channels.values() if c["kind"] == m]
+                if kinds and (ch not in channels or channels[ch]["kind"] != m):
+                    raise ValidationFailed("اختار " + ("المكنة" if m == "card" else "المحفظة / طريقة التحويل"),
+                                           code="channel_required", details={"method": m})
+                if not kinds:
+                    ch = None
+            else:
+                ch = None
+            out.append({"method": m, "amount": amount, "channel_id": ch})
+        return out
+
+    # ------------------------------------------------------------ open invoices (tabs) and details
+    def list_drafts(self, ctx: Context) -> list[dict]:
+        ctx.require("sales.create")
+        out = []
+        for r in self.db.all("SELECT id, kind, created_at FROM sales WHERE org_id=? AND branch_id=? AND"
+                             " status='draft' AND created_by=? ORDER BY created_at", (ctx.org_id, ctx.branch_id,
+                                                                                    ctx.user_id)):
+            n = self.db.one("SELECT count(*) c FROM sale_lines WHERE sale_id=?", (r["id"],))["c"]
+            out.append({**dict(r), "lines": n})
+        return out
+
+    def discard(self, ctx: Context, sid: str) -> None:
+        """Close an open invoice tab: only a draft, and only by whoever opened it."""
+        ctx.require("sales.create")
+        with self.db.transaction():
+            s = self._draft(ctx, sid)
+            if s["created_by"] != ctx.user_id:
+                raise Forbidden("الفاتورة دي مفتوحة باسم حد تاني")
+            self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=? WHERE id=?",
+                            (ctx.user_id, _now(), "تبويب اتقفل قبل البيع", sid))
+            self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=?", (sid,))
+
+    def set_details(self, ctx: Context, sid: str, data: dict) -> dict:
+        """On an open invoice: customer, store/delivery, delivery address/phone/courier/fee."""
+        ctx.require("sales.create")
+        with self.db.transaction():
+            s = self._draft(ctx, sid)
+            if "customer_id" in data:
+                cid = data["customer_id"] or None
+                if cid and not self.db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (cid, ctx.org_id)):
+                    raise NotFound("العميل غير موجود")
+                self.db.execute("UPDATE sales SET customer_id=? WHERE id=?", (cid, sid))
+            if "kind" in data:
+                if data["kind"] not in ("store", "delivery"):
+                    raise ValidationFailed("نوع الفاتورة غير صحيح")
+                self.db.execute("UPDATE sales SET kind=? WHERE id=?", (data["kind"], sid))
+                if data["kind"] == "delivery":
+                    self.db.execute("INSERT OR IGNORE INTO sale_deliveries (sale_id, org_id) VALUES (?,?)",
+                                    (sid, ctx.org_id))
+                else:
+                    self.db.execute("UPDATE sales SET delivery_fee=0 WHERE id=?", (sid,))
+            d = data.get("delivery")
+            if isinstance(d, dict):
+                kind = self.db.one("SELECT kind FROM sales WHERE id=?", (sid,))["kind"]
+                if kind != "delivery":
+                    raise ValidationFailed("الفاتورة مش توصيل")
+                fee = d.get("fee", None)
+                if fee is not None:
+                    if not isinstance(fee, int) or not 0 <= fee <= 100000:
+                        raise ValidationFailed("رسوم التوصيل غير صحيحة")
+                    self.db.execute("UPDATE sales SET delivery_fee=? WHERE id=?", (fee, sid))
+                for k in ("address", "phone", "courier"):
+                    if k in d:
+                        self.db.execute(f"UPDATE sale_deliveries SET {k}=? WHERE sale_id=?",
+                                        ((str(d[k] or "").strip()[:200] or None), sid))
+            self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+        return self.get(ctx, sid)
+
+    def update_line(self, ctx: Context, sid: str, line_id: str, *, qty_base: int | None = None,
+                    discount_bp: int | None = None) -> dict:
+        ctx.require("sales.create")
+        with self.db.transaction():
+            s = self._draft(ctx, sid)
+            l = self.db.one("SELECT * FROM sale_lines WHERE id=? AND sale_id=?", (line_id, sid))
+            if not l:
+                raise NotFound("السطر غير موجود")
+            if qty_base is not None:
+                if not isinstance(qty_base, int) or qty_base <= 0:
+                    raise ValidationFailed("الكمية غير صحيحة")
+                others = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=? AND"
+                                     " item_id=? AND id<>?", (sid, l["item_id"], line_id))["q"]
+                sellable, _ = self._available(ctx, s["branch_id"], l["item_id"])
+                if others + qty_base > sellable:
+                    raise Conflict(f"الكمية المتاحة للبيع {sellable} وحدة", code="insufficient_stock",
+                                   details={"available": sellable})
+                item = self.db.one("SELECT pack_size FROM items WHERE id=?", (l["item_id"],))
+                self.db.execute("UPDATE sale_lines SET qty_base=?, partial_pack=? WHERE id=?",
+                                (qty_base, 1 if qty_base % item["pack_size"] else 0, line_id))
+            if discount_bp is not None:
+                if not isinstance(discount_bp, int) or not 0 <= discount_bp <= 10000:
+                    raise ValidationFailed("نسبة الخصم غير صحيحة")
+                if discount_bp > ctx.discount_limit_bp:
+                    raise discount_denied(ctx, discount_bp)
+                self.db.execute("UPDATE sale_lines SET discount_bp=?, discount_by=?, discount_approved_by=? WHERE id=?",
+                                (discount_bp, ctx.user_id if discount_bp else None,
+                                 ctx.approver_id if discount_bp and discount_bp > ctx.max_discount_bp else None, line_id))
+            self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+        return self.get(ctx, sid)
+
+    # ------------------------------------------------------------ home delivery
+    def delivery_status(self, ctx: Context, sid: str, status: str) -> dict:
+        """out -> delivered -> settled. 'settled' = the courier handed the cash: it enters the drawer now."""
+        ctx.require("sales.create")
+        if status not in ("delivered", "settled"):
+            raise ValidationFailed("الحالة غير صحيحة")
+        with self.db.transaction():
+            d = self.db.one("SELECT d.*, s.status sale_status, s.branch_id, s.sale_no FROM sale_deliveries d"
+                            " JOIN sales s ON s.id=d.sale_id WHERE d.sale_id=? AND d.org_id=?", (sid, ctx.org_id))
+            if not d or d["sale_status"] != "completed":
+                raise NotFound("فاتورة التوصيل غير موجودة")
+            order = ["out", "delivered", "settled"]
+            if d["status"] not in order or order.index(status) <= order.index(d["status"]):
+                raise Conflict("الحالة دي اتسجلت قبل كده", code="delivery_state")
+            if status == "settled":
+                cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم فلوس توصيل فاتورة {d['sale_no']}",
+                            branch_id=d["branch_id"])
+                self.db.execute("UPDATE sale_deliveries SET status='settled', settled_at=?, settled_by=?,"
+                                " delivered_at=coalesce(delivered_at, ?) WHERE sale_id=?",
+                                (_now(), ctx.user_id, _now(), sid))
+            else:
+                self.db.execute("UPDATE sale_deliveries SET status='delivered', delivered_at=? WHERE sale_id=?",
+                                (_now(), sid))
+            audit.record(self.db, ctx, f"delivery.{status}", "sale", sid, after={"cash": d["cash_due"]})
+        return self.get(ctx, sid)
+
+    def open_deliveries(self, ctx: Context) -> list[dict]:
+        ctx.require("sales.create")
+        return [dict(r) for r in self.db.all(
+            "SELECT d.*, s.sale_no, s.total, s.completed_at, c.name customer FROM sale_deliveries d JOIN sales s"
+            " ON s.id=d.sale_id LEFT JOIN customers c ON c.id=s.customer_id WHERE d.org_id=? AND s.branch_id=?"
+            " AND d.status IN ('out','delivered') ORDER BY s.completed_at", (ctx.org_id, ctx.branch_id))]
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
@@ -522,7 +704,11 @@ class Sales:
                 inventory.post_movement(self.db, ctx, item_id=a["item_id"], qty_delta=a["qty_base"],
                                         batch_id=a["batch_id"], movement_type="sale_return",
                                         ref_type="sale_void", ref_id=sid, branch_id=s["branch_id"], note=reason)
-            cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
+            dl = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=?", (sid,))
+            if dl and dl["status"] != "settled":
+                self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=?", (sid,))
+            else:
+                cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
@@ -573,7 +759,8 @@ class Sales:
         d = date.fromisoformat(day) if day else local_today()
         lo, hi = local_day_bounds(d)
         r = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_cash),0) cash,"
-                        " coalesce(sum(paid_card),0) card, coalesce(sum(on_credit),0) credit,"
+                        " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
+                        " coalesce(sum(on_credit),0) credit,"
                         " coalesce(sum(returned_total),0) returns FROM sales WHERE org_id=? AND branch_id=?"
                         " AND status='completed' AND completed_at >= ? AND completed_at < ?",
                         (ctx.org_id, ctx.branch_id, lo, hi))

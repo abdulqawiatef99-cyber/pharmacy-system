@@ -118,6 +118,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     backfill_search_keys(db)
     from ..catalog import card as item_card
     item_card.ensure_default_categories(db)
+    from ..sales import channels as pay_channels
+    pay_channels.ensure_defaults(db)
     from ..core.autobackup import AutoBackup
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
@@ -260,6 +262,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                          owner_full_name=str(b.get("full_name") or user).strip(),
                                          owner_password=pw)
             item_card.ensure_default_categories(db)
+            pay_channels.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx)}, status_code=201)
@@ -1057,6 +1060,45 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(Sales(db).remove_line(ctx, req.path_params["id"], req.path_params["line_id"]))
 
     @handler
+    async def sales_drafts(req):
+        return J({"drafts": Sales(db).list_drafts(ctx_of(req))})
+
+    @handler
+    async def sales_details(req):
+        ctx = ctx_of(req)
+        return J(Sales(db).set_details(ctx, req.path_params["id"], await body(req)))
+
+    @handler
+    async def sales_discard(req):
+        Sales(db).discard(ctx_of(req), req.path_params["id"])
+        return J({"ok": True})
+
+    @handler
+    async def sales_update_line(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).update_line(ctx, req.path_params["id"], req.path_params["line_id"],
+                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp")))
+
+    @handler
+    async def sales_delivery(req):
+        ctx = ctx_of(req)
+        return J(Sales(db).delivery_status(ctx, req.path_params["id"], str((await body(req)).get("status", ""))))
+
+    @handler
+    async def deliveries_open(req):
+        return J({"deliveries": Sales(db).open_deliveries(ctx_of(req))})
+
+    @handler
+    async def channels_list(req):
+        return J({"channels": pay_channels.listing(db, ctx_of(req))})
+
+    @handler
+    async def channels_save(req):
+        ctx = ctx_of(req)
+        return J({"channels": pay_channels.save(db, ctx, await body(req), req.path_params.get("id"))})
+
+    @handler
     async def sales_check(req):
         ctx = ctx_of(req)
         return J({"findings": [f.as_dict() for f in Sales(db).safety_check(ctx, req.path_params["id"])]})
@@ -1071,7 +1113,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                    confirm_below_cost=bool(b.get("confirm_below_cost"))))
+                                    confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None))
 
     @handler
     async def sales_return(req):
@@ -1175,6 +1218,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay.append(f"<tr><td>نقدي</td><td>{m(sale['paid_cash'])}</td></tr>")
         if sale["paid_card"]:
             pay.append(f"<tr><td>فيزا</td><td>{m(sale['paid_card'])}</td></tr>")
+        if sale.get("paid_transfer"):
+            pay.append(f"<tr><td>تحويل</td><td>{m(sale['paid_transfer'])}</td></tr>")
+        if sale.get("delivery_fee"):
+            pay.append(f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>")
         if sale["on_credit"]:
             pay.append(f"<tr><td>آجل</td><td>{m(sale['on_credit'])}</td></tr>")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -1276,6 +1323,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales", sales_create, methods=["POST"]),
         Route("/api/sales", sales_list),
         Route("/api/sales/summary", sales_summary),
+        Route("/api/sales/drafts", sales_drafts),
+        Route("/api/deliveries", deliveries_open),
+        Route("/api/payment-channels", channels_list),
+        Route("/api/payment-channels", channels_save, methods=["POST"]),
+        Route("/api/payment-channels/{id}", channels_save, methods=["PATCH"]),
+        Route("/api/sales/{id}", sales_details, methods=["PATCH"]),
+        Route("/api/sales/{id}/discard", sales_discard, methods=["POST"]),
+        Route("/api/sales/{id}/delivery", sales_delivery, methods=["POST"]),
+        Route("/api/sales/{id}/lines/{line_id}", sales_update_line, methods=["PATCH"]),
         Route("/api/sales/{id}", sales_get),
         Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),
