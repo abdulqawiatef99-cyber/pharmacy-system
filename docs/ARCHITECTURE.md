@@ -57,10 +57,12 @@ Partial UNIQUE index: one live invoice per (org, supplier, invoice_no).
 - **0007 counting**: `count_sessions`, `count_entries` (one live entry per item/batch/location;
   `ledger_seq` = ledger position at count time).
 - **0008 procurement**: `consumption_history`; suppliers gain `lead_time_days`, `order_cycle_days`.
+- **0009 sales**: `customers`, `branch_counters` (gap-free numbering in-transaction), `sales`
+  (draft→completed→voided, cash/card/credit split), `sale_lines`, `sale_allocations` (batch,
+  legal unit price, cost, returned qty), `customer_ledger` (append-only), `sale_returns`.
 
 ### Still planned (designed to reuse the above)
-- Sales: `sales`, `sale_lines(batch_id)`, `payments`, `customers`, `customer_ledger` — sale lines
-  call `SafetyEngine.check/resolve` before posting `sale` movements (FEFO).
+- Cash shifts / drawer closing, card terminal integration, local print agent (ESC/POS + drawer kick).
 - Integrations: `integration_accounts(org, provider, encrypted credentials ref)`,
   `outbox(event, payload, status)` for reliable delivery to Talabat/Instashop/app.
 - Sync (cloud phase): per-table change log keyed by uuid7.

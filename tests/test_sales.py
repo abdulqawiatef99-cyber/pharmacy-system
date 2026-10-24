@@ -180,3 +180,15 @@ class TestSales(SalesCase):
         from app.core.errors import NotFound
         with self.assertRaises(NotFound):
             self.s.get(other, sid)
+
+
+class TestConcurrency(SalesCase):
+    def test_two_cashiers_last_units(self):
+        s1, s2 = self.s.create(self.ctx), self.s.create(self.ctx)
+        d1 = self.s.add_line(self.ctx, s1, self.pan, units=13)
+        d2 = self.s.add_line(self.ctx, s2, self.pan, units=13)     # both drafts see 13 available
+        self.s.complete(self.ctx, s1, paid_cash=d1["total"], safety_decisions=self.ack_all(s1))
+        with self.assertRaises(Conflict):
+            self.s.complete(self.ctx, s2, paid_cash=d2["total"], safety_decisions=self.ack_all(s2))
+        self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.pan)["total_qty"], 0)
+        self.assertEqual(inv.verify_balances(self.db, self.ctx.org_id), [])
