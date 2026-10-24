@@ -210,3 +210,17 @@ a { color: var(--brand); }
 .accents button { width: 40px; height: 40px; border-radius: 10px; border: 2px solid transparent; cursor: pointer; }
 .accents button.on { outline: 3px solid var(--ink); outline-offset: 2px; }
 .acc-0f5e54 { background: #0f5e54; } .acc-1f4e8c { background: #1f4e8c; } .acc-5b3e96 { background: #5b3e96; } .acc-7a4b21 { background: #7a4b21; } .acc-9f1d48 { background: #9f1d48; }
+
+/* top navigation: main screens + "more" menu */
+.topbar nav { align-items: center; flex-wrap: nowrap; }
+.more { position: relative; }
+.more > summary { list-style: none; cursor: pointer; padding: 8px 12px; border-radius: 10px; font-weight: 500; }
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::after { content: " ▾"; }
+.more.active > summary, .more > summary:hover { background: rgba(255,255,255,.18); }
+.more .menu { position: absolute; inset-inline-start: 0; top: calc(100% + 6px); min-width: 240px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; display: flex; flex-direction: column; z-index: 30; }
+.topbar .more .menu a { color: var(--ink); padding: 10px 12px; }
+.topbar .more .menu a:hover { background: var(--brand-soft); }
+.topbar .more .menu a.active { background: var(--brand-soft); color: var(--brand); }
+@media (max-width: 700px) { .more .menu { position: fixed; inset-inline: 10px; top: auto; } }

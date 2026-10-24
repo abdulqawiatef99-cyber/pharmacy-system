@@ -208,6 +208,7 @@ async function route() {
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
+  $("#navMore")?.classList.toggle("active", !!$("#navMore .menu a.active"));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
     if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
@@ -215,6 +216,8 @@ async function route() {
   location.hash = "#/purchases";
 }
 window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => { const m = $("#navMore"); if (m) m.open = false; });
+document.addEventListener("click", (e) => { const m = $("#navMore"); if (m?.open && !m.contains(e.target)) m.open = false; });
 $("#logout").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";

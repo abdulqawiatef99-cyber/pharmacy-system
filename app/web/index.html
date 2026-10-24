@@ -14,16 +14,20 @@
     <div class="brand">منصة الصيدلية</div>
     <nav>
       <a href="#/pos" data-nav="pos">الكاشير</a>
-      <a href="#/purchases" data-nav="purchases">فواتير الشراء</a>
-      <a href="#/procurement" data-nav="procurement">الطلبية</a>
-      <a href="#/deadstock" data-nav="deadstock">الرواكد</a>
       <a href="#/sales" data-nav="sales">فواتير البيع</a>
-      <a href="#/system" data-nav="system" id="navSystem">البرنامج <span id="updBadge" class="badge b-warn" hidden>تحديث</span></a>
+      <a href="#/purchases" data-nav="purchases">الشراء</a>
       <a href="#/items" data-nav="items">الأصناف</a>
       <a href="#/counts" data-nav="counts">الجرد</a>
-      <a href="#/import" data-nav="import">نقل البيانات</a>
-      <a href="#/recalls" data-nav="recalls">تنبيهات السحب</a>
-      <a href="#/users" data-nav="users" id="navUsers" hidden>المستخدمين</a>
+      <details class="more" id="navMore"><summary>المزيد <span id="updBadge" class="badge b-warn" hidden>تحديث</span></summary>
+        <div class="menu">
+          <a href="#/procurement" data-nav="procurement">الطلبية</a>
+          <a href="#/deadstock" data-nav="deadstock">الرواكد</a>
+          <a href="#/recalls" data-nav="recalls">تنبيهات السحب</a>
+          <a href="#/import" data-nav="import">نقل البيانات</a>
+          <a href="#/users" data-nav="users" id="navUsers" hidden>المستخدمين</a>
+          <a href="#/system" data-nav="system" id="navSystem">البرنامج والنسخ الاحتياطي</a>
+          <a href="#/me" data-nav="me">الشكل واللغة ورقمي السري</a>
+        </div></details>
     </nav>
     <a href="#/notifications" data-nav="notifications" id="bell" class="bell" hidden aria-label="الإشعارات">🔔 <span id="bellN" class="badge b-err" hidden></span></a>
     <div class="who"><a href="#/me" id="who" title="حسابي"></a> <button class="link" id="logout">خروج</button></div>
