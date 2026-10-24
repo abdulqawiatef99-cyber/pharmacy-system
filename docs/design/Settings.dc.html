@@ -14,7 +14,7 @@ body{margin:0}
 a{color:#0F5E54}a:hover{color:#0A4038}
 </style>
 </helmet>
-<div dir="rtl" style="min-height: 1100px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
+<div dir="rtl" style="min-height: 1500px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
   <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px">
     <div><h1 style="margin: 0; font-size: 26px; font-weight: 700">الشكل واللغة</h1><div style="font-size: 15px; color: #5B6168">الإعدادات دي لكل مستخدم لوحده. أول ما البرنامج يتسطب بيبقى على الافتراضي.</div></div>
     <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">↺ رجّع كل حاجة للافتراضي</button>
@@ -106,10 +106,37 @@ a{color:#0F5E54}a:hover{color:#0A4038}
         <li>مش متأكد من حرف أو أكتر؟ حط مكانهم % — مثال: <span dir="ltr">asp%cid</span> بيلاقي ASPOCID وأي اسم بادئ ومنتهي كده.</li>
       </ul>
     </section>
+
+    <section style="grid-column: 1 / -1; background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 600">النسخة الاحتياطية — أوتوماتيك</h2>
+        <div role="radiogroup" aria-label="كل قد إيه" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px">
+          <button type="button" style="min-height: 44px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 14px">ربع ساعة</button>
+          <button type="button" style="min-height: 44px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 14px">نص ساعة</button>
+          <button type="button" style="min-height: 44px; border-radius: 10px; border: 2px solid #0F5E54; background: #E8F2F0; color: #0F5E54; font: inherit; font-size: 14px; font-weight: 700">✓ ساعة</button>
+          <button type="button" style="min-height: 44px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 14px">6 ساعات</button>
+        </div>
+        <span style="font-size: 14px; color: #5B6168">وكمان نسخة عند قفل الشيفت وعند قفل البرنامج.</span>
+        <div style="padding: 10px 12px; border-radius: 10px; background: #E7F4EA; color: #1E7B3A; font-size: 14px"><b>✓ آخر نسخة من 12 دقيقة</b> — اتراجعت وسليمة · 7.9 م.ب</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 600">نحتفظ بكام نسخة</h2>
+        <label style="display: flex; align-items: center; gap: 10px; font-size: 15px">آخر <input value="10" style="width: 64px; min-height: 40px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; text-align: center"> نسخ — الأقدم بيتمسح لوحده</label>
+        <label style="display: flex; align-items: center; gap: 10px; font-size: 15px"><span style="width: 22px; height: 22px; border-radius: 6px; background: #0F5E54; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 14px">✓</span> + نسخة من كل يوم لآخر 7 أيام</label>
+        <label style="display: flex; align-items: center; gap: 10px; font-size: 15px"><span style="width: 22px; height: 22px; border-radius: 6px; background: #0F5E54; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 14px">✓</span> + نسخة من كل أسبوع لآخر 4 أسابيع</label>
+        <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; color: #1D5FA8; font-size: 14px">المساحة كلها حوالي 170 م.ب. اليومي والأسبوعي عشان لو غلطة اتكشفت بعد يومين، تلاقي نسخة قبلها.</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 600">نسخة برّه الجهاز</h2>
+        <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">فلاشة أو هارد خارجي أو فولدر Google Drive على الجهاز<input value="E:\نسخ الصيدلية" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 15px; color: #1F2328"></label>
+        <div style="padding: 10px 12px; border-radius: 10px; background: #FFF1DF; color: #9A4A00; font-size: 14px">⚠ الفلاشة مش متوصلة من 3 أيام — آخر نسخة برّه الجهاز يوم 21/10</div>
+        <button type="button" style="min-height: 44px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">اعمل نسخة دلوقتي</button>
+      </div>
+    </section>
   </div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1500}}'>
 class Component extends DCLogic {
   renderVals() { return {}; }
 }
