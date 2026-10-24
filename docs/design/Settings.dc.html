@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>الإعدادات — الشكل واللغة</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#0F5E54}a:hover{color:#0A4038}
+</style>
+</helmet>
+<div dir="rtl" style="min-height: 1100px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px">
+    <div><h1 style="margin: 0; font-size: 26px; font-weight: 700">الشكل واللغة</h1><div style="font-size: 15px; color: #5B6168">الإعدادات دي لكل مستخدم لوحده. أول ما البرنامج يتسطب بيبقى على الافتراضي.</div></div>
+    <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">↺ رجّع كل حاجة للافتراضي</button>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 600">الألوان</h2>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px">
+        <div style="border: 2px solid #0F5E54; border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px">
+          <div style="height: 54px; border-radius: 8px; background: #F5F4F0; border: 1px solid #D9D6CE; display: flex; align-items: center; justify-content: center; gap: 6px"><span style="width: 36px; height: 14px; border-radius: 4px; background: #0F5E54"></span><span style="width: 36px; height: 14px; border-radius: 4px; background: #FFFFFF; border: 1px solid #D9D6CE"></span></div>
+          <b style="font-size: 15px">✓ الافتراضي</b><span style="font-size: 13px; color: #5B6168">فاتح دافي — الأريح لشغل اليوم كله</span>
+        </div>
+        <div style="border: 1px solid #D9D6CE; border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px">
+          <div style="height: 54px; border-radius: 8px; background: #1B1E21; display: flex; align-items: center; justify-content: center; gap: 6px"><span style="width: 36px; height: 14px; border-radius: 4px; background: #4FB3A3"></span><span style="width: 36px; height: 14px; border-radius: 4px; background: #2A2E33"></span></div>
+          <b style="font-size: 15px">ليلي</b><span style="font-size: 13px; color: #5B6168">للإضاءة الضعيفة بالليل</span>
+        </div>
+        <div style="border: 1px solid #D9D6CE; border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px">
+          <div style="height: 54px; border-radius: 8px; background: #FFFFFF; border: 2px solid #000000; display: flex; align-items: center; justify-content: center; gap: 6px"><span style="width: 36px; height: 14px; border-radius: 4px; background: #003D35"></span><span style="width: 36px; height: 14px; border-radius: 4px; background: #000000"></span></div>
+          <b style="font-size: 15px">تباين عالي</b><span style="font-size: 13px; color: #5B6168">لضعف النظر أو شاشة في الشمس</span>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <b style="font-size: 15px">لون البرنامج (اختياري)</b>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
+          <span aria-label="أخضر بترولي — الافتراضي" style="width: 40px; height: 40px; border-radius: 10px; background: #0F5E54; outline: 3px solid #1F2328; outline-offset: 2px"></span>
+          <span aria-label="أزرق" style="width: 40px; height: 40px; border-radius: 10px; background: #1F4E8C"></span>
+          <span aria-label="بنفسجي" style="width: 40px; height: 40px; border-radius: 10px; background: #5B3E96"></span>
+          <span aria-label="بني" style="width: 40px; height: 40px; border-radius: 10px; background: #7A4B21"></span>
+          <span aria-label="لبني فاتح" style="width: 40px; height: 40px; border-radius: 10px; background: #8FD3F4"></span>
+          <button type="button" style="min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px dashed #8A8F96; background: #FFFFFF; font: inherit; font-size: 14px">لون تاني…</button>
+        </div>
+        <div style="padding: 10px 12px; border-radius: 10px; background: #FDECEA; color: #B42318; font-size: 14px">✕ اللبني الفاتح مش هينفع: الكلام الأبيض عليه مش هيتقري (التباين 1.6 والمطلوب 4.5 على الأقل). اختار لون أغمق.</div>
+      </div>
+      <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; color: #1D5FA8; font-size: 14px">ألوان التنبيه ثابتة ومش بتتغير: أحمر = غلط، أخضر = تمام، برتقالي = تنبيه، أزرق = معلومة. عشان معناها يفضل واحد عند كل الناس.</div>
+    </section>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 600">حجم الخط</h2>
+      <div role="radiogroup" aria-label="حجم الخط" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px">
+        <button type="button" style="min-height: 56px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 14px">صغير</button>
+        <button type="button" style="min-height: 56px; border-radius: 10px; border: 2px solid #0F5E54; background: #E8F2F0; color: #0F5E54; font: inherit; font-size: 16px; font-weight: 700">✓ عادي<br><span style="font-size: 12px; font-weight: 400">الافتراضي</span></button>
+        <button type="button" style="min-height: 56px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 18px">كبير</button>
+        <button type="button" style="min-height: 56px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit; font-size: 20px">كبير جدًا</button>
+      </div>
+      <div style="padding: 14px; border-radius: 10px; background: #F5F4F0; display: flex; flex-direction: column; gap: 6px">
+        <span style="font-size: 13px; color: #5B6168">معاينة</span>
+        <div style="display: flex; justify-content: space-between; font-size: 16px"><b style="direction: ltr">ASPOCID 75MG 30TAB</b><b style="direction: ltr">33.00</b></div>
+        <div style="font-size: 14px; color: #5B6168">اسبوسيد 75 مجم 30 قرص · الرصيد 1 شريط</div>
+      </div>
+      <ul style="margin: 0; padding-inline-start: 20px; font-size: 14px; color: #5B6168; display: flex; flex-direction: column; gap: 4px">
+        <li>كل الشاشة بتكبر مع بعض والترتيب مش بيبوظ، حتى على الموبايل.</li>
+        <li>إجمالي الفاتورة في الكاشير بيفضل كبير في كل الأحجام.</li>
+        <li>اختصار سريع: Ctrl و + أو −</li>
+      </ul>
+    </section>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 600">لغة البرنامج</h2>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+        <div style="border: 2px solid #0F5E54; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <b>✓ العربية <span style="font-size: 12px; color: #5B6168; font-weight: 400">(الافتراضي)</span></b>
+          <div dir="rtl" style="border-radius: 8px; background: #F5F4F0; padding: 8px; display: flex; justify-content: space-between; font-size: 13px"><span>القائمة ←</span><b>فاتورة بيع</b></div>
+        </div>
+        <div style="border: 1px solid #D9D6CE; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <b lang="en">English</b>
+          <div dir="ltr" lang="en" style="border-radius: 8px; background: #F5F4F0; padding: 8px; display: flex; justify-content: space-between; font-size: 13px"><b>New sale</b><span>→ Menu</span></div>
+        </div>
+      </div>
+      <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; color: #1D5FA8; font-size: 14px">مع الإنجليزي الشاشة كلها بتتقلب من الشمال لليمين. الفاتورة المطبوعة ليها لغة لوحدها في إعدادات الطباعة.</div>
+    </section>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 600">أسماء الأصناف والبحث</h2>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; font-size: 14px">
+        <div style="border: 2px solid #0F5E54; border-radius: 10px; padding: 10px"><b>✓ الاتنين</b><div style="direction: ltr; text-align: right; font-weight: 600">ASPOCID 75MG</div><div style="color: #5B6168">اسبوسيد 75 مجم</div></div>
+        <div style="border: 1px solid #D9D6CE; border-radius: 10px; padding: 10px"><b>إنجليزي بس</b><div style="direction: ltr; text-align: right; font-weight: 600">ASPOCID 75MG</div></div>
+        <div style="border: 1px solid #D9D6CE; border-radius: 10px; padding: 10px"><b>عربي بس</b><div style="font-weight: 600">اسبوسيد 75 مجم</div></div>
+      </div>
+      <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">جرّب البحث<input value="شسحخؤهي" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 2px solid #0F5E54; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <div style="padding: 10px 12px; border-radius: 10px; background: #FFF1DF; color: #9A4A00; font-size: 14px">⚠ الكيبورد كان على العربي. البرنامج دوّر كمان على <span dir="ltr">aspocid</span>.</div>
+      <div style="padding: 10px 12px; border-radius: 10px; background: #F5F4F0; display: flex; justify-content: space-between"><b style="direction: ltr">ASPOCID 75MG 30TAB</b><span style="font-size: 14px; color: #5B6168">اسبوسيد 75 مجم 30 قرص</span></div>
+      <ul style="margin: 0; padding-inline-start: 20px; font-size: 14px; color: #5B6168; display: flex; flex-direction: column; gap: 4px">
+        <li>البحث بيلاقي الصنف بالإنجليزي أو العربي أو الكود أو الباركود.</li>
+        <li>ينفع تكتب حتت من الاسم: <span dir="ltr">asp 75</span> أو "اسبو 75".</li>
+        <li>مش بيفرق بين أ وإ وا، ولا بين ة وه، ولا ى وي.</li>
+        <li>لو نسيت تغيّر لغة الكيبورد، بيصلّحها لوحده.</li>
+      </ul>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
