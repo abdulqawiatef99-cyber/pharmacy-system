@@ -570,7 +570,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 100))
+        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 200),
+                          category=req.query_params.get("category") or None)
+        cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
+        for r in res["items"]:
+            c = cats.get(r.get("category_id"))
+            r["category"], r["mark"], r["no_return"] = (c["name"], c["mark"], c["no_return"]) if c else (None, None, 0)
         rows = res["items"]
         if rows and ctx.can("inventory.read") and ctx.branch_id:
             ids = [r["id"] for r in rows]

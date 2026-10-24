@@ -224,3 +224,27 @@ a { color: var(--brand); }
 .topbar .more .menu a:hover { background: var(--brand-soft); }
 .topbar .more .menu a.active { background: var(--brand-soft); color: var(--brand); }
 @media (max-width: 700px) { .more .menu { position: fixed; inset-inline: 10px; top: auto; } }
+
+/* item card */
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px; font-size: .8125rem;
+  background: var(--bg); border: 1px solid var(--line); color: var(--ink); }
+.mk-fridge { background: #e3f2f7; color: #1c6e8c; border-color: #1c6e8c; }
+.mk-inj { background: #efeaf7; color: #6b4fa0; border-color: #6b4fa0; }
+.mk-nr { background: var(--err-bg); color: var(--err); border-color: currentColor; }
+[data-theme="dark"] .mk-fridge { background: #15303a; color: #8fd0e8; } [data-theme="dark"] .mk-inj { background: #2a2140; color: #c7b5f0; }
+.tags { gap: 6px; margin-top: 6px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+.bars { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; align-items: end; height: 130px; }
+.bars > div { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 4px; }
+.bars span { display: block; width: 100%; background: var(--brand); border-radius: 4px 4px 0 0; min-height: 2px; }
+.bars span.imp { background: color-mix(in srgb, var(--brand) 45%, var(--panel)); }
+.bars small { font-size: .6875rem; color: var(--muted); }
+.plain { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+tr.best > td { background: var(--ok-bg) !important; }
+.formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.formgrid input, .formgrid select { width: 100%; }
+.bulk { background: var(--info-bg); border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; align-items: center; }
+input[type=checkbox], input[type=radio] { min-height: 0; width: 20px; height: 20px; padding: 0; accent-color: var(--brand); }
+td input[type=checkbox] { width: 20px; min-width: 0; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }

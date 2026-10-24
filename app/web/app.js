@@ -171,6 +171,9 @@ const routes = [
   [/^#\/purchases$/, viewPurchases],
   [/^#\/purchases\/([\w-]+)$/, viewInvoice],
   [/^#\/items$/, viewItems],
+  [/^#\/items\/([\w-]+)\/edit$/, viewItemEdit],
+  [/^#\/items\/([\w-]+)$/, viewItem],
+  [/^#\/categories$/, viewCategories],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
@@ -676,39 +679,237 @@ app.addEventListener("click", async (e) => {
 });
 
 // ------------------------------------------------------------------ items
+const MARK = { fridge: ["mk-fridge", "❄ تلاجة"], injection: ["mk-inj", "💉 حقن"] };
+const markChip = (m) => (MARK[m] ? `<span class="chip ${MARK[m][0]}">${MARK[m][1]}</span>` : "");
+let CATS = null;
+async function loadCats(force = false) {
+  if (!CATS || force) CATS = (await api("/api/categories")).categories;
+  return CATS;
+}
+const canW = () => ME.permissions.includes("items.write");
+
 async function viewItems() {
+  const cats = await loadCats(true);
   app.innerHTML = `
   <section class="panel">
-    <div class="row between"><h1>الأصناف</h1><a href="/api/export/items.xlsx">تصدير كل الأصناف Excel</a></div>
-    <div class="row"><label class="f grow">بحث بالاسم أو الباركود
-      <input id="q" placeholder="مثال: panadol أو بانادول أو 622..." autocomplete="off"></label></div>
+    <div class="row between"><h1>الأصناف</h1>
+      <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}
+      <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
+    <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
+      <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
+      <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">من غير قسم</option>
+        ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label></div>
   </section>
-  <section class="panel"><div id="itemsHint"></div><div class="tablewrap"><table>
-    <thead><tr><th>الاسم</th><th>التركيز</th><th>الشكل</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
+  <section class="panel"><div id="itemsHint"></div>
+    ${canW() ? `<div class="row bulk" id="bulk" hidden><b id="bulkN"></b> <select id="bulkCat"><option value="">— اختار قسم —</option>
+      ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}<option value="none">شيلهم من أي قسم</option></select>
+      <button class="btn small" id="bulkGo">حطهم في القسم</button></div>` : ""}
+    <div class="tablewrap"><table>
+    <thead><tr>${canW() ? `<th><input type="checkbox" id="selAll" aria-label="اختار الكل"></th>` : ""}<th>الاسم</th><th>القسم</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
+  let rows = [];
+  const sel = new Set();
+  const bulkUi = () => { if (!$("#bulk")) return; $("#bulk").hidden = !sel.size; $("#bulkN").textContent = `${sel.size} صنف مختار`; };
   const load = async () => {
-    const found = await findItems($("#q").value, 50), rows = found.items;
-    $("#itemsHint").innerHTML = hintHtml(found.hint);
-    $("#itemsBody").innerHTML = rows.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${itemHtml(r)}</td>
-      <td>${esc(r.strength_norm || "")}</td><td>${esc(r.dosage_form || "")}</td>
-      <td>${r.pack_size} ${esc(unitName(r))}</td><td>${money(r.public_price)}</td><td><b>${esc(fmtStock(r.stock_qty, r))}</b></td><td>${esc(r.code || "")}</td></tr>
-      <tr class="detail" id="det${i}" hidden><td colspan="7"></td></tr>`).join("")
-      || `<tr><td colspan="7" class="muted">لا توجد نتائج</td></tr>`;
-    $("#itemsBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", async () => {
-      const r = rows[+tr.dataset.i], det = $(`#det${tr.dataset.i}`);
-      if (!det.hidden) { det.hidden = true; return; }
-      const it = await api(`/api/items/${r.id}`), st = it.stock || { batches: [] };
-      det.firstElementChild.innerHTML = st.batches.length ? `<table class="sub"><thead><tr><th>الصلاحية</th><th>التشغيلة</th><th>الكمية</th></tr></thead><tbody>
-        ${st.batches.map((b) => `<tr><td>${esc(b.expiry_date ? (b.expiry_precision === "month" ? b.expiry_date.slice(0, 7) : b.expiry_date) : "غير مسجلة")}</td>
-        <td>${esc(b.batch_no || "—")}</td><td>${esc(fmtStock(b.qty, r))}</td></tr>`).join("")}</tbody></table>
-        ${st.avg_cost != null ? `<p class="muted">متوسط التكلفة للعلبة: ${(Number(st.avg_cost) * r.pack_size).toFixed(2)} ج</p>` : ""}`
-        : `<p class="muted">مفيش رصيد</p>`;
-      det.hidden = false;
+    const cat = $("#qCat").value;
+    const r = await api(`/api/items?q=${encodeURIComponent($("#q").value)}&limit=100&meta=1${cat ? `&category=${encodeURIComponent(cat)}` : ""}`);
+    rows = r.items; sel.clear(); bulkUi();
+    $("#itemsHint").innerHTML = hintHtml(r.hint);
+    $("#itemsBody").innerHTML = rows.map((it, i) => `<tr class="clickable" data-i="${i}">
+      ${canW() ? `<td><input type="checkbox" data-sel="${i}" aria-label="اختار"></td>` : ""}
+      <td>${itemHtml(it)}${it.shortage_at ? ` <span class="badge b-warn">⚠ ناقص</span>` : ""}</td>
+      <td>${esc(it.category || "—")} ${markChip(it.mark)}${it.no_return ? ` <span class="chip mk-nr">مالوش مرتجع</span>` : ""}</td>
+      <td>${it.pack_size} ${esc(unitName(it))}</td><td>${money(it.public_price)}</td>
+      <td><b>${esc(fmtStock(it.stock_qty, it)) || "0"}</b>${it.min_stock && it.stock_qty != null && it.stock_qty <= it.min_stock ? ` <span class="badge b-warn">⚠ تحت حد الطلب</span>` : ""}</td>
+      <td>${esc(it.code || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">لا توجد نتائج</td></tr>`;
+    $("#itemsBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", (e) => {
+      if (e.target.matches("input[type=checkbox]")) return;
+      location.hash = `#/items/${rows[+tr.dataset.i].id}`;
+    }));
+    $("#itemsBody").querySelectorAll("[data-sel]").forEach((cb) => cb.addEventListener("change", () => {
+      const id = rows[+cb.dataset.sel].id; cb.checked ? sel.add(id) : sel.delete(id); bulkUi();
     }));
   };
+  $("#selAll")?.addEventListener("change", (e) => {
+    document.querySelectorAll("[data-sel]").forEach((cb) => { cb.checked = e.target.checked; const id = rows[+cb.dataset.sel].id; cb.checked ? sel.add(id) : sel.delete(id); });
+    bulkUi();
+  });
+  $("#bulkGo")?.addEventListener("click", async () => {
+    const v = $("#bulkCat").value; if (!v) return toast("اختار القسم", true);
+    try { const r = await api("/api/categories/assign", { method: "POST", body: { item_ids: [...sel], category_id: v === "none" ? null : v } });
+      toast(`اتحط ${r.updated} صنف`); load(); }
+    catch (err) { toast(err.message, true); }
+  });
   let t;
   $("#q").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
+  $("#qCat").addEventListener("change", load);
   load();
+}
+
+// ------------------------------------------------------------------ item card
+const packs = (q, it) => (it.pack_size > 1 ? fmtStock(q, it) : `${q} ${esc(unitName(it))}`);
+async function viewItem(id) {
+  if (id === "new") return viewItemEdit(null);
+  const c = await api(`/api/items/${id}/card`), cats = await loadCats();
+  const low = c.min_stock && c.stock_qty != null && c.stock_qty <= c.min_stock;
+  const maxM = Math.max(1, ...c.monthly.map((m) => m.qty));
+  const today = new Date().toISOString().slice(0, 10), soon = new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10);
+  const expCls = (d) => (!d ? "b-plain" : d < today ? "b-err" : d < soon ? "b-warn" : "b-ok");
+  app.innerHTML = `
+  <section class="panel"><div class="row between">
+    <div><a href="#/items">← الأصناف</a>
+      <h1 class="ltr-name">${esc(c.name_en || c.name_ar)}</h1>
+      ${c.name_en && c.name_ar ? `<p class="muted">${esc(c.name_ar)}</p>` : ""}
+      <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}
+        ${c.no_return ? `<span class="chip mk-nr">✕ مالوش مرتجع ولا استبدال</span>` : ""}
+        ${c.manufacturer ? `<span class="chip">${esc(c.manufacturer)}</span>` : ""}${c.code ? `<span class="chip">كود ${esc(c.code)}</span>` : ""}
+        ${c.shortage_at ? `<span class="badge b-warn">⚠ متعلّم ناقص من ${esc(c.shortage_at)}${c.shortage_by_name ? ` — ${esc(c.shortage_by_name)}` : ""}</span>` : ""}</div></div>
+    ${canW() ? `<div class="row"><a class="btn" href="#/items/${esc(id)}/edit">تعديل</a>
+      <button class="btn secondary" id="shortBtn">${c.shortage_at ? "شيل علامة ناقص" : "علّمه ناقص"}</button></div>` : ""}
+  </div></section>
+  <div class="totals">
+    <div>الرصيد<b>${c.stock_qty != null ? esc(packs(c.stock_qty, c)) || "0" : "—"}</b>
+      ${low ? `<span class="badge b-warn">⚠ تحت حد الطلب (${esc(packs(c.min_stock, c))})</span>` : c.min_stock ? `<span class="muted">حد الطلب ${esc(packs(c.min_stock, c))}</span>` : `<span class="muted">مفيش حد طلب</span>`}</div>
+    <div>سعر الجمهور<b>${money(c.public_price)} ج</b>${c.pack_size > 1 && c.public_price ? `<span class="muted">${esc(unitName(c))}: ${money(Math.round(c.public_price / c.pack_size))} ج</span>` : ""}</div>
+    ${c.avg_cost_pack != null ? `<div>متوسط التكلفة<b>${money(c.avg_cost_pack)} ج</b><span class="badge ${c.margin_pct >= 0 ? "b-ok" : "b-err"}">ربح ${c.margin_pct}%</span></div>` : ""}
+    <div>المكان<b>${esc(c.location || "—")}</b></div>
+  </div>
+  <div class="grid2 mt">
+    <section class="panel"><h2>الوحدات والبيع</h2>
+      <div class="totals"><div>العبوة<b>${esc(c.pack_unit_name === "pack" ? "علبة" : c.pack_unit_name)}</b></div>
+        <div>بتتباع بـ<b>${esc(unitName(c))}</b></div><div>العبوة فيها<b>${c.pack_size} ${esc(unitName(c))}</b></div>
+        <div>الحد الأقصى<b>${c.max_stock ? esc(packs(c.max_stock, c)) : "—"}</b></div></div>
+      <h2 class="mt">الباركود والكود الدولي</h2>
+      <ul class="plain">${c.barcodes.map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}</li>`).join("") || `<li class="muted">مفيش باركود</li>`}</ul>
+      <h2 class="mt">البيع آخر 12 شهر</h2>
+      <div class="bars" role="img" aria-label="البيع الشهري">${c.monthly.map((m) => `<div title="${esc(m.month)}: ${m.qty}"><span class="${m.source === "import" ? "imp" : ""}" data-h="${Math.round((m.qty / maxM) * 100)}"></span><small>${esc(m.month.slice(5))}</small></div>`).join("")}</div>
+      <p class="muted">${c.monthly.some((m) => m.source === "import") ? "الأعمدة الفاتحة من مبيعات البرنامج القديم." : ""} الأرقام بالـ ${esc(unitName(c))}.</p>
+    </section>
+    <section class="panel"><h2>التشغيلات والصلاحية</h2>
+      ${c.batches ? `<table><thead><tr><th>الصلاحية</th><th>التشغيلة</th><th>الكمية</th><th>السعر</th><th>دخلت من</th></tr></thead><tbody>
+        ${c.batches.map((b) => `<tr><td><span class="badge ${expCls(b.expiry_date)}">${b.expiry_date && b.expiry_date < today ? "✕ " : b.expiry_date && b.expiry_date < soon ? "⚠ " : ""}${esc(b.expiry_date ? b.expiry_date.slice(0, 7) : "غير مسجلة")}</span></td>
+          <td>${esc(b.batch_no || "—")}</td><td>${esc(packs(b.qty, c))}</td><td>${b.public_price != null ? money(b.public_price) : money(c.public_price)}</td><td>${esc(b.supplier || "—")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">مفيش رصيد</td></tr>`}</tbody></table>
+        <p class="badge b-info mt">ℹ كل تشغيلة بسعرها: لو السعر زاد، القديم بيتباع بسعره لحد ما يخلص.</p>` : ""}
+      ${c.suppliers ? `<h2 class="mt">الموردين وآخر أسعار شراء</h2><table><thead><tr><th>المورد</th><th>آخر مرة</th><th>الخصم</th><th>سعر الشراء</th></tr></thead><tbody>
+        ${c.suppliers.map((sp, i) => `<tr${i === 0 && c.suppliers.length > 1 ? ` class="best"` : ""}><td>${esc(sp.supplier)}${i === 0 && c.suppliers.length > 1 ? ` <span class="badge b-ok">✓ الأرخص</span>` : ""}</td>
+          <td>${esc(sp.last_date || "")}</td><td>${sp.discount_bp != null ? pct(sp.discount_bp) + "%" : "—"}</td><td>${money(sp.unit_net_price)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لسه مفيش شراء متسجل</td></tr>`}</tbody></table>` : ""}
+      ${c.price_history?.length ? `<h2 class="mt">آخر تغييرات السعر</h2><ul class="plain">${c.price_history.map((h) => `<li>${esc(h.observed_at.slice(0, 10))}: ${h.previous_price != null ? `${money(h.previous_price)} ← ` : ""}<b>${money(h.public_price)}</b> <span class="muted">${h.source === "manual" ? "يدوي" : h.source === "purchase_invoice" ? "من فاتورة شراء" : "استيراد"}</span></li>`).join("")}</ul>` : ""}
+    </section></div>`;
+  document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+  $("#shortBtn")?.addEventListener("click", async () => {
+    try { await api(`/api/items/${id}/shortage`, { method: "POST", body: { on: !c.shortage_at } }); viewItem(id); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
+async function viewItemEdit(id) {
+  if (!canW()) { location.hash = id ? `#/items/${id}` : "#/items"; return; }
+  const it = id ? await api(`/api/items/${id}/card`) : { pack_size: 1, base_unit_name: "unit", pack_unit_name: "pack", barcodes: [] };
+  const cats = (await loadCats(true)).filter((c) => c.is_active || c.id === it.category_id);
+  const canPrice = ME.permissions.includes("items.price") || !id;
+  const unitVal = (v, def) => (v === "unit" ? "" : v === "pack" ? "" : v) || def;
+  app.innerHTML = `<form class="panel" id="itemForm"><div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
+      <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>
+    <div class="formgrid">
+      <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
+      <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
+      <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
+      <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}"></label>
+      <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
+      <label class="f">القسم <select name="category_id"><option value="">— من غير قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}</select></label>
+      <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
+        ${canPrice ? "" : `<span class="muted">تحديث السعر للصاحب والمدير</span>`}</label>
+      <label class="f">اسم العبوة <input name="pack_unit_name" value="${esc(unitVal(it.pack_unit_name, "علبة"))}"></label>
+      <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
+      <label class="f">العبوة فيها كام وحدة <input name="pack_size" type="number" min="1" step="1" value="${it.pack_size}" ${id && it.stock_qty ? "disabled" : ""}>
+        ${id && it.stock_qty ? `<span class="muted">مقفولة لأن الصنف ليه رصيد؛ صححها بالجرد</span>` : ""}</label>
+      <label class="f">حد الطلب (بالعبوة) <input name="min_packs" type="number" min="0" step="1" value="${it.min_stock ? Math.round(it.min_stock / it.pack_size) : ""}"></label>
+      <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
+      <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
+    </div>
+    <h2 class="mt">الباركود والكود الدولي</h2>
+    <p class="muted">امسح الباركود أو الكود المربع اللي على العلبة هنا. الكود المربع بيتحفظ بالكود الدولي اللي جواه.</p>
+    <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
+      ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">شيل</button>` : ""}</li>`).join("")}</ul>
+    <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
+    <div class="row mt"><button class="btn">احفظ</button></div></form>`;
+  const newCodes = [];
+  const readCode = (raw) => {     // a 2D code -> its GTIN (as the EAN-13 printed on most packs when it starts with 0)
+    const m = raw.trim().replace(/^\](d2|Q3|C1)/, "").match(/^(?:\(01\)|01)(\d{14})/) || raw.match(/\/01\/(\d{8,14})/);
+    if (!m) return raw.trim();
+    const g = m[1].padStart(14, "0");
+    return g.startsWith("0") ? g.slice(1) : g;
+  };
+  $("#bcNew").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#bcAdd").click(); } });
+  $("#bcAdd").addEventListener("click", async () => {
+    const code = readCode($("#bcNew").value); if (!code) return;
+    if (id) {
+      try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: code } }); viewItemEdit(id); }
+      catch (err) { toast(err.message, true); }
+    } else { newCodes.push(code); $("#bcList").insertAdjacentHTML("beforeend", `<li><bdi dir="ltr">${esc(code)}</bdi></li>`); $("#bcNew").value = ""; }
+  });
+  document.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirmInline(b)) return;
+    try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: b.dataset.rm, remove: true } }); viewItemEdit(id); }
+    catch (err) { toast(err.message, true); }
+  }));
+  $("#itemForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
+    const pack = +(v("pack_size") ?? it.pack_size) || 1;
+    const data = { name_en: v("name_en") || null, name_ar: v("name_ar") || null, manufacturer: v("manufacturer") || null,
+      active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
+      pack_unit_name: v("pack_unit_name") || "علبة", base_unit_name: v("base_unit_name") || "وحدة",
+      min_stock: v("min_packs") ? +v("min_packs") * pack : 0, max_stock: v("max_packs") ? +v("max_packs") * pack : null };
+    if (v("pack_size") !== undefined) data.pack_size = pack;
+    if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
+    if (id && data.public_price === it.public_price) delete data.public_price;
+    if (id && data.pack_size === it.pack_size) delete data.pack_size;
+    try {
+      let iid = id;
+      if (id) await api(`/api/items/${id}`, { method: "PATCH", body: data });
+      else {
+        try { iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes } })).id; }
+        catch (err) {
+          if (err.code !== "possible_duplicate") throw err;
+          const d = (err.details?.duplicates || []).map((x) => x.name || x.name_en).join("، ");
+          if (!confirm(`فيه صنف شبهه: ${d}\nمتأكد إنه صنف مختلف؟`)) return;
+          iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes, force: true } })).id;
+        }
+      }
+      const cat = f.category_id.value || null;
+      if (cat !== (it.category_id || null)) await api(`/api/items/${iid}/category`, { method: "POST", body: { category_id: cat } });
+      toast("اتحفظ"); location.hash = `#/items/${iid}`;
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+// ------------------------------------------------------------------ sections (أقسام)
+async function viewCategories() {
+  const cats = await loadCats(true), owner = ME.permissions.includes("items.no_return");
+  app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/items">← الأصناف</a><h1>الأقسام</h1></div></div>
+    <p class="muted">الأقسام بتنظم الأصناف. القسم اللي "مالوش مرتجع" محدش يقدر يرجّع أصنافه غير الصاحب (أو حد الصاحب فتحله). العلامة بتظهر جنب الصنف في الفواتير.</p>
+    <table><thead><tr><th>القسم</th><th>عدد الأصناف</th><th>مرتجع</th><th>علامة في الفاتورة</th><th>شغال</th><th></th></tr></thead>
+    <tbody>${cats.map((c) => `<tr data-id="${esc(c.id)}"><td><input name="name" value="${esc(c.name)}" ${canW() ? "" : "disabled"}></td><td>${c.items}</td>
+      <td><select name="no_return" ${owner ? "" : "disabled"}><option value="0" ${!c.no_return ? "selected" : ""}>✓ ليه مرتجع</option><option value="1" ${c.no_return ? "selected" : ""}>✕ مالوش مرتجع</option></select></td>
+      <td><select name="mark" ${canW() ? "" : "disabled"}><option value="">بدون</option><option value="fridge" ${c.mark === "fridge" ? "selected" : ""}>❄ تلاجة</option><option value="injection" ${c.mark === "injection" ? "selected" : ""}>💉 حقن</option></select></td>
+      <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""} ${canW() ? "" : "disabled"}></td>
+      <td>${canW() ? `<button class="btn small secondary" data-save>احفظ</button>` : ""}</td></tr>`).join("")}</tbody></table>
+    ${owner ? "" : `<p class="muted">تغيير "ليه مرتجع / مالوش مرتجع" للصاحب بس.</p>`}</section>
+    ${canW() ? `<form class="panel row" id="catNew"><label class="f">قسم جديد <input name="name" required></label><button class="btn">أضف</button></form>` : ""}`;
+  document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+    const tr = b.closest("tr"), g = (n) => tr.querySelector(`[name=${n}]`);
+    try {
+      await api(`/api/categories/${tr.dataset.id}`, { method: "PATCH", body: { name: g("name").value, no_return: g("no_return").value === "1",
+        mark: g("mark").value || null, is_active: g("is_active").checked } });
+      toast("اتحفظ"); viewCategories();
+    } catch (err) { toast(err.message, true); }
+  }));
+  $("#catNew")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/categories", { method: "POST", body: { name: e.target.name.value } }); viewCategories(); }
+    catch (err) { toast(err.message, true); }
+  });
 }
 
 // ------------------------------------------------------------------ data import

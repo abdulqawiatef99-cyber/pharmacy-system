@@ -51,28 +51,38 @@ def _patterns(q: str) -> list[str]:
     return [f"%{t.strip('%')}%" if t.strip("%") else "%" for t in glued.split() if t.strip("%")]
 
 
-def _by_name(db: Database, org_id: str, q: str, limit: int) -> list[dict]:
+def _cat_sql(category: str | None) -> tuple[str, tuple]:
+    if not category:
+        return "", ()
+    if category == "none":
+        return " AND category_id IS NULL", ()
+    return " AND category_id=?", (category,)
+
+
+def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None = None) -> list[dict]:
     pats = _patterns(q)
     if not pats:
         return []
+    csql, cparams = _cat_sql(category)
     where = " AND ".join("(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)" for _ in pats)
     params: list = []
     for p in pats:
         params += [p, p]
     first = pats[0].lstrip("%")
-    rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}"
+    rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
                   " ORDER BY (name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?) DESC, length(name_norm)"
-                  " LIMIT ?", (org_id, *params, first, first, limit))
+                  " LIMIT ?", (org_id, *params, *cparams, first, first, limit))
     return [dict(r) for r in rows]
 
 
-def search(db: Database, ctx: Context, q: str, limit: int = 20) -> dict:
+def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
     """{'items': [...], 'hint': None | {'kind': 'layout', 'query': 'aspocid'}}"""
     ctx.require("items.read")
     q = (q or "").strip()[:100]
     if not q:
-        rows = db.all("SELECT * FROM items WHERE org_id=? AND status='active'"
-                      " ORDER BY coalesce(name_en, name_ar) LIMIT ?", (ctx.org_id, limit))
+        csql, cparams = _cat_sql(category)
+        rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active'{csql}"
+                      " ORDER BY coalesce(name_en, name_ar) LIMIT ?", (ctx.org_id, *cparams, limit))
         return {"items": [dict(r) for r in rows], "hint": None}
     code = gs1.parse(q)
     if code:                                     # 2D code on the pack: GTIN + expiry + batch
@@ -91,17 +101,17 @@ def search(db: Database, ctx: Context, q: str, limit: int = 20) -> dict:
     r = db.one("SELECT * FROM items WHERE org_id=? AND code=? AND status='active'", (ctx.org_id, q))
     if r:
         found[r["id"]] = dict(r)
-    for row in _by_name(db, ctx.org_id, q, limit):
+    for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
     hint = None
     if not found:
         alt = swap_layout(q)
         if alt:
-            for row in _by_name(db, ctx.org_id, alt, limit):
+            for row in _by_name(db, ctx.org_id, alt, limit, category):
                 found.setdefault(row["id"], row)
             if found:
                 hint = {"kind": "layout", "query": alt}
-    if not found and "%" not in q:
+    if not found and "%" not in q and not category:
         from . import matching
         for c in matching.fuzzy_candidates(db, ctx.org_id, q, limit):
             row = db.one("SELECT * FROM items WHERE id=?", (c.item_id,))
