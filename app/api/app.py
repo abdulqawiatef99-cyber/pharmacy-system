@@ -107,13 +107,15 @@ class RateLimiter:
 
 
 def create_app(db: Database | None = None, settings: config_mod.Settings | None = None,
-               purchasing: Purchasing | None = None) -> Starlette:
+               purchasing: Purchasing | None = None, *, auto_backup: bool = False) -> Starlette:
     s = settings or config_mod.load()
     if db is None:
         s.data_dir.mkdir(parents=True, exist_ok=True)
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)
+    from ..core.autobackup import AutoBackup
+    autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
     safety = SafetyEngine(db)
@@ -477,6 +479,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ids = (await body(req)).get("ids")
         notify.mark_read(db, ctx, ids)
         return J({"unread": notify.unread_count(db, ctx)})
+
+    @handler
+    async def backup_status(req):
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            autob.update_settings(ctx, await body(req))
+        return J(autob.status(ctx))
+
+    @handler
+    async def backup_run(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        st = await run_in_threadpool(lambda: autob.run("manual", force=True))
+        if not st.get("last_ok"):
+            raise Conflict(f"النسخة فشلت: {st.get('last_error')}", code="backup_failed")
+        return J(autob.status(ctx))
 
     @handler
     async def sales_settings(req):
@@ -1150,6 +1168,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications", notifications_list),
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
+        Route("/api/backup", backup_status, methods=["GET", "PUT"]),
+        Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
@@ -1224,6 +1244,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/", index),
         Mount("/static", StaticFiles(directory=WEB_DIR), name="static"),
     ]
-    app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)])
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        if auto_backup:
+            autob.start()
+        try:
+            yield
+        finally:
+            if auto_backup:
+                await run_in_threadpool(autob.stop)
+
+    app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)
     app.state.db = db
+    app.state.autobackup = autob
     return app

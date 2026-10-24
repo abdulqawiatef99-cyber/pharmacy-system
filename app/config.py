@@ -20,6 +20,12 @@ class Settings:
     cookie_secure: bool
     short_expiry_days: int
     total_tolerance_piasters: int
+    backup_dir: Path | None = None
+
+    @property
+    def backup_path(self) -> Path:
+        """Automatic backups: next to the data folder (installed: %LOCALAPPDATA%\\PharmacyPlatform\\backups)."""
+        return self.backup_dir or self.data_dir.parent / "backups"
 
 
 def load() -> Settings:
@@ -35,4 +41,5 @@ def load() -> Settings:
         cookie_secure=os.environ.get("PHARM_COOKIE_SECURE", "0") == "1",
         short_expiry_days=int(os.environ.get("PHARM_SHORT_EXPIRY_DAYS", "180")),
         total_tolerance_piasters=int(os.environ.get("PHARM_TOTAL_TOLERANCE", "100")),
+        backup_dir=Path(os.environ["PHARM_BACKUP_DIR"]).resolve() if os.environ.get("PHARM_BACKUP_DIR") else None,
     )

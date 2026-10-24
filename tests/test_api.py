@@ -17,7 +17,8 @@ H = {"X-Requested-With": "pharm"}
 class APICase(DBTestCase):
     def setUp(self):
         super().setUp()
-        self.s = replace(config.load(), upload_dir=self.tmp / "up", anthropic_api_key=None)
+        self.s = replace(config.load(), upload_dir=self.tmp / "up", anthropic_api_key=None, data_dir=self.tmp,
+                         backup_dir=self.tmp / "backups")
         self.app = create_app(self.db, self.s, Purchasing(self.db, self.s))
         self.c = TestClient(self.app)
         cat.create_supplier(self.db, self.ctx, name="ابن سينا فارما")

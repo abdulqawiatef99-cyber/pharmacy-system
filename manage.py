@@ -49,7 +49,7 @@ def cmd_serve(a, s):
     if a.host not in ("127.0.0.1", "localhost") and not s.cookie_secure:
         print("تحذير: التشغيل على الشبكة بدون HTTPS. فعّل PHARM_COOKIE_SECURE=1 خلف HTTPS.",
               file=sys.stderr)
-    uvicorn.run(create_app(_db(s), s), host=a.host, port=a.port, proxy_headers=False,
+    uvicorn.run(create_app(_db(s), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
                 server_header=False)
 
 

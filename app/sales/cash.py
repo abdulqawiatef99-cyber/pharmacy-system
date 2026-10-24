@@ -121,4 +121,6 @@ class CashDrawer:
                             f"{'عجز' if diff < 0 else 'زيادة'} في الدرج {abs(diff) / 100:,.2f} ج",
                             f"قفل الشيفت: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
                             "cash_shift", sid)
+        from ..core import autobackup
+        autobackup.trigger("shift_close")
         return self.summary(ctx, sid)
