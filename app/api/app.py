@@ -31,6 +31,7 @@ from ..core.errors import DomainError, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
+from ..dataimport.service import DataImport, export_catalog
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -91,6 +92,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         db = Database(s.db_path)
         db.migrate()
     purch = purchasing or Purchasing(db, s)
+    dimp = DataImport(db)
     login_limiter = RateLimiter(10, 60)
 
     def client_ip(req: Request) -> str:
@@ -312,6 +314,63 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return Response(data, media_type=mime, headers={
             "Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"})
 
+    # ------------------------------------------------------------- data import
+    async def _upload(req) -> tuple[bytes, str, dict]:
+        if "multipart/form-data" not in req.headers.get("content-type", ""):
+            raise ValidationFailed("ارفع الملف كـ multipart/form-data")
+        form = await req.form(max_files=1, max_fields=8)
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):
+            raise ValidationFailed("اختر الملف")
+        try:
+            data = await up.read(s.max_upload_bytes + 1)
+        finally:
+            await up.close()
+        if len(data) > s.max_upload_bytes:
+            raise ValidationFailed("حجم الملف أكبر من المسموح")
+        return data, up.filename or "upload", {k: v for k, v in form.items() if k != "file"}
+
+    @handler
+    async def import_analyze(req):
+        ctx = ctx_of(req)
+        data, name, fields = await _upload(req)
+        mapping = json.loads(fields["mapping"]) if fields.get("mapping") else None
+        options = {"qty_unit": fields.get("qty_unit") or "pack"}
+        if fields.get("header_row"):
+            options["header_row"] = int(fields["header_row"])
+        run = dimp.analyze(ctx, data, name, kind=fields.get("kind") or "items", mapping=mapping,
+                           source_system=fields.get("source_system") or "generic", options=options)
+        return J(dimp.get(ctx, run), status_code=201)
+
+    @handler
+    async def import_get(req):
+        return J(dimp.get(ctx_of(req), req.path_params["id"], req.query_params.get("action")))
+
+    @handler
+    async def import_decide(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        dimp.decide(ctx, req.path_params["id"], str(b.get("row_id", "")), str(b.get("decision", "")))
+        return J({"ok": True})
+
+    @handler
+    async def import_apply(req):
+        ctx = ctx_of(req)
+        return J(dimp.apply(ctx, req.path_params["id"]))
+
+    @handler
+    async def import_discard(req):
+        ctx = ctx_of(req)
+        dimp.discard(ctx, req.path_params["id"])
+        return J({"ok": True})
+
+    @handler
+    async def export_items(req):
+        ctx = ctx_of(req)
+        return Response(export_catalog(db, ctx), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=items-export.xlsx"})
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -348,6 +407,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
+        Route("/api/imports", import_analyze, methods=["POST"]),
+        Route("/api/imports/{id}", import_get),
+        Route("/api/imports/{id}/decide", import_decide, methods=["POST"]),
+        Route("/api/imports/{id}/apply", import_apply, methods=["POST"]),
+        Route("/api/imports/{id}/discard", import_discard, methods=["POST"]),
+        Route("/api/export/items.xlsx", export_items),
         Route("/sw.js", sw),
         Route("/", index),
         Mount("/static", StaticFiles(directory=WEB_DIR), name="static"),

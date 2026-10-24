@@ -127,3 +127,26 @@ class TestAPI(APICase):
         self.http_login()
         r = self.c.patch("/api/purchases/x/lines/y", headers=H, content=b"[1,2]")
         self.assertEqual(r.status_code, 422)
+
+
+class TestImportAPI(APICase):
+    def test_import_flow_and_export(self):
+        import io
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["كود الصنف", "اسم الصنف", "سعر الجمهور", "عدد الوحدات"])
+        ws.append([501, "Concor 5mg 30 tab", 52, 3])
+        b = io.BytesIO()
+        wb.save(b)
+        self.http_login()
+        r = self.c.post("/api/imports", headers=H, data={"kind": "items"},
+                        files={"file": ("items.xlsx", b.getvalue(), "x")})
+        self.assertEqual(r.status_code, 201, r.text)
+        run = r.json()
+        self.assertEqual(run["report"]["counts"], {"create": 1})
+        r = self.c.post(f"/api/imports/{run['id']}/apply", headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.c.get("/api/export/items.xlsx")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("attachment", r.headers["content-disposition"])

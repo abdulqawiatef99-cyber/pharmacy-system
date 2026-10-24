@@ -45,6 +45,8 @@ const routes = [
   [/^#\/purchases$/, viewPurchases],
   [/^#\/purchases\/([\w-]+)$/, viewInvoice],
   [/^#\/items$/, viewItems],
+  [/^#\/import$/, viewImport],
+  [/^#\/import\/([\w-]+)$/, viewImportRun],
 ];
 
 async function route() {
@@ -360,7 +362,7 @@ app.addEventListener("click", async (e) => {
 async function viewItems() {
   app.innerHTML = `
   <section class="panel">
-    <h1>الأصناف</h1>
+    <div class="row between"><h1>الأصناف</h1><a href="/api/export/items.xlsx">تصدير كل الأصناف Excel</a></div>
     <div class="row"><label class="f grow">بحث بالاسم أو الباركود
       <input id="q" placeholder="مثال: panadol أو بانادول أو 622..." autocomplete="off"></label></div>
   </section>
@@ -377,6 +379,103 @@ async function viewItems() {
   let t;
   $("#q").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
   load();
+}
+
+// ------------------------------------------------------------------ data import
+const ISSUE_AR = {
+  missing_name: "بدون اسم", invalid_barcode: "باركود غير صحيح", invalid_public_price: "سعر غير صحيح",
+  invalid_cost: "تكلفة غير صحيحة", invalid_qty: "كمية غير صحيحة", invalid_expiry: "صلاحية غير مفهومة",
+  invalid_pack_size: "عدد وحدات غير صحيح", duplicate_code_in_file: "كود مكرر في الملف",
+  duplicate_barcode_in_file: "باركود مكرر في الملف", duplicate_item_in_file: "صنف مكرر في الملف",
+  same_item_exists: "الصنف موجود بالفعل", similar_item_exists: "صنف مشابه موجود",
+  code_barcode_conflict: "الكود والباركود لصنفين مختلفين", price_missing: "بدون سعر",
+  missing_item: "الصنف غير موجود — استورد الأصناف أولًا", missing_qty: "بدون كمية", zero_qty: "رصيد صفر",
+  item_has_history: "الصنف له حركات سابقة", no_batch_or_expiry: "بدون تشغيلة/صلاحية (هيتسجل بدونها)",
+  cost_missing: "بدون تكلفة", matched_by_name_only: "اتطابق بالاسم فقط — أكّد",
+  unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
+};
+const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
+
+function viewImport() {
+  app.innerHTML = `
+  <section class="panel">
+    <h1>نقل البيانات من برنامج آخر</h1>
+    <p class="muted">الخطوات: رفع الملف ← تقرير مسبق (بدون أي تعديل) ← مراجعة ← تطبيق مرة واحدة. ابدأ بالأصناف ثم الأرصدة الافتتاحية.</p>
+    <form id="impForm" class="row">
+      <label class="f">النوع <select name="kind"><option value="items">الأصناف</option>
+        <option value="opening_stock">الأرصدة الافتتاحية</option></select></label>
+      <label class="f">الكمية في الملف بـ <select name="qty_unit"><option value="pack">العلبة</option>
+        <option value="base">الوحدة الصغرى (شريط)</option></select></label>
+      <label class="f">البرنامج القديم <select name="source_system"><option value="estock">E-Stock</option>
+        <option value="generic">Excel عام</option></select></label>
+      <label class="f">الملف (Excel / CSV) <input type="file" name="file" required accept=".xlsx,.csv"></label>
+      <button class="btn" type="submit">تحليل الملف</button>
+    </form>
+  </section>`;
+  $("#impForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/imports", { method: "POST", form: new FormData(e.target) });
+      location.hash = `#/import/${r.id}`;
+    } catch (err) {
+      toast(err.message, true);
+      if (err.code === "mapping_required") {
+        app.insertAdjacentHTML("beforeend", `<section class="panel"><h2>أول أسطر في الملف</h2><div class="tablewrap"><table>
+          ${err.details.preview.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</table></div>
+          <p class="muted">أسماء الأعمدة مش معروفة. ابعت الملف ده للمطور عشان يضيف الأسماء دي.</p></section>`);
+      }
+    }
+  });
+}
+
+async function viewImportRun(id) {
+  const r = await api(`/api/imports/${encodeURIComponent(id)}`);
+  const c = r.report.counts || {};
+  const open = r.status === "analyzed";
+  const attention = r.rows.filter((x) => ["review", "error"].includes(x.action));
+  app.innerHTML = `
+  <section class="panel">
+    <div class="row between"><h1>${r.kind === "items" ? "استيراد أصناف" : "أرصدة افتتاحية"} — ${esc(r.filename)}</h1>
+      <span class="badge ${open ? "b-warn" : "b-ok"}">${open ? "تقرير مسبق (لم يُطبّق)" : ({ applied: "تم التطبيق", discarded: "ملغاة" }[r.status] || esc(r.status))}</span></div>
+    <div class="totals">
+      ${Object.entries(ACTION_AR).map(([k, v]) => `<div>${v}<b>${c[k] || 0}</b></div>`).join("")}
+      ${r.kind === "opening_stock" ? `<div>إجمالي الكميات في الملف<b>${esc(r.report.source_qty_total)}</b></div>
+        <div>قيمة المخزون في الملف<b>${esc(r.report.source_value_total)}</b></div>` : ""}
+    </div>
+    <h2 class="mt">المشكلات المكتشفة</h2>
+    <ul class="issues">${Object.entries(r.report.issues || {}).map(([k, n]) => `<li class="warn">${esc(ISSUE_AR[k] || k)}: ${n}</li>`).join("") || "<li>لا يوجد</li>"}</ul>
+    ${r.report.applied ? `<p class="badge b-ok">تم التطبيق: ${esc(JSON.stringify(r.report.applied))}</p>` : ""}
+    ${r.report.reconciliation ? `<p>المطابقة بعد النقل: ${r.report.reconciliation.ok ? "✅ مطابقة" : "⛔ غير مطابقة"}</p>` : ""}
+    <div class="row">${open ? `<button class="btn" id="impApply">تطبيق الاستيراد</button>
+      <button class="btn secondary" id="impDiscard">إلغاء</button>` : ""}</div>
+  </section>
+  <section class="panel"><h2>أسطر تحتاج قرار (${attention.length})</h2><div class="tablewrap"><table>
+    <thead><tr><th>سطر</th><th>البيانات</th><th>الحالة</th><th>المشكلة</th><th>القرار</th></tr></thead>
+    <tbody>${attention.map((x) => `<tr><td>${x.row_no}</td>
+      <td>${esc([x.data.code, x.data.name_en || x.data.name_ar, x.data.qty].filter(Boolean).join(" · "))}</td>
+      <td>${ACTION_AR[x.action]}</td>
+      <td>${x.issues.map((i) => esc(ISSUE_AR[i.code] || i.code) + (i.label ? `: ${esc(i.label)}` : "")).join("<br>")}</td>
+      <td>${open ? `<select data-dec="${esc(x.id)}">
+        <option value="">${x.decision ? esc(x.decision) : "— اختر —"}</option>
+        <option value="skip">تجاهل السطر</option>
+        ${x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : ""}
+        ${x.target_id && r.kind === "items" ? `<option value="link:${esc(x.target_id)}">ربط بالصنف الموجود</option>` : ""}
+      </select>` : esc(x.decision || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا يوجد</td></tr>`}</tbody>
+  </table></div></section>`;
+  app.querySelectorAll("[data-dec]").forEach((s) => s.addEventListener("change", async () => {
+    if (!s.value) return;
+    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision: s.value } }); toast("تم الحفظ"); }
+    catch (e) { toast(e.message, true); }
+  }));
+  $("#impApply")?.addEventListener("click", async () => {
+    if (!confirm("تطبيق الاستيراد؟ العملية تتم مرة واحدة بالكامل أو لا شيء.")) return;
+    try { await api(`/api/imports/${id}/apply`, { method: "POST" }); toast("تم الاستيراد بنجاح"); viewImportRun(id); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#impDiscard")?.addEventListener("click", async () => {
+    await api(`/api/imports/${id}/discard`, { method: "POST" }).catch((e) => toast(e.message, true));
+    location.hash = "#/import";
+  });
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
