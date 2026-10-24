@@ -64,6 +64,11 @@ PARTY_HEADERS: dict[str, list[str]] = {
              "supplier name", "customer", "customer name"],
     "code": ["كود", "الكود", "كود المورد", "كود العميل", "رقم", "code", "id"],
     "phone": ["التليفون", "تليفون", "الموبايل", "موبايل", "الهاتف", "رقم الهاتف", "phone", "mobile", "tel"],
+    "phone2": ["موبايل 2", "موبايل2", "تليفون 2", "تليفون2", "الموبايل 2", "رقم اخر", "phone 2", "phone2", "mobile 2"],
+    "phone3": ["موبايل 3", "موبايل3", "تليفون 3", "تليفون3", "الموبايل 3", "phone 3", "phone3", "mobile 3"],
+    "name_alt": ["الاسم الانجليزي", "اسم انجليزي", "الاسم التاني", "اسم اخر", "english name", "name en", "name 2"],
+    "address1": ["العنوان", "عنوان", "العنوان 1", "عنوان 1", "address", "address 1", "address1"],
+    "address2": ["العنوان 2", "عنوان 2", "عنوان اخر", "address 2", "address2"],
     "supplier_type": ["نوع المورد", "النوع", "type"],
     "discount_local": ["خصم محلي", "خصم المحلي", "local discount", "discount local"],
     "discount_imported": ["خصم مستورد", "خصم المستورد", "imported discount", "discount imported"],
@@ -96,7 +101,8 @@ LABELS_AR = {"code": "الكود", "name_en": "اسم الصنف", "name_ar": "�
              "min_stock": "حد الطلب", "is_imported": "محلي/مستورد", "is_drug": "دواء/غير دواء",
              "location": "الموقع", "name": "الاسم", "phone": "التليفون", "supplier_type": "نوع المورد",
              "discount_local": "خصم محلي", "discount_imported": "خصم مستورد", "balance": "الرصيد",
-             "credit_limit": "حد الائتمان", "notes": "ملاحظات"}
+             "credit_limit": "حد الائتمان", "notes": "ملاحظات", "phone2": "موبايل 2", "phone3": "موبايل 3",
+             "name_alt": "اسم تاني", "address1": "العنوان", "address2": "العنوان 2"}
 
 
 def _detect(rows: list[list], kind: str = "items") -> tuple[int, dict[int, str]] | None:
@@ -142,7 +148,8 @@ def template_xlsx(kind: str) -> bytes:
              "opening_stock": ["code", "barcode", "name_en", "qty", "cost", "batch_no", "expiry"],
              "suppliers": ["code", "name", "phone", "supplier_type", "discount_local",
                            "discount_imported", "balance"],
-             "customers": ["code", "name", "phone", "credit_limit", "balance", "notes"]}[kind]
+             "customers": ["code", "name", "name_alt", "phone", "phone2", "phone3", "address1", "address2",
+                           "credit_limit", "balance", "notes"]}[kind]
     wb = Workbook()
     ws = wb.active
     ws.title = "data"
@@ -356,17 +363,21 @@ class DataImport:
     def _normalize_party(self, raw: dict) -> tuple[dict, list[dict]]:
         d: dict[str, Any] = {}
         issues: list[dict] = []
-        for k in ("name", "code", "phone", "supplier_type", "notes"):
+        for k in ("name", "code", "phone", "phone2", "phone3", "name_alt", "address1", "address2", "supplier_type", "notes"):
             v = raw.get(k)
             if isinstance(v, float) and v == int(v):
                 v = int(v)
             d[k] = str(v).strip() if v not in (None, "") else None
-        if d.get("phone"):
-            d["phone"] = "".join(ch for ch in d["phone"].translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
-                                 if ch.isdigit() or ch == "+") or None
-            if d["phone"] and len(d["phone"]) < 7:
-                issues.append({"code": "invalid_phone", "value": raw.get("phone")})
-                d["phone"] = None
+        for pk in ("phone", "phone2", "phone3"):
+            if not d.get(pk):
+                continue
+            d[pk] = "".join(ch for ch in d[pk].translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+                            if ch.isdigit() or ch == "+") or None
+            if d[pk] and len(d[pk]) == 10 and d[pk][0] == "1":     # Excel dropped the leading 0 of a mobile
+                d[pk] = "0" + d[pk]
+            if d[pk] and len(d[pk]) < 7:
+                issues.append({"code": "invalid_phone", "value": raw.get(pk)})
+                d[pk] = None
         for k in ("balance", "credit_limit"):
             v = raw.get(k)
             if v not in (None, ""):
@@ -437,8 +448,9 @@ class DataImport:
             from ..sales.service import Sales
             limit = to_piasters(Decimal(d["credit_limit"])) if d.get("credit_limit") else 0
             if action == "create":
-                target = Sales(self.db).create_customer(ctx, name=d["name"], phone=d.get("phone"),
-                                                        credit_limit=limit, notes=d.get("notes"))
+                target = Sales(self.db).create_customer(
+                    ctx, name=d["name"], phone=d.get("phone"), credit_limit=limit, notes=d.get("notes"),
+                    **{k: d.get(k) for k in ("name_alt", "address1", "address2", "phone2", "phone3")})
                 done["created"] += 1
             else:
                 if d.get("credit_limit") is not None:

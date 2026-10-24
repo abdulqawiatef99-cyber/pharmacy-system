@@ -1810,11 +1810,13 @@ function renderSide() {
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
     const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
-    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.phone ? ` — ${esc(c.phone)}` : ""}</button>`).join("") || `<p class="muted">مفيش عميل بالاسم ده</p>`;
+    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}</button>`).join("") || `<p class="muted">مفيش عميل بالاسم ده</p>`;
     $("#posCustRes").querySelectorAll("[data-cust]").forEach((b) => b.addEventListener("click", async () => {
       SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } });
-      if (SALE.kind === "delivery" && SALE.customer?.phone && !SALE.delivery?.phone)
-        SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { phone: SALE.customer.phone } } });
+      const fill = {};
+      if (SALE.kind === "delivery" && SALE.customer?.phone && !SALE.delivery?.phone) fill.phone = SALE.customer.phone;
+      if (SALE.kind === "delivery" && SALE.customer?.address1 && !SALE.delivery?.address) fill.address = SALE.customer.address1;
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: fill } });
       renderSide();
     }));
   });
@@ -2087,14 +2089,16 @@ async function viewCustomers(filter = "") {
     <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم موبايل" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم فلوس</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">طلبهم الشهري قرّب</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الموبايل</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table></section>
-  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم <input name="name" required></label>
-    <label class="f">الموبايل <input name="phone" inputmode="tel"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
+    <label class="f">اسم تاني (إنجليزي أو الزوجة) <input name="name_alt"></label>
+    <label class="f">الموبايل <input name="phone" inputmode="tel"></label><label class="f">موبايل 2 <input name="phone2" inputmode="tel"></label>
+    <label class="f">العنوان <input name="address1"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
     <button class="btn">أضف</button></form>` : ""}`;
   const today = new Date().toISOString().slice(0, 10);
   const load = async () => {
     const f = $("#cuF .on").dataset.f;
     const list = (await api(`/api/customers/all?q=${encodeURIComponent($("#cuQ").value)}${f ? `&only=${f}` : ""}`)).customers;
-    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b></td><td dir="ltr">${esc(c.phone || "")}</td>
+    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b>${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
       <td>${c.balance > 0 ? `<span class="badge b-err">✕ ${money(c.balance)}</span>` : `<span class="ok">✓ مفيش</span>`}</td>
       <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ ميعاده عدى" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">مفيش عملاء</td></tr>`;
@@ -2104,7 +2108,7 @@ async function viewCustomers(filter = "") {
   document.querySelectorAll("#cuF [data-f]").forEach((b) => b.addEventListener("click", () => { document.querySelectorAll("#cuF button").forEach((x) => x.classList.toggle("on", x === b)); load(); }));
   $("#cuNew")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { const r = await api("/api/customers", { method: "POST", body: { name: e.target.name.value, phone: e.target.phone.value || null, credit_limit: toPiasters(e.target.lim.value) || 0 } }); location.hash = `#/customers/${r.id}`; }
+    try { const r = await api("/api/customers", { method: "POST", body: { name: e.target.name.value, name_alt: e.target.name_alt.value || null, phone: e.target.phone.value || null, phone2: e.target.phone2.value || null, address1: e.target.address1.value || null, credit_limit: toPiasters(e.target.lim.value) || 0 } }); location.hash = `#/customers/${r.id}`; }
     catch (err) { toast(err.message, true); }
   });
   load();
@@ -2115,8 +2119,13 @@ async function viewCustomer(id) {
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><div class="row between"><h1>${esc(c.name)}</h1>
       ${ME.permissions.includes("sales.create") ? `<button class="btn" id="cuSale">فاتورة له</button>` : ""}</div>
-    <div class="formgrid"><label class="f">الاسم <input id="cName" value="${esc(c.name)}" ${canM ? "" : "disabled"}></label>
+    <div class="formgrid"><label class="f">الاسم بالعربي <input id="cName" value="${esc(c.name)}" ${canM ? "" : "disabled"}></label>
+      <label class="f">اسم تاني (إنجليزي أو الزوجة) <input id="cName2" value="${esc(c.name_alt || "")}" ${canM ? "" : "disabled"}></label>
       <label class="f">الموبايل <input id="cPhone" value="${esc(c.phone || "")}" inputmode="tel" ${canM ? "" : "disabled"}></label>
+      <label class="f">موبايل 2 <input id="cPhone2" value="${esc(c.phone2 || "")}" inputmode="tel" ${canM ? "" : "disabled"}></label>
+      <label class="f">موبايل 3 <input id="cPhone3" value="${esc(c.phone3 || "")}" inputmode="tel" ${canM ? "" : "disabled"}></label>
+      <label class="f">العنوان 1 <input id="cAddr1" value="${esc(c.address1 || "")}" ${canM ? "" : "disabled"}></label>
+      <label class="f">العنوان 2 (اختياري) <input id="cAddr2" value="${esc(c.address2 || "")}" ${canM ? "" : "disabled"}></label>
       <label class="f">حد الآجل (ج) <input id="cLim" type="number" min="0" value="${money(c.credit_limit)}" ${canM ? "" : "disabled"}></label>
       <label class="f">ملاحظات <input id="cNotes" value="${esc(c.notes || "")}" ${canM ? "" : "disabled"}></label></div>
     <label class="chk mt"><input type="checkbox" id="cWa" ${c.whatsapp_ok ? "checked" : ""} ${canM ? "" : "disabled"}> موافق إننا نبعتله رسايل واتساب (تذكير الطلب الشهري)</label>
@@ -2126,7 +2135,8 @@ async function viewCustomer(id) {
   ${canM && c.balance > 0 ? `<form class="panel row" id="cPay"><h2 class="grow">تحصيل من الحساب</h2><label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
     <label class="f">منين <select name="m"><option value="cash">نقدي في الدرج</option><option value="card">فيزا</option></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
-    <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<button class="btn small" id="cPrep">جهّز الطلب في الكاشير</button>` : ""}</div>
+    <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في الكاشير</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 فكّره على واتساب</button>` : ""}</span>` : ""}</div>
+      ${c.reminded_at ? `<p class="muted small">آخر تذكير اتبعت: ${esc(c.reminded_at.slice(0, 10))}</p>` : ""}
       <table><thead><tr><th>الصنف</th><th>الكمية</th><th>كل</th><th>ميعاده</th><th>عندنا؟</th><th></th></tr></thead><tbody>
       ${c.refills.map((r) => `<tr><td>${itemHtml(r)}</td><td>${esc(fmtStock(r.qty_base, it(r)))}</td><td>${r.every_days} يوم</td>
         <td><span class="badge ${r.days_left < 0 ? "b-err" : r.days_left <= 5 ? "b-warn" : "b-ok"}">${r.days_left < 0 ? `✕ متأخر ${-r.days_left} يوم` : r.days_left <= 5 ? `⚠ بعد ${r.days_left} يوم` : `✓ ${esc(r.due)}`}</span></td>
@@ -2137,14 +2147,14 @@ async function viewCustomer(id) {
       ${canM ? `<form class="row mt" id="rAdd"><input id="rQ" class="grow" placeholder="ضيف صنف للطلب الشهري (اسم أو باركود)" autocomplete="off">
         <input id="rQty" type="number" min="1" value="1" class="narrow" title="الكمية بالعلبة"><select id="rEvery"><option value="30">كل شهر</option><option value="15">كل 15 يوم</option><option value="60">كل شهرين</option></select>
         <button class="btn small">أضف</button></form><div id="rRes" class="cands"></div>` : ""}
-      <p class="muted">البرنامج بيقترح، وانت اللي بتأكد. مفيش رسالة بتطلع لوحدها.</p></section>
+      <p class="muted">البرنامج بيقترح، وانت اللي بتأكد. مفيش رسالة بتطلع لوحدها: زرار الواتساب بيفتح المحادثة والرسالة جاهزة، وانت اللي بتدوس إرسال. الرسالة مفيهاش اسم الدوا.</p></section>
     <section class="panel"><h2>الحساب</h2><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead><tbody>
       ${c.ledger.map((l) => `<tr><td>${esc(l.created_at.slice(0, 10))}</td><td>${esc(CL_KIND[l.kind] || l.kind)}${l.note ? ` — ${esc(l.note)}` : ""}</td>
         <td class="num ${l.amount < 0 ? "ok" : ""}">${l.amount < 0 ? "− " : "+ "}${money(Math.abs(l.amount))}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">مفيش حركات</td></tr>`}</tbody></table>
       <h2 class="mt">آخر الفواتير</h2><ul class="plain">${c.sales.map((x) => `<li><a href="#/sales/${esc(x.id)}">فاتورة ${x.sale_no}</a> — ${money(x.total)} ج — ${esc((x.completed_at || "").slice(0, 10))}</li>`).join("") || `<li class="muted">مفيش</li>`}</ul></section>
   </div>`;
   $("#cSave")?.addEventListener("click", async () => {
-    try { await api(`/api/customers/${id}`, { method: "PATCH", body: { name: $("#cName").value, phone: $("#cPhone").value || null, notes: $("#cNotes").value || null, credit_limit: toPiasters($("#cLim").value) || 0, whatsapp_ok: $("#cWa").checked } }); toast("اتحفظ"); viewCustomer(id); }
+    try { await api(`/api/customers/${id}`, { method: "PATCH", body: { name: $("#cName").value, name_alt: $("#cName2").value || null, phone: $("#cPhone").value || null, phone2: $("#cPhone2").value || null, phone3: $("#cPhone3").value || null, address1: $("#cAddr1").value || null, address2: $("#cAddr2").value || null, notes: $("#cNotes").value || null, credit_limit: toPiasters($("#cLim").value) || 0, whatsapp_ok: $("#cWa").checked } }); toast("اتحفظ"); viewCustomer(id); }
     catch (err) { toast(err.message, true); }
   });
   $("#cPay")?.addEventListener("submit", async (e) => {
@@ -2155,6 +2165,11 @@ async function viewCustomer(id) {
   const toPos = async (sid) => { SALE = await api(`/api/sales/${sid}`); location.hash = "#/pos"; };
   $("#cuSale")?.addEventListener("click", async () => {
     try { const d = await api("/api/sales", { method: "POST", body: { customer_id: id } }); await toPos(d.id); } catch (err) { toast(err.message, true); }
+  });
+  $("#cWaSend")?.addEventListener("click", async () => {
+    const w = window.open("", "_blank");
+    try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { whatsapp: true } }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }
+    catch (err) { w?.close(); toast(err.message, true); }
   });
   $("#cPrep")?.addEventListener("click", async () => {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { prepare: true } }); await toPos(r.sale_id); } catch (err) { toast(err.message, true); }

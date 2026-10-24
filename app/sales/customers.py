@@ -1,12 +1,52 @@
 """Customers: profile, credit account, monthly (chronic) orders the pharmacist confirms."""
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
+
+
+SEARCH_SQL = ("c.name LIKE ? OR coalesce(c.name_alt,'') LIKE ? OR coalesce(c.phone,'') LIKE ?"
+              " OR coalesce(c.phone2,'') LIKE ? OR coalesce(c.phone3,'') LIKE ?")
+SEARCH_N = 5
+TEXT_FIELDS = ("name", "name_alt", "address1", "address2", "phone", "phone2", "phone3", "notes")
+
+
+def clean_phone(v) -> str | None:
+    """Keeps digits and a leading +; Arabic-Indic digits become 0-9."""
+    s = str(v or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    s = re.sub(r"[^\d+]", "", s)
+    if not s:
+        return None
+    if not re.fullmatch(r"\+?\d{3,15}", s):
+        raise ValidationFailed(f"رقم الموبايل مش صحيح: {v}")
+    return s
+
+
+def wa_number(phone: str | None) -> str | None:
+    """International form for wa.me: Egyptian 01xxxxxxxxx -> 201xxxxxxxxx."""
+    if not phone:
+        return None
+    p = phone.lstrip("+")
+    if re.fullmatch(r"01[0125]\d{8}", p):
+        return "2" + p
+    if re.fullmatch(r"201[0125]\d{8}", p) or (phone.startswith("+") and len(p) >= 8):
+        return p
+    return None
+
+
+def check_phones(db: Database, org_id: str, phones: list[str], exclude: str | None = None) -> None:
+    for ph in phones:
+        r = db.one("SELECT id, name FROM customers WHERE org_id=? AND (phone=? OR phone2=? OR phone3=?)"
+                   + (" AND id<>?" if exclude else ""), (org_id, ph, ph, ph) + ((exclude,) if exclude else ()))
+        if r:
+            raise Conflict(f"رقم {ph} مسجل للعميل {r['name']}")
+    if len(set(phones)) != len(phones):
+        raise ValidationFailed("نفس الرقم مكتوب مرتين")
 
 
 def _bal_sql() -> str:
@@ -22,8 +62,8 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
            " FROM customers c WHERE c.org_id=? AND c.is_active=1")
     params: list = [ctx.org_id]
     if q.strip():
-        sql += " AND (c.name LIKE ? OR coalesce(c.phone,'') LIKE ?)"
-        params += [f"%{q.strip()}%", f"%{q.strip()}%"]
+        sql += f" AND ({SEARCH_SQL})"
+        params += [f"%{q.strip()}%"] * SEARCH_N
     sql += " ORDER BY c.name LIMIT 300"
     rows = [dict(r) for r in db.all(sql, tuple(params))]
     soon = (today + timedelta(days=5)).isoformat()
@@ -40,11 +80,14 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
     if not c:
         raise NotFound("العميل غير موجود")
     ch = {}
-    for k in ("name", "phone", "notes"):
+    for k in TEXT_FIELDS:
         if k in data:
-            ch[k] = str(data[k] or "").strip() or None
+            ch[k] = clean_phone(data[k]) if k.startswith("phone") else (str(data[k] or "").strip() or None)
     if "name" in ch and not ch["name"]:
         raise ValidationFailed("اسم العميل مطلوب")
+    phones = [ch.get(k, c[k]) for k in ("phone", "phone2", "phone3")]
+    if any(k.startswith("phone") for k in ch):
+        check_phones(db, ctx.org_id, [p for p in phones if p], exclude=cid)
     if "credit_limit" in data:
         v = data["credit_limit"]
         if not isinstance(v, int) or v < 0:
@@ -70,6 +113,7 @@ def profile(db: Database, ctx: Context, cid: str, today: date | None = None) -> 
     if not c:
         raise NotFound("العميل غير موجود")
     out = dict(c)
+    out["wa"] = [w for w in (wa_number(c[k]) for k in ("phone", "phone2", "phone3")) if w]
     out["ledger"] = [dict(r) for r in db.all(
         "SELECT l.amount, l.kind, l.note, l.created_at, l.ref_id, u.full_name by_name FROM customer_ledger l LEFT JOIN users u"
         " ON u.id=l.created_by WHERE l.org_id=? AND l.customer_id=? ORDER BY l.created_at DESC LIMIT 100", (ctx.org_id, cid))]
@@ -148,3 +192,30 @@ def mark_refilled(db: Database, sale_id: str) -> None:
         return
     db.execute("UPDATE customer_refills SET last_at=? WHERE customer_id=? AND item_id IN"
                " (SELECT item_id FROM sale_lines WHERE sale_id=?)", (s["completed_at"], s["customer_id"], sale_id))
+
+
+REMINDER_TEXT = "أهلاً {name}، معاد طلبك الشهري من {pharmacy} {date}. تحب نجهزهولك؟ ابعتلنا هنا ونوصلهولك."
+
+
+def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None = None) -> dict:
+    """A free wa.me click-to-chat link (opens WhatsApp on this device with the text ready; the
+    person presses send). No API, no subscription. The text never names the medicine: it leaves
+    this program through WhatsApp."""
+    from urllib.parse import quote
+    ctx.require("customers.manage")
+    p = profile(db, ctx, cid, today)
+    if not p["whatsapp_ok"]:
+        raise Conflict("العميل مش موافق على رسايل واتساب")
+    if not p["wa"]:
+        raise ValidationFailed("مفيش رقم موبايل صالح للواتساب")
+    from ..printing import settings as ps
+    org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))
+    pharmacy = ps.get(db, ctx.org_id).get("title") or (org["name"] if org else "الصيدلية")
+    due = min((r["due"] for r in p["refills"]), default=None)
+    today = today or date.today()
+    when = "النهارده" if due == today.isoformat() else ("خلص" if due and due < today.isoformat() else f"يوم {due}" if due else "قرّب")
+    text = REMINDER_TEXT.format(name=p["name"].split()[0], pharmacy=pharmacy, date=when)
+    with db.transaction():
+        db.execute("UPDATE customers SET reminded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (cid,))
+        audit.record(db, ctx, "customer.whatsapp_reminder", "customer", cid)
+    return {"url": f"https://wa.me/{p['wa'][0]}?text={quote(text)}", "text": text, "phone": p["wa"][0]}

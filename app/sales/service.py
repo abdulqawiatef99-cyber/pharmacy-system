@@ -86,21 +86,23 @@ class Sales:
 
     # ------------------------------------------------------------ customers
     def create_customer(self, ctx: Context, *, name: str, phone: str | None = None,
-                        credit_limit: int = 0, notes: str | None = None) -> str:
+                        credit_limit: int = 0, notes: str | None = None, **more) -> str:
+        from . import customers as cu
         ctx.require("customers.manage")
         if not name.strip():
             raise ValidationFailed("اسم العميل مطلوب")
         if credit_limit < 0:
             raise ValidationFailed("حد الآجل لا يكون بالسالب")
+        d = {"name": name.strip(), "phone": cu.clean_phone(phone), "notes": notes or None}
+        for k in ("name_alt", "address1", "address2"):
+            d[k] = str(more.get(k) or "").strip() or None
+        for k in ("phone2", "phone3"):
+            d[k] = cu.clean_phone(more.get(k))
         cid = new_id()
         with self.db.transaction():
-            if phone and self.db.one("SELECT 1 FROM customers WHERE org_id=? AND phone=?",
-                                     (ctx.org_id, phone.strip())):
-                raise Conflict("رقم التليفون مسجل لعميل آخر")
-            self.db.execute("INSERT INTO customers (id, org_id, name, phone, credit_limit, notes)"
-                            " VALUES (?,?,?,?,?,?)",
-                            (cid, ctx.org_id, name.strip(), phone.strip() if phone else None,
-                             credit_limit, notes))
+            cu.check_phones(self.db, ctx.org_id, [d[k] for k in ("phone", "phone2", "phone3") if d[k]])
+            self.db.execute(f"INSERT INTO customers (id, org_id, credit_limit, {', '.join(d)}) VALUES (?,?,?{',?' * len(d)})",
+                            (cid, ctx.org_id, credit_limit, *d.values()))
             audit.record(self.db, ctx, "customer.create", "customer", cid,
                          after={"name": name, "credit_limit": credit_limit})
         return cid
@@ -290,7 +292,7 @@ class Sales:
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
         if s["customer_id"]:
-            c = self.db.one("SELECT id, name, phone, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
+            c = self.db.one("SELECT id, name, name_alt, phone, address1, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
         return s
 

@@ -509,6 +509,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         cid = req.path_params["id"]
         if b.get("prepare"):
             return J({"sale_id": cu.prepare_refill(db, ctx, cid)})
+        if b.get("whatsapp"):
+            return J(cu.whatsapp_reminder(db, ctx, cid))
         if b.get("remove"):
             return J(cu.remove_refill(db, ctx, cid, str(b.get("item_id", ""))))
         return J(cu.save_refill(db, ctx, cid, str(b.get("item_id", "")), b.get("qty_base"), b.get("every_days", 30)))
@@ -1329,10 +1331,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def customers_list(req):
         ctx = ctx_of(req)
         ctx.require("sales.read")
-        q = "%" + req.query_params.get("q", "") + "%"
-        rows = db.all("SELECT id, name, phone, credit_limit FROM customers WHERE org_id=? AND is_active=1"
-                      " AND (name LIKE ? OR coalesce(phone,'') LIKE ?) ORDER BY name LIMIT 30",
-                      (ctx.org_id, q, q))
+        from ..sales import customers as cu
+        q = "%" + req.query_params.get("q", "").strip() + "%"
+        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
+                      f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
+                      (ctx.org_id, *[q] * cu.SEARCH_N))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -1341,7 +1344,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         cid = Sales(db).create_customer(ctx, name=str(b.get("name", "")), phone=b.get("phone") or None,
-                                        credit_limit=_int(b.get("credit_limit"), "limit"), notes=b.get("notes"))
+                                        credit_limit=_int(b.get("credit_limit"), "limit"), notes=b.get("notes"),
+                                        **{k: b.get(k) for k in ("name_alt", "address1", "address2", "phone2", "phone3")})
         return J({"id": cid}, status_code=201)
 
     @handler
