@@ -26,6 +26,7 @@ PERMISSIONS: dict[str, str] = {
     "items.no_return": "تحديد الأقسام اللي مالهاش مرتجع",
     "suppliers.read": "عرض الموردين",
     "suppliers.write": "إضافة وتعديل الموردين",
+    "suppliers.pay": "تسجيل دفع للموردين",
     "purchases.read": "عرض فواتير الشراء",
     "purchases.create": "إدخال فواتير الشراء",
     "purchases.edit": "مراجعة وتعديل فواتير الشراء",
@@ -66,7 +67,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("اللي يشوفه", ["sales.totals", "costs.read", "cash.see_expected", "notifications.read", "audit.read"]),
     ("الشراء والأصناف", ["purchases.create", "purchases.read", "purchases.edit", "purchases.approve",
                          "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return",
-                         "suppliers.read", "suppliers.write"]),
+                         "suppliers.read", "suppliers.write", "suppliers.pay"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
     ("الفلوس", ["cash.close", "cash.manage"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
@@ -83,7 +84,7 @@ _EMPLOYEE = ["items.read", "suppliers.read", "purchases.read", "purchases.create
 DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
     "owner": ("الصاحب", list(PERMISSIONS), 10000),
     "manager": ("مدير", _EMPLOYEE + [
-        "items.write", "items.price", "suppliers.write", "purchases.approve", "inventory.adjust",
+        "items.write", "items.price", "suppliers.write", "suppliers.pay", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
         "audit.read", "safety.override"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
@@ -93,7 +94,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-10-24"
+ROLES_VERSION = "2026-10-25"
 
 
 @dataclass(frozen=True)

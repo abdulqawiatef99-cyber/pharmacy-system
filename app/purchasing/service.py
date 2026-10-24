@@ -565,6 +565,14 @@ class Purchasing:
                             (ctx.user_id, now, net_total, inv_id))
             audit.record(self.db, ctx, "purchase.approve", "purchase_invoice", inv_id,
                          after={"lines": len(lines), "base_units": moved, "total": net_total})
+            if inv["supplier_id"]:      # the supplier's account: we now owe this invoice
+                self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
+                                " VALUES (?,?,?,?,'purchase',?,?,?)", (new_id(), ctx.org_id, inv["supplier_id"], net_total,
+                                                                       inv_id, f"فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
+            ids = [l["item_id"] for l in lines if l["item_id"]]
+            if ids:                     # arrived: no longer short
+                self.db.execute(f"UPDATE items SET shortage_at=NULL, shortage_by=NULL WHERE org_id=? AND id IN"
+                                f" ({','.join('?' * len(ids))})", (ctx.org_id, *ids))
             label = inv["invoice_no"] or ""
             if cost_ups:
                 notify.emit(self.db, ctx, "cost_increase", "warning",
@@ -614,6 +622,14 @@ class Purchasing:
             self.db.execute("UPDATE purchase_invoices SET status='cancelled', cancelled_by=?,"
                             " cancelled_at=?, cancel_reason=?, version=version+1 WHERE id=?",
                             (ctx.user_id, accounts.iso(accounts.utcnow()), reason.strip(), inv_id))
+            if inv["status"] == "approved" and inv["supplier_id"]:
+                posted = self.db.one("SELECT coalesce(sum(amount),0) a FROM supplier_ledger WHERE ref_id=? AND kind='purchase'",
+                                     (inv_id,))["a"]
+                if posted:
+                    self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
+                                    " created_by) VALUES (?,?,?,?,'adjustment',?,?,?)",
+                                    (new_id(), ctx.org_id, inv["supplier_id"], -posted, inv_id,
+                                     f"إلغاء فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
             audit.record(self.db, ctx, "purchase.cancel", "purchase_invoice", inv_id,
                          before={"status": inv["status"]}, after={"reason": reason})
         return self.get(ctx, inv_id, with_candidates=False)

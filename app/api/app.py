@@ -459,6 +459,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"updated": n})
 
     @handler
+    async def suppliers_all(req):
+        from ..procurement import suppliers as sup
+        return J({"suppliers": sup.listing(db, ctx_of(req))})
+
+    @handler
+    async def supplier_account(req):
+        from ..procurement import suppliers as sup
+        ctx = ctx_of(req)
+        if req.method == "PATCH":
+            return J(sup.update(db, ctx, req.path_params["id"], await body(req)))
+        return J(sup.account(db, ctx, req.path_params["id"]))
+
+    @handler
+    async def supplier_pay(req):
+        from ..procurement import suppliers as sup
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(sup.pay(db, ctx, req.path_params["id"], _int(b.get("amount"), "amount"), str(b.get("method", "")),
+                         b.get("note")))
+
+    @handler
+    async def shortages_list(req):
+        from ..procurement import suppliers as sup
+        return J({"items": sup.shortages(db, ctx_of(req))})
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -1337,6 +1363,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/categories/{id}", categories_save, methods=["PATCH"]),
         Route("/api/suppliers", suppliers_list),
         Route("/api/suppliers", suppliers_create, methods=["POST"]),
+        Route("/api/suppliers/all", suppliers_all),
+        Route("/api/suppliers/{id}", supplier_account, methods=["GET", "PATCH"]),
+        Route("/api/suppliers/{id}/pay", supplier_pay, methods=["POST"]),
+        Route("/api/shortages", shortages_list),
         Route("/api/purchases", purchases_list),
         Route("/api/purchases", purchases_manual, methods=["POST"]),
         Route("/api/purchases/import", purchases_import, methods=["POST"]),
