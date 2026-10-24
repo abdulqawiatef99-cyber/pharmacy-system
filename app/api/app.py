@@ -34,6 +34,7 @@ from ..purchasing.service import Purchasing
 from ..dataimport.service import DataImport, export_catalog
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
+from ..inventory.counting import Counting
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -97,6 +98,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     dimp = DataImport(db)
     safety = SafetyEngine(db)
     recalls = Recalls(db)
+    counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
 
     def client_ip(req: Request) -> str:
@@ -469,6 +471,54 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         recalls.decide(ctx, req.path_params["id"], str(b.get("status", "")), b.get("note"))
         return J({"ok": True})
 
+    # ------------------------------------------------------------- counting
+    @handler
+    async def counts_list(req):
+        ctx = ctx_of(req)
+        ctx.require("inventory.count")
+        rows = db.all("SELECT id, title, scope, status, blind, created_at FROM count_sessions"
+                      " WHERE org_id=? ORDER BY created_at DESC LIMIT 50", (ctx.org_id,))
+        return J([dict(r) for r in rows])
+
+    @handler
+    async def counts_create(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        sid = counting.create(ctx, title=str(b.get("title", "")), scope=b.get("scope", "full"),
+                              locations=b.get("locations"), item_ids=b.get("item_ids"),
+                              blind=bool(b.get("blind", True)))
+        return J({"id": sid}, status_code=201)
+
+    @handler
+    async def counts_entry(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        try:
+            qty = int(b.get("qty"))
+        except (TypeError, ValueError):
+            raise ValidationFailed("الكمية غير صحيحة")
+        return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),
+                                 qty=qty, batch_id=b.get("batch_id"),
+                                 location=str(b.get("location") or ""), mode=b.get("mode", "set"),
+                                 recount=bool(b.get("recount")), device=req.headers.get("user-agent", "")[:80]))
+
+    @handler
+    async def counts_variances(req):
+        return J(counting.variances(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def counts_approve(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=bool(b.get("zero_uncounted")),
+                                  reason=b.get("reason")))
+
+    @handler
+    async def counts_cancel(req):
+        ctx = ctx_of(req)
+        counting.cancel(ctx, req.path_params["id"])
+        return J({"ok": True})
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -518,6 +568,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/safety/rules/{id}/approve", safety_rule_approve, methods=["POST"]),
         Route("/api/safety/rules/{id}/disable", safety_rule_disable, methods=["POST"]),
         Route("/api/safety/sources", safety_source_add, methods=["POST"]),
+        Route("/api/counts", counts_list),
+        Route("/api/counts", counts_create, methods=["POST"]),
+        Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
+        Route("/api/counts/{id}/variances", counts_variances),
+        Route("/api/counts/{id}/approve", counts_approve, methods=["POST"]),
+        Route("/api/counts/{id}/cancel", counts_cancel, methods=["POST"]),
         Route("/api/recalls/extract", recall_extract, methods=["POST"]),
         Route("/api/recalls", recall_add, methods=["POST"]),
         Route("/api/recalls/alerts", recall_alerts),

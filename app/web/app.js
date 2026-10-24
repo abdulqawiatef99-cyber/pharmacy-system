@@ -48,6 +48,8 @@ const routes = [
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
+  [/^#\/counts$/, viewCounts],
+  [/^#\/counts\/([\w-]+)$/, viewCountSession],
 ];
 
 async function route() {
@@ -536,6 +538,133 @@ async function viewRecalls() {
     try { await api(`/api/recalls/alerts/${b.dataset.rc}`, { method: "POST", body: { status: b.dataset.st, note } }); viewRecalls(); }
     catch (err) { toast(err.message, true); }
   }));
+}
+
+// ------------------------------------------------------------------ inventory count
+async function viewCounts() {
+  const list = await api("/api/counts");
+  const canManage = ME.permissions.includes("inventory.adjust");
+  app.innerHTML = `
+  <section class="panel">
+    <h1>الجرد</h1>
+    ${canManage ? `<form id="cntForm" class="row">
+      <label class="f grow">اسم الجرد <input name="title" required placeholder="مثال: جرد رف A"></label>
+      <label class="f">النطاق <select name="scope"><option value="full">شامل</option><option value="location">مواقع محددة</option></select></label>
+      <label class="f">المواقع (لو النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
+      <button class="btn" type="submit">بدء جرد</button></form>` : ""}
+  </section>
+  <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+    <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${esc(c.scope)}</td>
+      <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(c.created_at.slice(0, 10))}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
+  $("#cntForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      const r = await api("/api/counts", { method: "POST", body: { title: f.title.value, scope: f.scope.value,
+        locations: f.locations.value.split(/[,،]/).map((x) => x.trim()).filter(Boolean) } });
+      location.hash = `#/counts/${r.id}`;
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+let COUNT_ITEM = null;
+
+async function viewCountSession(id) {
+  const canManage = ME.permissions.includes("inventory.adjust");
+  app.innerHTML = `
+  <section class="panel">
+    <div class="row between"><h1>تسجيل الجرد</h1><a href="#/counts">رجوع</a></div>
+    <p class="muted">امسح الباركود بالقارئ أو اكتب الاسم. الكميات بالوحدة الصغرى (شريط/وحدة).</p>
+    <div class="row">
+      <label class="f grow">باركود أو اسم الصنف <input id="cntQ" autocomplete="off" autofocus></label>
+      ${"BarcodeDetector" in window ? `<button class="btn secondary" id="cntCam" type="button">كاميرا</button>` : ""}
+    </div>
+    <video id="cntVideo" playsinline hidden class="scanvideo"></video>
+    <div id="cntPick"></div>
+    <div id="cntItem" class="mt"></div>
+  </section>
+  ${canManage ? `<section class="panel"><div class="row between"><h2>الفروقات</h2>
+    <button class="btn secondary" id="cntVar">تحديث الفروقات</button></div><div id="cntVarBox" class="muted">اضغط تحديث لعرض الفروقات</div></section>` : ""}`;
+  const q = $("#cntQ");
+  const chooseItem = (it) => {
+    COUNT_ITEM = it;
+    $("#cntPick").innerHTML = "";
+    $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
+      <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(it.base_unit_name)} — موقع ${esc(it.location || "—")}</div>
+      <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
+      <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
+      <label class="f"><span>إضافة على السابق</span><input id="cntAdd" type="checkbox"></label>
+      <button class="btn" id="cntSave">حفظ</button></div></div>`;
+    $("#cntQty").focus();
+    $("#cntSave").addEventListener("click", () => save(false));
+    $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
+  };
+  const save = async (recount) => {
+    const qty = parseInt($("#cntQty").value, 10);
+    if (Number.isNaN(qty) || qty < 0) return toast("اكتب كمية صحيحة", true);
+    try {
+      await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
+        location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
+      toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${qty}`);
+      $("#cntItem").innerHTML = ""; q.value = ""; q.focus();
+    } catch (err) {
+      if (err.code === "already_counted" && confirm(`الصنف اتجرد قبل كده بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) return save(true);
+      toast(err.message, true);
+    }
+  };
+  const lookup = async () => {
+    const v = q.value.trim();
+    if (!v) return;
+    const res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
+    if (res.length === 1) return chooseItem(res[0]);
+    if (!res.length) return toast("الصنف غير موجود", true);
+    $("#cntPick").innerHTML = `<div class="cands">${res.map((r, i) => `<button class="btn secondary small" data-pk="${i}">${esc(r.name_en || r.name_ar)}</button>`).join("")}</div>`;
+    $("#cntPick").querySelectorAll("[data-pk]").forEach((b) => b.addEventListener("click", () => chooseItem(res[+b.dataset.pk])));
+  };
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); lookup(); } });
+  $("#cntCam")?.addEventListener("click", async () => {
+    const video = $("#cntVideo");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      video.srcObject = stream; video.hidden = false; await video.play();
+      const det = new BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "code_128", "qr_code"] });
+      const tick = async () => {
+        if (video.hidden) return;
+        const codes = await det.detect(video).catch(() => []);
+        if (codes.length) {
+          stream.getTracks().forEach((t) => t.stop()); video.hidden = true;
+          q.value = codes[0].rawValue; lookup(); return;
+        }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    } catch { toast("تعذر فتح الكاميرا (تحتاج HTTPS أو تصريح الكاميرا)", true); }
+  });
+  $("#cntVar")?.addEventListener("click", async () => {
+    try {
+      const v = await api(`/api/counts/${id}/variances`);
+      const box = $("#cntVarBox");
+      box.className = "";
+      box.innerHTML = `<div class="totals"><div>أصناف مجرودة<b>${v.summary.counted_lines}</b></div>
+        <div>عجز (وحدات)<b>${v.summary.shortage_units}</b></div><div>زيادة (وحدات)<b>${v.summary.excess_units}</b></div>
+        <div>أصناف لم تُجرد ولها رصيد<b>${v.summary.uncounted_items}</b></div></div>
+        <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد بالنظام</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
+        <tbody>${v.lines.map((l) => `<tr class="${l.difference ? "has-err" : ""}"><td>${esc(l.label)}</td><td>${l.system_qty}</td>
+          <td>${l.counted}</td><td>${l.moves_after_count}</td><td>${l.difference}</td><td>${esc(l.value ?? "")}</td>
+          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : "رصيد سالب"}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>
+        <div class="row mt"><button class="btn" id="cntApprove">اعتماد التسويات</button></div>`;
+      $("#cntApprove").addEventListener("click", async () => {
+        let zero = false, reason = null;
+        if (v.summary.uncounted_items && confirm(`${v.summary.uncounted_items} صنف لم يُجرد ولهم رصيد. هل تريد تصفيرهم؟ (إلغاء = تركهم كما هم)`)) {
+          zero = true; reason = prompt("سبب التصفير:"); if (!reason) return;
+        }
+        if (!confirm("اعتماد الجرد وتسجيل التسويات في المخزون؟")) return;
+        try { await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason } }); toast("تم اعتماد الجرد"); location.hash = "#/counts"; }
+        catch (err) { toast(err.message, true); }
+      });
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

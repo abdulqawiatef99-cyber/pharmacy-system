@@ -22,6 +22,7 @@ PERMISSIONS: dict[str, str] = {
     "purchases.cancel": "إلغاء فاتورة معتمدة",
     "inventory.read": "عرض المخزون",
     "inventory.adjust": "تسويات المخزون",
+    "inventory.count": "تسجيل الجرد",
     "costs.read": "عرض التكلفة",
     "users.manage": "إدارة المستخدمين",
     "settings.manage": "إدارة الإعدادات",
@@ -38,11 +39,11 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
     "pharmacist": ("صيدلي", [
         "items.read", "items.write", "suppliers.read", "purchases.read",
         "purchases.create", "purchases.edit", "purchases.approve",
-        "inventory.read", "costs.read", "safety.read", "safety.override",
+        "inventory.read", "costs.read", "safety.read", "safety.override", "inventory.count",
     ]),
     "assistant": ("مساعد", [
         "items.read", "suppliers.read", "purchases.read", "purchases.create",
-        "purchases.edit", "inventory.read", "safety.read",
+        "purchases.edit", "inventory.read", "safety.read", "inventory.count",
     ]),
 }
 
