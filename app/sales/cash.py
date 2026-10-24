@@ -9,7 +9,9 @@ Card and credit amounts never touch the drawer.
 from __future__ import annotations
 
 from ..core import audit, notify
-from ..core.errors import Conflict, NotFound, ValidationFailed
+import json
+
+from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 
@@ -41,6 +43,27 @@ def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | Non
     db.execute("INSERT INTO cash_movements (id, org_id, shift_id, amount, kind, ref_id, note, created_by)"
                " VALUES (?,?,?,?,?,?,?,?)", (new_id(), ctx.org_id, shift, amount, kind, ref_id, note, ctx.user_id))
     return shift
+
+
+# Egyptian notes and coins, in piasters
+DENOMINATIONS = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25]
+
+
+def count_total(detail: dict) -> tuple[int, dict]:
+    """{"20000": 3, "100": 7, ...} -> (total piasters, cleaned detail)."""
+    if not isinstance(detail, dict):
+        raise ValidationFailed("عدد الفئات غير صحيح")
+    clean = {}
+    for k, v in detail.items():
+        try:
+            d, n = int(k), int(v or 0)
+        except (TypeError, ValueError):
+            raise ValidationFailed("عدد الفئات غير صحيح")
+        if d not in DENOMINATIONS or n < 0 or n > 100000:
+            raise ValidationFailed("عدد الفئات غير صحيح")
+        if n:
+            clean[str(d)] = n
+    return sum(int(k) * n for k, n in clean.items()), clean
 
 
 class CashDrawer:
@@ -109,8 +132,12 @@ class CashDrawer:
             shift = record(self.db, ctx, -amount if kind == "payout" else amount, kind, note=note.strip())
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
-    def close(self, ctx: Context, counted_cash: int, note: str | None = None) -> dict:
+    def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
+              denominations: dict | None = None) -> dict:
         ctx.require("cash.close")
+        detail = None
+        if denominations is not None:
+            counted_cash, detail = count_total(denominations)
         if not isinstance(counted_cash, int) or counted_cash < 0:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         with self.db.transaction():
@@ -121,8 +148,9 @@ class CashDrawer:
                 raise ValidationFailed("فيه فرق في الخزنة؛ اكتب سببه قبل القفل", code="difference_note_required",
                                        details={"expected": expected, "difference": diff})
             self.db.execute("UPDATE cash_shifts SET status='closed', expected_cash=?, counted_cash=?, difference=?,"
-                            " close_note=?, closed_by=?, closed_at=? WHERE id=?",
-                            (expected, counted_cash, diff, note, ctx.user_id, _now(), sid))
+                            " close_note=?, closed_by=?, closed_at=?, counted_detail=? WHERE id=?",
+                            (expected, counted_cash, diff, note, ctx.user_id, _now(),
+                             json.dumps(detail) if detail else None, sid))
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
                          after={"expected": expected, "counted": counted_cash, "difference": diff})
             if diff:
@@ -133,4 +161,48 @@ class CashDrawer:
                             "cash_shift", sid)
         from ..core import autobackup
         autobackup.trigger("shift_close")
-        return self.summary(ctx, sid)
+        return self.report(ctx, sid)
+
+    def report(self, ctx: Context, shift_id: str) -> dict:
+        """Closing report. The person who closed sees the result (shortage / surplus) only after
+        his count is saved; the owner and managers see every shift."""
+        ctx.require("sales.read")
+        s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
+        if not s:
+            raise NotFound("الشيفت غير موجود")
+        own_closed = s["status"] == "closed" and s["closed_by"] == ctx.user_id
+        if not (ctx.can("cash.see_expected") or own_closed):
+            raise Forbidden("تقرير الشيفت للمدير والصاحب", code="forbidden")
+        full = {**dict(s)}
+        k = {r["kind"]: r["t"] for r in self.db.all(
+            "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
+        sales = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_card),0) card,"
+                            " coalesce(sum(paid_transfer),0) transfer, coalesce(sum(on_credit),0) credit,"
+                            " coalesce(sum(discount_total),0) discount FROM sales WHERE shift_id=? AND status='completed'",
+                            (shift_id,))
+        voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL",
+                             (shift_id,))["n"]
+        returns = self.db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN cash_movements m"
+                              " ON m.ref_id=r.id WHERE m.shift_id=?", (shift_id,))
+        by_channel = [dict(r) for r in self.db.all(
+            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
+            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
+            " WHERE x.shift_id=? AND x.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
+        names = {u["id"]: u["full_name"] for u in self.db.all(
+            "SELECT id, full_name FROM users WHERE id IN (?,?)", (s["opened_by"], s["closed_by"] or ""))}
+        expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
+        full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
+                    transfer_total=sales["transfer"], credit_total=sales["credit"], discount_total=sales["discount"],
+                    voided_count=voided, returns_count=returns["n"], returns_total=returns["t"], by_channel=by_channel,
+                    expected_cash=expected, opened_by_name=names.get(s["opened_by"]),
+                    closed_by_name=names.get(s["closed_by"]),
+                    counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None)
+        return full
+
+    def recent(self, ctx: Context, limit: int = 30) -> list[dict]:
+        ctx.require("cash.see_expected")
+        return [dict(r) for r in self.db.all(
+            "SELECT s.id, s.status, s.opened_at, s.closed_at, s.opening_cash, s.expected_cash, s.counted_cash,"
+            " s.difference, s.close_note, u.full_name closed_by_name FROM cash_shifts s LEFT JOIN users u"
+            " ON u.id=s.closed_by WHERE s.org_id=? AND s.branch_id=? ORDER BY s.opened_at DESC LIMIT ?",
+            (ctx.org_id, ctx.branch_id, min(limit, 200)))]

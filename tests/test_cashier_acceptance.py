@@ -78,8 +78,7 @@ class TestShift(Base):
         # assistant closes "count only": never sees the expected amount, no note demanded
         self.assertNotIn("expected_cash", self.cd.summary(actx))
         r = self.cd.close(actx, 0)
-        self.assertTrue(r["blind"])
-        self.assertNotIn("difference", r)
+        self.assertLess(r["difference"], 0)            # after his count is saved, the closer sees the result
         owner_view = self.cd.summary(self.ctx, r["id"])
         self.assertLess(owner_view["difference"], 0)
         from app.core import notify

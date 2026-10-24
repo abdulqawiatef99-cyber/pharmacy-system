@@ -174,6 +174,7 @@ const routes = [
   [/^#\/items\/([\w-]+)\/edit$/, viewItemEdit],
   [/^#\/items\/([\w-]+)$/, viewItem],
   [/^#\/categories$/, viewCategories],
+  [/^#\/shift$/, viewShift],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
@@ -1801,41 +1802,7 @@ async function complete(findings) {
 }
 
 function bindPosExtras() {
-  $("#posShift").addEventListener("click", async (e) => {
-    e.preventDefault();
-    let sh = null;
-    try { sh = await api("/api/cash/current"); } catch { /* no open shift */ }
-    if (!sh) {
-      const v = prompt("الخزنة مقفولة. رصيد بداية الشيفت بالجنيه:", "0");
-      if (v === null) return;
-      try { sh = await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(v) || 0 } }); sh = await api("/api/cash/current"); }
-      catch (er) { return toast(er.message, true); }
-    }
-    const k = sh.cash_by_kind || {};
-    $("#posSum").innerHTML = (sh.blind
-      ? `<p class="muted">الشيفت مفتوح. عند القفل: عدّ الفلوس اللي في الدرج واكتبها، والفرق بيظهر للمدير والصاحب.</p>`
-      : `<div class="totals"><div>بداية<b>${money(sh.opening_cash)}</b></div>
-      <div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div><div>مرتجع/إلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div>
-      <div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div><div>مصروفات<b>${money(k.payout || 0)}</b></div>
-      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div>
-      ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "فيزا" : "تحويل"} — ${esc(c.channel || "")}<b>${money(c.amount)}</b></div>`).join("")}
-      ${sh.with_courier ? `<div>مع الدليفري<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لسه ماتسلمتش</span></div>` : ""}</div>`)
-      + `<div class="row mt">${ME.permissions.includes("cash.manage") ? `<button class="btn small secondary" id="shPay">مصروف من الدرج</button>` : ""}
-      ${ME.permissions.includes("cash.close") ? `<button class="btn small" id="shClose">قفل الشيفت</button>` : ""}</div>`;
-    $("#shPay")?.addEventListener("click", async () => {
-      const a = prompt("المبلغ بالجنيه:"); const n = a && prompt("السبب:"); if (!n) return;
-      try { await api("/api/cash/movements", { method: "POST", body: { kind: "payout", amount: toPiasters(a), note: n } }); toast("تم"); }
-      catch (er) { toast(er.message, true); }
-    });
-    $("#shClose")?.addEventListener("click", async () => {
-      const c = prompt(sh.blind ? "عدّ الفلوس اللي في الدرج واكتب المبلغ:" : `عدّ الفلوس في الدرج واكتب المبلغ (المتوقع ${money(sh.expected_cash)}):`); if (c === null) return;
-      let note = null;
-      if (!sh.blind && toPiasters(c) !== sh.expected_cash) { note = prompt("فيه فرق — اكتب السبب:"); if (!note) return; }
-      try { const r = await api("/api/cash/close", { method: "POST", body: { counted_cash: toPiasters(c), note } });
-        toast(r.blind ? "تم قفل الشيفت" : `تم قفل الشيفت — الفرق ${money(r.difference)}`); $("#posSum").innerHTML = ""; }
-      catch (er) { toast(er.message, true); }
-    });
-  });
+  $("#posShift").addEventListener("click", (e) => { e.preventDefault(); location.hash = "#/shift"; });
   $("#posDeliv").addEventListener("click", async (e) => {
     e.preventDefault();
     const ds = (await api("/api/deliveries")).deliveries;
@@ -1856,6 +1823,79 @@ function bindPosExtras() {
     $("#posSum").innerHTML = `<div class="totals"><div>فواتير<b>${s.n}</b></div><div>مبيعات<b>${money(s.total)}</b></div>
       <div>نقدي<b>${money(s.cash)}</b></div><div>فيزا<b>${money(s.card)}</b></div><div>تحويل<b>${money(s.transfer || 0)}</b></div><div>آجل<b>${money(s.credit)}</b></div>
       <div>مرتجع<b>${money(s.returns)}</b></div>${s.gross_profit_egp != null ? `<div>مجمل الربح<b>${esc(s.gross_profit_egp)}</b></div>` : ""}</div>`;
+  });
+}
+
+// ------------------------------------------------------------------ shift: open, count the drawer, close, report
+const DENOMS = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25];
+const denomLabel = (d) => (d >= 100 ? `${d / 100} جنيه` : d === 50 ? "نص جنيه" : "ربع جنيه");
+async function viewShift() {
+  let sh = null;
+  try { sh = await api("/api/cash/current"); } catch { /* none open */ }
+  const seeAll = ME.permissions.includes("cash.see_expected");
+  const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
+  const hist = recent.length ? `<section class="panel"><h2>آخر الشيفتات</h2><table><thead><tr><th>من</th><th>لحد</th><th>قفله</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
+    ${recent.map((r) => `<tr><td>${esc(new Date(r.opened_at).toLocaleString("ar-EG"))}</td><td>${r.closed_at ? esc(new Date(r.closed_at).toLocaleString("ar-EG")) : `<span class="badge b-info">مفتوح</span>`}</td>
+      <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
+      <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مظبوط</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
+  if (!sh) {
+    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">⚠ مفيش شيفت مفتوح — البيع النقدي مقفول</p>
+      <form id="shOpen" class="row mt"><label class="f">الفلوس اللي في الدرج دلوقتي (ج) <input name="v" type="number" step="0.25" min="0" value="0" class="big"></label>
+      <button class="btn">افتح الشيفت</button></form></section>${hist}`;
+    $("#shOpen").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try { await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(e.target.v.value) || 0 } }); toast("✓ الشيفت اتفتح"); viewShift(); }
+      catch (err) { toast(err.message, true); }
+    });
+    return;
+  }
+  const k = sh.cash_by_kind || {};
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(new Date(sh.opened_at).toLocaleString("ar-EG"))}</span></div>
+    ${sh.blind ? `<p class="badge b-info">ℹ عدّ الفلوس اللي في الدرج فئة فئة واكتب العدد. النتيجة بتظهر بعد ما تقفل.</p>`
+    : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
+      <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
+      <div>مصروفات<b>${money(k.payout || 0)}</b></div><div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div>
+      ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "فيزا" : "تحويل"} — ${esc(c.channel)}<b>${money(c.amount)}</b></div>`).join("")}
+      ${sh.with_courier ? `<div>مع الدليفري<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لسه ماتسلمتش</span></div>` : ""}</div>`}
+    ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الدرج (ج) <input name="a" type="number" step="0.25" min="0"></label>
+      <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
+  </section>
+  ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>قفل الشيفت — عدّ الدرج</h2>
+    <table class="denoms"><thead><tr><th>الفئة</th><th>العدد</th><th>المبلغ</th></tr></thead><tbody>
+    ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
+    <tfoot><tr><th>الإجمالي المعدود</th><th></th><th class="num big" id="dTotal">0.00</th></tr></tfoot></table>
+    <label class="f mt">ملاحظة (اختياري) <input name="note"></label>
+    <button class="btn big">قفل الشيفت وطباعة التقرير</button></form>` : ""}
+  ${hist}`;
+  const recalc = () => {
+    let t = 0;
+    document.querySelectorAll("[data-d]").forEach((inp) => { const v = (+inp.value || 0) * +inp.dataset.d; t += v; $(`#dt${inp.dataset.d}`).textContent = money(v); });
+    $("#dTotal").textContent = money(t);
+  };
+  document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
+  $("#shPay")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/cash/movements", { method: "POST", body: { kind: "payout", amount: toPiasters(e.target.a.value), note: e.target.n.value } }); toast("اتسجل"); viewShift(); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#shClose")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const den = {};
+    document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
+    if (!Object.keys(den).length && !confirm("مكتبتش أي فئة — يعني الدرج فاضي. أكمل؟")) return;
+    try {
+      const r = await api("/api/cash/close", { method: "POST", body: { denominations: den, note: e.target.note.value || null } });
+      const d = r.difference;
+      app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت اتقفل</h1>
+        <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الدرج مظبوط" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
+        <div class="totals"><div>المفروض<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
+        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح شيفت جديد</a></div></section>`;
+      window.open(`/shift-report/${r.id}`, "_blank");
+    } catch (err) {
+      toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
+      if (err.code === "difference_note_required") e.target.note.focus();
+    }
   });
 }
 

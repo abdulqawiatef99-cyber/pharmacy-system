@@ -126,3 +126,36 @@ class TestCashierAPI(APICase):
         r = self.c.patch(f"/api/sales/{sid}", json={"kind": "delivery", "delivery": {"phone": "0100", "fee": 500}}, headers=H)
         self.assertEqual((r.json()["kind"], r.json()["total"]), ("delivery", 500))
         self.assertEqual(self.c.post(f"/api/sales/{sid}/discard", json={}, headers=H).status_code, 200)
+
+
+class TestShiftCount(V2):
+    def test_denominations_report_and_who_sees_it(self):
+        self.done(self.draft(), [{"method": "cash", "amount": 4000}])           # drawer: 100 + 40
+        with self.assertRaises(ValidationFailed):          # the owner sees the difference before closing: needs a reason
+            self.cd.close(self.ctx, denominations={"10000": 1, "2000": 1, "1000": 1, "500": 1, "25": 4})
+        r = self.cd.close(self.ctx, denominations={"10000": 1, "2000": 1, "1000": 1, "500": 1, "25": 4}, note="فكة")
+        self.assertEqual((r["counted_cash"], r["difference"]), (13600, -400))
+        self.assertEqual(r["counted_detail"], {"10000": 1, "2000": 1, "1000": 1, "500": 1, "25": 4})
+        self.assertEqual((r["sales_count"], r["sales_total"]), (1, 4000))
+        from app.sales.cash import count_total
+        with self.assertRaises(ValidationFailed):
+            count_total({"300": 1})
+        people.add_user(self.db, self.ctx, username="asst", full_name="A", password=PW, role_code="assistant")
+        a = self.login("asst", PW)
+        with self.assertRaises(Forbidden):
+            self.cd.report(a, r["id"])                     # someone else's shift
+        self.cd.open(a, 0)
+        mine = self.cd.close(a, denominations={})
+        self.assertEqual(mine["difference"], 0)            # his own, after closing: he sees it
+        self.assertEqual(len(self.cd.recent(self.ctx)), 2)
+
+
+class TestShiftAPI(APICase):
+    def test_close_with_denominations_and_print_page(self):
+        self.http_login()
+        self.c.post("/api/cash/open", json={"opening_cash": 5000}, headers=H)
+        r = self.c.post("/api/cash/close", json={"denominations": {"5000": 1}}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        page = self.c.get(f"/shift-report/{r.json()['id']}")
+        self.assertIn("تقرير تقفيل الشيفت", page.text)
+        self.assertIn("مظبوط", page.text)

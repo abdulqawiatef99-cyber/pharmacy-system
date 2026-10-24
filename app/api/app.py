@@ -1184,7 +1184,58 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def cash_close(req):
         ctx = ctx_of(req)
         b = await body(req)
+        if isinstance(b.get("denominations"), dict):
+            return J(CashDrawer(db).close(ctx, note=b.get("note"), denominations=b["denominations"]))
         return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note")))
+
+    @handler
+    async def cash_shifts(req):
+        return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
+
+    @handler
+    async def cash_report(req):
+        return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def shift_report_page(req):
+        """Closing report sized for the 80mm receipt printer (browser print)."""
+        from ..sales.cash import DENOMINATIONS
+        ctx = ctx_of(req)
+        r = CashDrawer(db).report(ctx, req.path_params["id"])
+        org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
+        e = _html.escape
+        m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
+        t = lambda iso: accounts.parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M") if iso else "—"  # noqa: E731
+        k = r["cash_by_kind"]
+        rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
+                ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
+                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الدرج", k.get("payout", 0)), ("إيداع", k.get("deposit", 0))]
+        cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
+        ch_rows = "".join(f"<tr><td>{'فيزا' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
+                          for c in r["by_channel"])
+        den = r["counted_detail"] or {}
+        den_rows = "".join(f"<tr><td>{d / 100:g} × {den[str(d)]}</td><td>{m(d * den[str(d)])}</td></tr>"
+                           for d in DENOMINATIONS if den.get(str(d)))
+        diff = r["difference"]
+        res = ("" if r["status"] != "closed" else
+               f"<tr class='t'><td>{'✓ مظبوط' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
+        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>تقفيل الشيفت</title>
+<link rel="stylesheet" href="/static/receipt.css"></head><body>
+<div class="r"><h1>{e(org)}</h1><p>تقرير تقفيل الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
+لحد {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
+<table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
+{f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
+{f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
+{f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
+<table>{cash_rows}<tr class="t"><td>المفروض في الدرج</td><td>{m(r['expected_cash'])}</td></tr></table>
+{f"<hr><table>{den_rows}</table>" if den_rows else ""}
+<table><tr class="t"><td>المعدود</td><td>{m(r['counted_cash'])}</td></tr>{res}</table>
+{f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
+{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr></table>" if r['credit_total'] else ""}
+{f"<p>ملاحظة: {e(r['close_note'])}</p>" if r.get('close_note') else ""}
+<p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
+        return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
     async def print_receipt(req):
@@ -1349,6 +1400,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),
         Route("/api/cash/close", cash_close, methods=["POST"]),
+        Route("/api/cash/shifts", cash_shifts),
+        Route("/api/cash/shifts/{id}", cash_report),
+        Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),

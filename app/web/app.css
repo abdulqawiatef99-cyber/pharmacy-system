@@ -290,3 +290,8 @@ td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; 
 .part { margin-bottom: 6px; align-items: center; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 input.narrow { width: 104px; }
+
+.denoms { max-width: 520px; }
+.denoms td, .denoms th { padding: 6px 8px; }
+th.big { font-size: 1.5rem; }
+.result { font-size: 1.6rem; font-weight: 700; padding: 14px 18px; border-radius: 12px; }
