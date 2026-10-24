@@ -61,6 +61,12 @@ Partial UNIQUE index: one live invoice per (org, supplier, invoice_no).
   (draft→completed→voided, cash/card/credit split), `sale_lines`, `sale_allocations` (batch,
   legal unit price, cost, returned qty), `customer_ledger` (append-only), `sale_returns`.
 
+- **0010 hardening**: audit hash chain (`seq`, `prev_hash`, `row_hash`), `idempotency_keys`,
+  `sales.complete_request_id`, `sale_lines.client_ref`, per-tool entitlements.
+- **0011 import**: `import_runs.kind` + suppliers/customers (table rebuild with foreign keys off — the
+  runner supports `-- requires: foreign_keys_off`), `import_profiles`, `supplier_ledger` (append-only).
+- **0012 cash**: `cash_shifts` (one open per branch), `cash_movements` (append-only), `sales.shift_id`.
+
 ### Still planned (designed to reuse the above)
 - Cash shifts / drawer closing, card terminal integration, local print agent (ESC/POS + drawer kick).
 - Integrations: `integration_accounts(org, provider, encrypted credentials ref)`,
@@ -89,8 +95,8 @@ upload → sniff by magic bytes → duplicate-file check (sha256)
 |---|---|---|
 | USB/Bluetooth barcode scanner (keyboard mode) | Types into focused input | Works with any input field; dedicated scan flows in Inventory/Sales phases |
 | Phone camera as scanner | Browser `BarcodeDetector` (Chrome Android) with a JS fallback | Not built yet; needs HTTPS on LAN |
-| Thermal receipt printer (ESC/POS) | Browser can't send raw ESC/POS reliably → small local print agent on the PC (USB/network), or print via OS driver as HTML | Not built (Sales phase); must be tested on the actual printer model |
-| Cash drawer | Kicked by the receipt printer (ESC/POS pulse) | Depends on printer agent |
+| Thermal receipt printer (ESC/POS) | Server on the pharmacy PC renders the receipt as a bitmap (correct Arabic shaping) and sends `GS v 0` raster over tcp / Windows queue / device file (`app/printing`); browser printing of an 80 mm HTML receipt is the fallback | Built; tested against a fake network printer only. Real printer + Windows queue: `WINDOWS_ACCEPTANCE.md` |
+| Cash drawer | ESC/POS kick pulse through the printer; opening without a sale needs `cash.manage` + reason, audited | Built; untested on hardware |
 | Label/barcode printer | Same agent (ZPL/TSPL depending on model) | Not built; needs model |
 | A4 printer | Browser print of HTML reports | Works generically |
 | Handheld inventory terminals | Android browser (PWA) or CSV upload | Inventory phase |

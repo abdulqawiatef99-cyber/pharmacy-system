@@ -18,7 +18,14 @@
 | Errors | internal exceptions logged, generic message to client | handler |
 | Self-granting features | entitlements settable only by platform operator | `test_tenant_cannot_grant_itself` |
 | AI data minimization | only the invoice image is sent; no customer data | design (ai_vision.py) |
-| Secrets | API keys from environment only, never in DB/repo | config.py |
+| Secrets | API keys from environment only, never in DB/repo; pre-commit guard blocks data files and key-like strings | config.py, `scripts/check_secrets.py` |
+| Audit tamper evidence | sha256 hash chain; `manage.py verify` detects edited/deleted rows even with raw DB access | `TestAuditChain` |
+| No secrets in audit | password/token keys scrubbed at any depth | `test_no_secrets_in_audit` |
+| Replay / double submit | Idempotency-Key on POSTs; domain-level ids for sale lines and payment | `TestApiHardening`, `TestSaleIdempotency` |
+| Cross-tenant sweep | every id route called by another pharmacy with real ids: no 2xx, no data change | `test_isolation_sweep.py` |
+| Import tenant safety | link decisions validated against the importing pharmacy | `test_import_cannot_touch_other_tenant` |
+| Feature switches | a disabled tool answers 403 without affecting others | `test_feature_switch` |
+| Backup integrity | backups verified on write and before restore; restore refuses tampered archives and keeps a pre-restore copy | `test_backup_resilience.py` |
 
 ## Known gaps (must close before multi-pharmacy / internet exposure)
 1. **No HTTPS yet on the LAN.** Fine on `127.0.0.1`; phones on Wi-Fi need TLS (reverse proxy

@@ -1,9 +1,41 @@
+# ---- Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# ---- REAL PHARMACY DATA: never commit
 data/
 *.db
 *.db-wal
 *.db-shm
-.env
+*.sqlite
+*.sqlite3
 uploads/
 backups/
+*.zip
+*.restoring
+real_invoices/
+exports/
+*.xlsx
+*.xls
+*.csv
+*.pdf
+*.jpg
+*.jpeg
+*.png
+!app/web/*.png
+!docs/**/*.png
+
+# ---- secrets
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# ---- OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
