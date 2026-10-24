@@ -198,8 +198,10 @@ class Purchasing:
         lines = [dict(r) for r in self.db.all(
             "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
         comp = validation.computed_total(inv, lines)
+        # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
-            (normalize_text(l["raw_name"]), l["qty"], l["line_total"]) for l in lines),
+            ((normalize_text(l["raw_name"]), l["qty"], l["line_total"]) for l in lines),
+            key=lambda t: (t[0], t[1] is None, t[1] or 0, t[2] is None, t[2] or 0)),
             default=str).encode()).hexdigest() if lines else None
         self.db.execute("UPDATE purchase_invoices SET computed_total=?, content_hash=? WHERE id=?",
                         (comp, h, inv_id))

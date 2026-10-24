@@ -140,6 +140,18 @@ async function viewPurchases() {
     <p class="muted">لا يتم تعديل المخزون إلا بعد مراجعة الفاتورة واعتمادها.</p>
   </section>
   <section class="panel">
+    <h2>أو: فاتورة يدوي</h2>
+    <form id="manForm" class="row">
+      <label class="f">المورد<select name="supplier_id" required><option value="">— اختار —</option>
+        ${suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>
+      <label class="f">رقم الفاتورة<input name="invoice_no" required></label>
+      <label class="f">التاريخ<input name="invoice_date" type="date" value="${localDay()}"></label>
+      <button class="btn" type="submit">ابدأ الفاتورة</button>
+    </form>
+    <p class="muted">${suppliers.length ? "المورد مش في القايمة؟" : "مفيش موردين متسجلين لسه."} اكتب اسمه:
+      <input id="newSup" placeholder="اسم المورد"> <button class="btn small secondary" id="addSup" type="button">إضافة مورد</button></p>
+  </section>
+  <section class="panel">
     <h2>الفواتير</h2>
     <div class="tablewrap"><table class="list">
       <thead><tr><th>المورد</th><th>رقم الفاتورة</th><th>التاريخ</th><th>الأصناف</th>
@@ -153,6 +165,20 @@ async function viewPurchases() {
         `<tr><td colspan="7" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
     </table></div>
   </section>`;
+  $("#addSup").addEventListener("click", async () => {
+    const name = $("#newSup").value.trim(); if (!name) return;
+    try { await api("/api/suppliers", { method: "POST", body: { name } }); toast("المورد اتضاف"); viewPurchases(); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#manForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      const d = await api("/api/purchases", { method: "POST", body: { supplier_id: f.get("supplier_id"),
+        invoice_no: f.get("invoice_no"), invoice_date: f.get("invoice_date") || null } });
+      location.hash = `#/purchases/${d.invoice.id}`;
+    } catch (err) { toast(err.message, true); }
+  });
   $("#upForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector("button");
@@ -251,6 +277,7 @@ function renderInvoice() {
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
+  ${draft ? quickAddHtml() : ""}
   <div class="review">
     <section class="panel doc ${["image","pdf"].includes(inv.source_type) && fileUrl ? "" : "compact"}">${doc}</section>
     <section class="panel">
@@ -264,6 +291,68 @@ function renderInvoice() {
     </section>
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
+  if (draft) bindQuickAdd();
+}
+
+// fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
+function quickAddHtml() {
+  return `<section class="panel" id="qa"><h2>إضافة صنف للفاتورة</h2>
+    <div class="row">
+      <label class="f grow">الصنف (اسم أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب أو امسح الباركود"></label>
+      <label class="f">كمية (علبة)<input id="qaQty" type="number" min="1" step="1" class="narrow"></label>
+      <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
+      <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
+      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="05/2028" class="narrow"></label>
+      <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
+      <button class="btn" id="qaAdd" type="button">إضافة</button>
+    </div>
+    <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
+}
+
+let QA_ITEM = null;
+function bindQuickAdd() {
+  const q = $("#qaQ");
+  if (!q) return;
+  const pick = (it) => {
+    QA_ITEM = it;
+    $("#qaRes").innerHTML = "";
+    q.value = it.name_en || it.name_ar;
+    $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
+    if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
+    $("#qaQty").focus();
+  };
+  let t, res = [];
+  q.addEventListener("input", () => {
+    QA_ITEM = null; clearTimeout(t);
+    t = setTimeout(async () => {
+      const v = q.value.trim(); if (v.length < 2) { $("#qaRes").innerHTML = ""; return; }
+      res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
+      if (res.length === 1 && /^\d{6,}$/.test(v)) { pick(res[0]); return; }
+      $("#qaRes").innerHTML = res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${esc(r.name_en || r.name_ar)}
+        <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">مفيش نتائج</p>`;
+      $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
+    }, 250);
+  });
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
+  const add = async () => {
+    if (!QA_ITEM) { toast("اختار الصنف الأول", true); q.focus(); return; }
+    const qty = parseInt($("#qaQty").value, 10);
+    if (!(qty > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
+    const line = { item_id: QA_ITEM.id, qty, bonus_qty: parseInt($("#qaBonus").value || "0", 10) };
+    if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
+    if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
+    if ($("#qaExp").value.trim()) line.expiry_date = $("#qaExp").value.trim();
+    if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
+    const keepDisc = $("#qaDisc").value;
+    QA_ITEM = null;
+    await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST");
+    if ($("#qaDisc")) $("#qaDisc").value = keepDisc;     // same supplier discount usually repeats
+    $("#qaQ")?.focus();
+  };
+  $("#qaAdd").addEventListener("click", add);
+  ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"].forEach((s) =>
+    $(s).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }));
 }
 
 function renderLine(l) {

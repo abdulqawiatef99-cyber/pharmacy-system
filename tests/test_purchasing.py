@@ -417,3 +417,21 @@ class TestPdfText(PurchasingCase):
         self.assertEqual(len(d["lines"]), 2)
         self.assertEqual(self.ai_calls, [])
         self.assertEqual(self.codes(d), set(), d["issues"])
+
+
+class TestManualEntry(PurchasingCase):
+    def test_typed_invoice_lines_and_approve(self):
+        sup = cat.create_supplier(self.db, self.ctx, name="ابن سينا")
+        inv = self.p.create_manual(self.ctx, supplier_id=sup)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        d = self.p.add_line(self.ctx, inv, {"raw_name": "سطر لسه بيتكتب"}, v)      # no qty yet
+        item = self.db.one("SELECT id FROM items LIMIT 1")[0]
+        d = self.p.add_line(self.ctx, inv, {"item_id": item, "qty": 5, "public_price": 4000,
+                                            "discount_bp": 2000, "expiry_date": FUT}, d["invoice"]["version"])
+        line = d["lines"][-1]
+        self.assertEqual((line["unit_net_price"], line["line_total"]), (3200, 16000))
+        self.p.delete_line(self.ctx, inv, d["lines"][0]["id"], d["invoice"]["version"])
+        d = self.p.get(self.ctx, inv)
+        d = self.p.update_header(self.ctx, inv, {"invoice_no": "M-1", "declared_total": 16000},
+                                 d["invoice"]["version"])
+        self.assertTrue(d["can_approve"], d["issues"])

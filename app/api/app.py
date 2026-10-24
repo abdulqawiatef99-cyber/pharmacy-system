@@ -306,8 +306,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def purchases_manual(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(purch.get(ctx, purch.create_manual(ctx, supplier_id=b.get("supplier_id"))),
-                 status_code=201)
+        inv_id = purch.create_manual(ctx, supplier_id=b.get("supplier_id"))
+        head = {k: b[k] for k in ("invoice_no", "invoice_date") if b.get(k)}
+        if head:
+            try:
+                purch.update_header(ctx, inv_id, head, purch.get(ctx, inv_id)["invoice"]["version"])
+            except DomainError:      # e.g. duplicate invoice number: don't leave an empty draft behind
+                purch.cancel(ctx, inv_id, "إلغاء تلقائي: بيانات الفاتورة مرفوضة عند الإنشاء", None)
+                raise
+        return J(purch.get(ctx, inv_id), status_code=201)
 
     @handler
     async def purchase_get(req):
