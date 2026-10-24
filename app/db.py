@@ -56,11 +56,15 @@ class Database:
         conn = sqlite3.connect(self.path, timeout=15, isolation_level=None,
                                check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 15000")
-        if self.path != ":memory:":
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = FULL")  # financial data: durability first
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 15000")
+            if self.path != ":memory:":
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute("PRAGMA synchronous = FULL")  # financial data: durability first
+        except sqlite3.Error:
+            conn.close()          # e.g. the file is not a database
+            raise
         return conn
 
     @property

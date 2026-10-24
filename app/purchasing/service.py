@@ -85,7 +85,12 @@ class Purchasing:
         r = self.db.one("SELECT * FROM source_files WHERE id=? AND org_id=?", (file_id, ctx.org_id))
         if not r:
             raise NotFound("الملف غير موجود")
-        return Path(r["storage_path"]).read_bytes(), r["mime_type"], r["filename"]
+        path = Path(r["storage_path"])
+        if not path.exists():   # restored on another machine / data folder moved
+            path = self.s.upload_dir / r["org_id"] / path.name
+        if not path.exists():
+            raise NotFound("ملف الفاتورة الأصلي غير موجود على هذا الجهاز")
+        return path.read_bytes(), r["mime_type"], r["filename"]
 
     # ------------------------------------------------------------ import
     def import_file(self, ctx: Context, data: bytes, filename: str,

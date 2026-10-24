@@ -50,45 +50,36 @@ def cmd_serve(a, s):
 
 
 def cmd_backup(a, s):
+    from app.core import backup
     db = _db(s)
-    dest = Path(a.dest)
-    dest.mkdir(parents=True, exist_ok=True)
-    out = dest / f"pharmacy-{datetime.now():%Y%m%d-%H%M%S}.db"
-    db.backup_to(out)
-    # prove the backup opens and is consistent
-    check = Database(out)
-    n = check.one("SELECT count(*) c FROM schema_migrations")["c"]
-    check.close()
-    print(f"backup written: {out} ({out.stat().st_size} bytes, {n} migrations)")
-
-
-def verify_db(db: Database) -> list[str]:
-    """Integrity checks used by `verify` and `restore`. Returns problems."""
-    from app.core import audit
-    problems = []
-    r = db.one("PRAGMA integrity_check")[0]
-    if r != "ok":
-        problems.append(f"sqlite integrity_check: {r}")
-    fk = db.all("PRAGMA foreign_key_check")
-    if fk:
-        problems.append(f"foreign key violations: {len(fk)}")
-    for org in db.all("SELECT id, name FROM organizations"):
-        diffs = inventory.verify_balances(db, org["id"])
-        if diffs:
-            problems.append(f"{org['name']}: {len(diffs)} stock balance differences")
-    chain = audit.verify_chain(db)
-    if chain:
-        problems.append(f"audit chain broken at seq {chain[0]['seq']} ({chain[0]['problem']})")
-    return problems
+    out = backup.create(db, s.upload_dir, Path(a.dest))
+    info = backup.verify_archive(out)
+    if info["problems"]:
+        print("BACKUP FAILED VERIFICATION:", info["problems"])
+        sys.exit(1)
+    print(f"backup written and verified: {out} ({out.stat().st_size} bytes, {info['files']} files)")
 
 
 def cmd_verify(a, s):
-    db = _db(s)
-    problems = verify_db(db)
+    from app.core import backup
+    if a.archive:
+        info = backup.verify_archive(Path(a.archive))
+        problems = info["problems"]
+    else:
+        problems = backup.integrity_problems(_db(s))
     for p in problems:
         print("PROBLEM:", p)
     print("OK" if not problems else f"{len(problems)} problem(s)")
     sys.exit(1 if problems else 0)
+
+
+def cmd_restore(a, s):
+    from app.core import backup
+    if not a.yes:
+        print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
+        sys.exit(2)
+    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir, Path(a.pre_dir))
+    print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
 def cmd_feature(a, s):
@@ -112,7 +103,12 @@ def main(argv=None):
     sv.add_argument("--port", type=int, default=8000)
     b = sub.add_parser("backup")
     b.add_argument("--dest", default="backups")
-    sub.add_parser("verify")
+    v = sub.add_parser("verify")
+    v.add_argument("archive", nargs="?", help="verify a backup .zip instead of the live database")
+    rs = sub.add_parser("restore")
+    rs.add_argument("archive")
+    rs.add_argument("--yes", action="store_true")
+    rs.add_argument("--pre-dir", default="backups/pre-restore")
     f = sub.add_parser("feature")
     f.add_argument("org_id")
     f.add_argument("feature")
@@ -121,7 +117,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
-     "feature": cmd_feature}[a.cmd](a, s)
+     "feature": cmd_feature, "restore": cmd_restore}[a.cmd](a, s)
 
 
 if __name__ == "__main__":

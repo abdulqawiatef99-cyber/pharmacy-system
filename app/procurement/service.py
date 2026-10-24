@@ -188,6 +188,8 @@ class Procurement:
         """Effective cost per base unit by supplier from approved invoices
         (bonus included as free units; invoice-level discount allocated)."""
         ctx.require("costs.read")
+        if not self.db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
+            raise NotFound("الصنف غير موجود")
         rows = self.db.all(
             "SELECT p.supplier_id, s.name, p.approved_at, m.unit_cost, m.qty_delta"
             " FROM stock_movements m JOIN purchase_invoices p ON p.id=m.ref_id"
