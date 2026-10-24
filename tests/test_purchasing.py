@@ -380,6 +380,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
+try:
+    import reportlab  # noqa: F401  (test-only: builds the sample PDF)
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
+
+
+@unittest.skipUnless(HAS_REPORTLAB, "reportlab not installed (only needed to build the sample PDF)")
 class TestPdfText(PurchasingCase):
     def make_pdf(self):
         from reportlab.lib.pagesizes import A4

@@ -2,6 +2,7 @@
 delivered to a FAKE network printer (local socket). A real printer, the
 Windows queue (pywin32) and the drawer pulse still need manual checks:
 docs/WINDOWS_ACCEPTANCE.md."""
+import unittest
 import os
 import socket
 import threading
@@ -35,6 +36,10 @@ class FakePrinter:
         self.sock.close()
 
 
+NO_RAQM = "raqm not available here: receipts go to browser printing (checked by selftest)"
+
+
+@unittest.skipUnless(escpos.shaping_available(), NO_RAQM)
 class TestEscPos(DBTestCase):
     def test_raster_header_and_size(self):
         img = escpos.render_receipt([("title", "صيدلية", ""), ("row", "بانادول", "40.00")])
@@ -85,6 +90,7 @@ class TestPrintService(DBTestCase):
         f = s.safety_check(self.ctx, self.sid)
         s.complete(self.ctx, self.sid, paid_cash=d["total"], safety_decisions={i: "x" for i in range(len(f))})
 
+    @unittest.skipUnless(escpos.shaping_available(), NO_RAQM)
     def test_receipt_to_network_printer_with_drawer(self):
         fp = FakePrinter()
         printing.print_receipt(self.db, self.ctx, self.sid, open_drawer=True, target=f"tcp:127.0.0.1:{fp.port}")
