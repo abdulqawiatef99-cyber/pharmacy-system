@@ -497,6 +497,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                  "Cache-Control": "no-store"})
 
     @handler
+    async def sale_attach(req):
+        from ..sales import attachments as att
+        ctx = ctx_of(req)
+        data, name, fields = await _upload(req)
+        return J(await run_in_threadpool(att.attach, db, s.upload_dir, ctx, req.path_params["id"], data, name, fields.get("note")))
+
+    @handler
+    async def attachment_get(req):
+        from ..sales import attachments as att
+        data, mime = att.file(db, s.upload_dir, ctx_of(req), req.path_params["id"])
+        return Response(data, media_type=mime, headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600",
+                                                        "X-Content-Type-Options": "nosniff"})
+
+    @handler
+    async def attachment_review(req):
+        from ..sales import attachments as att
+        b = await body(req)
+        return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note")))
+
+    @handler
+    async def transfers_report(req):
+        from ..sales import attachments as att
+        qp = req.query_params
+        return J(att.transfers(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+
+    @handler
     async def exp_sched(req):
         from ..finance import schedules
         ctx = ctx_of(req)
@@ -1661,6 +1687,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications", notifications_list),
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
+        Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
+        Route("/api/attachments/{id}", attachment_get),
+        Route("/api/attachments/{id}/review", attachment_review, methods=["POST"]),
+        Route("/api/reports/transfers", transfers_report),
         Route("/api/expense-schedules", exp_sched, methods=["GET", "POST"]),
         Route("/api/expense-schedules/{id}", exp_sched, methods=["POST"]),
         Route("/api/expenses", expenses_list),

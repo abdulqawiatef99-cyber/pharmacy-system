@@ -178,6 +178,7 @@ const routes = [
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
   [/^#\/shortages$/, viewShortages],
+  [/^#\/transfers$/, viewTransfers],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
   [/^#\/home$/, viewHome],
@@ -219,6 +220,7 @@ async function route() {
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
+    $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -1470,9 +1472,17 @@ async function viewSale(id) {
   <section class="panel"><div class="row between"><h1>فاتورة بيع ${s.sale_no ?? ""} ${s.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : ""}</h1>
     <div class="row"><a class="btn secondary" href="/receipt/${s.id}" target="_blank">طباعة</a><a href="#/sales">رجوع للفواتير</a></div></div>
     <div class="totals"><div>الإجمالي<b>${money(s.total)}</b></div><div>نقدي<b>${money(s.paid_cash)}</b></div>
-      <div>فيزا<b>${money(s.paid_card)}</b></div><div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
+      <div>فيزا<b>${money(s.paid_card)}</b></div>${s.paid_transfer ? `<div>تحويل<b>${money(s.paid_transfer)}</b></div>` : ""}<div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
+  ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer && !s.attachments.length ? `<span class="badge b-warn">⚠ مفيش صورة</span>` : ""}</h2>
+    <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
+      : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
+      <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ اتراجعت", problem: "✕ فيها مشكلة", pending: "⚠ مستنية مراجعة" }[a.review]}</span>
+        ${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
+        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ الفلوس وصلت</button>` : ""}
+        ${can("sales.totals") && a.review !== "problem" ? `<button class="btn small secondary" data-rvbad="${esc(a.id)}">✕ فيها مشكلة</button>` : ""}</figcaption></figure>`).join("")}</div>
+    ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">ضيف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
     ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${esc(fq(l.qty_base, l))}</td><td>${money(l.net)}</td>
@@ -1496,6 +1506,19 @@ async function viewSale(id) {
       toast(`اتسجل المرتجع: ${money(r.refund)} ج`); viewSale(id);
     } catch (e) { toast(e.message, true); }
   });
+  $("#proofUp")?.addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try { const r = await api(`/api/sales/${id}/attachments`, { method: "POST", form: fd }); toast(r.duplicate_of ? `⚠ نفس الصورة دي متسجلة مع فاتورة ${r.duplicate_of}` : "✓ الصورة اتحفظت", !!r.duplicate_of); viewSale(id); }
+    catch (err) { toast(err.message, true); }
+  });
+  app.querySelectorAll("[data-rvok]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/attachments/${b.dataset.rvok}/review`, { method: "POST", body: { ok: true } }); viewSale(id); } catch (err) { toast(err.message, true); }
+  }));
+  app.querySelectorAll("[data-rvbad]").forEach((b) => b.addEventListener("click", async () => {
+    const note = prompt("إيه المشكلة؟ (مثال: الفلوس موصلتش / المبلغ أقل)"); if (!note) return;
+    try { await api(`/api/attachments/${b.dataset.rvbad}/review`, { method: "POST", body: { ok: false, note } }); viewSale(id); } catch (err) { toast(err.message, true); }
+  }));
   $("#vGo")?.addEventListener("click", async () => {
     if (!confirmInline($("#vGo"))) return;
     try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }); toast("الفاتورة اتلغت"); viewSale(id); }
@@ -1640,6 +1663,9 @@ let SALE = null;
 let CHANNELS = null;
 const POS = { method: "cash", channel: null, split: false, parts: [] };
 const METHODS = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "تحويل"], ["credit", "آجل"]];
+// screenshot of the transfer, saved with the invoice for the owner to check (optional)
+const proofInput = (s) => `<label class="f mt proof">📎 صورة التحويل ${(s.attachments || []).length ? `<span class="badge b-ok">✓ ${(s.attachments || []).length} صورة</span>` : `<span class="muted">(اختياري — للمراجعة)</span>`}
+  <input type="file" id="posProof" accept="image/*,application/pdf"></label>`;
 const qtyText = (q, it) => (it.pack_size > 1 && q % it.pack_size === 0 ? `${q / it.pack_size} ${esc(it.pack_unit && it.pack_unit !== "pack" ? it.pack_unit : "علبة")}`
   : it.pack_size > 1 && q > it.pack_size ? `${Math.floor(q / it.pack_size)} علبة + ${q % it.pack_size} ${esc(unitName({ base_unit_name: it.base_unit }))}`
   : `${q} ${esc(unitName({ base_unit_name: it.base_unit }))}`);
@@ -1811,16 +1837,25 @@ function renderSide() {
           ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
           <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}">
           <button class="btn small secondary" data-prm="${i}" aria-label="شيل">✕</button></div>`).join("")}
+        ${POS.parts.some((p) => p.method === "transfer") ? proofInput(s) : ""}
         <button class="btn small secondary" id="partAdd">+ طريقة دفع</button>
         <p class="badge ${remaining === 0 ? "b-ok" : "b-warn"} mt">${remaining === 0 ? "✓ الدفع كامل" : `⚠ فاضل ${money(remaining)}`}</p>
         <p><a href="#" id="splitOff">رجوع لطريقة دفع واحدة</a></p>`
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختار العميل الأول\"" : ""}>${t}</button>`).join("")}</div>
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "المكنة" : "المحفظة / طريقة التحويل"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
+        ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء كاش وجزء فيزا أو تحويل)</a></p>`}
       <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع وطباعة <kbd>F9</kbd></button>
     </section>`;
+  $("#posProof")?.addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try { const r = await api(`/api/sales/${SALE.id}/attachments`, { method: "POST", form: fd }); SALE.attachments = r.attachments;
+      toast(r.duplicate_of ? `⚠ نفس الصورة دي متسجلة مع فاتورة ${r.duplicate_of}` : "✓ صورة التحويل اتحفظت مع الفاتورة", !!r.duplicate_of); renderSide(); }
+    catch (err) { toast(err.message, true); }
+  });
   document.querySelectorAll("[data-kind]").forEach((b) => b.addEventListener("click", async () => {
     try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { kind: b.dataset.kind } }); renderSide(); refreshTabLabel(); }
     catch (er) { toast(er.message, true); }
@@ -2133,6 +2168,31 @@ async function viewSupplier(id) {
         l.amount > 0 ? l.amount : null, l.amount < 0 ? -l.amount : null, l.balance])],
       total: ["", "رصيد آخر المدة", "", "", "", st.purchases, st.payments + st.returns, st.closing] },
     { name: "طرق الدفع", columns: [Tx("الطريقة"), M("المبلغ")], rows: st.by_method.map((m) => [m.label, m.amount]) }] }));
+}
+
+// ------------------------------------------------------------------ transfers review (مراجعة التحويلات)
+const TR_ST = { missing: ["b-warn", "⚠ مفيش صورة"], pending: ["b-info", "ℹ مستنية مراجعة"], ok: ["b-ok", "✓ اتراجعت"], problem: ["b-err", "✕ فيها مشكلة"], voided: ["b-plain", "ملغاة"] };
+async function viewTransfers() {
+  app.innerHTML = `<section class="panel" id="trRep"><div class="row between"><h1>مراجعة التحويلات (إنستاباي / فودافون كاش)</h1>${reportTools("tr")}</div>
+    ${rangeBar("trRange", "week")}<div id="trBox"></div>
+    <p class="muted noprint">قارن كل سطر برسايل البنك أو المحفظة، وافتح الفاتورة وعلّم "الفلوس وصلت" أو "فيها مشكلة". الكاشير بيرفع الصورة من شاشة البيع أو من الفاتورة.</p></section>`;
+  let t = null;
+  wireRange("trRange", async (f, to) => {
+    try {
+      t = await api(`/api/reports/transfers?from=${f}&to=${to}`);
+      const T = t.totals;
+      $("#trBox").innerHTML = `<div class="totals"><div>إجمالي التحويلات<b>${money(T.all)}</b></div><div class="t-ok">اتراجعت<b>${money(T.ok)}</b></div>
+        <div>مستنية مراجعة<b>${money(T.pending)}</b></div><div class="${T.missing ? "t-warn" : ""}">من غير صورة<b>${money(T.missing)}</b></div><div class="${T.problem ? "t-err" : ""}">فيها مشكلة<b>${money(T.problem)}</b></div></div>
+        <div class="tablewrap mt"><table><thead><tr><th>الفاتورة</th><th>اليوم والوقت</th><th>المحفظة</th><th>مبلغ التحويل</th><th>الكاشير</th><th>الحالة</th></tr></thead><tbody>
+        ${t.rows.map((r) => `<tr class="clickable" data-sale="${esc(r.id)}"><td><b>${r.sale_no}</b></td><td>${esc(dayOf(r.completed_at))} ${hhmm(r.completed_at)}</td><td>${esc(r.channel || "—")}</td>
+          <td class="num"><b>${money(r.paid_transfer)}</b></td><td>${esc(r.cashier || "")}</td><td><span class="badge ${TR_ST[r.state][0]}">${TR_ST[r.state][1]}</span></td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش تحويلات في الفترة دي</td></tr>`}</tbody></table></div>`;
+      document.querySelectorAll("[data-sale]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/sales/${tr.dataset.sale}`; }));
+    } catch (err) { toast(err.message, true); }
+  });
+  wireTools("tr", () => ({ title: "مراجعة التحويلات", subtitle: rangeText(t.from, t.to), el: $("#trRep"), sheets: [
+    { name: "التحويلات", columns: [N("الفاتورة"), Tx("اليوم والوقت"), Tx("المحفظة"), M("مبلغ التحويل"), Tx("الكاشير"), Tx("الحالة")],
+      rows: t.rows.map((r) => [r.sale_no, `${dayOf(r.completed_at)} ${hhmm(r.completed_at)}`, r.channel || "", r.paid_transfer, r.cashier || "", TR_ST[r.state][1].replace(/^[⚠ℹ✓✕] /, "")]),
+      total: ["الإجمالي", "", "", t.totals.all, "", ""] }] }));
 }
 
 // ------------------------------------------------------------------ shortages (النواقص)
@@ -2514,7 +2574,7 @@ async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1>${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والصاحب.</p>`}
-    <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
+    <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div><div id="rStock"></div>`;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   const sales = async (f, t) => {

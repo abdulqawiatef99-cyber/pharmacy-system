@@ -311,6 +311,8 @@ class Sales:
             s["total"] = subtotal - discount + (s["delivery_fee"] or 0)
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
+        from .attachments import listing as att_listing
+        s["attachments"] = att_listing(self.db, ctx, sid)
         s["payments"] = [dict(r) for r in self.db.all(
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
