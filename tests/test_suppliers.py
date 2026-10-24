@@ -57,3 +57,53 @@ class TestSuppliers(Base):
         self.buy(packs=20)
         self.assertIsNone(card.card(self.db, self.ctx, self.pan)["shortage_at"])
         self.assertEqual(sup.shortages(self.db, self.ctx), [])                      # 20 + 40 units > 30
+
+
+class TestStatement(TestSuppliers):
+    def test_period_statement_and_all_suppliers(self):
+        from datetime import date
+        from app.sales.service import local_today
+        today = local_today()
+        self.buy()                                                                    # 150
+        self.cd.open(self.ctx, 20000)
+        sup.pay(self.db, self.ctx, self.sid, 5000, "drawer")
+        sup.pay(self.db, self.ctx, self.sid, 3000, "cheque", ref="000123")
+        with self.assertRaises(ValidationFailed):
+            sup.pay(self.db, self.ctx, self.sid, 100, "cheque")                       # cheque needs its number
+        st = sup.statement(self.db, self.ctx, self.sid, today.isoformat(), today.isoformat())
+        self.assertEqual((st["opening"], st["purchases"], st["payments"], st["closing"]), (0, 15000, 8000, 7000))
+        self.assertEqual({m["method"]: m["amount"] for m in st["by_method"]}, {"drawer": 5000, "cheque": 3000})
+        self.assertEqual([l["balance"] for l in st["lines"]], [15000, 10000, 7000])
+        nxt = (today + timedelta(days=1)).isoformat()
+        st2 = sup.statement(self.db, self.ctx, self.sid, nxt, nxt)                   # next period starts from 70
+        self.assertEqual((st2["opening"], st2["closing"], st2["lines"]), (7000, 7000, []))
+        other = cat.create_supplier(self.db, self.ctx, name="شركة فاركو")
+        sup.update(self.db, self.ctx, other, {"supplier_type": "company"})
+        all_ = sup.statements(self.db, self.ctx, today.isoformat(), today.isoformat())
+        self.assertEqual(all_["totals"]["closing"], 7000)
+        self.assertEqual(sup.statements(self.db, self.ctx, today.isoformat(), today.isoformat(), "company")["rows"], [])
+        with self.assertRaises(ValidationFailed):
+            sup.statement(self.db, self.ctx, self.sid, nxt, today.isoformat())
+        people.add_user(self.db, self.ctx, username="asst", full_name="A", password=PW, role_code="assistant")
+        with self.assertRaises(Forbidden):
+            sup.statements(self.db, self.login("asst", PW), today.isoformat(), today.isoformat())
+        self.assertIsInstance(date.fromisoformat(st["from"]), date)
+
+
+class TestExport(Base):
+    def test_xlsx_money_rtl_and_limits(self):
+        import io
+        from openpyxl import load_workbook
+        from app.reports.export import xlsx
+        data = xlsx({"title": "صيدلية — المبيعات", "sheets": [{"name": "يوم/بيوم", "columns": [{"label": "اليوم", "type": "date"},
+                     {"label": "الإجمالي", "type": "money"}, {"label": "ملاحظة"}], "rows": [["2026-10-25", 123456, "x"], ["bad", "zz", None]],
+                     "total": ["الإجمالي", 123456, None]}]})
+        ws = load_workbook(io.BytesIO(data)).active
+        self.assertTrue(ws.sheet_view.rightToLeft)
+        self.assertEqual(ws.title, "يوم بيوم")                        # "/" not allowed in sheet names
+        self.assertEqual(ws.cell(4, 2).value, 1234.56)
+        self.assertEqual(ws.cell(5, 2).value, "zz")                   # bad number kept as text, not lost
+        self.assertEqual(ws.cell(6, 2).value, 1234.56)
+        for bad in ({}, {"sheets": []}, {"sheets": [{"columns": [], "rows": []}]}):
+            with self.assertRaises(ValidationFailed):
+                xlsx(bad)

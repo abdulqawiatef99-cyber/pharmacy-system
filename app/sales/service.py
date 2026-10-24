@@ -749,7 +749,7 @@ class Sales:
 
     # ------------------------------------------------------------ reports
     def list_sales(self, ctx: Context, *, day: str | None = None, sale_no: int | None = None,
-             limit: int = 200) -> list[dict]:
+                   limit: int = 200, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
         """Completed/voided invoices of one local day (default today), newest first;
         or one invoice by its number."""
         ctx.require("sales.read")
@@ -766,6 +766,19 @@ class Sales:
         if sale_no is not None:
             q += " AND s.sale_no=?"
             params.append(sale_no)
+        elif date_from and date_to:
+            if mine_only:
+                raise Forbidden("فواتير الأيام اللي فاتت للمدير والصاحب بس", code="forbidden",
+                                details={"permission": "sales.totals"})
+            try:
+                d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+            except ValueError:
+                raise ValidationFailed("التاريخ غير صحيح")
+            if d2 < d1:
+                raise ValidationFailed("تاريخ النهاية قبل البداية")
+            q += " AND s.completed_at>=? AND s.completed_at<?"
+            params += [local_day_bounds(d1)[0], local_day_bounds(d2)[1]]
+            limit = 5000
         else:
             d = date.fromisoformat(day) if day else local_today()
             if mine_only and d != local_today():
@@ -775,7 +788,7 @@ class Sales:
             q += " AND s.completed_at>=? AND s.completed_at<?"
             params += [lo, hi]
         q += " ORDER BY s.completed_at DESC LIMIT ?"
-        params.append(min(limit, 500))
+        params.append(min(limit, 5000))
         return [dict(r) for r in self.db.all(q, tuple(params))]
 
     def day_summary(self, ctx: Context, day: str | None = None) -> dict:

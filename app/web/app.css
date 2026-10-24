@@ -319,3 +319,18 @@ textarea { width: 100%; padding: 8px 12px; border: 1px solid #c9c5bc; border-rad
 .cart .lno { display: inline-block; min-width: 1.8em; color: var(--muted); font-size: .8em; }
 .cart tr.just-added td { background: color-mix(in srgb, var(--brand) 12%, transparent); }
 .cart tr.just-added .lno { color: var(--brand); font-weight: 700; }
+
+/* print preview of one report (see printPreview in app.js) */
+#printArea { display: none; }
+.print-head { text-align: center; margin-bottom: 12px; }
+.print-head h1 { margin: 4px 0; font-size: 1.3rem; }
+.print-head p { margin: 2px 0; }
+@media print {
+  body.printing > *:not(#printArea) { display: none !important; }
+  body.printing #printArea { display: block; }
+  #printArea table { width: 100%; border-collapse: collapse; font-size: 11pt; }
+  #printArea th, #printArea td { border: 1px solid #999; padding: 3px 6px; }
+  #printArea .panel { break-inside: avoid-page; }
+  .noprint { display: none !important; }
+}
+.range { gap: 8px; }

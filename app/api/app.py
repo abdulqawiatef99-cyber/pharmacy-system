@@ -9,6 +9,8 @@ only translate HTTP <-> service calls.
 """
 from __future__ import annotations
 
+import re
+
 import hashlib
 import json
 import logging
@@ -480,7 +482,31 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(sup.pay(db, ctx, req.path_params["id"], _int(b.get("amount"), "amount"), str(b.get("method", "")),
-                         b.get("note")))
+                         b.get("note"), b.get("ref")))
+
+    @handler
+    async def export_xlsx(req):
+        from urllib.parse import quote
+        from ..reports.export import xlsx
+        ctx_of(req)                                   # signed in; the content is what the screen already shows
+        b = await body(req)
+        data = await run_in_threadpool(xlsx, b)
+        name = re.sub(r'[\\/:*?"<>|]', " ", str(b.get("filename") or "report"))[:80].strip() or "report"
+        return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename=report.xlsx; filename*=UTF-8''{quote(name)}.xlsx",
+                                 "Cache-Control": "no-store"})
+
+    @handler
+    async def supplier_statement(req):
+        from ..procurement import suppliers as sup
+        qp = req.query_params
+        return J(sup.statement(db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
+
+    @handler
+    async def supplier_statements(req):
+        from ..procurement import suppliers as sup
+        qp = req.query_params
+        return J(sup.statements(db, ctx_of(req), qp.get("from", ""), qp.get("to", ""), qp.get("type") or None))
 
     @handler
     async def shortages_list(req):
@@ -519,7 +545,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def expenses_list(req):
         ctx = ctx_of(req)
         qp = req.query_params
-        return J({"expenses": fin.listing(db, ctx, status=qp.get("status") or None, month=qp.get("month") or None),
+        return J({"expenses": fin.listing(db, ctx, status=qp.get("status") or None, month=qp.get("month") or None,
+                                                 date_from=qp.get("from") or None, date_to=qp.get("to") or None),
                   "categories": fin.categories(db, ctx), "manager_limit": fin.manager_limit(db, ctx.org_id)})
 
     @handler
@@ -1242,7 +1269,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         no = qp.get("no")
         if no is not None and not no.isdigit():
             raise ValidationFailed("رقم الفاتورة لازم يكون رقم")
-        return J(Sales(db).list_sales(ctx_of(req), day=qp.get("day") or None, sale_no=int(no) if no else None))
+        return J(Sales(db).list_sales(ctx_of(req), day=qp.get("day") or None, sale_no=int(no) if no else None,
+                                      date_from=qp.get("from") or None, date_to=qp.get("to") or None))
 
     @handler
     async def sales_get(req):
@@ -1640,8 +1668,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/suppliers", suppliers_list),
         Route("/api/suppliers", suppliers_create, methods=["POST"]),
         Route("/api/suppliers/all", suppliers_all),
+        Route("/api/suppliers/statements", supplier_statements),
         Route("/api/suppliers/{id}", supplier_account, methods=["GET", "PATCH"]),
         Route("/api/suppliers/{id}/pay", supplier_pay, methods=["POST"]),
+        Route("/api/suppliers/{id}/statement", supplier_statement),
+        Route("/api/export/xlsx", export_xlsx, methods=["POST"]),
         Route("/api/shortages", shortages_list),
         Route("/api/purchases", purchases_list),
         Route("/api/purchases", purchases_manual, methods=["POST"]),

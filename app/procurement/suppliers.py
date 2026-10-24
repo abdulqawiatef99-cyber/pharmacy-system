@@ -75,29 +75,128 @@ def account(db: Database, ctx: Context, sid: str) -> dict:
     return out
 
 
-def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: str | None = None) -> dict:
+PAY_METHODS = {"drawer": "نقدي من الدرج", "cash": "نقدي من برّه الدرج", "bank": "تحويل بنكي",
+               "cheque": "شيك", "wallet": "إنستاباي / محفظة"}
+
+
+def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: str | None = None,
+        ref: str | None = None) -> dict:
     """A payment to the supplier. 'drawer' takes it out of today's cash drawer (needs an open shift);
-    'outside' = paid from outside the drawer (bank, owner's pocket)."""
+    the others are paid from outside the drawer (bank, cheque number in ref, owner's pocket)."""
     ctx.require("suppliers.pay")
+    if method == "outside":                      # older screens
+        method = "cash"
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
-    if method not in ("drawer", "outside"):
-        raise ValidationFailed("اختار الدفع منين")
+    if method not in PAY_METHODS:
+        raise ValidationFailed("اختار طريقة الدفع")
+    ref = (str(ref or "").strip()[:60]) or None
+    if method == "cheque" and not ref:
+        raise ValidationFailed("اكتب رقم الشيك")
     s = db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))
     if not s:
         raise NotFound("المورد غير موجود")
     with db.transaction():
         lid = new_id()
-        db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
-                   " VALUES (?,?,?,?,'payment',?,?,?)", (lid, ctx.org_id, sid, -amount, None,
-                                                        (note or "").strip()[:200] or ("من الدرج" if method == "drawer" else "من برّه الدرج"),
-                                                        ctx.user_id))
+        db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by, pay_method, pay_ref)"
+                   " VALUES (?,?,?,?,'payment',?,?,?,?,?)", (lid, ctx.org_id, sid, -amount, None,
+                                                            (note or "").strip()[:200] or PAY_METHODS[method],
+                                                            ctx.user_id, method, ref))
         if method == "drawer":
             cash.record(db, ctx, -amount, "payout", lid, f"دفع للمورد {s['name']}")
-        audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method})
+        audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method, "ref": ref})
         notify.emit(db, ctx, "supplier_payment", "info", f"دفع {amount / 100:,.2f} ج لـ {s['name']}",
-                    "من الدرج" if method == "drawer" else "من برّه الدرج", "supplier", sid)
+                    PAY_METHODS[method] + (f" {ref}" if ref else ""), "supplier", sid)
     return account(db, ctx, sid)
+
+
+def _entries(db: Database, org_id: str, sid: str | None = None) -> list[dict]:
+    """Ledger rows with the date that counts for the account: a purchase on its invoice date,
+    everything else on the local day it was recorded."""
+    from ..sales.service import _local_date
+    rows = db.all(
+        "SELECT l.*, p.invoice_no, p.invoice_date, u.full_name by_name, s.name supplier, s.supplier_type FROM supplier_ledger l"
+        " JOIN suppliers s ON s.id=l.supplier_id LEFT JOIN purchase_invoices p ON p.id=l.ref_id AND l.kind IN ('purchase','adjustment')"
+        " LEFT JOIN users u ON u.id=l.created_by WHERE l.org_id=?" + (" AND l.supplier_id=?" if sid else ""),
+        (org_id, sid) if sid else (org_id,))
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["day"] = (d["invoice_date"] if d["kind"] == "purchase" and d["invoice_date"] else _local_date(d["created_at"]).isoformat())
+        out.append(d)
+    out.sort(key=lambda d: (d["day"], d["created_at"]))
+    return out
+
+
+def _period(date_from: str, date_to: str) -> tuple[str, str]:
+    try:
+        d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    except (TypeError, ValueError):
+        raise ValidationFailed("اختار الفترة (من / لحد)")
+    if d2 < d1:
+        raise ValidationFailed("تاريخ النهاية قبل البداية")
+    return d1.isoformat(), d2.isoformat()
+
+
+def _need_money(ctx: Context) -> None:
+    if not (ctx.allowed("suppliers.pay") or ctx.allowed("costs.read")):
+        ctx.require("suppliers.pay")
+
+
+def statement(db: Database, ctx: Context, sid: str, date_from: str, date_to: str) -> dict:
+    """Account statement for closing the month with the supplier: balance at the start, every
+    invoice / return / payment (with how it was paid) in the period, totals, balance at the end."""
+    _need_money(ctx)
+    lo, hi = _period(date_from, date_to)
+    s = db.one("SELECT id, name, supplier_type, phone, payment_terms FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))
+    if not s:
+        raise NotFound("المورد غير موجود")
+    rows = _entries(db, ctx.org_id, sid)
+    opening = sum(r["amount"] for r in rows if r["day"] < lo)
+    period = [r for r in rows if lo <= r["day"] <= hi]
+    run, lines = opening, []
+    for r in period:
+        run += r["amount"]
+        lines.append({"day": r["day"], "kind": r["kind"], "amount": r["amount"], "balance": run, "invoice_no": r["invoice_no"],
+                      "ref_id": r["ref_id"], "note": r["note"], "pay_method": r["pay_method"], "pay_ref": r["pay_ref"], "by": r["by_name"]})
+    tot = {k: sum(r["amount"] for r in period if r["kind"] == k) for k in ("opening", "purchase", "return", "payment", "adjustment")}
+    by_method: dict[str, int] = {}
+    for r in period:
+        if r["kind"] == "payment":
+            k = r["pay_method"] or "unknown"
+            by_method[k] = by_method.get(k, 0) - r["amount"]
+    return {"supplier": dict(s), "from": lo, "to": hi, "opening": opening, "closing": run, "lines": lines,
+            "purchases": tot["purchase"], "returns": -tot["return"], "payments": -tot["payment"],
+            "adjustments": tot["adjustment"] + tot["opening"], "invoices": sum(1 for r in period if r["kind"] == "purchase"),
+            "by_method": [{"method": k, "label": PAY_METHODS.get(k, "مش متسجلة"), "amount": v} for k, v in by_method.items()]}
+
+
+def statements(db: Database, ctx: Context, date_from: str, date_to: str, supplier_type: str | None = None) -> dict:
+    """All suppliers for one period (the monthly claims of companies and warehouses)."""
+    _need_money(ctx)
+    lo, hi = _period(date_from, date_to)
+    if supplier_type and supplier_type not in TYPES:
+        raise ValidationFailed("النوع غير صحيح")
+    acc: dict[str, dict] = {}
+    for r in _entries(db, ctx.org_id):
+        if supplier_type and r["supplier_type"] != supplier_type:
+            continue
+        a = acc.setdefault(r["supplier_id"], {"supplier_id": r["supplier_id"], "name": r["supplier"], "type": r["supplier_type"],
+                                              "opening": 0, "purchases": 0, "returns": 0, "payments": 0, "adjustments": 0, "invoices": 0})
+        if r["day"] < lo:
+            a["opening"] += r["amount"]
+        elif r["day"] <= hi:
+            k = {"purchase": "purchases", "return": "returns", "payment": "payments"}.get(r["kind"], "adjustments")
+            a[k] += -r["amount"] if k in ("returns", "payments") else r["amount"]
+            a["invoices"] += r["kind"] == "purchase"
+    rows = []
+    for a in acc.values():
+        a["closing"] = a["opening"] + a["purchases"] - a["returns"] - a["payments"] + a["adjustments"]
+        if a["opening"] or a["purchases"] or a["returns"] or a["payments"] or a["adjustments"]:
+            rows.append(a)
+    rows.sort(key=lambda a: -a["closing"])
+    keys = ("opening", "purchases", "returns", "payments", "adjustments", "closing", "invoices")
+    return {"from": lo, "to": hi, "rows": rows, "totals": {k: sum(a[k] for a in rows) for k in keys}}
 
 
 # -------------------------------------------------------------------------- shortages

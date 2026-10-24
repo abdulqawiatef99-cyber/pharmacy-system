@@ -108,7 +108,8 @@ def get(db: Database, ctx: Context, eid: str) -> dict:
     return dict(r)
 
 
-def listing(db: Database, ctx: Context, *, status: str | None = None, month: str | None = None) -> list[dict]:
+def listing(db: Database, ctx: Context, *, status: str | None = None, month: str | None = None,
+            date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     ctx.require("expenses.record")
     q = ("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name FROM expenses e"
          " JOIN expense_categories c ON c.id=e.category_id LEFT JOIN users u ON u.id=e.created_by"
@@ -123,7 +124,10 @@ def listing(db: Database, ctx: Context, *, status: str | None = None, month: str
     if month:
         q += " AND substr(e.spent_on,1,7)=?"
         p.append(month)
-    q += " ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 300"
+    if date_from and date_to:
+        q += " AND e.spent_on>=? AND e.spent_on<=?"
+        p += [date_from[:10], date_to[:10]]
+    q += " ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 5000"
     return [dict(r) for r in db.all(q, tuple(p))]
 
 
