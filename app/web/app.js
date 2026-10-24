@@ -181,6 +181,7 @@ const routes = [
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
   [/^#\/home$/, viewHome],
+  [/^#\/feedback$/, viewFeedback],
   [/^#\/reports$/, viewReports],
   [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
@@ -232,6 +233,7 @@ async function route() {
 window.addEventListener("hashchange", route);
 window.addEventListener("hashchange", () => { const m = $("#navMore"); if (m) m.open = false; });
 document.addEventListener("click", (e) => { const m = $("#navMore"); if (m?.open && !m.contains(e.target)) m.open = false; });
+$("#fbBtn")?.addEventListener("click", (e) => { e.preventDefault(); openFeedback(); });
 $("#logout").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
@@ -2302,6 +2304,45 @@ async function viewReports() {
     $("#csvE").addEventListener("click", () => csvDownload("صلاحية قريبة.csv", [["الصنف", "التشغيلة", "الصلاحية", "الكمية بالوحدة", "القيمة"],
       ...s.expiring.map((e) => [e.name_en || e.name_ar, e.batch_no || "", e.expiry_date, e.qty, money(e.value)])]));
   }
+}
+
+// ------------------------------------------------------------------ complaints and suggestions
+const FB_KIND = { suggestion: "💡 اقتراح", complaint: "😕 شكوى", bug: "🐞 مشكلة في البرنامج" };
+const FB_ST = { new: ["b-warn", "جديدة"], seen: ["b-info", "اتشافت"], done: ["b-ok", "✓ اتعملت"] };
+function openFeedback() {
+  let dlg = $("#fbDlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "fbDlg"; document.body.append(dlg); }
+  const screen = location.hash;
+  dlg.innerHTML = `<form method="dialog" class="approve"><h2>ملاحظة على البرنامج</h2>
+    <div class="seg">${Object.entries(FB_KIND).map(([k, t], i) => `<label><input type="radio" name="k" value="${k}" ${i === 0 ? "checked" : ""}> ${t}</label>`).join("")}</div>
+    <label class="f mt">اكتب اللي عايزه <textarea name="t" rows="5" required minlength="5"></textarea></label>
+    <p class="muted">الشاشة اللي كنت فيها بتتسجل معاها. الملاحظات بتتحفظ على الجهاز وبيقراها الصاحب، وبتتراجع في جلسة التطوير.</p>
+    <div class="row mt"><button class="btn" value="ok">ابعت</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  dlg.showModal();
+  dlg.querySelector("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (e.submitter?.value === "cancel") { dlg.close(); return; }
+    try { await api("/api/feedback", { method: "POST", body: { kind: e.target.k.value, text: e.target.t.value, screen } }); dlg.close(); toast("✓ اتسجلت — شكرًا"); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+async function viewFeedback() {
+  const items = (await api("/api/feedback")).items, owner = ME.permissions.includes("users.manage");
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشكاوي والمقترحات</h1>
+      <div class="row"><button class="btn" id="fbNew">+ ملاحظة جديدة</button>${owner && items.length ? `<button class="btn secondary" id="fbDl">نزّلهم (عشان تبعتهم للتطوير)</button>` : ""}</div></div>
+    <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(f.created_at.slice(0, 16).replace("T", " "))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
+      <div>${esc(f.text)}</div>${f.reply ? `<div class="muted">الرد: ${esc(f.reply)}</div>` : ""}</div>
+      ${owner ? `<select data-fb="${esc(f.id)}">${Object.entries(FB_ST).map(([k, [, t]]) => `<option value="${k}" ${f.status === k ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}</li>`).join("")
+      || `<li class="muted">مفيش ملاحظات لسه</li>`}</ul></section>`;
+  $("#fbNew").addEventListener("click", () => { openFeedback(); $("#fbDlg").addEventListener("close", () => viewFeedback(), { once: true }); });
+  document.querySelectorAll("[data-fb]").forEach((sel) => sel.addEventListener("change", async () => {
+    try { await api("/api/feedback", { method: "POST", body: { id: sel.dataset.fb, status: sel.value } }); toast("اتحفظ"); } catch (err) { toast(err.message, true); }
+  }));
+  $("#fbDl")?.addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(items.map((f) => ({ kind: f.kind, text: f.text, screen: f.screen, by: f.by_name, at: f.created_at, status: f.status })), null, 1)], { type: "application/json" }));
+    a.download = `ملاحظات-البرنامج-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  });
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)

@@ -563,6 +563,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(rep_svc.stock_report(db, ctx_of(req)))
 
     @handler
+    async def feedback_view(req):
+        from ..core import feedback as fb
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            b = await body(req)
+            if b.get("id"):
+                fb.set_status(db, ctx, str(b["id"]), str(b.get("status", "")), b.get("reply"))
+                return J({"items": fb.listing(db, ctx)})
+            return J(fb.add(db, ctx, str(b.get("kind", "")), str(b.get("text", "")), b.get("screen")), status_code=201)
+        return J({"items": fb.listing(db, ctx)})
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -1520,6 +1532,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reports/sales", reports_sales),
         Route("/api/reports/stock", reports_stock),
         Route("/api/home", home_view),
+        Route("/api/feedback", feedback_view, methods=["GET", "POST"]),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/items", items_list),

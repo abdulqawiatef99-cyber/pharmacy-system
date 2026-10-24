@@ -52,3 +52,19 @@ class TestHomeAPI(APICase):
         r = self.c.get("/api/home").json()
         self.assertFalse(r["shift_open"])
         self.assertIn("backup", r)
+
+
+class TestFeedback(Base):
+    def test_feedback(self):
+        from app.core import feedback as fb
+        people.add_user(self.db, self.ctx, username="asst", full_name="A", password=PW, role_code="assistant")
+        a = self.login("asst", PW)
+        fb.add(self.db, a, "suggestion", "عايز زرار يطبع الفاتورة مرتين", "#/pos")
+        with self.assertRaises(Exception):
+            fb.add(self.db, a, "x", "نص")
+        self.assertEqual(len(fb.listing(self.db, self.ctx)), 1)
+        self.assertEqual(len(fb.listing(self.db, a)), 1)
+        with self.assertRaises(Forbidden):
+            fb.set_status(self.db, a, fb.listing(self.db, a)[0]["id"], "done")
+        fb.set_status(self.db, self.ctx, fb.listing(self.db, a)[0]["id"], "done", "اتعمل")
+        self.assertEqual(fb.listing(self.db, a)[0]["reply"], "اتعمل")
