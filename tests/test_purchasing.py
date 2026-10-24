@@ -351,6 +351,20 @@ class TestAIFlow(PurchasingCase):
         used = self.db.one("SELECT used FROM usage_counters WHERE feature='ai_extraction'")[0]
         self.assertEqual(used, 1)
 
+    def test_editing_a_low_confidence_discount_clears_it(self):
+        accounts.set_entitlement(self.db, self.ctx.org_id, "ai_extraction")
+        fixture = json.loads(AI_FIXTURE["content"][0]["text"])
+        fixture["lines"][0]["confidence"]["discount_pct"] = 0.4
+        fixture["lines"][0]["confidence"]["qty"] = 0.95
+        p = Purchasing(self.db, self.settings, ai_extract=lambda d, m: ai_vision.from_json(fixture, "f"))
+        inv_id = p.import_file(self.ctx, self.JPEG, "photo.jpg")
+        d = p.get(self.ctx, inv_id)
+        self.assertEqual([i["field"] for i in d["issues"] if i["code"] == "low_confidence"],
+                         ["discount_bp"])
+        d = p.update_line(self.ctx, inv_id, d["lines"][0]["id"], {"discount_bp": 2000},
+                          d["invoice"]["version"])
+        self.assertNotIn("low_confidence", self.codes(d))
+
     def test_real_extractor_without_key_fails_clearly(self):
         accounts.set_entitlement(self.db, self.ctx.org_id, "ai_extraction")
         p = Purchasing(self.db, self.settings)   # real extractor, no API key configured

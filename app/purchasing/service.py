@@ -35,6 +35,15 @@ EDITABLE_HEADER_FIELDS = {"supplier_id", "invoice_no", "invoice_date", "declared
                           "extra_discount", "extra_tax", "notes"}
 
 
+_KEY_MAP = {"discount_pct": "discount_bp"}
+
+
+def _db_keys(d: dict) -> dict:
+    """Extraction field names -> DB column names, so a later user edit of the
+    column clears the matching confidence flag."""
+    return {_KEY_MAP.get(k, k): v for k, v in d.items()}
+
+
 class Purchasing:
     def __init__(self, db: Database, settings: config_mod.Settings | None = None,
                  ai_extract=None):
@@ -144,7 +153,7 @@ class Purchasing:
                     "tax_amount": to_piasters(l.tax_amount), "line_total": to_piasters(l.line_total),
                     "batch_no": l.batch_no, "expiry_date": l.expiry_date,
                     "expiry_precision": l.expiry_precision,
-                    "field_sources": dict(l.sources), "field_confidence": dict(l.confidence),
+                    "field_sources": _db_keys(l.sources), "field_confidence": _db_keys(l.confidence),
                 }
                 self._apply_match(ctx, row, supplier_id)
                 validation.derive_line(row)
