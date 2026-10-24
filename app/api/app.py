@@ -1717,12 +1717,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @asynccontextmanager
     async def lifespan(_app):
+        from ..core.daily import DailyChecks
+        daily = DailyChecks(db)
         if auto_backup:
             autob.start()
+            daily.start()
         try:
             yield
         finally:
             if auto_backup:
+                daily.stop()
                 await run_in_threadpool(autob.stop)
 
     app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)

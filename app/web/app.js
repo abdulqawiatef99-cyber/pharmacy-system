@@ -2445,7 +2445,9 @@ async function viewNotifications() {
         <div><b>${esc(n.title)}</b>${n.body ? `<div>${esc(n.body)}</div>` : ""}
         <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${new Date(n.created_at).toLocaleString("ar-EG")}
         ${n.entity_type === "sale" ? ` · <a href="#/sales/${esc(n.entity_id)}">الفاتورة</a>` : ""}
-        ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}</div></div></li>`;
+        ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}
+        ${n.entity_type === "item" ? ` · <a href="#/items/${esc(n.entity_id)}">كارت الصنف</a>` : ""}
+        ${n.entity_type === "report" ? ` · <a href="#/reports">التقارير</a>` : ""}</div></div></li>`;
     }).join("") || `<li class="muted">مفيش إشعارات</li>`}</ul></section>`;
   $("#nRead").addEventListener("click", async () => {
     const x = await api("/api/notifications/read", { method: "POST", body: {} });
