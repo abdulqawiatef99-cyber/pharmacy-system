@@ -28,10 +28,20 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
           python -m pip install -r requirements.txt
-          python -m unittest discover -s tests -t .
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $ErrorActionPreference = 'Continue'
+          python -m unittest discover -s tests -t . *> test-out.txt
+          $code = $LASTEXITCODE
+          Get-Content test-out.txt -Tail 5
+          if ($code -ne 0) {
+            # the failures as one annotation, readable from the API when the log itself is not reachable
+            $start = (Select-String -Path test-out.txt -Pattern '^(=+|FAIL:|ERROR:)' | Select-Object -First 1).LineNumber
+            $txt = (Get-Content test-out.txt | Select-Object -Skip ([Math]::Max(0, $start - 1)) -First 150) -join '%0A'
+            Write-Output "::error title=Windows tests::$txt"
+            exit 1
+          }
 
       - name: Embedded Python + libraries
         shell: pwsh
