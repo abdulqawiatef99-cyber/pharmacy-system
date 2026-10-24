@@ -1836,7 +1836,7 @@ async function viewPos() {
   }
   const tabs = (await api("/api/sales/drafts")).drafts;
   app.innerHTML = `
-  <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}">
+  <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فاضية"}
       <span class="x" data-close="${esc(d.id)}" title="اقفل الفاتورة دي" aria-label="اقفل">✕</span></button>`).join("")}
     <button class="tab add" id="tabNew" title="فاتورة جديدة (F2)">+ فاتورة <kbd>F2</kbd></button></nav>
@@ -1920,6 +1920,7 @@ async function patchLine(lineId, body) {
 
 function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
+  refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
   $("#posCart").innerHTML = `
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف زي ما اتدخلت" : "الأصناف مترتبة أبجدي A→Z (أسرع في التحضير)"} — آخر صنف اتضاف متعلّم ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
@@ -1932,7 +1933,7 @@ function renderCart(findings = null) {
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زود">+</button></div></td>
         <td class="num">${l.allocations.map((a) => money(a.unit_price)).filter((v, i, arr) => arr.indexOf(v) === i).join(" / ")}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
-        <td>${canDisc ? `<input class="narrow" type="number" min="0" max="100" step="0.5" value="${l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="%">`
+        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<input class="narrow" type="number" min="0" max="100" step="0.5" value="${l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="%">`
           : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}</td>
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="شيل الصنف">✕</button></td></tr>`).join("")
@@ -1973,7 +1974,8 @@ function renderSide() {
       <label class="f mt">العميل ${s.kind === "delivery" ? "" : "(اختياري)"}
         <input id="posCust" placeholder="اسم أو رقم موبايل" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
-      ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">شيل العميل</a></p>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
+      ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">شيل العميل</a></p>
+        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
         <label class="f">الموبايل <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
@@ -2061,7 +2063,10 @@ function renderSide() {
 
 function refreshTabLabel() {
   const t = document.querySelector(`.tab.on`);
-  if (t && SALE) t.firstChild.textContent = t.firstChild.textContent.replace(/ · توصيل/, "") .replace(/^(\s*فاتورة \d+)/, `$1${SALE.kind === "delivery" ? " · توصيل" : ""}`);
+  if (!t || !SALE) return;
+  const n = (t.dataset.n ||= (t.firstChild.textContent.match(/\d+/) || ["1"])[0]);
+  t.firstChild.textContent = `\n      فاتورة ${n}${SALE.kind === "delivery" ? " · توصيل" : ""} · ${SALE.lines.length ? `${SALE.lines.length} صنف` : "فاضية"}\n      `;
+  if (I18N.on) trNode(t);
 }
 
 function renderFindings(findings) {
@@ -2416,6 +2421,7 @@ async function viewCustomers(filter = "") {
     <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم موبايل" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم فلوس</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">طلبهم الشهري قرّب</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الموبايل</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
+  ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
   ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
     <label class="f">اسم تاني (إنجليزي أو الزوجة) <input name="name_alt"></label>
     <label class="f">الموبايل <input name="phone" inputmode="tel"></label><label class="f">موبايل 2 <input name="phone2" inputmode="tel"></label>
@@ -2435,6 +2441,7 @@ async function viewCustomers(filter = "") {
       || `<tr><td colspan="4" class="muted">مفيش عملاء</td></tr>`;
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
   };
+  if ($("#ktBox")) renderContracts();
   let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
   const FT = { "": "كل العملاء", debt: "العملاء اللي عليهم فلوس", refill: "طلبهم الشهري قرّب" };
   wireTools("cust", () => { const { list, f } = cur; return { title: "تقرير العملاء", subtitle: FT[f] + ($("#cuQ").value ? ` — بحث: ${$("#cuQ").value}` : ""), el: $("#cuRep"), sheets: [
@@ -2447,6 +2454,52 @@ async function viewCustomers(filter = "") {
     catch (err) { toast(err.message, true); }
   });
   load();
+}
+
+// contracts (التعاقدات): agreed discount for a company's / union's members
+async function renderContracts(edit = null) {
+  const box = $("#ktBox"); if (!box) return;
+  const list = (await api("/api/contracts")).contracts, canK = ME.permissions.includes("contracts.manage"), e = edit ? list.find((x) => x.id === edit) : null;
+  box.innerHTML = `<div class="row between"><h2>التعاقدات</h2></div>
+    <p class="muted">شركة أو نقابة أو نادي ليهم خصم متفق عليه: نسبة للمحلي ونسبة للمستورد. اربط العميل بالتعاقد من ملفه، والخصم بيتحط لوحده في الكاشير (ومش بينزل تحت التكلفة من غير الصاحب).</p>
+    <table><thead><tr><th>الجهة</th><th>خصم المحلي</th><th>خصم المستورد</th><th>عملاء</th><th></th></tr></thead><tbody>
+    ${list.map((x) => `<tr class="${x.is_active ? "" : "muted"}"><td><b>${esc(x.name)}</b>${x.note ? `<div class="muted small">${esc(x.note)}</div>` : ""}${x.is_active ? "" : " <span class='badge b-plain'>موقوف</span>"}</td>
+      <td>${pct(x.discount_local_bp)}%</td><td>${pct(x.discount_imported_bp)}%</td><td>${x.customers}</td>
+      <td class="row">${ME.permissions.includes("sales.totals") ? `<button class="btn small secondary" data-ktrep="${esc(x.id)}">فواتيرهم</button>` : ""}${canK ? `<button class="btn small secondary" data-ktedit="${esc(x.id)}">تعديل</button>` : ""}</td></tr>`).join("")
+      || `<tr><td colspan="5" class="muted">مفيش تعاقدات</td></tr>`}</tbody></table>
+    ${canK ? `<form id="ktForm" class="row mt"><label class="f grow">اسم الجهة <input name="n" required value="${esc(e?.name || "")}" placeholder="مثال: نقابة المهندسين"></label>
+      <label class="f">خصم المحلي % <input class="narrow" name="l" type="number" min="0" max="50" step="0.5" value="${e ? pct(e.discount_local_bp) : ""}"></label>
+      <label class="f">خصم المستورد % <input class="narrow" name="i" type="number" min="0" max="50" step="0.5" value="${e ? pct(e.discount_imported_bp) : ""}"></label>
+      <label class="f grow">ملاحظة <input name="note" value="${esc(e?.note || "")}"></label>
+      ${e ? `<label class="chk"><input type="checkbox" name="act" ${e.is_active ? "checked" : ""}> شغال</label>` : ""}
+      <button class="btn small">${e ? "احفظ التعديل" : "أضف تعاقد"}</button>${e ? `<button type="button" class="btn small secondary" id="ktCancel">إلغاء</button>` : ""}</form>` : ""}
+    <div id="ktRep" class="mt"></div>`;
+  $("#ktForm")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault(); const f = ev.target;
+    const body = { name: f.n.value, discount_local_bp: toBp(f.l.value) ?? 0, discount_imported_bp: toBp(f.i.value) ?? 0, note: f.note.value || null };
+    if (e) body.is_active = f.act.checked;
+    try { await api(`/api/contracts${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("اتحفظ"); renderContracts(); } catch (err) { toast(err.message, true); }
+  });
+  $("#ktCancel")?.addEventListener("click", () => renderContracts());
+  box.querySelectorAll("[data-ktedit]").forEach((b) => b.addEventListener("click", () => renderContracts(b.dataset.ktedit)));
+  box.querySelectorAll("[data-ktrep]").forEach((b) => b.addEventListener("click", () => {
+    const x = list.find((y) => y.id === b.dataset.ktrep);
+    $("#ktRep").innerHTML = `<section class="panel" id="ktRepBox"><div class="row between"><h3>فواتير ${esc(x.name)}</h3>${reportTools("kt")}</div>${rangeBar("ktRange", "last")}<div id="ktRepOut"></div></section>`;
+    let r = null;
+    wireRange("ktRange", async (f, t) => {
+      try {
+        r = await api(`/api/contracts/${x.id}/report?from=${f}&to=${t}`);
+        $("#ktRepOut").innerHTML = `<div class="totals"><div>الفواتير<b>${r.rows.length}</b></div><div>الإجمالي<b>${money(r.totals.total)}</b></div><div>الخصم<b>${money(r.totals.discount_total)}</b></div><div>آجل<b>${money(r.totals.on_credit)}</b></div><div>مرتجع<b>${money(r.totals.returned_total)}</b></div></div>
+          <table class="mt"><thead><tr><th>الفاتورة</th><th>اليوم</th><th>العميل</th><th>الإجمالي</th><th>الخصم</th><th>آجل</th></tr></thead><tbody>
+          ${r.rows.map((y) => `<tr class="clickable" data-sale="${esc(y.id)}"><td>${y.sale_no}</td><td>${esc(dayOf(y.completed_at))}</td><td>${esc(y.customer)}</td><td class="num">${money(y.total)}</td><td class="num">${money(y.discount_total)}</td><td class="num">${money(y.on_credit)}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش فواتير</td></tr>`}</tbody></table>`;
+        document.querySelectorAll("#ktRepOut [data-sale]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/sales/${tr.dataset.sale}`; }));
+      } catch (err) { toast(err.message, true); }
+    });
+    wireTools("kt", () => ({ title: `فواتير تعاقد ${x.name}`, subtitle: rangeText(r.from, r.to), el: $("#ktRepBox"), sheets: [
+      { name: "الفواتير", columns: [N("الفاتورة"), Dt("اليوم"), Tx("العميل"), M("الإجمالي"), M("الخصم"), M("آجل"), M("مرتجع")],
+        rows: r.rows.map((y) => [y.sale_no, dayOf(y.completed_at), y.customer, y.total, y.discount_total, y.on_credit, y.returned_total]),
+        total: ["الإجمالي", "", "", r.totals.total, r.totals.discount_total, r.totals.on_credit, r.totals.returned_total] }] }));
+  }));
 }
 
 async function viewCustomer(id) {
@@ -2464,6 +2517,8 @@ async function viewCustomer(id) {
       <label class="f">حد الآجل (ج) <input id="cLim" type="number" min="0" value="${money(c.credit_limit)}" ${canM ? "" : "disabled"}></label>
       <label class="f">ملاحظات <input id="cNotes" value="${esc(c.notes || "")}" ${canM ? "" : "disabled"}></label></div>
     <label class="chk mt"><input type="checkbox" id="cWa" ${c.whatsapp_ok ? "checked" : ""} ${canM ? "" : "disabled"}> موافق إننا نبعتله رسايل واتساب (تذكير الطلب الشهري)</label>
+    <div class="row mt" id="cKt">${c.contract ? `<span class="chip">🤝 تعاقد: ${esc(c.contract.name)} — محلي ${pct(c.contract.discount_local_bp)}% / مستورد ${pct(c.contract.discount_imported_bp)}%</span>` : `<span class="muted">مش على تعاقد</span>`}
+      ${ME.permissions.includes("contracts.manage") ? `<select id="cKtSel"><option value="">— من غير تعاقد —</option></select><button class="btn small secondary" id="cKtSave">اربط</button>` : ""}</div>
     ${canM ? `<button class="btn small secondary mt" id="cSave">احفظ</button>` : ""}</section>
   <div class="totals"><div class="${c.balance > 0 ? "t-err" : "t-ok"}">${c.balance > 0 ? "✕ عليه" : "✓ مفيش عليه"}<b>${money(Math.max(0, c.balance))} ج</b><span>الحد المسموح ${money(c.credit_limit)} ج</span></div>
     <div class="${c.whatsapp_ok ? "t-ok" : ""}">${c.whatsapp_ok ? "✓ موافق على واتساب" : "مش موافق على رسايل"}<b>${esc(c.phone || "—")}</b></div></div>
@@ -2501,6 +2556,12 @@ async function viewCustomer(id) {
   $("#cuSale")?.addEventListener("click", async () => {
     try { const d = await api("/api/sales", { method: "POST", body: { customer_id: id } }); await toPos(d.id); } catch (err) { toast(err.message, true); }
   });
+  if ($("#cKtSel")) {
+    api("/api/contracts").then((r) => { $("#cKtSel").insertAdjacentHTML("beforeend", r.contracts.filter((x) => x.is_active).map((x) => `<option value="${esc(x.id)}" ${c.contract?.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")); });
+    $("#cKtSave").addEventListener("click", async () => {
+      try { await api(`/api/customers/${id}/contract`, { method: "POST", body: { contract_id: $("#cKtSel").value || null } }); toast("اتحفظ"); viewCustomer(id); } catch (err) { toast(err.message, true); }
+    });
+  }
   $("#cWaSend")?.addEventListener("click", async () => {
     const w = window.open("", "_blank");
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { whatsapp: true } }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }

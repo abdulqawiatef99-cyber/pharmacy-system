@@ -113,6 +113,9 @@ def profile(db: Database, ctx: Context, cid: str, today: date | None = None) -> 
     if not c:
         raise NotFound("العميل غير موجود")
     out = dict(c)
+    k = db.one("SELECT id, name, discount_local_bp, discount_imported_bp, is_active FROM contracts WHERE id=?", (c["contract_id"],)) \
+        if c["contract_id"] else None
+    out["contract"] = dict(k) if k else None
     out["wa"] = [w for w in (wa_number(c[k]) for k in ("phone", "phone2", "phone3")) if w]
     out["ledger"] = [dict(r) for r in db.all(
         "SELECT l.amount, l.kind, l.note, l.created_at, l.ref_id, u.full_name by_name FROM customer_ledger l LEFT JOIN users u"

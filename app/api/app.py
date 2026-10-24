@@ -429,6 +429,29 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def contracts_api(req):
+        from ..sales import contracts as k
+        ctx = ctx_of(req)
+        if req.method == "GET":
+            return J({"contracts": k.listing(db, ctx)})
+        return J({"contracts": k.save(db, ctx, await body(req), req.path_params.get("id"))})
+
+    @handler
+    async def contract_report(req):
+        from ..sales import contracts as k
+        qp = req.query_params
+        return J(k.report(db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
+
+    @handler
+    async def customer_contract(req):
+        from ..sales import contracts as k
+        from ..sales import customers as cu
+        ctx = ctx_of(req)
+        b = await body(req)
+        k.link_customer(db, ctx, req.path_params["id"], b.get("contract_id") or None)
+        return J(cu.profile(db, ctx, req.path_params["id"]))
+
+    @handler
     async def audit_list(req):
         qp = req.query_params
         return J(audit.listing(db, ctx_of(req), qp.get("from", ""), qp.get("to", ""), qp.get("user") or None,
@@ -1770,6 +1793,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}/card", item_card_get),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
+        Route("/api/contracts", contracts_api, methods=["GET", "POST"]),
+        Route("/api/contracts/{id}", contracts_api, methods=["POST"]),
+        Route("/api/contracts/{id}/report", contract_report),
+        Route("/api/customers/{id}/contract", customer_contract, methods=["POST"]),
         Route("/api/items/{id}/{action}", item_action, methods=["POST"]),
         Route("/api/categories", categories_list),
         Route("/api/categories", categories_save, methods=["POST"]),

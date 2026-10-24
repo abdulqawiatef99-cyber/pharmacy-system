@@ -229,6 +229,9 @@ class Sales:
                              client_ref, ctx.user_id if discount_bp else None,
                              ctx.approver_id if discount_bp and ctx.discount_limit_bp > ctx.max_discount_bp
                              else None))
+            if s["customer_id"]:
+                from . import contracts
+                contracts.apply(self.db, sid)
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
         return self.get(ctx, sid)
 
@@ -322,6 +325,9 @@ class Sales:
         if s["customer_id"]:
             c = self.db.one("SELECT id, name, name_alt, phone, address1, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
+        if s.get("contract_id"):
+            k = self.db.one("SELECT id, name, discount_local_bp, discount_imported_bp FROM contracts WHERE id=?", (s["contract_id"],))
+            s["contract"] = dict(k) if k else None
         return s
 
     @staticmethod
@@ -460,7 +466,7 @@ class Sales:
                                 "below_cost": below_cost or None})
             from . import customers as _cust
             _cust.mark_refilled(self.db, sid)
-            disc_lines = [l for l in preview["lines"] if l["discount_bp"]]
+            disc_lines = [l for l in preview["lines"] if l["discount_bp"] and l.get("discount_source") != "contract"]
             if disc_lines:
                 names = "، ".join(f"{l['item']['name']} {l['discount_bp'] / 100:g}%" for l in disc_lines[:4])
                 notify.emit(self.db, ctx, "discount", "warning",
@@ -539,6 +545,8 @@ class Sales:
                 if cid and not self.db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (cid, ctx.org_id)):
                     raise NotFound("العميل غير موجود")
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=?", (cid, sid))
+                from . import contracts
+                contracts.apply(self.db, sid)
             if "kind" in data:
                 if data["kind"] not in ("store", "delivery"):
                     raise ValidationFailed("نوع الفاتورة غير صحيح")
@@ -590,7 +598,7 @@ class Sales:
                     raise ValidationFailed("نسبة الخصم غير صحيحة")
                 if discount_bp > ctx.discount_limit_bp:
                     raise discount_denied(ctx, discount_bp)
-                self.db.execute("UPDATE sale_lines SET discount_bp=?, discount_by=?, discount_approved_by=? WHERE id=?",
+                self.db.execute("UPDATE sale_lines SET discount_bp=?, discount_source=NULL, discount_by=?, discount_approved_by=? WHERE id=?",
                                 (discount_bp, ctx.user_id if discount_bp else None,
                                  ctx.approver_id if discount_bp and discount_bp > ctx.max_discount_bp else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
