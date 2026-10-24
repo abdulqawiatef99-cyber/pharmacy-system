@@ -216,12 +216,13 @@ def change_password(db: Database, ctx: Context, old: str, new: str) -> None:
 def me(db: Database, ctx: Context) -> dict:
     u = db.one("SELECT id, username, full_name FROM users WHERE id=?", (ctx.user_id,))
     o = db.one("SELECT id, name, org_type FROM organizations WHERE id=?", (ctx.org_id,))
+    from . import people
     r = db.one("SELECT name FROM roles WHERE org_id=? AND code=?", (ctx.org_id, ctx.role_code))
     has_pin = bool(db.one("SELECT pin_hash FROM users WHERE id=?", (ctx.user_id,))["pin_hash"])
     return {"user": dict(u), "organization": dict(o), "branch_id": ctx.branch_id,
             "permissions": sorted(ctx.permissions), "role": ctx.role_code,
             "role_name": r["name"] if r else None, "max_discount_bp": ctx.max_discount_bp,
-            "has_pin": has_pin}
+            "has_pin": has_pin, "prefs": people.get_prefs(db, ctx.user_id)}
 
 
 # --------------------------------------------------------------------------

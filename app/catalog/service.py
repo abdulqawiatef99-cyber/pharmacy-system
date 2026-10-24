@@ -122,6 +122,7 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
     d["strength_norm"] = strength_norm(d.get("strength")) or parsed.strength
     d["dosage_form"] = d.get("dosage_form") or parsed.form
     d["name_norm"] = parsed.norm
+    d["name_ar_norm"] = normalize_text(d.get("name_ar")) or None
     d["dedupe_key"] = dedupe_key(name, d.get("strength"), d.get("dosage_form"), d["pack_size"],
                                  d.get("manufacturer"))
     if dedupe_suffix:
@@ -198,6 +199,8 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
                                      merged["pack_size"], merged.get("manufacturer"))
         if "|dup:" in (before.get("dedupe_key") or ""):
             d["dedupe_key"] += before["dedupe_key"][before["dedupe_key"].index("|dup:"):]
+    if "name_ar" in d:
+        d["name_ar_norm"] = normalize_text(d.get("name_ar")) or None
     d["updated_at"] = _now()
     sets = ", ".join(f"{k}=?" for k in d)
     with db.transaction():
@@ -282,29 +285,8 @@ def set_supplier_code(db: Database, ctx: Context, supplier_id: str, code: str, i
 
 
 def search_items(db: Database, ctx: Context, q: str, limit: int = 20) -> list[dict]:
-    ctx.require("items.read")
-    q = (q or "").strip()
-    if not q:
-        rows = db.all("SELECT * FROM items WHERE org_id=? AND status='active'"
-                      " ORDER BY coalesce(name_en, name_ar) LIMIT ?", (ctx.org_id, limit))
-        return [dict(r) for r in rows]
-    bc = normalize_barcode(q)
-    if bc and len(bc) >= 6 and bc == q.strip():
-        r = db.one("SELECT i.* FROM item_barcodes b JOIN items i ON i.id=b.item_id"
-                   " WHERE b.org_id=? AND b.barcode=?", (ctx.org_id, bc))
-        if r:
-            return [dict(r)]
-    norm = normalize_text(q)
-    rows = db.all("SELECT * FROM items WHERE org_id=? AND status='active' AND"
-                  " (name_norm LIKE ? OR code = ?) ORDER BY length(name_norm) LIMIT ?",
-                  (ctx.org_id, f"%{norm}%", q, limit))
-    found = {r["id"]: dict(r) for r in rows}
-    if len(found) < limit:
-        for c in matching.fuzzy_candidates(db, ctx.org_id, q, limit):
-            if c.item_id not in found:
-                r = db.one("SELECT * FROM items WHERE id=?", (c.item_id,))
-                found[c.item_id] = dict(r)
-    return list(found.values())[:limit]
+    from .search import search
+    return search(db, ctx, q, limit)["items"]
 
 
 def _now() -> str:

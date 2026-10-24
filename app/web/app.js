@@ -24,6 +24,47 @@ const normExpiry = (v) => {
   const m = t.match(/^(\d{1,2})(\d{2})$/);
   return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
 };
+// ------------------------------------------------------------------ person's screen preferences
+const PREFS_DEFAULT = { theme: "light", accent: null, font: "m", lang: "ar", names: "both" };
+const FONT_STEPS = ["s", "m", "l", "xl"];
+let PREFS = { ...PREFS_DEFAULT };
+try { PREFS = { ...PREFS_DEFAULT, ...JSON.parse(localStorage.getItem("prefs") || "{}") }; } catch { /* storage blocked */ }
+function applyPrefs(p) {
+  PREFS = { ...PREFS_DEFAULT, ...(p || {}) };
+  const h = document.documentElement;
+  h.dataset.theme = PREFS.theme; h.dataset.font = PREFS.font;
+  if (PREFS.accent && PREFS.theme !== "dark") h.style.setProperty("--brand", PREFS.accent);
+  else h.style.removeProperty("--brand");
+  try { localStorage.setItem("prefs", JSON.stringify(PREFS)); } catch { /* storage blocked */ }
+}
+applyPrefs(PREFS);
+async function savePrefs(changes) {
+  const p = await api("/api/me/prefs", { method: "PUT", body: changes });
+  if (ME) ME.prefs = p;
+  applyPrefs(p);
+  return p;
+}
+document.addEventListener("keydown", (e) => {        // Ctrl + / Ctrl - : font size for this person
+  if (!(e.ctrlKey || e.metaKey) || !ME) return;
+  const d = e.key === "=" || e.key === "+" ? 1 : e.key === "-" ? -1 : 0;
+  if (!d) return;
+  e.preventDefault();
+  const i = Math.min(FONT_STEPS.length - 1, Math.max(0, FONT_STEPS.indexOf(PREFS.font) + d));
+  savePrefs({ font: FONT_STEPS[i] }).catch(() => {});
+});
+// item names as the person chose: both (English + Arabic under it), English only, Arabic only
+const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
+  ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
+// search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
+async function findItems(q, limit = 8) {
+  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1`);
+  return r;
+}
+const hintHtml = (h) => (!h ? "" : h.kind === "layout"
+  ? `<p class="badge b-warn search-hint">⚠ الكيبورد كان على اللغة التانية — بدوّر على: <bdi>${esc(h.query)}</bdi></p>`
+  : `<p class="badge b-info search-hint">ℹ مفيش اسم مطابق بالظبط — دي أقرب أصناف</p>`);
+
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 
 function toast(msg, isError = false) {
@@ -157,6 +198,7 @@ async function route() {
   }
   $("#topbar").hidden = !ME;
   if (ME) {
+    if (ME.prefs) applyPrefs(ME.prefs);
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
@@ -465,7 +507,7 @@ function bindQuickAdd() {
   const pick = (it) => {
     QA_ITEM = it;
     $("#qaRes").innerHTML = "";
-    q.value = it.name_en || it.name_ar;
+    q.value = itemText(it);
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
     if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
     $("#qaQty").focus();
@@ -475,10 +517,10 @@ function bindQuickAdd() {
     QA_ITEM = null; clearTimeout(t);
     t = setTimeout(async () => {
       const v = q.value.trim(); if (v.length < 2) { $("#qaRes").innerHTML = ""; return; }
-      res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
+      const found = await findItems(v); res = found.items;
       if (res.length === 1 && /^\d{6,}$/.test(v)) { pick(res[0]); return; }
-      $("#qaRes").innerHTML = res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${esc(r.name_en || r.name_ar)}
-        <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">مفيش نتائج</p>`;
+      $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
+        <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">مفيش نتائج</p>`);
       $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
     }, 250);
   });
@@ -638,12 +680,13 @@ async function viewItems() {
     <div class="row"><label class="f grow">بحث بالاسم أو الباركود
       <input id="q" placeholder="مثال: panadol أو بانادول أو 622..." autocomplete="off"></label></div>
   </section>
-  <section class="panel"><div class="tablewrap"><table>
+  <section class="panel"><div id="itemsHint"></div><div class="tablewrap"><table>
     <thead><tr><th>الاسم</th><th>التركيز</th><th>الشكل</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
   const load = async () => {
-    const rows = await api(`/api/items?q=${encodeURIComponent($("#q").value)}&limit=50`);
-    $("#itemsBody").innerHTML = rows.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${esc(r.name_en || "")}<div class="raw">${esc(r.name_ar || "")}</div></td>
+    const found = await findItems($("#q").value, 50), rows = found.items;
+    $("#itemsHint").innerHTML = hintHtml(found.hint);
+    $("#itemsBody").innerHTML = rows.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${itemHtml(r)}</td>
       <td>${esc(r.strength_norm || "")}</td><td>${esc(r.dosage_form || "")}</td>
       <td>${r.pack_size} ${esc(unitName(r))}</td><td>${money(r.public_price)}</td><td><b>${esc(fmtStock(r.stock_qty, r))}</b></td><td>${esc(r.code || "")}</td></tr>
       <tr class="detail" id="det${i}" hidden><td colspan="7"></td></tr>`).join("")
@@ -905,10 +948,10 @@ async function viewCountSession(id) {
   const lookup = async () => {
     const v = q.value.trim();
     if (!v) return;
-    const res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
-    if (res.length === 1) return chooseItem(res[0]);
+    const found = await findItems(v), res = found.items;
+    if (res.length === 1 && !found.hint) return chooseItem(res[0]);
     if (!res.length) return toast("الصنف غير موجود", true);
-    $("#cntPick").innerHTML = `<div class="cands">${res.map((r, i) => `<button class="btn secondary small" data-pk="${i}">${esc(r.name_en || r.name_ar)}</button>`).join("")}</div>`;
+    $("#cntPick").innerHTML = hintHtml(found.hint) + `<div class="cands">${res.map((r, i) => `<button class="btn secondary small" data-pk="${i}">${itemHtml(r)}</button>`).join("")}</div>`;
     $("#cntPick").querySelectorAll("[data-pk]").forEach((b) => b.addEventListener("click", () => chooseItem(res[+b.dataset.pk])));
   };
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); lookup(); } });
@@ -1258,9 +1301,9 @@ async function viewPos() {
   const q = $("#posQ");
   const search = async () => {
     const v = q.value.trim(); if (!v) return;
-    const res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
+    const found = await findItems(v), res = found.items;
     if (res.length === 1 && /^\d{6,}$/.test(v)) { await addItem(res[0], 0, 1); q.value = ""; return; }
-    $("#posRes").innerHTML = res.map((r, i) => `<div class="row"><span class="grow">${esc(r.name_en || r.name_ar)} <span class="muted">${esc(r.strength_norm || "")} · العبوة ${r.pack_size} ${esc(unitName(r))} · ${money(r.public_price)} ج · الرصيد ${esc(fmtStock(r.stock_qty, r) || "0")}</span></span>
+    $("#posRes").innerHTML = hintHtml(found.hint) + res.map((r, i) => `<div class="row"><span class="grow">${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · العبوة ${r.pack_size} ${esc(unitName(r))} · ${money(r.public_price)} ج · الرصيد ${esc(fmtStock(r.stock_qty, r) || "0")}</span></span>
       <button class="btn small" data-add="${i}" data-kind="pack">علبة</button>
       ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
@@ -1449,16 +1492,54 @@ async function viewNotifications() {
   });
 }
 
-// ------------------------------------------------------------------ my account: PIN
+// ------------------------------------------------------------------ my account: appearance + PIN
+const ACCENTS = [["#0F5E54", "أخضر بترولي (الافتراضي)"], ["#1F4E8C", "أزرق"], ["#5B3E96", "بنفسجي"], ["#7A4B21", "بني"], ["#9F1D48", "نبيتي"]];
+function contrastWhite(hex) {
+  const ch = (v) => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const [r, g, b] = [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16));
+  return 1.05 / (0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b) + 0.05);
+}
 function viewMe() {
-  app.innerHTML = `<section class="panel narrowpanel"><h1>حسابي</h1>
-    <p>${esc(ME.user.full_name)} — <span class="badge b-info">${esc(ME.role_name || "")}</span></p>
-    <p class="badge ${ME.has_pin ? "b-ok" : "b-warn"}">${ME.has_pin ? "✓ عندك رقم سري" : "⚠ لسه معندكش رقم سري"}</p>
+  const p = PREFS, cur = (p.accent || "#0F5E54").toUpperCase();
+  const radio = (name, v, label, extra = "") => `<label><input type="radio" name="${name}" value="${v}" ${p[name] === v ? "checked" : ""} ${extra}> ${label}</label>`;
+  app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>الشكل واللغة</h1>
+      <button class="btn small secondary" id="prReset">↺ رجّع كل حاجة للافتراضي</button></div>
+    <p class="muted">الإعدادات دي ليك انت بس، وبتتحفظ على حسابك. الافتراضي هو الأريح لشغل اليوم كله.</p>
+    <h2 class="mt">الألوان</h2>
+    <div class="themes">
+      <label><span class="swatch sw-light"><i></i><i></i></span><span><input type="radio" name="theme" value="light" ${p.theme === "light" ? "checked" : ""}> فاتح دافي (الافتراضي)</span></label>
+      <label><span class="swatch sw-dark"><i></i><i></i></span><span><input type="radio" name="theme" value="dark" ${p.theme === "dark" ? "checked" : ""}> ليلي</span></label>
+      <label><span class="swatch sw-contrast"><i></i><i></i></span><span><input type="radio" name="theme" value="contrast" ${p.theme === "contrast" ? "checked" : ""}> تباين عالي</span></label>
+    </div>
+    <h2 class="mt">لون البرنامج</h2>
+    <div class="accents">${ACCENTS.map(([c, n]) => `<button type="button" class="acc-${c.slice(1).toLowerCase()} ${cur === c ? "on" : ""}" data-acc="${c}" title="${n}" aria-label="${n}"></button>`).join("")}
+      <label class="f">لون تاني <input type="color" id="accPick" value="${cur.toLowerCase()}"></label></div>
+    <p class="badge b-info mt">ℹ ألوان التنبيه ثابتة: أحمر = غلط، أخضر = تمام، برتقالي = تنبيه، أزرق = معلومة.</p>
+    <h2 class="mt">حجم الخط</h2>
+    <div class="seg">${radio("font", "s", "صغير")}${radio("font", "m", "عادي (الافتراضي)")}${radio("font", "l", "كبير")}${radio("font", "xl", "كبير جدًا")}</div>
+    <p class="muted">اختصار: Ctrl و + أو Ctrl و −</p>
+    <h2 class="mt">أسماء الأصناف</h2>
+    <div class="seg">${radio("names", "both", "الاتنين (الافتراضي)")}${radio("names", "en", "إنجليزي بس")}${radio("names", "ar", "عربي بس")}</div>
+    <h2 class="mt">لغة البرنامج</h2>
+    <div class="seg">${radio("lang", "ar", "العربية (الافتراضي)")}<label class="muted"><input type="radio" disabled> English — جاية في الخطوة 15</label></div>
+  </section>
+  <section class="panel narrowpanel"><h1>الرقم السري</h1>
+    <p>${esc(ME.user.full_name)} — <span class="badge b-info">${esc(ME.role_name || "")}</span>
+    <span class="badge ${ME.has_pin ? "b-ok" : "b-warn"}">${ME.has_pin ? "✓ عندك رقم سري" : "⚠ لسه معندكش رقم سري"}</span></p>
     <p class="muted">الرقم السري (4 لـ 6 أرقام) للدخول السريع على جهاز الصيدلية${["owner", "manager"].includes(ME.role) ? "، وللموافقة على شاشة حد تاني" : ""}.</p>
     <form id="pinSet" class="row">
       <label class="f">كلمة المرور الحالية <input name="password" type="password" autocomplete="current-password" required></label>
       <label class="f">الرقم السري الجديد <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" required></label>
       <button class="btn">احفظ</button></form></section>`;
+  const save = async (ch) => { try { await savePrefs(ch); viewMe(); } catch (err) { toast(err.message, true); viewMe(); } };
+  document.querySelectorAll("input[type=radio][name]").forEach((r) => r.addEventListener("change", () => save({ [r.name]: r.value })));
+  document.querySelectorAll("[data-acc]").forEach((b) => b.addEventListener("click", () => save({ accent: b.dataset.acc === "#0F5E54" ? null : b.dataset.acc })));
+  $("#accPick").addEventListener("change", (e) => {
+    const c = e.target.value.toUpperCase(), cr = contrastWhite(c);
+    if (cr < 4.5) { toast(`اللون ده فاتح: الكلام الأبيض عليه مش هيتقري (التباين ${cr.toFixed(1)} والمطلوب 4.5). اختار أغمق`, true); e.target.value = cur.toLowerCase(); return; }
+    save({ accent: c });
+  });
+  $("#prReset").addEventListener("click", (e) => { if (confirmInline(e.target)) save({ reset: true }); });
   $("#pinSet").addEventListener("submit", async (e) => {
     e.preventDefault();
     try {

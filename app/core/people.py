@@ -292,3 +292,59 @@ def add_user(db: Database, ctx: Context, *, username: str, full_name: str, passw
     if pin:
         set_pin(db, ctx, uid, str(pin))
     return uid
+
+
+# -------------------------------------------------------------------------- screen preferences
+PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both"}
+_PREF_CHOICES = {"theme": ("light", "dark", "contrast"), "font": ("s", "m", "l", "xl"),
+                 "lang": ("ar", "en"), "names": ("both", "en", "ar")}
+
+
+def _luminance(hex6: str) -> float:
+    def ch(v: int) -> float:
+        c = v / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(hex6[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+
+
+def contrast_with_white(hex6: str) -> float:
+    return round(1.05 / (_luminance(hex6) + 0.05), 2)
+
+
+def get_prefs(db: Database, user_id: str) -> dict:
+    r = db.one("SELECT prefs FROM users WHERE id=?", (user_id,))
+    try:
+        stored = json.loads(r["prefs"]) if r else {}
+    except ValueError:
+        stored = {}
+    return {**PREF_DEFAULTS, **{k: v for k, v in stored.items() if k in PREF_DEFAULTS}}
+
+
+def set_prefs(db: Database, ctx: Context, changes: dict) -> dict:
+    """Each person's own screen: colors, font size, language, item names. Defaults are the
+    recommended setup; 'reset' brings them back."""
+    if changes.get("reset"):
+        new = dict(PREF_DEFAULTS)
+    else:
+        new = get_prefs(db, ctx.user_id)
+        for k, v in changes.items():
+            if k in _PREF_CHOICES:
+                if v not in _PREF_CHOICES[k]:
+                    raise ValidationFailed("اختيار غير صحيح")
+                new[k] = v
+            elif k == "accent":
+                if v in (None, ""):
+                    new["accent"] = None
+                    continue
+                v = str(v).strip().upper()
+                if not (len(v) == 7 and v[0] == "#" and all(c in "0123456789ABCDEF" for c in v[1:])):
+                    raise ValidationFailed("اللون غير صحيح")
+                cr = contrast_with_white(v)
+                if cr < 4.5:
+                    raise ValidationFailed(f"اللون ده فاتح: الكلام الأبيض عليه مش هيتقري (التباين {cr} والمطلوب 4.5 على الأقل)",
+                                           code="low_contrast", details={"contrast": cr})
+                new["accent"] = v
+    with db.transaction():
+        db.execute("UPDATE users SET prefs=? WHERE id=?", (json.dumps(new), ctx.user_id))
+    return new

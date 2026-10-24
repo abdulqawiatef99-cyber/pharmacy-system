@@ -31,6 +31,8 @@ def _db(s: config.Settings) -> Database:
     if applied:
         print("migrations applied:", ", ".join(applied))
     accounts.sync_system_roles(db)
+    from app.catalog.search import backfill_search_keys
+    backfill_search_keys(db)
     return db
 
 

@@ -114,6 +114,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)
+    from ..catalog.search import backfill_search_keys, search as item_search
+    backfill_search_keys(db)
     from ..core.autobackup import AutoBackup
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
@@ -407,6 +409,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True})
 
     @handler
+    async def my_prefs(req):
+        ctx = ctx_of(req)
+        return J(people.set_prefs(db, ctx, await body(req)))
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -521,8 +528,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        rows = catalog.search_items(db, ctx, req.query_params.get("q", ""),
-                                    min(int(req.query_params.get("limit", 20)), 100))
+        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 100))
+        rows = res["items"]
         if rows and ctx.can("inventory.read") and ctx.branch_id:
             ids = [r["id"] for r in rows]
             qty = {r["item_id"]: r["q"] for r in db.all(
@@ -531,6 +538,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 (ctx.org_id, ctx.branch_id, *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+        if req.query_params.get("meta") == "1":
+            return J({"items": rows, "hint": res["hint"]})
         return J(rows)
 
     @handler
@@ -1158,6 +1167,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/auth/quick-users", quick_users),
         Route("/api/auth/pin", pin_login, methods=["POST"]),
         Route("/api/me/pin", my_pin, methods=["POST"]),
+        Route("/api/me/prefs", my_prefs, methods=["PUT"]),
         Route("/api/approvers", approvers_list),
         Route("/api/approvals/check", approval_check, methods=["POST"]),
         Route("/api/users", users_list),
