@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>الكاشير — كمبيوتر</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#0F5E54}a:hover{color:#0A4038}
+</style>
+</helmet>
+<div dir="rtl" style="min-height: 900px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; display: flex; flex-direction: column">
+  <header style="display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: #0F5E54; color: #FFFFFF; flex-wrap: wrap">
+    <a href="Home.dc.html" style="color: #FFFFFF; font-weight: 700; font-size: 18px; text-decoration: none">صيدلية عبد القوي</a>
+    <span style="font-size: 15px; opacity: 0.9">فاتورة بيع جديدة</span>
+    <span style="flex: 1"></span>
+    <span style="font-size: 14px; opacity: 0.9">الوردية مفتوحة — الدرج: 450.00 ج</span>
+  </header>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: 18px; padding: 18px 24px; box-sizing: border-box">
+    <section style="flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 14px">
+      <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">امسح الباركود أو اكتب أول حروف الصنف
+        <input value="aspo" style="min-height: 56px; padding: 0 16px; border-radius: 12px; border: 2px solid #0F5E54; outline: 3px solid #CDE4DF; background: #FFFFFF; font: inherit; font-size: 20px; color: #1F2328"></label>
+
+      <div role="listbox" aria-label="نتائج البحث" style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 12px; overflow: hidden">
+        <div style="display: grid; grid-template-columns: minmax(0, 1fr) 120px 110px 200px; gap: 12px; align-items: center; padding: 12px 16px; background: #E6EFFA">
+          <div><b style="font-size: 16px">ASPOCID 75MG 30TAB</b><div style="font-size: 13px; color: #5B6168">اسبوسيد 75 مجم · 3 شرايط في العلبة · رف الأقراص A</div></div>
+          <span style="font-size: 14px">رصيد: <b>1 شريط</b></span>
+          <b style="font-size: 16px; direction: ltr; text-align: right">33.00 ج</b>
+          <div style="display: flex; gap: 8px; justify-content: flex-end"><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">علبة ↵</button><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid #0F5E54; background: #FFFFFF; color: #0F5E54; font: inherit; font-weight: 600">شريط</button></div>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1fr) 120px 110px 200px; gap: 12px; align-items: center; padding: 12px 16px; border-top: 1px solid #ECEAE4">
+          <div><b style="font-size: 16px">ASPOCID INF 75MG 30TAB</b><div style="font-size: 13px; color: #5B6168">اسبوسيد أطفال مضغ · 5 شرايط</div></div>
+          <span style="font-size: 14px">رصيد: <b>2 علبة + 4 شريط</b></span>
+          <b style="font-size: 16px; direction: ltr; text-align: right">35.00 ج</b>
+          <div style="display: flex; gap: 8px; justify-content: flex-end"><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid #0F5E54; background: #FFFFFF; color: #0F5E54; font: inherit; font-weight: 600">علبة</button><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid #0F5E54; background: #FFFFFF; color: #0F5E54; font: inherit; font-weight: 600">شريط</button></div>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1fr) 120px 110px 200px; gap: 12px; align-items: center; padding: 12px 16px; border-top: 1px solid #ECEAE4; background: #FDECEA">
+          <div><b style="font-size: 16px">ASPOCID C 12/EFF TAB</b><div style="font-size: 13px; color: #B42318">ناقص — آخر مرة اتشرى من ابن سينا</div></div>
+          <span style="font-size: 14px; color: #B42318; font-weight: 600">رصيد: 0</span>
+          <b style="font-size: 16px; direction: ltr; text-align: right">5.85 ج</b>
+          <div style="display: flex; justify-content: flex-end"><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid #B42318; background: #FFFFFF; color: #B42318; font: inherit; font-weight: 600">سجّل طلب عميل</button></div>
+        </div>
+      </div>
+
+      <div style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 12px; overflow-x: auto">
+        <table style="width: 100%; border-collapse: collapse; font-size: 16px">
+          <thead><tr style="background: #ECEAE4; color: #5B6168; font-size: 14px; text-align: right">
+            <th style="padding: 10px 16px; font-weight: 600">الصنف</th><th style="padding: 10px 12px; font-weight: 600">الكمية</th>
+            <th style="padding: 10px 12px; font-weight: 600">السعر</th><th style="padding: 10px 12px; font-weight: 600">الصلاحية</th>
+            <th style="padding: 10px 12px; font-weight: 600">الإجمالي</th><th style="padding: 10px 12px"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden">حذف</span></th></tr></thead>
+          <tbody>
+            <tr style="border-top: 1px solid #ECEAE4">
+              <td style="padding: 12px 16px"><b>OLFEN-75 6 AMP</b><div style="font-size: 13px; color: #5B6168">أولفين 75 · أمبولات</div></td>
+              <td style="padding: 12px"><div style="display: flex; align-items: center; gap: 6px"><button type="button" aria-label="نقص" style="width: 36px; height: 36px; border-radius: 8px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">−</button><b style="min-width: 60px; text-align: center">2 أمبول</b><button type="button" aria-label="زود" style="width: 36px; height: 36px; border-radius: 8px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">+</button></div></td>
+              <td style="padding: 12px; direction: ltr; text-align: right">4.38</td>
+              <td style="padding: 12px"><span style="padding: 3px 10px; border-radius: 999px; background: #E7F4EA; color: #1E7B3A; font-size: 13px; font-weight: 600">09/2028</span></td>
+              <td style="padding: 12px; direction: ltr; text-align: right; font-weight: 700">8.75</td>
+              <td style="padding: 12px"><button type="button" aria-label="شيل الصنف" style="width: 36px; height: 36px; border-radius: 8px; border: 0; background: #FDECEA; color: #B42318; font: inherit">✕</button></td>
+            </tr>
+            <tr style="border-top: 1px solid #ECEAE4">
+              <td style="padding: 12px 16px"><b>diclac 75 20/tab</b><div style="font-size: 13px; color: #5B6168">ديكلاك 75</div></td>
+              <td style="padding: 12px"><div style="display: flex; align-items: center; gap: 6px"><button type="button" aria-label="نقص" style="width: 36px; height: 36px; border-radius: 8px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">−</button><b style="min-width: 60px; text-align: center">1 علبة</b><button type="button" aria-label="زود" style="width: 36px; height: 36px; border-radius: 8px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">+</button></div></td>
+              <td style="padding: 12px; direction: ltr; text-align: right">90.00</td>
+              <td style="padding: 12px"><span style="padding: 3px 10px; border-radius: 999px; background: #FFF1DF; color: #9A4A00; font-size: 13px; font-weight: 600">⚠ 01/2027</span></td>
+              <td style="padding: 12px; direction: ltr; text-align: right; font-weight: 700">90.00</td>
+              <td style="padding: 12px"><button type="button" aria-label="شيل الصنف" style="width: 36px; height: 36px; border-radius: 8px; border: 0; background: #FDECEA; color: #B42318; font: inherit">✕</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; font-size: 13px; color: #5B6168">
+        <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4">Enter: يضيف علبة</span>
+        <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4">Shift+Enter: يضيف شريط</span>
+        <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4">+ / −: الكمية</span>
+        <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4">F9: دفع</span>
+        <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4">F8: تعليق الفاتورة</span>
+      </div>
+    </section>
+
+    <aside style="flex: 1 1 340px; max-width: 420px; min-width: 300px; display: flex; flex-direction: column; gap: 14px">
+      <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 10px">
+        <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">العميل (اختياري)
+          <input placeholder="اسم أو رقم موبايل" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px"></label>
+        <div style="display: flex; justify-content: space-between; font-size: 16px"><span>الإجمالي</span><b style="direction: ltr">98.75</b></div>
+        <div style="display: flex; justify-content: space-between; font-size: 16px; color: #1E7B3A"><span>خصم</span><b style="direction: ltr">0.00</b></div>
+        <div style="height: 1px; background: #ECEAE4"></div>
+        <div style="display: flex; justify-content: space-between; align-items: baseline"><span style="font-size: 18px; font-weight: 600">المطلوب</span><b style="font-size: 40px; direction: ltr; font-variant-numeric: tabular-nums">98.75</b></div>
+      </section>
+      <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+          <button type="button" style="min-height: 48px; border-radius: 10px; border: 2px solid #0F5E54; background: #E8F2F0; color: #0F5E54; font: inherit; font-weight: 700">نقدي</button>
+          <button type="button" style="min-height: 48px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; color: #1F2328; font: inherit">فيزا</button>
+          <button type="button" style="min-height: 48px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; color: #1F2328; font: inherit">آجل</button>
+        </div>
+        <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">العميل دفع
+          <input value="100" style="min-height: 48px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 22px; direction: ltr; text-align: right"></label>
+        <div style="display: flex; justify-content: space-between; font-size: 18px; padding: 10px 12px; border-radius: 10px; background: #E7F4EA; color: #1E7B3A"><span>الباقي للعميل</span><b style="direction: ltr">1.25</b></div>
+        <button type="button" style="min-height: 56px; border-radius: 12px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-size: 20px; font-weight: 700">إتمام البيع وطباعة  (F9)</button>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
