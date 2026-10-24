@@ -22,7 +22,7 @@ class TestSetup(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.db = Database(self.tmp / "t.db")
         self.db.migrate()
-        self.app = create_app(self.db, replace(config.load(), upload_dir=self.tmp / "up"))
+        self.app = create_app(self.db, replace(config.load(), upload_dir=self.tmp / "up", data_dir=self.tmp))
 
     def tearDown(self):
         self.db.close()

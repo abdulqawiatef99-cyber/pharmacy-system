@@ -316,7 +316,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         data, name, _ = await _upload(req)
         pending = s.data_dir / "pending_restore.zip"
         pending.write_bytes(data)
-        info = await run_in_threadpool(backup_mod.verify_archive, pending)
+        try:
+            info = await run_in_threadpool(backup_mod.verify_archive, pending)
+        except Exception as e:  # noqa: BLE001 - not a zip / unreadable
+            info = {"problems": [f"الملف مش نسخة احتياطية ({type(e).__name__})"]}
         if info["problems"]:
             pending.unlink(missing_ok=True)
             raise ValidationFailed("ملف النسخة الاحتياطية مش سليم: " + "؛ ".join(info["problems"][:3]))
