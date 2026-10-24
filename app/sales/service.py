@@ -42,6 +42,27 @@ def return_window_days(db: Database, org_id: str) -> int:
         return DEFAULT_RETURN_DAYS
 
 
+LINE_ORDERS = ("alpha", "entry")
+
+
+def line_order(db: Database, org_id: str) -> str:
+    """How invoice lines are shown, saved for reprint and printed: alphabetical (default: the
+    pharmacist collects A, then B... in one walk along the shelves) or as they were entered."""
+    r = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='line_order'", (org_id,))
+    return r["value"] if r and r["value"] in LINE_ORDERS else "alpha"
+
+
+def sort_lines(lines: list[dict], order: str, names: str = "en") -> list[dict]:
+    if order != "alpha":
+        return sorted(lines, key=lambda l: l["line_no"])
+
+    def key(l):
+        it = l["item"]
+        n = (it.get("name_ar") if names == "ar" else it.get("name_en")) or it.get("name") or ""
+        return (n.strip().casefold(), l["line_no"])
+    return sorted(lines, key=key)
+
+
 def discount_denied(ctx: Context, discount_bp: int) -> Forbidden:
     return Forbidden(f"الخصم المسموح لك {ctx.discount_limit_bp / 100:g}% بس", code="approval_required",
                      details={"permission": "discount", "label": f"خصم {discount_bp / 100:g}%",
@@ -282,7 +303,9 @@ class Sales:
             subtotal += gross
             discount += disc
             lines.append(l)
-        s["lines"] = lines
+        from ..printing import settings as ps
+        s["line_order"] = line_order(self.db, ctx.org_id)
+        s["lines"] = sort_lines(lines, s["line_order"], ps.get(self.db, ctx.org_id).get("names", "en"))
         if s["status"] == "draft":
             s["subtotal"], s["discount_total"] = subtotal, discount
             s["total"] = subtotal - discount + (s["delivery_fee"] or 0)

@@ -1316,7 +1316,8 @@ function renderLan(n) {
     } catch (err) { e.target.disabled = false; toast(err.message, true); }
   });
 }
-function renderReceiptCfg(c) {
+async function renderReceiptCfg(c) {
+  const order = (await api("/api/settings/sales")).line_order;
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الكاشير <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
@@ -1325,13 +1326,15 @@ function renderReceiptCfg(c) {
     <label class="f">سطر 2 (التليفون) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاتنين</option></select></label>
+    <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>زي ما اتدخلت</option></select></label>
     <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
     <div>${chk("show_cashier", "اسم الكاشير")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف اللي مالهاش مرتجع)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   $("#rcForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
-    try { renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
+    try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
+      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
       footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("اتحفظ"); }
     catch (err) { toast(err.message, true); }
@@ -1720,11 +1723,13 @@ async function patchLine(lineId, body) {
 
 function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
+  const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
   $("#posCart").innerHTML = `
+    ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف زي ما اتدخلت" : "الأصناف مترتبة أبجدي A→Z (أسرع في التحضير)"} — آخر صنف اتضاف متعلّم ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
     <div class="tablewrap"><table class="cart">
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
-      <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""}">
-        <td><b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
+      <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""} ${l.line_no === lastNo && s.lines.length > 1 ? "just-added" : ""}">
+        <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية مش متاحة"}</span>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زود">+</button></div></td>

@@ -742,11 +742,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_settings(req):
-        from ..sales.service import return_window_days
+        from ..sales.service import LINE_ORDERS, line_order, return_window_days
         ctx = ctx_of(req)
         if req.method == "PUT":
             ctx.require("settings.manage")
             b = await body(req)
+            if "line_order" in b:
+                if b["line_order"] not in LINE_ORDERS:
+                    raise ValidationFailed("اختار ترتيب الأصناف")
+                with db.transaction():
+                    before = line_order(db, ctx.org_id)
+                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'line_order', ?)"
+                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, b["line_order"]))
+                    audit.record(db, ctx, "settings.line_order", "organization", ctx.org_id,
+                                 before={"order": before}, after={"order": b["line_order"]})
+                if "return_window_days" not in b:
+                    return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
             try:
                 days = int(b.get("return_window_days"))
             except (TypeError, ValueError):
@@ -759,7 +770,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                            " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, str(days)))
                 audit.record(db, ctx, "settings.return_window", "organization", ctx.org_id,
                              before={"days": before}, after={"days": days})
-        return J({"return_window_days": return_window_days(db, ctx.org_id)})
+        return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
 
     # ------------------------------------------------------------- catalog
     @handler
