@@ -26,6 +26,11 @@ PERMISSIONS: dict[str, str] = {
     "users.manage": "إدارة المستخدمين",
     "settings.manage": "إدارة الإعدادات",
     "audit.read": "عرض سجل العمليات",
+    "safety.read": "عرض تنبيهات السلامة الدوائية",
+    "safety.manage": "إنشاء وتعطيل قواعد السلامة",
+    "safety.approve": "اعتماد قواعد السلامة وربط المواد الفعالة",
+    "safety.override": "تجاوز تنبيه سلامة مرتفع الخطورة بسبب مكتوب",
+    "safety.override_critical": "تجاوز تنبيه حرج (بعد مراجعة مختص)",
 }
 
 DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
@@ -33,11 +38,11 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
     "pharmacist": ("صيدلي", [
         "items.read", "items.write", "suppliers.read", "purchases.read",
         "purchases.create", "purchases.edit", "purchases.approve",
-        "inventory.read", "costs.read",
+        "inventory.read", "costs.read", "safety.read", "safety.override",
     ]),
     "assistant": ("مساعد", [
         "items.read", "suppliers.read", "purchases.read", "purchases.create",
-        "purchases.edit", "inventory.read",
+        "purchases.edit", "inventory.read", "safety.read",
     ]),
 }
 

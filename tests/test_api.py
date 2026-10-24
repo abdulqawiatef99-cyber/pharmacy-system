@@ -150,3 +150,19 @@ class TestImportAPI(APICase):
         r = self.c.get("/api/export/items.xlsx")
         self.assertEqual(r.status_code, 200)
         self.assertIn("attachment", r.headers["content-disposition"])
+
+
+class TestSafetyAPI(APICase):
+    def test_check_endpoint(self):
+        self.http_login()
+        r = self.c.post("/api/safety/check", headers=H, json={"lines": [{"item_id": self.pan}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual([f["code"] for f in r.json()["findings"]],
+                         ["insufficient_data", "interaction_check_unavailable"])
+        r = self.c.put(f"/api/items/{self.pan}/ingredients", headers=H,
+                       json={"ingredients": [{"name": "Paracetamol", "strength": "500mg"}],
+                             "verify": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.c.post("/api/safety/check", headers=H, json={"lines": [{"item_id": self.pan}]})
+        self.assertEqual([f["code"] for f in r.json()["findings"]],
+                         ["interaction_check_unavailable"])  # never an empty "all clear"

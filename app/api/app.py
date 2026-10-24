@@ -32,6 +32,7 @@ from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
 from ..dataimport.service import DataImport, export_catalog
+from ..safety.engine import SafetyEngine
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -93,6 +94,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         db.migrate()
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
+    safety = SafetyEngine(db)
     login_limiter = RateLimiter(10, 60)
 
     def client_ip(req: Request) -> str:
@@ -371,6 +373,71 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=items-export.xlsx"})
 
+    # ------------------------------------------------------------- safety
+    @handler
+    async def safety_check(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        lines = [l for l in (b.get("lines") or []) if isinstance(l, dict) and l.get("item_id")]
+        if not lines:
+            raise ValidationFailed("أرسل الأصناف المراد فحصها")
+        findings = safety.check(ctx, lines, context_type="check")
+        return J({"findings": [f.as_dict() for f in findings]})
+
+    @handler
+    async def safety_ingredients(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        ings = [(str(i.get("name", "")), i.get("strength")) for i in (b.get("ingredients") or [])
+                if isinstance(i, dict)]
+        safety.set_item_ingredients(ctx, req.path_params["id"], ings, b.get("source_id"))
+        if b.get("verify"):
+            safety.verify_item_ingredients(ctx, req.path_params["id"])
+        return J({"ok": True})
+
+    @handler
+    async def safety_rules_list(req):
+        ctx = ctx_of(req)
+        ctx.require("safety.read")
+        rows = db.all("SELECT r.*, s.name source_name, s.version source_version FROM safety_rules r"
+                      " LEFT JOIN knowledge_sources s ON s.id=r.source_id"
+                      " WHERE r.org_id IS NULL OR r.org_id=? ORDER BY r.created_at DESC", (ctx.org_id,))
+        return J([dict(r) for r in rows])
+
+    @handler
+    async def safety_rule_create(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        rid = safety.create_rule(ctx, rule_type=str(b.get("rule_type")), severity=str(b.get("severity")),
+                                 title=str(b.get("title", "")), explanation=str(b.get("explanation", "")),
+                                 params=b.get("params") or {}, source_id=b.get("source_id"),
+                                 source_ref=b.get("source_ref"), supersedes=b.get("supersedes"))
+        return J({"id": rid}, status_code=201)
+
+    @handler
+    async def safety_rule_approve(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        safety.approve_rule(ctx, req.path_params["id"], self_approval_reason=b.get("reason"))
+        return J({"ok": True})
+
+    @handler
+    async def safety_rule_disable(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        safety.disable_rule(ctx, req.path_params["id"], str(b.get("reason", "")))
+        return J({"ok": True})
+
+    @handler
+    async def safety_source_add(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        sid = safety.add_source(ctx, name=str(b.get("name", "")), version=str(b.get("version", "")),
+                                license=str(b.get("license", "")), publisher=b.get("publisher"),
+                                url=b.get("url"), published_at=b.get("published_at"),
+                                notes=b.get("notes"))
+        return J({"id": sid}, status_code=201)
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -413,6 +480,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/imports/{id}/apply", import_apply, methods=["POST"]),
         Route("/api/imports/{id}/discard", import_discard, methods=["POST"]),
         Route("/api/export/items.xlsx", export_items),
+        Route("/api/safety/check", safety_check, methods=["POST"]),
+        Route("/api/items/{id}/ingredients", safety_ingredients, methods=["PUT"]),
+        Route("/api/safety/rules", safety_rules_list),
+        Route("/api/safety/rules", safety_rule_create, methods=["POST"]),
+        Route("/api/safety/rules/{id}/approve", safety_rule_approve, methods=["POST"]),
+        Route("/api/safety/rules/{id}/disable", safety_rule_disable, methods=["POST"]),
+        Route("/api/safety/sources", safety_source_add, methods=["POST"]),
         Route("/sw.js", sw),
         Route("/", index),
         Mount("/static", StaticFiles(directory=WEB_DIR), name="static"),
