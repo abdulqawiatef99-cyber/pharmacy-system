@@ -128,6 +128,13 @@ def home(db: Database, ctx: Context) -> dict:
         e = db.one("SELECT count(*) n FROM expenses WHERE org_id=? AND status='pending'", (ctx.org_id,))["n"]
         if e:
             out["alerts"].append({"level": "warning", "text": f"{e} مصروف مستني موافقتك", "link": "#/expenses"})
+        from ..finance import schedules
+        for sc in schedules.listing(db, ctx, today):
+            n = sc["next"]
+            if n and n["state"] != "later":
+                when = "عدّى ميعاده" if n["state"] == "late" else "ميعاده النهارده" if n["days"] == 0 else f"ميعاده بعد {n['days']} يوم"
+                out["alerts"].append({"level": "error" if n["state"] == "late" else "warning",
+                                      "text": f"{sc['name']} {when} ({n['due']})", "link": "#/expenses"})
     soon5 = (today + timedelta(days=5)).isoformat()
     r = db.one("SELECT count(DISTINCT customer_id) c FROM customer_refills WHERE org_id=? AND"
                " date(coalesce(last_at, created_at), '+' || every_days || ' days') <= ?", (ctx.org_id, soon5))["c"]

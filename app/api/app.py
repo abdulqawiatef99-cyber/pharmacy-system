@@ -497,6 +497,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                  "Cache-Control": "no-store"})
 
     @handler
+    async def exp_sched(req):
+        from ..finance import schedules
+        ctx = ctx_of(req)
+        sid = req.path_params.get("id")
+        if req.method == "GET":
+            return J({"schedules": schedules.listing(db, ctx)})
+        b = await body(req)
+        if sid and b.get("action") == "pay":
+            amt = b.get("amount")
+            return J(schedules.pay(db, ctx, sid, _int(amt, "amount") if amt not in (None, "") else None,
+                                   b.get("paid_from") or None, b.get("note")))
+        if sid and b.get("action") == "skip":
+            return J({"schedules": schedules.skip(db, ctx, sid, str(b.get("period", "")))})
+        if "amount" in b and b["amount"] not in (None, ""):
+            b["amount"] = _int(b["amount"], "amount")
+        return J(schedules.save(db, ctx, b, sid))
+
+    @handler
     async def supplier_statement(req):
         from ..procurement import suppliers as sup
         qp = req.query_params
@@ -1643,6 +1661,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications", notifications_list),
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
+        Route("/api/expense-schedules", exp_sched, methods=["GET", "POST"]),
+        Route("/api/expense-schedules/{id}", exp_sched, methods=["POST"]),
         Route("/api/expenses", expenses_list),
         Route("/api/expenses", expenses_add, methods=["POST"]),
         Route("/api/expenses/{id}/decide", expenses_decide, methods=["POST"]),

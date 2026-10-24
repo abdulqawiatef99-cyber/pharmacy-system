@@ -71,6 +71,8 @@ def run(db: Database, today: date | None = None) -> int:
                 notified[r["item_id"]] = today.isoformat()
                 sent += 1
             st["spikes"] = {k: v for k, v in notified.items() if date.fromisoformat(v) > today - timedelta(days=30)}
+            from ..finance import schedules
+            sent += schedules.remind(db, ctx, today, st)
             st["last"] = today.isoformat()
             db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'daily_state', ?) ON CONFLICT(org_id, key)"
                        " DO UPDATE SET value=excluded.value", (o["id"], json.dumps(st)))

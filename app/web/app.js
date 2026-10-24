@@ -2292,11 +2292,13 @@ async function viewExpenses(period) {
     <button class="btn mt">سجّل</button>
     <p class="muted">${ME.role === "owner" ? "مصاريفك بتتعتمد على طول." : `المصروف بيستنى موافقة ${canA ? "الصاحب لو أكبر من " + money(r.manager_limit) + " ج" : "المدير أو الصاحب"} قبل ما يتحسب.`}</p></form>
   ${canA && pending.length ? `<section class="panel"><h2>⚠ مستني موافقتك (${pending.length})</h2>${exTable(pending, true)}</section>` : ""}
+  ${canA ? `<section class="panel" id="scBox"></section>` : ""}
   <section class="panel" id="exRep"><div class="row between"><h2>المصاريف — ${esc(rangeText(pf, pt))}</h2>${reportTools("exp")}</div>
     <div class="row between noprint"><div id="exRangeBox"></div>${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${exTable(r.expenses, false)}
     <p><b>الإجمالي المعتمد: ${money(r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
     ${canA ? `<form class="row mt" id="exCat"><input name="n" placeholder="بند جديد" required><button class="btn small secondary">أضف بند</button></form>` : ""}</section>`;
+  if (canA) renderSchedules(r.categories);
   $("#exRangeBox").innerHTML = rangeBar("exRange");
   $("#exRange [data-rf]").value = pf; $("#exRange [data-rt]").value = pt;
   $("#exRange").querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", false));
@@ -2319,6 +2321,56 @@ async function viewExpenses(period) {
   document.querySelectorAll("[data-exno]").forEach((b) => b.addEventListener("click", async () => {
     const reason = prompt("سبب الرفض:"); if (!reason) return;
     try { await api(`/api/expenses/${b.dataset.exno}/decide`, { method: "POST", body: { approve: false, reason } }); viewExpenses(); } catch (err) { toast(err.message, true); }
+  }));
+}
+const EVERY_T = { 1: "كل شهر", 2: "كل شهرين", 3: "كل 3 شهور", 6: "كل 6 شهور", 12: "كل سنة" };
+const SC_ST = { late: ["b-err", "✕ عدّى ميعاده"], soon: ["b-warn", "⚠ قرّب"], later: ["b-ok", "✓"] };
+async function renderSchedules(cats, edit = null) {
+  const list = (await api("/api/expense-schedules")).schedules, box = $("#scBox");
+  if (!box) return;
+  const e = edit ? list.find((x) => x.id === edit) : null, v = (k, d = "") => esc(e ? e[k] ?? d : d);
+  box.innerHTML = `<h2>المصاريف المجدولة (الإيجار، الكهربا، الإنترنت…)</h2>
+    <p class="muted">بيوصلك تذكير قبل ميعاد كل بند بعدد الأيام اللي تختاره له، ويفضل يفكّرك لحد ما يتسجل. التسجيل بيمشي بنفس قواعد الموافقة والدرج.</p>
+    <div class="tablewrap"><table><thead><tr><th>البند</th><th>المبلغ</th><th>الميعاد</th><th>التذكير قبلها</th><th>الجاي</th><th></th></tr></thead><tbody>
+    ${list.map((x) => `<tr class="${x.is_active ? "" : "muted"}"><td><b>${esc(x.name)}</b><div class="muted small">${esc(x.category)}${x.note ? ` · ${esc(x.note)}` : ""}</div></td>
+      <td class="num">${x.amount ? money(x.amount) : "<span class='muted'>بيتغير</span>"}</td><td>يوم ${x.day_of_month} · ${EVERY_T[x.every_months]}</td><td>${x.remind_days} يوم</td>
+      <td>${!x.is_active ? "موقوف" : x.next ? `<span class="badge ${SC_ST[x.next.state][0]}">${SC_ST[x.next.state][1]} ${esc(x.next.due)}</span>` : "—"}${x.last_paid ? `<div class="muted small">آخر مرة: ${esc(x.last_paid)}</div>` : ""}</td>
+      <td class="row">${x.is_active && x.next ? `${x.amount ? "" : `<input class="narrow" type="number" min="0" step="0.01" placeholder="المبلغ" data-scamt="${esc(x.id)}">`}
+        <button class="btn small" data-scpay="${esc(x.id)}">سجّل الدفع</button><button class="btn small secondary" data-scskip="${esc(x.id)}" data-p="${esc(x.next.period)}">مش المرة دي</button>` : ""}
+        <button class="btn small secondary" data-scedit="${esc(x.id)}">تعديل</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش بنود مجدولة لسه</td></tr>`}</tbody></table></div>
+    <form id="scForm" class="mt"><h3>${e ? `تعديل: ${esc(e.name)}` : "بند مجدول جديد"}</h3><div class="formgrid">
+      <label class="f">الاسم <input name="name" required value="${v("name")}" placeholder="مثال: إيجار الصيدلية"></label>
+      <label class="f">بند المصروف <select name="cat">${cats.map((c) => `<option value="${esc(c.id)}" ${e && e.category_id === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
+      <label class="f">المبلغ (ج) — فاضي لو بيتغير <input name="a" type="number" min="0" step="0.01" value="${e && e.amount ? money(e.amount).replace(/,/g, "") : ""}"></label>
+      <label class="f">يوم الاستحقاق في الشهر <input name="day" type="number" min="1" max="31" required value="${v("day_of_month", 1)}"></label>
+      <label class="f">بيتكرر <select name="every">${Object.entries(EVERY_T).map(([k, t]) => `<option value="${k}" ${e && e.every_months === +k ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <label class="f">فكّرني قبلها بكام يوم <input name="rd" type="number" min="0" max="60" required value="${v("remind_days", 3)}"></label>
+      <label class="f">بيتدفع منين <select name="from"><option value="outside">من برّه الدرج</option><option value="drawer" ${e && e.paid_from === "drawer" ? "selected" : ""}>من الدرج</option></select></label>
+      <label class="f">أول شهر <input name="start" type="month" value="${v("start_month", isoDay(new Date()).slice(0, 7))}"></label>
+      <label class="f">ملاحظة <input name="note" value="${v("note")}"></label></div>
+      ${e ? `<label class="chk"><input type="checkbox" name="active" ${e.is_active ? "checked" : ""}> شغال</label>` : ""}
+      <div class="row mt"><button class="btn">${e ? "احفظ التعديل" : "أضف"}</button>${e ? `<button type="button" class="btn secondary" id="scCancel">إلغاء</button>` : ""}</div></form>`;
+  $("#scForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = ev.target, body = { name: f.name.value, category_id: f.cat.value, amount: f.a.value ? toPiasters(f.a.value) : null, day_of_month: +f.day.value,
+      every_months: +f.every.value, remind_days: +f.rd.value, paid_from: f.from.value, start_month: f.start.value, note: f.note.value || null };
+    if (e) body.is_active = f.active.checked;
+    try { await api(`/api/expense-schedules${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("اتحفظ"); renderSchedules(cats); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#scCancel")?.addEventListener("click", () => renderSchedules(cats));
+  box.querySelectorAll("[data-scedit]").forEach((b) => b.addEventListener("click", () => { renderSchedules(cats, b.dataset.scedit).then(() => $("#scForm").scrollIntoView()); }));
+  box.querySelectorAll("[data-scpay]").forEach((b) => b.addEventListener("click", async () => {
+    const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
+    if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ المرة دي", true); return; }
+    try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", amount: amt ? toPiasters(amt.value) : null } });
+      toast(x.status === "approved" ? "✓ اتسجل واتعتمد" : "اتسجل — مستني الموافقة"); viewExpenses(); }
+    catch (err) { toast(err.message, true); }
+  }));
+  box.querySelectorAll("[data-scskip]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirmInline(b)) return;
+    try { await api(`/api/expense-schedules/${b.dataset.scskip}`, { method: "POST", body: { action: "skip", period: b.dataset.p } }); renderSchedules(cats); }
+    catch (err) { toast(err.message, true); }
   }));
 }
 function exTable(list, actions) {
@@ -2614,7 +2666,8 @@ async function viewNotifications() {
         ${n.entity_type === "sale" ? ` · <a href="#/sales/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "item" ? ` · <a href="#/items/${esc(n.entity_id)}">كارت الصنف</a>` : ""}
-        ${n.entity_type === "report" ? ` · <a href="#/reports">التقارير</a>` : ""}</div></div></li>`;
+        ${n.entity_type === "report" ? ` · <a href="#/reports">التقارير</a>` : ""}
+        ${n.entity_type === "expense_schedule" || n.entity_type === "expense" ? ` · <a href="#/expenses">المصاريف</a>` : ""}</div></div></li>`;
     }).join("") || `<li class="muted">مفيش إشعارات</li>`}</ul></section>`;
   $("#nRead").addEventListener("click", async () => {
     const x = await api("/api/notifications/read", { method: "POST", body: {} });
