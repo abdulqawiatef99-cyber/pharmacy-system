@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>المستخدمين والصلاحيات</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#0F5E54}a:hover{color:#0A4038}
+td,th{padding:10px 12px;text-align:right}
+</style>
+</helmet>
+<div dir="rtl" style="min-height: 1000px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr); gap: 18px; align-items: start">
+
+  <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; justify-content: space-between; align-items: center"><h1 style="margin: 0; font-size: 24px; font-weight: 700">المستخدمين</h1><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">+ مستخدم</button></div>
+    <div style="padding: 12px; border-bottom: 1px solid #ECEAE4; display: flex; justify-content: space-between; align-items: center"><div><b>د. عبد القوي</b><div style="font-size: 13px; color: #5B6168">مدير — كل الصلاحيات</div></div><span style="padding: 3px 10px; border-radius: 999px; background: #E8F2F0; color: #0F5E54; font-size: 13px; font-weight: 600">مدير</span></div>
+    <div style="padding: 12px; border-bottom: 1px solid #ECEAE4; display: flex; justify-content: space-between; align-items: center"><div><b>د. منى (مثال)</b><div style="font-size: 13px; color: #5B6168">على الافتراضي</div></div><span style="padding: 3px 10px; border-radius: 999px; background: #E6EFFA; color: #1D5FA8; font-size: 13px; font-weight: 600">صيدلي</span></div>
+    <div style="padding: 12px; border-radius: 10px; background: #E8F2F0; border-right: 4px solid #0F5E54; display: flex; justify-content: space-between; align-items: center"><div><b>أحمد (مثال)</b><div style="font-size: 13px; color: #5B6168">الافتراضي + تعديلين</div></div><span style="padding: 3px 10px; border-radius: 999px; background: #F5F4F0; color: #1F2328; font-size: 13px; font-weight: 600">مساعد</span></div>
+    <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; color: #1D5FA8; font-size: 14px">الدخول السريع على الكاشير برقم سري من 4 أرقام، وكل فاتورة وكل تعديل بيتسجل باسم اللي عمله.</div>
+  </section>
+
+  <div style="display: flex; flex-direction: column; gap: 16px">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap">
+      <div><h2 style="margin: 0; font-size: 26px; font-weight: 700">أحمد (مثال) — مساعد</h2><div style="font-size: 15px; color: #5B6168">صلاحياته جاية من نوع "مساعد"، والمدير غيّر فيها حاجتين.</div></div>
+      <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">↺ رجّعه للافتراضي</button>
+    </div>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; overflow: hidden">
+      <table style="width: 100%; border-collapse: collapse; font-size: 15px">
+        <thead><tr style="background: #ECEAE4; color: #5B6168; font-size: 13px"><th style="font-weight: 600">الصلاحية</th><th style="font-weight: 600">مساعد</th><th style="font-weight: 600">صيدلي</th><th style="font-weight: 600">أحمد</th></tr></thead>
+        <tbody>
+          <tr style="border-top: 1px solid #ECEAE4"><td>البيع والبحث عن الأصناف</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>خصم على الفاتورة</td><td>لحد 5%</td><td>لحد 10%</td><td>لحد 5%</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4; background: #E6EFFA"><td>مرتجع بيع</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #1E7B3A">✓ مسموح</td><td><span style="padding: 3px 10px; border-radius: 999px; background: #E6EFFA; border: 1px solid #1D5FA8; color: #1D5FA8; font-size: 13px; font-weight: 600">✓ مفتوحة له</span></td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>إلغاء فاتورة</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>البيع آجل</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #1E7B3A">✓ في حدود العميل</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>تسجيل فاتورة شراء (مسودة)</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>اعتماد الشراء وإضافته للمخزون</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>إضافة صنف / تعديل بياناته</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>تغيير الأسعار</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>الجرد</td><td style="color: #1E7B3A">✓ يعد بس</td><td style="color: #1E7B3A">✓ يعد ويعتمد</td><td style="color: #1E7B3A">✓ يعد بس</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4; background: #FFF8EE"><td>يشوف سعر التكلفة والربح</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4; background: #FDECEA"><td>قفل الوردية والخزنة</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td><td><span style="padding: 3px 10px; border-radius: 999px; background: #FDECEA; border: 1px solid #B42318; color: #B42318; font-size: 13px; font-weight: 600">✕ مقفولة عليه</span></td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>تسجيل مصروف (بيستنى موافقة)</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td><td style="color: #1E7B3A">✓ مسموح</td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td>التقارير والرواتب والإعدادات والمستخدمين</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td><td style="color: #5B6168">✕ ممنوع</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap; font-size: 13px">
+      <span style="padding: 4px 10px; border-radius: 8px; background: #E6EFFA; color: #1D5FA8">✓ مفتوحة له = المدير فتحها للشخص ده بس</span>
+      <span style="padding: 4px 10px; border-radius: 8px; background: #FDECEA; color: #B42318">✕ مقفولة عليه = المدير قفلها عليه بس</span>
+      <span style="padding: 4px 10px; border-radius: 8px; background: #ECEAE4; color: #1F2328">الباقي = افتراضي نوعه</span>
+    </div>
+    <div style="padding: 10px 12px; border-radius: 10px; background: #FFF1DF; color: #9A4A00; font-size: 14px">⚠ لو حد ممنوع من حاجة وحاول يعملها: يطلب من الصيدلي أو المدير يكتب رقمه السري على نفس الشاشة، والعملية بتتسجل باسم اللي وافق.</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
