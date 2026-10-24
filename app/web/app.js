@@ -959,7 +959,9 @@ async function viewCountSession(id) {
 // ------------------------------------------------------------------ program / update
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للمالك بس.</p></section>`; return; }
-  app.innerHTML = `<section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
+  app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
+    <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
+  renderBackup(await api("/api/backup"));
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المتثبتة<b>${esc((st.installed || "غير معروفة").slice(0, 7))}</b></div>
@@ -980,6 +982,51 @@ async function viewSystem() {
         setTimeout(wait, 4000);
       } else { b.textContent = "خلص. اقفل البرنامج وافتحه تاني"; }
     } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج دلوقتي"; toast(e.message, true); }
+  });
+}
+const MB = (b) => (b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} ك.ب` : `${(b / 1048576).toFixed(1)} م.ب`);
+const BK_INT = [[15, "ربع ساعة"], [30, "نص ساعة"], [60, "ساعة"], [360, "6 ساعات"]];
+const BK_REASON = { schedule: "في ميعادها", manual: "يدوي", shift_close: "قفل الشيفت", shutdown: "قفل البرنامج" };
+function renderBackup(b) {
+  const c = b.settings, st = b.state, ago = st.last_at ? Math.round((Date.now() - new Date(st.last_at)) / 60000) : null;
+  $("#bkBox").innerHTML = `
+    ${st.last_ok === false ? `<p class="badge b-err">✕ آخر محاولة فشلت: ${esc(st.last_error || "")}</p>` : ""}
+    ${st.last_at ? `<p class="badge b-ok">✓ آخر نسخة من ${ago < 60 ? `${ago} دقيقة` : `${Math.round(ago / 60)} ساعة`} — ${MB(st.last_bytes || 0)} — ${esc(BK_REASON[st.last_reason] || "")}</p>`
+      : `<p class="badge b-warn">⚠ لسه معملتش ولا نسخة أوتوماتيك</p>`}
+    <form id="bkForm" class="bk">
+      <div><b>كل قد إيه</b><div class="seg" role="radiogroup">${BK_INT.map(([v, t]) => `<label><input type="radio" name="interval_min" value="${v}" ${c.interval_min === v ? "checked" : ""}> ${t}${v === 60 ? " (الافتراضي)" : ""}</label>`).join("")}</div>
+        <label class="chk"><input type="checkbox" name="on_shift_close" ${c.on_shift_close ? "checked" : ""}> وكمان نسخة لما الشيفت يتقفل</label>
+        <p class="muted">لو مفيش أي تغيير من آخر نسخة، مش بيعمل نسخة جديدة.</p></div>
+      <div><b>نحتفظ بكام نسخة</b>
+        <label class="f">آخر <input class="narrow" type="number" name="keep_last" min="1" max="100" value="${c.keep_last}"> نسخ — الأقدم بيتمسح لوحده</label>
+        <label class="f">+ نسخة من كل يوم لآخر <input class="narrow" type="number" name="keep_daily" min="0" max="60" value="${c.keep_daily}"> يوم</label>
+        <label class="f">+ نسخة من كل أسبوع لآخر <input class="narrow" type="number" name="keep_weekly" min="0" max="52" value="${c.keep_weekly}"> أسابيع</label>
+        <p class="muted">اليومي والأسبوعي عشان لو غلطة اتكشفت بعد كام يوم، تلاقي نسخة قبلها.</p></div>
+      <div><b>نسخة برّه الجهاز</b>
+        <label class="f">فلاشة أو هارد خارجي أو فولدر Google Drive على الجهاز (المسار كامل)
+          <input name="offsite_dir" value="${esc(c.offsite_dir)}" placeholder="E:\\نسخ الصيدلية" dir="auto"></label>
+        ${!c.offsite_dir ? `<p class="badge b-warn">⚠ مفيش نسخة برّه الجهاز — لو الجهاز باظ النسخ هتضيع معاه</p>`
+          : b.offsite_stale ? `<p class="badge b-warn">⚠ آخر نسخة برّه الجهاز ${st.offsite_at ? esc(st.offsite_at.slice(0, 10)) : "مفيش"}${st.offsite_error ? ` — ${esc(st.offsite_error)}` : ""}</p>`
+          : `<p class="badge b-ok">✓ آخر نسخة برّه الجهاز ${esc((st.offsite_at || "").replace("T", " ").slice(0, 16))}</p>`}</div>
+      <div class="row"><button class="btn">احفظ</button><button class="btn secondary" type="button" id="bkNow">اعمل نسخة دلوقتي</button></div>
+    </form>
+    <details class="mt"><summary>النسخ الموجودة (${b.files.length}) — المساحة ${MB(b.total_bytes)} — الفولدر ${esc(b.folder)}</summary>
+      <table><tbody>${b.files.map((f) => `<tr><td dir="ltr">${esc(f.name)}</td><td>${MB(f.bytes)}</td><td>${f.auto ? "أوتوماتيك" : "يدوي / قبل تحديث"}</td></tr>`).join("")}</tbody></table></details>`;
+  $("#bkForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      renderBackup(await api("/api/backup", { method: "PUT", body: {
+        interval_min: +f.querySelector("[name=interval_min]:checked").value, on_shift_close: f.on_shift_close.checked,
+        keep_last: +f.keep_last.value, keep_daily: +f.keep_daily.value, keep_weekly: +f.keep_weekly.value,
+        offsite_dir: f.offsite_dir.value } }));
+      toast("اتحفظ");
+    } catch (err) { toast(err.message, true); }
+  });
+  $("#bkNow").addEventListener("click", async (e) => {
+    e.target.disabled = true; e.target.textContent = "بيعمل نسخة…";
+    try { renderBackup(await api("/api/backup/run", { method: "POST", body: {} })); toast("النسخة اتعملت واتراجعت"); }
+    catch (err) { e.target.disabled = false; e.target.textContent = "اعمل نسخة دلوقتي"; toast(err.message, true); }
   });
 }
 async function checkUpdateBadge() {
