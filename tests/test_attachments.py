@@ -51,3 +51,14 @@ class TestTransferProofAPI(APICase):
         g = self.c.get(f"/api/attachments/{aid}")
         self.assertEqual((g.status_code, g.headers["content-type"]), (200, "image/png"))
         self.assertEqual(self.c.post(f"/api/attachments/{aid}/review", json={"ok": True}, headers=H).json()["review"], "ok")
+
+
+class TestReturnReceipt(Base):
+    def test_return_slip_lines(self):
+        self.cd.open(self.ctx, 0)
+        sale = self.sell(units=2)
+        r = self.s.return_items(self.ctx, sale["id"], {sale["lines"][0]["id"]: 1}, refund_method="cash", reason="مش مناسب")
+        x = self.s.return_receipt(self.ctx, r["return_id"])
+        self.assertEqual([l["returned_now"] for l in x["lines"]], [1])
+        self.assertEqual(x["return"]["total"], r["refund"])
+        self.assertEqual(len(self.s.get(self.ctx, sale["id"])["returns"]), 1)

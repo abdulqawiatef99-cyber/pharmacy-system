@@ -313,6 +313,9 @@ class Sales:
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
         s["attachments"] = att_listing(self.db, ctx, sid)
+        s["returns"] = [dict(r) for r in self.db.all(
+            "SELECT r.id, r.total, r.refund_method, r.reason, r.created_at, u.full_name by_name FROM sale_returns r"
+            " LEFT JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.created_at", (sid,))]
         s["payments"] = [dict(r) for r in self.db.all(
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
@@ -708,6 +711,19 @@ class Sales:
                         + (" · الفاتورة باعها حد تاني" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف مالهاش مرتجع: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
+
+    def return_receipt(self, ctx: Context, rid: str) -> dict:
+        """One return with its items, for the printed return slip."""
+        r = self.db.one("SELECT r.*, u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
+                        " WHERE r.id=? AND r.org_id=?", (rid, ctx.org_id))
+        if not r:
+            raise NotFound("المرتجع غير موجود")
+        sale = self.get(ctx, r["sale_id"])
+        a = self.db.one("SELECT after_json FROM audit_log WHERE entity_type='sale' AND entity_id=? AND action='sale.return'"
+                        " AND json_extract(after_json, '$.return_id')=?", (r["sale_id"], rid))
+        qty = json.loads(a["after_json"]).get("lines", {}) if a else {}
+        lines = [{**l, "returned_now": int(qty[l["id"]])} for l in sale["lines"] if l["id"] in qty]
+        return {"return": dict(r), "sale": sale, "lines": lines}
 
     def void(self, ctx: Context, sid: str, reason: str) -> dict:
         ctx.require("sales.void")

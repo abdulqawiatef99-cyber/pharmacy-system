@@ -1535,6 +1535,43 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(printing.open_drawer, db, ctx, str(b.get("reason", ""))))
 
     @handler
+    async def return_receipt(req):
+        """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
+        from ..printing import settings as rs
+        ctx = ctx_of(req)
+        x = Sales(db).return_receipt(ctx, req.path_params["id"])
+        r, sale = x["return"], x["sale"]
+        cfg = rs.get(db, ctx.org_id)
+        if req.query_params.get("w") in ("58", "80"):
+            cfg["paper"] = int(req.query_params["w"])
+        org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
+        e = _html.escape
+        m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
+
+        def name(it):
+            if cfg["names"] == "ar":
+                return e(it.get("name_ar") or it["name"])
+            return e(it.get("name_en") or it["name"])
+        rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
+                       for l in x["lines"])
+        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
+        MET = {"cash": "نقدي من الدرج", "card": "على الفيزا", "credit": "على حساب العميل"}
+        head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
+        info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"اتباعت <bdi dir='ltr'>{sold}</bdi> · اترجعت <bdi dir='ltr'>{when}</bdi>",
+                f"سجّله: {e(r['by_name'] or '')}"]
+        if sale.get("customer"):
+            info.append(f"العميل: {e(sale['customer']['name'])}")
+        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع {sale['sale_no']}</title>
+<link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
+<div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
+<table>{rows}</table><hr><table>
+<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>اترد</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
+<p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
+        return Response(page, media_type="text/html; charset=utf-8")
+
+    @handler
     async def receipt(req):
         """Printable receipt for 80 / 58 mm thermal printers (browser print), as set in the program page."""
         from ..printing import settings as rs
@@ -1792,6 +1829,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
         Route("/receipt/{id}", receipt),
+        Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),
         Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),

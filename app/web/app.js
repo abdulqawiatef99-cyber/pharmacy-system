@@ -1485,6 +1485,9 @@ async function viewSale(id) {
       <div>فيزا<b>${money(s.paid_card)}</b></div>${s.paid_transfer ? `<div>تحويل<b>${money(s.paid_transfer)}</b></div>` : ""}<div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
+  ${s.returns.length ? `<section class="panel"><h2>المرتجعات</h2><table><thead><tr><th>اليوم</th><th>المبلغ</th><th>اترد</th><th>السبب</th><th>سجّله</th><th></th></tr></thead><tbody>
+    ${s.returns.map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${{ cash: "نقدي", card: "فيزا", credit: "على الحساب" }[r.refund_method]}</td>
+      <td>${esc(r.reason)}</td><td>${esc(r.by_name || "")}</td><td><a class="btn small secondary" href="/return-receipt/${esc(r.id)}" target="_blank">🖨 إيصال المرتجع</a></td></tr>`).join("")}</tbody></table></section>` : ""}
   ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer && !s.attachments.length ? `<span class="badge b-warn">⚠ مفيش صورة</span>` : ""}</h2>
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
@@ -1513,7 +1516,7 @@ async function viewSale(id) {
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
     try {
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
-      toast(`اتسجل المرتجع: ${money(r.refund)} ج`); viewSale(id);
+      toast(`اتسجل المرتجع: ${money(r.refund)} ج — اطبع إيصاله من "المرتجعات" تحت`); viewSale(id);
     } catch (e) { toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
