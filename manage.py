@@ -248,7 +248,11 @@ def cmd_update(a, s):
     steps = [[sys.executable, str(root / "manage.py"), "verify"],
              [sys.executable, str(root / "manage.py"), "selftest", "--quick"]]
     if req.read_bytes() != req_before:          # packages only when the list changed
-        steps.insert(0, [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
+        import importlib.util
+        if importlib.util.find_spec("pip") is None:   # installed build (embedded Python, no pip)
+            print("تنبيه: التحديث ده محتاج مكتبات جديدة. نزّل ملف التثبيت الجديد وشغّله (بياناتك مش هتتلمس).")
+        else:
+            steps.insert(0, [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
     for cmd in steps:
         if subprocess.run(cmd, cwd=root).returncode != 0:
             sys.exit("خطوة بعد التحديث فشلت. للرجوع للنسخة القديمة:\n"

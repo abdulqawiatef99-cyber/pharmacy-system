@@ -1,0 +1,89 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-installer
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Tests (Windows)
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -t .
+
+      - name: Embedded Python + libraries
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $v = python -c "import platform; print(platform.python_version())"
+          Invoke-WebRequest "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath build/python
+          $pth = Get-ChildItem build/python -Filter "python*._pth" | Select-Object -First 1
+          $lines = (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site'
+          $lines += 'Lib\site-packages'
+          $lines += '..\program'
+          Set-Content $pth.FullName $lines
+          python -m pip install -r requirements.txt --target build/python/Lib/site-packages --only-binary=:all: --no-compile
+
+      - name: Program files
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory build/program | Out-Null
+          git archive --format=zip HEAD -o program.zip
+          Expand-Archive program.zip -DestinationPath build/program
+
+      - name: Smoke test of the embedded build
+        shell: pwsh
+        env:
+          PHARM_DATA_DIR: ${{ runner.temp }}\pharm-smoke
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          build/python/python.exe build/program/manage.py selftest --quick
+          build/python/python.exe build/program/manage.py init --pharmacy smoke --username owner --password Smoke-Pass-2026
+          build/python/python.exe build/program/manage.py verify
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ github.run_number }}
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PharmacySetup
+          path: dist/PharmacySetup.exe
+
+      - name: Publish as release "installer-latest"
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete installer-latest --yes --cleanup-tag 2>$null
+          gh release create installer-latest dist/PharmacySetup.exe --title "منصة الصيدلية — آخر نسخة" --notes "ملف التثبيت لآخر نسخة على main (${{ github.sha }}). بياناتك محفوظة في %LOCALAPPDATA%\PharmacyPlatform ومش بتتلمس عند إعادة التثبيت." --target ${{ github.sha }}
