@@ -68,3 +68,18 @@ class TestFeedback(Base):
             fb.set_status(self.db, a, fb.listing(self.db, a)[0]["id"], "done")
         fb.set_status(self.db, self.ctx, fb.listing(self.db, a)[0]["id"], "done", "اتعمل")
         self.assertEqual(fb.listing(self.db, a)[0]["reply"], "اتعمل")
+
+
+class TestNetworkAPI(APICase):
+    def test_lan_toggle_and_launcher_reads_it(self):
+        self.http_login()
+        self.assertFalse(self.c.get("/api/system/network").json()["lan"])
+        r = self.c.put("/api/system/network", json={"lan": True}, headers=H).json()
+        self.assertTrue(r["lan"])
+        self.assertNotIn("restarting", r)                  # not under the launcher in tests
+        import launcher
+        home = self.tmp / "home"
+        (home / "data").mkdir(parents=True)
+        (home / "data" / "network.json").write_text((self.s.data_dir / "network.json").read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertTrue(launcher.lan_enabled(home))
+        self.assertFalse(launcher.lan_enabled(self.tmp / "nowhere"))

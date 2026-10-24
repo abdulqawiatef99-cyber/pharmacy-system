@@ -313,3 +313,4 @@ th.big { font-size: 1.5rem; }
 
 .fb { font-size: .875rem; }
 textarea { width: 100%; padding: 8px 12px; border: 1px solid #c9c5bc; border-radius: 10px; font: inherit; background: var(--panel); color: var(--ink); }
+.lan-url { font-size: 1.6rem; font-weight: 700; color: var(--brand); text-align: center; background: var(--brand-soft); border-radius: 12px; padding: 10px; }

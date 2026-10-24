@@ -31,6 +31,15 @@ def home() -> Path:
     return Path.home() / ".local" / "share" / "pharmacy-platform"
 
 
+def lan_enabled(h: Path) -> bool:
+    """The owner turns on "mobiles on the pharmacy Wi-Fi" from the program page (data\\network.json)."""
+    import json
+    try:
+        return bool(json.loads((h / "data" / "network.json").read_text(encoding="utf-8")).get("lan"))
+    except (OSError, ValueError):
+        return False
+
+
 def running() -> bool:
     try:
         with urllib.request.urlopen(URL + "api/health", timeout=2) as r:
@@ -68,7 +77,8 @@ def main() -> int:
                                stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
             pending.replace(h / "backups" / f"restored-{time.strftime('%Y%m%d-%H%M%S')}.zip")
         with open(h / "logs" / "server.log", "a", encoding="utf-8") as log:
-            p = subprocess.Popen([sys.executable, str(ROOT / "manage.py"), "serve", "--port", str(PORT)],
+            host = "0.0.0.0" if lan_enabled(h) else "127.0.0.1"
+            p = subprocess.Popen([sys.executable, str(ROOT / "manage.py"), "serve", "--port", str(PORT), "--host", host],
                                  cwd=h, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
             if first:
                 threading.Thread(target=open_when_ready, daemon=True).start()

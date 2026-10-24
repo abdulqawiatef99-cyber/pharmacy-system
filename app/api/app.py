@@ -574,6 +574,46 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(fb.add(db, ctx, str(b.get("kind", "")), str(b.get("text", "")), b.get("screen")), status_code=201)
         return J({"items": fb.listing(db, ctx)})
 
+    def _lan_addresses() -> list[str]:
+        import socket
+        ips = set()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+                sk.connect(("10.255.255.255", 1))          # no packet is sent; picks the LAN interface
+                ips.add(sk.getsockname()[0])
+        except OSError:
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(info[4][0])
+        except OSError:
+            pass
+        return sorted(ip for ip in ips if not ip.startswith("127.") and not ip.startswith("169.254."))
+
+    @handler
+    async def system_network(req):
+        """Mobiles on the pharmacy Wi-Fi: on/off (owner). Takes effect after the program restarts itself."""
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        f = s.data_dir / "network.json"
+        try:
+            cur = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cur = {"lan": False}
+        if req.method == "PUT":
+            want = bool((await body(req)).get("lan"))
+            f.write_text(json.dumps({"lan": want}), encoding="utf-8")
+            with db.transaction():
+                audit.record(db, ctx, "system.network", "system", None, before=cur, after={"lan": want})
+            cur = {"lan": want}
+            if os.environ.get("PHARM_LAUNCHER") == "1":
+                threading.Timer(1.5, lambda: os._exit(75)).start()
+                cur["restarting"] = True
+        listening_lan = req.url.hostname not in ("127.0.0.1", "localhost") or os.environ.get("PHARM_HOST") == "0.0.0.0"
+        port = req.url.port or 80
+        return J({**cur, "addresses": [f"http://{ip}:{port}/" for ip in _lan_addresses()], "active_now": listening_lan,
+                  "launcher": os.environ.get("PHARM_LAUNCHER") == "1"})
+
     @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
@@ -1507,6 +1547,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/setup", setup_status),
         Route("/api/system/update", system_update_status),
         Route("/api/system/update", system_update_run, methods=["POST"]),
+        Route("/api/system/network", system_network, methods=["GET", "PUT"]),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),

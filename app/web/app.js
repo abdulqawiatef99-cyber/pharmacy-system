@@ -1258,12 +1258,14 @@ async function viewCountSession(id) {
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للمالك بس.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
+    <section class="panel"><h1>الموبايل على واي فاي الصيدلية</h1><div id="lanBox"></div></section>
     <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
     <section class="panel"><h1>مكن الفيزا وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
+  renderLan(await api("/api/system/network"));
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المتثبتة<b>${esc((st.installed || "غير معروفة").slice(0, 7))}</b></div>
@@ -1284,6 +1286,31 @@ async function viewSystem() {
         setTimeout(wait, 4000);
       } else { b.textContent = "خلص. اقفل البرنامج وافتحه تاني"; }
     } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج دلوقتي"; toast(e.message, true); }
+  });
+}
+function renderLan(n) {
+  $("#lanBox").innerHTML = `
+    <p>لما تشغّلها، أي موبايل متوصل بنفس واي فاي الصيدلية يقدر يفتح البرنامج ويبيع أو يجرد، وكله بيتسجل على نفس البيانات اللي على الكمبيوتر — من غير إنترنت ومن غير سيرفر.</p>
+    <p class="badge ${n.lan ? "b-ok" : "b-plain"}">${n.lan ? "✓ شغالة" : "مقفولة (الافتراضي)"}</p>
+    ${n.lan && n.addresses.length ? `<p class="mt">افتح المتصفح على الموبايل واكتب:</p>${n.addresses.map((a) => `<p class="lan-url" dir="ltr">${esc(a)}</p>`).join("")}
+      <p class="muted">لو الكمبيوتر اتغير عنوانه (بعد ما الراوتر يرستر) هتلاقي العنوان الجديد هنا.</p>` : ""}
+    <ul class="muted">
+      <li>أول مرة ويندوز هيسألك تسمح للبرنامج على الشبكة: اختار "Private networks" ودوس Allow.</li>
+      <li>خلي باسورد الواي فاي قوي، ومتشغّلهاش على واي فاي مفتوح للزباين.</li>
+      <li>كاميرا الموبايل مش هتمسح الباركود من خلال الشبكة (المتصفح بيمنعها من غير HTTPS)؛ اكتب الاسم أو استخدم قارئ باركود بلوتوث.</li>
+      <li>الدخول السريع بالرقم السري على كمبيوتر الصيدلية بس؛ الموبايل بيدخل باسم المستخدم وكلمة المرور.</li></ul>
+    <button class="btn ${n.lan ? "secondary" : ""}" id="lanGo">${n.lan ? "اقفلها" : "شغّلها"}</button>
+    ${!n.launcher ? `<p class="muted">التغيير بيشتغل بعد ما تقفل البرنامج وتفتحه تاني.</p>` : ""}`;
+  $("#lanGo").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("/api/system/network", { method: "PUT", body: { lan: !n.lan } });
+      if (r.restarting) {
+        e.target.textContent = "البرنامج بيعيد تشغيل نفسه…";
+        const wait = async () => { try { await fetch("/api/health"); location.reload(); } catch { setTimeout(wait, 1500); } };
+        setTimeout(wait, 4000);
+      } else renderLan(await api("/api/system/network"));
+    } catch (err) { e.target.disabled = false; toast(err.message, true); }
   });
 }
 function renderReceiptCfg(c) {
