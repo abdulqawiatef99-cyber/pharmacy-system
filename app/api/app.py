@@ -542,6 +542,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(fin.profit(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
+    async def home_view(req):
+        from ..reports import service as rep_svc
+        ctx = ctx_of(req)
+        out = rep_svc.home(db, ctx)
+        if ctx.can("settings.manage"):
+            st = autob.state()
+            out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
+        return J(out)
+
+    @handler
+    async def reports_sales(req):
+        from ..reports import service as rep_svc
+        qp = req.query_params
+        return J(rep_svc.sales_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+
+    @handler
+    async def reports_stock(req):
+        from ..reports import service as rep_svc
+        return J(rep_svc.stock_report(db, ctx_of(req)))
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -1496,6 +1517,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/expenses", expenses_add, methods=["POST"]),
         Route("/api/expenses/{id}/decide", expenses_decide, methods=["POST"]),
         Route("/api/reports/profit", profit_report),
+        Route("/api/reports/sales", reports_sales),
+        Route("/api/reports/stock", reports_stock),
+        Route("/api/home", home_view),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/items", items_list),

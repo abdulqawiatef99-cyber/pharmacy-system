@@ -180,6 +180,8 @@ const routes = [
   [/^#\/shortages$/, viewShortages],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
+  [/^#\/home$/, viewHome],
+  [/^#\/reports$/, viewReports],
   [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
@@ -200,7 +202,7 @@ const routes = [
 ];
 
 async function route() {
-  const hash = location.hash || "#/purchases";
+  const hash = location.hash || "#/home";
   if (!ME && hash !== "#/setup") {
     try { if ((await api("/api/setup")).needed) { location.hash = "#/setup"; return; } } catch { /* offline: fall through */ }
   }
@@ -225,7 +227,7 @@ async function route() {
     const m = hash.match(re);
     if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
   }
-  location.hash = "#/purchases";
+  location.hash = "#/home";
 }
 window.addEventListener("hashchange", route);
 window.addEventListener("hashchange", () => { const m = $("#navMore"); if (m) m.open = false; });
@@ -320,7 +322,7 @@ async function viewLogin() {
     try {
       const r = await api("/api/auth/login", { method: "POST",
         body: { username: f.get("username"), password: f.get("password") } });
-      ME = r.me; location.hash = "#/purchases";
+      ME = r.me; location.hash = "#/home";
     } catch (err) { toast(err.message, true); }
   });
 }
@@ -2223,6 +2225,83 @@ async function viewProfit() {
   }));
   $("#prGo").addEventListener("click", () => show($("#prF").value, $("#prT").value));
   show(iso(first), iso(now));
+}
+
+// ------------------------------------------------------------------ home
+async function viewHome() {
+  const h = await api("/api/home");
+  const hour = new Date().getHours(), greet = hour < 12 ? "صباح الخير" : "مساء الخير";
+  const lvl = { error: ["b-err", "✕"], warning: ["b-warn", "⚠"], info: ["b-info", "ℹ"] };
+  const can = (p) => ME.permissions.includes(p);
+  const diff = h.sales && h.sales_week_ago ? Math.round((h.sales.total - h.sales_week_ago) / h.sales_week_ago * 100) : null;
+  app.innerHTML = `<section class="panel"><h1>${greet} يا ${esc(ME.user.full_name)}</h1>
+    <div class="quick">
+      ${can("sales.create") ? `<a class="btn big" href="#/pos">الكاشير</a>` : ""}
+      ${can("purchases.create") ? `<a class="btn secondary" href="#/purchases">فاتورة شراء</a>` : ""}
+      <a class="btn secondary" href="#/items">الأصناف</a>
+      ${can("inventory.count") ? `<a class="btn secondary" href="#/counts">الجرد</a>` : ""}
+      ${can("sales.create") ? `<a class="btn secondary" href="#/shift">الشيفت</a>` : ""}</div></section>
+  <div class="totals">
+    ${h.sales ? `<div>مبيعات النهارده<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن نفس اليوم الأسبوع اللي فات` : ""}</span></div>` : ""}
+    <div>فواتيرك النهارده<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
+    <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الشيفت مفتوح" : "⚠ الشيفت مقفول"}<b>${h.shift_open ? "شغال" : "افتحه"}</b></div>
+    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لسه مفيش نسخة أوتوماتيك" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(h.backup.last_at.slice(11, 16)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة برّه الجهاز فيها مشكلة" : ""}</span></div>` : ""}
+  </div>
+  <section class="panel mt"><h2>محتاج انتباهك</h2>
+    <ul class="notes">${h.alerts.map((a) => `<li><span class="badge ${lvl[a.level][0]}">${lvl[a.level][1]}</span><div>${esc(a.text)} ${a.link ? `<a href="${a.link}">افتح</a>` : ""}</div></li>`).join("")
+      || `<li><span class="badge b-ok">✓</span><div>كله تمام</div></li>`}</ul>
+    ${h.notifications_unread ? `<p class="mt"><a href="#/notifications">🔔 ${h.notifications_unread} إشعار جديد</a></p>` : ""}</section>`;
+}
+
+// ------------------------------------------------------------------ reports
+function csvDownload(name, rows) {
+  const text = "\ufeff" + rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" })); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+async function viewReports() {
+  const can = (p) => ME.permissions.includes(p);
+  const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const now = new Date(), first = new Date(now.getFullYear(), now.getMonth(), 1);
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1>${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
+    ${can("sales.totals") ? `<div class="row"><label class="f">من <input type="date" id="rF" value="${iso(first)}"></label><label class="f">لحد <input type="date" id="rT" value="${iso(now)}"></label>
+      <button class="btn small" id="rGo">اعرض المبيعات</button></div>` : `<p class="muted">تقارير المبيعات للمدير والصاحب.</p>`}</section>
+  <div id="rSales"></div><div id="rStock"></div>`;
+  const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
+  const sales = async () => {
+    const r = await api(`/api/reports/sales?from=${$("#rF").value}&to=${$("#rT").value}`);
+    const maxH = Math.max(1, ...r.by_hour.map((x) => x.total));
+    $("#rSales").innerHTML = `<div class="totals"><div>الفواتير<b>${r.totals.n}</b></div><div>المبيعات<b>${money(r.totals.total)}</b></div>
+      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div></div>
+    <div class="grid2 mt"><section class="panel"><div class="row between"><h2>يوم بيوم</h2><button class="btn small secondary" id="csvD">تنزيل Excel (CSV)</button></div>
+      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>فيزا</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
+      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">مفيش</td></tr>`}</tbody></table></section>
+    <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">مفيش</td></tr>`}</tbody></table>
+      <h2 class="mt">ساعات الشغل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${h}:00 — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${h}</small></div>`; }).join("")}</div></section></div>
+    <section class="panel mt"><div class="row between"><h2>أكتر الأصناف بيعًا</h2><button class="btn small secondary" id="csvT">تنزيل CSV</button></div><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
+      ${r.top_items.map((t) => `<tr><td>${itemHtml(t)}</td><td>${esc(fmtStock(t.qty, it(t)))}</td><td class="num">${money(t.revenue)}</td>${can("costs.read") ? `<td class="num">${t.profit != null ? money(t.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش</td></tr>`}</tbody></table></section>`;
+    document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+    $("#csvD").addEventListener("click", () => csvDownload(`مبيعات ${r.from} — ${r.to}.csv`, [["اليوم", "فواتير", "الإجمالي", "نقدي", "فيزا", "تحويل", "آجل", "مرتجع"],
+      ...r.daily.map((d) => [d.day, d.n, money(d.total), money(d.cash), money(d.card), money(d.transfer), money(d.credit), money(d.returns)])]));
+    $("#csvT").addEventListener("click", () => csvDownload(`أكتر الأصناف ${r.from}.csv`, [["الصنف", "الكمية بالوحدة", "المبيعات", "الربح"],
+      ...r.top_items.map((t) => [t.name_en || t.name_ar, t.qty, money(t.revenue), t.profit != null ? money(t.profit) : ""])]));
+  };
+  if (can("sales.totals")) { $("#rGo").addEventListener("click", () => sales().catch((e) => toast(e.message, true))); sales().catch((e) => toast(e.message, true)); }
+  if (can("inventory.read")) {
+    const s = await api("/api/reports/stock");
+    $("#rStock").innerHTML = `${s.value_by_category ? `<section class="panel mt"><h2>قيمة المخزون</h2><div class="totals"><div>بالتكلفة<b>${money(s.value_cost)}</b></div><div>بسعر الجمهور<b>${money(s.value_retail)}</b></div></div>
+      <table class="mt"><thead><tr><th>القسم</th><th>أصناف</th><th>بالتكلفة</th><th>بسعر الجمهور</th></tr></thead><tbody>${s.value_by_category.map((c) => `<tr><td>${esc(c.category)}</td><td>${c.items}</td><td class="num">${money(c.cost)}</td><td class="num">${money(c.retail)}</td></tr>`).join("")}</tbody></table></section>` : ""}
+    <section class="panel mt"><div class="row between"><h2>الصلاحية خلال 90 يوم (${s.expiring.length})</h2><button class="btn small secondary" id="csvE">تنزيل CSV</button></div>
+      <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>القيمة (جمهور)</th></tr></thead><tbody>
+      ${s.expiring.map((e) => `<tr class="clickable" data-go="${esc(e.item_id)}"><td>${itemHtml(e)}</td><td>${esc(e.batch_no || "—")}</td>
+        <td><span class="badge ${e.days_left < 0 ? "b-err" : e.days_left <= 30 ? "b-warn" : "b-info"}">${e.days_left < 0 ? "✕ خلصت" : e.days_left <= 30 ? "⚠" : "ℹ"} ${esc(e.expiry_date.slice(0, 7))} (${e.days_left} يوم)</span></td>
+        <td>${esc(fmtStock(e.qty, it(e)))}</td><td class="num">${money(e.value)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">✓ مفيش</td></tr>`}</tbody></table>
+      <p class="muted">ابدأ بيع الأقرب، أو رجّعه للمورد قبل ما يخلص لو بيقبل مرتجع.</p></section>`;
+    document.querySelectorAll("#rStock [data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/items/${tr.dataset.go}`; }));
+    $("#csvE").addEventListener("click", () => csvDownload("صلاحية قريبة.csv", [["الصنف", "التشغيلة", "الصلاحية", "الكمية بالوحدة", "القيمة"],
+      ...s.expiring.map((e) => [e.name_en || e.name_ar, e.batch_no || "", e.expiry_date, e.qty, money(e.value)])]));
+  }
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)
