@@ -46,7 +46,7 @@ async function api(path, { method = "GET", body, form } = {}) {
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/")) opts.headers["Idempotency-Key"] = newKey();
+  if (method === "POST" && !path.startsWith("/api/auth/") && path !== "/api/setup") opts.headers["Idempotency-Key"] = newKey();
   let r;
   for (let attempt = 0; ; attempt++) {
     try { r = await fetch(path, opts); break; }
@@ -69,6 +69,7 @@ async function api(path, { method = "GET", body, form } = {}) {
 // ------------------------------------------------------------------ routing
 const routes = [
   [/^#\/login$/, viewLogin],
+  [/^#\/setup$/, viewSetup],
   [/^#\/purchases$/, viewPurchases],
   [/^#\/purchases\/([\w-]+)$/, viewInvoice],
   [/^#\/items$/, viewItems],
@@ -86,7 +87,10 @@ const routes = [
 
 async function route() {
   const hash = location.hash || "#/purchases";
-  if (!ME && hash !== "#/login") {
+  if (!ME && hash !== "#/setup") {
+    try { if ((await api("/api/setup")).needed) { location.hash = "#/setup"; return; } } catch { /* offline: fall through */ }
+  }
+  if (!ME && hash !== "#/login" && hash !== "#/setup") {
     try { ME = await api("/api/me"); } catch { location.hash = "#/login"; return; }
   }
   $("#topbar").hidden = !ME;
@@ -106,6 +110,35 @@ $("#logout").addEventListener("click", async () => {
 });
 
 // ------------------------------------------------------------------ login
+function viewSetup() {
+  $("#topbar").hidden = true;
+  app.innerHTML = `
+  <form class="panel login" id="setupForm">
+    <h1>أهلًا بيك</h1>
+    <p class="muted">دي أول مرة البرنامج يشتغل على الجهاز ده. اكتب البيانات دي مرة واحدة بس.</p>
+    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية عبد القوي"></label><br>
+    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. عبد القوي"></label><br>
+    <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
+    <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <label class="f">اكتب كلمة السر تاني <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <button class="btn" type="submit">ابدأ</button>
+    <p class="muted">احفظ كلمة السر في مكان آمن. من غيرها مش هتقدر تدخل.</p>
+  </form>`;
+  $("#setupForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    if (f.get("password") !== f.get("password2")) { toast("كلمتين السر مش زي بعض", true); return; }
+    try {
+      const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password"].map((k) => [k, f.get(k)])) });
+      ME = r.me; location.hash = "#/import";
+      toast("البرنامج جاهز. الخطوة الجاية: نقل بياناتك من البرنامج القديم");
+    } catch (err) {
+      if (err.code === "already_setup") { location.hash = "#/login"; return; }
+      toast(err.message, true);
+    }
+  });
+}
+
 function viewLogin() {
   $("#topbar").hidden = true;
   app.innerHTML = `

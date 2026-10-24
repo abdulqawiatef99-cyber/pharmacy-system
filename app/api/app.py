@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections import defaultdict, deque
 from decimal import Decimal
@@ -29,7 +30,7 @@ from starlette.staticfiles import StaticFiles
 from .. import config as config_mod
 from ..catalog import service as catalog
 from ..core import accounts
-from ..core.errors import DomainError, Unauthorized, ValidationFailed
+from ..core.errors import Conflict, DomainError, Forbidden, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
@@ -212,6 +213,44 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict",
                         secure=s.cookie_secure, max_age=int(accounts.SESSION_TTL.total_seconds()),
                         path="/")
+        return resp
+
+    # ------------------------------------------------------------- first run
+    setup_lock = threading.Lock()
+
+    def _setup_needed() -> bool:
+        return db.one("SELECT count(*) n FROM organizations")["n"] == 0
+
+    @handler
+    async def setup_status(req):
+        return J({"needed": _setup_needed()})
+
+    @handler
+    async def setup_create(req):
+        """First run only: creates the pharmacy and its owner, then logs in. Refused once any
+        pharmacy exists, and (unless PHARM_ALLOW_REMOTE_SETUP=1) from any machine but this PC."""
+        import os as _os
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
+                _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
+            raise Forbidden("الإعداد الأول بيتعمل من جهاز الصيدلية نفسه بس")
+        login_limiter.check(client_ip(req))
+        if not _setup_needed():
+            raise Conflict("البرنامج متجهز بالفعل؛ سجّل دخول", code="already_setup")
+        b = await body(req)
+        name, user, pw = (str(b.get(k, "")).strip() for k in ("pharmacy", "username", "password"))
+        if len(name) < 2 or len(user) < 3:
+            raise ValidationFailed("اكتب اسم الصيدلية واسم مستخدم (3 حروف على الأقل)")
+        with setup_lock:
+            if not _setup_needed():
+                raise Conflict("البرنامج متجهز بالفعل؛ سجّل دخول", code="already_setup")
+            accounts.create_organization(db, name=name, owner_username=user,
+                                         owner_full_name=str(b.get("full_name") or user).strip(),
+                                         owner_password=pw)
+        res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
+        ctx = accounts.resolve_session(db, res["token"])
+        resp = J({"me": accounts.me(db, ctx)}, status_code=201)
+        resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
+                        max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
         return resp
 
     @handler
@@ -857,6 +896,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     routes = [
         Route("/api/health", health),
         Route("/api/auth/login", login, methods=["POST"]),
+        Route("/api/setup", setup_status),
+        Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
         Route("/api/items", items_list),
