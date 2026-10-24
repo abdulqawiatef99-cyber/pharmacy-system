@@ -85,6 +85,10 @@ a{color:#0F5E54}a:hover{color:#0A4038}
 
     <aside style="flex: 1 1 340px; max-width: 420px; min-width: 300px; display: flex; flex-direction: column; gap: 14px">
       <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 10px">
+        <div role="radiogroup" aria-label="نوع الفاتورة" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 4px; border-radius: 12px; background: #F5F4F0">
+          <button type="button" style="min-height: 40px; border-radius: 9px; border: 0; background: #FFFFFF; color: #0F5E54; font: inherit; font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,.12)">✓ في الصيدلية</button>
+          <button type="button" style="min-height: 40px; border-radius: 9px; border: 0; background: transparent; color: #1F2328; font: inherit">توصيل للبيت</button>
+        </div>
         <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">العميل (اختياري)
           <input placeholder="اسم أو رقم موبايل" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px"></label>
         <div style="display: flex; justify-content: space-between; font-size: 16px"><span>الإجمالي</span><b style="direction: ltr">98.75</b></div>
@@ -93,11 +97,13 @@ a{color:#0F5E54}a:hover{color:#0A4038}
         <div style="display: flex; justify-content: space-between; align-items: baseline"><span style="font-size: 18px; font-weight: 600">المطلوب</span><b style="font-size: 40px; direction: ltr; font-variant-numeric: tabular-nums">98.75</b></div>
       </section>
       <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
-        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px">
           <button type="button" style="min-height: 48px; border-radius: 10px; border: 2px solid #0F5E54; background: #E8F2F0; color: #0F5E54; font: inherit; font-weight: 700">نقدي</button>
           <button type="button" style="min-height: 48px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; color: #1F2328; font: inherit">فيزا</button>
+          <button type="button" style="min-height: 48px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; color: #1F2328; font: inherit">تحويل</button>
           <button type="button" style="min-height: 48px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; color: #1F2328; font: inherit">آجل</button>
         </div>
+        <div style="font-size: 13px; color: #5B6168; line-height: 1.6">فيزا ← تختار المكنة (مثلًا مكنة البنك الأهلي أو مكنة فوري)<br>تحويل ← إنستاباي، فودافون كاش، أو أي محفظة تضيفها<br><a href="#">تقسيم الدفع</a> — جزء كاش وجزء فيزا أو تحويل</div>
         <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">العميل دفع
           <input value="100" style="min-height: 48px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 22px; direction: ltr; text-align: right"></label>
         <div style="display: flex; justify-content: space-between; font-size: 18px; padding: 10px 12px; border-radius: 10px; background: #E7F4EA; color: #1E7B3A"><span>الباقي للعميل</span><b style="direction: ltr">1.25</b></div>
