@@ -302,6 +302,28 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                   "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
 
     @handler
+    async def setup_restore(req):
+        """First run only: bring an existing pharmacy over from a backup .zip (moving to a new PC
+        or to the installed version). The file is verified now and applied by the launcher on
+        restart, when no database connection is open."""
+        from ..core import backup as backup_mod
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise Forbidden("الاسترجاع بيتعمل من جهاز الصيدلية نفسه بس")
+        if not _setup_needed():
+            raise Conflict("البرنامج فيه بيانات بالفعل؛ الاسترجاع من هنا لأول تشغيل بس", code="already_setup")
+        if os.environ.get("PHARM_LAUNCHER") != "1":
+            raise ValidationFailed("الاسترجاع من هنا بيشتغل في النسخة المتثبتة بس. استخدم أمر restore")
+        data, name, _ = await _upload(req)
+        pending = s.data_dir / "pending_restore.zip"
+        pending.write_bytes(data)
+        info = await run_in_threadpool(backup_mod.verify_archive, pending)
+        if info["problems"]:
+            pending.unlink(missing_ok=True)
+            raise ValidationFailed("ملف النسخة الاحتياطية مش سليم: " + "؛ ".join(info["problems"][:3]))
+        threading.Timer(1.0, lambda: os._exit(75)).start()
+        return J({"ok": True, "restarting": True})
+
+    @handler
     async def logout(req):
         token = req.cookies.get(COOKIE) or req.headers.get("authorization", "")[7:]
         if token:
@@ -948,6 +970,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/update", system_update_status),
         Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/setup", setup_create, methods=["POST"]),
+        Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
         Route("/api/items", items_list),

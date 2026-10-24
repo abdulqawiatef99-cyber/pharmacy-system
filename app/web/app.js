@@ -46,7 +46,7 @@ async function api(path, { method = "GET", body, form } = {}) {
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/") && path !== "/api/setup") opts.headers["Idempotency-Key"] = newKey();
+  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
   let r;
   for (let attempt = 0; ; attempt++) {
     try { r = await fetch(path, opts); break; }
@@ -125,7 +125,23 @@ function viewSetup() {
     <label class="f">اكتب كلمة السر تاني <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <button class="btn" type="submit">ابدأ</button>
     <p class="muted">احفظ كلمة السر في مكان آمن. من غيرها مش هتقدر تدخل.</p>
+  </form>
+  <form class="panel login" id="restoreForm">
+    <h2>أو: عندك بيانات من قبل؟</h2>
+    <p class="muted">لو البرنامج كان شغال قبل كده (على الجهاز ده أو جهاز تاني)، اختار آخر نسخة احتياطية، وهي ملف بيبدأ اسمه بـ pharmacy-backup. هتدخل بنفس اسم المستخدم وكلمة السر القديمة.</p>
+    <input type="file" name="file" accept=".zip" required><br>
+    <button class="btn secondary" type="submit">استرجع بياناتي</button>
   </form>`;
+  $("#restoreForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector("button"); btn.disabled = true; btn.textContent = "بيراجع الملف…";
+    try {
+      await api("/api/setup/restore", { method: "POST", form: new FormData(e.target) });
+      btn.textContent = "بيسترجع ويعيد التشغيل…";
+      const wait = async () => { try { const r = await fetch("/api/setup"); if (r.ok && !(await r.json()).needed) { location.hash = "#/login"; location.reload(); return; } } catch { /* restarting */ } setTimeout(wait, 1500); };
+      setTimeout(wait, 3000);
+    } catch (err) { btn.disabled = false; btn.textContent = "استرجع بياناتي"; toast(err.message, true); }
+  });
   $("#setupForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);

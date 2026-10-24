@@ -46,3 +46,16 @@ class TestSetup(unittest.TestCase):
         r = TestClient(self.app).post("/api/setup", headers=H, json={**BODY, "password": "123"})
         self.assertEqual(r.status_code, 422)
         self.assertTrue(TestClient(self.app).get("/api/setup").json()["needed"])
+
+    def test_restore_only_under_launcher_and_only_when_empty(self):
+        c = TestClient(self.app)
+        files = {"file": ("b.zip", b"not a zip")}
+        self.assertEqual(c.post("/api/setup/restore", headers=H, files=files).status_code, 422)  # no launcher
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PHARM_LAUNCHER": "1"}), mock.patch("threading.Timer") as t:
+            r = c.post("/api/setup/restore", headers=H, files=files)
+            self.assertEqual(r.status_code, 422)                       # bad archive refused, no restart
+            t.assert_not_called()
+            c.post("/api/setup", headers=H, json=BODY)
+            self.assertEqual(c.post("/api/setup/restore", headers=H, files=files).status_code, 409)

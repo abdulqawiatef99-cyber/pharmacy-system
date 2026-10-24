@@ -60,6 +60,13 @@ def main() -> int:
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     while True:
+        pending = h / "data" / "pending_restore.zip"
+        if pending.exists():                     # restore asked from the first-run screen
+            with open(h / "logs" / "restore.log", "a", encoding="utf-8") as log:
+                subprocess.run([sys.executable, str(ROOT / "manage.py"), "restore", str(pending), "--yes",
+                                "--pre-dir", str(h / "backups" / "pre-restore")], cwd=h, env=env,
+                               stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+            pending.replace(h / "backups" / f"restored-{time.strftime('%Y%m%d-%H%M%S')}.zip")
         with open(h / "logs" / "server.log", "a", encoding="utf-8") as log:
             p = subprocess.Popen([sys.executable, str(ROOT / "manage.py"), "serve", "--port", str(PORT)],
                                  cwd=h, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
