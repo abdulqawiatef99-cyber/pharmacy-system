@@ -429,6 +429,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def audit_list(req):
+        qp = req.query_params
+        return J(audit.listing(db, ctx_of(req), qp.get("from", ""), qp.get("to", ""), qp.get("user") or None,
+                               qp.get("group") or None))
+
+    @handler
+    async def item_moves(req):
+        qp = req.query_params
+        return J(item_card.movements(db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
+
+    @handler
     async def item_action(req):
         ctx = ctx_of(req)
         iid, action = req.path_params["id"], req.path_params["action"]
@@ -910,7 +921,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- purchases
     @handler
     async def purchases_list(req):
-        return J(purch.list(ctx_of(req), req.query_params.get("status")))
+        qp = req.query_params
+        return J(purch.list(ctx_of(req), qp.get("status") or None, date_from=qp.get("from") or None,
+                            date_to=qp.get("to") or None, supplier_id=qp.get("supplier") or None))
 
     @handler
     async def purchases_import(req):
@@ -1755,6 +1768,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/movements", item_moves),
+        Route("/api/audit", audit_list),
         Route("/api/items/{id}/{action}", item_action, methods=["POST"]),
         Route("/api/categories", categories_list),
         Route("/api/categories", categories_save, methods=["POST"]),

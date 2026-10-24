@@ -99,3 +99,18 @@ class TestCardAPI(APICase):
         self.assertEqual(r.status_code, 200, r.text)
         r = self.c.get("/api/items", params={"q": "0106221025012345", "meta": "1"}).json()
         self.assertEqual(r["hint"]["kind"], "gs1")
+
+
+class TestMovements(Base):
+    def test_period_opening_rows_closing(self):
+        from app.sales.service import local_today
+        self.cd.open(self.ctx, 0)
+        sale = self.sell(units=2)
+        today = local_today().isoformat()
+        m = card.movements(self.db, self.ctx, self.pan, today, today)
+        self.assertEqual(m["opening"] + sum(r["qty_delta"] for r in m["rows"]), m["closing"])
+        self.assertEqual(m["closing"], 18)
+        self.assertEqual(m["rows"][-1]["sale_no"], sale["sale_no"])
+        self.assertIn("بيع", [t["label"] for t in m["totals"]])
+        nxt = (local_today() + timedelta(days=1)).isoformat()
+        self.assertEqual(card.movements(self.db, self.ctx, self.pan, nxt, nxt)["opening"], 18)

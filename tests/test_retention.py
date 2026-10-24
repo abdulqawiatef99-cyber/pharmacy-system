@@ -36,3 +36,16 @@ class TestStorageAPI(APICase):
         r = self.c.get("/api/system/storage")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertGreater(r.json()["db"], 0)
+
+
+class TestAuditList(DBTestCase):
+    def test_owner_reads_log_with_labels(self):
+        from app.core import audit
+        from app.sales.service import local_today
+        from app.catalog import service as cat
+        cat.create_item(self.db, self.ctx, {"name_en": "X 1mg", "public_price": 100})
+        t = local_today().isoformat()
+        r = audit.listing(self.db, self.ctx, t, t, group="item")
+        self.assertEqual(r["rows"][0]["label"], "صنف جديد")
+        with self.assertRaises(Exception):
+            audit.listing(self.db, self.ctx, t, t, group="nope")

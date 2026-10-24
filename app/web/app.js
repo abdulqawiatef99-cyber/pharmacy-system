@@ -276,6 +276,7 @@ const routes = [
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
+  [/^#\/audit$/, viewAudit],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
   [/^#\/home$/, viewHome],
@@ -318,6 +319,7 @@ async function route() {
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
     $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
+    $("#navAudit").hidden = !ME.permissions.includes("audit.read");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -462,20 +464,37 @@ async function viewPurchases() {
     <p class="muted">${suppliers.length ? "المورد مش في القايمة؟" : "مفيش موردين متسجلين لسه."} اكتب اسمه:
       <input id="newSup" placeholder="اسم المورد"> <button class="btn small secondary" id="addSup" type="button">إضافة مورد</button></p>
   </section>
-  <section class="panel">
-    <h2>الفواتير</h2>
-    <div class="tablewrap"><table class="list">
+  <section class="panel" id="puRep">
+    <div class="row between"><h2>الفواتير</h2>${reportTools("pur")}</div>
+    <div class="row noprint">${rangeBar("puRange")}
+      <label class="f">المورد <select id="puSup"><option value="">الكل</option>${suppliers.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
+      <label class="f">الحالة <select id="puSt"><option value="">الكل</option>${Object.entries(STATUS).map(([k, [t]]) => `<option value="${k}">${t}</option>`).join("")}</select></label></div>
+    <div id="puBox"></div>
+  </section>`;
+  let rows = list, sub = "";
+  const drawList = () => {
+    const ok = rows.filter((i) => i.status === "approved");
+    $("#puBox").innerHTML = `<div class="tablewrap"><table class="list">
       <thead><tr><th>المورد</th><th>رقم الفاتورة</th><th>التاريخ</th><th>الأصناف</th>
         <th>الإجمالي</th><th>الحالة</th><th>المصدر</th></tr></thead>
-      <tbody>${list.map((i) => `<tr>
+      <tbody>${rows.map((i) => `<tr>
         <td><a href="#/purchases/${esc(i.id)}">${esc(i.supplier_name || "— غير محدد —")}</a></td>
-        <td>${esc(i.invoice_no || "")}</td><td>${esc(i.invoice_date || "")}</td><td>${i.lines}</td>
+        <td>${esc(i.invoice_no || "")}</td><td>${esc(i.invoice_date || dayOf(i.created_at))}</td><td>${i.lines}</td>
         <td>${money(i.declared_total ?? i.computed_total)}</td>
         <td><span class="badge ${STATUS[i.status][1]}">${STATUS[i.status][0]}</span></td>
         <td>${esc(i.source_type)}</td></tr>`).join("") ||
         `<tr><td colspan="7" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
-    </table></div>
-  </section>`;
+    </table></div>${ok.length ? `<p><b>المعتمد: ${ok.length} فاتورة — ${money(ok.reduce((a, i) => a + (i.computed_total ?? i.declared_total ?? 0), 0))} ج</b></p>` : ""}`;
+  };
+  const loadList = async (f, t) => {
+    const qs = new URLSearchParams({ from: f, to: t }); if ($("#puSup").value) qs.set("supplier", $("#puSup").value); if ($("#puSt").value) qs.set("status", $("#puSt").value);
+    rows = await api(`/api/purchases?${qs}`); sub = rangeText(f, t); drawList();
+  };
+  const getRange = wireRange("puRange", (f, t) => loadList(f, t).catch((e) => toast(e.message, true)));
+  ["#puSup", "#puSt"].forEach((id) => $(id).addEventListener("change", () => loadList(...getRange()).catch((e) => toast(e.message, true))));
+  wireTools("pur", () => ({ title: "فواتير الشراء", subtitle: sub + ($("#puSup").value ? ` — ${$("#puSup").selectedOptions[0].text}` : ""), el: $("#puRep"), sheets: [
+    { name: "فواتير الشراء", columns: [Tx("المورد"), Tx("رقم الفاتورة"), Dt("التاريخ"), N("الأصناف"), M("الإجمالي"), Tx("الحالة")],
+      rows: rows.map((i) => [i.supplier_name || "", i.invoice_no || "", i.invoice_date || dayOf(i.created_at), i.lines, i.declared_total ?? i.computed_total, STATUS[i.status][0]]) }] }));
   $("#addSup").addEventListener("click", async () => {
     const name = $("#newSup").value.trim(); if (!name) return;
     try { await api("/api/suppliers", { method: "POST", body: { name } }); toast("المورد اتضاف"); viewPurchases(); }
@@ -946,8 +965,32 @@ async function viewItem(id) {
         ${c.suppliers.map((sp, i) => `<tr${i === 0 && c.suppliers.length > 1 ? ` class="best"` : ""}><td>${esc(sp.supplier)}${i === 0 && c.suppliers.length > 1 ? ` <span class="badge b-ok">✓ الأرخص</span>` : ""}</td>
           <td>${esc(sp.last_date || "")}</td><td>${sp.discount_bp != null ? pct(sp.discount_bp) + "%" : "—"}</td><td>${money(sp.unit_net_price)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لسه مفيش شراء متسجل</td></tr>`}</tbody></table>` : ""}
       ${c.price_history?.length ? `<h2 class="mt">آخر تغييرات السعر</h2><ul class="plain">${c.price_history.map((h) => `<li>${esc(dayOf(h.observed_at))}: ${h.previous_price != null ? `${money(h.previous_price)} ← ` : ""}<b>${money(h.public_price)}</b> <span class="muted">${h.source === "manual" ? "يدوي" : h.source === "purchase_invoice" ? "من فاتورة شراء" : "استيراد"}</span></li>`).join("")}</ul>` : ""}
-    </section></div>`;
+    </section></div>
+  ${ME.permissions.includes("inventory.read") ? `<section class="panel" id="mvRep"><div class="row between"><h2>حركة الصنف لفترة</h2>${reportTools("mv")}</div>${rangeBar("mvRange")}<div id="mvBox"></div></section>` : ""}`;
   document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+  if ($("#mvRep")) {
+    let mv = null;
+    const q = (n) => `${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
+    wireRange("mvRange", async (f, t) => {
+      try {
+        mv = await api(`/api/items/${id}/movements?from=${f}&to=${t}`);
+        $("#mvBox").innerHTML = `<div class="totals"><div>الرصيد أول المدة<b>${esc(q(mv.opening))}</b></div>
+          ${mv.totals.map((x) => `<div>${esc(x.label)}<b>${x.qty < 0 ? "− " : "+ "}${esc(q(x.qty))}</b></div>`).join("")}
+          <div>الرصيد آخر المدة<b>${esc(q(mv.closing))}</b></div></div>
+          <div class="tablewrap mt"><table><thead><tr><th>اليوم والوقت</th><th>الحركة</th><th>المرجع</th><th>التشغيلة</th><th>وارد</th><th>صادر</th><th>الرصيد</th><th>مين</th></tr></thead><tbody>
+          ${mv.rows.map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td>${esc(r.label)}</td>
+            <td>${r.sale_no ? `فاتورة بيع ${r.sale_no}` : r.invoice_no ? `فاتورة ${esc(r.invoice_no)} — ${esc(r.supplier || "")}` : esc(r.note || "")}</td>
+            <td>${esc(r.batch_no || "")}${r.expiry_date ? ` <span class="muted">${esc(r.expiry_date.slice(0, 7))}</span>` : ""}</td>
+            <td>${r.qty_delta > 0 ? esc(q(r.qty_delta)) : ""}</td><td>${r.qty_delta < 0 ? esc(q(r.qty_delta)) : ""}</td><td>${esc(q(r.balance))}</td><td>${esc(r.by_name || "")}</td></tr>`).join("")
+            || `<tr><td colspan="8" class="muted">مفيش حركة في الفترة دي</td></tr>`}</tbody></table></div>`;
+      } catch (err) { toast(err.message, true); }
+    });
+    wireTools("mv", () => ({ title: `حركة ${c.name_en || c.name_ar}`, subtitle: rangeText(mv.from, mv.to), el: $("#mvRep"), sheets: [
+      { name: "حركة الصنف", columns: [Tx("اليوم والوقت"), Tx("الحركة"), Tx("المرجع"), Tx("التشغيلة"), Dt("الصلاحية"), N("الكمية بالوحدة"), N("الرصيد بالوحدة"), Tx("مين")],
+        rows: [["", "الرصيد أول المدة", "", "", "", null, mv.opening, ""], ...mv.rows.map((r) => [`${dayOf(r.created_at)} ${hhmm(r.created_at)}`, r.label,
+          r.sale_no ? `فاتورة بيع ${r.sale_no}` : r.invoice_no ? `فاتورة ${r.invoice_no} — ${r.supplier || ""}` : r.note || "", r.batch_no || "", r.expiry_date || "", r.qty_delta, r.balance, r.by_name || ""])],
+        total: ["", "الرصيد آخر المدة", "", "", "", null, mv.closing, ""] }] }));
+  }
   $("#lbGo")?.addEventListener("click", () => window.open(`/labels?items=${encodeURIComponent(id)}:${+$("#lbN").value || 1}`, "_blank"));
   $("#shortBtn")?.addEventListener("click", async () => {
     try { await api(`/api/items/${id}/shortage`, { method: "POST", body: { on: !c.shortage_at } }); viewItem(id); }
@@ -2113,7 +2156,7 @@ async function viewShift() {
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
   const seeAll = ME.permissions.includes("cash.see_expected");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
-  const hist = recent.length ? `<section class="panel"><h2>آخر الشيفتات</h2><table><thead><tr><th>من</th><th>لحد</th><th>قفله</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
+  const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>لحد</th><th>قفله</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
     ${recent.map((r) => `<tr><td>${esc(new Date(r.opened_at).toLocaleString("ar-EG"))}</td><td>${r.closed_at ? esc(new Date(r.closed_at).toLocaleString("ar-EG")) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مظبوط</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
@@ -2122,6 +2165,7 @@ async function viewShift() {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">⚠ مفيش شيفت مفتوح — البيع النقدي مقفول</p>
       <form id="shOpen" class="row mt"><label class="f">الفلوس اللي في الدرج دلوقتي (ج) <input name="v" type="number" step="0.25" min="0" value="0" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
+    wireHist();
     $("#shOpen").addEventListener("submit", async (e) => {
       e.preventDefault();
       try { await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(e.target.v.value) || 0 } }); toast("✓ الشيفت اتفتح"); viewShift(); }
@@ -2153,6 +2197,11 @@ async function viewShift() {
     $("#dTotal").textContent = money(t);
   };
   document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
+  wireHist();
+  function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الشيفتات", subtitle: "", el: $("#shHist"), sheets: [
+    { name: "الشيفتات", columns: [Tx("من"), Tx("لحد"), Tx("قفله"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
+      rows: recent.map((r) => [new Date(r.opened_at).toLocaleString("ar-EG"), r.closed_at ? new Date(r.closed_at).toLocaleString("ar-EG") : "مفتوح", r.closed_by_name || "",
+        r.expected_cash, r.counted_cash, r.difference, r.close_note || ""]) }] })); }
   $("#shPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     try { await api("/api/cash/movements", { method: "POST", body: { kind: "payout", amount: toPiasters(e.target.a.value), note: e.target.n.value } }); toast("اتسجل"); viewShift(); }
@@ -2303,6 +2352,42 @@ async function viewTransfers() {
     { name: "التحويلات", columns: [N("الفاتورة"), Tx("اليوم والوقت"), Tx("المحفظة"), M("مبلغ التحويل"), Tx("الكاشير"), Tx("الحالة")],
       rows: t.rows.map((r) => [r.sale_no, `${dayOf(r.completed_at)} ${hhmm(r.completed_at)}`, r.channel || "", r.paid_transfer, r.cashier || "", TR_ST[r.state][1].replace(/^[⚠ℹ✓✕] /, "")]),
       total: ["الإجمالي", "", "", t.totals.all, "", ""] }] }));
+}
+
+// ------------------------------------------------------------------ activity log (سجل العمليات)
+function auditDetail(j) {
+  if (!j) return "";
+  try {
+    const o = JSON.parse(j);
+    return Object.entries(o).filter(([k]) => !["approved_by"].includes(k)).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · ").slice(0, 160);
+  } catch { return ""; }
+}
+async function viewAudit() {
+  app.innerHTML = `<section class="panel" id="auRep"><div class="row between"><h1>سجل العمليات</h1>${reportTools("audit")}</div>
+    <p class="muted noprint">كل عملية في البرنامج بتتسجل هنا باسم اللي عملها ووقتها، ومحدش يقدر يعدّلها أو يمسحها.</p>
+    <div class="row noprint">${rangeBar("auRange", "today")}<label class="f">النوع <select id="auG"><option value="">الكل</option></select></label>
+      <label class="f">الشخص <select id="auU"><option value="">الكل</option></select></label></div><div id="auBox"></div></section>`;
+  let data = null;
+  const draw = () => {
+    const u = $("#auU").value, rows = data.rows.filter((r) => !u || r.user_name === u);
+    $("#auBox").innerHTML = `${data.truncated ? `<p class="badge b-warn">⚠ أول 5000 عملية بس — صغّر الفترة</p>` : ""}<div class="tablewrap"><table><thead><tr><th>الوقت</th><th>مين</th><th>العملية</th><th>التفاصيل</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td>${esc(dayOf(r.at))} ${hhmm(r.at)}</td><td>${esc(r.user_name || "—")}</td><td>${esc(r.label)}${r.after_json?.includes("approved_by") ? ` <span class="badge b-info">بموافقة</span>` : ""}</td>
+        <td class="muted small" data-raw>${esc(auditDetail(r.after_json))}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش عمليات</td></tr>`}</tbody></table></div>`;
+    return rows;
+  };
+  const load = async (f, t) => {
+    data = await api(`/api/audit?from=${f}&to=${t}${$("#auG").value ? `&group=${$("#auG").value}` : ""}`);
+    if ($("#auG").options.length === 1) $("#auG").insertAdjacentHTML("beforeend", Object.entries(data.groups).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join(""));
+    const cur = $("#auU").value, names = [...new Set(data.rows.map((r) => r.user_name).filter(Boolean))];
+    $("#auU").innerHTML = `<option value="">الكل</option>${names.map((n) => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("")}`;
+    draw();
+  };
+  const get = wireRange("auRange", (f, t) => load(f, t).catch((e) => toast(e.message, true)));
+  $("#auG").addEventListener("change", () => load(...get()).catch((e) => toast(e.message, true)));
+  $("#auU").addEventListener("change", draw);
+  wireTools("audit", () => { const rows = draw(); return { title: "سجل العمليات", subtitle: rangeText(data.from, data.to), el: $("#auRep"), sheets: [
+    { name: "العمليات", columns: [Tx("الوقت"), Tx("مين"), Tx("العملية"), Tx("التفاصيل")],
+      rows: rows.map((r) => [`${dayOf(r.at)} ${hhmm(r.at)}`, r.user_name || "", r.label, auditDetail(r.after_json)]) }] }; });
 }
 
 // ------------------------------------------------------------------ shortages (النواقص)
@@ -2788,7 +2873,7 @@ async function viewStaff(month) {
   month = month || new Date().toISOString().slice(0, 7);
   const r = await api(`/api/staff?month=${month}`);
   const post = async (body) => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("اتحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } };
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><label class="f">الشهر <input type="month" id="stM" value="${month}"></label></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
     <p class="muted">المرتب = الأساسي − الغياب (الأساسي ÷ أيام الشغل × الأيام الناقصة) − السلف + المكافأة − الخصم. بتراجع وتعتمد كل واحد، والصرف بيتسجل مصروف "رواتب وأجور".</p></section>
   ${r.people.map((p) => { const pr = p.payroll, sg = p.suggested; return `<section class="panel staff" data-u="${esc(p.id)}">
     <div class="row between"><h2>${esc(p.full_name)} <span class="chip">${esc(p.role_name)}</span></h2>
@@ -2810,6 +2895,12 @@ async function viewStaff(month) {
       <table class="mt"><tbody>${p.attendance.map((x) => `<tr><td>${esc(x.day)}</td><td>${tm(x.check_in)} ← ${tm(x.check_out)}</td><td>${x.source === "owner" ? `<span class="badge b-warn">⚠ تعديل: ${esc(x.note || "")}</span>` : x.source === "phone" ? "موبايل" : "الكمبيوتر"}</td></tr>`).join("") || `<tr><td class="muted">مفيش</td></tr>`}</tbody></table></details>
   </section>`; }).join("") || `<section class="panel"><p class="muted">مفيش موظفين — ضيفهم من "المستخدمين".</p></section>`}`;
   $("#stM").addEventListener("change", (e) => viewStaff(e.target.value));
+  wireTools("pay", () => ({ title: "الحضور والرواتب", subtitle: `شهر ${month}`, el: app, sheets: [
+    { name: "الرواتب", columns: [Tx("الموظف"), Tx("النوع"), M("الأساسي"), N("أيام الشغل"), N("حضر (يوم)"), { label: "ساعات", type: "num" }, N("غياب (يوم)"), M("خصم الغياب"), M("السلف"), M("المكافأة"), M("الخصم"), M("الصافي"), Tx("الحالة")],
+      rows: r.people.map((p) => [p.full_name, p.role_name, p.monthly_salary, p.work_days, p.days_present, p.hours, p.suggested.missing_days, p.suggested.absence_deduction, p.advances,
+        p.payroll?.bonus || 0, p.payroll?.deduction || 0, p.payroll ? p.payroll.net : p.suggested.net, p.payroll ? (p.payroll.status === "paid" ? "اتصرف" : "معتمد") : "مقترح"]) },
+    { name: "الحضور", columns: [Tx("الموظف"), Dt("اليوم"), Tx("حضور"), Tx("انصراف"), Tx("ملاحظة")],
+      rows: r.people.flatMap((p) => p.attendance.map((x) => [p.full_name, x.day, tm(x.check_in), tm(x.check_out), x.source === "owner" ? `تعديل: ${x.note || ""}` : ""])) }] }));
   document.querySelectorAll(".staff [data-a]").forEach((b) => b.addEventListener("click", () => {
     const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
     if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 });

@@ -262,7 +262,8 @@ class Purchasing:
         return {"invoice": inv, "lines": lines, "issues": [i.as_dict() for i in issues],
                 "can_approve": inv["status"] == "draft" and not validation.blocking(issues)}
 
-    def list(self, ctx: Context, status: str | None = None, limit: int = 50) -> list[dict]:
+    def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
+             date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
         ctx.require("purchases.read")
         q = ("SELECT pi.id, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
              " pi.declared_total, pi.computed_total, pi.created_at, s.name supplier_name,"
@@ -273,8 +274,19 @@ class Purchasing:
         if status:
             q += " AND pi.status=?"
             params.append(status)
-        q += " ORDER BY pi.created_at DESC LIMIT ?"
-        params.append(min(limit, 200))
+        if supplier_id:
+            q += " AND pi.supplier_id=?"
+            params.append(supplier_id)
+        if date_from and date_to and status != "draft":      # open drafts always show, whatever their date
+            try:
+                d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+            except ValueError:
+                raise ValidationFailed("التاريخ غير صحيح")
+            q += " AND coalesce(pi.invoice_date, substr(pi.created_at,1,10)) BETWEEN ? AND ?"
+            params += [d1.isoformat(), d2.isoformat()]
+            limit = 5000
+        q += " ORDER BY coalesce(pi.invoice_date, substr(pi.created_at,1,10)) DESC, pi.created_at DESC LIMIT ?"
+        params.append(min(limit, 5000))
         return [dict(r) for r in self.db.all(q, tuple(params))]
 
     # ------------------------------------------------------------ edit

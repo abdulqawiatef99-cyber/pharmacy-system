@@ -189,3 +189,47 @@ def remove_barcode(db: Database, ctx: Context, item_id: str, barcode: str) -> No
         if not n:
             raise NotFound("الباركود مش متسجل على الصنف ده")
         audit.record(db, ctx, "item.barcode_remove", "item", item_id, before={"barcode": barcode})
+
+
+MOVE_LABELS = {"purchase": "شراء", "purchase_reversal": "إلغاء شراء", "sale": "بيع", "sale_return": "مرتجع بيع",
+               "supplier_return": "مرتجع للمورد", "adjustment": "تسوية / جرد", "opening": "رصيد افتتاحي",
+               "transfer_in": "تحويل وارد", "transfer_out": "تحويل صادر", "damage": "تالف / إعدام"}
+
+
+def movements(db: Database, ctx: Context, item_id: str, date_from: str, date_to: str) -> dict:
+    """Everything that moved this item in a period: balance at the start, each movement with its
+    invoice / count and who did it, and the balance at the end (in base units)."""
+    from ..sales.service import local_day_bounds
+    ctx.require("inventory.read")
+    it = db.one("SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
+    if not it:
+        raise NotFound("الصنف غير موجود")
+    try:
+        d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    except (TypeError, ValueError):
+        raise ValidationFailed("اختار الفترة")
+    if d2 < d1:
+        raise ValidationFailed("تاريخ النهاية قبل البداية")
+    lo, hi = local_day_bounds(d1)[0], local_day_bounds(d2)[1]
+    opening = db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE org_id=? AND item_id=? AND created_at<?",
+                     (ctx.org_id, item_id, lo))["q"]
+    rows = db.all(
+        "SELECT m.created_at, m.movement_type, m.qty_delta, m.ref_type, m.ref_id, m.note, b.batch_no, b.expiry_date,"
+        " u.full_name by_name, s.sale_no, p.invoice_no, sp.name supplier FROM stock_movements m"
+        " LEFT JOIN batches b ON b.id=m.batch_id LEFT JOIN users u ON u.id=m.created_by"
+        " LEFT JOIN sales s ON s.id=m.ref_id AND m.movement_type IN ('sale','sale_return')"
+        " LEFT JOIN purchase_invoices p ON p.id=m.ref_id AND m.movement_type IN ('purchase','purchase_reversal')"
+        " LEFT JOIN suppliers sp ON sp.id=p.supplier_id"
+        " WHERE m.org_id=? AND m.item_id=? AND m.created_at>=? AND m.created_at<? ORDER BY m.created_at, m.rowid",
+        (ctx.org_id, item_id, lo, hi))
+    bal, out = opening, []
+    for r in rows:
+        bal += r["qty_delta"]
+        d = dict(r)
+        d["label"], d["balance"] = MOVE_LABELS.get(r["movement_type"], r["movement_type"]), bal
+        out.append(d)
+    by = {}
+    for r in out:
+        by[r["movement_type"]] = by.get(r["movement_type"], 0) + r["qty_delta"]
+    return {"item": dict(it), "from": d1.isoformat(), "to": d2.isoformat(), "opening": opening, "closing": bal,
+            "rows": out, "totals": [{"type": k, "label": MOVE_LABELS.get(k, k), "qty": v} for k, v in by.items()]}

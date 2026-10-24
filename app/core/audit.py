@@ -91,3 +91,68 @@ def list_for_entity(db: Database, ctx: Context, entity_type: str, entity_id: str
             d[k] = json.loads(d[k]) if d[k] else None
         out.append(d)
     return out
+
+
+ACTION_LABELS = {
+    "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري غلط",
+    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الدرج", "cash.shift_close": "قفل شيفت",
+    "cash.shift_open": "فتح شيفت", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
+    "count.create": "بدء جرد", "customer.create": "عميل جديد", "customer.payment": "تحصيل من عميل",
+    "customer.refill_remove": "شيل من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
+    "customer.whatsapp_reminder": "تذكير واتساب", "entitlement.set": "تفعيل خاصية", "expense.approve": "قرار مصروف",
+    "expense.record": "تسجيل مصروف", "expense_schedule.create": "بند مصروف مجدول", "expense_schedule.skip": "تخطي مصروف مجدول",
+    "expense_schedule.update": "تعديل مصروف مجدول", "import.analyze": "تحليل ملف استيراد", "import.apply": "تطبيق استيراد",
+    "import.decide": "قرار في الاستيراد", "import.discard": "إلغاء استيراد", "item.alias_remap": "ربط اسم صنف",
+    "item.barcode_add": "إضافة باركود", "item.barcode_remove": "شيل باركود", "item.category": "تغيير قسم صنف",
+    "item.create": "صنف جديد", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
+    "payment_channel.save": "مكنة / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
+    "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال",
+    "procurement.consumption_import": "رفع مبيعات للطلبية", "procurement.offer_eval": "تقييم عرض", "purchase.approve": "اعتماد فاتورة شراء",
+    "purchase.cancel": "إلغاء فاتورة شراء", "purchase.header_edit": "تعديل رأس فاتورة شراء", "purchase.import": "رفع فاتورة شراء",
+    "purchase.issue_ack": "قبول فرق في فاتورة شراء", "purchase.line_add": "إضافة سطر شراء", "purchase.line_delete": "حذف سطر شراء",
+    "purchase.line_edit": "تعديل سطر شراء", "recall.decide": "قرار سحب", "recall.matched": "مطابقة سحب", "recall.notice_add": "منشور سحب",
+    "role.discount_limit": "حد خصم نوع", "roles.sync": "تحديث الأدوار", "safety.ingredients_set": "مواد فعالة",
+    "safety.ingredients_verify": "اعتماد مواد فعالة", "safety.rule_approve": "اعتماد قاعدة سلامة", "safety.rule_create": "قاعدة سلامة",
+    "safety.rule_disable": "تعطيل قاعدة سلامة", "safety.source_add": "مصدر سلامة", "sale.attach": "صورة تحويل",
+    "sale.complete": "بيع", "sale.return": "مرتجع", "sale.transfer_review": "مراجعة تحويل", "sale.void": "إلغاء فاتورة بيع",
+    "settings.line_order": "ترتيب الفاتورة", "settings.receipt": "شكل الإيصال", "settings.return_window": "مدة المرتجع",
+    "supplier.create": "مورد جديد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الموبايل على الواي فاي",
+    "system.update": "تحديث البرنامج", "user.active": "إيقاف/تشغيل مستخدم", "user.create": "مستخدم جديد",
+    "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة السر", "user.password_reset": "إعادة كلمة السر",
+    "user.permission": "صلاحية شخص", "user.pin_set": "رقم سري", "user.reset_permissions": "رجوع الصلاحيات للافتراضي", "user.role": "تغيير النوع",
+}
+GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الشيفت والدرج", "user": "المستخدمين", "settings": "الإعدادات",
+          "item": "الأصناف", "expense": "المصاريف", "supplier": "الموردين", "customer": "العملاء", "count": "الجرد",
+          "payroll": "الرواتب", "auth": "الدخول"}
+
+
+def listing(db: Database, ctx: Context, date_from: str, date_to: str, user_id: str | None = None,
+            group: str | None = None) -> dict:
+    """Who did what, for the owner (audit.read). Read-only; the log itself can never change."""
+    from datetime import date as _d
+
+    from ..core.errors import ValidationFailed
+    from ..sales.service import local_day_bounds
+    ctx.require("audit.read")
+    try:
+        d1, d2 = _d.fromisoformat(date_from), _d.fromisoformat(date_to)
+    except (TypeError, ValueError):
+        raise ValidationFailed("اختار الفترة")
+    q = ("SELECT a.at, a.action, a.entity_type, a.entity_id, a.before_json, a.after_json, a.ip, u.full_name user_name"
+         " FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.at>=? AND a.at<?")
+    p: list = [ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]]
+    if user_id:
+        q += " AND a.user_id=?"
+        p.append(user_id)
+    if group:
+        if group not in GROUPS:
+            raise ValidationFailed("نوع غير معروف")
+        q += " AND (a.action LIKE ? OR a.action LIKE ?)"
+        p += [group + ".%", group + "_%"]
+    q += " ORDER BY a.at DESC LIMIT 5000"
+    rows = []
+    for r in db.all(q, tuple(p)):
+        d = dict(r)
+        d["label"] = ACTION_LABELS.get(d["action"], d["action"])
+        rows.append(d)
+    return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows, "groups": GROUPS, "truncated": len(rows) >= 5000}
