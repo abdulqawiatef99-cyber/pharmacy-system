@@ -134,7 +134,9 @@ def cmd_selftest(a, s):
             if not r.wasSuccessful():
                 raise RuntimeError(f"{len(r.failures)} failures, {len(r.errors)} errors out of {r.testsRun}: "
                                    + "; ".join(str(t[0]) for t in (r.failures + r.errors)[:5]))
-            return f"{r.testsRun} tests passed"
+            skipped = f" ({len(r.skipped)} skipped: " + "; ".join(sorted({why for _, why in r.skipped})) + ")" \
+                if r.skipped else ""
+            return f"{r.testsRun - len(r.skipped)} tests passed{skipped}"
     if not a.quick:
         check("automated_tests", tests)
     for k, v in report.items():
