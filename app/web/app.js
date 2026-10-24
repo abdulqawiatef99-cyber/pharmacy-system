@@ -931,7 +931,9 @@ async function complete(findings) {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { paid_cash: cash, paid_card: card, on_credit: credit, safety_decisions: decisions,
               version: SALE.version, request_id: SALE.request_id } });
-    window.open(`/receipt/${done.id}`, "_blank");
+    // thermal printer + drawer through the PC; if not configured or offline, print from the browser
+    try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 } }); }
+    catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
     toast(`تم البيع — فاتورة رقم ${done.sale_no}`);
     SALE = null; viewPos();
   } catch (er) {

@@ -34,7 +34,8 @@ class APICase(DBTestCase):
 class TestAPI(APICase):
     def test_requires_login(self):
         self.assertEqual(self.c.get("/api/purchases").status_code, 401)
-        self.assertEqual(self.c.get("/api/health").json(), {"ok": True})
+        h = self.c.get("/api/health").json()
+        self.assertTrue(h["ok"] and h["version"] and h["schema"].startswith("00"))
 
     def test_login_sets_httponly_cookie_and_headers(self):
         r = self.http_login()

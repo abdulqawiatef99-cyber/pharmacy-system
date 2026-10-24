@@ -1,5 +1,5 @@
 @echo off
-REM Daily backup - schedule with Windows Task Scheduler (e.g. every night 23:30)
+REM Nightly backup - add to Windows Task Scheduler (e.g. 23:30). Keeps the zip in backups\
 cd /d "%~dp0\..\.."
-python manage.py backup --dest backups
-python manage.py verify
+if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat
+python manage.py backup --dest backups || echo BACKUP FAILED

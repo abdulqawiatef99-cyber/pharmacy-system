@@ -40,6 +40,7 @@ from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
 from ..sales.service import Sales
 from ..sales.cash import CashDrawer
+from ..printing import service as printing
 import html as _html
 
 log = logging.getLogger("pharm.api")
@@ -50,7 +51,7 @@ MAX_JSON = 256 * 1024
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
 FEATURE_PREFIXES = (("/api/sales", "sales"), ("/api/customers", "sales"), ("/receipt", "sales"),
-                    ("/api/cash", "sales"),
+                    ("/api/cash", "sales"), ("/api/print", "sales"),
                     ("/api/purchases", "purchasing"), ("/api/imports", "dataimport"),
                     ("/api/counts", "counting"), ("/api/procurement", "procurement"),
                     ("/api/recalls", "recalls"), ("/api/safety", "safety"))
@@ -745,6 +746,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note")))
 
     @handler
+    async def print_receipt(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(printing.print_receipt, db, ctx, req.path_params["id"],
+                                         open_drawer=bool(b.get("open_drawer"))))
+
+    @handler
+    async def print_drawer(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(printing.open_drawer, db, ctx, str(b.get("reason", ""))))
+
+    @handler
     async def receipt(req):
         """Printable receipt sized for 80mm thermal printers (browser print).
         Raw ESC/POS printing + cash drawer need a local print agent (not built)."""
@@ -778,8 +792,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def health(req):
-        db.one("SELECT 1")
-        return J({"ok": True})
+        from ..version import __version__
+        last = db.one("SELECT max(version) v FROM schema_migrations")["v"]
+        return J({"ok": True, "version": __version__, "schema": last})
 
     async def index(req):
         return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
@@ -845,6 +860,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
         Route("/receipt/{id}", receipt),
+        Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
+        Route("/api/print/drawer", print_drawer, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),

@@ -174,7 +174,10 @@ class TestEvalHarness(CorpusCase):
             "lines": [{"name": "بانادول اكسترا ٢٤ قرص", "qty": 10, "bonus_qty": 2, "line_total": "459.20",
                        "batch_no": "PX9", "expiry": FUT},
                       {"name": "كتافلام ٥٠ مجم ٢٠ قرص", "qty": 6, "unit_net_price": "49.20"}]}), encoding="utf-8")
-        s = eval_invoices.main([str(folder), "--no-ai", "--json", str(self.tmp / "r.json")])
+        import contextlib
+        import io as _io
+        with contextlib.redirect_stdout(_io.StringIO()):
+            s = eval_invoices.main([str(folder), "--no-ai", "--json", str(self.tmp / "r.json")])
         self.assertEqual(s["scored"], 1)
         # one expected value (qty 6) deliberately differs from the file -> 1 confident error
         self.assertEqual(s["wrong_but_confident"], 1)
