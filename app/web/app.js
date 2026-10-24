@@ -1207,8 +1207,10 @@ async function viewCountSession(id) {
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للمالك بس.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
+    <section class="panel"><h1>مكن الفيزا وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
+  renderChannels((await api("/api/payment-channels")).channels);
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المتثبتة<b>${esc((st.installed || "غير معروفة").slice(0, 7))}</b></div>
@@ -1229,6 +1231,25 @@ async function viewSystem() {
         setTimeout(wait, 4000);
       } else { b.textContent = "خلص. اقفل البرنامج وافتحه تاني"; }
     } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج دلوقتي"; toast(e.message, true); }
+  });
+}
+function renderChannels(list) {
+  CHANNELS = null;
+  $("#chBox").innerHTML = `<p class="muted">اللي هنا بيظهر في الكاشير لما تختار فيزا أو تحويل، وبيتجمع لوحده في قفل الشيفت.</p>
+    <table><thead><tr><th>النوع</th><th>الاسم</th><th>شغال</th><th></th></tr></thead><tbody>
+    ${list.map((c) => `<tr data-id="${esc(c.id)}"><td>${c.kind === "card" ? "مكنة فيزا" : "تحويل / محفظة"}</td><td><input name="name" value="${esc(c.name)}"></td>
+      <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""}></td><td><button class="btn small secondary" data-chsave>احفظ</button></td></tr>`).join("")}</tbody></table>
+    <form class="row mt" id="chNew"><label class="f">النوع <select name="kind"><option value="card">مكنة فيزا</option><option value="transfer">تحويل / محفظة</option></select></label>
+      <label class="f">الاسم <input name="name" required placeholder="مثال: مكنة البنك الأهلي"></label><button class="btn small">أضف</button></form>`;
+  document.querySelectorAll("[data-chsave]").forEach((b) => b.addEventListener("click", async () => {
+    const tr = b.closest("tr");
+    try { renderChannels((await api(`/api/payment-channels/${tr.dataset.id}`, { method: "PATCH", body: { name: tr.querySelector("[name=name]").value, is_active: tr.querySelector("[name=is_active]").checked } })).channels); toast("اتحفظ"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  $("#chNew").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { renderChannels((await api("/api/payment-channels", { method: "POST", body: { kind: e.target.kind.value, name: e.target.name.value } })).channels); }
+    catch (err) { toast(err.message, true); }
   });
 }
 const MB = (b) => (b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} ك.ب` : `${(b / 1048576).toFixed(1)} م.ب`);
