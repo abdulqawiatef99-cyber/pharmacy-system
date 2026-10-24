@@ -18,6 +18,12 @@ const fmtStock = (q, it) => {
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
+// pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
+const normExpiry = (v) => {
+  const t = String(v || "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/\s+/g, "-");
+  const m = t.match(/^(\d{1,2})(\d{2})$/);
+  return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
+};
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 
 function toast(msg, isError = false) {
@@ -303,7 +309,7 @@ function quickAddHtml() {
       <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
       <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
-      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="05/2028" class="narrow"></label>
+      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="6-29" class="narrow"></label>
       <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
@@ -342,7 +348,7 @@ function bindQuickAdd() {
     const line = { item_id: QA_ITEM.id, qty, bonus_qty: parseInt($("#qaBonus").value || "0", 10) };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
-    if ($("#qaExp").value.trim()) line.expiry_date = $("#qaExp").value.trim();
+    if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
     if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
     const keepDisc = $("#qaDisc").value;
     QA_ITEM = null;
@@ -398,7 +404,7 @@ async function fillSuppliers(selected, draft) {
 const CONVERT = {
   public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters, tax_amount: toPiasters,
   discount_bp: toBp, qty: (v) => (v === "" ? null : parseInt(v, 10)),
-  bonus_qty: (v) => (v === "" ? 0 : parseInt(v, 10)), batch_no: (v) => v, expiry_date: (v) => v,
+  bonus_qty: (v) => (v === "" ? 0 : parseInt(v, 10)), batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
 async function save(path, body, method = "PATCH") {
