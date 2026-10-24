@@ -5,6 +5,7 @@
   python manage.py serve [--host 127.0.0.1] [--port 8000]
   python manage.py backup [--dest backups/]
   python manage.py verify                      (ledger vs balances consistency)
+  python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
 """
 from __future__ import annotations
@@ -141,6 +142,61 @@ def cmd_selftest(a, s):
     sys.exit(0 if ok else 1)
 
 
+def cmd_import_estock(a, s):
+    """Dry run on a copy of the database by default; --apply writes, after a verified backup."""
+    import json
+    import shutil
+    import tempfile
+    from app.core import backup
+    from app.dataimport import estock_job
+    db = _db(s)
+    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    tok = accounts.login(db, a.username, pw)["token"]
+    files = {k: Path(getattr(a, k)) for k in ("catalog", "stock")}
+    packs = Path(a.packs) if a.packs else None
+    for f in [*files.values(), *([packs] if packs else [])]:
+        if not f.exists():
+            sys.exit(f"الملف مش موجود: {f}")
+    tmp = None
+    target = db
+    if not a.apply:
+        tmp = Path(tempfile.mkdtemp(prefix="estock-dry-"))
+        db.backup_to(tmp / "copy.db")
+        target = Database(tmp / "copy.db")
+        print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
+    else:
+        out = backup.create(db, s.upload_dir, Path(a.backup_dir))
+        if backup.verify_archive(out)["problems"]:
+            sys.exit("النسخة الاحتياطية فشلت؛ مفيش استيراد")
+        print("نسخة احتياطية قبل الاستيراد:", out)
+    try:
+        ctx = accounts.resolve_session(target, tok)
+        rep = estock_job.run(target, ctx, catalog_file=files["catalog"], stock_file=files["stock"],
+                             packs_file=packs, stores=a.store or ["الصيدلية"],
+                             accept_zero_cost=a.accept_zero_cost, max_unit_error=a.max_unit_error)
+    finally:
+        if tmp:
+            target.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+    rdir = s.data_dir / "reports"
+    rdir.mkdir(parents=True, exist_ok=True)
+    rpath = rdir / f"estock-import-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}.json"
+    rpath.write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    st = rep["stock"]
+    print(f"الأصناف: {rep['catalog']['created']} جديد، {rep['catalog']['updated']} اتحدث، "
+          f"{rep['catalog']['kept_duplicates']} بنفس الاسم اتسابوا منفصلين")
+    print(f"عدد الوحدات: {rep['packs']['applied']} صنف")
+    print(f"الأرصدة: {st['applied']['stock_rows']} تشغيلة اتنقلت — المطابقة: "
+          f"{'OK' if st['reconciliation']['ok'] else 'FAILED'}")
+    for k, label in (("rounded", "اتقربت لأقرب وحدة"), ("posted_zero_cost", "دخلت بتكلفة صفر"),
+                     ("skipped_unknown_pack", "اتسابت: عدد الوحدات مش معروف"),
+                     ("skipped_zero_cost", "اتسابت: تكلفة صفر"), ("skipped_review", "اتسابت: محتاجة مراجعة"),
+                     ("errors", "أخطاء")):
+        if st.get(k):
+            print(f"  {label}: {len(st[k])}")
+    print("التقرير الكامل:", rpath)
+
+
 def cmd_feature(a, s):
     db = _db(s)
     limits = {"monthly": a.monthly} if a.monthly else {}
@@ -177,10 +233,22 @@ def main(argv=None):
     f.add_argument("feature")
     f.add_argument("--monthly", type=int)
     f.add_argument("--disable", action="store_true")
+    ie = sub.add_parser("import-estock", help="migrate items + opening stock from E-Stock exports")
+    ie.add_argument("--catalog", required=True, help="قائمة الأصناف .xlsx")
+    ie.add_argument("--stock", required=True, help="كميات الأصناف طبقًا لتواريخ الصلاحية .xlsx")
+    ie.add_argument("--packs", help="ملف عدد الوحدات المراجَع (.xlsx أو .json)")
+    ie.add_argument("--store", action="append", help="اسم المخزن (يتكرر)؛ الافتراضي: الصيدلية")
+    ie.add_argument("--accept-zero-cost", action="store_true", help="تشغيلات بونص/تبرع تدخل بتكلفة صفر")
+    ie.add_argument("--max-unit-error", default="0.15")
+    ie.add_argument("--username", required=True)
+    ie.add_argument("--password", help="for automation only; prefer the prompt")
+    ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
+    ie.add_argument("--backup-dir", default="backups")
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
-     "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest}[a.cmd](a, s)
+     "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
+     "import-estock": cmd_import_estock}[a.cmd](a, s)
 
 
 if __name__ == "__main__":
