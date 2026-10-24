@@ -27,6 +27,11 @@ def run(db: Database, today: date | None = None) -> int:
     from ..sales.service import local_day_bounds, local_today
     today = today or local_today()
     sent = 0
+    from . import retention
+    try:
+        retention.clean(db)
+    except Exception:
+        log.exception("cleanup failed")
     for o in db.all("SELECT id FROM organizations WHERE status='active'"):
         st = _state(db, o["id"])
         if st.get("last") == today.isoformat():

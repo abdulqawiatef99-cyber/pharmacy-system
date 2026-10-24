@@ -1268,6 +1268,7 @@ async function viewSystem() {
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>الموبايل على واي فاي الصيدلية</h1><div id="lanBox"></div></section>
     <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
+    <section class="panel"><h1>مساحة البيانات والاحتفاظ بيها</h1><div id="stoBox"><p class="muted">بيحسب…</p></div></section>
     <section class="panel"><h1>مكن الفيزا وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
@@ -1283,6 +1284,15 @@ async function viewSystem() {
          <button class="btn" id="updGo">حدّث البرنامج دلوقتي</button>`
       : `<p class="badge b-ok">البرنامج محدّث</p>`}
     <pre id="updOut" class="muted" hidden></pre>`;
+  api("/api/system/storage").then((x) => {
+    const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} ميجا`;
+    $("#stoBox").innerHTML = `<div class="totals"><div>قاعدة البيانات<b>${mb(x.db)}</b><span>${x.since ? `فيها بيع من ${esc(x.since)}` : ""}</span></div>
+      <div>صور الفواتير والتحويلات<b>${mb(x.uploads)}</b></div><div>النسخ الاحتياطية<b>${mb(x.backups)}</b></div></div>
+      <p class="mt"><b>اللي مش بيتمسح أبدًا:</b> فواتير البيع والشراء، حسابات العملاء والموردين، الدرج والمصاريف، حركة المخزون، وسجل العمليات. القانون بيلزم الدفاتر تفضل محفوظة سنين، وحجمها صغير (صيدلية شغالة بتزود حوالي 20–40 ميجا في السنة).</p>
+      <p><b>اللي بيتنضف لوحده كل يوم:</b> الإشعارات الأقدم من ${x.policy.notifications_days} يوم، وجلسات الدخول المنتهية بعد ${x.policy.sessions_days} يوم، والنسخ الاحتياطية الأوتوماتيك الزيادة (بتفضل آخر 10 + نسخة كل يوم لأسبوع + كل أسبوع لشهر).</p>
+      <p class="muted">النسخ الاحتياطية مضغوطة (بتاخد حوالي عُشر حجم قاعدة البيانات). لو المساحة قلّت في يوم، نقدر نعمل أرشيف مضغوط للسنين القديمة — ده محتاج قرارك.</p>
+      <p class="muted">عدد الفواتير: ${x.rows.sales} · سطور البيع: ${x.rows.sale_lines} · فواتير الشراء: ${x.rows.purchase_invoices} · حركات المخزون: ${x.rows.stock_movements}</p>`;
+  }).catch((e) => { $("#stoBox").innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; });
   $("#updGo")?.addEventListener("click", async () => {
     const b = $("#updGo"); b.disabled = true; b.textContent = "بيحدّث… (دقيقة أو اتنين)";
     try {

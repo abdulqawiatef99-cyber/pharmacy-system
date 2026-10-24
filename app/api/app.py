@@ -664,6 +664,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return sorted(ip for ip in ips if not ip.startswith("127.") and not ip.startswith("169.254."))
 
     @handler
+    async def system_storage(req):
+        from ..core import retention
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        return J(await run_in_threadpool(retention.sizes, db, Path(db.path), s.upload_dir, s.backup_path))
+
+    @handler
     async def system_network(req):
         """Mobiles on the pharmacy Wi-Fi: on/off (owner). Takes effect after the program restarts itself."""
         ctx = ctx_of(req)
@@ -1669,6 +1676,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/update", system_update_status),
         Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/system/network", system_network, methods=["GET", "PUT"]),
+        Route("/api/system/storage", system_storage),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
