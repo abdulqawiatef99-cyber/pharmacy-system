@@ -23,6 +23,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, features
 
 DOTS_80MM = 576          # 72 mm printable at 203 dpi (typical 80 mm printer)
+DOTS_58MM = 384          # 48 mm printable (58 mm printer)
 ESC, GS = b"\x1b", b"\x1d"
 INIT = ESC + b"@"
 CUT = GS + b"V" + b"\x42" + b"\x00"          # feed and partial cut
@@ -153,12 +154,19 @@ def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover 
         win32print.ClosePrinter(h)
 
 
-def receipt_lines(org_name: str, sale: dict, when: str) -> list[tuple[str, str, str]]:
+def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None) -> list[tuple[str, str, str]]:
+    cfg = cfg or {}
     m = lambda p: f"{p / 100:.2f}"  # noqa: E731
-    out = [("title", org_name, ""), ("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
+    out = [("title", cfg.get("title") or org_name, "")]
+    for ln in cfg.get("lines") or []:
+        if ln:
+            out.append(("small", ln, ""))
+    out += [("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
     for l in sale["lines"]:
-        out.append(("row", l["item"]["name"], m(l["line_total"])))
-        out.append(("small", f"{l['qty_base']} {l['item']['base_unit']}", ""))
+        it = l["item"]
+        name = (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
+        out.append(("row", name, m(l["line_total"])))
+        out.append(("small", f"{l['qty_base']} {it['base_unit']}", ""))
     out.append(("rule", "", ""))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
@@ -167,5 +175,5 @@ def receipt_lines(org_name: str, sale: dict, when: str) -> list[tuple[str, str, 
                        ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
         if sale.get(key):
             out.append(("row", label, m(sale[key])))
-    out.append(("small", "شكرًا لزيارتكم", ""))
+    out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
     return out

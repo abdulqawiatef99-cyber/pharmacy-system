@@ -747,7 +747,7 @@ async function viewItems() {
   <section class="panel"><div id="itemsHint"></div>
     ${canW() ? `<div class="row bulk" id="bulk" hidden><b id="bulkN"></b> <select id="bulkCat"><option value="">— اختار قسم —</option>
       ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}<option value="none">شيلهم من أي قسم</option></select>
-      <button class="btn small" id="bulkGo">حطهم في القسم</button></div>` : ""}
+      <button class="btn small" id="bulkGo">حطهم في القسم</button> <button class="btn small secondary" id="bulkLabels">اطبع ملصق لكل واحد</button></div>` : ""}
     <div class="tablewrap"><table>
     <thead><tr>${canW() ? `<th><input type="checkbox" id="selAll" aria-label="اختار الكل"></th>` : ""}<th>الاسم</th><th>القسم</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
@@ -778,6 +778,7 @@ async function viewItems() {
     document.querySelectorAll("[data-sel]").forEach((cb) => { cb.checked = e.target.checked; const id = rows[+cb.dataset.sel].id; cb.checked ? sel.add(id) : sel.delete(id); });
     bulkUi();
   });
+  $("#bulkLabels")?.addEventListener("click", () => window.open(`/labels?items=${[...sel].map((x) => `${encodeURIComponent(x)}:1`).join(",")}`, "_blank"));
   $("#bulkGo")?.addEventListener("click", async () => {
     const v = $("#bulkCat").value; if (!v) return toast("اختار القسم", true);
     try { const r = await api("/api/categories/assign", { method: "POST", body: { item_ids: [...sel], category_id: v === "none" ? null : v } });
@@ -809,6 +810,7 @@ async function viewItem(id) {
         ${c.manufacturer ? `<span class="chip">${esc(c.manufacturer)}</span>` : ""}${c.code ? `<span class="chip">كود ${esc(c.code)}</span>` : ""}
         ${c.shortage_at ? `<span class="badge b-warn">⚠ متعلّم ناقص من ${esc(c.shortage_at)}${c.shortage_by_name ? ` — ${esc(c.shortage_by_name)}` : ""}</span>` : ""}</div></div>
     ${canW() ? `<div class="row"><a class="btn" href="#/items/${esc(id)}/edit">تعديل</a>
+      <span class="row"><input id="lbN" type="number" min="1" max="500" value="1" class="narrow" title="عدد الملصقات"><button class="btn secondary" id="lbGo">اطبع ملصق باركود</button></span>
       <button class="btn secondary" id="shortBtn">${c.shortage_at ? "شيل علامة ناقص" : "علّمه ناقص"}</button></div>` : ""}
   </div></section>
   <div class="totals">
@@ -840,6 +842,7 @@ async function viewItem(id) {
       ${c.price_history?.length ? `<h2 class="mt">آخر تغييرات السعر</h2><ul class="plain">${c.price_history.map((h) => `<li>${esc(h.observed_at.slice(0, 10))}: ${h.previous_price != null ? `${money(h.previous_price)} ← ` : ""}<b>${money(h.public_price)}</b> <span class="muted">${h.source === "manual" ? "يدوي" : h.source === "purchase_invoice" ? "من فاتورة شراء" : "استيراد"}</span></li>`).join("")}</ul>` : ""}
     </section></div>`;
   document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+  $("#lbGo")?.addEventListener("click", () => window.open(`/labels?items=${encodeURIComponent(id)}:${+$("#lbN").value || 1}`, "_blank"));
   $("#shortBtn")?.addEventListener("click", async () => {
     try { await api(`/api/items/${id}/shortage`, { method: "POST", body: { on: !c.shortage_at } }); viewItem(id); }
     catch (err) { toast(err.message, true); }
@@ -1251,10 +1254,12 @@ async function viewCountSession(id) {
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للمالك بس.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
+    <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
     <section class="panel"><h1>مكن الفيزا وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
+  renderReceiptCfg(await api("/api/settings/receipt"));
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المتثبتة<b>${esc((st.installed || "غير معروفة").slice(0, 7))}</b></div>
@@ -1275,6 +1280,33 @@ async function viewSystem() {
         setTimeout(wait, 4000);
       } else { b.textContent = "خلص. اقفل البرنامج وافتحه تاني"; }
     } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج دلوقتي"; toast(e.message, true); }
+  });
+}
+function renderReceiptCfg(c) {
+  const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
+  $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
+    <label class="f">مقاس ورق الكاشير <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
+    <label class="f">اسم الصيدلية على الفاتورة (فاضي = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
+    <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
+    <label class="f">سطر 2 (التليفون) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
+    <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
+    <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاتنين</option></select></label>
+    <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
+    <div>${chk("show_cashier", "اسم الكاشير")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف اللي مالهاش مرتجع)")}</div>
+    <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
+  $("#rcForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try { renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
+      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("اتحفظ"); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#rcTry").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const last = (await api("/api/sales"))[0];
+    if (!last) return toast("مفيش فواتير النهارده", true);
+    window.open(`/receipt/${last.id}`, "_blank");
   });
 }
 function renderChannels(list) {

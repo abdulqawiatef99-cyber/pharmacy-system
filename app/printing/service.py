@@ -31,7 +31,10 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
     when = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
     try:
-        img = escpos.render_receipt(escpos.receipt_lines(org, sale, when))
+        from . import settings as rs
+        cfg = rs.get(db, ctx.org_id)
+        img = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg),
+                                    width=escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM)
         escpos.send(target or printer_target(), escpos.receipt_job(img, open_drawer))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e

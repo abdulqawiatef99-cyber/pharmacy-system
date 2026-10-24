@@ -1335,39 +1335,125 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def receipt(req):
-        """Printable receipt sized for 80mm thermal printers (browser print).
-        Raw ESC/POS printing + cash drawer need a local print agent (not built)."""
+        """Printable receipt for 80 / 58 mm thermal printers (browser print), as set in the program page."""
+        from ..printing import settings as rs
+        from ..sales.service import return_window_days
         ctx = ctx_of(req)
         sale = Sales(db).get(ctx, req.path_params["id"])
         if sale["status"] != "completed":
             raise ValidationFailed("الإيصال متاح للفواتير المكتملة فقط")
+        cfg = rs.get(db, ctx.org_id)
+        if req.query_params.get("w") in ("58", "80"):
+            cfg["paper"] = int(req.query_params["w"])
         org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
         e = _html.escape
-        m = lambda p: f"{p / 100:.2f}"  # noqa: E731
-        rows = "".join(
-            f"<tr><td>{e(l['item']['name'])}<br><small>{l['qty_base']} {e(l['item']['base_unit'])}</small></td>"
-            f"<td>{m(l['line_total'])}</td></tr>" for l in sale["lines"])
-        pay = []
-        if sale["paid_cash"]:
-            pay.append(f"<tr><td>نقدي</td><td>{m(sale['paid_cash'])}</td></tr>")
-        if sale["paid_card"]:
-            pay.append(f"<tr><td>فيزا</td><td>{m(sale['paid_card'])}</td></tr>")
-        if sale.get("paid_transfer"):
-            pay.append(f"<tr><td>تحويل</td><td>{m(sale['paid_transfer'])}</td></tr>")
-        if sale.get("delivery_fee"):
-            pay.append(f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>")
-        if sale["on_credit"]:
-            pay.append(f"<tr><td>آجل</td><td>{m(sale['on_credit'])}</td></tr>")
+        m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
+
+        def name(it):
+            if cfg["names"] == "ar":
+                return e(it.get("name_ar") or it["name"])
+            if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):
+                return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
+            return e(it.get("name_en") or it["name"])
+
+        def qty(l):
+            it, q = l["item"], l["qty_base"]
+            unit = it["base_unit"] if it["base_unit"] not in (None, "unit") else "وحدة"
+            pack = it.get("pack_unit") if it.get("pack_unit") not in (None, "pack") else "علبة"
+            if it["pack_size"] > 1 and q % it["pack_size"] == 0:
+                return f"{q // it['pack_size']} {e(pack)}"
+            return f"{q} {e(unit)}"
+        rows = []
+        restricted = False
+        for l in sale["lines"]:
+            restricted |= bool(l["item"].get("no_return"))
+            exp = ""
+            if cfg["show_expiry"]:
+                exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
+                exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
+            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else ""
+            star = " ✱" if l["item"].get("no_return") else ""
+            rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
+                        f"<td>{m(l['line_total'])}</td></tr>")
+        MET = {"cash": "نقدي", "card": "فيزا", "transfer": "تحويل", "credit": "آجل"}
+        pays = sale.get("payments") or []
+        pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
+                      for p in pays)
+        if not pays:
+            pay = "".join(f"<tr><td>{lbl}</td><td>{m(sale[k])}</td></tr>" for k, lbl in
+                          (("paid_cash", "نقدي"), ("paid_card", "فيزا"), ("on_credit", "آجل")) if sale.get(k))
+        cashier = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],))
+        d = sale.get("delivery") or {}
+        head = "".join(f"<p>{e(x)}</p>" for x in cfg["lines"] if x)
+        when = accounts.parse_iso(sale['completed_at']).astimezone().strftime('%Y-%m-%d %H:%M')
+        info = [f"فاتورة رقم {sale['sale_no']}", when]
+        if cfg["show_cashier"] and cashier:
+            info.append(f"الكاشير: {e(cashier['full_name'])}")
+        if cfg["show_customer"] and sale.get("customer"):
+            info.append(f"العميل: {e(sale['customer']['name'])}")
+        if sale.get("kind") == "delivery":
+            info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
+        policy = ""
+        if cfg["show_return_policy"]:
+            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يوم بالفاتورة دي"
+            policy += " · الأصناف اللي عليها ✱ مالهاش مرتجع ولا استبدال</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
-<link rel="stylesheet" href="/static/receipt.css"></head><body>
-<div class="r"><h1>{e(org)}</h1><p>فاتورة رقم {sale['sale_no']}<br>{e(accounts.parse_iso(sale['completed_at']).astimezone().strftime('%Y-%m-%d %H:%M'))}</p>
-<table>{rows}</table><hr><table>
+<link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
+<div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
+<table>{''.join(rows)}</table><hr><table>
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
-<tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{''.join(pay)}</table>
-<p class="f">شكرًا لزيارتكم</p></div><script src="/static/print.js"></script></body></html>"""
+{f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
+<tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{pay}</table>
+<p class="f">{e(cfg['footer'])}</p>{policy}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
+
+    @handler
+    async def labels_page(req):
+        """Barcode labels: ?items=<id>:<count>,... — name, price, barcode. Sized for label printers."""
+        from ..printing import barcode as bc, settings as rs
+        ctx = ctx_of(req)
+        ctx.require("items.read")
+        cfg = rs.get(db, ctx.org_id)
+        size = req.query_params.get("size") or cfg["label_size"]
+        if size not in rs.LABEL_SIZES:
+            raise ValidationFailed("مقاس الملصق غير صحيح")
+        w, h = (int(x) for x in size.split("x"))
+        wanted = []
+        for part in (req.query_params.get("items") or "").split(",")[:200]:
+            iid, _, n = part.partition(":")
+            if iid:
+                wanted.append((iid, max(1, min(int(n) if n.isdigit() else 1, 500))))
+        e = _html.escape
+        cells = []
+        for iid, n in wanted:
+            it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
+            if not it:
+                continue
+            codes = [r["barcode"] for r in db.all("SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, iid))]
+            value = next((c for c in codes if len(c) == 13), None) or (codes[0] if codes else None) or it["code"] or iid[-12:]
+            mark, kind = bc.svg(str(value))
+            nm = e((it["name_en"] or it["name_ar"] or "")[:34])
+            price = f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else ""
+            cell = f'<div class="lb"><div class="n">{nm}</div><div class="b">{mark}</div><div class="c"><span>{e(str(value))}</span><b>{price}</b></div></div>'
+            cells += [cell] * n
+        if not cells:
+            raise ValidationFailed("اختار الأصناف")
+        with db.transaction():
+            audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": size})
+        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملصقات باركود</title>
+<link rel="stylesheet" href="/static/labels.css"><link rel="stylesheet" href="/static/page-{w}x{h}.css"></head><body class="s{w}x{h}">{''.join(cells)}
+<script src="/static/print.js"></script></body></html>"""
+        return Response(page, media_type="text/html; charset=utf-8")
+
+    @handler
+    async def receipt_settings(req):
+        from ..printing import settings as rs
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(rs.save(db, ctx, await body(req)))
+        return J(rs.get(db, ctx.org_id))
 
     @handler
     async def health(req):
@@ -1488,6 +1574,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
         Route("/receipt/{id}", receipt),
+        Route("/labels", labels_page),
+        Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
