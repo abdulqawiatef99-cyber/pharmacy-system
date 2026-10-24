@@ -1485,54 +1485,301 @@ const SEV = {
   low: ["ℹ️ منخفضة", "b-warn"], info: ["ℹ️ معلومة", "b-ok"], insufficient: ["❔ لا توجد بيانات كافية", "b-ai"],
 };
 let SALE = null;
+let CHANNELS = null;
+const POS = { method: "cash", channel: null, split: false, parts: [] };
+const METHODS = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "تحويل"], ["credit", "آجل"]];
+const qtyText = (q, it) => (it.pack_size > 1 && q % it.pack_size === 0 ? `${q / it.pack_size} ${esc(it.pack_unit && it.pack_unit !== "pack" ? it.pack_unit : "علبة")}`
+  : it.pack_size > 1 && q > it.pack_size ? `${Math.floor(q / it.pack_size)} علبة + ${q % it.pack_size} ${esc(unitName({ base_unit_name: it.base_unit }))}`
+  : `${q} ${esc(unitName({ base_unit_name: it.base_unit }))}`);
+
+async function openDraft(id) {
+  SALE = id ? await api(`/api/sales/${id}`) : await api("/api/sales", { method: "POST", body: {} });
+  POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = [];
+}
 
 async function viewPos() {
-  if (!SALE || SALE.status !== "draft") SALE = await api("/api/sales", { method: "POST", body: {} });
+  CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
+  const drafts = (await api("/api/sales/drafts")).drafts;
+  if (!SALE || SALE.status !== "draft" || !drafts.some((d) => d.id === SALE.id)) {
+    await openDraft(drafts.length ? drafts[drafts.length - 1].id : null);
+  }
+  const tabs = (await api("/api/sales/drafts")).drafts;
   app.innerHTML = `
-  <div class="review">
-    <section class="panel">
-      <h1>الكاشير</h1>
-      <label class="f">امسح الباركود أو اكتب اسم الصنف <input id="posQ" autocomplete="off" autofocus></label>
-      <div id="posRes" class="cands mt"></div>
-      <div class="row mt"><label class="f grow">العميل (للآجل) <input id="posCust" placeholder="اسم أو تليفون"></label>
-        <button class="btn secondary small" id="posCustNew" type="button">عميل جديد</button></div>
-      <div id="posCustRes" class="cands"></div>
-      <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزنة</a></p><div id="posSum"></div>
+  <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}">
+      فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فاضية"}
+      <span class="x" data-close="${esc(d.id)}" title="اقفل الفاتورة دي" aria-label="اقفل">✕</span></button>`).join("")}
+    <button class="tab add" id="tabNew" title="فاتورة جديدة (F2)">+ فاتورة <kbd>F2</kbd></button></nav>
+  <div class="pos">
+    <section class="pos-main">
+      <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
+        <input id="posQ" class="big" autocomplete="off" autofocus></label>
+      <div id="posRes" class="results"></div>
+      <section class="panel" id="posCart"></section>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F2</kbd> فاتورة جديدة</p>
     </section>
-    <section class="panel" id="posCart"></section>
-  </div>`;
-  renderCart();
+    <aside class="pos-side" id="posSide"></aside>
+  </div>
+  <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزنة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a></p><div id="posSum"></div>`;
+  renderCart(); renderSide();
+  document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
+    if (e.target.dataset.close) return;
+    await openDraft(b.dataset.tab); viewPos();
+  }));
+  document.querySelectorAll("[data-close]").forEach((x) => x.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const d = tabs.find((t) => t.id === x.dataset.close);
+    if (d?.lines && !confirm("الفاتورة دي فيها أصناف. تقفلها من غير بيع؟")) return;
+    try { await api(`/api/sales/${x.dataset.close}/discard`, { method: "POST", body: {} }); if (SALE.id === x.dataset.close) SALE = null; viewPos(); }
+    catch (er) { toast(er.message, true); }
+  }));
+  $("#tabNew").addEventListener("click", newTab);
   const q = $("#posQ");
-  const search = async () => {
+  let res = [];
+  const search = async (unit) => {
     const v = q.value.trim(); if (!v) return;
-    const found = await findItems(v), res = found.items;
-    if (res.length === 1 && /^\d{6,}$/.test(v)) { await addItem(res[0], 0, 1); q.value = ""; return; }
-    $("#posRes").innerHTML = hintHtml(found.hint) + res.map((r, i) => `<div class="row"><span class="grow">${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · العبوة ${r.pack_size} ${esc(unitName(r))} · ${money(r.public_price)} ج · الرصيد ${esc(fmtStock(r.stock_qty, r) || "0")}</span></span>
-      <button class="btn small" data-add="${i}" data-kind="pack">علبة</button>
-      ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
+    const found = await findItems(v); res = found.items;
+    const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
+    if (res.length === 1 && scanned) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    if (res.length === 1 && !found.hint) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
+      ? `<p class="badge b-warn">⚠ الكود المربع ده مش متسجل على أي صنف. افتح كارت الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
+      + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
+        <div class="muted">${esc(r.strength_norm || "")} · ${r.pack_size} ${esc(unitName(r))} في العلبة · ${r.location ? `${esc(r.location)} · ` : ""}رصيد: <b>${esc(fmtStock(r.stock_qty, r) || "0")}</b></div></div>
+        <b class="price">${money(r.public_price)} ج</b>
+        ${r.stock_qty ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>
+        ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}`
+        : `<span class="badge b-err">✕ ناقص</span>`}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
   };
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search().catch((er) => toast(er.message, true)); } });
+  q.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const first = $("#posRes [data-add]");
+    if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
+      const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
+    }
+    q.dataset.searched = q.value.trim();
+    search(e.shiftKey).catch((er) => toast(er.message, true));
+  });
+  bindPosExtras();
+}
+
+async function newTab() {
+  try { await openDraft(null); viewPos(); } catch (er) { toast(er.message, true); }
+}
+document.addEventListener("keydown", (e) => {
+  if (!location.hash.startsWith("#/pos") || $("dialog[open]")) return;
+  if (e.key === "F2") { e.preventDefault(); newTab(); }
+  if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
+});
+
+async function addItem(item, packs, units) {
+  try {
+    SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
+    $("#posRes").innerHTML = ""; $("#posQ").value = ""; delete $("#posQ").dataset.searched; $("#posQ").focus();
+    renderCart(); renderSide();
+  } catch (er) { toast(er.message, true); }
+}
+
+async function patchLine(lineId, body) {
+  try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); }
+  catch (er) { toast(er.message, true); }
+}
+
+function renderCart(findings = null) {
+  const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
+  $("#posCart").innerHTML = `
+    <div class="tablewrap"><table class="cart">
+      <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
+      <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""}">
+        <td><b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
+          ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية مش متاحة"}</span>` : ""}</td>
+        <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
+          <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زود">+</button></div></td>
+        <td class="num">${l.allocations.map((a) => money(a.unit_price)).filter((v, i, arr) => arr.indexOf(v) === i).join(" / ")}</td>
+        <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
+        <td>${canDisc ? `<input class="narrow" type="number" min="0" max="100" step="0.5" value="${l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="%">`
+          : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}</td>
+        <td class="num"><b>${money(l.net)}</b></td>
+        <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="شيل الصنف">✕</button></td></tr>`).join("")
+        || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
+    </table></div><div id="posSafety"></div>`;
+  const line = (id) => s.lines.find((l) => l.id === id);
+  const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
+  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
+  $("#posCart").querySelectorAll("[data-minus]").forEach((b) => b.addEventListener("click", async () => {
+    const l = line(b.dataset.minus), n = l.qty_base - step(l);
+    if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
+    else patchLine(l.id, { qty_base: n });
+  }));
+  $("#posCart").querySelectorAll("[data-disc]").forEach((inp) => inp.addEventListener("change", () => patchLine(inp.dataset.disc, { discount_bp: toBp(inp.value) || 0 })));
+  $("#posCart").querySelectorAll("[data-askdisc]").forEach((b) => b.addEventListener("click", () => {
+    const v = prompt("نسبة الخصم %:"); if (v) patchLine(b.dataset.askdisc, { discount_bp: toBp(v) });
+  }));
+  $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
+    SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart(); renderSide();
+  }));
+  if (findings) renderFindings(findings);
+}
+
+function chanOptions(kind, sel) {
+  const list = CHANNELS.filter((c) => c.kind === kind);
+  return list.length ? `<select data-ch>${list.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>` : "";
+}
+
+function renderSide() {
+  const s = SALE, d = s.delivery || {};
+  if (!POS.split) POS.parts = [];
+  const remaining = s.total - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
+  $("#posSide").innerHTML = `
+    <section class="panel">
+      <div class="seg2" role="radiogroup" aria-label="نوع الفاتورة">
+        <button class="${s.kind !== "delivery" ? "on" : ""}" data-kind="store">${s.kind !== "delivery" ? "✓ " : ""}في الصيدلية</button>
+        <button class="${s.kind === "delivery" ? "on" : ""}" data-kind="delivery">${s.kind === "delivery" ? "✓ " : ""}توصيل للبيت</button></div>
+      <label class="f mt">العميل ${s.kind === "delivery" ? "" : "(اختياري)"}
+        <input id="posCust" placeholder="اسم أو رقم موبايل" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
+      <div id="posCustRes" class="cands"></div>
+      ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">شيل العميل</a></p>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
+      ${s.kind === "delivery" ? `<div class="deliv">
+        <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
+        <label class="f">الموبايل <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
+        <label class="f">مين هيوصّل <input data-dl="courier" value="${esc(d.courier || "")}"></label>
+        <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}"></label></div>` : ""}
+      <div class="sum"><span>الإجمالي</span><b>${money(s.subtotal)}</b></div>
+      ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
+      ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
+      <div class="sum due"><span>المطلوب</span><b>${money(s.total)}</b></div>
+    </section>
+    <section class="panel">
+      ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
+          <select data-pm="${i}">${METHODS.map(([m, t]) => `<option value="${m}" ${p.method === m ? "selected" : ""}>${t}</option>`).join("")}</select>
+          ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
+          <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}">
+          <button class="btn small secondary" data-prm="${i}" aria-label="شيل">✕</button></div>`).join("")}
+        <button class="btn small secondary" id="partAdd">+ طريقة دفع</button>
+        <p class="badge ${remaining === 0 ? "b-ok" : "b-warn"} mt">${remaining === 0 ? "✓ الدفع كامل" : `⚠ فاضل ${money(remaining)}`}</p>
+        <p><a href="#" id="splitOff">رجوع لطريقة دفع واحدة</a></p>`
+      : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختار العميل الأول\"" : ""}>${t}</button>`).join("")}</div>
+        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "المكنة" : "المحفظة / طريقة التحويل"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
+        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}"></label>
+          <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
+        <p><a href="#" id="splitOn">تقسيم الدفع (جزء كاش وجزء فيزا أو تحويل)</a></p>`}
+      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع وطباعة <kbd>F9</kbd></button>
+    </section>`;
+  document.querySelectorAll("[data-kind]").forEach((b) => b.addEventListener("click", async () => {
+    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { kind: b.dataset.kind } }); renderSide(); refreshTabLabel(); }
+    catch (er) { toast(er.message, true); }
+  }));
+  document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
+    const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
+    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
+    catch (er) { toast(er.message, true); }
+  }));
   $("#posCust").addEventListener("input", async (e) => {
-    const v = e.target.value.trim(); if (v.length < 2) return;
+    const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
     const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
-    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)} — رصيد ${money(c.balance)} / حد ${money(c.credit_limit)}</button>`).join("");
+    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.phone ? ` — ${esc(c.phone)}` : ""}</button>`).join("") || `<p class="muted">مفيش عميل بالاسم ده</p>`;
     $("#posCustRes").querySelectorAll("[data-cust]").forEach((b) => b.addEventListener("click", async () => {
-      // customer is fixed when the sale is created: start a new draft for this customer, moving lines
-      const lines = SALE.lines;
-      SALE = await api("/api/sales", { method: "POST", body: { customer_id: b.dataset.cust } });
-      for (const l of lines) SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: l.item_id, units: l.qty_base, discount_bp: l.discount_bp } });
-      $("#posCustRes").innerHTML = ""; renderCart();
+      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } });
+      if (SALE.kind === "delivery" && SALE.customer?.phone && !SALE.delivery?.phone)
+        SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { phone: SALE.customer.phone } } });
+      renderSide();
     }));
   });
-  $("#posCustNew").addEventListener("click", async () => {
+  $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
+  $("#posCustNew")?.addEventListener("click", async (e) => {
+    e.preventDefault();
     const name = prompt("اسم العميل:"); if (!name) return;
-    const phone = prompt("التليفون (اختياري):") || null;
-    const limit = parseFloat(prompt("حد الآجل بالجنيه (0 = بدون آجل):", "0") || "0");
-    try { await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: Math.round(limit * 100) } }); toast("تم إضافة العميل"); }
-    catch (er) { toast(er.message, true); }
+    const phone = prompt("الموبايل (اختياري):") || null;
+    try {
+      const c = await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: 0 } });
+      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } }); renderSide();
+    } catch (er) { toast(er.message, true); }
   });
+  document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
+    POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
+  }));
+  $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
+  $("#payGiven")?.addEventListener("input", (e) => {
+    const g = toPiasters(e.target.value), ch = g - s.total;
+    $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
+  });
+  $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total }]; renderSide(); });
+  $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });
+  $("#partAdd")?.addEventListener("click", () => { POS.parts.push({ method: "card", channel_id: CHANNELS.find((c) => c.kind === "card")?.id, amount: Math.max(0, remaining) }); renderSide(); });
+  document.querySelectorAll("[data-pm]").forEach((x) => x.addEventListener("change", () => { const p = POS.parts[+x.dataset.pm]; p.method = x.value; p.channel_id = CHANNELS.find((c) => c.kind === x.value)?.id || null; renderSide(); }));
+  document.querySelectorAll("[data-pc]").forEach((x) => x.addEventListener("change", () => { POS.parts[+x.dataset.pc].channel_id = x.value; }));
+  document.querySelectorAll("[data-pa]").forEach((x) => x.addEventListener("change", () => { POS.parts[+x.dataset.pa].amount = toPiasters(x.value) || 0; renderSide(); }));
+  document.querySelectorAll("[data-prm]").forEach((x) => x.addEventListener("click", () => { POS.parts.splice(+x.dataset.prm, 1); renderSide(); }));
+  $("#posDone").addEventListener("click", () => complete(null));
+}
+
+function refreshTabLabel() {
+  const t = document.querySelector(`.tab.on`);
+  if (t && SALE) t.firstChild.textContent = t.firstChild.textContent.replace(/ · توصيل/, "") .replace(/^(\s*فاتورة \d+)/, `$1${SALE.kind === "delivery" ? " · توصيل" : ""}`);
+}
+
+function renderFindings(findings) {
+  const needs = (f) => ["override", "block", "acknowledge"].includes(f.requires);
+  $("#posSafety").innerHTML = `<div class="panel mt"><h2>فحص السلامة الدوائية</h2>
+    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${SEV[f.severity][0]}</span> ${esc(f.message)}
+      ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
+      ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
+      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يتسجل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
+    <button class="btn mt" id="posConfirm">تأكيد وإتمام البيع</button></div>`;
+  $("#posConfirm").addEventListener("click", () => complete(findings));
+}
+
+function currentPayments() {
+  if (POS.split) return POS.parts.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount, channel_id: p.channel_id || null }));
+  return [{ method: POS.method, amount: SALE.total, channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
+}
+
+async function complete(findings) {
+  const payments = currentPayments();
+  const cash = payments.filter((p) => p.method === "cash").reduce((a, p) => a + p.amount, 0);
+  if (!findings) {
+    const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
+    const blocking = r.findings.filter((f) => ["override", "block", "acknowledge"].includes(f.requires));
+    if (r.findings.length && (blocking.length || r.findings.some((f) => f.severity !== "insufficient"))) {
+      renderCart(r.findings); return;
+    }
+    findings = r.findings;
+  }
+  const decisions = {};
+  document.querySelectorAll("input[data-dec]").forEach((inp) => {
+    const f = findings[+inp.dataset.dec];
+    if (!f) return;
+    if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
+    else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
+  });
+  const btn = $("#posDone");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  SALE.request_id = SALE.request_id || newKey();
+  try {
+    const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
+      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id,
+              confirm_below_cost: !!SALE.confirm_below_cost } });
+    try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 && done.kind !== "delivery" } }); }
+    catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
+    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: الفلوس مع اللي بيوصّل لحد ما يسلمها)" : ""}`);
+    SALE = null; viewPos();
+  } catch (er) {
+    toast(er.message, true);
+    btn.disabled = false;
+    if (er.code === "safety_unresolved") renderCart(er.details.findings);
+    if (er.code === "not_draft") { SALE = null; viewPos(); }
+    if (er.code === "no_open_shift") $("#posShift").click();
+    if (er.code === "below_cost_confirm") {
+      const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
+      if (confirm(`⛔ البيع ده تحت التكلفة (بخسارة):\n${lines}\n\nمتأكد إنك عايز تكمل؟`)) { SALE.confirm_below_cost = true; return complete(findings); }
+    }
+  }
+}
+
+function bindPosExtras() {
   $("#posShift").addEventListener("click", async (e) => {
     e.preventDefault();
     let sh = null;
@@ -1540,7 +1787,7 @@ async function viewPos() {
     if (!sh) {
       const v = prompt("الخزنة مقفولة. رصيد بداية الشيفت بالجنيه:", "0");
       if (v === null) return;
-      try { sh = await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(v) || 0 } }); }
+      try { sh = await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(v) || 0 } }); sh = await api("/api/cash/current"); }
       catch (er) { return toast(er.message, true); }
     }
     const k = sh.cash_by_kind || {};
@@ -1549,7 +1796,9 @@ async function viewPos() {
       : `<div class="totals"><div>بداية<b>${money(sh.opening_cash)}</b></div>
       <div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div><div>مرتجع/إلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div>
       <div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div><div>مصروفات<b>${money(k.payout || 0)}</b></div>
-      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div><div>فيزا<b>${money(sh.card_total)}</b></div></div>`)
+      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div>
+      ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "فيزا" : "تحويل"} — ${esc(c.channel || "")}<b>${money(c.amount)}</b></div>`).join("")}
+      ${sh.with_courier ? `<div>مع الدليفري<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لسه ماتسلمتش</span></div>` : ""}</div>`)
       + `<div class="row mt">${ME.permissions.includes("cash.manage") ? `<button class="btn small secondary" id="shPay">مصروف من الدرج</button>` : ""}
       ${ME.permissions.includes("cash.close") ? `<button class="btn small" id="shClose">قفل الشيفت</button>` : ""}</div>`;
     $("#shPay")?.addEventListener("click", async () => {
@@ -1566,107 +1815,28 @@ async function viewPos() {
       catch (er) { toast(er.message, true); }
     });
   });
+  $("#posDeliv").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const ds = (await api("/api/deliveries")).deliveries;
+    const ST = { out: ["b-warn", "⚠ خرجت"], delivered: ["b-info", "ℹ اتسلمت — الفلوس لسه"] };
+    $("#posSum").innerHTML = `<section class="panel"><h2>التوصيلات المفتوحة</h2><table><thead><tr><th>فاتورة</th><th>العميل / العنوان</th><th>مين بيوصّل</th><th>فلوس معاه</th><th>الحالة</th><th></th></tr></thead><tbody>
+      ${ds.map((d) => `<tr><td><a href="#/sales/${esc(d.sale_id)}">${d.sale_no}</a></td><td>${esc(d.customer || "")} ${esc(d.address || "")} ${esc(d.phone || "")}</td>
+        <td>${esc(d.courier || "—")}</td><td class="num">${money(d.cash_due)}</td><td><span class="badge ${ST[d.status][0]}">${ST[d.status][1]}</span></td>
+        <td>${d.status === "out" ? `<button class="btn small secondary" data-dst="delivered" data-id="${esc(d.sale_id)}">اتسلمت</button>` : ""}
+          <button class="btn small" data-dst="settled" data-id="${esc(d.sale_id)}">الفلوس وصلت الدرج</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش توصيلات مفتوحة</td></tr>`}</tbody></table></section>`;
+    document.querySelectorAll("[data-dst]").forEach((b) => b.addEventListener("click", async () => {
+      try { await api(`/api/sales/${b.dataset.id}/delivery`, { method: "POST", body: { status: b.dataset.dst } }); toast("اتسجل"); $("#posDeliv").click(); }
+      catch (er) { toast(er.message, true); }
+    }));
+  });
   $("#posSummary")?.addEventListener("click", async (e) => {
     e.preventDefault();
     const s = await api("/api/sales/summary");
     $("#posSum").innerHTML = `<div class="totals"><div>فواتير<b>${s.n}</b></div><div>مبيعات<b>${money(s.total)}</b></div>
-      <div>نقدي<b>${money(s.cash)}</b></div><div>فيزا<b>${money(s.card)}</b></div><div>آجل<b>${money(s.credit)}</b></div>
+      <div>نقدي<b>${money(s.cash)}</b></div><div>فيزا<b>${money(s.card)}</b></div><div>تحويل<b>${money(s.transfer || 0)}</b></div><div>آجل<b>${money(s.credit)}</b></div>
       <div>مرتجع<b>${money(s.returns)}</b></div>${s.gross_profit_egp != null ? `<div>مجمل الربح<b>${esc(s.gross_profit_egp)}</b></div>` : ""}</div>`;
   });
 }
-
-async function addItem(item, packs, units) {
-  try {
-    SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
-    $("#posRes").innerHTML = ""; $("#posQ").value = ""; $("#posQ").focus();
-    renderCart();
-  } catch (er) { toast(er.message, true); }
-}
-
-function renderCart(findings = null) {
-  const s = SALE;
-  $("#posCart").innerHTML = `
-    <h2>الفاتورة ${s.customer ? `— ${esc(s.customer.name)} (رصيد ${money(s.customer.balance)} / حد ${money(s.customer.credit_limit)})` : ""}</h2>
-    <div class="tablewrap"><table>
-      <thead><tr><th>الصنف</th><th>الكمية</th><th>التشغيلة/السعر</th><th>الإجمالي</th><th></th></tr></thead>
-      <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""}">
-        <td><b>${esc(l.item.name)}</b><div class="muted">${esc(l.item.strength || "")} ${esc(l.item.form || "")}${l.item.active_ingredient ? ` · ${esc(l.item.active_ingredient)}` : ""}</div>
-          ${l.near_expiry ? `<span class="badge b-warn">⚠️ صلاحية قريبة</span>` : ""}${l.problem ? `<span class="badge b-err">${l.problem === "no_price" ? "بدون سعر" : "غير متاح"}</span>` : ""}</td>
-        <td>${l.qty_base} ${esc(l.item.base_unit)}</td>
-        <td class="muted">${l.allocations.map((a) => `${esc(a.batch_no || "—")}: ${a.qty} × ${money(a.unit_price)}`).join("<br>")}</td>
-        <td>${money(l.net)}${l.discount ? `<div class="muted">خصم ${money(l.discount)}</div>` : ""}</td>
-        <td><button class="btn small secondary" data-rm="${esc(l.id)}">حذف</button></td></tr>`).join("") || `<tr><td colspan="5" class="muted">امسح أول صنف</td></tr>`}</tbody>
-    </table></div>
-    <div class="totals mt"><div>الإجمالي<b>${money(s.subtotal)}</b></div><div>الخصم<b>${money(s.discount_total)}</b></div><div>المطلوب<b>${money(s.total)}</b></div></div>
-    <div class="row mt">
-      <label class="f">نقدي <input id="payCash" type="number" step="0.01" value="${money(s.total)}"></label>
-      <label class="f">فيزا <input id="payCard" type="number" step="0.01" value="0"></label>
-      <label class="f">آجل <input id="payCredit" type="number" step="0.01" value="0" ${s.customer ? "" : "disabled"}></label>
-    </div>
-    <div id="posSafety"></div>
-    <div class="row mt"><button class="btn" id="posDone" ${s.lines.length ? "" : "disabled"}>${findings ? "تأكيد وإتمام البيع" : "مراجعة السلامة وإتمام البيع"}</button></div>`;
-  $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
-    SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart();
-  }));
-  if (findings) renderFindings(findings);
-  $("#posDone").addEventListener("click", () => complete(findings));
-}
-
-function renderFindings(findings) {
-  const needs = (f) => ["override", "block", "acknowledge"].includes(f.requires);
-  $("#posSafety").innerHTML = `<div class="panel mt"><h2>فحص السلامة الدوائية</h2>
-    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${SEV[f.severity][0]}</span> ${esc(f.message)}
-      ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
-      ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
-      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يتسجل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}</div>`;
-}
-
-async function complete(findings) {
-  const cash = toPiasters($("#payCash").value) || 0, card = toPiasters($("#payCard").value) || 0,
-    credit = toPiasters($("#payCredit").value) || 0;
-  if (!findings) {
-    const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
-    const blocking = r.findings.filter((f) => ["override", "block", "acknowledge"].includes(f.requires));
-    if (r.findings.length && (blocking.length || r.findings.some((f) => f.severity !== "insufficient"))) {
-      renderCart(r.findings); $("#payCash").value = money(cash); return;
-    }
-    findings = r.findings;
-  }
-  const decisions = {};
-  document.querySelectorAll("[data-dec]").forEach((inp) => {
-    const f = findings[+inp.dataset.dec];
-    // overrides need a reason the user actually typed; acknowledgements may be blank
-    if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
-    else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
-  });
-  const btn = $("#posDone");
-  if (btn.disabled) return;                     // ignore double clicks
-  btn.disabled = true;
-  SALE.request_id = SALE.request_id || newKey(); // same id for every retry of this payment
-  try {
-    const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { paid_cash: cash, paid_card: card, on_credit: credit, safety_decisions: decisions,
-              version: SALE.version, request_id: SALE.request_id, confirm_below_cost: !!SALE.confirm_below_cost } });
-    // thermal printer + drawer through the PC; if not configured or offline, print from the browser
-    try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 } }); }
-    catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
-    toast(`تم البيع — فاتورة رقم ${done.sale_no}`);
-    SALE = null; viewPos();
-  } catch (er) {
-    toast(er.message, true);
-    btn.disabled = false;
-    if (er.code === "safety_unresolved") renderCart(er.details.findings);
-    if (er.code === "not_draft") { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); }
-    if (er.code === "no_open_shift") $("#posShift").click();
-    if (er.code === "below_cost_confirm") {
-      const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
-      if (confirm(`⛔ البيع ده تحت التكلفة (بخسارة):\n${lines}\n\nمتأكد إنك عايز تكمل؟`)) {
-        SALE.confirm_below_cost = true; btn.disabled = false; return complete(findings);
-      }
-    }
-  }
-}
-
 
 // ------------------------------------------------------------------ notifications (owner + managers)
 function setBell(n) {
