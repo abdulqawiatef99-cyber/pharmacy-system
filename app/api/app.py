@@ -485,6 +485,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"items": sup.shortages(db, ctx_of(req))})
 
     @handler
+    async def customers_all(req):
+        from ..sales import customers as cu
+        qp = req.query_params
+        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None)})
+
+    @handler
+    async def customer_profile(req):
+        from ..sales import customers as cu
+        ctx = ctx_of(req)
+        if req.method == "PATCH":
+            return J(cu.update(db, ctx, req.path_params["id"], await body(req)))
+        return J(cu.profile(db, ctx, req.path_params["id"]))
+
+    @handler
+    async def customer_refill(req):
+        from ..sales import customers as cu
+        ctx = ctx_of(req)
+        b = await body(req)
+        cid = req.path_params["id"]
+        if b.get("prepare"):
+            return J({"sale_id": cu.prepare_refill(db, ctx, cid)})
+        if b.get("remove"):
+            return J(cu.remove_refill(db, ctx, cid, str(b.get("item_id", ""))))
+        return J(cu.save_refill(db, ctx, cid, str(b.get("item_id", "")), b.get("qty_base"), b.get("every_days", 30)))
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -1423,6 +1449,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers", customers_list),
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
+        Route("/api/customers/all", customers_all),
+        Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
+        Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
         Route("/receipt/{id}", receipt),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),

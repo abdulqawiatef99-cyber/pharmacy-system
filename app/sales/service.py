@@ -428,6 +428,8 @@ class Sales:
                          after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
                                 "below_cost": below_cost or None})
+            from . import customers as _cust
+            _cust.mark_refilled(self.db, sid)
             disc_lines = [l for l in preview["lines"] if l["discount_bp"]]
             if disc_lines:
                 names = "، ".join(f"{l['item']['name']} {l['discount_bp'] / 100:g}%" for l in disc_lines[:4])
