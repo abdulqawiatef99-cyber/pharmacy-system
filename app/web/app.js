@@ -179,6 +179,8 @@ const routes = [
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
   [/^#\/shortages$/, viewShortages],
   [/^#\/customers$/, viewCustomers],
+  [/^#\/expenses$/, viewExpenses],
+  [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
@@ -210,6 +212,7 @@ async function route() {
     if (ME.prefs) applyPrefs(ME.prefs);
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
+    $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -2111,6 +2114,83 @@ async function viewCustomer(id) {
     try { await api(`/api/customers/${id}/refills`, { method: "POST", body: { item_id: picked.id, qty_base: (+$("#rQty").value || 1) * picked.pack_size, every_days: +$("#rEvery").value } }); viewCustomer(id); }
     catch (err) { toast(err.message, true); }
   });
+}
+
+// ------------------------------------------------------------------ expenses
+const EX_ST = { pending: ["b-warn", "⚠ مستني موافقة"], approved: ["b-ok", "✓ معتمد"], rejected: ["b-err", "✕ مرفوض"] };
+async function viewExpenses() {
+  const month = new Date().toISOString().slice(0, 7);
+  const r = await api(`/api/expenses?month=${month}`), canA = ME.permissions.includes("expenses.approve");
+  const pending = r.expenses.filter((e) => e.status === "pending");
+  app.innerHTML = `<form class="panel" id="exNew"><h1>تسجيل مصروف</h1>
+    <div class="formgrid"><label class="f">البند <select name="cat">${r.categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
+      <label class="f">المبلغ (ج) <input name="a" type="number" step="0.25" min="0" required></label>
+      <label class="f">الفلوس طلعت منين <select name="from"><option value="drawer">من درج الشيفت</option><option value="outside">من برّه الدرج</option></select></label>
+      <label class="f">التاريخ <input name="d" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
+      <label class="f">ملاحظة <input name="n" placeholder="مثال: أكياس + بكرة إيصالات"></label></div>
+    <button class="btn mt">سجّل</button>
+    <p class="muted">${ME.role === "owner" ? "مصاريفك بتتعتمد على طول." : `المصروف بيستنى موافقة ${canA ? "الصاحب لو أكبر من " + money(r.manager_limit) + " ج" : "المدير أو الصاحب"} قبل ما يتحسب.`}</p></form>
+  ${canA && pending.length ? `<section class="panel"><h2>⚠ مستني موافقتك (${pending.length})</h2>${exTable(pending, true)}</section>` : ""}
+  <section class="panel"><div class="row between"><h2>مصاريف الشهر ده</h2>${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>${exTable(r.expenses, false)}
+    ${canA ? `<form class="row mt" id="exCat"><input name="n" placeholder="بند جديد" required><button class="btn small secondary">أضف بند</button></form>` : ""}</section>`;
+  $("#exNew").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try { const x = await api("/api/expenses", { method: "POST", body: { category_id: f.cat.value, amount: toPiasters(f.a.value), paid_from: f.from.value, spent_on: f.d.value, note: f.n.value || null } });
+      toast(x.status === "approved" ? "✓ اتسجل واتعتمد" : "اتسجل — مستني الموافقة"); viewExpenses(); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#exCat")?.addEventListener("submit", async (e) => { e.preventDefault(); try { await api("/api/expenses", { method: "POST", body: { new_category: e.target.n.value } }); viewExpenses(); } catch (err) { toast(err.message, true); } });
+  document.querySelectorAll("[data-exok]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/expenses/${b.dataset.exok}/decide`, { method: "POST", body: { approve: true } }); viewExpenses(); } catch (err) { toast(err.message, true); }
+  }));
+  document.querySelectorAll("[data-exno]").forEach((b) => b.addEventListener("click", async () => {
+    const reason = prompt("سبب الرفض:"); if (!reason) return;
+    try { await api(`/api/expenses/${b.dataset.exno}/decide`, { method: "POST", body: { approve: false, reason } }); viewExpenses(); } catch (err) { toast(err.message, true); }
+  }));
+}
+function exTable(list, actions) {
+  return `<table><thead><tr><th>التاريخ</th><th>البند</th><th>المبلغ</th><th>منين</th><th>سجّله</th><th>الحالة</th>${actions ? "<th></th>" : ""}</tr></thead><tbody>
+    ${list.map((e) => `<tr><td>${esc(e.spent_on)}</td><td>${esc(e.category)}${e.note ? `<div class="muted">${esc(e.note)}</div>` : ""}</td><td class="num">${money(e.amount)}</td>
+      <td>${e.paid_from === "drawer" ? "الدرج" : "برّه"}</td><td>${esc(e.by_name || "")}</td>
+      <td><span class="badge ${EX_ST[e.status][0]}">${EX_ST[e.status][1]}</span>${e.reject_reason ? `<div class="muted">${esc(e.reject_reason)}</div>` : ""}</td>
+      ${actions ? `<td><button class="btn small" data-exok="${esc(e.id)}">اعتمد</button> <button class="btn small secondary" data-exno="${esc(e.id)}">ارفض</button></td>` : ""}</tr>`).join("")
+      || `<tr><td colspan="7" class="muted">مفيش مصاريف</td></tr>`}</tbody></table>`;
+}
+
+// ------------------------------------------------------------------ profit (owner)
+async function viewProfit() {
+  const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const now = new Date(), first = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastFirst = new Date(now.getFullYear(), now.getMonth() - 1, 1), lastEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+  const ranges = { today: [now, now], month: [first, now], last: [lastFirst, lastEnd] };
+  app.innerHTML = `<section class="panel"><h1>الربح</h1><div class="row">
+    <div class="seg2 small" id="prR"><button data-r="today">النهارده</button><button data-r="month" class="on">الشهر ده</button><button data-r="last">الشهر اللي فات</button></div>
+    <label class="f">من <input type="date" id="prF"></label><label class="f">لحد <input type="date" id="prT"></label><button class="btn small secondary" id="prGo">اعرض</button></div></section>
+    <div id="prBox"></div>`;
+  const show = async (f, t) => {
+    $("#prF").value = f; $("#prT").value = t;
+    try {
+      const r = await api(`/api/reports/profit?from=${f}&to=${t}`);
+      $("#prBox").innerHTML = `<div class="totals">
+        <div>المبيعات (بعد المرتجع)<b>${money(r.revenue)}</b><span>${r.invoices} فاتورة · خصومات ${money(r.discount)}</span></div>
+        <div>تكلفة البضاعة اللي اتباعت<b>${money(r.cost)}</b></div>
+        <div class="${r.gross_profit >= 0 ? "t-ok" : "t-err"}">مجمل الربح<b>${money(r.gross_profit)}</b>${r.gross_margin_pct != null ? `<span>${r.gross_margin_pct}%</span>` : ""}</div>
+        <div>المصاريف المعتمدة<b>${money(r.expenses_total)}</b></div>
+        <div class="${r.net_profit >= 0 ? "t-ok" : "t-err"}">${r.net_profit >= 0 ? "✓ صافي الربح" : "✕ صافي خسارة"}<b>${money(Math.abs(r.net_profit))}</b></div></div>
+        ${r.pending_expenses.n ? `<p class="badge b-warn mt">⚠ فيه ${r.pending_expenses.n} مصروف (${money(r.pending_expenses.a)} ج) مستني موافقة ومش محسوب — <a href="#/expenses">راجعهم</a></p>` : ""}
+        ${r.unknown_cost_lines ? `<p class="badge b-warn mt">⚠ ${r.unknown_cost_lines} سطر بيع من غير تكلفة مسجلة — الربح الحقيقي ممكن يبقى أقل</p>` : ""}
+        ${r.delivery_fees ? `<p class="muted">رسوم توصيل: ${money(r.delivery_fees)} ج (محسوبة في مجمل الربح)</p>` : ""}
+        <section class="panel mt"><h2>المصاريف حسب البند</h2><table><tbody>${r.expenses.map((e) => `<tr><td>${esc(e.category)}</td><td class="num">${money(e.amount)}</td></tr>`).join("") || `<tr><td class="muted">مفيش</td></tr>`}</tbody></table>
+        <p class="muted">الرواتب هتتحسب لوحدها لما نعمل الرواتب (المرحلة 2)؛ لحد دلوقتي سجّلها كمصروف "رواتب وأجور".</p></section>`;
+    } catch (err) { $("#prBox").innerHTML = `<p class="badge b-err">✕ ${esc(err.message)}</p>`; }
+  };
+  document.querySelectorAll("#prR [data-r]").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll("#prR button").forEach((x) => x.classList.toggle("on", x === b));
+    const [a, z] = ranges[b.dataset.r]; show(iso(a), iso(z));
+  }));
+  $("#prGo").addEventListener("click", () => show($("#prF").value, $("#prT").value));
+  show(iso(first), iso(now));
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)
