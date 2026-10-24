@@ -49,19 +49,21 @@ extra_discount/extra_tax, acknowledged_issues, raw_extraction)`,
 `purchase_invoice_lines(raw fields + item_id + match_status + field_sources/field_confidence)`.
 Partial UNIQUE index: one live invoice per (org, supplier, invoice_no).
 
-### Planned tables (not created yet — designed so they reuse the above)
-- Sales: `sales`, `sale_lines(batch_id)`, `payments`, `customers`, `customer_ledger`.
-- Inventory count: `count_sessions`, `count_entries(device, scanned_at)`, adjustments post
-  `adjustment` movements.
-- Safety engine: `active_ingredients`, `item_ingredients(item, ingredient, strength)`,
-  `knowledge_sources(name, version, license, valid_from)`, `safety_rules(type, severity,
-  source_id, status draft|approved|disabled, approved_by)`, `safety_events(rule, context, decision,
-  override_reason, user)`.
-- Recalls: `regulatory_notices(source=EDA, number, date, url)`, `notice_batches(item ref,
-  batch_no)` matched against `batches.batch_no`.
+### Created after the core (migrations 0004–0008)
+- **0004 data import**: `import_runs` (dry-run report, status, applied once per file), `import_rows`.
+- **0005 safety**: `knowledge_sources`, `active_ingredients`, `item_ingredients` (verified flag),
+  `safety_rules` (versioned, draft→approved→disabled, supersedes), `safety_events` (append-only).
+- **0006 recalls**: `regulatory_notices`, `notice_items(batch_numbers)`, `recall_matches`.
+- **0007 counting**: `count_sessions`, `count_entries` (one live entry per item/batch/location;
+  `ledger_seq` = ledger position at count time).
+- **0008 procurement**: `consumption_history`; suppliers gain `lead_time_days`, `order_cycle_days`.
+
+### Still planned (designed to reuse the above)
+- Sales: `sales`, `sale_lines(batch_id)`, `payments`, `customers`, `customer_ledger` — sale lines
+  call `SafetyEngine.check/resolve` before posting `sale` movements (FEFO).
 - Integrations: `integration_accounts(org, provider, encrypted credentials ref)`,
   `outbox(event, payload, status)` for reliable delivery to Talabat/Instashop/app.
-- Migration: `import_runs(source, file sha, mode dry|apply, report JSON)`, `import_rows`.
+- Sync (cloud phase): per-table change log keyed by uuid7.
 
 ## 4. Purchase invoice pipeline
 ```
