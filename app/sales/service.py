@@ -455,6 +455,29 @@ class Sales:
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ reports
+    def list_sales(self, ctx: Context, *, day: str | None = None, sale_no: int | None = None,
+             limit: int = 200) -> list[dict]:
+        """Completed/voided invoices of one local day (default today), newest first;
+        or one invoice by its number."""
+        ctx.require("sales.read")
+        q = ("SELECT s.id, s.sale_no, s.status, s.total, s.paid_cash, s.paid_card, s.on_credit,"
+             " s.returned_total, s.completed_at, s.voided_at, c.name customer,"
+             " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
+             " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"
+             " WHERE s.org_id=? AND s.branch_id=? AND s.status<>'draft'")
+        params: list = [ctx.org_id, ctx.branch_id]
+        if sale_no is not None:
+            q += " AND s.sale_no=?"
+            params.append(sale_no)
+        else:
+            d = date.fromisoformat(day) if day else local_today()
+            lo, hi = local_day_bounds(d)
+            q += " AND s.completed_at>=? AND s.completed_at<?"
+            params += [lo, hi]
+        q += " ORDER BY s.completed_at DESC LIMIT ?"
+        params.append(min(limit, 500))
+        return [dict(r) for r in self.db.all(q, tuple(params))]
+
     def day_summary(self, ctx: Context, day: str | None = None) -> dict:
         ctx.require("sales.read")
         d = date.fromisoformat(day) if day else local_today()

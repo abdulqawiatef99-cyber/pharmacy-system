@@ -224,3 +224,29 @@ class TestItemsStock(APICase):
         self.http_login()
         rows = self.c.get("/api/items?q=panadol").json()
         self.assertEqual(rows[0]["stock_qty"], 5)
+
+
+class TestSalesHistory(APICase):
+    def test_list_view_and_return_through_api(self):
+        from decimal import Decimal
+        from app.inventory import service as inv
+        from app.sales.cash import CashDrawer
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=10, movement_type="opening",
+                              unit_cost=Decimal("16"))
+        CashDrawer(self.db).open(self.ctx, 0)
+        self.http_login()
+        sale = self.c.post("/api/sales", headers=H, json={}).json()
+        sale = self.c.post(f"/api/sales/{sale['id']}/lines", headers=H, json={"item_id": self.pan, "packs": 1}).json()
+        r = self.c.post(f"/api/sales/{sale['id']}/complete", headers=H,
+                        json={"paid_cash": sale["total"], "request_id": "t1"})
+        self.assertEqual(r.status_code, 200, r.text)
+        rows = self.c.get("/api/sales").json()
+        self.assertEqual([x["id"] for x in rows], [sale["id"]])
+        self.assertEqual(self.c.get(f"/api/sales?no={rows[0]['sale_no']}").json()[0]["id"], sale["id"])
+        self.assertEqual(self.c.get("/api/sales?no=abc").status_code, 422)
+        line = self.c.get(f"/api/sales/{sale['id']}").json()["lines"][0]
+        r = self.c.post(f"/api/sales/{sale['id']}/return", headers=H,
+                        json={"lines": {line["id"]: 1}, "refund_method": "cash", "reason": "غيّر رأيه"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.c.get("/api/sales").json()[0]["returned_total"], r.json()["refund"])

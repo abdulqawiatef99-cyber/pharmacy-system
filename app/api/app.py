@@ -678,6 +678,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(sales.get(ctx, sales.create(ctx, b.get("customer_id"))), status_code=201)
 
     @handler
+    async def sales_list(req):
+        qp = req.query_params
+        no = qp.get("no")
+        if no is not None and not no.isdigit():
+            raise ValidationFailed("رقم الفاتورة لازم يكون رقم")
+        return J(Sales(db).list_sales(ctx_of(req), day=qp.get("day") or None, sale_no=int(no) if no else None))
+
+    @handler
     async def sales_get(req):
         return J(Sales(db).get(ctx_of(req), req.path_params["id"]))
 
@@ -885,6 +893,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
         Route("/api/procurement/deadstock", proc_deadstock, methods=["POST"]),
         Route("/api/sales", sales_create, methods=["POST"]),
+        Route("/api/sales", sales_list),
         Route("/api/sales/summary", sales_summary),
         Route("/api/sales/{id}", sales_get),
         Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),

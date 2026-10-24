@@ -72,6 +72,8 @@ const routes = [
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
   [/^#\/deadstock$/, viewDeadstock],
+  [/^#\/sales$/, viewSales],
+  [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
 ];
@@ -715,6 +717,83 @@ async function viewCountSession(id) {
       });
     } catch (err) { toast(err.message, true); }
   });
+}
+
+// ------------------------------------------------------------------ sales history / returns
+const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
+const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "");
+
+async function viewSales() {
+  app.innerHTML = `
+  <section class="panel"><h1>فواتير البيع</h1>
+    <div class="row"><label class="f">اليوم<input type="date" id="sDay" value="${localDay()}"></label>
+      <label class="f">أو رقم الفاتورة<input id="sNo" inputmode="numeric" placeholder="مثال: 125"></label>
+      <button class="btn secondary" id="sGo">عرض</button></div></section>
+  <section class="panel"><div class="tablewrap"><table><thead><tr><th>رقم</th><th>الوقت</th><th>العميل</th><th>الأصناف</th>
+    <th>الإجمالي</th><th>نقدي/فيزا/آجل</th><th>مرتجع</th><th>الحالة</th></tr></thead><tbody id="sBody"></tbody></table></div></section>`;
+  const load = async () => {
+    const no = $("#sNo").value.trim();
+    const rows = await api(`/api/sales?${no ? `no=${encodeURIComponent(no)}` : `day=${$("#sDay").value}`}`);
+    $("#sBody").innerHTML = rows.map((r) => `<tr class="clickable" data-id="${r.id}"><td><b>${r.sale_no ?? ""}</b></td>
+      <td>${hhmm(r.completed_at)}</td><td>${esc(r.customer || "—")}</td><td>${r.lines}</td><td><b>${money(r.total)}</b></td>
+      <td>${money(r.paid_cash)} / ${money(r.paid_card)} / ${money(r.on_credit)}</td><td>${r.returned_total ? money(r.returned_total) : ""}</td>
+      <td>${r.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : SALE_ST[r.status]}</td></tr>`).join("")
+      || `<tr><td colspan="8" class="muted">مفيش فواتير</td></tr>`;
+    $("#sBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/sales/${tr.dataset.id}`; }));
+  };
+  $("#sGo").addEventListener("click", load);
+  $("#sDay").addEventListener("change", () => { $("#sNo").value = ""; load(); });
+  load();
+}
+
+async function viewSale(id) {
+  const s = await api(`/api/sales/${id}`);
+  const can = (p) => ME?.permissions?.includes(p);
+  const returnable = (l) => l.allocations.reduce((t, a) => t + a.qty - (a.returned_qty || 0), 0);
+  const fq = (q, l) => fmtStock(q, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit });
+  app.innerHTML = `
+  <section class="panel"><div class="row between"><h1>فاتورة بيع ${s.sale_no ?? ""} ${s.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : ""}</h1>
+    <div class="row"><a class="btn secondary" href="/receipt/${s.id}" target="_blank">طباعة</a><a href="#/sales">رجوع للفواتير</a></div></div>
+    <div class="totals"><div>الإجمالي<b>${money(s.total)}</b></div><div>نقدي<b>${money(s.paid_cash)}</b></div>
+      <div>فيزا<b>${money(s.paid_card)}</b></div><div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
+      <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
+    ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
+  <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>الصافي</th>
+    <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
+    ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${esc(fq(l.qty_base, l))}</td><td>${money(l.net)}</td>
+      <td class="muted">${l.allocations.map((a) => `${esc(a.expiry_date ? a.expiry_date.slice(0, 7) : "—")}: ${a.qty}${a.returned_qty ? ` (رجع ${a.returned_qty})` : ""}`).join("، ")}</td>
+      ${s.status === "completed" && can("sales.return") ? `<td>${returnable(l) ? `<input type="number" min="0" max="${returnable(l)}" step="1" value="0" data-ret="${l.id}" class="narrow">
+        <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">رجع كله</span>`}</td>` : ""}</tr>`).join("")}
+    </tbody></table></div>
+    ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
+      <option value="cash">نقدي من الخزنة</option><option value="card">فيزا</option>${s.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+      <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
+      <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
+    ${s.status === "completed" && can("sales.void") && !s.returned_total ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (نفس اليوم بس) — السبب
+      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
+  </section>`;
+  $("#rGo")?.addEventListener("click", async () => {
+    const lines = {};
+    app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
+    if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
+    try {
+      const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
+      toast(`اتسجل المرتجع: ${money(r.refund)} ج`); viewSale(id);
+    } catch (e) { toast(e.message, true); }
+  });
+  $("#vGo")?.addEventListener("click", async () => {
+    if (!confirmInline($("#vGo"))) return;
+    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }); toast("الفاتورة اتلغت"); viewSale(id); }
+    catch (e) { toast(e.message, true); }
+  });
+}
+// two-click confirmation without browser dialogs
+function confirmInline(btn) {
+  if (btn.dataset.armed) return true;
+  btn.dataset.armed = "1"; const t = btn.textContent; btn.textContent = "متأكد؟ اضغط تاني";
+  setTimeout(() => { delete btn.dataset.armed; btn.textContent = t; }, 4000);
+  return false;
 }
 
 // ------------------------------------------------------------------ dead stock
