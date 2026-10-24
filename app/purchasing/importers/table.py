@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from ...catalog.normalize import normalize_text
 from ..model import (ExtractedInvoice, ExtractedLine, normalize_percent_column, parse_date,
-                     parse_decimal, parse_expiry, parse_int, parse_percent)
+                     parse_decimal, parse_expiry, parse_int, parse_percent, parse_qty_bonus)
 
 # field -> synonyms (already normalized: lowercase, Arabic letters unified)
 HEADERS: dict[str, list[str]] = {
@@ -81,12 +81,12 @@ def find_header(rows: list[list[Any]], scan: int = 40) -> tuple[int, dict[int, s
 
 _META = {
     "invoice_no": re.compile(r"(?:رقم الفاتوره|فاتوره رقم|invoice\s*(?:no|number|#)\.?|inv\.?\s*no\.?)"
-                             r"\s*[:\-#]?\s*([A-Za-z0-9][A-Za-z0-9\-/]{0,30})", re.I),
+                             r"[\s:\-#]*([A-Za-z0-9][A-Za-z0-9\-/]{0,30})", re.I),
     "invoice_date": re.compile(r"(?:تاريخ الفاتوره|التاريخ|invoice\s*date|date)"
-                               r"\s*[:\-]?\s*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4})", re.I),
-    "supplier_name": re.compile(r"(?:اسم المورد|المورد|supplier|vendor)\s*[:\-]\s*(.{2,60})", re.I),
+                               r"[\s:\-]*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4})", re.I),
+    "supplier_name": re.compile(r"(?:اسم المورد|المورد|supplier|vendor)\s*[:\-]+\s*(.{2,60})", re.I),
 }
-_LIGHT = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه",
+_LIGHT = str.maketrans({"٪": "%", "أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه",
                         "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
                         "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9"})
 
@@ -134,6 +134,7 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
         cells = [str(c) for c in r if c not in (None, "")]
         meta_cells += [f"{a}: {b}" for a, b in zip(cells, cells[1:])]
     _scan_meta(meta_cells + (extra_text or []), inv)
+    inv.header_texts = [str(c)[:120] for r in rows[:hi] for c in r if c not in (None, "")][:40]
 
     raw_lines: list[dict[str, Any]] = []
     for r in rows[hi + 1:]:
@@ -177,6 +178,11 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
                     val = str(int(raw))
             elif f in ("qty", "bonus_qty"):
                 val = parse_int(raw)
+                qb = parse_qty_bonus(raw) if f == "qty" and val is None else None
+                if qb and vals.get("bonus_qty") in (None, "", 0):
+                    val = qb[0]
+                    line.bonus_qty = qb[1]
+                    line.sources["bonus_qty"], line.confidence["bonus_qty"] = "read", 1.0
             elif f == "discount_pct":
                 val = disc
             elif f == "expiry_date":

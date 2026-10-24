@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬", "01234567890123456789.,")
+_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬٪", "01234567890123456789.,%")
 
 LINE_FIELDS = ("raw_name", "raw_code", "raw_barcode", "qty", "bonus_qty", "public_price",
                "discount_pct", "unit_net_price", "tax_amount", "line_total", "batch_no",
@@ -55,6 +55,8 @@ class ExtractedInvoice:
     lines: list[ExtractedLine] = field(default_factory=list)
     model: str | None = None
     warnings: list[str] = field(default_factory=list)
+    usage: dict = field(default_factory=dict)     # provider tokens/cost, for real cost tracking
+    header_texts: list[str] = field(default_factory=list)   # text above the table (letterhead)
     header_sources: dict = field(default_factory=dict)
     header_confidence: dict = field(default_factory=dict)
 
@@ -114,6 +116,17 @@ def parse_int(v) -> int | None:
     if d != d.to_integral_value():
         return None          # 2.5 boxes is not a valid pack quantity: leave for review
     return int(d)
+
+
+_QTY_BONUS = re.compile(r"^\s*(\d{1,5})\s*\+\s*(\d{1,5})\s*$")
+
+
+def parse_qty_bonus(v) -> tuple[int, int] | None:
+    """Egyptian invoices often print quantity and bonus together: '10+2'."""
+    if v is None or isinstance(v, (int, float)):
+        return None
+    m = _QTY_BONUS.match(str(v).translate(_AR_DIGITS))
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def parse_percent(v) -> Decimal | None:

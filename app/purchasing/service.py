@@ -49,9 +49,12 @@ class Purchasing:
                  ai_extract=None):
         self.db = db
         self.s = settings or config_mod.load()
-        # injectable for tests; default calls the real API
-        self._ai_extract = ai_extract or (lambda data, mime: ai_vision.extract(
-            self.s.anthropic_api_key, self.s.ai_model, data, mime, self.s.ai_timeout_s))
+        # injectable for tests; default = configured provider (see extractors.py)
+        if ai_extract is None:
+            from .extractors import from_settings
+            provider = from_settings(self.s)
+            ai_extract = provider.extract
+        self._ai_extract = ai_extract
 
     # ------------------------------------------------------------ files
     def _store_file(self, ctx: Context, data: bytes, filename: str, mime: str) -> tuple[str, str]:
@@ -107,9 +110,9 @@ class Purchasing:
 
         extracted = files.extract_structured(kind, data)
         if extracted is None:   # image or scanned PDF
-            accounts.require_feature(self.db, ctx, "ai_extraction")
+            accounts.check_usage(self.db, ctx, "ai_extraction")
+            extracted = self._ai_extract(data, mime)      # a failed read is not counted
             accounts.consume_usage(self.db, ctx, "ai_extraction")
-            extracted = self._ai_extract(data, mime)
         file_id, _ = self._store_file(ctx, data, filename, mime)
         return self._create_from_extraction(ctx, extracted, kind, file_id, supplier_id)
 
@@ -124,6 +127,11 @@ class Purchasing:
             raise ValidationFailed("لا يوجد فرع محدد للمستخدم")
         supplier_id = supplier_id or catalog.find_supplier_by_name(self.db, ctx.org_id,
                                                                     ex.supplier_name)
+        if not supplier_id:      # no "supplier:" label — try the letterhead text
+            for t in ex.header_texts:
+                supplier_id = catalog.find_supplier_by_name(self.db, ctx.org_id, t)
+                if supplier_id:
+                    break
         if supplier_id and ex.invoice_no:
             dup = self.db.one("SELECT id FROM purchase_invoices WHERE org_id=? AND supplier_id=?"
                               " AND invoice_no=? AND status<>'cancelled'",

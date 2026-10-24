@@ -221,6 +221,19 @@ def require_feature(db: Database, ctx: Context, feature: str) -> dict:
     return json.loads(row["limits_json"])
 
 
+def check_usage(db: Database, ctx: Context, feature: str, amount: int = 1) -> None:
+    """Raise if using `amount` more would exceed the monthly limit (no write)."""
+    limits = require_feature(db, ctx, feature)
+    monthly = limits.get("monthly")
+    if monthly is None:
+        return
+    row = db.one("SELECT used FROM usage_counters WHERE org_id=? AND feature=? AND period=?",
+                 (ctx.org_id, feature, utcnow().strftime("%Y-%m")))
+    if (row["used"] if row else 0) + amount > monthly:
+        raise Forbidden("وصلت للحد الشهري لهذه الخدمة", code="usage_limit",
+                        details={"feature": feature, "limit": monthly})
+
+
 def consume_usage(db: Database, ctx: Context, feature: str, amount: int = 1) -> int:
     """Atomically count usage of a metered feature (e.g. AI extractions)
     against its monthly limit. Raises Forbidden when the limit would be exceeded."""

@@ -24,7 +24,7 @@ from ..model import (ExtractedInvoice, ExtractedLine, parse_date, parse_decimal,
 
 API_URL = "https://api.anthropic.com/v1/messages"
 AI_CONFIDENCE_CAP = 0.9
-MAX_EDGE = 2200
+MAX_EDGE = 2576   # high-resolution tier long edge for Claude 4.7+ models (vision docs)
 
 PROMPT = """You are reading a supplier PURCHASE INVOICE from an Egyptian pharmacy distributor.
 The text may be Arabic, English or both. Transcribe what is PRINTED. Do not calculate,
@@ -128,7 +128,11 @@ def parse_response(resp: dict, model: str | None = None) -> ExtractedInvoice:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError as e:
         raise ValidationFailed("نتيجة القراءة الآلية غير صالحة", code="ai_bad_output") from e
-    return from_json(obj, model or resp.get("model"))
+    inv = from_json(obj, model or resp.get("model"))
+    u = resp.get("usage") or {}
+    inv.usage = {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
+                 "model": resp.get("model") or model}
+    return inv
 
 
 def _conf(c: dict | None, key: str) -> float:
@@ -164,6 +168,9 @@ def from_json(obj: dict, model: str | None) -> ExtractedInvoice:
         line.raw_barcode = str(raw["raw_barcode"]).strip() if raw.get("raw_barcode") else None
         line.qty = parse_int(raw.get("qty"))
         line.bonus_qty = parse_int(raw.get("bonus_qty"))
+        qb = parse_qty_bonus(raw.get("qty")) if line.qty is None else None
+        if qb and line.bonus_qty is None:
+            line.qty, line.bonus_qty = qb
         line.public_price = parse_decimal(raw.get("public_price"))
         line.discount_pct = parse_percent(raw.get("discount_pct"))
         line.unit_net_price = parse_decimal(raw.get("unit_net_price"))
