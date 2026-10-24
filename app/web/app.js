@@ -416,6 +416,9 @@ const ISSUE_AR = {
   missing_item: "الصنف غير موجود — استورد الأصناف أولًا", missing_qty: "بدون كمية", zero_qty: "رصيد صفر",
   item_has_history: "الصنف له حركات سابقة", no_batch_or_expiry: "بدون تشغيلة/صلاحية (هيتسجل بدونها)",
   cost_missing: "بدون تكلفة", matched_by_name_only: "اتطابق بالاسم فقط — أكّد",
+  price_below_cost: "سعر البيع أقل من التكلفة", party_has_history: "له حركات سابقة — الرصيد الافتتاحي ممكن يتكرر",
+  same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم تليفون غير صحيح",
+  invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
@@ -424,10 +427,13 @@ function viewImport() {
   app.innerHTML = `
   <section class="panel">
     <h1>نقل البيانات من برنامج آخر</h1>
-    <p class="muted">الخطوات: رفع الملف ← تقرير مسبق (بدون أي تعديل) ← مراجعة ← تطبيق مرة واحدة. ابدأ بالأصناف ثم الأرصدة الافتتاحية.</p>
+    <p class="muted">الخطوات: رفع الملف ← تقرير مسبق (بدون أي تعديل) ← مراجعة ← تطبيق مرة واحدة. الترتيب: الأصناف ← الأرصدة الافتتاحية ← الموردين ← العملاء.</p>
+    <p>قوالب جاهزة: <a href="/api/imports/templates/items.xlsx">الأصناف</a> · <a href="/api/imports/templates/opening_stock.xlsx">الأرصدة</a> ·
+      <a href="/api/imports/templates/suppliers.xlsx">الموردين</a> · <a href="/api/imports/templates/customers.xlsx">العملاء</a></p>
     <form id="impForm" class="row">
       <label class="f">النوع <select name="kind"><option value="items">الأصناف</option>
-        <option value="opening_stock">الأرصدة الافتتاحية</option></select></label>
+        <option value="opening_stock">الأرصدة الافتتاحية</option><option value="suppliers">الموردين وأرصدتهم</option>
+        <option value="customers">العملاء وأرصدتهم</option></select></label>
       <label class="f">الكمية في الملف بـ <select name="qty_unit"><option value="pack">العلبة</option>
         <option value="base">الوحدة الصغرى (شريط)</option></select></label>
       <label class="f">البرنامج القديم <select name="source_system"><option value="estock">E-Stock</option>
@@ -443,6 +449,12 @@ function viewImport() {
       location.hash = `#/import/${r.id}`;
     } catch (err) {
       toast(err.message, true);
+      if (err.code === "missing_columns") {
+        const c = err.details.columns;
+        app.insertAdjacentHTML("beforeend", `<section class="panel"><h2>أعمدة ناقصة</h2>
+          <p>إلزامي ناقص: <b>${c.missing_required.map(esc).join("، ")}</b></p>
+          <p class="muted">أعمدة غير معروفة في الملف: ${c.unmapped_headers.map(esc).join("، ") || "—"}</p></section>`);
+      }
       if (err.code === "mapping_required") {
         app.insertAdjacentHTML("beforeend", `<section class="panel"><h2>أول أسطر في الملف</h2><div class="tablewrap"><table>
           ${err.details.preview.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</table></div>
@@ -459,7 +471,7 @@ async function viewImportRun(id) {
   const attention = r.rows.filter((x) => ["review", "error"].includes(x.action));
   app.innerHTML = `
   <section class="panel">
-    <div class="row between"><h1>${r.kind === "items" ? "استيراد أصناف" : "أرصدة افتتاحية"} — ${esc(r.filename)}</h1>
+    <div class="row between"><h1>${({ items: "استيراد أصناف", opening_stock: "أرصدة افتتاحية", suppliers: "استيراد موردين", customers: "استيراد عملاء" })[r.kind]} — ${esc(r.filename)}</h1>
       <span class="badge ${open ? "b-warn" : "b-ok"}">${open ? "تقرير مسبق (لم يُطبّق)" : ({ applied: "تم التطبيق", discarded: "ملغاة" }[r.status] || esc(r.status))}</span></div>
     <div class="totals">
       ${Object.entries(ACTION_AR).map(([k, v]) => `<div>${v}<b>${c[k] || 0}</b></div>`).join("")}
@@ -468,6 +480,8 @@ async function viewImportRun(id) {
     </div>
     <h2 class="mt">المشكلات المكتشفة</h2>
     <ul class="issues">${Object.entries(r.report.issues || {}).map(([k, n]) => `<li class="warn">${esc(ISSUE_AR[k] || k)}: ${n}</li>`).join("") || "<li>لا يوجد</li>"}</ul>
+    ${r.report.columns ? `<p class="muted">أعمدة مقترح إضافتها: ${r.report.columns.missing_recommended.map(esc).join("، ") || "—"}
+      · أعمدة تم تجاهلها: ${r.report.columns.unmapped_headers.map(esc).join("، ") || "—"}${r.report.profile_used ? " · تم استخدام ربط أعمدة محفوظ" : ""}</p>` : ""}
     ${r.report.applied ? `<p class="badge b-ok">تم التطبيق: ${esc(JSON.stringify(r.report.applied))}</p>` : ""}
     ${r.report.reconciliation ? `<p>المطابقة بعد النقل: ${r.report.reconciliation.ok ? "✅ مطابقة" : "⛔ غير مطابقة"}</p>` : ""}
     <div class="row">${open ? `<button class="btn" id="impApply">تطبيق الاستيراد</button>

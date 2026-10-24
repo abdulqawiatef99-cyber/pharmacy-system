@@ -53,20 +53,33 @@ def _looks_text(data: bytes) -> bool:
     return False
 
 
-def read_excel(data: bytes) -> list[list]:
+INSTRUCTION_SHEETS = {"تعليمات", "instructions", "readme"}
+
+
+def read_excel_sheets(data: bytes) -> list[tuple[str, list[list]]]:
+    """All non-empty sheets, instruction sheets excluded, a sheet named 'data'
+    first, then by number of filled rows."""
     from openpyxl import load_workbook
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:  # corrupt / password protected
         raise ValidationFailed("تعذر قراءة ملف Excel") from e
-    best: list[list] = []
-    for ws in wb.worksheets:              # the sheet with the most filled rows wins
+    out = []
+    for ws in wb.worksheets:
+        if ws.title.strip().lower() in INSTRUCTION_SHEETS:
+            continue
         rows = [list(r) for r in ws.iter_rows(values_only=True)]
         rows = [r for r in rows if any(c not in (None, "") for c in r)]
-        if len(rows) > len(best):
-            best = rows
+        if rows:
+            out.append((ws.title, rows))
     wb.close()
-    return best
+    out.sort(key=lambda t: (t[0].strip().lower() != "data", -len(t[1])))
+    return out
+
+
+def read_excel(data: bytes) -> list[list]:
+    sheets = read_excel_sheets(data)
+    return sheets[0][1] if sheets else []
 
 
 def read_csv(data: bytes) -> list[list]:

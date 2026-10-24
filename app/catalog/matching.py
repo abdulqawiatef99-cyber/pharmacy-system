@@ -10,6 +10,7 @@ or a modifier (Extra, XR, Forte...) disagrees or is missing.
 """
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -160,6 +161,12 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
     if q.modifiers != it.modifiers:
         score *= 0.7
         reasons.append("modifier_mismatch")
+    # numbers that belong to the name (B12 vs B6, Omega 3 vs 6) must agree exactly
+    qn = {re.sub(r"\D", "", t) for t in q.core_tokens if re.search(r"\d", t)}
+    inn = [{re.sub(r"\D", "", t) for t in p.core_tokens if re.search(r"\d", t)} for p in it.parsed]
+    if (qn or any(inn)) and qn not in inn:
+        score *= 0.35
+        reasons.append("name_number_mismatch")
     return Candidate(it.item_id, it.label, round(score, 4), reasons)
 
 

@@ -58,23 +58,111 @@ ITEM_HEADERS: dict[str, list[str]] = {
     "is_drug": ["دواء/غير دواء", "دواء", "is drug", "drug"],
     "location": ["الموقع", "المكان", "الرف", "location", "shelf"],
 }
-_SYN = {normalize_text(s): f for f, ss in ITEM_HEADERS.items() for s in ss}
+PARTY_HEADERS: dict[str, list[str]] = {
+    "name": ["الاسم", "اسم المورد", "المورد", "اسم العميل", "العميل", "name", "supplier",
+             "supplier name", "customer", "customer name"],
+    "code": ["كود", "الكود", "كود المورد", "كود العميل", "رقم", "code", "id"],
+    "phone": ["التليفون", "تليفون", "الموبايل", "موبايل", "الهاتف", "رقم الهاتف", "phone", "mobile", "tel"],
+    "supplier_type": ["نوع المورد", "النوع", "type"],
+    "discount_local": ["خصم محلي", "خصم المحلي", "local discount", "discount local"],
+    "discount_imported": ["خصم مستورد", "خصم المستورد", "imported discount", "discount imported"],
+    "balance": ["الرصيد", "رصيد", "المديونيه", "الحساب", "المستحق", "balance", "opening balance", "due"],
+    "credit_limit": ["حد الائتمان", "حد الاجل", "الحد", "credit limit", "limit"],
+    "notes": ["ملاحظات", "notes", "remarks"],
+}
+HEADERS_BY_KIND = {"items": ITEM_HEADERS, "opening_stock": ITEM_HEADERS,
+                   "suppliers": PARTY_HEADERS, "customers": PARTY_HEADERS}
+_SYN_BY_KIND = {k: {normalize_text(x): f for f, xs in h.items() for x in xs}
+                for k, h in HEADERS_BY_KIND.items()}
+_SYN = _SYN_BY_KIND["items"]
 FIELDS = set(ITEM_HEADERS)
+FIELDS_BY_KIND = {k: set(h) for k, h in HEADERS_BY_KIND.items()}
+
+# each tuple = "at least one of these columns must exist"
+REQUIRED = {"items": [("name_en", "name_ar")],
+            "opening_stock": [("code", "barcode", "name_en", "name_ar"), ("qty",)],
+            "suppliers": [("name",)], "customers": [("name",)]}
+RECOMMENDED = {"items": ["code", "barcode", "public_price", "pack_size"],
+               "opening_stock": ["code", "cost", "batch_no", "expiry"],
+               "suppliers": ["balance", "phone"], "customers": ["phone", "balance", "credit_limit"]}
+KEY_FIELDS = {"items": {"name_en", "name_ar", "code", "barcode"},
+              "opening_stock": {"name_en", "name_ar", "code", "barcode"},
+              "suppliers": {"name"}, "customers": {"name"}}
+LABELS_AR = {"code": "الكود", "name_en": "اسم الصنف", "name_ar": "الاسم العربي", "barcode": "الباركود",
+             "public_price": "سعر الجمهور", "cost": "التكلفة", "qty": "الرصيد", "batch_no": "التشغيلة",
+             "expiry": "الصلاحية", "manufacturer": "الشركة", "active_ingredient": "المادة الفعالة",
+             "dosage_form": "الشكل", "strength": "التركيز", "pack_size": "عدد الوحدات",
+             "min_stock": "حد الطلب", "is_imported": "محلي/مستورد", "is_drug": "دواء/غير دواء",
+             "location": "الموقع", "name": "الاسم", "phone": "التليفون", "supplier_type": "نوع المورد",
+             "discount_local": "خصم محلي", "discount_imported": "خصم مستورد", "balance": "الرصيد",
+             "credit_limit": "حد الائتمان", "notes": "ملاحظات"}
 
 
-def _detect(rows: list[list]) -> tuple[int, dict[int, str]] | None:
+def _detect(rows: list[list], kind: str = "items") -> tuple[int, dict[int, str]] | None:
+    syn, keys = _SYN_BY_KIND[kind], KEY_FIELDS[kind]
     best = None
     for i, row in enumerate(rows[:30]):
         cmap: dict[int, str] = {}
         for j, v in enumerate(row):
             t = normalize_text(str(v)) if v is not None else ""
-            f = _SYN.get(t)
+            f = syn.get(t)
             if f and f not in cmap.values():
                 cmap[j] = f
-        names = {"name_en", "name_ar", "code", "barcode"} & set(cmap.values())
-        if names and len(cmap) >= 2 and (best is None or len(cmap) > len(best[1])):
+        if keys & set(cmap.values()) and len(cmap) >= (1 if kind in ("suppliers", "customers") else 2) \
+                and (best is None or len(cmap) > len(best[1])):
             best = (i, cmap)
     return best
+
+
+def _header_sig(row: list) -> str:
+    cells = [normalize_text(str(c)) for c in row if c not in (None, "")]
+    return hashlib.sha256("|".join(cells).encode()).hexdigest()[:32]
+
+
+def column_report(kind: str, header_row: list, cmap: dict[int, str]) -> dict:
+    found = set(cmap.values())
+    missing_req = [" أو ".join(LABELS_AR.get(f, f) for f in group) for group in REQUIRED[kind]
+                   if not found & set(group)]
+    return {"found": sorted(found),
+            "missing_required": missing_req,
+            "missing_recommended": [LABELS_AR.get(f, f) for f in RECOMMENDED[kind] if f not in found],
+            "unmapped_headers": [str(c) for j, c in enumerate(header_row)
+                                 if c not in (None, "") and j not in cmap]}
+
+
+def template_xlsx(kind: str) -> bytes:
+    """Empty import template + an instructions sheet (Arabic)."""
+    from openpyxl import Workbook
+    if kind not in HEADERS_BY_KIND:
+        raise ValidationFailed("نوع قالب غير معروف")
+    order = {"items": ["code", "name_en", "name_ar", "barcode", "pack_size", "public_price",
+                       "active_ingredient", "strength", "dosage_form", "manufacturer", "is_imported",
+                       "is_drug", "min_stock", "location"],
+             "opening_stock": ["code", "barcode", "name_en", "qty", "cost", "batch_no", "expiry"],
+             "suppliers": ["code", "name", "phone", "supplier_type", "discount_local",
+                           "discount_imported", "balance"],
+             "customers": ["code", "name", "phone", "credit_limit", "balance", "notes"]}[kind]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append([LABELS_AR[f] for f in order])
+    ins = wb.create_sheet("تعليمات")
+    req = {f for g in REQUIRED[kind] for f in g}
+    notes = {"qty": "بالعلبة افتراضيًا (أو بالوحدة الصغرى لو اخترت ذلك عند الرفع)",
+             "expiry": "مثال: 05/2027 أو 31/05/2027 — لو مش معروفة سيبها فاضية (ممنوع التخمين)",
+             "cost": "تكلفة العلبة (أو الوحدة حسب اختيارك)", "public_price": "بالجنيه للعلبة",
+             "balance": "بالجنيه — للمورد: المستحق له علينا. للعميل: المستحق عليه لنا",
+             "pack_size": "عدد الشرائط/الوحدات في العلبة", "is_imported": "محلي أو مستورد",
+             "discount_local": "نسبة مئوية مثل 20", "discount_imported": "نسبة مئوية مثل 12",
+             "credit_limit": "بالجنيه — 0 يعني بدون آجل"}
+    ins.append(["العمود", "إلزامي؟", "ملاحظات"])
+    for f in order:
+        ins.append([LABELS_AR[f], "نعم" if f in req else "لا", notes.get(f, "")])
+    ins.append([])
+    ins.append(["ممكن ترفع ملف التصدير من البرنامج القديم كما هو؛ لو أسماء الأعمدة مختلفة هتظهرلك صفحة لربطها مرة واحدة."])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def _bool(v) -> int | None:
@@ -86,10 +174,15 @@ def _bool(v) -> int | None:
     return None
 
 
-def _read(data: bytes, filename: str) -> list[list]:
+def _read(data: bytes, filename: str, import_kind: str | None = None) -> list[list]:
     kind, _ = files.sniff(data, filename)
     if kind == "excel":
-        return files.read_excel(data)
+        sheets = files.read_excel_sheets(data)
+        if import_kind:          # first sheet whose columns are recognised
+            for _, rows in sheets:
+                if _detect(rows, import_kind):
+                    return rows
+        return sheets[0][1] if sheets else []
     if kind == "csv":
         return files.read_csv(data)
     raise ValidationFailed("استيراد البيانات يقبل ملفات Excel (.xlsx) أو CSV فقط")
@@ -104,27 +197,40 @@ class DataImport:
                 mapping: dict[int, str] | None = None, source_system: str = "generic",
                 options: dict | None = None) -> str:
         ctx.require("items.import")
-        if kind not in ("items", "opening_stock"):
+        if kind not in HEADERS_BY_KIND:
             raise ValidationFailed("نوع استيراد غير معروف")
         if kind == "opening_stock":
             ctx.require("inventory.adjust")
+        if kind == "suppliers":
+            ctx.require("suppliers.write")
+        if kind == "customers":
+            ctx.require("customers.manage")
         options = {"qty_unit": "pack", **(options or {})}
         if options["qty_unit"] not in ("pack", "base"):
             raise ValidationFailed("وحدة الكمية لازم تكون pack أو base")
-        rows = _read(data, filename)
+        rows = _read(data, filename, None if mapping else kind)
+        preview = [[str(c) if c is not None else "" for c in r] for r in rows[:8]]
+        profile_used = False
         if mapping:
-            bad = set(mapping.values()) - FIELDS
+            bad = set(mapping.values()) - FIELDS_BY_KIND[kind]
             if bad:
                 raise ValidationFailed(f"حقول غير معروفة: {', '.join(sorted(bad))}")
             header_row, cmap = int(options.get("header_row", 0)), {int(k): v for k, v in mapping.items()}
+            if header_row < len(rows):
+                self._save_profile(ctx, source_system, kind, rows[header_row], cmap)
         else:
-            found = _detect(rows)
+            found = self._from_profile(ctx, source_system, kind, rows) or _detect(rows, kind)
+            profile_used = bool(found and found[2:] == (True,))
             if not found:
                 raise ValidationFailed("لم أتعرف على أعمدة الملف؛ حدد الأعمدة يدويًا",
                                        code="mapping_required",
-                                       details={"preview": [[str(c) if c is not None else "" for c in r]
-                                                            for r in rows[:5]]})
-            header_row, cmap = found
+                                       details={"preview": preview, "fields": {
+                                           f: LABELS_AR.get(f, f) for f in sorted(FIELDS_BY_KIND[kind])}})
+            header_row, cmap = found[0], found[1]
+        cols = column_report(kind, rows[header_row] if header_row < len(rows) else [], cmap)
+        if cols["missing_required"]:
+            raise ValidationFailed("أعمدة إلزامية ناقصة: " + "، ".join(cols["missing_required"]),
+                                   code="missing_columns", details={"columns": cols, "preview": preview})
         sha = hashlib.sha256(data).hexdigest()
         if self.db.one("SELECT 1 FROM import_runs WHERE org_id=? AND kind=? AND file_sha256=?"
                        " AND status='applied'", (ctx.org_id, kind, sha)):
@@ -139,9 +245,26 @@ class DataImport:
             raw = {cmap[j]: (r[j] if j < len(r) else None) for j in cmap}
             if all(v in (None, "") for v in raw.values()):
                 continue
+            if kind in ("suppliers", "customers"):
+                d, issues = self._normalize_party(raw)
+                action, target, more = self._plan_party(ctx, kind, d)
+                issues += more
+                key = d.get("phone") if kind == "customers" and d.get("phone") else d.get("_norm")
+                if key:
+                    if key in seen_key:
+                        issues.append({"code": "duplicate_in_file", "other_row": seen_key[key]})
+                        if action in ("create", "update"):
+                            action = "review"
+                    else:
+                        seen_key[key] = idx
+                planned.append((idx, raw, d, action, target, issues))
+                continue
             d, issues = self._normalize(raw, options)
             if kind == "items":
                 action, target, more = self._plan_item(ctx, d)
+                if d.get("cost") and d.get("public_price") and \
+                        Decimal(d["public_price"]) < Decimal(d["cost"]):
+                    more.append({"code": "price_below_cost"})
             else:
                 action, target, more = self._plan_stock(ctx, d)
             issues += more
@@ -176,11 +299,142 @@ class DataImport:
                                  json.dumps(d, default=str, ensure_ascii=False), action, target,
                                  json.dumps(issues, ensure_ascii=False)))
             report = self._report(run_id)
+            report["columns"] = cols
+            report["profile_used"] = profile_used
             self.db.execute("UPDATE import_runs SET report=? WHERE id=?",
                             (json.dumps(report, ensure_ascii=False), run_id))
             audit.record(self.db, ctx, "import.analyze", "import_run", run_id,
                          after={"kind": kind, "file": filename, "counts": report["counts"]})
         return run_id
+
+    # ------------------------------------------------------------ profiles
+    def _save_profile(self, ctx: Context, source_system: str, kind: str, header: list,
+                      cmap: dict[int, str]) -> None:
+        by_text = {normalize_text(str(header[j])): f for j, f in cmap.items()
+                   if j < len(header) and header[j] not in (None, "")}
+        if not by_text:
+            return
+        with self.db.transaction():
+            self.db.execute("INSERT INTO import_profiles (org_id, source_system, kind, header_sig, mapping)"
+                            " VALUES (?,?,?,?,?) ON CONFLICT(org_id, source_system, kind, header_sig)"
+                            " DO UPDATE SET mapping=excluded.mapping, updated_at=excluded.updated_at",
+                            (ctx.org_id, source_system, kind, _header_sig(header),
+                             json.dumps(by_text, ensure_ascii=False)))
+
+    def _from_profile(self, ctx: Context, source_system: str, kind: str, rows: list[list]):
+        profiles = {r["header_sig"]: json.loads(r["mapping"]) for r in self.db.all(
+            "SELECT header_sig, mapping FROM import_profiles WHERE org_id=? AND source_system=? AND kind=?",
+            (ctx.org_id, source_system, kind))}
+        if not profiles:
+            return None
+        for i, row in enumerate(rows[:30]):
+            m = profiles.get(_header_sig(row))
+            if m:
+                cmap = {j: m[normalize_text(str(c))] for j, c in enumerate(row)
+                        if c not in (None, "") and normalize_text(str(c)) in m}
+                return (i, cmap, True)
+        return None
+
+    # ------------------------------------------------------------ suppliers / customers
+    def _normalize_party(self, raw: dict) -> tuple[dict, list[dict]]:
+        d: dict[str, Any] = {}
+        issues: list[dict] = []
+        for k in ("name", "code", "phone", "supplier_type", "notes"):
+            v = raw.get(k)
+            if isinstance(v, float) and v == int(v):
+                v = int(v)
+            d[k] = str(v).strip() if v not in (None, "") else None
+        if d.get("phone"):
+            d["phone"] = "".join(ch for ch in d["phone"].translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+                                 if ch.isdigit() or ch == "+") or None
+            if d["phone"] and len(d["phone"]) < 7:
+                issues.append({"code": "invalid_phone", "value": raw.get("phone")})
+                d["phone"] = None
+        for k in ("balance", "credit_limit"):
+            v = raw.get(k)
+            if v not in (None, ""):
+                dec = parse_decimal(v)
+                if dec is None or (k == "credit_limit" and dec < 0):
+                    issues.append({"code": f"invalid_{k}", "value": str(v)})
+                else:
+                    d[k] = str(dec)
+        for k in ("discount_local", "discount_imported"):
+            v = raw.get(k)
+            if v not in (None, ""):
+                dec = parse_decimal(v)
+                if dec is not None and 0 < dec <= 1:
+                    dec = dec * 100
+                if dec is None or not 0 <= dec <= 100:
+                    issues.append({"code": f"invalid_{k}", "value": str(v)})
+                else:
+                    d[k] = str(dec)
+        d["_norm"] = normalize_text(d["name"]) if d.get("name") else None
+        d["_name"] = d.get("name")
+        return d, issues
+
+    def _plan_party(self, ctx: Context, kind: str, d: dict) -> tuple[str, str | None, list[dict]]:
+        if not d.get("name"):
+            return "error", None, [{"code": "missing_name"}]
+        issues: list[dict] = []
+        if kind == "suppliers":
+            r = self.db.one("SELECT id FROM suppliers WHERE org_id=? AND name_norm=?", (ctx.org_id, d["_norm"]))
+            if not r:
+                return "create", None, issues
+            has = self.db.one("SELECT 1 FROM supplier_ledger WHERE org_id=? AND supplier_id=? LIMIT 1",
+                              (ctx.org_id, r["id"]))
+            if has and d.get("balance") not in (None, "0"):
+                return "review", r["id"], [{"code": "party_has_history"}]
+            return "update", r["id"], issues
+        if d.get("phone"):
+            r = self.db.one("SELECT id FROM customers WHERE org_id=? AND phone=?", (ctx.org_id, d["phone"]))
+            if r:
+                has = self.db.one("SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? LIMIT 1",
+                                  (ctx.org_id, r["id"]))
+                if has and d.get("balance") not in (None, "0"):
+                    return "review", r["id"], [{"code": "party_has_history"}]
+                return "update", r["id"], issues
+        same = self.db.one("SELECT id FROM customers WHERE org_id=? AND name=?", (ctx.org_id, d["name"]))
+        if same:
+            return "review", same["id"], [{"code": "same_name_exists"}]
+        return "create", None, issues
+
+    def _apply_party(self, ctx: Context, kind: str, d: dict, action: str, target: str | None,
+                     run_id: str, done: dict) -> None:
+        bal = to_piasters(Decimal(d["balance"])) if d.get("balance") is not None else 0
+        if kind == "suppliers":
+            if action == "create":
+                stype = {"موزع": "distributor", "مخزن": "warehouse", "شركه": "company"}.get(
+                    normalize_text(d.get("supplier_type") or ""), "other")
+                target = catalog.create_supplier(
+                    self.db, ctx, name=d["name"], supplier_type=stype, phone=d.get("phone"),
+                    base_discount_local_bp=round(Decimal(d["discount_local"]) * 100) if d.get("discount_local") else None,
+                    base_discount_imported_bp=round(Decimal(d["discount_imported"]) * 100) if d.get("discount_imported") else None)
+                done["created"] += 1
+            else:
+                done["updated" if action == "update" else "linked"] += 1
+            if bal:
+                self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id,"
+                                " note, created_by) VALUES (?,?,?,?, 'opening', ?, 'رصيد افتتاحي', ?)",
+                                (new_id(), ctx.org_id, target, bal, run_id, ctx.user_id))
+        else:
+            from ..sales.service import Sales
+            limit = to_piasters(Decimal(d["credit_limit"])) if d.get("credit_limit") else 0
+            if action == "create":
+                target = Sales(self.db).create_customer(ctx, name=d["name"], phone=d.get("phone"),
+                                                        credit_limit=limit, notes=d.get("notes"))
+                done["created"] += 1
+            else:
+                if d.get("credit_limit") is not None:
+                    self.db.execute("UPDATE customers SET credit_limit=? WHERE id=? AND org_id=?",
+                                    (limit, target, ctx.org_id))
+                done["updated" if action == "update" else "linked"] += 1
+            if bal:
+                self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
+                                " note, created_by) VALUES (?,?,?,?, 'adjustment', ?, 'رصيد افتتاحي', ?)",
+                                (new_id(), ctx.org_id, target, bal, run_id, ctx.user_id))
+        if bal:
+            done["balance_rows"] += 1
+            done["posted_balance"] += bal
 
     def _normalize(self, raw: dict, options: dict) -> tuple[dict, list[dict]]:
         d: dict[str, Any] = {}
@@ -369,9 +623,10 @@ class DataImport:
         if row["action"] == "error" and decision != "skip":
             raise ValidationFailed("السطر فيه خطأ؛ صحح الملف أو تجاهل السطر")
         if decision.startswith("link:"):
-            item_id = decision[5:]
-            if not self.db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
-                raise NotFound("الصنف غير موجود")
+            target_table = {"suppliers": "suppliers", "customers": "customers"}.get(run["kind"], "items")
+            if not self.db.one(f"SELECT 1 FROM {target_table} WHERE id=? AND org_id=?",
+                               (decision[5:], ctx.org_id)):
+                raise NotFound("السجل المراد الربط به غير موجود")
         elif decision not in ("create", "skip"):
             raise ValidationFailed("قرار غير صحيح")
         if run["kind"] == "opening_stock" and decision == "create" and row["action"] == "review":
@@ -395,6 +650,10 @@ class DataImport:
                 raise Conflict("عملية الاستيراد مطبقة أو ملغاة", code="already_applied")
             if run["kind"] == "opening_stock":
                 ctx.require("inventory.adjust")
+            if run["kind"] == "suppliers":
+                ctx.require("suppliers.write")
+            if run["kind"] == "customers":
+                ctx.require("customers.manage")
             rows = [dict(r) for r in self.db.all(
                 "SELECT * FROM import_rows WHERE run_id=? ORDER BY row_no", (run_id,))]
             pending = [r["row_no"] for r in rows if r["action"] == "review" and not r["decision"]]
@@ -403,7 +662,9 @@ class DataImport:
                                details={"rows": pending[:50], "count": len(pending)})
             options = json.loads(run["options"])
             done = {"created": 0, "updated": 0, "linked": 0, "skipped": 0, "errors": 0,
-                    "stock_rows": 0, "posted_qty_packs": Decimal(0), "posted_base_units": 0}
+                    "stock_rows": 0, "posted_qty_packs": Decimal(0), "posted_base_units": 0,
+                    "balance_rows": 0, "posted_balance": 0}
+            expected_balance = 0
             for r in rows:
                 d = json.loads(r["data"])
                 action = r["action"]
@@ -420,14 +681,38 @@ class DataImport:
                     action = "create"
                 if run["kind"] == "items":
                     self._apply_item(ctx, d, action, target, run_id, done)
+                elif run["kind"] in ("suppliers", "customers"):
+                    if d.get("balance") is not None:
+                        expected_balance += to_piasters(Decimal(d["balance"]))
+                    self._apply_party(ctx, run["kind"], d, action, target, run_id, done)
                 else:
                     self._apply_stock(ctx, d, target, run_id, options, done)
             now = _now()
             done["posted_qty_packs"] = str(done["posted_qty_packs"])
             report = json.loads(run["report"])
             report["applied"] = done
+            accounted = done["created"] + done["updated"] + done["linked"] + done["skipped"] + \
+                done["errors"] + done["stock_rows"]
             if run["kind"] == "opening_stock":
-                report["reconciliation"] = self._reconcile(ctx, run_id, report)
+                accounted = done["stock_rows"] + done["skipped"] + done["errors"]
+            if accounted != len(rows):
+                raise Conflict("عدد الأسطر المطبقة لا يساوي أسطر الملف؛ تم إلغاء العملية",
+                               code="reconciliation_failed", details={"rows": len(rows), "accounted": accounted})
+            report["reconciliation"] = {"ok": True, "rows_in_file": len(rows), "rows_accounted": accounted}
+            if run["kind"] in ("suppliers", "customers"):
+                table = "supplier_ledger" if run["kind"] == "suppliers" else "customer_ledger"
+                posted = self.db.one(f"SELECT coalesce(sum(amount),0) a, count(*) n FROM {table}"
+                                     " WHERE org_id=? AND ref_id=?", (ctx.org_id, run_id))
+                rec = {"ok": posted["a"] == expected_balance == done["posted_balance"],
+                       "file_balance_total": expected_balance, "ledger_balance_total": posted["a"],
+                       "ledger_rows": posted["n"], "rows_in_file": len(rows), "rows_accounted": accounted}
+                report["reconciliation"] = rec
+                if not rec["ok"]:
+                    raise Conflict("الأرصدة بعد الاستيراد لا تطابق الملف؛ تم إلغاء العملية بالكامل",
+                                   code="reconciliation_failed", details=rec)
+            if run["kind"] == "opening_stock":
+                report["reconciliation"] = {**self._reconcile(ctx, run_id, report),
+                                            "rows_in_file": len(rows), "rows_accounted": accounted}
                 if not report["reconciliation"]["ok"]:
                     raise Conflict("الأرصدة بعد الاستيراد لا تطابق الملف؛ تم إلغاء العملية بالكامل",
                                    code="reconciliation_failed", details=report["reconciliation"])

@@ -33,7 +33,7 @@ from ..core.errors import DomainError, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
-from ..dataimport.service import DataImport, export_catalog
+from ..dataimport.service import DataImport, export_catalog, template_xlsx
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
@@ -417,6 +417,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True})
 
     @handler
+    async def import_template(req):
+        ctx_of(req)
+        kind = req.path_params["kind"]
+        return Response(template_xlsx(kind), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": f"attachment; filename=template-{kind}.xlsx"})
+
+    @handler
     async def export_items(req):
         ctx = ctx_of(req)
         return Response(export_catalog(db, ctx), media_type=(
@@ -778,6 +786,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
         Route("/api/imports", import_analyze, methods=["POST"]),
+        Route("/api/imports/templates/{kind}.xlsx", import_template),
         Route("/api/imports/{id}", import_get),
         Route("/api/imports/{id}/decide", import_decide, methods=["POST"]),
         Route("/api/imports/{id}/apply", import_apply, methods=["POST"]),

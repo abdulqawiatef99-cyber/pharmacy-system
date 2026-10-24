@@ -132,17 +132,28 @@ class Database:
                         f"migration {version} was edited after being applied; "
                         "add a new migration instead")
                 continue
+            # Table rebuilds (SQLite cannot ALTER a CHECK constraint) follow the
+            # official procedure: foreign keys off, rebuild in one transaction,
+            # foreign_key_check must be clean before commit, foreign keys back on.
+            fk_off = "-- requires: foreign_keys_off" in sql.splitlines()[0]
             with self._write_lock:
+                if fk_off:
+                    conn.execute("PRAGMA foreign_keys = OFF")
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for stmt in _split_sql(sql):
                         conn.execute(stmt)
+                    if fk_off and conn.execute("PRAGMA foreign_key_check").fetchall():
+                        raise MigrationError(f"migration {version} left foreign key violations")
                     conn.execute("INSERT INTO schema_migrations VALUES (?,?,datetime('now'))",
                                  (version, checksum))
                     conn.execute("COMMIT")
                 except BaseException:
                     conn.execute("ROLLBACK")
                     raise
+                finally:
+                    if fk_off:
+                        conn.execute("PRAGMA foreign_keys = ON")
             done.append(version)
         return done
 

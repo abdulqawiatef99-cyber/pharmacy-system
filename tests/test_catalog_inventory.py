@@ -208,3 +208,19 @@ class TestInventory(CatalogCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNameNumbers(CatalogCase):
+    """Regression: numbers that are part of a product name must not be dropped."""
+    def test_b6_vs_b12_and_omega(self):
+        b12 = cat.create_item(self.db, self.ctx, {"name_en": "Vitamin B12 30 tab"})
+        b6 = cat.create_item(self.db, self.ctx, {"name_en": "Vitamin B6 30 tab"})    # not a duplicate
+        o3 = cat.create_item(self.db, self.ctx, {"name_en": "Omega 3 1000mg 30 caps"})
+        o6 = cat.create_item(self.db, self.ctx, {"name_en": "Omega 6 1000mg 30 caps"})
+        r = matching.match_line(self.db, self.ctx.org_id, raw_name="VITAMIN B6 30 TAB")
+        self.assertEqual(r.item_id, b6)
+        r = matching.match_line(self.db, self.ctx.org_id, raw_name="VITAMIN B12 30 TAB")
+        self.assertEqual(r.item_id, b12)
+        r = matching.match_line(self.db, self.ctx.org_id, raw_name="OMEGA-6 1000 MG 30 CAPS")
+        self.assertEqual(r.item_id, o6)
+        self.assertNotEqual(o3, o6)

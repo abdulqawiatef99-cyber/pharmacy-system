@@ -109,8 +109,11 @@ def normalize_text(s: str | None) -> str:
     s = re.sub(r"(?<=\d),(?=\d)", ".", s)             # 2,5 -> 2.5
     s = re.sub(r"[^\w\s.%/']", " ", s)
     s = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", s)           # keep decimal points only
-    s = re.sub(r"(\d)([a-z؀-ۿ])", r"\1 \2", s)  # 500mg -> 500 mg
-    s = re.sub(r"([a-z؀-ۿ])(\d)", r"\1 \2", s)
+    s = re.sub(r"(\d)([a-z\u0600-\u06ff])", r"\1 \2", s)  # 500mg -> 500 mg
+    # letter->digit split ("x20", "tab14") except name codes such as vitamin
+    # B12 / D3 / K2 / Q10 and Omega-3, which must stay distinct from B6 / Omega-6
+    s = re.sub(r"(?<![a-z\u0600-\u06ff])([a-wyz])\s?(\d{1,2})(?![\d.])", r"\1\2", s)
+    s = re.sub(r"([a-z\u0600-\u06ff])(?<![^a-z\u0600-\u06ff][a-wyz])(?<!^[a-wyz])(\d)", r"\1 \2", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -164,13 +167,17 @@ def parse_name(raw: str) -> ParsedName:
         pack = int(m.group(1) or m.group(2))
         work = _COUNT_RE.sub(" ", work)
     tokens = [t for t in work.split() if t]
-    nums = [t for t in tokens if t.isdigit()]
-    if pack is None and len(nums) == 1 and form:
-        pack = int(nums[0])
-    tokens = [t for t in tokens if not t.isdigit() and t not in ("'", "/")]
+    nums = [i for i, t in enumerate(tokens) if t.isdigit()]
+    if pack is None and nums and form:
+        # with a dosage form, the last bare number is the pack count ("Omega 3 30 caps")
+        pack = int(tokens[nums[-1]])
+        tokens.pop(nums[-1])
+    # remaining bare numbers are part of the product name ("Omega 3", "Centrum 50+"):
+    # keep them, otherwise "Omega 3" and "Omega 6" would look identical
+    tokens = [t for t in tokens if t not in ("'", "/")]
     modifiers = frozenset(_MOD_CANON.get(t, t) for t in tokens if t in _MODIFIERS)
     core_tokens = [t for t in tokens if t not in _NOISE or t in _MODIFIERS]
-    core_tokens = [t for t in core_tokens if len(t) > 1]
+    core_tokens = [t for t in core_tokens if len(t) > 1 or t.isdigit()]
     return ParsedName(
         raw=raw, norm=norm, core=" ".join(sorted(core_tokens)), core_tokens=core_tokens,
         strength="+".join(strengths) if strengths else None, form=form, pack_count=pack,
