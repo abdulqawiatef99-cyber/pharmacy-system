@@ -105,7 +105,15 @@ def cmd_selftest(a, s):
     def libs():
         import openpyxl, pdfplumber, PIL, starlette, uvicorn, multipart  # noqa: F401
     check("libraries", libs)
-    check("arabic_shaping(raqm)", lambda: None if escpos.shaping_available() else (_ for _ in ()).throw(RuntimeError("raqm missing: Arabic receipts cannot be printed as image")))
+    def shaping():
+        if escpos.shaping_available():
+            return None
+        # without raqm the receipt is printed from the browser (handled, not a failure)
+        # — unless direct printing was configured, which then cannot work
+        if os.environ.get("PHARM_PRINTER", "none") != "none":
+            raise RuntimeError("raqm missing: direct printing of Arabic receipts is not possible")
+        return "WARN: raqm missing -> receipts are printed from the browser"
+    check("arabic_shaping(raqm)", shaping)
     check("receipt_font", escpos.find_font)
     def data_dir():
         s.data_dir.mkdir(parents=True, exist_ok=True)
