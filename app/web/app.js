@@ -314,13 +314,13 @@ function renderInvoice() {
     </ul>
     <div class="row">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && ME.permissions.includes("purchases.approve") ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>
-        <button class="btn secondary" id="addLine">إضافة صنف</button>` : ""}
+        ${fileUrl ? `<button class="btn secondary" id="addLine">إضافة سطر ناقص من الملف</button>` : ""}` : ""}
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
   ${draft ? quickAddHtml() : ""}
-  <div class="review">
-    <section class="panel doc ${["image","pdf"].includes(inv.source_type) && fileUrl ? "" : "compact"}">${doc}</section>
+  <div class="${fileUrl ? "review" : ""}">
+    ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
     <section class="panel">
       <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج مراجعة</span>
         <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
