@@ -166,7 +166,10 @@ class TestOpeningStock(DBTestCase):
         data = self.stock_sheet([[101, "Panadol", 5, 32, None, None],
                                  [102, "Cataflam", 1.3, 49.2, None, None]])  # 2.6 strips
         run = self.di.analyze(self.ctx, data, "s.xlsx", kind="opening_stock")
-        with self.assertRaises(ValidationFailed):
+        row = [r for r in self.di.get(self.ctx, run)["rows"] if r["data"].get("code") == "102"][0]
+        self.assertEqual(row["action"], "error")       # flagged before apply, not at apply time
+        self.assertEqual(row["issues"][0]["code"], "fractional_qty_needs_pack_size")
+        with self.assertRaises(ValidationFailed):          # never a silent partial import
             self.di.apply(self.ctx, run)
         self.assertEqual(self.db.one("SELECT count(*) FROM stock_movements")[0], 0)
 

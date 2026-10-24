@@ -74,7 +74,7 @@ _STRENGTH_RE = re.compile(
 # pack count: '14 tab', '20 caps', 'x30', '30's', 'ع 20'
 _COUNT_RE = re.compile(r"(?:(?<![\w.])x\s*(\d{1,4})\b|\b(\d{1,4})\s*'?s\b)")
 
-_NOISE = {"new", "جديد", "the", "and", "for", "of", "film", "coated", "f", "c", "fc",
+_NOISE = {"new", "جديد", "the", "and", "for", "of", "film", "coated", "fc",
           "plain", "عاديه", "عادي", "pack", "box", "علبه", "عبوه", "strip", "شريط",
           "sr", "xr", "er", "mr", "cr", "retard"}
 # release modifiers are meaningful and must not be dropped silently:
@@ -139,6 +139,9 @@ def parse_name(raw: str) -> ParsedName:
     norm = normalize_text(raw)
     work = f" {norm} "
     work = re.sub(r"(?<=[a-z\u0600-\u06ff])/(?=[a-z\u0600-\u06ff])", " ", work)
+    # "S.R." / "X.R." are normalized to "s r": rejoin so the release modifier is kept
+    work = re.sub(r"(?<![a-z])([sxemc]) r(?![a-z])", r"\1r", work)
+    work = re.sub(r"(?<![a-z])f c(?![a-z])", "fc", work)     # F.C. = film coated (noise)
 
     form = None
     for rx, code in _FORM_RES:
@@ -177,7 +180,8 @@ def parse_name(raw: str) -> ParsedName:
     tokens = [t for t in tokens if t not in ("'", "/")]
     modifiers = frozenset(_MOD_CANON.get(t, t) for t in tokens if t in _MODIFIERS)
     core_tokens = [t for t in tokens if t not in _NOISE or t in _MODIFIERS]
-    core_tokens = [t for t in core_tokens if len(t) > 1 or t.isdigit()]
+    # single letters are kept: they tell apart Anti-A / Anti-D sera, Alveolin / Alveolin-P
+    core_tokens = [t for t in core_tokens if len(t) > 1 or t.isdigit() or t.isalpha()]
     return ParsedName(
         raw=raw, norm=norm, core=" ".join(sorted(core_tokens)), core_tokens=core_tokens,
         strength="+".join(strengths) if strengths else None, form=form, pack_count=pack,
@@ -214,12 +218,25 @@ def skeleton(text: str) -> str:
     return " ".join(out)
 
 
-def dedupe_key(name: str, strength: str | None, form: str | None, pack_size: int) -> str:
+_UNKNOWN_MAKER = {"غير معرفه", "غير معروف", "unknown", "-"}
+
+
+def dedupe_key(name: str, strength: str | None, form: str | None, pack_size: int,
+               manufacturer: str | None = None) -> str:
+    """Identity of an item inside one pharmacy. The same generic name from two
+    manufacturers (Ampicillin 500 12 cap) is two items, so a known maker is part
+    of the key; an unknown maker is left out (never guessed)."""
     p = parse_name(name)
     s = strength_norm(strength) if strength else p.strength
     f = form or p.form
-    return "|".join([p.core, s or "", FORM_GROUP.get(f or "", f or ""), p.content or "",
-                     str(p.pack_count or ""), str(pack_size)])
+    # exact form, not FORM_GROUP: cream vs gel vs ointment of one brand are different items
+    return "|".join([p.core, s or "", f or "", p.content or "",
+                     str(p.pack_count or ""), str(pack_size)]) + _maker(manufacturer)
+
+
+def _maker(m: str | None) -> str:
+    t = normalize_text(m) if m else ""
+    return f"|m:{t}" if t and t not in _UNKNOWN_MAKER else ""
 
 
 def strength_norm(text: str | None) -> str | None:

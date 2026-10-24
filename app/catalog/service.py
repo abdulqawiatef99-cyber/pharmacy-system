@@ -108,7 +108,8 @@ def find_duplicates(db: Database, ctx: Context, name: str, *, exclude_id: str | 
 
 
 def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] | None = None,
-                force: bool = False, source: str = "manual") -> str:
+                force: bool = False, source: str = "manual",
+                dedupe_suffix: str | None = None) -> str:
     """Creates an item. Refuses near-duplicates (same name after normalization,
     including Arabic/English spelling) unless force=True."""
     ctx.require("items.write")
@@ -121,7 +122,14 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
     d["strength_norm"] = strength_norm(d.get("strength")) or parsed.strength
     d["dosage_form"] = d.get("dosage_form") or parsed.form
     d["name_norm"] = parsed.norm
-    d["dedupe_key"] = dedupe_key(name, d.get("strength"), d.get("dosage_form"), d["pack_size"])
+    d["dedupe_key"] = dedupe_key(name, d.get("strength"), d.get("dosage_form"), d["pack_size"],
+                                 d.get("manufacturer"))
+    if dedupe_suffix:
+        # a duplicate the user chose to keep (e.g. two E-Stock codes for one product):
+        # stored as a separate item, visibly tagged so it can be merged later
+        if not force:
+            raise ValidationFailed("dedupe_suffix requires force")
+        d["dedupe_key"] += f"|dup:{dedupe_suffix}"
     if not force:
         dups = find_duplicates(db, ctx, name)
         if dups:
@@ -179,12 +187,15 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
     name = merged.get("name_en") or merged.get("name_ar")
     if not name:
         raise ValidationFailed("اسم الصنف مطلوب")
-    if any(k in d for k in ("name_en", "name_ar", "strength", "dosage_form", "pack_size")):
+    if any(k in d for k in ("name_en", "name_ar", "strength", "dosage_form", "pack_size",
+                            "manufacturer")):
         p = parse_name(name)
         d["name_norm"] = p.norm
         d["strength_norm"] = strength_norm(merged.get("strength")) or p.strength
         d["dedupe_key"] = dedupe_key(name, merged.get("strength"), merged.get("dosage_form"),
-                                     merged["pack_size"])
+                                     merged["pack_size"], merged.get("manufacturer"))
+        if "|dup:" in (before.get("dedupe_key") or ""):
+            d["dedupe_key"] += before["dedupe_key"][before["dedupe_key"].index("|dup:"):]
     d["updated_at"] = _now()
     sets = ", ".join(f"{k}=?" for k in d)
     with db.transaction():

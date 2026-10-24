@@ -30,6 +30,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..purchasing.importers import files
+from . import estock
 from ..purchasing.model import parse_decimal, parse_expiry, to_piasters
 
 ITEM_HEADERS: dict[str, list[str]] = {
@@ -209,6 +210,8 @@ class DataImport:
         if options["qty_unit"] not in ("pack", "base"):
             raise ValidationFailed("وحدة الكمية لازم تكون pack أو base")
         rows = _read(data, filename, None if mapping else kind)
+        if source_system == "estock" and not mapping:
+            rows = estock.normalize(rows, kind, options) or rows
         preview = [[str(c) if c is not None else "" for c in r] for r in rows[:8]]
         profile_used = False
         if mapping:
@@ -266,13 +269,27 @@ class DataImport:
                         Decimal(d["public_price"]) < Decimal(d["cost"]):
                     more.append({"code": "price_below_cost"})
             else:
-                action, target, more = self._plan_stock(ctx, d)
+                action, target, more = self._plan_stock(ctx, d, options)
             issues += more
             # duplicates inside the file itself
-            for key, store, code in ((d.get("code"), seen_code, "duplicate_code_in_file"),
-                                     (d.get("barcode"), seen_bc, "duplicate_barcode_in_file"),
-                                     (d.get("_dedupe") if kind == "items" else None, seen_key,
-                                      "duplicate_item_in_file")):
+            if kind == "items" and d.get("_dedupe_base"):
+                maker = d["_dedupe"][len(d["_dedupe_base"]):]
+                prev = seen_key.setdefault(d["_dedupe_base"], [])
+                # same name: duplicate when both makers match or one of them is unknown
+                other = next((i for m, i in prev if m == maker or not m or not maker), None)
+                if other is not None:
+                    issues.append({"code": "duplicate_item_in_file", "other_row": other})
+                    if action in ("create", "update", "link"):
+                        action = "review"
+                prev.append((maker, idx))
+            if kind == "opening_stock":   # one item has many batches: a duplicate is the same batch twice
+                bkey = "|".join(str(d.get(k) or "") for k in ("expiry_date", "batch_no", "cost"))
+                ids = ((d.get("code") and d["code"] + "|" + bkey, seen_code, "duplicate_batch_in_file"),
+                       (d.get("barcode") and d["barcode"] + "|" + bkey, seen_bc, "duplicate_batch_in_file"))
+            else:
+                ids = ((d.get("code"), seen_code, "duplicate_code_in_file"),
+                       (d.get("barcode"), seen_bc, "duplicate_barcode_in_file"))
+            for key, store, code in ids:
                 if key:
                     if key in store:
                         issues.append({"code": code, "other_row": store[key]})
@@ -498,7 +515,9 @@ class DataImport:
         d["_name"] = name
         if name:
             d["_dedupe"] = dedupe_key(name, d.get("strength"), d.get("dosage_form"),
-                                      d.get("pack_size") or 1)
+                                      d.get("pack_size") or 1, d.get("manufacturer"))
+            d["_dedupe_base"] = dedupe_key(name, d.get("strength"), d.get("dosage_form"),
+                                           d.get("pack_size") or 1)
         return d, issues
 
     def _existing_by_ids(self, ctx: Context, d: dict) -> tuple[str | None, str | None, list[dict]]:
@@ -525,8 +544,13 @@ class DataImport:
             return "review", None, conflict
         if by_code or by_bc:
             return "update", by_code or by_bc, issues
-        dup = self.db.one("SELECT id FROM items WHERE org_id=? AND dedupe_key=?",
-                          (ctx.org_id, d["_dedupe"]))
+        base, full = d["_dedupe_base"], d["_dedupe"]
+        if full != base:      # known maker: same maker, or an existing item with unknown maker
+            dup = self.db.one("SELECT id FROM items WHERE org_id=? AND (dedupe_key=? OR dedupe_key=?)",
+                              (ctx.org_id, full, base))
+        else:                 # unknown maker: any maker
+            dup = self.db.one("SELECT id FROM items WHERE org_id=? AND (dedupe_key=? OR"
+                              " substr(dedupe_key, 1, ?)=?)", (ctx.org_id, base, len(base) + 3, base + "|m:"))
         if dup:
             return "review", dup["id"], [{"code": "same_item_exists", "item_id": dup["id"]}]
         cands = [c for c in matching.fuzzy_candidates(self.db, ctx.org_id, d["_name"], 3)
@@ -539,7 +563,8 @@ class DataImport:
             issues.append({"code": "price_missing"})          # informative only
         return "create", None, issues
 
-    def _plan_stock(self, ctx: Context, d: dict) -> tuple[str, str | None, list[dict]]:
+    def _plan_stock(self, ctx: Context, d: dict, options: dict | None = None
+                    ) -> tuple[str, str | None, list[dict]]:
         by_code, by_bc, conflict = self._existing_by_ids(ctx, d)
         if conflict:
             return "review", None, conflict
@@ -561,10 +586,18 @@ class DataImport:
         if has_history:
             return "review", item_id, [{"code": "item_has_history"}]
         issues = []
+        if (options or {}).get("qty_unit", "pack") == "pack":
+            pack = self.db.one("SELECT pack_size FROM items WHERE id=?", (item_id,))["pack_size"]
+            if _whole_units(Decimal(d["qty"]), pack) is None:
+                return "error", item_id, [{"code": "fractional_qty_needs_pack_size",
+                                           "qty": d["qty"], "pack_size": pack,
+                                           "hint": "حدد عدد الوحدات (الشرايط) في العلبة للصنف ده الأول"}]
         if not d.get("expiry_date") and not d.get("batch_no"):
             issues.append({"code": "no_batch_or_expiry"})  # will be posted untracked
         if d.get("cost") is None:
             issues.append({"code": "cost_missing"})
+        elif Decimal(d["cost"]) == 0:          # a zero cost would silently lower the average cost
+            return "review", item_id, issues + [{"code": "zero_cost"}]
         return "create", item_id, issues
 
     def _report(self, run_id: str) -> dict:
@@ -660,6 +693,14 @@ class DataImport:
             if pending:
                 raise Conflict("فيه أسطر محتاجة قرار قبل التطبيق", code="pending_review",
                                details={"rows": pending[:50], "count": len(pending)})
+            if run["kind"] == "opening_stock":
+                frac = [r["row_no"] for r in rows if r["decision"] != "skip" and any(
+                    i["code"] == "fractional_qty_needs_pack_size" for i in json.loads(r["issues"]))]
+                if frac:
+                    raise ValidationFailed("فيه أصناف كميتها كسور والعبوة مش متحدد فيها عدد الوحدات؛"
+                                           " حدد عدد الوحدات أو تجاهل الأسطر دي صراحة",
+                                           code="fractional_qty", details={"rows": frac[:50],
+                                                                          "count": len(frac)})
             options = json.loads(run["options"])
             done = {"created": 0, "updated": 0, "linked": 0, "skipped": 0, "errors": 0,
                     "stock_rows": 0, "posted_qty_packs": Decimal(0), "posted_base_units": 0,
@@ -680,7 +721,11 @@ class DataImport:
                 elif r["decision"] == "create":
                     action = "create"
                 if run["kind"] == "items":
-                    self._apply_item(ctx, d, action, target, run_id, done)
+                    dup = r["decision"] == "create" and any(
+                        i["code"] in ("duplicate_item_in_file", "same_item_exists", "duplicate_code_in_file")
+                        for i in json.loads(r["issues"]))
+                    self._apply_item(ctx, d, action, target, run_id, done,
+                                     keep_duplicate=d.get("code") or r["row_no"] if dup else None)
                 elif run["kind"] in ("suppliers", "customers"):
                     if d.get("balance") is not None:
                         expected_balance += to_piasters(Decimal(d["balance"]))
@@ -725,7 +770,7 @@ class DataImport:
         return report
 
     def _apply_item(self, ctx: Context, d: dict, action: str, target: str | None, run_id: str,
-                    done: dict) -> None:
+                    done: dict, keep_duplicate=None) -> None:
         fields = {k: d.get(k) for k in ("code", "name_en", "name_ar", "manufacturer",
                                         "active_ingredient", "strength", "dosage_form",
                                         "pack_size", "min_stock", "location", "is_imported",
@@ -733,7 +778,8 @@ class DataImport:
         if d.get("public_price") is not None:
             fields["public_price"] = to_piasters(Decimal(d["public_price"]))
         if action == "create":
-            item_id = catalog.create_item(self.db, ctx, fields, force=True, source="import")
+            item_id = catalog.create_item(self.db, ctx, fields, force=True, source="import",
+                                          dedupe_suffix=str(keep_duplicate) if keep_duplicate else None)
             done["created"] += 1
         elif action in ("update", "link"):
             item_id = target
@@ -762,11 +808,12 @@ class DataImport:
         item = catalog.get_item(self.db, ctx, item_id)
         qty = Decimal(d["qty"])
         pack = item["pack_size"]
-        base = qty * pack if options.get("qty_unit") == "pack" else qty
-        if base != base.to_integral_value():
+        base = _whole_units(qty, pack) if options.get("qty_unit") == "pack" else (
+            int(qty) if qty == qty.to_integral_value() else None)
+        if base is None:
             raise ValidationFailed(f"الكمية {qty} لا تساوي عدد صحيح من الوحدات للصنف {item['name_en'] or item['name_ar']}",
                                    code="fractional_qty")
-        base_units = int(base)
+        base_units = base
         unit_cost = None
         if d.get("cost") is not None:
             per_pack = Decimal(d["cost"])
@@ -825,6 +872,15 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _whole_units(qty: Decimal, pack: int) -> int | None:
+    """Packs -> base units. Exports print 3 decimals (15.667 = 15 + 2/3 packs),
+    so a rounding error up to 0.0006 pack per unit of pack size is accepted;
+    anything else is a real fraction and returns None."""
+    base = qty * pack
+    whole = base.to_integral_value(ROUND_HALF_UP)
+    return int(whole) if abs(base - whole) <= Decimal("0.0006") * pack else None
 
 
 def _now() -> str:
