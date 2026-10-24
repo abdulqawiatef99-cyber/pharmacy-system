@@ -295,3 +295,10 @@ input.narrow { width: 104px; }
 .denoms td, .denoms th { padding: 6px 8px; }
 th.big { font-size: 1.5rem; }
 .result { font-size: 1.6rem; font-weight: 700; padding: 14px 18px; border-radius: 12px; }
+
+.totals .t-ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+.totals .t-warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.totals .t-err { background: var(--err-bg); color: var(--err); border-color: currentColor; }
+.seg2.small { display: inline-grid; grid-auto-flow: column; grid-template-columns: none; }
+.seg2.small button { min-height: 36px; padding: 0 14px; }
+@media print { .topbar, #shPrint, .tabs, #toast { display: none !important; } .panel { border: 0; } tbody tr:nth-child(even) > td { background: #f3f3f3 !important; } }

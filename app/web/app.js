@@ -175,6 +175,9 @@ const routes = [
   [/^#\/items\/([\w-]+)$/, viewItem],
   [/^#\/categories$/, viewCategories],
   [/^#\/shift$/, viewShift],
+  [/^#\/suppliers$/, viewSuppliers],
+  [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
+  [/^#\/shortages$/, viewShortages],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
@@ -431,7 +434,10 @@ function renderInvoice() {
   else if (fileUrl && inv.source_type === "pdf") doc = `<iframe src="${fileUrl}" title="ملف الفاتورة"></iframe>`;
   else if (fileUrl) doc = `<p>ملف ${esc(inv.source_type)} — <a href="${fileUrl}">تحميل الملف الأصلي</a></p>`;
 
+  const diff = inv.declared_total != null && inv.computed_total != null ? inv.declared_total - inv.computed_total : null;
+  const totalErr = issues.some((i) => i.code === "total_mismatch" && !i.acknowledged);
   app.innerHTML = `
+  <nav class="tabs" id="pTabs" aria-label="فواتير الشراء المفتوحة"></nav>
   <section class="panel">
     <div class="row between">
       <h1>فاتورة شراء <span class="badge ${STATUS[inv.status][1]}">${STATUS[inv.status][0]}</span>
@@ -441,6 +447,7 @@ function renderInvoice() {
     <div class="row">
       <label class="f">المورد <select data-h="supplier_id" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
+      <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
       <label class="f">رقم الفاتورة <input data-h="invoice_no" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">التاريخ <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">الإجمالي المطبوع (ج) <input data-h="declared_total" type="number" step="0.01" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}></label>
@@ -452,7 +459,8 @@ function renderInvoice() {
     <div class="totals">
       <div>الإجمالي المطبوع<b>${money(inv.declared_total) || "—"}</b></div>
       <div>الإجمالي المحسوب<b>${money(inv.computed_total) || "—"}</b></div>
-      <div>الفرق<b>${inv.declared_total != null && inv.computed_total != null ? money(inv.declared_total - inv.computed_total) : "—"}</b></div>
+      <div class="${diff == null ? "" : diff === 0 ? "t-ok" : totalErr ? "t-err" : "t-warn"}">${diff == null ? "الفرق" : diff === 0 ? "✓ الإجماليين زي بعض" : totalErr ? "✕ الفرق" : "⚠ الفرق (مقبول)"}<b>${diff == null ? "—" : money(diff)}</b>
+        ${totalErr ? `<span>سطر زيادة أو ناقص سطر؟ راجع قبل الاعتماد</span>` : ""}</div>
       <div>عدد الأصناف<b>${lines.length}</b></div>
     </div>
     <h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة لازم تتحل قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
@@ -489,6 +497,7 @@ function renderInvoice() {
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
   if (draft) bindQuickAdd();
+  purchaseTabs(inv.id);
 }
 
 // fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
@@ -525,6 +534,14 @@ function bindQuickAdd() {
     t = setTimeout(async () => {
       const v = q.value.trim(); if (v.length < 2) { $("#qaRes").innerHTML = ""; return; }
       const found = await findItems(v); res = found.items;
+      if (found.hint?.kind === "gs1") {             // 2D code on the pack: item + expiry + batch in one scan
+        if (!res.length) { $("#qaRes").innerHTML = `<p class="badge b-warn">⚠ الكود المربع ده مش متسجل على صنف. سجّله من كارت الصنف.</p>`; return; }
+        pick(res[0]);
+        if (found.hint.expiry) { const [y, m] = found.hint.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
+        if (found.hint.batch) $("#qaBatch").value = found.hint.batch;
+        $("#qaPicked").textContent += found.hint.expiry ? ` · الصلاحية والتشغيلة اتقروا من الكود` : "";
+        return;
+      }
       if (res.length === 1 && /^\d{6,}$/.test(v)) { pick(res[0]); return; }
       $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
         <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">مفيش نتائج</p>`);
@@ -584,12 +601,33 @@ function renderLine(l) {
   </tr>`;
 }
 
+const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
 async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
   const list = await api("/api/suppliers");
   sel.innerHTML = `<option value="">— اختر —</option>` + list.map((s) =>
-    `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+    `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}${SUP_TYPE[s.supplier_type] ? ` (${SUP_TYPE[s.supplier_type]})` : ""}</option>`).join("");
   sel.disabled = !draft;
+  const cur = list.find((x) => x.id === selected), box = $("#supType");
+  if (!box) return;
+  if (!cur) { box.innerHTML = `<span class="muted">اختار المورد</span>`; return; }
+  const canEdit = ME.permissions.includes("suppliers.write");
+  box.innerHTML = Object.entries(SUP_TYPE).map(([v, t]) => `<button type="button" class="${cur.supplier_type === v ? "on" : ""}" data-st="${v}" ${canEdit ? "" : "disabled"}>${cur.supplier_type === v ? "✓ " : ""}${t}</button>`).join("");
+  box.querySelectorAll("[data-st]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/suppliers/${cur.id}`, { method: "PATCH", body: { supplier_type: b.dataset.st } }); fillSuppliers(selected, draft); toast("اتحفظ نوع المورد"); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+
+async function purchaseTabs(curId) {
+  const box = $("#pTabs"); if (!box) return;
+  const drafts = (await api("/api/purchases?status=draft")).slice(0, 12);
+  box.innerHTML = drafts.map((d) => `<a class="tab ${d.id === curId ? "on" : ""}" href="#/purchases/${esc(d.id)}">${esc(d.supplier_name || "مورد؟")}${d.invoice_no ? ` · ${esc(d.invoice_no)}` : ""}</a>`).join("")
+    + `<button class="tab add" id="pNew">+ فاتورة شراء</button>`;
+  $("#pNew").addEventListener("click", async () => {
+    try { const r = await api("/api/purchases", { method: "POST", body: {} }); location.hash = `#/purchases/${r.invoice.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
 }
 
 const CONVERT = {
@@ -1897,6 +1935,77 @@ async function viewShift() {
       if (err.code === "difference_note_required") e.target.note.focus();
     }
   });
+}
+
+// ------------------------------------------------------------------ suppliers and their accounts
+const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتورة شراء", payment: "دفعة", return: "مرتجع", adjustment: "تسوية / إلغاء" };
+async function viewSuppliers() {
+  const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردين</h1>
+    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
+      <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف مورد</button></form>` : ""}</div>
+    <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>علينا له</th>" : ""}</tr></thead><tbody>
+    ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
+      <td>${SUP_TYPE[x.supplier_type] ? `<span class="chip">${SUP_TYPE[x.supplier_type]}</span>` : `<span class="badge b-warn">⚠ حدد النوع</span>`}</td>
+      <td>${esc(x.last_invoice || "—")}</td>${showBal ? `<td class="num">${x.balance > 0 ? `<b>${money(x.balance)}</b>` : x.balance < 0 ? `<span class="ok">ليه عندنا ${money(-x.balance)}</span>` : "—"}</td>` : ""}</tr>`).join("")
+      || `<tr><td colspan="4" class="muted">مفيش موردين</td></tr>`}</tbody></table>
+    <p class="muted">نوع المورد (شركة أو مخزن) بيفرق في الضرايب، وبيتحفظ مع كل فاتورة شراء.</p></section>`;
+  document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/suppliers/${tr.dataset.go}`; }));
+  $("#supNew")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/suppliers", { method: "POST", body: { name: e.target.name.value, supplier_type: e.target.t.value } }); viewSuppliers(); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
+async function viewSupplier(id) {
+  const a = await api(`/api/suppliers/${id}`), canW = ME.permissions.includes("suppliers.write"), canPay = ME.permissions.includes("suppliers.pay");
+  app.innerHTML = `<section class="panel"><a href="#/suppliers">← الموردين</a>
+    <div class="row between"><h1>${esc(a.name)}</h1>
+      <span class="seg2 small" id="supType">${Object.entries(SUP_TYPE).map(([v, t]) => `<button type="button" class="${a.supplier_type === v ? "on" : ""}" data-st="${v}" ${canW ? "" : "disabled"}>${a.supplier_type === v ? "✓ " : ""}${t}</button>`).join("")}</span></div>
+    <div class="row"><label class="f">التليفون <input id="supPhone" value="${esc(a.phone || "")}" ${canW ? "" : "disabled"}></label>
+      <label class="f grow">شروط الدفع <input id="supTerms" value="${esc(a.payment_terms || "")}" placeholder="مثال: آجل 30 يوم" ${canW ? "" : "disabled"}></label>
+      ${canW ? `<button class="btn small secondary" id="supSave">احفظ</button>` : ""}</div></section>
+  ${a.balance != null ? `<div class="totals"><div class="${a.balance > 0 ? "t-warn" : "t-ok"}">${a.balance > 0 ? "علينا له" : a.balance < 0 ? "ليه عندنا" : "✓ مفيش حساب"}<b>${money(Math.abs(a.balance))} ج</b></div></div>` : ""}
+  ${canPay ? `<form class="panel row" id="supPay"><h2 class="grow">تسجيل دفعة للمورد</h2>
+    <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+    <label class="f">منين <select name="m"><option value="drawer">من درج الشيفت</option><option value="outside">من برّه الدرج (بنك / من جيبي)</option></select></label>
+    <label class="f grow">ملاحظة <input name="n"></label><button class="btn">سجّل الدفعة</button></form>` : ""}
+  <div class="grid2">
+    <section class="panel"><h2>الفواتير</h2><table><thead><tr><th>الرقم</th><th>التاريخ</th><th>الحالة</th><th>الإجمالي</th></tr></thead><tbody>
+      ${a.invoices.map((i) => `<tr class="clickable" data-inv="${esc(i.id)}"><td>${esc(i.invoice_no || "—")}</td><td>${esc(i.invoice_date || "")}</td>
+        <td><span class="badge ${STATUS[i.status][1]}">${STATUS[i.status][0]}</span></td><td class="num">${money(i.computed_total ?? i.declared_total)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش فواتير</td></tr>`}</tbody></table></section>
+    ${a.ledger ? `<section class="panel"><h2>الحساب</h2><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th><th>مين</th></tr></thead><tbody>
+      ${a.ledger.map((l) => `<tr><td>${esc(l.created_at.slice(0, 10))}</td><td>${esc(LEDGER_KIND[l.kind] || l.kind)}${l.note ? ` — ${esc(l.note)}` : ""}</td>
+        <td class="num ${l.amount < 0 ? "ok" : ""}">${l.amount < 0 ? "− " : "+ "}${money(Math.abs(l.amount))}</td><td>${esc(l.by_name || "")}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش حركات</td></tr>`}</tbody></table></section>` : ""}
+  </div>`;
+  document.querySelectorAll("[data-inv]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/purchases/${tr.dataset.inv}`; }));
+  document.querySelectorAll("[data-st]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/suppliers/${id}`, { method: "PATCH", body: { supplier_type: b.dataset.st } }); viewSupplier(id); } catch (err) { toast(err.message, true); }
+  }));
+  $("#supSave")?.addEventListener("click", async () => {
+    try { await api(`/api/suppliers/${id}`, { method: "PATCH", body: { phone: $("#supPhone").value, payment_terms: $("#supTerms").value } }); toast("اتحفظ"); } catch (err) { toast(err.message, true); }
+  });
+  $("#supPay")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value, note: e.target.n.value || null } }); toast("✓ الدفعة اتسجلت"); viewSupplier(id); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
+// ------------------------------------------------------------------ shortages (النواقص)
+const SH_REASON = { marked: ["b-warn", "⚠ متعلّم ناقص"], below_min: ["b-warn", "⚠ تحت حد الطلب"], sold_out: ["b-err", "✕ خلص وبيتباع"] };
+async function viewShortages() {
+  const items = (await api("/api/shortages")).items;
+  const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>النواقص (${items.length})</h1><button class="btn secondary" id="shPrint">اطبع القايمة</button></div>
+    <p class="muted">أصناف حد علّمها ناقص، أو وصلت حد الطلب، أو خلصت وكانت بتتباع آخر 60 يوم. العلامة بتتشال لوحدها لما فاتورة شراء الصنف تتعتمد.</p>
+    <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>السبب</th><th>الرصيد</th><th>حد الطلب</th><th>اتباع 60 يوم</th><th>المقترح</th><th>آخر مورد</th></tr></thead><tbody>
+    ${items.map((r) => `<tr class="clickable" data-go="${esc(r.id)}"><td>${itemHtml(r)}</td><td>${r.reasons.map((x) => `<span class="badge ${SH_REASON[x][0]}">${SH_REASON[x][1]}</span>`).join(" ")}</td>
+      <td>${esc(fmtStock(r.stock, it(r)) || "0")}</td><td>${r.min_stock ? esc(fmtStock(r.min_stock, it(r))) : "—"}</td><td>${esc(fmtStock(r.sold_60d, it(r)) || "0")}</td>
+      <td><b>${r.suggest_base ? esc(fmtStock(r.suggest_base, it(r))) : "—"}</b></td><td>${esc(r.last_supplier || "—")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">✓ مفيش نواقص</td></tr>`}</tbody></table></div></section>`;
+  document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/items/${tr.dataset.go}`; }));
+  $("#shPrint").addEventListener("click", () => window.print());
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)
