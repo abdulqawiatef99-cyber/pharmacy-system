@@ -615,6 +615,40 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                   "launcher": os.environ.get("PHARM_LAUNCHER") == "1"})
 
     @handler
+    async def attendance_me(req):
+        from ..finance import payroll as pay
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            b = await body(req)
+            src = "pc" if client_ip(req) in ("127.0.0.1", "::1", "testclient") else "phone"
+            return J(pay.check(db, ctx, str(b.get("action", "")), src))
+        return J(pay.status(db, ctx))
+
+    @handler
+    async def staff_sheet(req):
+        from ..finance import payroll as pay
+        ctx = ctx_of(req)
+        month = req.query_params.get("month") or ""
+        if req.method == "POST":
+            b = await body(req)
+            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
+            if a == "pay_settings":
+                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), int(b.get("work_days") or 26))
+            elif a == "advance":
+                pay.add_advance(db, ctx, uid, _int(b.get("amount"), "amount"), month, b.get("note"), str(b.get("paid_from", "outside")))
+            elif a == "fix":
+                pay.fix_attendance(db, ctx, uid, str(b.get("day", "")), str(b.get("check_in", "")), b.get("check_out") or None,
+                                   str(b.get("note", "")))
+            elif a == "approve":
+                return J(pay.approve(db, ctx, uid, month, _int(b.get("bonus"), "bonus") or 0, _int(b.get("deduction"), "deduction") or 0,
+                                     b.get("note")))
+            elif a == "pay":
+                return J(pay.pay(db, ctx, uid, month, str(b.get("paid_from", "outside"))))
+            else:
+                raise ValidationFailed("عملية غير معروفة")
+        return J(pay.month_sheet(db, ctx, month))
+
+    @handler
     async def approvers_list(req):
         return J({"approvers": people.approvers(db, ctx_of(req))})
 
@@ -1574,6 +1608,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reports/stock", reports_stock),
         Route("/api/home", home_view),
         Route("/api/feedback", feedback_view, methods=["GET", "POST"]),
+        Route("/api/attendance", attendance_me, methods=["GET", "POST"]),
+        Route("/api/staff", staff_sheet, methods=["GET", "POST"]),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/items", items_list),

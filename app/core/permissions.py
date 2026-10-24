@@ -38,6 +38,7 @@ PERMISSIONS: dict[str, str] = {
     "costs.read": "عرض التكلفة والربح",
     "users.manage": "المستخدمين والصلاحيات",
     "settings.manage": "الإعدادات والنسخ الاحتياطي والتحديث",
+    "payroll.manage": "الحضور والرواتب والسلف",
     "audit.read": "عرض سجل العمليات",
     "sales.read": "فتح فواتير البيع",
     "sales.create": "البيع (الكاشير)",
@@ -74,7 +75,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("الفلوس", ["cash.close", "cash.manage", "expenses.record", "expenses.approve"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
                           "safety.manage", "safety.approve"]),
-    ("الإدارة", ["users.manage", "settings.manage"]),
+    ("الإدارة", ["users.manage", "settings.manage", "payroll.manage"]),
 ]
 assert sorted(p for _, ps in GROUPS for p in ps) == sorted(PERMISSIONS), "every permission in one group"
 

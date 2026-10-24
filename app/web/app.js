@@ -181,6 +181,8 @@ const routes = [
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
   [/^#\/home$/, viewHome],
+  [/^#\/staff$/, viewStaff],
+  [/^#\/attendance$/, viewAttendance],
   [/^#\/feedback$/, viewFeedback],
   [/^#\/reports$/, viewReports],
   [/^#\/profit$/, viewProfit],
@@ -216,6 +218,7 @@ async function route() {
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
+    $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -2258,9 +2261,13 @@ async function viewProfit() {
 
 // ------------------------------------------------------------------ home
 async function viewHome() {
-  const h = await api("/api/home");
+  const [h, att] = await Promise.all([api("/api/home"), api("/api/attendance")]);
   const hour = new Date().getHours(), greet = hour < 12 ? "صباح الخير" : "مساء الخير";
   const lvl = { error: ["b-err", "✕"], warning: ["b-warn", "⚠"], info: ["b-info", "ℹ"] };
+  setTimeout(() => $("#attBtn")?.addEventListener("click", async () => {
+    try { await api("/api/attendance", { method: "POST", body: { action: att.open ? "out" : "in" } }); toast(att.open ? "✓ اتسجل الانصراف" : "✓ اتسجل الحضور"); viewHome(); }
+    catch (err) { toast(err.message, true); }
+  }), 0);
   const can = (p) => ME.permissions.includes(p);
   const diff = h.sales && h.sales_week_ago ? Math.round((h.sales.total - h.sales_week_ago) / h.sales_week_ago * 100) : null;
   app.innerHTML = `<section class="panel"><h1>${greet} يا ${esc(ME.user.full_name)}</h1>
@@ -2269,7 +2276,9 @@ async function viewHome() {
       ${can("purchases.create") ? `<a class="btn secondary" href="#/purchases">فاتورة شراء</a>` : ""}
       <a class="btn secondary" href="#/items">الأصناف</a>
       ${can("inventory.count") ? `<a class="btn secondary" href="#/counts">الجرد</a>` : ""}
-      ${can("sales.create") ? `<a class="btn secondary" href="#/shift">الشيفت</a>` : ""}</div></section>
+      ${can("sales.create") ? `<a class="btn secondary" href="#/shift">الشيفت</a>` : ""}
+      ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
+        <span class="muted">${att.open ? `حاضر من ${esc(new Date(att.open.check_in).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }))}` : ""} · <a href="#/attendance">حضوري الشهر ده (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
   <div class="totals">
     ${h.sales ? `<div>مبيعات النهارده<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن نفس اليوم الأسبوع اللي فات` : ""}</span></div>` : ""}
     <div>فواتيرك النهارده<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
@@ -2370,6 +2379,50 @@ async function viewFeedback() {
     a.href = URL.createObjectURL(new Blob([JSON.stringify(items.map((f) => ({ kind: f.kind, text: f.text, screen: f.screen, by: f.by_name, at: f.created_at, status: f.status })), null, 1)], { type: "application/json" }));
     a.download = `ملاحظات-البرنامج-${new Date().toISOString().slice(0, 10)}.json`; a.click();
   });
+}
+
+// ------------------------------------------------------------------ attendance and payroll
+const tm = (iso) => (iso ? new Date(iso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "—");
+async function viewAttendance() {
+  const a = await api("/api/attendance");
+  app.innerHTML = `<section class="panel narrowpanel"><h1>حضوري الشهر ده</h1><p>${a.days_this_month} يوم</p>
+    <table><thead><tr><th>اليوم</th><th>حضور</th><th>انصراف</th><th>منين</th></tr></thead><tbody>
+    ${a.rows.map((r) => `<tr><td>${esc(r.day)}</td><td>${tm(r.check_in)}</td><td>${tm(r.check_out)}</td><td>${r.source === "phone" ? "موبايل" : r.source === "owner" ? "تعديل الصاحب" : "الكمبيوتر"}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش</td></tr>`}</tbody></table></section>`;
+}
+async function viewStaff(month) {
+  month = month || new Date().toISOString().slice(0, 7);
+  const r = await api(`/api/staff?month=${month}`);
+  const post = async (body) => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("اتحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } };
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><label class="f">الشهر <input type="month" id="stM" value="${month}"></label></div>
+    <p class="muted">المرتب = الأساسي − الغياب (الأساسي ÷ أيام الشغل × الأيام الناقصة) − السلف + المكافأة − الخصم. بتراجع وتعتمد كل واحد، والصرف بيتسجل مصروف "رواتب وأجور".</p></section>
+  ${r.people.map((p) => { const pr = p.payroll, sg = p.suggested; return `<section class="panel staff" data-u="${esc(p.id)}">
+    <div class="row between"><h2>${esc(p.full_name)} <span class="chip">${esc(p.role_name)}</span></h2>
+      ${pr ? `<span class="badge ${pr.status === "paid" ? "b-ok" : "b-info"}">${pr.status === "paid" ? "✓ اتصرف" : "✓ معتمد — لسه ماتصرفش"}: ${money(pr.net)} ج</span>` : ""}</div>
+    <div class="row"><label class="f">المرتب الأساسي (ج) <input class="narrow" data-f="sal" type="number" min="0" value="${money(p.monthly_salary)}"></label>
+      <label class="f">أيام الشغل في الشهر <input class="narrow" data-f="wd" type="number" min="1" max="31" value="${p.work_days}"></label>
+      <button class="btn small secondary" data-a="pay_settings">احفظ</button></div>
+    <div class="totals mt"><div>حضر<b>${p.days_present} يوم</b><span>${p.hours} ساعة</span></div><div>غياب<b>${sg.missing_days} يوم</b><span>− ${money(sg.absence_deduction)}</span></div>
+      <div>سلف الشهر<b>${money(p.advances)}</b></div><div class="t-ok">المقترح<b>${money(sg.net)}</b></div></div>
+    ${pr?.status === "paid" ? "" : `<div class="row mt"><label class="f">مكافأة (ج) <input class="narrow" data-f="bonus" type="number" min="0" value="${pr ? money(pr.bonus) : ""}"></label>
+      <label class="f">خصم (ج) <input class="narrow" data-f="ded" type="number" min="0" value="${pr ? money(pr.deduction) : ""}"></label>
+      <label class="f grow">ملاحظة <input data-f="note" value="${esc(pr?.note || "")}"></label><button class="btn small" data-a="approve">اعتمد المرتب</button>
+      ${pr ? `<select data-f="from"><option value="outside">من برّه الدرج</option><option value="drawer">من درج الشيفت</option></select><button class="btn small" data-a="pay">اصرف ${money(pr.net)} ج</button>` : ""}</div>`}
+    <details class="mt"><summary>سلفة / تعديل حضور / تفاصيل الأيام (${p.attendance.length})</summary>
+      <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom"><option value="drawer">من الدرج</option><option value="outside">من برّه</option></select>
+        <button class="btn small secondary" data-a="advance">سجّل السلفة</button></div>
+      <div class="row mt"><label class="f">اليوم <input type="date" data-f="day"></label><label class="f">حضور <input type="time" data-f="in" value="10:00"></label>
+        <label class="f">انصراف <input type="time" data-f="out" value="18:00"></label><label class="f grow">السبب <input data-f="why" placeholder="مثال: نسي يسجل"></label><button class="btn small secondary" data-a="fix">سجّل اليوم</button></div>
+      <table class="mt"><tbody>${p.attendance.map((x) => `<tr><td>${esc(x.day)}</td><td>${tm(x.check_in)} ← ${tm(x.check_out)}</td><td>${x.source === "owner" ? `<span class="badge b-warn">⚠ تعديل: ${esc(x.note || "")}</span>` : x.source === "phone" ? "موبايل" : "الكمبيوتر"}</td></tr>`).join("") || `<tr><td class="muted">مفيش</td></tr>`}</tbody></table></details>
+  </section>`; }).join("") || `<section class="panel"><p class="muted">مفيش موظفين — ضيفهم من "المستخدمين".</p></section>`}`;
+  $("#stM").addEventListener("change", (e) => viewStaff(e.target.value));
+  document.querySelectorAll(".staff [data-a]").forEach((b) => b.addEventListener("click", () => {
+    const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
+    if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 });
+    if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null });
+    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") });
+    if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" });
+    if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") });
+  }));
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)
