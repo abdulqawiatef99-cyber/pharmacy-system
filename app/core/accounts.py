@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 from ..db import Database, new_id
 from . import audit, security
 from .errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
-from .permissions import DEFAULT_ROLES, PERMISSIONS, Context
+from dataclasses import replace
+
+from .permissions import APPROVER_ROLES, DEFAULT_ROLES, PERMISSIONS, ROLE_ORDER, ROLES_VERSION, Context
 
 SESSION_TTL = timedelta(hours=12)
 SESSION_IDLE = timedelta(hours=2)
@@ -45,11 +47,13 @@ def create_organization(db: Database, *, name: str, org_type: str = "pharmacy",
         db.execute("INSERT INTO branches (id, org_id, name) VALUES (?,?,?)",
                    (branch_id, org_id, branch_name))
         role_ids = {}
-        for code, (role_name, perms) in DEFAULT_ROLES.items():
+        for code, (role_name, perms, max_disc) in DEFAULT_ROLES.items():
             rid = new_id()
             role_ids[code] = rid
-            db.execute("INSERT INTO roles (id, org_id, code, name, permissions, is_system)"
-                       " VALUES (?,?,?,?,?,1)", (rid, org_id, code, role_name, json.dumps(perms)))
+            db.execute("INSERT INTO roles (id, org_id, code, name, permissions, is_system, max_discount_bp)"
+                       " VALUES (?,?,?,?,?,1,?)", (rid, org_id, code, role_name, json.dumps(perms), max_disc))
+        db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'roles_version', ?)",
+                   (org_id, ROLES_VERSION))
         for feature in DEFAULT_FEATURES:
             db.execute("INSERT INTO org_entitlements (org_id, feature) VALUES (?,?)",
                        (org_id, feature))
@@ -134,20 +138,26 @@ def login(db: Database, username: str, password: str, *, org_id: str | None = No
     elif org_id not in orgs:
         raise generic
 
-    token = security.new_token()
-    expires = now + SESSION_TTL
     with db.transaction():
         updates = {"failed_logins": 0, "locked_until": None}
         if security.needs_rehash(user["password_hash"]):
             updates["password_hash"] = security.hash_password(password)
         sets = ", ".join(f"{k}=?" for k in updates)
         db.execute(f"UPDATE users SET {sets} WHERE id=?", (*updates.values(), user["id"]))
-        db.execute("INSERT INTO sessions (id, token_hash, user_id, org_id, created_at, expires_at,"
-                   " last_seen_at, ip, user_agent) VALUES (?,?,?,?,?,?,?,?,?)",
-                   (new_id(), security.token_hash(token), user["id"], org_id, iso(now),
-                    iso(expires), iso(now), ip, (user_agent or "")[:200]))
-        audit.record(db, None, "auth.login", "user", user["id"], after={"ip": ip},
-                     org_id=org_id, user_id=user["id"])
+        return _new_session(db, user["id"], org_id, ip, user_agent, "auth.login")
+
+
+def _new_session(db: Database, user_id: str, org_id: str, ip: str | None, user_agent: str | None,
+                 action: str) -> dict:
+    """Call inside a transaction."""
+    now = utcnow()
+    token = security.new_token()
+    expires = now + SESSION_TTL
+    db.execute("INSERT INTO sessions (id, token_hash, user_id, org_id, created_at, expires_at,"
+               " last_seen_at, ip, user_agent) VALUES (?,?,?,?,?,?,?,?,?)",
+               (new_id(), security.token_hash(token), user_id, org_id, iso(now),
+                iso(expires), iso(now), ip, (user_agent or "")[:200]))
+    audit.record(db, None, action, "user", user_id, after={"ip": ip}, org_id=org_id, user_id=user_id)
     return {"token": token, "expires_at": iso(expires), "org_id": org_id}
 
 
@@ -166,8 +176,7 @@ def resolve_session(db: Database, token: str, ip: str | None = None) -> Context:
             or parse_iso(row["last_seen_at"]) + SESSION_IDLE <= now
             or not row["user_active"] or not row["m_active"] or row["org_status"] != "active"):
         raise Unauthorized("انتهت الجلسة، سجّل الدخول مرة أخرى", code="session_expired")
-    role = db.one("SELECT permissions FROM roles WHERE id=?", (row["role_id"],))
-    perms = frozenset(p for p in json.loads(role["permissions"]) if p in PERMISSIONS)
+    access = effective_access(db, row["org_id"], row["user_id"])
     branch_id = row["branch_id"]
     if branch_id is None:
         b = db.one("SELECT id FROM branches WHERE org_id=? AND is_active=1 ORDER BY created_at LIMIT 1",
@@ -178,7 +187,8 @@ def resolve_session(db: Database, token: str, ip: str | None = None) -> Context:
         with db.transaction():
             db.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (iso(now), row["id"]))
     return Context(user_id=row["user_id"], org_id=row["org_id"], branch_id=branch_id,
-                   permissions=perms, ip=ip)
+                   permissions=access["permissions"], ip=ip, role_code=access["role_code"],
+                   max_discount_bp=access["max_discount_bp"])
 
 
 def logout(db: Database, token: str) -> None:
@@ -206,8 +216,12 @@ def change_password(db: Database, ctx: Context, old: str, new: str) -> None:
 def me(db: Database, ctx: Context) -> dict:
     u = db.one("SELECT id, username, full_name FROM users WHERE id=?", (ctx.user_id,))
     o = db.one("SELECT id, name, org_type FROM organizations WHERE id=?", (ctx.org_id,))
+    r = db.one("SELECT name FROM roles WHERE org_id=? AND code=?", (ctx.org_id, ctx.role_code))
+    has_pin = bool(db.one("SELECT pin_hash FROM users WHERE id=?", (ctx.user_id,))["pin_hash"])
     return {"user": dict(u), "organization": dict(o), "branch_id": ctx.branch_id,
-            "permissions": sorted(ctx.permissions)}
+            "permissions": sorted(ctx.permissions), "role": ctx.role_code,
+            "role_name": r["name"] if r else None, "max_discount_bp": ctx.max_discount_bp,
+            "has_pin": has_pin}
 
 
 # --------------------------------------------------------------------------
@@ -266,3 +280,63 @@ def set_entitlement(db: Database, org_id: str, feature: str, *, enabled: bool = 
         audit.record(db, None, "entitlement.set", "entitlement", feature,
                      after={"enabled": enabled, "limits": limits, "operator": operator},
                      org_id=org_id)
+
+
+# -------------------------------------------------------------------------- roles & access
+def effective_access(db: Database, org_id: str, user_id: str) -> dict:
+    """(role defaults ∪ grants) − denies. The owner always has everything."""
+    m = db.one("SELECT m.perm_grants, m.perm_denies, m.max_discount_bp m_disc, r.code, r.permissions,"
+               " r.max_discount_bp r_disc FROM memberships m JOIN roles r ON r.id=m.role_id"
+               " WHERE m.org_id=? AND m.user_id=?", (org_id, user_id))
+    if m is None:
+        return {"permissions": frozenset(), "role_code": None, "max_discount_bp": 0}
+    if m["code"] == "owner":
+        return {"permissions": frozenset(PERMISSIONS), "role_code": "owner", "max_discount_bp": 10000}
+    base = set(json.loads(m["permissions"]))
+    perms = (base | set(json.loads(m["perm_grants"]))) - set(json.loads(m["perm_denies"]))
+    disc = m["m_disc"] if m["m_disc"] is not None else m["r_disc"]
+    return {"permissions": frozenset(p for p in perms if p in PERMISSIONS), "role_code": m["code"],
+            "max_discount_bp": int(disc or 0)}
+
+
+def sync_system_roles(db: Database) -> int:
+    """Bring the built-in roles of every pharmacy to the current defaults, once per
+    ROLES_VERSION. Per-person exceptions and changed discount limits are kept."""
+    changed = 0
+    for o in db.all("SELECT id FROM organizations"):
+        v = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='roles_version'", (o["id"],))
+        if v and v["value"] == ROLES_VERSION:
+            continue
+        first = v is None
+        with db.transaction():
+            for code, (name, perms, disc) in DEFAULT_ROLES.items():
+                r = db.one("SELECT id, is_system FROM roles WHERE org_id=? AND code=?", (o["id"], code))
+                if r is None:
+                    db.execute("INSERT INTO roles (id, org_id, code, name, permissions, is_system,"
+                               " max_discount_bp) VALUES (?,?,?,?,?,1,?)",
+                               (new_id(), o["id"], code, name, json.dumps(perms), disc))
+                elif r["is_system"]:
+                    db.execute("UPDATE roles SET name=?, permissions=? WHERE id=?",
+                               (name, json.dumps(perms), r["id"]))
+                    if first:
+                        db.execute("UPDATE roles SET max_discount_bp=? WHERE id=?", (disc, r["id"]))
+            db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'roles_version', ?)"
+                       " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (o["id"], ROLES_VERSION))
+            audit.record(db, None, "roles.sync", "organization", o["id"],
+                         after={"version": ROLES_VERSION}, org_id=o["id"])
+        changed += 1
+    return changed
+
+
+def with_approval(db: Database, ctx: Context, approver_id: str, pin: str) -> Context:
+    """The owner or a manager typed his PIN on this screen: the request may use his
+    permissions. Visibility (ctx.can) stays the actor's own."""
+    from . import people
+    if approver_id == ctx.user_id:
+        raise ValidationFailed("الموافقة لازم تبقى من حد تاني")
+    access = effective_access(db, ctx.org_id, approver_id)
+    if access["role_code"] not in APPROVER_ROLES:
+        raise Forbidden("الموافقة من الصاحب أو المدير بس", code="approver_invalid")
+    people.verify_pin(db, approver_id, pin, org_id=ctx.org_id)
+    return replace(ctx, approver_id=approver_id, approver_permissions=access["permissions"],
+                   approver_discount_bp=access["max_discount_bp"])

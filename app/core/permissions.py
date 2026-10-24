@@ -2,6 +2,15 @@
 
 Permissions are checked in the service layer (not only the UI), so a request
 from any client is subject to the same rules.
+
+Effective permissions of a person = (role defaults ∪ grants) − denies, where
+grants/denies are per-person exceptions the owner sets. The owner role always
+has everything and can never be restricted.
+
+A person who lacks a permission can still do the action if an approver (the
+owner or a manager) types his PIN on the same screen: the request then carries
+the approver, `require()` accepts the approver's permissions, and the audit row
+records who approved.
 """
 from __future__ import annotations
 
@@ -12,28 +21,36 @@ from .errors import Forbidden
 PERMISSIONS: dict[str, str] = {
     "items.read": "عرض الأصناف",
     "items.write": "إضافة وتعديل الأصناف",
+    "items.price": "تحديث سعر الجمهور",
     "items.import": "استيراد الأصناف",
     "suppliers.read": "عرض الموردين",
     "suppliers.write": "إضافة وتعديل الموردين",
     "purchases.read": "عرض فواتير الشراء",
     "purchases.create": "إدخال فواتير الشراء",
     "purchases.edit": "مراجعة وتعديل فواتير الشراء",
-    "purchases.approve": "اعتماد فواتير الشراء",
-    "purchases.cancel": "إلغاء فاتورة معتمدة",
+    "purchases.approve": "اعتماد فواتير الشراء وإضافتها للمخزون",
+    "purchases.cancel": "إلغاء فاتورة شراء معتمدة",
     "inventory.read": "عرض المخزون",
     "inventory.adjust": "تسويات المخزون",
     "inventory.count": "تسجيل الجرد",
-    "costs.read": "عرض التكلفة",
-    "users.manage": "إدارة المستخدمين",
-    "settings.manage": "إدارة الإعدادات",
+    "costs.read": "عرض التكلفة والربح",
+    "users.manage": "المستخدمين والصلاحيات",
+    "settings.manage": "الإعدادات والنسخ الاحتياطي والتحديث",
     "audit.read": "عرض سجل العمليات",
-    "sales.read": "عرض المبيعات",
+    "sales.read": "فتح فواتير البيع",
     "sales.create": "البيع (الكاشير)",
-    "sales.discount": "عمل خصم في البيع",
+    "sales.totals": "عرض إجمالي المبيعات وفواتير كل الموظفين",
+    "sales.below_cost": "بيع تحت سعر التكلفة",
     "sales.void": "إلغاء فاتورة بيع",
-    "sales.return": "مرتجع المبيعات",
+    "sales.return": "مرتجع فاتورة باعها بنفسه",
+    "sales.return_others": "مرتجع فاتورة باعها حد تاني",
+    "sales.return_late": "مرتجع بعد مدة المرتجع",
+    "sales.return_restricted": "مرتجع أصناف لا ترتجع (تلاجة واستعمال شخصي)",
     "customers.manage": "إدارة العملاء والآجل",
-    "cash.manage": "قفل الخزنة والمصروفات من الدرج",
+    "cash.close": "قفل الشيفت (عد الدرج)",
+    "cash.see_expected": "معرفة المفروض يبقى في الدرج",
+    "cash.manage": "صرف وإيداع من الدرج وفتح الدرج",
+    "notifications.read": "استلام الإشعارات",
     "safety.read": "عرض تنبيهات السلامة الدوائية",
     "safety.manage": "إنشاء وتعطيل قواعد السلامة",
     "safety.approve": "اعتماد قواعد السلامة وربط المواد الفعالة",
@@ -41,21 +58,41 @@ PERMISSIONS: dict[str, str] = {
     "safety.override_critical": "تجاوز تنبيه حرج (بعد مراجعة مختص)",
 }
 
-DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
-    "owner": ("المالك", list(PERMISSIONS)),
-    "pharmacist": ("صيدلي", [
-        "items.read", "items.write", "suppliers.read", "purchases.read",
-        "purchases.create", "purchases.edit", "purchases.approve",
-        "inventory.read", "costs.read", "safety.read", "safety.override", "inventory.count",
-        "sales.read", "sales.create", "sales.discount", "sales.return", "customers.manage",
-        "cash.manage",
-    ]),
-    "assistant": ("مساعد", [
-        "items.read", "suppliers.read", "purchases.read", "purchases.create",
-        "purchases.edit", "inventory.read", "safety.read", "inventory.count",
-        "sales.read", "sales.create",
-    ]),
+# Permission groups, in the order the users screen shows them.
+GROUPS: list[tuple[str, list[str]]] = [
+    ("البيع", ["sales.create", "sales.read", "sales.below_cost", "sales.void", "customers.manage"]),
+    ("المرتجع", ["sales.return", "sales.return_others", "sales.return_late", "sales.return_restricted"]),
+    ("اللي يشوفه", ["sales.totals", "costs.read", "cash.see_expected", "notifications.read", "audit.read"]),
+    ("الشراء والأصناف", ["purchases.create", "purchases.read", "purchases.edit", "purchases.approve",
+                         "purchases.cancel", "items.read", "items.write", "items.price", "items.import",
+                         "suppliers.read", "suppliers.write"]),
+    ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
+    ("الفلوس", ["cash.close", "cash.manage"]),
+    ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
+                          "safety.manage", "safety.approve"]),
+    ("الإدارة", ["users.manage", "settings.manage"]),
+]
+assert sorted(p for _, ps in GROUPS for p in ps) == sorted(PERMISSIONS), "every permission in one group"
+
+_EMPLOYEE = ["items.read", "suppliers.read", "purchases.read", "purchases.create", "purchases.edit",
+             "inventory.read", "inventory.count", "safety.read", "sales.read", "sales.create",
+             "sales.return", "cash.close"]
+
+# code -> (display name, permissions, default max discount in basis points)
+DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
+    "owner": ("الصاحب", list(PERMISSIONS), 10000),
+    "manager": ("مدير", _EMPLOYEE + [
+        "items.write", "items.price", "suppliers.write", "purchases.approve", "inventory.adjust",
+        "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
+        "audit.read", "safety.override"], 0),
+    "pharmacist": ("صيدلي", _EMPLOYEE + [
+        "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
+    "assistant": ("مساعد", list(_EMPLOYEE), 0),
 }
+ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
+APPROVER_ROLES = ("owner", "manager")
+# bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
+ROLES_VERSION = "2026-10-24"
 
 
 @dataclass(frozen=True)
@@ -67,12 +104,30 @@ class Context:
     branch_id: str | None
     permissions: frozenset[str] = field(default_factory=frozenset)
     ip: str | None = None
+    role_code: str | None = None
+    max_discount_bp: int = 0
+    approver_id: str | None = None
+    approver_permissions: frozenset[str] = field(default_factory=frozenset)
+    approver_discount_bp: int = 0
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role_code == "owner"
 
     def can(self, perm: str) -> bool:
+        """What the person himself may see/do. Visibility never comes from an approver."""
         return perm in self.permissions
+
+    def allowed(self, perm: str) -> bool:
+        return perm in self.permissions or perm in self.approver_permissions
+
+    @property
+    def discount_limit_bp(self) -> int:
+        return max(self.max_discount_bp, self.approver_discount_bp)
 
     def require(self, perm: str) -> None:
         if perm not in PERMISSIONS:
             raise ValueError(f"unknown permission {perm}")
-        if perm not in self.permissions:
-            raise Forbidden(f"ليس لديك صلاحية: {PERMISSIONS[perm]}", details={"permission": perm})
+        if not self.allowed(perm):
+            raise Forbidden(f"ليس لديك صلاحية: {PERMISSIONS[perm]}", code="approval_required",
+                            details={"permission": perm, "label": PERMISSIONS[perm]})

@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import config as config_mod
 from ..catalog import matching, service as catalog
 from ..catalog.normalize import normalize_text
-from ..core import accounts, audit
+from ..core import accounts, audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -507,6 +507,8 @@ class Purchasing:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
                                details={"issues": [i.as_dict() for i in blocking]})
             amounts = [validation.effective_amount(l) for l in lines]
+            cost_ups: list[str] = []
+            price_changes: list[str] = []
             gross = sum(amounts)
             net_total = gross - inv["extra_discount"] + inv["extra_tax"]
             moved = 0
@@ -523,6 +525,15 @@ class Purchasing:
                 if batch_id and l["public_price"] is not None:
                     self.db.execute("UPDATE batches SET public_price=coalesce(public_price, ?)"
                                     " WHERE id=?", (l["public_price"], batch_id))
+                last = self.db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND"
+                                   " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+                                   (ctx.org_id, item["id"]))
+                if last and Decimal(last["unit_cost"]) > 0 and unit_cost > Decimal(last["unit_cost"]) * Decimal("1.005"):
+                    up_pct = (unit_cost / Decimal(last["unit_cost"]) - 1) * 100
+                    pack_old = Decimal(last["unit_cost"]) * item["pack_size"]
+                    pack_new = unit_cost * item["pack_size"]
+                    cost_ups.append(f"{item['name_en'] or item['name_ar']}: {pack_old:.2f} ← {pack_new:.2f}"
+                                    f" (+{up_pct:.1f}%)")
                 inventory.post_movement(self.db, ctx, item_id=item["id"], qty_delta=base_qty,
                                         movement_type="purchase", batch_id=batch_id,
                                         unit_cost=unit_cost, ref_type="purchase_invoice",
@@ -534,6 +545,8 @@ class Purchasing:
                                     (l["public_price"], accounts.iso(accounts.utcnow()), item["id"]))
                     catalog.record_price(self.db, ctx, item["id"], l["public_price"],
                                          item["public_price"], "purchase_invoice", inv_id)
+                    price_changes.append(f"{item['name_en'] or item['name_ar']}: "
+                                         f"{(item['public_price'] or 0) / 100:,.2f} ← {l['public_price'] / 100:,.2f}")
                 # learn from human confirmations only
                 if l["match_status"] == "confirmed" and inv["supplier_id"]:
                     catalog.add_alias(self.db, ctx, item["id"], l["raw_name"],
@@ -552,6 +565,16 @@ class Purchasing:
                             (ctx.user_id, now, net_total, inv_id))
             audit.record(self.db, ctx, "purchase.approve", "purchase_invoice", inv_id,
                          after={"lines": len(lines), "base_units": moved, "total": net_total})
+            label = inv["invoice_no"] or ""
+            if cost_ups:
+                notify.emit(self.db, ctx, "cost_increase", "warning",
+                            f"سعر شراء زاد في {len(cost_ups)} صنف — فاتورة {label}".strip(),
+                            "، ".join(cost_ups[:4]) + (" …" if len(cost_ups) > 4 else ""), "purchase_invoice", inv_id)
+            if price_changes:
+                notify.emit(self.db, ctx, "price_change", "info",
+                            f"سعر الجمهور اتغير من فاتورة شراء ({len(price_changes)} صنف)",
+                            "، ".join(price_changes[:4]) + (" …" if len(price_changes) > 4 else ""),
+                            "purchase_invoice", inv_id)
         matching.invalidate(ctx.org_id)
         # a recalled batch may arrive after the circular was registered
         try:

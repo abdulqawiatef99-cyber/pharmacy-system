@@ -30,6 +30,7 @@ def _db(s: config.Settings) -> Database:
     applied = db.migrate()
     if applied:
         print("migrations applied:", ", ".join(applied))
+    accounts.sync_system_roles(db)
     return db
 
 

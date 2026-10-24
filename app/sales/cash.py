@@ -8,7 +8,7 @@ Card and credit amounts never touch the drawer.
 """
 from __future__ import annotations
 
-from ..core import audit
+from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -28,7 +28,7 @@ def open_shift_id(db: Database, ctx: Context, branch_id: str | None = None) -> s
 def require_open_shift(db: Database, ctx: Context, branch_id: str | None = None) -> str:
     sid = open_shift_id(db, ctx, branch_id)
     if not sid:
-        raise Conflict("الخزنة مقفولة — افتح وردية قبل أي عملية نقدية", code="no_open_shift")
+        raise Conflict("الخزنة مقفولة — افتح شيفت قبل أي عملية نقدية", code="no_open_shift")
     return sid
 
 
@@ -50,10 +50,10 @@ class CashDrawer:
     def open(self, ctx: Context, opening_cash: int) -> str:
         ctx.require("sales.create")
         if not isinstance(opening_cash, int) or opening_cash < 0:
-            raise ValidationFailed("رصيد بداية الوردية غير صحيح")
+            raise ValidationFailed("رصيد بداية الشيفت غير صحيح")
         with self.db.transaction():
             if open_shift_id(self.db, ctx):
-                raise Conflict("يوجد وردية مفتوحة بالفعل", code="shift_already_open")
+                raise Conflict("يوجد شيفت مفتوح بالفعل", code="shift_already_open")
             sid = new_id()
             self.db.execute("INSERT INTO cash_shifts (id, org_id, branch_id, opening_cash, opened_by, opened_at)"
                             " VALUES (?,?,?,?,?,?)", (sid, ctx.org_id, ctx.branch_id, opening_cash,
@@ -65,17 +65,28 @@ class CashDrawer:
         ctx.require("sales.read")
         shift_id = shift_id or open_shift_id(self.db, ctx)
         if not shift_id:
-            raise NotFound("لا توجد وردية مفتوحة")
+            raise NotFound("لا يوجد شيفت مفتوح")
         s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s:
-            raise NotFound("الوردية غير موجودة")
+            raise NotFound("الشيفت غير موجود")
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
         card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(on_credit),0) cr, count(*) n"
                            " FROM sales WHERE shift_id=? AND status='completed'", (shift_id,))
         expected = s["opening_cash"] + sum(by_kind.values())
-        return {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
-                else s["expected_cash"], "card_total": card["c"], "credit_total": card["cr"], "sales_count": card["n"]}
+        out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
+               else s["expected_cash"], "card_total": card["c"], "credit_total": card["cr"], "sales_count": card["n"]}
+        if not ctx.can("cash.see_expected"):
+            # blind count: the person closing the drawer must not know the target number
+            for k in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total"):
+                out.pop(k, None)
+            out["blind"] = True
+        return out
+
+    def _expected(self, shift_id: str) -> int:
+        s = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=?", (shift_id,))
+        m = self.db.one("SELECT coalesce(sum(amount),0) t FROM cash_movements WHERE shift_id=?", (shift_id,))
+        return s["opening_cash"] + m["t"]
 
     def movement(self, ctx: Context, amount: int, kind: str, note: str) -> None:
         """Payout (مصروف من الدرج) or deposit by an authorized user, with a reason."""
@@ -89,19 +100,25 @@ class CashDrawer:
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
     def close(self, ctx: Context, counted_cash: int, note: str | None = None) -> dict:
-        ctx.require("cash.manage")
+        ctx.require("cash.close")
         if not isinstance(counted_cash, int) or counted_cash < 0:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         with self.db.transaction():
             sid = require_open_shift(self.db, ctx)
-            summ = self.summary(ctx, sid)
-            diff = counted_cash - summ["expected_cash"]
-            if diff and len((note or "").strip()) < 3:
+            expected = self._expected(sid)
+            diff = counted_cash - expected
+            if diff and ctx.can("cash.see_expected") and len((note or "").strip()) < 3:
                 raise ValidationFailed("فيه فرق في الخزنة؛ اكتب سببه قبل القفل", code="difference_note_required",
-                                       details={"expected": summ["expected_cash"], "difference": diff})
+                                       details={"expected": expected, "difference": diff})
             self.db.execute("UPDATE cash_shifts SET status='closed', expected_cash=?, counted_cash=?, difference=?,"
                             " close_note=?, closed_by=?, closed_at=? WHERE id=?",
-                            (summ["expected_cash"], counted_cash, diff, note, ctx.user_id, _now(), sid))
+                            (expected, counted_cash, diff, note, ctx.user_id, _now(), sid))
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
-                         after={"expected": summ["expected_cash"], "counted": counted_cash, "difference": diff})
+                         after={"expected": expected, "counted": counted_cash, "difference": diff})
+            if diff:
+                who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
+                notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
+                            f"{'عجز' if diff < 0 else 'زيادة'} في الدرج {abs(diff) / 100:,.2f} ج",
+                            f"قفل الشيفت: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
+                            "cash_shift", sid)
         return self.summary(ctx, sid)

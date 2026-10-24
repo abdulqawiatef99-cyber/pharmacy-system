@@ -42,6 +42,11 @@ def record(db: Database, ctx: Context | None, action: str, entity_type: str | No
     """Append an audit entry. Must be called inside the same transaction as the
     change it describes, so a change can never exist without its audit row.
     Each row is chained to the previous one (sha256) for tamper evidence."""
+    approver = getattr(ctx, "approver_id", None) if ctx is not None else None
+    if approver:
+        after = ({"approved_by": approver} if after is None else
+                 {**after, "approved_by": approver} if isinstance(after, dict) else
+                 {"value": after, "approved_by": approver})
     last = db.one("SELECT seq, row_hash FROM audit_log WHERE seq IS NOT NULL ORDER BY seq DESC LIMIT 1")
     seq = (last["seq"] + 1) if last else 1
     prev = last["row_hash"] if last else "GENESIS"

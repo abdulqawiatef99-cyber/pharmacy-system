@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from ..core import audit
+from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id, row_to_dict
@@ -183,6 +183,8 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
         # silently would mis-state quantities and unit prices
         raise Conflict("لا يمكن تغيير عدد الوحدات في العبوة لصنف له حركات مخزون؛ صحح الرصيد بالجرد أولًا"
                        " أو أنشئ صنفًا جديدًا", code="pack_size_locked")
+    if "public_price" in d and d["public_price"] != before.get("public_price"):
+        ctx.require("items.price")
     merged = {**before, **d}
     name = merged.get("name_en") or merged.get("name_ar")
     if not name:
@@ -206,6 +208,10 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
             raise Conflict("التعديل يجعل الصنف مكررًا مع صنف آخر") from e
         if "public_price" in d and d["public_price"] != before.get("public_price"):
             record_price(db, ctx, item_id, d["public_price"], before.get("public_price"), "manual")
+            old = before.get("public_price")
+            notify.emit(db, ctx, "price_change", "warning",
+                        f"تحديث سعر الجمهور: {merged.get('name_en') or merged.get('name_ar')}",
+                        f"{(old or 0) / 100:,.2f} ← {(d['public_price'] or 0) / 100:,.2f} ج", "item", item_id)
         audit.record(db, ctx, "item.update", "item", item_id,
                      before={k: before.get(k) for k in d if k != "updated_at"},
                      after={k: v for k, v in d.items() if k != "updated_at"})

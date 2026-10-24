@@ -30,7 +30,7 @@ from starlette.staticfiles import StaticFiles
 
 from .. import config as config_mod
 from ..catalog import service as catalog
-from ..core import accounts, audit
+from ..core import accounts, audit, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
@@ -113,12 +113,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         s.data_dir.mkdir(parents=True, exist_ok=True)
         db = Database(s.db_path)
         db.migrate()
+    accounts.sync_system_roles(db)
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
+    approver_limiter = RateLimiter(20, 60)
 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
@@ -136,6 +138,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        approver = req.headers.get("x-approver", "").strip()
+        if approver:
+            approver_limiter.check(client_ip(req))
+            ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
@@ -356,7 +362,142 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def me(req):
-        return J(accounts.me(db, ctx_of(req)))
+        ctx = ctx_of(req)
+        return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx)})
+
+    # ------------------------------------------------------------- people: PIN, approval, users
+    def _local_only(req):
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
+                os.environ.get("PHARM_ALLOW_REMOTE_QUICK") != "1":
+            raise Forbidden("الدخول السريع من جهاز الصيدلية بس", code="local_only")
+
+    @handler
+    async def quick_users(req):
+        _local_only(req)
+        return J({"users": people.quick_users(db)})
+
+    @handler
+    async def pin_login(req):
+        _local_only(req)
+        login_limiter.check(client_ip(req))
+        b = await body(req)
+        users = {u["id"]: u for u in people.quick_users(db)}
+        u = users.get(str(b.get("user_id", "")))
+        if not u:
+            raise Unauthorized("الرقم السري غلط", code="invalid_pin")
+        res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", ""))[:6], ip=client_ip(req),
+                               user_agent=req.headers.get("user-agent"))
+        ctx = accounts.resolve_session(db, res["token"])
+        resp = J({"me": accounts.me(db, ctx), "expires_at": res["expires_at"]})
+        resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
+                        max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
+        return resp
+
+    @handler
+    async def my_pin(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
+        from ..core import security as _sec
+        if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
+            raise ValidationFailed("كلمة المرور غلط")
+        people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
+        return J({"ok": True})
+
+    @handler
+    async def approvers_list(req):
+        return J({"approvers": people.approvers(db, ctx_of(req))})
+
+    @handler
+    async def approval_check(req):
+        """The approver typed his PIN: confirm it before the screen retries the action."""
+        ctx = ctx_of(req)
+        if not ctx.approver_id:
+            raise ValidationFailed("اختار مين هيوافق")
+        perm = str((await body(req)).get("permission", ""))
+        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == "discount"
+        return J({"ok": ok, "discount_limit_bp": ctx.discount_limit_bp})
+
+    @handler
+    async def users_list(req):
+        ctx = ctx_of(req)
+        return J({"users": people.list_users(db, ctx), "roles": people.roles(db, ctx)})
+
+    @handler
+    async def users_create(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        uid = people.add_user(db, ctx, username=str(b.get("username", "")), full_name=str(b.get("full_name", "")),
+                              password=str(b.get("password", "")), role_code=str(b.get("role", "")),
+                              pin=(str(b["pin"]) if b.get("pin") else None))
+        return J(people.access_matrix(db, ctx, uid), status_code=201)
+
+    @handler
+    async def users_get(req):
+        return J(people.access_matrix(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def users_action(req):
+        ctx = ctx_of(req)
+        uid, action = req.path_params["id"], req.path_params["action"]
+        b = await body(req)
+        if action == "permission":
+            return J(people.set_exception(db, ctx, uid, str(b.get("permission", "")), str(b.get("mode", ""))))
+        if action == "reset":
+            return J(people.reset_to_role(db, ctx, uid))
+        if action == "discount":
+            return J(people.set_discount(db, ctx, uid, b.get("max_discount_bp")))
+        if action == "role":
+            return J(people.set_role(db, ctx, uid, str(b.get("role", ""))))
+        if action == "active":
+            return J(people.set_active(db, ctx, uid, bool(b.get("active"))))
+        if action == "password":
+            people.reset_password(db, ctx, uid, str(b.get("password", "")))
+            return J({"ok": True})
+        if action == "pin":
+            people.set_pin(db, ctx, uid, str(b.get("pin", "")))
+            return J({"ok": True})
+        raise ValidationFailed("عملية غير معروفة")
+
+    @handler
+    async def role_discount(req):
+        ctx = ctx_of(req)
+        people.set_role_discount(db, ctx, req.path_params["code"], (await body(req)).get("max_discount_bp"))
+        return J({"roles": people.roles(db, ctx)})
+
+    @handler
+    async def notifications_list(req):
+        ctx = ctx_of(req)
+        return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
+                                limit=int(req.query_params.get("limit", 50) or 50)))
+
+    @handler
+    async def notifications_read(req):
+        ctx = ctx_of(req)
+        ids = (await body(req)).get("ids")
+        notify.mark_read(db, ctx, ids)
+        return J({"unread": notify.unread_count(db, ctx)})
+
+    @handler
+    async def sales_settings(req):
+        from ..sales.service import return_window_days
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            ctx.require("settings.manage")
+            b = await body(req)
+            try:
+                days = int(b.get("return_window_days"))
+            except (TypeError, ValueError):
+                raise ValidationFailed("اكتب عدد الأيام")
+            if not 0 <= days <= 365:
+                raise ValidationFailed("مدة المرتجع من 0 لـ 365 يوم")
+            with db.transaction():
+                before = return_window_days(db, ctx.org_id)
+                db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
+                           " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, str(days)))
+                audit.record(db, ctx, "settings.return_window", "organization", ctx.org_id,
+                             before={"days": before}, after={"days": days})
+        return J({"return_window_days": return_window_days(db, ctx.org_id)})
 
     # ------------------------------------------------------------- catalog
     @handler
@@ -855,7 +996,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
-                                    request_id=(str(b["request_id"])[:64] if b.get("request_id") else None)))
+                                    request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
+                                    confirm_below_cost=bool(b.get("confirm_below_cost"))))
 
     @handler
     async def sales_return(req):
@@ -995,6 +1137,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
+        Route("/api/auth/quick-users", quick_users),
+        Route("/api/auth/pin", pin_login, methods=["POST"]),
+        Route("/api/me/pin", my_pin, methods=["POST"]),
+        Route("/api/approvers", approvers_list),
+        Route("/api/approvals/check", approval_check, methods=["POST"]),
+        Route("/api/users", users_list),
+        Route("/api/users", users_create, methods=["POST"]),
+        Route("/api/users/{id}", users_get),
+        Route("/api/users/{id}/{action}", users_action, methods=["POST"]),
+        Route("/api/roles/{code}/discount", role_discount, methods=["POST"]),
+        Route("/api/notifications", notifications_list),
+        Route("/api/notifications/read", notifications_read, methods=["POST"]),
+        Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),

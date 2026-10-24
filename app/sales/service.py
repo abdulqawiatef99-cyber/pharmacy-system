@@ -18,7 +18,7 @@ import json
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from ..core import audit
+from ..core import audit, notify
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -27,6 +27,25 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
+DEFAULT_RETURN_DAYS = 14
+
+
+def egp(piasters: int) -> str:
+    return f"{piasters / 100:,.2f}"
+
+
+def return_window_days(db: Database, org_id: str) -> int:
+    r = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='return_window_days'", (org_id,))
+    try:
+        return max(0, int(r["value"])) if r else DEFAULT_RETURN_DAYS
+    except ValueError:
+        return DEFAULT_RETURN_DAYS
+
+
+def discount_denied(ctx: Context, discount_bp: int) -> Forbidden:
+    return Forbidden(f"الخصم المسموح لك {ctx.discount_limit_bp / 100:g}% بس", code="approval_required",
+                     details={"permission": "discount", "label": f"خصم {discount_bp / 100:g}%",
+                              "requested_bp": discount_bp, "limit_bp": ctx.discount_limit_bp})
 
 
 def _now() -> str:
@@ -42,6 +61,11 @@ def local_day_bounds(day: date) -> tuple[str, str]:
     end = datetime.combine(day + timedelta(days=1), time.min).astimezone().astimezone(timezone.utc)
     f = "%Y-%m-%dT%H:%M:%S.%fZ"
     return start.strftime(f), end.strftime(f)
+
+
+def _local_date(utc_iso: str) -> date:
+    from datetime import datetime, timezone
+    return datetime.strptime(utc_iso, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).astimezone().date()
 
 
 def local_today() -> date:
@@ -153,9 +177,10 @@ class Sales:
         if packs < 0 or units < 0 or packs + units == 0:
             raise ValidationFailed("الكمية غير صحيحة")
         if discount_bp:
-            ctx.require("sales.discount")
             if not 0 < discount_bp <= 10000:
                 raise ValidationFailed("نسبة الخصم غير صحيحة")
+            if discount_bp > ctx.discount_limit_bp:
+                raise discount_denied(ctx, discount_bp)
         with self.db.transaction():
             s = self._draft(ctx, sid)
             item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=? AND status='active'",
@@ -175,9 +200,12 @@ class Sales:
             n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM sale_lines WHERE sale_id=?", (sid,))["n"]
             partial = 1 if units % item["pack_size"] else 0
             self.db.execute("INSERT INTO sale_lines (id, sale_id, org_id, line_no, item_id, qty_base,"
-                            " discount_bp, partial_pack, client_ref) VALUES (?,?,?,?,?,?,?,?,?)",
+                            " discount_bp, partial_pack, client_ref, discount_by, discount_approved_by)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                             (new_id(), sid, ctx.org_id, n, item_id, qty, discount_bp, partial,
-                             client_ref))
+                             client_ref, ctx.user_id if discount_bp else None,
+                             ctx.approver_id if discount_bp and ctx.discount_limit_bp > ctx.max_discount_bp
+                             else None))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
         return self.get(ctx, sid)
 
@@ -215,6 +243,7 @@ class Sales:
         if not s:
             raise NotFound("الفاتورة غير موجودة")
         s = dict(s)
+        self._may_view(ctx, s)
         lines = []
         subtotal = discount = 0
         for l in self.db.all("SELECT * FROM sale_lines WHERE sale_id=? ORDER BY line_no", (sid,)):
@@ -254,6 +283,13 @@ class Sales:
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
         return s
 
+    @staticmethod
+    def _may_view(ctx: Context, s: dict) -> None:
+        """An employee sees his own invoices; other people's need sales.totals (or an
+        approver, e.g. to return someone else's invoice)."""
+        if s["created_by"] != ctx.user_id and not ctx.can("sales.totals"):
+            ctx.require("sales.return_others")
+
     # ------------------------------------------------------------ safety + complete
     def safety_check(self, ctx: Context, sid: str) -> list[Finding]:
         s = self.get(ctx, sid)
@@ -263,7 +299,8 @@ class Sales:
 
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
-                 version: int | None = None, request_id: str | None = None) -> dict:
+                 version: int | None = None, request_id: str | None = None,
+                 confirm_below_cost: bool = False) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -289,7 +326,7 @@ class Sales:
             raise Conflict("فيه أصناف غير متاحة أو بدون سعر", code="line_problems",
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
         if paid_cash and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزنة مقفولة — افتح وردية قبل البيع النقدي", code="no_open_shift")
+            raise Conflict("الخزنة مقفولة — افتح شيفت قبل البيع النقدي", code="no_open_shift")
         if paid_cash + paid_card + on_credit != preview["total"]:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"]})
@@ -310,6 +347,7 @@ class Sales:
             if s["version"] != preview["version"]:
                 raise Conflict("الفاتورة اتعدلت أثناء الإتمام", code="stale_version")
             total = 0
+            below_cost = []
             for l in preview["lines"]:
                 item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
                 plan = self._plan(ctx, s, l, item)          # re-plan inside the transaction
@@ -327,8 +365,18 @@ class Sales:
                                      cost_row["avg_cost"] if cost_row else None))
                     gross += a["unit_price"] * a["qty"]
                 net = gross - round(gross * l["discount_bp"] / 10000)
+                if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
+                    cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
+                    if Decimal(net) < cost:
+                        below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
+                                           "net": net, "cost": int(cost.to_integral_value(ROUND_HALF_UP))})
                 self.db.execute("UPDATE sale_lines SET line_total=? WHERE id=?", (net, l["id"]))
                 total += net
+            if below_cost:
+                ctx.require("sales.below_cost")
+                if not confirm_below_cost:
+                    raise Conflict("الخصم بينزّل السعر تحت التكلفة — البيع ده بخسارة", code="below_cost_confirm",
+                                   details={"lines": below_cost})
             if total != preview["total"]:
                 raise Conflict("السعر اتغير أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
@@ -346,7 +394,16 @@ class Sales:
                                 (new_id(), ctx.org_id, s["customer_id"], on_credit, sid, ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
                          after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
-                                "credit": on_credit})
+                                "credit": on_credit, "below_cost": below_cost or None})
+            disc_lines = [l for l in preview["lines"] if l["discount_bp"]]
+            if disc_lines:
+                names = "، ".join(f"{l['item']['name']} {l['discount_bp'] / 100:g}%" for l in disc_lines[:4])
+                notify.emit(self.db, ctx, "discount", "warning",
+                            f"خصم {egp(preview['discount_total'])} ج — فاتورة {no}", names, "sale", sid)
+            if below_cost:
+                notify.emit(self.db, ctx, "below_cost", "error", f"بيع تحت التكلفة — فاتورة {no}",
+                            "، ".join(f"{b['name']}: {egp(b['net'])} والتكلفة {egp(b['cost'])}"
+                                     for b in below_cost[:4]), "sale", sid)
         return self.get(ctx, sid)
 
     def _next_no(self, ctx: Context, branch_id: str, kind: str) -> int:
@@ -374,6 +431,12 @@ class Sales:
                 raise NotFound("الفاتورة غير موجودة")
             if s["status"] != "completed":
                 raise Conflict("المرتجع يكون من فاتورة مكتملة فقط")
+            if s["created_by"] != ctx.user_id:
+                ctx.require("sales.return_others")
+            days = return_window_days(self.db, ctx.org_id)
+            age = (self.today - _local_date(s["completed_at"])).days
+            if age > days:
+                ctx.require("sales.return_late")
             if refund_method == "credit" and not s["customer_id"]:
                 raise ValidationFailed("الاسترداد على الحساب يحتاج عميل")
             refund = 0
@@ -418,6 +481,10 @@ class Sales:
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines})
+            notify.emit(self.db, ctx, "return", "warning" if age > days or s["created_by"] != ctx.user_id
+                        else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
+                        f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
+                        + (" · الفاتورة باعها حد تاني" if s["created_by"] != ctx.user_id else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
 
     def void(self, ctx: Context, sid: str, reason: str) -> dict:
@@ -452,6 +519,8 @@ class Sales:
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
+            notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
+                        f"السبب: {reason.strip()}", "sale", sid)
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ reports
@@ -466,11 +535,17 @@ class Sales:
              " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"
              " WHERE s.org_id=? AND s.branch_id=? AND s.status<>'draft'")
         params: list = [ctx.org_id, ctx.branch_id]
+        mine_only = not ctx.can("sales.totals")
+        if mine_only and not (sale_no is not None and ctx.allowed("sales.return_others")):
+            q += " AND s.created_by=?"
+            params.append(ctx.user_id)
         if sale_no is not None:
             q += " AND s.sale_no=?"
             params.append(sale_no)
         else:
             d = date.fromisoformat(day) if day else local_today()
+            if mine_only and d != local_today():
+                ctx.require("sales.totals")
             lo, hi = local_day_bounds(d)
             q += " AND s.completed_at>=? AND s.completed_at<?"
             params += [lo, hi]
@@ -480,6 +555,9 @@ class Sales:
 
     def day_summary(self, ctx: Context, day: str | None = None) -> dict:
         ctx.require("sales.read")
+        if not ctx.can("sales.totals"):
+            raise Forbidden("إجمالي المبيعات للمدير والصاحب بس", code="forbidden",
+                            details={"permission": "sales.totals"})
         d = date.fromisoformat(day) if day else local_today()
         lo, hi = local_day_bounds(d)
         r = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_cash),0) cash,"

@@ -74,9 +74,18 @@ class TestShift(Base):
         actx = self.login("asst", "Assist-Pass-2026")
         self.sell(ctx=actx)                                         # assistant can sell
         with self.assertRaises(Forbidden):
-            self.cd.close(actx, 0)
-        with self.assertRaises(Forbidden):
             self.cd.movement(actx, 100, "payout", "سحب")
+        # assistant closes "count only": never sees the expected amount, no note demanded
+        self.assertNotIn("expected_cash", self.cd.summary(actx))
+        r = self.cd.close(actx, 0)
+        self.assertTrue(r["blind"])
+        self.assertNotIn("difference", r)
+        owner_view = self.cd.summary(self.ctx, r["id"])
+        self.assertLess(owner_view["difference"], 0)
+        from app.core import notify
+        n = notify.listing(self.db, self.ctx)["items"]
+        self.assertEqual(n[0]["kind"], "cash_difference")
+        self.assertEqual(n[0]["severity"], "error")
 
 
 class TestSaleRules(Base):
