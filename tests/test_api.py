@@ -166,3 +166,14 @@ class TestSafetyAPI(APICase):
         r = self.c.post("/api/safety/check", headers=H, json={"lines": [{"item_id": self.pan}]})
         self.assertEqual([f["code"] for f in r.json()["findings"]],
                          ["interaction_check_unavailable"])  # never an empty "all clear"
+
+
+class TestRecallAPI(APICase):
+    def test_extract_and_add(self):
+        self.http_login()
+        r = self.c.post("/api/recalls/extract", headers=H, json={"text": "سحب التشغيلة 2400905"})
+        self.assertEqual(r.json()["batches"], ["2400905"])
+        r = self.c.post("/api/recalls", headers=H, json={"title": "t", "items": [
+            {"product_name": "Panadol", "batch_numbers": ["2400905"]}]})
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual(self.c.get("/api/recalls/alerts").json(), [])

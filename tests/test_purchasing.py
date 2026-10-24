@@ -364,3 +364,34 @@ class TestAIFlow(PurchasingCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPdfText(PurchasingCase):
+    def make_pdf(self):
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib import colors
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4)
+        st = getSampleStyleSheet()
+        data = [["Item Name", "Qty", "Bonus", "Public Price", "Disc %", "Net Price", "Total", "Batch", "Exp"],
+                ["PANADOL 500 MG 24 TAB", "10", "0", "40.00", "20", "32.00", "320.00", "P1", FUT],
+                ["Cataflam 50mg 20 tab", "5", "0", "60.00", "18", "49.20", "246.00", "C9", FUT],
+                ["Total", "", "", "", "", "", "566.00", "", ""]]
+        t = Table(data)
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+        doc.build([Paragraph("Invoice No: PDF-9", st["Normal"]),
+                   Paragraph("Supplier: Pharma Overseas", st["Normal"]), t])
+        return buf.getvalue()
+
+    def test_text_pdf_imported_without_ai(self):
+        cat.create_supplier(self.db, self.ctx, name="Pharma Overseas")
+        inv_id = self.p.import_file(self.ctx, self.make_pdf(), "inv.pdf")
+        d = self.p.get(self.ctx, inv_id)
+        self.assertEqual(d["invoice"]["extraction_method"], "pdf_text")
+        self.assertEqual(d["invoice"]["invoice_no"], "PDF-9")
+        self.assertEqual(d["invoice"]["declared_total"], 56600)
+        self.assertEqual(len(d["lines"]), 2)
+        self.assertEqual(self.ai_calls, [])
+        self.assertEqual(self.codes(d), set(), d["issues"])

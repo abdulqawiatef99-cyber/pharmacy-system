@@ -33,6 +33,7 @@ from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
 from ..dataimport.service import DataImport, export_catalog
 from ..safety.engine import SafetyEngine
+from ..recalls.service import Recalls, extract_batches
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -95,6 +96,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
     safety = SafetyEngine(db)
+    recalls = Recalls(db)
     login_limiter = RateLimiter(10, 60)
 
     def client_ip(req: Request) -> str:
@@ -438,6 +440,35 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                 notes=b.get("notes"))
         return J({"id": sid}, status_code=201)
 
+    # ------------------------------------------------------------- recalls
+    @handler
+    async def recall_extract(req):
+        ctx_of(req)
+        b = await body(req)
+        return J({"batches": extract_batches(str(b.get("text", ""))[:20000])})
+
+    @handler
+    async def recall_add(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        nid = recalls.add_notice(ctx, title=str(b.get("title", "")), items=b.get("items") or [],
+                                 notice_no=b.get("notice_no"), notice_date=b.get("notice_date"),
+                                 url=b.get("url"), raw_text=b.get("raw_text"))
+        return J({"id": nid, "alerts": recalls.alerts(ctx)}, status_code=201)
+
+    @handler
+    async def recall_alerts(req):
+        ctx = ctx_of(req)
+        st = req.query_params.get("status", "pending")
+        return J(recalls.alerts(ctx, None if st == "all" else st))
+
+    @handler
+    async def recall_decide(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        recalls.decide(ctx, req.path_params["id"], str(b.get("status", "")), b.get("note"))
+        return J({"ok": True})
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -487,6 +518,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/safety/rules/{id}/approve", safety_rule_approve, methods=["POST"]),
         Route("/api/safety/rules/{id}/disable", safety_rule_disable, methods=["POST"]),
         Route("/api/safety/sources", safety_source_add, methods=["POST"]),
+        Route("/api/recalls/extract", recall_extract, methods=["POST"]),
+        Route("/api/recalls", recall_add, methods=["POST"]),
+        Route("/api/recalls/alerts", recall_alerts),
+        Route("/api/recalls/alerts/{id}", recall_decide, methods=["POST"]),
         Route("/sw.js", sw),
         Route("/", index),
         Mount("/static", StaticFiles(directory=WEB_DIR), name="static"),

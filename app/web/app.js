@@ -47,6 +47,7 @@ const routes = [
   [/^#\/items$/, viewItems],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
+  [/^#\/recalls$/, viewRecalls],
 ];
 
 async function route() {
@@ -476,6 +477,59 @@ async function viewImportRun(id) {
     await api(`/api/imports/${id}/discard`, { method: "POST" }).catch((e) => toast(e.message, true));
     location.hash = "#/import";
   });
+}
+
+// ------------------------------------------------------------------ recalls
+async function viewRecalls() {
+  const alerts = await api("/api/recalls/alerts");
+  app.innerHTML = `
+  <section class="panel">
+    <h1>تنبيهات سحب هيئة الدواء</h1>
+    <p class="muted">الصق نص المنشور، وراجع أرقام التشغيلات المقترحة قبل الحفظ. النظام بيقارنها بالتشغيلات المسجلة عندك من فواتير الشراء، ومش بيحرك المخزون لوحده.</p>
+    <form id="rcForm">
+      <div class="row">
+        <label class="f grow">عنوان المنشور <input name="title" required></label>
+        <label class="f">رقم المنشور <input name="notice_no"></label>
+        <label class="f">التاريخ <input name="notice_date" type="date"></label>
+      </div>
+      <label class="f">اسم المستحضر <input name="product_name" required></label>
+      <label class="f">نص المنشور (اختياري — لاستخراج التشغيلات) <textarea name="raw_text" rows="3"></textarea></label>
+      <div class="row"><button class="btn secondary" type="button" id="rcExtract">استخراج التشغيلات</button></div>
+      <label class="f">أرقام التشغيلات (افصل بينها بمسافة أو فاصلة) <input name="batches" required></label>
+      <button class="btn" type="submit">حفظ ومطابقة</button>
+    </form>
+  </section>
+  <section class="panel"><h2>تشغيلات مطابقة تحتاج قرار (${alerts.length})</h2><div class="tablewrap"><table>
+    <thead><tr><th>الصنف عندك</th><th>التشغيلة</th><th>الكمية في المخزون</th><th>المنشور</th><th>أساس المطابقة</th><th>القرار</th></tr></thead>
+    <tbody>${alerts.map((a) => `<tr class="${a.qty_in_stock > 0 ? "has-err" : ""}">
+      <td>${esc(a.item_label)}</td><td>${esc(a.batch_no)}</td><td>${a.qty_in_stock}</td>
+      <td>${esc(a.title)}${a.notice_no ? ` (${esc(a.notice_no)})` : ""}<div class="raw">${esc(a.product_name)}</div></td>
+      <td>${a.match_basis === "batch+name" ? `<span class="badge b-err">تشغيلة + اسم</span>` : `<span class="badge b-warn">رقم التشغيلة فقط — تأكد</span>`}</td>
+      <td><button class="btn small" data-rc="${esc(a.id)}" data-st="confirmed">مؤكد — سحب الكمية</button>
+        <button class="btn small secondary" data-rc="${esc(a.id)}" data-st="not_ours">ليست نفس المستحضر</button></td></tr>`).join("")
+      || `<tr><td colspan="6" class="muted">لا توجد تشغيلات مطابقة</td></tr>`}</tbody></table></div></section>`;
+  $("#rcExtract").addEventListener("click", async () => {
+    const f = $("#rcForm");
+    const r = await api("/api/recalls/extract", { method: "POST", body: { text: f.raw_text.value } });
+    f.batches.value = r.batches.join(" ");
+    toast(r.batches.length ? "راجع الأرقام المقترحة قبل الحفظ" : "لم يتم العثور على أرقام تشغيلات", !r.batches.length);
+  });
+  $("#rcForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api("/api/recalls", { method: "POST", body: { title: f.title.value, notice_no: f.notice_no.value || null,
+        notice_date: f.notice_date.value || null, raw_text: f.raw_text.value || null,
+        items: [{ product_name: f.product_name.value, batch_numbers: f.batches.value.split(/[\s,،]+/).filter(Boolean) }] } });
+      toast("تم الحفظ والمطابقة"); viewRecalls();
+    } catch (err) { toast(err.message, true); }
+  });
+  app.querySelectorAll("[data-rc]").forEach((b) => b.addEventListener("click", async () => {
+    const note = b.dataset.st === "not_ours" ? prompt("سبب إنها ليست نفس المستحضر:") : null;
+    if (b.dataset.st === "not_ours" && !note) return;
+    try { await api(`/api/recalls/alerts/${b.dataset.rc}`, { method: "POST", body: { status: b.dataset.st, note } }); viewRecalls(); }
+    catch (err) { toast(err.message, true); }
+  }));
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

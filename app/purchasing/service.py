@@ -529,6 +529,13 @@ class Purchasing:
             audit.record(self.db, ctx, "purchase.approve", "purchase_invoice", inv_id,
                          after={"lines": len(lines), "base_units": moved, "total": net_total})
         matching.invalidate(ctx.org_id)
+        # a recalled batch may arrive after the circular was registered
+        try:
+            from ..recalls.service import Recalls
+            Recalls(self.db).match_new_batches(ctx)
+        except Exception:   # alerting must never undo an approved invoice
+            import logging
+            logging.getLogger("pharm.recalls").exception("recall matching failed")
         return self.get(ctx, inv_id, with_candidates=False)
 
     def cancel(self, ctx: Context, inv_id: str, reason: str, version: int | None) -> dict:
