@@ -178,6 +178,8 @@ const routes = [
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
   [/^#\/shortages$/, viewShortages],
+  [/^#\/customers$/, viewCustomers],
+  [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
@@ -2006,6 +2008,109 @@ async function viewShortages() {
       <td><b>${r.suggest_base ? esc(fmtStock(r.suggest_base, it(r))) : "—"}</b></td><td>${esc(r.last_supplier || "—")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">✓ مفيش نواقص</td></tr>`}</tbody></table></div></section>`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/items/${tr.dataset.go}`; }));
   $("#shPrint").addEventListener("click", () => window.print());
+}
+
+// ------------------------------------------------------------------ customers
+const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية" };
+async function viewCustomers(filter = "") {
+  const canM = ME.permissions.includes("customers.manage");
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>العملاء</h1></div>
+    <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم موبايل" autocomplete="off">
+      <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم فلوس</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">طلبهم الشهري قرّب</button></div></div>
+    <table class="mt"><thead><tr><th>العميل</th><th>الموبايل</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table></section>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم <input name="name" required></label>
+    <label class="f">الموبايل <input name="phone" inputmode="tel"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+    <button class="btn">أضف</button></form>` : ""}`;
+  const today = new Date().toISOString().slice(0, 10);
+  const load = async () => {
+    const f = $("#cuF .on").dataset.f;
+    const list = (await api(`/api/customers/all?q=${encodeURIComponent($("#cuQ").value)}${f ? `&only=${f}` : ""}`)).customers;
+    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b></td><td dir="ltr">${esc(c.phone || "")}</td>
+      <td>${c.balance > 0 ? `<span class="badge b-err">✕ ${money(c.balance)}</span>` : `<span class="ok">✓ مفيش</span>`}</td>
+      <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ ميعاده عدى" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="muted">مفيش عملاء</td></tr>`;
+    document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
+  };
+  let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
+  document.querySelectorAll("#cuF [data-f]").forEach((b) => b.addEventListener("click", () => { document.querySelectorAll("#cuF button").forEach((x) => x.classList.toggle("on", x === b)); load(); }));
+  $("#cuNew")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { const r = await api("/api/customers", { method: "POST", body: { name: e.target.name.value, phone: e.target.phone.value || null, credit_limit: toPiasters(e.target.lim.value) || 0 } }); location.hash = `#/customers/${r.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
+  load();
+}
+
+async function viewCustomer(id) {
+  const c = await api(`/api/customers/${id}`), canM = ME.permissions.includes("customers.manage");
+  const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
+  app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><div class="row between"><h1>${esc(c.name)}</h1>
+      ${ME.permissions.includes("sales.create") ? `<button class="btn" id="cuSale">فاتورة له</button>` : ""}</div>
+    <div class="formgrid"><label class="f">الاسم <input id="cName" value="${esc(c.name)}" ${canM ? "" : "disabled"}></label>
+      <label class="f">الموبايل <input id="cPhone" value="${esc(c.phone || "")}" inputmode="tel" ${canM ? "" : "disabled"}></label>
+      <label class="f">حد الآجل (ج) <input id="cLim" type="number" min="0" value="${money(c.credit_limit)}" ${canM ? "" : "disabled"}></label>
+      <label class="f">ملاحظات <input id="cNotes" value="${esc(c.notes || "")}" ${canM ? "" : "disabled"}></label></div>
+    <label class="chk mt"><input type="checkbox" id="cWa" ${c.whatsapp_ok ? "checked" : ""} ${canM ? "" : "disabled"}> موافق إننا نبعتله رسايل واتساب (تذكير الطلب الشهري)</label>
+    ${canM ? `<button class="btn small secondary mt" id="cSave">احفظ</button>` : ""}</section>
+  <div class="totals"><div class="${c.balance > 0 ? "t-err" : "t-ok"}">${c.balance > 0 ? "✕ عليه" : "✓ مفيش عليه"}<b>${money(Math.max(0, c.balance))} ج</b><span>الحد المسموح ${money(c.credit_limit)} ج</span></div>
+    <div class="${c.whatsapp_ok ? "t-ok" : ""}">${c.whatsapp_ok ? "✓ موافق على واتساب" : "مش موافق على رسايل"}<b>${esc(c.phone || "—")}</b></div></div>
+  ${canM && c.balance > 0 ? `<form class="panel row" id="cPay"><h2 class="grow">تحصيل من الحساب</h2><label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+    <label class="f">منين <select name="m"><option value="cash">نقدي في الدرج</option><option value="card">فيزا</option></select></label><button class="btn">سجّل</button></form>` : ""}
+  <div class="grid2">
+    <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<button class="btn small" id="cPrep">جهّز الطلب في الكاشير</button>` : ""}</div>
+      <table><thead><tr><th>الصنف</th><th>الكمية</th><th>كل</th><th>ميعاده</th><th>عندنا؟</th><th></th></tr></thead><tbody>
+      ${c.refills.map((r) => `<tr><td>${itemHtml(r)}</td><td>${esc(fmtStock(r.qty_base, it(r)))}</td><td>${r.every_days} يوم</td>
+        <td><span class="badge ${r.days_left < 0 ? "b-err" : r.days_left <= 5 ? "b-warn" : "b-ok"}">${r.days_left < 0 ? `✕ متأخر ${-r.days_left} يوم` : r.days_left <= 5 ? `⚠ بعد ${r.days_left} يوم` : `✓ ${esc(r.due)}`}</span></td>
+        <td>${r.in_stock ? `<span class="ok">✓ موجود</span>` : `<span class="badge b-warn">⚠ مش كفاية — اطلب</span>`}</td>
+        <td>${canM ? `<button class="btn small secondary" data-rrm="${esc(r.item_id)}">شيل</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش طلب شهري</td></tr>`}</tbody></table>
+      ${c.suggest_refills.length && canM ? `<p class="badge b-info mt">ℹ اشترى الأصناف دي في 3 شهور أو أكتر — غالبًا علاج شهري:</p>
+        <ul class="plain">${c.suggest_refills.map((r) => `<li>${itemHtml(r)} (${r.months} شهور) <button class="btn small secondary" data-radd="${esc(r.item_id)}" data-rq="${r.qty_base}">ضيفه للطلب الشهري</button></li>`).join("")}</ul>` : ""}
+      ${canM ? `<form class="row mt" id="rAdd"><input id="rQ" class="grow" placeholder="ضيف صنف للطلب الشهري (اسم أو باركود)" autocomplete="off">
+        <input id="rQty" type="number" min="1" value="1" class="narrow" title="الكمية بالعلبة"><select id="rEvery"><option value="30">كل شهر</option><option value="15">كل 15 يوم</option><option value="60">كل شهرين</option></select>
+        <button class="btn small">أضف</button></form><div id="rRes" class="cands"></div>` : ""}
+      <p class="muted">البرنامج بيقترح، وانت اللي بتأكد. مفيش رسالة بتطلع لوحدها.</p></section>
+    <section class="panel"><h2>الحساب</h2><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead><tbody>
+      ${c.ledger.map((l) => `<tr><td>${esc(l.created_at.slice(0, 10))}</td><td>${esc(CL_KIND[l.kind] || l.kind)}${l.note ? ` — ${esc(l.note)}` : ""}</td>
+        <td class="num ${l.amount < 0 ? "ok" : ""}">${l.amount < 0 ? "− " : "+ "}${money(Math.abs(l.amount))}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">مفيش حركات</td></tr>`}</tbody></table>
+      <h2 class="mt">آخر الفواتير</h2><ul class="plain">${c.sales.map((x) => `<li><a href="#/sales/${esc(x.id)}">فاتورة ${x.sale_no}</a> — ${money(x.total)} ج — ${esc((x.completed_at || "").slice(0, 10))}</li>`).join("") || `<li class="muted">مفيش</li>`}</ul></section>
+  </div>`;
+  $("#cSave")?.addEventListener("click", async () => {
+    try { await api(`/api/customers/${id}`, { method: "PATCH", body: { name: $("#cName").value, phone: $("#cPhone").value || null, notes: $("#cNotes").value || null, credit_limit: toPiasters($("#cLim").value) || 0, whatsapp_ok: $("#cWa").checked } }); toast("اتحفظ"); viewCustomer(id); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#cPay")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value } }); toast("✓ اتسجل"); viewCustomer(id); }
+    catch (err) { toast(err.message, true); }
+  });
+  const toPos = async (sid) => { SALE = await api(`/api/sales/${sid}`); location.hash = "#/pos"; };
+  $("#cuSale")?.addEventListener("click", async () => {
+    try { const d = await api("/api/sales", { method: "POST", body: { customer_id: id } }); await toPos(d.id); } catch (err) { toast(err.message, true); }
+  });
+  $("#cPrep")?.addEventListener("click", async () => {
+    try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { prepare: true } }); await toPos(r.sale_id); } catch (err) { toast(err.message, true); }
+  });
+  document.querySelectorAll("[data-rrm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirmInline(b)) return;
+    try { await api(`/api/customers/${id}/refills`, { method: "POST", body: { remove: true, item_id: b.dataset.rrm } }); viewCustomer(id); } catch (err) { toast(err.message, true); }
+  }));
+  document.querySelectorAll("[data-radd]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/customers/${id}/refills`, { method: "POST", body: { item_id: b.dataset.radd, qty_base: +b.dataset.rq, every_days: 30 } }); viewCustomer(id); } catch (err) { toast(err.message, true); }
+  }));
+  let picked = null;
+  $("#rQ")?.addEventListener("input", async (e) => {
+    picked = null;
+    const v = e.target.value.trim(); if (v.length < 2) return;
+    const f = await findItems(v, 6);
+    $("#rRes").innerHTML = hintHtml(f.hint) + f.items.map((r, i) => `<button type="button" class="btn small secondary" data-rp="${i}">${itemHtml(r)}</button>`).join("");
+    $("#rRes").querySelectorAll("[data-rp]").forEach((b) => b.addEventListener("click", () => { picked = f.items[+b.dataset.rp]; $("#rQ").value = itemText(picked); $("#rRes").innerHTML = ""; }));
+  });
+  $("#rAdd")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!picked) return toast("اختار الصنف من القايمة", true);
+    try { await api(`/api/customers/${id}/refills`, { method: "POST", body: { item_id: picked.id, qty_base: (+$("#rQty").value || 1) * picked.pack_size, every_days: +$("#rEvery").value } }); viewCustomer(id); }
+    catch (err) { toast(err.message, true); }
+  });
 }
 
 // ------------------------------------------------------------------ notifications (owner + managers)
