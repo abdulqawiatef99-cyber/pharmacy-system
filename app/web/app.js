@@ -38,10 +38,107 @@ function applyPrefs(p) {
   try { localStorage.setItem("prefs", JSON.stringify(PREFS)); } catch { /* storage blocked */ }
 }
 applyPrefs(PREFS);
+
+// ------------------------------------------------------------------ English screen (لغة البرنامج)
+// The screens are written in Arabic; when a person chooses English, every Arabic text on the page
+// (and placeholders / titles) is swapped for its English from /static/i18n-en.js as it appears.
+// Whole texts match exactly; inside longer texts only multi-word phrases are swapped, so a
+// customer or item name is never "translated". Item names follow the separate names setting.
+const I18N = { on: false, map: null, re: null, obs: null };
+const AR = /[\u0600-\u06FF]/;
+function trString(s) {
+  if (!s || !AR.test(s)) return null;
+  const t = s.replace(/\s+/g, " ").trim();
+  let out = I18N.map.get(t);
+  if (out === undefined) {
+    out = I18N.re ? t.replace(I18N.re, (m) => I18N.map.get(m) ?? m) : t;
+    // then each piece between separators, only when the whole piece is a known phrase
+    out = out.replace(/[^—·():/،|\n]+/g, (seg) => { const k = seg.trim(); const v = k && I18N.map.get(k); return v ? seg.replace(k, v) : seg; });
+    for (const [re, rep] of I18N_PATTERNS) out = out.replace(re, rep);
+  }
+  if (out == null || out === t) return null;
+  const lead = s.match(/^\s*/)[0], trail = s.match(/\s*$/)[0];
+  return lead + out + trail;
+}
+// words that come next to numbers ("3 فاتورة", "76.45 ج", "5 يوم") and a few fixed bits
+const NUM = "(\\d[\\d.,]*)";
+const I18N_PATTERNS = [
+  [new RegExp(`${NUM}\\s*فواتير|${NUM}\\s*فاتورة`, "g"), (m, a, b) => `${a || b} invoices`],
+  [new RegExp(`${NUM}\\s*(?:يوم|أيام)(?![\\u0600-\\u06FF])`, "g"), "$1 days"],
+  [new RegExp(`${NUM}\\s*(?:وحدة|وحدات)(?![\\u0600-\\u06FF])`, "g"), "$1 units"],
+  [new RegExp(`${NUM}\\s*(?:علبة|علب)(?![\\u0600-\\u06FF])`, "g"), "$1 packs"],
+  [new RegExp(`${NUM}\\s*(?:صنف|أصناف)(?![\\u0600-\\u06FF])`, "g"), "$1 items"],
+  [new RegExp(`${NUM}\\s*(?:شهر|شهور)(?![\\u0600-\\u06FF])`, "g"), "$1 months"],
+  [new RegExp(`${NUM}\\s*(?:ساعة|ساعات)(?![\\u0600-\\u06FF])`, "g"), "$1 hours"],
+  [new RegExp(`${NUM}\\s*دقيقة`, "g"), "$1 min"],
+  [new RegExp(`${NUM}\\s*ك\\.ب`, "g"), "$1 KB"], [new RegExp(`${NUM}\\s*ميجا`, "g"), "$1 MB"], [new RegExp(`${NUM}\\s*مم`, "g"), "$1 mm"],
+  [new RegExp(`${NUM}\\s*ج(?![\\u0600-\\u06FF])`, "g"), "$1 EGP"], [/(?<![\u0600-\u06FF])ج(?![\u0600-\u06FF])/g, "EGP"],
+  [/(?<![\u0600-\u06FF])خصم(?![\u0600-\u06FF])/g, "discount"], [/\(الافتراضي\)/g, "(default)"],
+  [/(?<![\u0600-\u06FF])من (\S+) لحد (\S+)/g, "from $1 to $2"], [/(?<![\u0600-\u06FF])يوم (\d+)/g, "day $1"],
+  [/(?<![\u0600-\u06FF])بعد (\d+ days)/g, "in $1"],
+  [/(?<![\u0600-\u06FF])فاتورة (\d+)/g, "Invoice $1"],
+];
+const SKIP = new Set(["SCRIPT", "STYLE", "TEXTAREA", "INPUT"]);
+function trNode(root) {
+  if (!I18N.on || !root) return;
+  if (root.nodeType === 3) { const v = trString(root.nodeValue); if (v != null) root.nodeValue = v; return; }
+  const attrs = (el) => { for (const a of ["placeholder", "title", "aria-label"]) { const v = el.getAttribute?.(a); if (v) { const x = trString(v); if (x != null) el.setAttribute(a, x); } } };
+  if (root.nodeType !== 1 || root.closest?.("[data-raw], .iname-ar")) return;
+  attrs(root);
+  if (SKIP.has(root.tagName)) return;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (n) => {
+      if (n.nodeType !== 1) return NodeFilter.FILTER_ACCEPT;
+      if (n.hasAttribute("data-raw") || n.classList.contains("iname-ar")) return NodeFilter.FILTER_REJECT;
+      if (SKIP.has(n.tagName)) { attrs(n); return NodeFilter.FILTER_REJECT; }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (n.nodeType === 3) { const v = trString(n.nodeValue); if (v != null) n.nodeValue = v; } else attrs(n);
+  }
+}
+function loadScript(src) {
+  return new Promise((ok, bad) => { const sc = document.createElement("script"); sc.src = src; sc.onload = ok; sc.onerror = bad; document.head.append(sc); });
+}
+async function setLanguage(lang) {
+  const h = document.documentElement;
+  if (lang !== "en") {
+    if (I18N.on) { I18N.on = false; I18N.obs?.disconnect(); location.reload(); }
+    h.lang = "ar"; h.dir = "rtl"; return;
+  }
+  if (!I18N.map) {
+    try { await loadScript("/static/i18n-en.js"); } catch { toast("ملف الإنجليزي مش موجود", true); return; }
+    const dict = window.I18N_EN || {};
+    I18N.map = new Map(Object.entries(dict));
+    for (const [k, v] of Object.entries(dict)) {           // "⚠ نص" also known as "نص"
+      const m = k.match(/^([⚠✓✕ℹ⛔✅❗❔]\uFE0F?)\s+(.+)$/u);
+      if (m && !I18N.map.has(m[2])) I18N.map.set(m[2], v.replace(/^([⚠✓✕ℹ⛔✅❗❔]\uFE0F?)\s+/u, ""));
+    }
+    const multi = Object.keys(dict).filter((k) => k.includes(" ") && k.length > 4).sort((a, b) => b.length - a.length)
+      .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    I18N.re = multi.length ? new RegExp(`(?<![\\u0600-\\u06FF])(?:${multi.join("|")})(?![\\u0600-\\u06FF])`, "g") : null;
+  }
+  I18N.on = true; h.lang = "en"; h.dir = "ltr";
+  trNode(document.body); document.title = trString(document.title) ?? document.title;
+  if (!I18N.obs) {
+    I18N.obs = new MutationObserver((muts) => {
+      if (!I18N.on) return;
+      for (const m of muts) {
+        if (m.type === "characterData") trNode(m.target);
+        else if (m.type === "attributes") trNode(m.target);
+        else m.addedNodes.forEach(trNode);
+      }
+    });
+  }
+  I18N.obs.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label"] });
+}
+if (PREFS.lang === "en") document.addEventListener("DOMContentLoaded", () => setLanguage("en"));
 async function savePrefs(changes) {
   const p = await api("/api/me/prefs", { method: "PUT", body: changes });
   if (ME) ME.prefs = p;
   applyPrefs(p);
+  if ("lang" in changes || changes.reset) await setLanguage(p.lang);
   return p;
 }
 document.addEventListener("keydown", (e) => {        // Ctrl + / Ctrl - : font size for this person
@@ -215,7 +312,7 @@ async function route() {
   }
   $("#topbar").hidden = !ME;
   if (ME) {
-    if (ME.prefs) applyPrefs(ME.prefs);
+    if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
@@ -2549,6 +2646,12 @@ function reportTools(key) {
 }
 // sheets: [{name, columns: [{label, type: text|money|int|num|date}], rows: [[...]], total?: [...]}]
 async function exportXlsx(filename, subtitle, sheets) {
+  if (I18N.on) {                                   // English screen -> English file headings
+    const T = (x) => (typeof x === "string" ? trString(x) ?? x : x);
+    filename = T(filename); subtitle = T(subtitle);
+    sheets = sheets.map((sh) => ({ ...sh, name: T(sh.name), columns: sh.columns.map((c) => ({ ...c, label: T(c.label) })),
+      rows: sh.rows.map((r) => r.map(T)), total: sh.total?.map(T) }));
+  }
   try {
     const r = await fetch("/api/export/xlsx", { method: "POST", credentials: "same-origin",
       headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },
@@ -2777,7 +2880,8 @@ function viewMe() {
     <h2 class="mt">أسماء الأصناف</h2>
     <div class="seg">${radio("names", "both", "الاتنين (الافتراضي)")}${radio("names", "en", "إنجليزي بس")}${radio("names", "ar", "عربي بس")}</div>
     <h2 class="mt">لغة البرنامج</h2>
-    <div class="seg">${radio("lang", "ar", "العربية (الافتراضي)")}<label class="muted"><input type="radio" disabled> English — جاية في الخطوة 15</label></div>
+    <div class="seg">${radio("lang", "ar", "العربية (الافتراضي)")}${radio("lang", "en", "English")}</div>
+      <p class="muted small">English بيغيّر كلام الشاشات. أسماء الأصناف بتمشي على اختيار "أسماء الأصناف". لو فيه كلمة لسه عربي، ابعتها من 💬 ملاحظة.</p>
   </section>
   <section class="panel narrowpanel"><h1>الرقم السري</h1>
     <p>${esc(ME.user.full_name)} — <span class="badge b-info">${esc(ME.role_name || "")}</span>

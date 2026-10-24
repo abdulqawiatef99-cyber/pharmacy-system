@@ -1,7 +1,7 @@
 // Service worker: caches the app shell only. API responses are never cached
 // (financial/stock data must always be live; offline writes are a later phase).
-const CACHE = "pharm-shell-v42";
-const SHELL = ["/", "/static/app.css", "/static/app.js", "/static/manifest.json", "/static/icon.svg"];
+const CACHE = "pharm-shell-v43";
+const SHELL = ["/", "/static/app.css", "/static/app.js", "/static/i18n-en.js", "/static/manifest.json", "/static/icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
