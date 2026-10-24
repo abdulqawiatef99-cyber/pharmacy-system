@@ -37,8 +37,61 @@ function toast(msg, isError = false) {
 
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
-async function api(path, { method = "GET", body, form } = {}) {
-  const opts = { method, headers: { "X-Requested-With": "pharm" }, credentials: "same-origin" };
+// ------------------------------------------------------------------ on-screen approval
+// The owner or a manager types his PIN on this screen; the approval is kept for
+// 90 seconds on this screen only (cleared when leaving it), then asked again.
+let APPROVAL = null;
+const approvalHeaders = () => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return { "X-Approver": APPROVAL.id, "X-Approver-Pin": APPROVAL.pin };
+  APPROVAL = null; return {};
+};
+window.addEventListener("hashchange", () => { APPROVAL = null; });
+
+async function askApproval(details, message) {
+  let list = [];
+  try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
+  if (!list.length) {
+    toast(`${message}. مفيش صاحب أو مدير عنده رقم سري للموافقة — الصاحب يحط رقمه من صفحة "حسابي"`, true);
+    return false;
+  }
+  let dlg = $("#approveDlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "approveDlg"; document.body.append(dlg); }
+  dlg.innerHTML = `<form method="dialog" class="approve">
+    <h2>محتاج موافقة</h2>
+    <p class="badge b-warn">⚠ ${esc(details?.label || message)}</p>
+    <p class="muted">${esc(message)}</p>
+    <label class="f">مين هيوافق <select name="who">${list.map((a) => `<option value="${esc(a.id)}">${esc(a.full_name)} — ${esc(a.role_name)}</option>`).join("")}</select></label>
+    <label class="f">رقمه السري <input name="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required></label>
+    <p class="badge b-err" data-err hidden></p>
+    <div class="row mt"><button class="btn" value="ok">موافقة</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div>
+  </form>`;
+  dlg.showModal();
+  dlg.querySelector("[name=pin]").focus();
+  return await new Promise((resolve) => {
+    const form = dlg.querySelector("form");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (e.submitter?.value === "cancel") { dlg.close(); resolve(false); return; }
+      const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
+      const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
+        headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
+        body: JSON.stringify({ permission: details?.permission || "" }) });
+      const d = await r.json().catch(() => ({}));
+      const enough = r.ok && d.ok && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
+      if (!enough) {
+        err.hidden = false;
+        err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غلط"}` : "✕ اللي اخترته مش عنده الصلاحية دي";
+        form.pin.value = ""; form.pin.focus(); return;
+      }
+      APPROVAL = { id: who, pin, until: Date.now() + 90000 };
+      dlg.close(); resolve(true);
+    });
+    dlg.addEventListener("cancel", () => resolve(false), { once: true });
+  });
+}
+
+async function api(path, { method = "GET", body, form, _retried = false } = {}) {
+  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -57,8 +110,12 @@ async function api(path, { method = "GET", body, form } = {}) {
     }
   }
   const data = await r.json().catch(() => ({}));
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
+    if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
+  }
+  if (!r.ok && opts.headers["X-Approver"] && ["invalid_pin", "pin_locked"].includes(data?.error?.code)) APPROVAL = null;
   if (!r.ok) {
-    if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
+    if (r.status === 401 && !path.startsWith("/api/auth") && !opts.headers["X-Approver"]) { ME = null; location.hash = "#/login"; }
     const err = new Error(data?.error?.message || "خطأ في الاتصال");
     err.code = data?.error?.code; err.details = data?.error?.details;
     throw err;
@@ -84,6 +141,10 @@ const routes = [
   [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
+  [/^#\/users$/, viewUsers],
+  [/^#\/users\/([\w-]+)$/, viewUser],
+  [/^#\/notifications$/, viewNotifications],
+  [/^#\/me$/, viewMe],
 ];
 
 async function route() {
@@ -95,7 +156,13 @@ async function route() {
     try { ME = await api("/api/me"); } catch { location.hash = "#/login"; return; }
   }
   $("#topbar").hidden = !ME;
-  if (ME) $("#who").textContent = `${ME.user.full_name} — ${ME.organization.name}`;
+  if (ME) {
+    $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
+    $("#navUsers").hidden = !ME.permissions.includes("users.manage");
+    $("#bell").hidden = !ME.permissions.includes("notifications.read");
+    if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
+    if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
+  }
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
@@ -158,15 +225,38 @@ function viewSetup() {
   });
 }
 
-function viewLogin() {
+async function viewLogin() {
   $("#topbar").hidden = true;
+  let quick = [];
+  try { quick = (await api("/api/auth/quick-users")).users; } catch { /* not on the pharmacy PC */ }
   app.innerHTML = `
+  ${quick.length ? `<section class="panel login" id="quick">
+    <h1>دخول سريع</h1>
+    <div class="tiles">${quick.map((u) => `<button type="button" class="tile" data-u="${esc(u.id)}">${esc(u.full_name)}</button>`).join("")}</div>
+    <form id="pinForm" hidden class="mt"><label class="f"><span id="pinWho"></span> — الرقم السري
+      <input name="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required></label>
+      <button class="btn mt" type="submit">دخول</button></form>
+  </section>` : ""}
   <form class="panel login" id="loginForm">
     <h1>تسجيل الدخول</h1>
     <label class="f">اسم المستخدم <input name="username" autocomplete="username" required></label><br>
     <label class="f">كلمة المرور <input name="password" type="password" autocomplete="current-password" required></label><br>
     <button class="btn" type="submit">دخول</button>
   </form>`;
+  let quickUser = null;
+  document.querySelectorAll("[data-u]").forEach((b) => b.addEventListener("click", () => {
+    quickUser = b.dataset.u;
+    document.querySelectorAll("[data-u]").forEach((x) => x.classList.toggle("on", x === b));
+    $("#pinForm").hidden = false; $("#pinWho").textContent = b.textContent;
+    $("#pinForm").pin.value = ""; $("#pinForm").pin.focus();
+  }));
+  $("#pinForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/auth/pin", { method: "POST", body: { user_id: quickUser, pin: e.target.pin.value } });
+      ME = r.me; location.hash = "#/pos";
+    } catch (err) { e.target.pin.value = ""; toast(err.message, true); }
+  });
   $("#loginForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1113,7 +1203,7 @@ async function viewPos() {
       <div class="row mt"><label class="f grow">العميل (للآجل) <input id="posCust" placeholder="اسم أو تليفون"></label>
         <button class="btn secondary small" id="posCustNew" type="button">عميل جديد</button></div>
       <div id="posCustRes" class="cands"></div>
-      <p class="muted mt"><a href="#" id="posSummary">ملخص اليوم</a> · <a href="#" id="posShift">الخزنة</a></p><div id="posSum"></div>
+      <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزنة</a></p><div id="posSum"></div>
     </section>
     <section class="panel" id="posCart"></section>
   </div>`;
@@ -1154,33 +1244,35 @@ async function viewPos() {
     let sh = null;
     try { sh = await api("/api/cash/current"); } catch { /* no open shift */ }
     if (!sh) {
-      const v = prompt("الخزنة مقفولة. رصيد بداية الوردية بالجنيه:", "0");
+      const v = prompt("الخزنة مقفولة. رصيد بداية الشيفت بالجنيه:", "0");
       if (v === null) return;
       try { sh = await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(v) || 0 } }); }
       catch (er) { return toast(er.message, true); }
     }
     const k = sh.cash_by_kind || {};
-    $("#posSum").innerHTML = `<div class="totals"><div>بداية<b>${money(sh.opening_cash)}</b></div>
+    $("#posSum").innerHTML = (sh.blind
+      ? `<p class="muted">الشيفت مفتوح. عند القفل: عدّ الفلوس اللي في الدرج واكتبها، والفرق بيظهر للمدير والصاحب.</p>`
+      : `<div class="totals"><div>بداية<b>${money(sh.opening_cash)}</b></div>
       <div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div><div>مرتجع/إلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div>
       <div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div><div>مصروفات<b>${money(k.payout || 0)}</b></div>
-      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div><div>فيزا<b>${money(sh.card_total)}</b></div></div>
-      ${ME.permissions.includes("cash.manage") ? `<div class="row mt"><button class="btn small secondary" id="shPay">مصروف من الدرج</button>
-      <button class="btn small" id="shClose">قفل الوردية</button></div>` : ""}`;
+      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div><div>فيزا<b>${money(sh.card_total)}</b></div></div>`)
+      + `<div class="row mt">${ME.permissions.includes("cash.manage") ? `<button class="btn small secondary" id="shPay">مصروف من الدرج</button>` : ""}
+      ${ME.permissions.includes("cash.close") ? `<button class="btn small" id="shClose">قفل الشيفت</button>` : ""}</div>`;
     $("#shPay")?.addEventListener("click", async () => {
       const a = prompt("المبلغ بالجنيه:"); const n = a && prompt("السبب:"); if (!n) return;
       try { await api("/api/cash/movements", { method: "POST", body: { kind: "payout", amount: toPiasters(a), note: n } }); toast("تم"); }
       catch (er) { toast(er.message, true); }
     });
     $("#shClose")?.addEventListener("click", async () => {
-      const c = prompt(`عدّ الفلوس في الدرج واكتب المبلغ (المتوقع ${money(sh.expected_cash)}):`); if (c === null) return;
+      const c = prompt(sh.blind ? "عدّ الفلوس اللي في الدرج واكتب المبلغ:" : `عدّ الفلوس في الدرج واكتب المبلغ (المتوقع ${money(sh.expected_cash)}):`); if (c === null) return;
       let note = null;
-      if (toPiasters(c) !== sh.expected_cash) { note = prompt("فيه فرق — اكتب السبب:"); if (!note) return; }
+      if (!sh.blind && toPiasters(c) !== sh.expected_cash) { note = prompt("فيه فرق — اكتب السبب:"); if (!note) return; }
       try { const r = await api("/api/cash/close", { method: "POST", body: { counted_cash: toPiasters(c), note } });
-        toast(`تم قفل الوردية — الفرق ${money(r.difference)}`); $("#posSum").innerHTML = ""; }
+        toast(r.blind ? "تم قفل الشيفت" : `تم قفل الشيفت — الفرق ${money(r.difference)}`); $("#posSum").innerHTML = ""; }
       catch (er) { toast(er.message, true); }
     });
   });
-  $("#posSummary").addEventListener("click", async (e) => {
+  $("#posSummary")?.addEventListener("click", async (e) => {
     e.preventDefault();
     const s = await api("/api/sales/summary");
     $("#posSum").innerHTML = `<div class="totals"><div>فواتير<b>${s.n}</b></div><div>مبيعات<b>${money(s.total)}</b></div>
@@ -1260,7 +1352,7 @@ async function complete(findings) {
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { paid_cash: cash, paid_card: card, on_credit: credit, safety_decisions: decisions,
-              version: SALE.version, request_id: SALE.request_id } });
+              version: SALE.version, request_id: SALE.request_id, confirm_below_cost: !!SALE.confirm_below_cost } });
     // thermal printer + drawer through the PC; if not configured or offline, print from the browser
     try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 } }); }
     catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
@@ -1272,7 +1364,161 @@ async function complete(findings) {
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); }
     if (er.code === "no_open_shift") $("#posShift").click();
+    if (er.code === "below_cost_confirm") {
+      const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
+      if (confirm(`⛔ البيع ده تحت التكلفة (بخسارة):\n${lines}\n\nمتأكد إنك عايز تكمل؟`)) {
+        SALE.confirm_below_cost = true; btn.disabled = false; return complete(findings);
+      }
+    }
   }
+}
+
+
+// ------------------------------------------------------------------ notifications (owner + managers)
+function setBell(n) {
+  const b = $("#bellN"); if (!b) return;
+  b.hidden = !n; b.textContent = n > 99 ? "99+" : String(n);
+}
+async function refreshBell() {
+  if (!ME?.permissions?.includes("notifications.read") || document.hidden) return;
+  try { setBell((await api("/api/notifications?unread=1&limit=1")).unread); } catch { /* offline */ }
+}
+const NSEV = { error: ["b-err", "✕"], warning: ["b-warn", "⚠"], info: ["b-info", "ℹ"] };
+async function viewNotifications() {
+  const r = await api("/api/notifications?limit=100");
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الإشعارات</h1>
+    <button class="btn small secondary" id="nRead" ${r.unread ? "" : "disabled"}>علّم الكل اتقرا</button></div>
+    <ul class="notes">${r.items.map((n) => {
+      const [cls, ic] = NSEV[n.severity] || NSEV.info;
+      return `<li class="${n.seen ? "" : "new"}"><span class="badge ${cls}">${ic}</span>
+        <div><b>${esc(n.title)}</b>${n.body ? `<div>${esc(n.body)}</div>` : ""}
+        <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${new Date(n.created_at).toLocaleString("ar-EG")}
+        ${n.entity_type === "sale" ? ` · <a href="#/sales/${esc(n.entity_id)}">الفاتورة</a>` : ""}
+        ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}</div></div></li>`;
+    }).join("") || `<li class="muted">مفيش إشعارات</li>`}</ul></section>`;
+  $("#nRead").addEventListener("click", async () => {
+    const x = await api("/api/notifications/read", { method: "POST", body: {} });
+    setBell(x.unread); viewNotifications();
+  });
+}
+
+// ------------------------------------------------------------------ my account: PIN
+function viewMe() {
+  app.innerHTML = `<section class="panel narrowpanel"><h1>حسابي</h1>
+    <p>${esc(ME.user.full_name)} — <span class="badge b-info">${esc(ME.role_name || "")}</span></p>
+    <p class="badge ${ME.has_pin ? "b-ok" : "b-warn"}">${ME.has_pin ? "✓ عندك رقم سري" : "⚠ لسه معندكش رقم سري"}</p>
+    <p class="muted">الرقم السري (4 لـ 6 أرقام) للدخول السريع على جهاز الصيدلية${["owner", "manager"].includes(ME.role) ? "، وللموافقة على شاشة حد تاني" : ""}.</p>
+    <form id="pinSet" class="row">
+      <label class="f">كلمة المرور الحالية <input name="password" type="password" autocomplete="current-password" required></label>
+      <label class="f">الرقم السري الجديد <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" required></label>
+      <button class="btn">احفظ</button></form></section>`;
+  $("#pinSet").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/me/pin", { method: "POST", body: { password: e.target.password.value, pin: e.target.pin.value } });
+      ME = await api("/api/me"); toast("اتحفظ الرقم السري"); viewMe();
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+// ------------------------------------------------------------------ users & permissions (owner)
+const ROLE_CLS = { owner: "b-brand", manager: "b-ok", pharmacist: "b-info", assistant: "b-plain" };
+const pctOf = (bp) => (bp == null ? "" : String(bp / 100));
+async function viewUsers() {
+  if (!ME.permissions.includes("users.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للصاحب بس.</p></section>`; return; }
+  const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمين</h1></div>
+    <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
+    <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
+      <td><span class="badge ${ROLE_CLS[u.role] || ""}">${esc(u.role_name)}</span></td>
+      <td>${u.active ? `<span class="badge b-ok">✓ شغال</span>` : `<span class="badge b-err">✕ موقوف</span>`}</td>
+      <td>${u.has_pin ? "✓" : `<span class="badge b-warn">⚠ مفيش</span>`}</td>
+      <td>${u.role === "owner" ? "كل الصلاحيات" : u.changes ? `${u.changes} تعديل` : "على الافتراضي"}</td></tr>`).join("")}</tbody></table></section>
+  <section class="panel"><h2>مستخدم جديد</h2>
+    <form id="uNew" class="row">
+      <label class="f">الاسم <input name="full_name" required></label>
+      <label class="f">اسم الدخول <input name="username" required minlength="3" autocomplete="off"></label>
+      <label class="f">كلمة المرور (10 على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+      <label class="f">الرقم السري (اختياري) <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></label>
+      <label class="f">النوع <select name="role">${roles.filter((r) => r.code !== "owner").map((r) => `<option value="${r.code}" ${r.code === "assistant" ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select></label>
+      <button class="btn">أضف</button></form></section>
+  <section class="panel"><h2>حدود الخصم لكل نوع</h2>
+    <p class="muted">الافتراضي: مفيش خصم لحد غير الصاحب. ومهما كان الحد، محدش يقدر يخصم لحد ما السعر ينزل تحت التكلفة غير الصاحب.</p>
+    <div class="row">${roles.filter((r) => r.code !== "owner").map((r) => `<label class="f">${esc(r.name)} — أقصى خصم %
+      <span class="row"><input class="narrow" type="number" min="0" max="100" step="0.5" value="${pctOf(r.max_discount_bp)}" data-rdisc="${r.code}">
+      <button class="btn small secondary" data-rsave="${r.code}">احفظ</button></span></label>`).join("")}</div></section>
+  <section class="panel"><h2>مدة المرتجع</h2>
+    <form id="retWin" class="row"><label class="f">عدد الأيام <input class="narrow" type="number" min="0" max="365" name="days" value="${sales.return_window_days}"></label>
+    <button class="btn small secondary">احفظ</button></form>
+    <p class="muted">بعد المدة دي المرتجع بيحتاج الصاحب (أو حد الصاحب فتحله "مرتجع بعد مدة المرتجع").</p></section>`;
+  document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/users/${tr.dataset.go}`; }));
+  $("#uNew").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    if (!f.pin) delete f.pin;
+    try { const r = await api("/api/users", { method: "POST", body: f }); toast("اتضاف"); location.hash = `#/users/${r.user.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
+  document.querySelectorAll("[data-rsave]").forEach((b) => b.addEventListener("click", async () => {
+    const v = document.querySelector(`[data-rdisc="${b.dataset.rsave}"]`).value;
+    try { await api(`/api/roles/${b.dataset.rsave}/discount`, { method: "POST", body: { max_discount_bp: toBp(v) ?? 0 } }); toast("اتحفظ"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  $("#retWin").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value } }); toast("اتحفظ"); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
+async function viewUser(id) {
+  if (!ME.permissions.includes("users.manage")) { location.hash = "#/users"; return; }
+  const [m, { roles }] = await Promise.all([api(`/api/users/${id}`), api("/api/users")]);
+  const u = m.user, owner = u.role === "owner";
+  const roleName = Object.fromEntries(roles.map((r) => [r.code, r.name]));
+  const cell = (v) => (v ? `<span class="ok">✓ مسموح</span>` : `<span class="muted">✕ ممنوع</span>`);
+  const pick = (it) => {
+    if (owner) return `<span class="ok">✓ مسموح</span>`;
+    if (it.code === "users.manage") return `<span class="muted">للصاحب بس</span>`;
+    const def = it.roles[u.role];
+    return `<select data-perm="${it.code}" class="${it.exception === "grant" ? "ex-grant" : it.exception === "deny" ? "ex-deny" : ""}">
+      <option value="default" ${!it.exception ? "selected" : ""}>${def ? "✓ مسموح" : "✕ ممنوع"} (الافتراضي)</option>
+      ${def ? `<option value="deny" ${it.exception === "deny" ? "selected" : ""}>✕ مقفولة عليه</option>`
+            : `<option value="grant" ${it.exception === "grant" ? "selected" : ""}>✓ مفتوحة له</option>`}
+    </select>`;
+  };
+  app.innerHTML = `<section class="panel"><div class="row between">
+      <div><a href="#/users">← المستخدمين</a><h1>${esc(u.full_name)} <span class="badge ${ROLE_CLS[u.role] || ""}">${esc(u.role_name)}</span></h1>
+      <p class="muted">${owner ? "الصاحب صلاحياته كاملة ومحدش يقدر يقفل عليه حاجة." : "صلاحياته جاية من نوعه. أي تعديل هنا بيخصه هو بس."}</p></div>
+      ${owner ? "" : `<button class="btn secondary" id="uReset">↺ رجّعه للافتراضي</button>`}</div>
+    ${owner ? "" : `<div class="row">
+      <label class="f">النوع <select id="uRole">${roles.filter((r) => r.code !== "owner").map((r) => `<option value="${r.code}" ${r.code === u.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select></label>
+      <label class="f">أقصى خصم % (فاضي = حد نوعه ${pctOf(m.role_discount_bp[u.role])}%)
+        <span class="row"><input id="uDisc" class="narrow" type="number" min="0" max="100" step="0.5" value="${pctOf(m.max_discount_bp)}">
+        <button class="btn small secondary" id="uDiscSave">احفظ</button></span></label>
+      <button class="btn small ${u.active ? "danger" : ""}" id="uActive">${u.active ? "إيقاف المستخدم" : "تشغيل المستخدم"}</button></div>`}
+    <div class="row mt">
+      <form id="uPin" class="row"><label class="f">رقم سري جديد <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" required></label><button class="btn small secondary">احفظ الرقم</button></form>
+      ${owner ? "" : `<form id="uPw" class="row"><label class="f">كلمة مرور جديدة <input name="password" type="password" minlength="10" autocomplete="new-password" required></label><button class="btn small secondary">غيّر كلمة المرور</button></form>`}
+    </div></section>
+  <section class="panel tablewrap"><h2>الصلاحيات</h2>
+    <div class="legend"><span class="badge b-info">✓ مفتوحة له = اتفتحت للشخص ده بس</span><span class="badge b-err">✕ مقفولة عليه = اتقفلت عليه بس</span><span>الباقي = افتراضي نوعه</span></div>
+    <table class="perms"><thead><tr><th>الصلاحية</th>${["owner", "manager", "pharmacist", "assistant"].map((c) => `<th>${esc(roleName[c] || c)}</th>`).join("")}<th>${esc(u.full_name)}</th></tr></thead>
+    <tbody>${m.groups.map((g) => `<tr class="grp"><td colspan="6">${esc(g.title)}</td></tr>` + g.items.map((it) => `<tr class="${it.exception ? "ex" : ""}">
+      <td>${esc(it.label)}</td>${["owner", "manager", "pharmacist", "assistant"].map((c) => `<td>${cell(it.roles[c])}</td>`).join("")}
+      <td>${pick(it)}</td></tr>`).join("")).join("")}</tbody></table></section>`;
+  const post = async (action, body) => {
+    try { await api(`/api/users/${id}/${action}`, { method: "POST", body }); toast("اتحفظ"); viewUser(id); }
+    catch (err) { toast(err.message, true); }
+  };
+  document.querySelectorAll("[data-perm]").forEach((sel) => sel.addEventListener("change", () =>
+    post("permission", { permission: sel.dataset.perm, mode: sel.value })));
+  $("#uReset")?.addEventListener("click", (e) => { if (confirmInline(e.target)) post("reset", {}); });
+  $("#uRole")?.addEventListener("change", (e) => post("role", { role: e.target.value }));
+  $("#uDiscSave")?.addEventListener("click", () => post("discount", { max_discount_bp: toBp($("#uDisc").value) }));
+  $("#uActive")?.addEventListener("click", (e) => { if (confirmInline(e.target)) post("active", { active: !u.active }); });
+  $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value }); });
+  $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value }); });
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

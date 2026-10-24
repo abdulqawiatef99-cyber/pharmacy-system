@@ -545,7 +545,8 @@ class Sales:
         else:
             d = date.fromisoformat(day) if day else local_today()
             if mine_only and d != local_today():
-                ctx.require("sales.totals")
+                raise Forbidden("فواتير الأيام اللي فاتت للمدير والصاحب بس", code="forbidden",
+                                details={"permission": "sales.totals"})
             lo, hi = local_day_bounds(d)
             q += " AND s.completed_at>=? AND s.completed_at<?"
             params += [lo, hi]

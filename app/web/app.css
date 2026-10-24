@@ -110,3 +110,30 @@ input.narrow { width: 80px; }
 
 /* the hidden attribute must win over display rules (topbar, badges) */
 [hidden] { display: none !important; }
+
+/* people: roles, approval dialog, notifications, permissions matrix */
+:root { --info: #1d5fa8; --info-bg: #e6effa; }
+@media (prefers-color-scheme: dark) { :root { --info: #9cc3f5; --info-bg: #17263a; } }
+.b-info { background: var(--info-bg); color: var(--info); }
+.b-brand { background: var(--brand); color: var(--brand-ink); }
+.b-plain { background: var(--bg); color: var(--ink); border-color: var(--line); }
+.ok { color: var(--ok); font-weight: 600; }
+.bell { position: relative; font-size: 18px; }
+.bell .badge { position: absolute; top: -4px; inset-inline-end: -6px; font-size: 11px; padding: 0 6px; background: var(--err); color: #fff; }
+.who a { color: inherit; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.tile { min-height: 56px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; font-weight: 600; }
+.tile.on { border: 2px solid var(--brand); background: var(--ok-bg); }
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 20px; max-width: 420px; width: calc(100% - 32px);
+  background: var(--panel); color: var(--ink); }
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.approve label.f { margin-top: 10px; } .approve select, .approve input { width: 100%; }
+.notes { list-style: none; padding: 0; margin: 0; }
+.notes li { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: start; }
+.notes li.new { background: var(--warn-bg); padding-inline: 8px; border-radius: 8px; }
+.perms tr.grp td { background: var(--bg); font-weight: 700; color: var(--brand); }
+.perms tr:nth-child(even):not(.grp) td { background: rgba(0, 0, 0, .02); }
+.perms tr.ex td { background: var(--info-bg); }
+select.ex-grant { border: 2px solid var(--info); color: var(--info); font-weight: 600; }
+select.ex-deny { border: 2px solid var(--err); color: var(--err); font-weight: 600; }
+.narrowpanel { max-width: 720px; }
