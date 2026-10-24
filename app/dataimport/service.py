@@ -585,13 +585,18 @@ class DataImport:
                                   " AND item_id=? LIMIT 1", (ctx.org_id, ctx.branch_id, item_id))
         if has_history:
             return "review", item_id, [{"code": "item_has_history"}]
-        issues = []
+        issues: list[dict] = []
         if (options or {}).get("qty_unit", "pack") == "pack":
             pack = self.db.one("SELECT pack_size FROM items WHERE id=?", (item_id,))["pack_size"]
-            if _whole_units(Decimal(d["qty"]), pack) is None:
+            mue = Decimal(str((options or {}).get("max_unit_error", 0)))
+            if _whole_units(Decimal(d["qty"]), pack, mue) is None:
                 return "error", item_id, [{"code": "fractional_qty_needs_pack_size",
                                            "qty": d["qty"], "pack_size": pack,
                                            "hint": "حدد عدد الوحدات (الشرايط) في العلبة للصنف ده الأول"}]
+            exact = Decimal(d["qty"]) * pack
+            if abs(exact - exact.to_integral_value(ROUND_HALF_UP)) > Decimal("0.0006") * pack:
+                issues.append({"code": "rounded_units", "from": str(exact),
+                               "to": int(exact.to_integral_value(ROUND_HALF_UP))})
         if not d.get("expiry_date") and not d.get("batch_no"):
             issues.append({"code": "no_batch_or_expiry"})  # will be posted untracked
         if d.get("cost") is None:
@@ -808,7 +813,8 @@ class DataImport:
         item = catalog.get_item(self.db, ctx, item_id)
         qty = Decimal(d["qty"])
         pack = item["pack_size"]
-        base = _whole_units(qty, pack) if options.get("qty_unit") == "pack" else (
+        base = _whole_units(qty, pack, Decimal(str(options.get("max_unit_error", 0)))) \
+            if options.get("qty_unit") == "pack" else (
             int(qty) if qty == qty.to_integral_value() else None)
         if base is None:
             raise ValidationFailed(f"الكمية {qty} لا تساوي عدد صحيح من الوحدات للصنف {item['name_en'] or item['name_ar']}",
@@ -874,13 +880,16 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     return buf.getvalue()
 
 
-def _whole_units(qty: Decimal, pack: int) -> int | None:
+def _whole_units(qty: Decimal, pack: int, max_unit_error: Decimal | None = None) -> int | None:
     """Packs -> base units. Exports print 3 decimals (15.667 = 15 + 2/3 packs),
-    so a rounding error up to 0.0006 pack per unit of pack size is accepted;
-    anything else is a real fraction and returns None."""
+    so a rounding error up to 0.0006 pack per unit of pack size is accepted.
+    E-Stock also accumulates drift on split items (0.336 for 1/3); the caller
+    may allow a larger error in base units (options['max_unit_error']) — each
+    such row is reported as 'rounded_units'. Anything else returns None."""
     base = qty * pack
     whole = base.to_integral_value(ROUND_HALF_UP)
-    return int(whole) if abs(base - whole) <= Decimal("0.0006") * pack else None
+    tol = max(Decimal("0.0006") * pack, max_unit_error or Decimal(0))
+    return int(whole) if abs(base - whole) <= tol else None
 
 
 def _now() -> str:

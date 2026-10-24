@@ -166,3 +166,21 @@ class TestBatches(DBTestCase):
         run = di.analyze(self.ctx, xlsx(stock), "s.xlsx", kind="opening_stock")
         acts = [r["action"] for r in di.get(self.ctx, run)["rows"]]
         self.assertEqual(acts, ["create", "create", "review"])
+
+
+class TestDrift(DBTestCase):
+    def test_estock_drift_needs_explicit_tolerance_and_is_reported(self):
+        di = DataImport(self.db)
+        run = di.analyze(self.ctx, xlsx([["الكود", "الاسم الانجليزي", "عدد الوحدات"],
+                                         [1, "Pectol 24 pcs", 24]]), "i.xlsx", kind="items")
+        di.apply(self.ctx, run)
+        stock = xlsx([["الكود", "الكمية", "التكلفة"], [1, 0.623, 30]])     # 14.952 pieces
+        strict = di.analyze(self.ctx, stock, "s.xlsx", kind="opening_stock")
+        self.assertEqual(di.get(self.ctx, strict)["rows"][0]["action"], "error")
+        di.discard(self.ctx, strict)
+        run = di.analyze(self.ctx, stock, "s2.xlsx", kind="opening_stock",
+                         options={"max_unit_error": "0.15"})
+        row = di.get(self.ctx, run)["rows"][0]
+        self.assertEqual(row["action"], "create")
+        self.assertIn({"code": "rounded_units", "from": "14.952", "to": 15}, row["issues"])
+        self.assertEqual(di.apply(self.ctx, run)["applied"]["posted_base_units"], 15)
