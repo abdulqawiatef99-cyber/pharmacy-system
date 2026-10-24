@@ -14,7 +14,8 @@ SESSION_IDLE = timedelta(hours=2)
 MAX_FAILED_LOGINS = 5
 LOCKOUT = timedelta(minutes=15)
 
-DEFAULT_FEATURES = ("catalog", "purchasing", "inventory")
+DEFAULT_FEATURES = ("catalog", "purchasing", "inventory", "sales", "counting", "procurement",
+                    "recalls", "safety", "dataimport")
 
 
 def utcnow() -> datetime:

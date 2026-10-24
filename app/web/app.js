@@ -21,6 +21,8 @@ function toast(msg, isError = false) {
   toast._t = setTimeout(() => (t.hidden = true), isError ? 7000 : 3000);
 }
 
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+
 async function api(path, { method = "GET", body, form } = {}) {
   const opts = { method, headers: { "X-Requested-With": "pharm" }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -28,7 +30,18 @@ async function api(path, { method = "GET", body, form } = {}) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opts);
+  // every POST carries an idempotency key; on a network failure it is retried with
+  // the SAME key, so the server either replays the first result or runs it once.
+  if (method === "POST" && !path.startsWith("/api/auth/")) opts.headers["Idempotency-Key"] = newKey();
+  let r;
+  for (let attempt = 0; ; attempt++) {
+    try { r = await fetch(path, opts); break; }
+    catch (netErr) {
+      if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
+      if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+    }
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
@@ -803,7 +816,7 @@ async function viewPos() {
 
 async function addItem(item, packs, units) {
   try {
-    SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units } });
+    SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
     $("#posRes").innerHTML = ""; $("#posQ").value = ""; $("#posQ").focus();
     renderCart();
   } catch (er) { toast(er.message, true); }
@@ -865,15 +878,22 @@ async function complete(findings) {
     if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
     else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
   });
+  const btn = $("#posDone");
+  if (btn.disabled) return;                     // ignore double clicks
+  btn.disabled = true;
+  SALE.request_id = SALE.request_id || newKey(); // same id for every retry of this payment
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { paid_cash: cash, paid_card: card, on_credit: credit, safety_decisions: decisions, version: SALE.version } });
+      body: { paid_cash: cash, paid_card: card, on_credit: credit, safety_decisions: decisions,
+              version: SALE.version, request_id: SALE.request_id } });
     window.open(`/receipt/${done.id}`, "_blank");
     toast(`تم البيع — فاتورة رقم ${done.sale_no}`);
     SALE = null; viewPos();
   } catch (er) {
     toast(er.message, true);
+    btn.disabled = false;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
+    if (er.code === "not_draft") { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); }
   }
 }
 

@@ -9,6 +9,7 @@ only translate HTTP <-> service calls.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -17,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -43,6 +45,14 @@ log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
+
+# URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
+# without affecting the others.
+FEATURE_PREFIXES = (("/api/sales", "sales"), ("/api/customers", "sales"), ("/receipt", "sales"),
+                    ("/api/purchases", "purchasing"), ("/api/imports", "dataimport"),
+                    ("/api/counts", "counting"), ("/api/procurement", "procurement"),
+                    ("/api/recalls", "recalls"), ("/api/safety", "safety"))
+IDEMPOTENCY_TTL_DAYS = 7
 
 CSP = ("default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self';"
        " object-src 'none'; frame-src 'self' blob:; base-uri 'none'; frame-ancestors 'none';"
@@ -119,7 +129,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 raise Unauthorized("طلب غير موثّق", code="csrf")
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
-        return accounts.resolve_session(db, token, ip=client_ip(req))
+        ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        for prefix, feature in FEATURE_PREFIXES:
+            if req.url.path.startswith(prefix):
+                accounts.require_feature(db, ctx, feature)
+                break
+        return ctx
 
     async def body(req: Request) -> dict:
         raw = await req.body()
@@ -135,10 +150,38 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise ValidationFailed("صيغة الطلب غير صحيحة")
         return data
 
+    async def _idempotent(req: Request, fn):
+        """Replay the stored response for a repeated POST with the same
+        Idempotency-Key (client retry after a network drop / double click)."""
+        key = req.headers.get("idempotency-key", "").strip()
+        if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
+            return await fn(req)
+        ctx = ctx_of(req)
+        raw = await req.body()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+        hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?",
+                     (ctx.org_id, ctx.user_id, key))
+        if hit:
+            if hit["request_hash"] != rhash:
+                raise ValidationFailed("نفس مفتاح الطلب استُخدم لطلب مختلف", code="idempotency_mismatch")
+            resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
+            resp.headers["Idempotent-Replay"] = "true"
+            return resp
+        resp = await fn(req)
+        if 200 <= resp.status_code < 300 and resp.media_type == "application/json":
+            with db.transaction():
+                db.execute("DELETE FROM idempotency_keys WHERE created_at < datetime('now', ?)",
+                           (f"-{IDEMPOTENCY_TTL_DAYS} days",))
+                db.execute("INSERT OR IGNORE INTO idempotency_keys (org_id, user_id, key, method, path,"
+                           " request_hash, status, response) VALUES (?,?,?,?,?,?,?,?)",
+                           (ctx.org_id, ctx.user_id, key, req.method, req.url.path, rhash,
+                            resp.status_code, resp.body.decode("utf-8")))
+        return resp
+
     def handler(fn):
         async def wrapped(req: Request):
             try:
-                return await fn(req)
+                return await _idempotent(req, fn)
             except DomainError as e:
                 status = 429 if e.code == "rate_limited" else e.status
                 return J({"error": {"code": e.code, "message": e.message, "details": e.details}},
@@ -242,8 +285,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             data = await up.read(s.max_upload_bytes + 1)
         finally:
             await up.close()
-        inv_id = purch.import_file(ctx, data, up.filename or "upload",
-                                   form.get("supplier_id") or None)
+        inv_id = await run_in_threadpool(purch.import_file, ctx, data, up.filename or "upload",
+                                         form.get("supplier_id") or None)
         return J(purch.get(ctx, inv_id), status_code=201)
 
     @handler
@@ -597,7 +640,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         return J(Sales(db).add_line(ctx, req.path_params["id"], str(b.get("item_id", "")),
                                     packs=_int(b.get("packs"), "packs"), units=_int(b.get("units"), "units"),
-                                    discount_bp=_int(b.get("discount_bp"), "discount")))
+                                    discount_bp=_int(b.get("discount_bp"), "discount"),
+                                    client_ref=(str(b["client_ref"])[:64] if b.get("client_ref") else None)))
 
     @handler
     async def sales_remove_line(req):
@@ -617,7 +661,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
-                                    safety_decisions=decisions, version=b.get("version")))
+                                    safety_decisions=decisions, version=b.get("version"),
+                                    request_id=(str(b["request_id"])[:64] if b.get("request_id") else None)))
 
     @handler
     async def sales_return(req):

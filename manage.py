@@ -62,14 +62,33 @@ def cmd_backup(a, s):
     print(f"backup written: {out} ({out.stat().st_size} bytes, {n} migrations)")
 
 
-def cmd_verify(a, s):
-    db = _db(s)
-    bad = 0
+def verify_db(db: Database) -> list[str]:
+    """Integrity checks used by `verify` and `restore`. Returns problems."""
+    from app.core import audit
+    problems = []
+    r = db.one("PRAGMA integrity_check")[0]
+    if r != "ok":
+        problems.append(f"sqlite integrity_check: {r}")
+    fk = db.all("PRAGMA foreign_key_check")
+    if fk:
+        problems.append(f"foreign key violations: {len(fk)}")
     for org in db.all("SELECT id, name FROM organizations"):
         diffs = inventory.verify_balances(db, org["id"])
-        bad += len(diffs)
-        print(f"{org['name']}: {'OK' if not diffs else f'{len(diffs)} differences'}")
-    sys.exit(1 if bad else 0)
+        if diffs:
+            problems.append(f"{org['name']}: {len(diffs)} stock balance differences")
+    chain = audit.verify_chain(db)
+    if chain:
+        problems.append(f"audit chain broken at seq {chain[0]['seq']} ({chain[0]['problem']})")
+    return problems
+
+
+def cmd_verify(a, s):
+    db = _db(s)
+    problems = verify_db(db)
+    for p in problems:
+        print("PROBLEM:", p)
+    print("OK" if not problems else f"{len(problems)} problem(s)")
+    sys.exit(1 if problems else 0)
 
 
 def cmd_feature(a, s):

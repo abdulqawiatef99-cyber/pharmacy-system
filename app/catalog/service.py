@@ -169,6 +169,12 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
     d = _clean_item(changes)
     if not d:
         return before
+    if "pack_size" in d and d["pack_size"] != before["pack_size"] and db.one(
+            "SELECT 1 FROM stock_movements WHERE org_id=? AND item_id=? LIMIT 1", (ctx.org_id, item_id)):
+        # stock is stored in base units computed with the old pack size; changing it
+        # silently would mis-state quantities and unit prices
+        raise Conflict("لا يمكن تغيير عدد الوحدات في العبوة لصنف له حركات مخزون؛ صحح الرصيد بالجرد أولًا"
+                       " أو أنشئ صنفًا جديدًا", code="pack_size_locked")
     merged = {**before, **d}
     name = merged.get("name_en") or merged.get("name_ar")
     if not name:
