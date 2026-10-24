@@ -6,6 +6,7 @@
   python manage.py backup [--dest backups/]
   python manage.py verify                      (ledger vs balances consistency)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
+  python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
 """
 from __future__ import annotations
@@ -208,6 +209,53 @@ def cmd_import_estock(a, s):
     print("التقرير الكامل:", rpath)
 
 
+def cmd_update(a, s):
+    """Update the program code from GitHub (or a local zip), keeping data/ untouched."""
+    import subprocess
+    from app.core import backup, updater
+    root = Path(__file__).resolve().parent
+    try:
+        if a.from_zip:
+            data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
+        else:
+            token = updater.read_token()
+            sha = updater.latest_sha(a.repo, a.ref, token)
+            cur = updater.installed(s.data_dir).get("sha")
+            if cur == sha and not a.force:
+                print("البرنامج محدّث بالفعل:", sha[:7])
+                return
+            print(f"فيه تحديث: {(cur or 'غير معروف')[:7]} -> {sha[:7]}")
+            if a.check:
+                return
+            data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
+        if s.db_path.exists():                 # 1) verified data backup
+            db = _db(s)
+            out = backup.create(db, s.upload_dir, Path(a.backup_dir))
+            if backup.verify_archive(out)["problems"]:
+                sys.exit("النسخة الاحتياطية فشلت؛ التحديث اتلغى ومفيش حاجة اتغيرت")
+            db.close()
+            print("نسخة احتياطية للبيانات:", out)
+        req = root / "requirements.txt"
+        req_before = req.read_bytes() if req.exists() else b""
+        snap = updater.snapshot(root, Path(a.backup_dir))      # 2) code rollback point
+        print("نسخة من البرنامج الحالي (للرجوع):", snap)
+        res = updater.apply_zip(data, root)                       # 3) new code
+        updater.record(s.data_dir, sha, source)
+        print(f"اتحدث {res['files']} ملف")
+    except updater.UpdateError as e:
+        sys.exit(f"التحديث فشل: {e}")
+    # 4) packages + migrations + check, in a fresh process running the NEW code
+    steps = [[sys.executable, str(root / "manage.py"), "verify"],
+             [sys.executable, str(root / "manage.py"), "selftest", "--quick"]]
+    if req.read_bytes() != req_before:          # packages only when the list changed
+        steps.insert(0, [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
+    for cmd in steps:
+        if subprocess.run(cmd, cwd=root).returncode != 0:
+            sys.exit("خطوة بعد التحديث فشلت. للرجوع للنسخة القديمة:\n"
+                     f"  python manage.py update --from-zip \"{snap}\"")
+    print("التحديث خلص بنجاح. شغّل البرنامج من جديد.")
+
+
 def cmd_feature(a, s):
     db = _db(s)
     limits = {"monthly": a.monthly} if a.monthly else {}
@@ -261,11 +309,18 @@ def main(argv=None):
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default="backups")
+    up = sub.add_parser("update", help="update the program from GitHub; data is kept")
+    up.add_argument("--check", action="store_true", help="just say if an update exists")
+    up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
+    up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
+    up.add_argument("--ref", default="main")
+    up.add_argument("--force", action="store_true")
+    up.add_argument("--backup-dir", default="backups")
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "update": cmd_update}[a.cmd](a, s)
 
 
 if __name__ == "__main__":
