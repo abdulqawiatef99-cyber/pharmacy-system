@@ -1092,7 +1092,10 @@ async function viewCategories() {
       <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""} ${canW() ? "" : "disabled"}></td>
       <td>${canW() ? `<button class="btn small secondary" data-save>احفظ</button>` : ""}</td></tr>`).join("")}</tbody></table>
     ${owner ? "" : `<p class="muted">تغيير "ليه مرتجع / مالوش مرتجع" للصاحب بس.</p>`}</section>
-    ${canW() ? `<form class="panel row" id="catNew"><label class="f">قسم جديد <input name="name" required></label><button class="btn">أضف</button></form>` : ""}`;
+    ${canW() ? `<form class="panel row" id="catNew"><label class="f">قسم جديد <input name="name" required></label><button class="btn">أضف</button></form>
+    <section class="panel"><h2>توزيع الأصناف اللي من غير قسم</h2>
+      <p class="muted">البرنامج بيقترح قسم لكل صنف من كلمات اسمه وشكله (مثال: AMP / VIAL ← حقن، INSULIN ← تلاجة، SHAMPOO ← عناية). <b>ده اقتراح بس:</b> راجع كل مجموعة وشيل العلامة من اللي غلط، وبعدين "حطهم في القسم". اللي مش واضح بيفضل من غير قسم.</p>
+      <button class="btn secondary" id="sugGo">اقترح</button><div id="sugBox" class="mt"></div></section>` : ""}`;
   document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
     const tr = b.closest("tr"), g = (n) => tr.querySelector(`[name=${n}]`);
     try {
@@ -1101,6 +1104,33 @@ async function viewCategories() {
       toast("اتحفظ"); viewCategories();
     } catch (err) { toast(err.message, true); }
   }));
+  $("#sugGo")?.addEventListener("click", async () => {
+    $("#sugBox").innerHTML = `<p class="muted">بيحسب…</p>`;
+    try {
+      const r = await api("/api/categories/suggest");
+      $("#sugBox").innerHTML = `${r.groups.map((g, gi) => `<details class="panel" data-g="${gi}"><summary><b>${esc(g.category)}</b> ${markChip(g.mark)} — ${g.count} صنف${g.no_return ? ` <span class="badge b-warn">مالوش مرتجع</span>` : ""}</summary>
+          <p class="row"><label class="chk"><input type="checkbox" data-all="${gi}" checked> اختار الكل</label>
+            <button class="btn small" data-apply="${gi}">حطهم في القسم</button></p>
+          <ul class="plain cols">${g.items.map((it) => `<li><label class="chk"><input type="checkbox" data-it="${gi}" value="${esc(it.id)}" checked> ${itemHtml(it)}</label></li>`).join("")}</ul>
+          ${g.count > g.items.length ? `<p class="muted">ظاهر أول ${g.items.length} من ${g.count}. لو "اختار الكل" متعلّم، الباقي هيتحط معاهم؛ شيل علامة "اختار الكل" عشان تحط المتعلّم بس.</p>` : ""}</details>`).join("")
+        || `<p class="muted">مفيش اقتراحات</p>`}<p class="muted">${r.unmatched} صنف مش واضح من اسمه — يفضلوا من غير قسم (تقدر توزعهم من شاشة الأصناف بالفلتر).</p>`;
+      document.querySelectorAll("[data-all]").forEach((c) => c.addEventListener("change", () => document.querySelectorAll(`[data-it="${c.dataset.all}"]`).forEach((x) => { x.checked = c.checked; })));
+      document.querySelectorAll("[data-apply]").forEach((b) => b.addEventListener("click", async () => {
+        const gi = b.dataset.apply, g = r.groups[gi], all = document.querySelector(`[data-all="${gi}"]`).checked;
+        const off = new Set([...document.querySelectorAll(`[data-it="${gi}"]:not(:checked)`)].map((x) => x.value));
+        const ids = all ? g.ids.filter((x) => !off.has(x)) : [...document.querySelectorAll(`[data-it="${gi}"]:checked`)].map((x) => x.value);
+        if (!ids.length) { toast("مفيش أصناف متعلّمة", true); return; }
+        b.disabled = true;
+        try {
+          for (let i = 0; i < ids.length; i += 500) {
+            b.textContent = `بيحط… ${Math.min(i + 500, ids.length)} / ${ids.length}`;
+            await api("/api/categories/assign", { method: "POST", body: { item_ids: ids.slice(i, i + 500), category_id: g.category_id } });
+          }
+          toast(`✓ ${ids.length} صنف اتحطوا في ${g.category}`); viewCategories();
+        } catch (err) { b.disabled = false; b.textContent = "حطهم في القسم"; toast(err.message, true); }
+      }));
+    } catch (err) { $("#sugBox").innerHTML = ""; toast(err.message, true); }
+  });
   $("#catNew")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     try { await api("/api/categories", { method: "POST", body: { name: e.target.name.value } }); viewCategories(); }

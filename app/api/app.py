@@ -429,6 +429,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def sections_suggest(req):
+        from ..catalog import suggest_sections
+        return J(await run_in_threadpool(suggest_sections.suggest, db, ctx_of(req)))
+
+    @handler
     async def contracts_api(req):
         from ..sales import contracts as k
         ctx = ctx_of(req)
@@ -1793,6 +1798,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}/card", item_card_get),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
+        Route("/api/categories/suggest", sections_suggest),
         Route("/api/contracts", contracts_api, methods=["GET", "POST"]),
         Route("/api/contracts/{id}", contracts_api, methods=["POST"]),
         Route("/api/contracts/{id}/report", contract_report),

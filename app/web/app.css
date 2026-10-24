@@ -349,3 +349,5 @@ textarea { width: 100%; padding: 8px 12px; border: 1px solid #c9c5bc; border-rad
   .f, .f input, .f select, input, select { max-width: 100%; }
   .range { flex-wrap: wrap; }
 }
+ul.cols { columns: 3 240px; column-gap: 24px; }
+ul.cols li { break-inside: avoid; }
