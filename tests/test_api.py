@@ -212,3 +212,15 @@ class TestSalesAPI(APICase):
         self.assertIn("40.00", rc.text)
         self.assertIn("script-src 'self'", rc.headers["content-security-policy"])
         self.assertEqual(self.c.get("/api/sales/summary").json()["total"], 4000)
+
+
+class TestItemsStock(APICase):
+    def test_list_shows_stock_in_base_units(self):
+        from decimal import Decimal
+        from app.inventory import service as inv
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=5, movement_type="opening",
+                              unit_cost=Decimal("16"))
+        self.http_login()
+        rows = self.c.get("/api/items?q=panadol").json()
+        self.assertEqual(rows[0]["stock_qty"], 5)

@@ -8,6 +8,14 @@ let ME = null;
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (p) => (p == null ? "" : (p / 100).toFixed(2));
+const unitName = (it) => (!it.base_unit_name || it.base_unit_name === "unit" ? "وحدة" : it.base_unit_name);
+// stock in base units -> "15 علبة + 2 وحدة"
+const fmtStock = (q, it) => {
+  if (q == null) return "";
+  if (q === 0) return "0";
+  const p = it.pack_size || 1, packs = Math.trunc(q / p), rest = q % p;
+  return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
+};
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
@@ -391,14 +399,26 @@ async function viewItems() {
       <input id="q" placeholder="مثال: panadol أو بانادول أو 622..." autocomplete="off"></label></div>
   </section>
   <section class="panel"><div class="tablewrap"><table>
-    <thead><tr><th>الاسم</th><th>التركيز</th><th>الشكل</th><th>العبوة</th><th>سعر الجمهور</th><th>الكود</th></tr></thead>
+    <thead><tr><th>الاسم</th><th>التركيز</th><th>الشكل</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
   const load = async () => {
     const rows = await api(`/api/items?q=${encodeURIComponent($("#q").value)}&limit=50`);
-    $("#itemsBody").innerHTML = rows.map((r) => `<tr><td>${esc(r.name_en || "")}<div class="raw">${esc(r.name_ar || "")}</div></td>
+    $("#itemsBody").innerHTML = rows.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${esc(r.name_en || "")}<div class="raw">${esc(r.name_ar || "")}</div></td>
       <td>${esc(r.strength_norm || "")}</td><td>${esc(r.dosage_form || "")}</td>
-      <td>${r.pack_size} ${esc(r.base_unit_name)}</td><td>${money(r.public_price)}</td><td>${esc(r.code || "")}</td></tr>`).join("")
-      || `<tr><td colspan="6" class="muted">لا توجد نتائج</td></tr>`;
+      <td>${r.pack_size} ${esc(unitName(r))}</td><td>${money(r.public_price)}</td><td><b>${esc(fmtStock(r.stock_qty, r))}</b></td><td>${esc(r.code || "")}</td></tr>
+      <tr class="detail" id="det${i}" hidden><td colspan="7"></td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">لا توجد نتائج</td></tr>`;
+    $("#itemsBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", async () => {
+      const r = rows[+tr.dataset.i], det = $(`#det${tr.dataset.i}`);
+      if (!det.hidden) { det.hidden = true; return; }
+      const it = await api(`/api/items/${r.id}`), st = it.stock || { batches: [] };
+      det.firstElementChild.innerHTML = st.batches.length ? `<table class="sub"><thead><tr><th>الصلاحية</th><th>التشغيلة</th><th>الكمية</th></tr></thead><tbody>
+        ${st.batches.map((b) => `<tr><td>${esc(b.expiry_date ? (b.expiry_precision === "month" ? b.expiry_date.slice(0, 7) : b.expiry_date) : "غير مسجلة")}</td>
+        <td>${esc(b.batch_no || "—")}</td><td>${esc(fmtStock(b.qty, r))}</td></tr>`).join("")}</tbody></table>
+        ${st.avg_cost != null ? `<p class="muted">متوسط التكلفة للعلبة: ${(Number(st.avg_cost) * r.pack_size).toFixed(2)} ج</p>` : ""}`
+        : `<p class="muted">مفيش رصيد</p>`;
+      det.hidden = false;
+    }));
   };
   let t;
   $("#q").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
@@ -620,7 +640,7 @@ async function viewCountSession(id) {
     COUNT_ITEM = it;
     $("#cntPick").innerHTML = "";
     $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
-      <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(it.base_unit_name)} — موقع ${esc(it.location || "—")}</div>
+      <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(unitName(it))} — موقع ${esc(it.location || "—")}</div>
       <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
       <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
       <label class="f"><span>إضافة على السابق</span><input id="cntAdd" type="checkbox"></label>
@@ -793,9 +813,9 @@ async function viewPos() {
     const v = q.value.trim(); if (!v) return;
     const res = await api(`/api/items?q=${encodeURIComponent(v)}&limit=8`);
     if (res.length === 1 && /^\d{6,}$/.test(v)) { await addItem(res[0], 0, 1); q.value = ""; return; }
-    $("#posRes").innerHTML = res.map((r, i) => `<div class="row"><span class="grow">${esc(r.name_en || r.name_ar)} <span class="muted">${esc(r.strength_norm || "")} · العبوة ${r.pack_size} ${esc(r.base_unit_name)} · ${money(r.public_price)} ج</span></span>
+    $("#posRes").innerHTML = res.map((r, i) => `<div class="row"><span class="grow">${esc(r.name_en || r.name_ar)} <span class="muted">${esc(r.strength_norm || "")} · العبوة ${r.pack_size} ${esc(unitName(r))} · ${money(r.public_price)} ج · الرصيد ${esc(fmtStock(r.stock_qty, r) || "0")}</span></span>
       <button class="btn small" data-add="${i}" data-kind="pack">علبة</button>
-      ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(r.base_unit_name)}</button>` : ""}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
+      ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
   };

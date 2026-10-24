@@ -230,8 +230,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        return J(catalog.search_items(db, ctx, req.query_params.get("q", ""),
-                                      min(int(req.query_params.get("limit", 20)), 100)))
+        rows = catalog.search_items(db, ctx, req.query_params.get("q", ""),
+                                    min(int(req.query_params.get("limit", 20)), 100))
+        if rows and ctx.can("inventory.read") and ctx.branch_id:
+            ids = [r["id"] for r in rows]
+            qty = {r["item_id"]: r["q"] for r in db.all(
+                f"SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? AND branch_id=?"
+                f" AND item_id IN ({','.join('?' * len(ids))}) GROUP BY item_id",
+                (ctx.org_id, ctx.branch_id, *ids))}
+            for r in rows:
+                r["stock_qty"] = qty.get(r["id"], 0)     # base units
+        return J(rows)
 
     @handler
     async def items_create(req):
