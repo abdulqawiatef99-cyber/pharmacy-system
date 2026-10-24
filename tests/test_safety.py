@@ -118,6 +118,21 @@ class TestEngine(SafetyCase):
         with self.assertRaises(Conflict):
             self.se.edit_approved_rule(self.ctx, r2)
 
+    def test_partial_pack_default_policy(self):
+        f = self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True}])
+        su = [x for x in f if x.code == "split_unknown"][0]
+        self.assertEqual((su.severity, su.requires), ("moderate", "acknowledge"))
+        src = self.se.add_source(self.ctx, name="سياسة الصيدلية الداخلية", version="1", license="internal")
+        rid = self.se.create_rule(self.ctx, rule_type="split_policy", severity="moderate",
+                                  title="بيع الشريط", explanation="مسموح بيع شريط مع النشرة",
+                                  params={"scope": "all_items", "allow_partial_pack": True,
+                                          "allow_tablet_split": False}, source_id=src)
+        self.se.approve_rule(self.ctx, rid, self_approval_reason="سياسة الصيدلية المعتمدة")
+        f = self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True}])
+        self.assertNotIn("split_unknown", self.codes(f))
+        f = self.se.check(self.ctx, [{"item_id": self.a, "tablet_split": True}])
+        self.assertIn("split_forbidden", self.codes(f))
+
     def test_split_policy_absent_means_ask(self):
         f = self.se.check(self.ctx, [{"item_id": self.a, "tablet_split": True}])
         self.assertIn("split_unknown", self.codes(f))

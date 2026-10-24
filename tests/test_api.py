@@ -189,3 +189,24 @@ class TestProcurementAPI(APICase):
         r = self.c.post("/api/procurement/offer", headers=H,
                         json={"item_id": self.pan, "packs": 5, "discount_pct": 30})
         self.assertEqual(r.json()["verdict"], "no")     # no consumption history
+
+
+class TestSalesAPI(APICase):
+    def test_sale_flow_and_receipt(self):
+        from decimal import Decimal
+        from app.inventory import service as inv
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=6, movement_type="opening",
+                              unit_cost=Decimal("15"))
+        self.http_login()
+        s = self.c.post("/api/sales", headers=H, json={}).json()
+        s = self.c.post(f"/api/sales/{s['id']}/lines", headers=H, json={"item_id": self.pan, "packs": 1}).json()
+        self.assertEqual(s["total"], 4000)
+        r = self.c.post(f"/api/sales/{s['id']}/complete", headers=H,
+                        json={"paid_cash": 4000, "version": s["version"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        rc = self.c.get(f"/receipt/{s['id']}")
+        self.assertEqual(rc.status_code, 200)
+        self.assertIn("40.00", rc.text)
+        self.assertIn("script-src 'self'", rc.headers["content-security-policy"])
+        self.assertEqual(self.c.get("/api/sales/summary").json()["total"], 4000)

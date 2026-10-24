@@ -172,9 +172,10 @@ class SafetyEngine:
             if not (p.get("item_id") or p.get("ingredient_id")) or int(p.get("max_base_units", 0)) <= 0:
                 raise ValidationFailed("حدد الصنف أو المادة والحد الأقصى")
         elif rule_type == "split_policy":
-            if not p.get("item_id") or not isinstance(p.get("allow_partial_pack"), bool) \
+            if not (p.get("item_id") or p.get("scope") == "all_items") \
+                    or not isinstance(p.get("allow_partial_pack"), bool) \
                     or not isinstance(p.get("allow_tablet_split"), bool):
-                raise ValidationFailed("سياسة التقسيم تحتاج الصنف وقيم صريحة (نعم/لا)")
+                raise ValidationFailed("سياسة التقسيم تحتاج الصنف (أو كل الأصناف) وقيم صريحة (نعم/لا)")
 
     def approve_rule(self, ctx: Context, rule_id: str, *, self_approval_reason: str | None = None) -> None:
         ctx.require("safety.approve")
@@ -266,7 +267,8 @@ class SafetyEngine:
             if not any(c["status"] == "verified" for c in comp[i]):
                 findings.append(Finding("insufficient_data", "insufficient",
                                         f"لا توجد بيانات مادة فعالة موثقة للصنف {labels[i]} — لا يمكن فحص التكرار والتداخلات",
-                                        [i], requires="acknowledge"))
+                                        [i], requires="none"))   # shown, never hidden; not a click-gate
+                                                                 # (avoids alert fatigue on every sale)
 
         verified = {i: [c for c in comp[i] if c["status"] == "verified"] for i in comp}
         # duplicate ingredient across different items
@@ -325,17 +327,22 @@ class SafetyEngine:
                                         self._src(rule), requires=self._requires(rule["severity"])))
 
         # partial pack / tablet split: absent policy => ask the pharmacist (never assume)
-        policies = {r["params"]["item_id"]: r for r in self._rules(ctx, "split_policy")}
+        split_rules = self._rules(ctx, "split_policy")
+        policies = {r["params"]["item_id"]: r for r in split_rules if r["params"].get("item_id")}
+        default_policy = next((r for r in split_rules if r["params"].get("scope") == "all_items"), None)
         for l in lines:
             for flag, key, label in (("partial_pack", "allow_partial_pack", "صرف جزء من العبوة"),
                                      ("tablet_split", "allow_tablet_split", "تقسيم القرص")):
                 if not l.get(flag):
                     continue
-                pol = policies.get(l["item_id"])
+                pol = policies.get(l["item_id"]) or default_policy   # item policy wins
                 if pol is None:
-                    findings.append(Finding("split_unknown", "high",
+                    # selling a strip from a box is routine; splitting a tablet is riskier
+                    sev, req = (("moderate", "acknowledge") if flag == "partial_pack"
+                                else ("high", "override"))
+                    findings.append(Finding("split_unknown", sev,
                                             f"لا توجد سياسة موثقة لـ {label} للصنف {labels[l['item_id']]} — يلزم قرار الصيدلي",
-                                            [l["item_id"]], requires="override"))
+                                            [l["item_id"]], requires=req))
                 elif not pol["params"][key]:
                     findings.append(Finding("split_forbidden", pol["severity"],
                                             f"{label} غير مسموح للصنف {labels[l['item_id']]}: {pol['explanation']}",

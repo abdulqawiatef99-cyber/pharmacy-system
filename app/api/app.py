@@ -36,6 +36,8 @@ from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
+from ..sales.service import Sales
+import html as _html
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -571,6 +573,129 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     qty_unit=fields.get("qty_unit") or "pack",
                                     dry_run=fields.get("apply") != "1"))
 
+    # ------------------------------------------------------------- sales
+    def _int(v, name):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            raise ValidationFailed(f"قيمة غير صحيحة: {name}")
+
+    @handler
+    async def sales_create(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        sales = Sales(db)
+        return J(sales.get(ctx, sales.create(ctx, b.get("customer_id"))), status_code=201)
+
+    @handler
+    async def sales_get(req):
+        return J(Sales(db).get(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def sales_add_line(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).add_line(ctx, req.path_params["id"], str(b.get("item_id", "")),
+                                    packs=_int(b.get("packs"), "packs"), units=_int(b.get("units"), "units"),
+                                    discount_bp=_int(b.get("discount_bp"), "discount")))
+
+    @handler
+    async def sales_remove_line(req):
+        ctx = ctx_of(req)
+        return J(Sales(db).remove_line(ctx, req.path_params["id"], req.path_params["line_id"]))
+
+    @handler
+    async def sales_check(req):
+        ctx = ctx_of(req)
+        return J({"findings": [f.as_dict() for f in Sales(db).safety_check(ctx, req.path_params["id"])]})
+
+    @handler
+    async def sales_complete(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
+        return J(Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
+                                    paid_card=_int(b.get("paid_card"), "card"),
+                                    on_credit=_int(b.get("on_credit"), "credit"),
+                                    safety_decisions=decisions, version=b.get("version")))
+
+    @handler
+    async def sales_return(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        lines = {str(k): _int(v, "qty") for k, v in (b.get("lines") or {}).items()}
+        return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
+                                        refund_method=str(b.get("refund_method", "")),
+                                        reason=str(b.get("reason", ""))))
+
+    @handler
+    async def sales_void(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).void(ctx, req.path_params["id"], str(b.get("reason", ""))))
+
+    @handler
+    async def sales_summary(req):
+        return J(Sales(db).day_summary(ctx_of(req), req.query_params.get("day")))
+
+    @handler
+    async def customers_list(req):
+        ctx = ctx_of(req)
+        ctx.require("sales.read")
+        q = "%" + req.query_params.get("q", "") + "%"
+        rows = db.all("SELECT id, name, phone, credit_limit FROM customers WHERE org_id=? AND is_active=1"
+                      " AND (name LIKE ? OR coalesce(phone,'') LIKE ?) ORDER BY name LIMIT 30",
+                      (ctx.org_id, q, q))
+        sales = Sales(db)
+        return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
+
+    @handler
+    async def customers_create(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        cid = Sales(db).create_customer(ctx, name=str(b.get("name", "")), phone=b.get("phone") or None,
+                                        credit_limit=_int(b.get("credit_limit"), "limit"), notes=b.get("notes"))
+        return J({"id": cid}, status_code=201)
+
+    @handler
+    async def customers_pay(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J({"balance": Sales(db).customer_payment(ctx, req.path_params["id"],
+                                                         _int(b.get("amount"), "amount"), b.get("note"))})
+
+    @handler
+    async def receipt(req):
+        """Printable receipt sized for 80mm thermal printers (browser print).
+        Raw ESC/POS printing + cash drawer need a local print agent (not built)."""
+        ctx = ctx_of(req)
+        sale = Sales(db).get(ctx, req.path_params["id"])
+        if sale["status"] != "completed":
+            raise ValidationFailed("الإيصال متاح للفواتير المكتملة فقط")
+        org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
+        e = _html.escape
+        m = lambda p: f"{p / 100:.2f}"  # noqa: E731
+        rows = "".join(
+            f"<tr><td>{e(l['item']['name'])}<br><small>{l['qty_base']} {e(l['item']['base_unit'])}</small></td>"
+            f"<td>{m(l['line_total'])}</td></tr>" for l in sale["lines"])
+        pay = []
+        if sale["paid_cash"]:
+            pay.append(f"<tr><td>نقدي</td><td>{m(sale['paid_cash'])}</td></tr>")
+        if sale["paid_card"]:
+            pay.append(f"<tr><td>فيزا</td><td>{m(sale['paid_card'])}</td></tr>")
+        if sale["on_credit"]:
+            pay.append(f"<tr><td>آجل</td><td>{m(sale['on_credit'])}</td></tr>")
+        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
+<link rel="stylesheet" href="/static/receipt.css"></head><body>
+<div class="r"><h1>{e(org)}</h1><p>فاتورة رقم {sale['sale_no']}<br>{e(accounts.parse_iso(sale['completed_at']).astimezone().strftime('%Y-%m-%d %H:%M'))}</p>
+<table>{rows}</table><hr><table>
+<tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
+{f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
+<tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{''.join(pay)}</table>
+<p class="f">شكرًا لزيارتكم</p></div><script src="/static/print.js"></script></body></html>"""
+        return Response(page, media_type="text/html; charset=utf-8")
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -626,6 +751,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
+        Route("/api/sales", sales_create, methods=["POST"]),
+        Route("/api/sales/summary", sales_summary),
+        Route("/api/sales/{id}", sales_get),
+        Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),
+        Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),
+        Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
+        Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
+        Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
+        Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/customers", customers_list),
+        Route("/api/customers", customers_create, methods=["POST"]),
+        Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
+        Route("/receipt/{id}", receipt),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),

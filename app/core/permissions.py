@@ -27,6 +27,12 @@ PERMISSIONS: dict[str, str] = {
     "users.manage": "إدارة المستخدمين",
     "settings.manage": "إدارة الإعدادات",
     "audit.read": "عرض سجل العمليات",
+    "sales.read": "عرض المبيعات",
+    "sales.create": "البيع (الكاشير)",
+    "sales.discount": "عمل خصم في البيع",
+    "sales.void": "إلغاء فاتورة بيع",
+    "sales.return": "مرتجع المبيعات",
+    "customers.manage": "إدارة العملاء والآجل",
     "safety.read": "عرض تنبيهات السلامة الدوائية",
     "safety.manage": "إنشاء وتعطيل قواعد السلامة",
     "safety.approve": "اعتماد قواعد السلامة وربط المواد الفعالة",
@@ -40,10 +46,12 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
         "items.read", "items.write", "suppliers.read", "purchases.read",
         "purchases.create", "purchases.edit", "purchases.approve",
         "inventory.read", "costs.read", "safety.read", "safety.override", "inventory.count",
+        "sales.read", "sales.create", "sales.discount", "sales.return", "customers.manage",
     ]),
     "assistant": ("مساعد", [
         "items.read", "suppliers.read", "purchases.read", "purchases.create",
         "purchases.edit", "inventory.read", "safety.read", "inventory.count",
+        "sales.read", "sales.create",
     ]),
 }
 
