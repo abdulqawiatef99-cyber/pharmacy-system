@@ -313,9 +313,28 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise Conflict("البرنامج فيه بيانات بالفعل؛ الاسترجاع من هنا لأول تشغيل بس", code="already_setup")
         if os.environ.get("PHARM_LAUNCHER") != "1":
             raise ValidationFailed("الاسترجاع من هنا بيشتغل في النسخة المتثبتة بس. استخدم أمر restore")
-        data, name, _ = await _upload(req)
+        # a backup of a real pharmacy is far above the normal upload limit: stream it to disk
+        if "multipart/form-data" not in req.headers.get("content-type", ""):
+            raise ValidationFailed("اختار ملف النسخة الاحتياطية")
+        form = await req.form(max_files=1, max_fields=2)
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):
+            raise ValidationFailed("اختار ملف النسخة الاحتياطية")
+        s.data_dir.mkdir(parents=True, exist_ok=True)
         pending = s.data_dir / "pending_restore.zip"
-        pending.write_bytes(data)
+        size, limit = 0, 4 * 1024 ** 3
+        try:
+            with open(pending, "wb") as out:
+                while chunk := await up.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValidationFailed("ملف النسخة الاحتياطية أكبر من 4 جيجا")
+                    out.write(chunk)
+        except ValidationFailed:
+            pending.unlink(missing_ok=True)
+            raise
+        finally:
+            await up.close()
         try:
             info = await run_in_threadpool(backup_mod.verify_archive, pending)
         except Exception as e:  # noqa: BLE001 - not a zip / unreadable

@@ -113,6 +113,7 @@ $("#logout").addEventListener("click", async () => {
 
 // ------------------------------------------------------------------ login
 function viewSetup() {
+  ME = null;                       // a fresh install: any old session in this tab is meaningless
   $("#topbar").hidden = true;
   app.innerHTML = `
   <form class="panel login" id="setupForm">
