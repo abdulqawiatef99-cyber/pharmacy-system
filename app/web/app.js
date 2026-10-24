@@ -49,6 +49,7 @@ const routes = [
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
+  [/^#\/procurement$/, viewProcurement],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
 ];
 
@@ -664,6 +665,75 @@ async function viewCountSession(id) {
         catch (err) { toast(err.message, true); }
       });
     } catch (err) { toast(err.message, true); }
+  });
+}
+
+// ------------------------------------------------------------------ procurement
+const CONF_AR = { high: ["عالية", "b-ok"], medium: ["متوسطة", "b-warn"], low: ["منخفضة", "b-err"] };
+
+async function viewProcurement() {
+  app.innerHTML = `
+  <section class="panel">
+    <h1>اقتراح الطلبية</h1>
+    <p class="muted">الحساب: متوسط الاستهلاك × (أيام التوريد + أيام التغطية + أيام الأمان) − الرصيد − اللي في الطريق. كل سطر مكتوب معاه سببه. النظام مش بيطلب حاجة لوحده.</p>
+    <form id="prForm" class="row">
+      <label class="f">تغطية (يوم) <input name="cover_days" type="number" value="30" min="1"></label>
+      <label class="f">مدة التوريد (يوم) <input name="lead_days" type="number" value="2" min="0"></label>
+      <label class="f">أمان (يوم) <input name="safety_days" type="number" value="5" min="0"></label>
+      <label class="f">فترة الاستهلاك (يوم) <input name="window_days" type="number" value="90" min="7"></label>
+      <button class="btn" type="submit">احسب</button>
+      <a class="btn secondary" id="prXlsx" href="#">تحميل Excel للطلبية</a>
+    </form>
+  </section>
+  <section class="panel"><div class="tablewrap"><table>
+    <thead><tr><th>الصنف</th><th>الرصيد</th><th>استهلاك/يوم</th><th>يكفي (يوم)</th><th>المقترح (علبة)</th><th>الثقة</th><th>الأسباب</th></tr></thead>
+    <tbody id="prBody"><tr><td colspan="7" class="muted">جاري الحساب…</td></tr></tbody></table></div></section>
+  <section class="panel"><h2>صحة المخزون</h2><div id="prHealth" class="muted">…</div></section>
+  <section class="panel"><h2>رفع مبيعات شهر من البرنامج القديم</h2>
+    <p class="muted">المطابقة بالكود أو الباركود بس. الأصناف اللي مش متطابقة بتظهر في تقرير ومش بتتخمن.</p>
+    <form id="consForm" class="row">
+      <label class="f">من <input name="period_start" type="date" required></label>
+      <label class="f">إلى <input name="period_end" type="date" required></label>
+      <label class="f">الكمية بـ <select name="qty_unit"><option value="pack">العلبة</option><option value="base">الوحدة</option></select></label>
+      <label class="f">الملف <input type="file" name="file" required accept=".xlsx,.csv"></label>
+      <button class="btn secondary" type="submit">تجربة بدون حفظ</button>
+    </form><div id="consRes"></div></section>`;
+  const params = () => new URLSearchParams(new FormData($("#prForm"))).toString();
+  const load = async () => {
+    $("#prXlsx").href = `/api/procurement/suggestions.xlsx?${params()}`;
+    const rows = await api(`/api/procurement/suggestions?${params()}`);
+    $("#prBody").innerHTML = rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${r.on_hand}</td><td>${r.daily_usage}</td>
+      <td>${r.days_of_cover ?? "—"}</td><td><b>${r.suggested_packs}</b></td>
+      <td><span class="badge ${CONF_AR[r.confidence][1]}">${CONF_AR[r.confidence][0]}</span></td>
+      <td class="muted">${r.reasons.map(esc).join("<br>")}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">لا توجد أصناف محتاجة طلب (أو لا توجد بيانات استهلاك بعد — ارفع مبيعات شهر من الأسفل)</td></tr>`;
+  };
+  $("#prForm").addEventListener("submit", (e) => { e.preventDefault(); load().catch((er) => toast(er.message, true)); });
+  load().catch((er) => toast(er.message, true));
+  api("/api/procurement/health").then((h) => {
+    $("#prHealth").className = "";
+    $("#prHealth").innerHTML = `
+      <h3>قرب انتهاء الصلاحية (${h.near_expiry.length})</h3>
+      <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>متوقع يتباع</th><th>معرض للانتهاء</th><th>الإجراء</th></tr></thead>
+      <tbody>${h.near_expiry.map((e) => `<tr class="${e.units_at_risk ? "has-err" : ""}"><td>${esc(e.label)}</td><td>${esc(e.batch_no)}</td><td>${esc(e.expiry_date)}</td>
+        <td>${e.qty}</td><td>${e.expected_to_sell}</td><td>${e.units_at_risk}</td><td>${esc(e.action)}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">لا يوجد</td></tr>`}</tbody></table></div>
+      <h3>راكد (${h.slow_movers.length})</h3><p>${h.slow_movers.map((s) => `${esc(s.label)} (${s.on_hand})`).join("، ") || "لا يوجد"}</p>
+      <h3>مخزون زائد (${h.overstock.length})</h3><p>${h.overstock.map((s) => `${esc(s.label)} (${s.days_of_cover} يوم)`).join("، ") || "لا يوجد"}</p>`;
+  }).catch(() => {});
+  $("#consForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const r = await api("/api/procurement/consumption", { method: "POST", form: fd });
+      $("#consRes").innerHTML = `<p>أسطر متطابقة: <b>${r.matched_rows}</b> — إجمالي ${r.total_base_units} وحدة — غير متطابقة: <b>${r.unmatched.length}</b> — مشكلات: ${r.problems.length}</p>
+        ${r.unmatched.length ? `<p class="muted">غير متطابقة: ${r.unmatched.slice(0, 30).map((u) => esc(u.name || u.code)).join("، ")}</p>` : ""}
+        <button class="btn" id="consApply">حفظ المبيعات</button>`;
+      $("#consApply").addEventListener("click", async () => {
+        fd.set("apply", "1");
+        try { await api("/api/procurement/consumption", { method: "POST", form: fd }); toast("تم الحفظ"); load(); }
+        catch (er) { toast(er.message, true); }
+      });
+    } catch (er) { toast(er.message, true); }
   });
 }
 

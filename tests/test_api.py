@@ -177,3 +177,15 @@ class TestRecallAPI(APICase):
             {"product_name": "Panadol", "batch_numbers": ["2400905"]}]})
         self.assertEqual(r.status_code, 201, r.text)
         self.assertEqual(self.c.get("/api/recalls/alerts").json(), [])
+
+
+class TestProcurementAPI(APICase):
+    def test_endpoints(self):
+        self.http_login()
+        self.assertEqual(self.c.get("/api/procurement/suggestions").status_code, 200)
+        self.assertEqual(self.c.get("/api/procurement/health").status_code, 200)
+        r = self.c.get("/api/procurement/suggestions.xlsx")
+        self.assertEqual(r.status_code, 200)
+        r = self.c.post("/api/procurement/offer", headers=H,
+                        json={"item_id": self.pan, "packs": 5, "discount_pct": 30})
+        self.assertEqual(r.json()["verdict"], "no")     # no consumption history

@@ -35,6 +35,7 @@ from ..dataimport.service import DataImport, export_catalog
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
+from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -519,6 +520,57 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         counting.cancel(ctx, req.path_params["id"])
         return J({"ok": True})
 
+    # ------------------------------------------------------------- procurement
+    def _sugg_params(req):
+        qp = req.query_params
+        try:
+            return {"cover_days": int(qp.get("cover_days", 30)), "lead_days": int(qp.get("lead_days", 2)),
+                    "safety_days": int(qp.get("safety_days", 5)), "window_days": int(qp.get("window_days", 90))}
+        except ValueError:
+            raise ValidationFailed("قيم غير صحيحة")
+
+    @handler
+    async def proc_suggest(req):
+        ctx = ctx_of(req)
+        return J(Procurement(db).suggest(ctx, **_sugg_params(req)))
+
+    @handler
+    async def proc_suggest_xlsx(req):
+        ctx = ctx_of(req)
+        rows = Procurement(db).suggest(ctx, **_sugg_params(req))
+        return Response(suggestions_xlsx(rows, db, ctx), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
+
+    @handler
+    async def proc_health(req):
+        return J(Procurement(db).stock_health(ctx_of(req)))
+
+    @handler
+    async def proc_supplier_costs(req):
+        return J(Procurement(db).supplier_costs(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def proc_offer(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        try:
+            return J(Procurement(db).evaluate_offer(
+                ctx, str(b.get("item_id", "")), packs=int(b.get("packs", 0)),
+                discount_pct=float(b.get("discount_pct", -1)), expiry_date=b.get("expiry_date") or None,
+                cash_available=float(b["cash_available"]) if b.get("cash_available") else None))
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيم غير صحيحة")
+
+    @handler
+    async def proc_consumption(req):
+        ctx = ctx_of(req)
+        data, name, fields = await _upload(req)
+        return J(import_consumption(db, ctx, data, name, period_start=str(fields.get("period_start", "")),
+                                    period_end=str(fields.get("period_end", "")),
+                                    qty_unit=fields.get("qty_unit") or "pack",
+                                    dry_run=fields.get("apply") != "1"))
+
     @handler
     async def health(req):
         db.one("SELECT 1")
@@ -568,6 +620,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/safety/rules/{id}/approve", safety_rule_approve, methods=["POST"]),
         Route("/api/safety/rules/{id}/disable", safety_rule_disable, methods=["POST"]),
         Route("/api/safety/sources", safety_source_add, methods=["POST"]),
+        Route("/api/procurement/suggestions", proc_suggest),
+        Route("/api/procurement/suggestions.xlsx", proc_suggest_xlsx),
+        Route("/api/procurement/health", proc_health),
+        Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
+        Route("/api/procurement/offer", proc_offer, methods=["POST"]),
+        Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
