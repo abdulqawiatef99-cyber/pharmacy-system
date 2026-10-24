@@ -3,6 +3,7 @@ separately: extraction (no DB) -> matching -> arithmetic validation -> approval.
 Passing here does NOT prove accuracy on real supplier invoices; for that use
 scripts/eval_invoices.py on real files (docs/PROGRESS.md)."""
 import io
+from pathlib import Path
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -164,7 +165,7 @@ class TestEvalHarness(CorpusCase):
     def test_harness_scores_and_flags_confident_errors(self):
         import json as _json
         import sys
-        sys.path.insert(0, "scripts")
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
         import eval_invoices
         folder = self.tmp / "real"
         folder.mkdir()

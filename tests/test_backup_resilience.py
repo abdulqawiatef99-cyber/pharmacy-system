@@ -97,7 +97,7 @@ class TestBackupRestore(DBTestCase):
     def test_cli_backup_verify_restore(self):
         env = {**os.environ, "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
         run = lambda *a: subprocess.run([sys.executable, "manage.py", *a], cwd=ROOT, env=env,  # noqa: E731
-                                        capture_output=True, text=True)
+                                        capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026").returncode, 0)
         r = run("backup", "--dest", str(self.tmp / "clibk"))
         self.assertEqual(r.returncode, 0, r.stderr)

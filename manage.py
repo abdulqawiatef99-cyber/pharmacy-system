@@ -125,11 +125,12 @@ def cmd_selftest(a, s):
         return f"configured: {target} (add --print-test to print)"
     check("printer", printer)
     def tests():
-        with tempfile.TemporaryDirectory() as tmp:
+        # Windows keeps SQLite files locked a moment after close: never fail the check on cleanup
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             os.environ["PHARM_DATA_DIR"] = tmp
             suite = unittest.defaultTestLoader.discover(str(Path(__file__).parent / "tests"),
                                                         top_level_dir=str(Path(__file__).parent))
-            r = unittest.TextTestRunner(stream=open(os.devnull, "w"), verbosity=0).run(suite)
+            r = unittest.TextTestRunner(stream=open(os.devnull, "w", encoding="utf-8"), verbosity=0).run(suite)
             if not r.wasSuccessful():
                 raise RuntimeError(f"{len(r.failures)} failures, {len(r.errors)} errors out of {r.testsRun}: "
                                    + "; ".join(str(t[0]) for t in (r.failures + r.errors)[:5]))
@@ -206,6 +207,12 @@ def cmd_feature(a, s):
 
 
 def main(argv=None):
+    # Windows consoles default to a legacy code page; Arabic output must never crash a command
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(description="Pharmacy platform node")
     sub = p.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init")

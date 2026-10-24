@@ -1,4 +1,6 @@
 @echo off
+chcp 65001 >nul
+set PYTHONUTF8=1
 REM ---- Pharmacy platform: first install on a Windows PC (run once) ----
 REM Requires Python 3.11+ from python.org ("Add python.exe to PATH" ticked).
 cd /d "%~dp0\..\.."
@@ -12,5 +14,5 @@ echo.
 echo ---- self test (uses a temporary database, real data is not touched) ----
 python manage.py selftest
 echo.
-echo Next: python manage.py init --pharmacy "اسم الصيدلية" --username owner
+echo Next: python manage.py init --pharmacy "Pharmacy Name" --username owner
 pause
