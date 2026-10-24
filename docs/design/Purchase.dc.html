@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>فاتورة شراء</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#0F5E54}a:hover{color:#0A4038}
+</style>
+</helmet>
+<div dir="rtl" style="min-height: 1000px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <h1 style="margin: 0; font-size: 26px; font-weight: 700">فاتورة شراء</h1>
+      <span style="padding: 4px 12px; border-radius: 999px; background: #FFF1DF; color: #9A4A00; font-size: 14px; font-weight: 600">مسودة — المخزون لسه ما اتغيرش</span>
+    </div>
+    <div style="display: flex; gap: 10px">
+      <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">صوّر الفاتورة بالموبايل</button>
+      <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">ارفع ملف المورد (Excel / PDF)</button>
+    </div>
+  </div>
+
+  <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 16px 18px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px">
+    <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">المورد<input value="ابن سينا" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+    <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">رقم الفاتورة<input value="2026115471789" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+    <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">التاريخ<input value="22/10/2026" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+    <label style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #5B6168">الإجمالي المكتوب على الورقة<input value="187.50" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328; direction: ltr; text-align: right"></label>
+  </section>
+
+  <section style="background: #FFFFFF; border: 2px solid #0F5E54; border-radius: 14px; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px">
+    <b style="font-size: 16px">أضف صنف — اكتب أو امسح، وبعدين Enter بين الخانات</b>
+    <div style="display: grid; grid-template-columns: minmax(0, 3fr) repeat(6, minmax(0, 1fr)); gap: 10px; align-items: end">
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">الصنف<input value="gonat" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 2px solid #0F5E54; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">الكمية<input value="10" style="min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">بونص<input value="0" style="min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">سعر الجمهور<input value="26.00" style="min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">خصم %<input value="27.88" style="min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <label style="display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6168">الصلاحية<input value="629" style="min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px; color: #1F2328"></label>
+      <button type="button" style="min-height: 44px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 700">أضف ↵</button>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; display: flex; justify-content: space-between"><b>GONATESTON 1 AMP</b><span style="font-size: 14px; color: #1D5FA8">آخر شراء: 18.75 من ابن سينا · الرصيد 3 أمبول</span></div>
+    </div>
+  </section>
+
+  <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; overflow-x: auto">
+    <table style="width: 100%; border-collapse: collapse; font-size: 16px">
+      <thead><tr style="background: #ECEAE4; color: #5B6168; font-size: 14px; text-align: right">
+        <th style="padding: 10px 14px; font-weight: 600">#</th><th style="padding: 10px; font-weight: 600">الصنف</th><th style="padding: 10px; font-weight: 600">الكمية</th><th style="padding: 10px; font-weight: 600">بونص</th>
+        <th style="padding: 10px; font-weight: 600">الجمهور</th><th style="padding: 10px; font-weight: 600">خصم</th><th style="padding: 10px; font-weight: 600">الصافي</th><th style="padding: 10px; font-weight: 600">الإجمالي</th><th style="padding: 10px; font-weight: 600">الصلاحية</th><th style="padding: 10px; font-weight: 600">الحالة</th></tr></thead>
+      <tbody>
+        <tr style="border-top: 1px solid #ECEAE4">
+          <td style="padding: 12px 14px">1</td><td style="padding: 12px"><b>GONATESTON 1 AMP</b></td><td style="padding: 12px">10</td><td style="padding: 12px">0</td>
+          <td style="padding: 12px; direction: ltr; text-align: right">26.00</td><td style="padding: 12px">27.88%</td><td style="padding: 12px; direction: ltr; text-align: right">18.75</td><td style="padding: 12px; direction: ltr; text-align: right; font-weight: 700">187.50</td>
+          <td style="padding: 12px">06/2029</td><td style="padding: 12px"><span style="padding: 3px 10px; border-radius: 999px; background: #E7F4EA; color: #1E7B3A; font-size: 13px; font-weight: 600">✓ سليم</span></td>
+        </tr>
+        <tr style="border-top: 1px solid #ECEAE4; background: #FFF8EE">
+          <td style="padding: 12px 14px">2</td><td style="padding: 12px"><b>OLFEN-75 6 AMP</b></td><td style="padding: 12px">5</td><td style="padding: 12px">1</td>
+          <td style="padding: 12px; direction: ltr; text-align: right">26.25</td><td style="padding: 12px">25%</td><td style="padding: 12px; direction: ltr; text-align: right">19.69</td><td style="padding: 12px; direction: ltr; text-align: right; font-weight: 700">98.44</td>
+          <td style="padding: 12px"><span style="color: #9A4A00; font-weight: 600">⚠ ناقصة</span></td><td style="padding: 12px"><span style="padding: 3px 10px; border-radius: 999px; background: #FFF1DF; color: #9A4A00; font-size: 13px; font-weight: 600">اكتب الصلاحية</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px">
+    <div style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 14px 16px"><span style="font-size: 14px; color: #5B6168">إجمالي البرنامج</span><b style="display: block; font-size: 24px; direction: ltr; text-align: right">285.94</b></div>
+    <div style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 14px 16px"><span style="font-size: 14px; color: #5B6168">إجمالي الورقة</span><b style="display: block; font-size: 24px; direction: ltr; text-align: right">187.50</b></div>
+    <div style="background: #FDECEA; border: 1px solid #F3C7C2; border-radius: 14px; padding: 14px 16px; color: #B42318"><span style="font-size: 14px">✕ الفرق</span><b style="display: block; font-size: 24px; direction: ltr; text-align: right">98.44</b><span style="font-size: 13px">سطر زيادة أو ناقص سطر؟ راجع قبل الاعتماد</span></div>
+    <button type="button" disabled style="border-radius: 14px; border: 0; background: #E3E1DB; color: #6B7076; font: inherit; font-size: 18px; font-weight: 700">اعتماد وإضافة للمخزون<br><span style="font-size: 13px; font-weight: 400">بعد حل الفرق والصلاحية</span></button>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

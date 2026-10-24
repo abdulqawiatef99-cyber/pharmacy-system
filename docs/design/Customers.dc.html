@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>العملاء</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#0F5E54}a:hover{color:#0A4038}
+</style>
+</helmet>
+<div dir="rtl" style="min-height: 960px; background: #F5F4F0; color: #1F2328; font-family: 'IBM Plex Sans Arabic', Tahoma, sans-serif; padding: 24px 32px; box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 18px; align-items: start">
+
+  <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; justify-content: space-between; align-items: center"><h1 style="margin: 0; font-size: 24px; font-weight: 700">العملاء</h1><button type="button" style="min-height: 40px; padding: 0 14px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">+ عميل</button></div>
+    <input placeholder="اسم أو رقم موبايل" style="min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #C9C5BC; font: inherit; font-size: 16px">
+    <div style="display: flex; gap: 6px; flex-wrap: wrap; font-size: 13px">
+      <span style="padding: 4px 10px; border-radius: 999px; background: #0F5E54; color: #FFFFFF; font-weight: 600">الكل</span>
+      <span style="padding: 4px 10px; border-radius: 999px; background: #FDECEA; color: #B42318; font-weight: 600">عليهم فلوس</span>
+      <span style="padding: 4px 10px; border-radius: 999px; background: #FFF1DF; color: #9A4A00; font-weight: 600">طلب شهري قرّب</span>
+    </div>
+    <div style="display: flex; flex-direction: column">
+      <div style="padding: 12px; border-radius: 10px; background: #E8F2F0; border-right: 4px solid #0F5E54; display: flex; justify-content: space-between"><div><b>أ. محمود (مثال)</b><div style="font-size: 13px; color: #5B6168">01xxxxxxxxx</div></div><span style="font-size: 13px; color: #B42318; font-weight: 600">عليه 340</span></div>
+      <div style="padding: 12px; border-bottom: 1px solid #ECEAE4; display: flex; justify-content: space-between"><div><b>أم يوسف (مثال)</b><div style="font-size: 13px; color: #5B6168">01xxxxxxxxx</div></div><span style="font-size: 13px; color: #9A4A00; font-weight: 600">⚠ طلبها بعد 3 أيام</span></div>
+      <div style="padding: 12px; display: flex; justify-content: space-between"><div><b>د. سامي (مثال)</b><div style="font-size: 13px; color: #5B6168">01xxxxxxxxx</div></div><span style="font-size: 13px; color: #1E7B3A; font-weight: 600">✓ مفيش عليه</span></div>
+    </div>
+  </section>
+
+  <div style="display: flex; flex-direction: column; gap: 16px">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap">
+      <div><h2 style="margin: 0; font-size: 26px; font-weight: 700">أ. محمود (مثال)</h2><div style="font-size: 15px; color: #5B6168">عميل من 2024 · آخر زيارة من 6 أيام</div></div>
+      <div style="display: flex; gap: 10px">
+        <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid #0F5E54; background: #FFFFFF; color: #0F5E54; font: inherit; font-weight: 600">سجّل دفعة</button>
+        <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">فاتورة له</button>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px">
+      <div style="background: #FDECEA; border: 1px solid #F3C7C2; border-radius: 14px; padding: 14px 16px; color: #B42318"><span style="font-size: 14px">✕ عليه</span><b style="display: block; font-size: 24px; direction: ltr; text-align: right">340.00 ج</b><span style="font-size: 13px">الحد المسموح 500 ج</span></div>
+      <div style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 14px 16px"><span style="font-size: 14px; color: #5B6168">مشترياته الشهر ده</span><b style="display: block; font-size: 24px; direction: ltr; text-align: right">612.50 ج</b></div>
+      <div style="background: #E7F4EA; border: 1px solid #BFDFC7; border-radius: 14px; padding: 14px 16px; color: #1E7B3A"><span style="font-size: 14px">✓ موافق على رسائل واتساب</span><b style="display: block; font-size: 18px; margin-top: 6px">تذكير الطلب الشهري فقط</b></div>
+    </div>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; justify-content: space-between; align-items: center"><h3 style="margin: 0; font-size: 18px; font-weight: 600">الطلب الشهري</h3><span style="padding: 3px 10px; border-radius: 999px; background: #FFF1DF; color: #9A4A00; font-size: 13px; font-weight: 600">⚠ ميعاده بعد 4 أيام</span></div>
+      <table style="width: 100%; border-collapse: collapse; font-size: 15px">
+        <thead><tr style="color: #5B6168; font-size: 13px; text-align: right"><th style="padding: 8px; font-weight: 600">الصنف</th><th style="padding: 8px; font-weight: 600">الكمية</th><th style="padding: 8px; font-weight: 600">آخر صرف</th><th style="padding: 8px; font-weight: 600">عندنا؟</th></tr></thead>
+        <tbody>
+          <tr style="border-top: 1px solid #ECEAE4"><td style="padding: 10px 8px; direction: ltr; text-align: right">ASPOCID 75MG 30TAB</td><td style="padding: 10px 8px">1 علبة</td><td style="padding: 10px 8px">26/09</td><td style="padding: 10px 8px"><span style="color: #9A4A00; font-weight: 600">⚠ شريط واحد — اطلب</span></td></tr>
+          <tr style="border-top: 1px solid #ECEAE4"><td style="padding: 10px 8px; direction: ltr; text-align: right">صنف ضغط (مثال)</td><td style="padding: 10px 8px">2 علبة</td><td style="padding: 10px 8px">26/09</td><td style="padding: 10px 8px"><span style="color: #1E7B3A; font-weight: 600">✓ موجود</span></td></tr>
+        </tbody>
+      </table>
+      <div style="display: flex; gap: 10px">
+        <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 10px; border: 0; background: #0F5E54; color: #FFFFFF; font: inherit; font-weight: 600">جهّز الطلب</button>
+        <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid #C9C5BC; background: #FFFFFF; font: inherit">ابعت تذكير (بموافقتك)</button>
+      </div>
+      <div style="padding: 10px 12px; border-radius: 10px; background: #E6EFFA; color: #1D5FA8; font-size: 14px">البرنامج بيقترح الطلب الشهري من تكرار الشراء، وانت اللي بتأكده. مفيش رسالة بتطلع من غير ضغطة منك.</div>
+    </section>
+
+    <section style="background: #FFFFFF; border: 1px solid #D9D6CE; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 8px">
+      <h3 style="margin: 0; font-size: 18px; font-weight: 600">الحساب</h3>
+      <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #ECEAE4"><span>18/10 · فاتورة آجل</span><b style="color: #B42318; direction: ltr">+ 240.00</b></div>
+      <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #ECEAE4"><span>10/10 · دفعة نقدي</span><b style="color: #1E7B3A; direction: ltr">− 200.00</b></div>
+      <div style="display: flex; justify-content: space-between; padding: 8px 0"><span>26/09 · فاتورة آجل</span><b style="color: #B42318; direction: ltr">+ 300.00</b></div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
