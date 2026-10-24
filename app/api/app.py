@@ -120,6 +120,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     item_card.ensure_default_categories(db)
     from ..sales import channels as pay_channels
     pay_channels.ensure_defaults(db)
+    from ..finance import expenses as fin
+    fin.ensure_defaults(db)
     from ..core.autobackup import AutoBackup
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
@@ -263,6 +265,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                          owner_password=pw)
             item_card.ensure_default_categories(db)
             pay_channels.ensure_defaults(db)
+            fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx)}, status_code=201)
@@ -509,6 +512,34 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if b.get("remove"):
             return J(cu.remove_refill(db, ctx, cid, str(b.get("item_id", ""))))
         return J(cu.save_refill(db, ctx, cid, str(b.get("item_id", "")), b.get("qty_base"), b.get("every_days", 30)))
+
+    @handler
+    async def expenses_list(req):
+        ctx = ctx_of(req)
+        qp = req.query_params
+        return J({"expenses": fin.listing(db, ctx, status=qp.get("status") or None, month=qp.get("month") or None),
+                  "categories": fin.categories(db, ctx), "manager_limit": fin.manager_limit(db, ctx.org_id)})
+
+    @handler
+    async def expenses_add(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        if b.get("new_category"):
+            return J({"categories": fin.add_category(db, ctx, str(b["new_category"]))})
+        return J(fin.record(db, ctx, category_id=str(b.get("category_id", "")), amount=_int(b.get("amount"), "amount"),
+                            paid_from=str(b.get("paid_from", "")), note=b.get("note"), spent_on=b.get("spent_on")),
+                 status_code=201)
+
+    @handler
+    async def expenses_decide(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(fin.decide(db, ctx, req.path_params["id"], bool(b.get("approve")), b.get("reason")))
+
+    @handler
+    async def profit_report(req):
+        qp = req.query_params
+        return J(fin.profit(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def approvers_list(req):
@@ -1375,6 +1406,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications", notifications_list),
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
+        Route("/api/expenses", expenses_list),
+        Route("/api/expenses", expenses_add, methods=["POST"]),
+        Route("/api/expenses/{id}/decide", expenses_decide, methods=["POST"]),
+        Route("/api/reports/profit", profit_report),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/items", items_list),

@@ -35,6 +35,10 @@ def _db(s: config.Settings) -> Database:
     backfill_search_keys(db)
     from app.catalog.card import ensure_default_categories
     ensure_default_categories(db)
+    from app.sales.channels import ensure_defaults as _ch
+    from app.finance.expenses import ensure_defaults as _ex
+    _ch(db)
+    _ex(db)
     return db
 
 

@@ -52,6 +52,8 @@ PERMISSIONS: dict[str, str] = {
     "cash.close": "قفل الشيفت (عد الدرج)",
     "cash.see_expected": "معرفة المفروض يبقى في الدرج",
     "cash.manage": "صرف وإيداع من الدرج وفتح الدرج",
+    "expenses.record": "تسجيل مصروف (بيستنى موافقة)",
+    "expenses.approve": "اعتماد المصاريف",
     "notifications.read": "استلام الإشعارات",
     "safety.read": "عرض تنبيهات السلامة الدوائية",
     "safety.manage": "إنشاء وتعطيل قواعد السلامة",
@@ -69,7 +71,7 @@ GROUPS: list[tuple[str, list[str]]] = [
                          "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return",
                          "suppliers.read", "suppliers.write", "suppliers.pay"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
-    ("الفلوس", ["cash.close", "cash.manage"]),
+    ("الفلوس", ["cash.close", "cash.manage", "expenses.record", "expenses.approve"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
                           "safety.manage", "safety.approve"]),
     ("الإدارة", ["users.manage", "settings.manage"]),
@@ -78,7 +80,7 @@ assert sorted(p for _, ps in GROUPS for p in ps) == sorted(PERMISSIONS), "every 
 
 _EMPLOYEE = ["items.read", "suppliers.read", "purchases.read", "purchases.create", "purchases.edit",
              "inventory.read", "inventory.count", "safety.read", "sales.read", "sales.create",
-             "sales.return", "cash.close"]
+             "sales.return", "cash.close", "expenses.record"]
 
 # code -> (display name, permissions, default max discount in basis points)
 DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
@@ -86,7 +88,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
     "manager": ("مدير", _EMPLOYEE + [
         "items.write", "items.price", "suppliers.write", "suppliers.pay", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
-        "audit.read", "safety.override"], 0),
+        "audit.read", "safety.override", "expenses.approve"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
         "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
     "assistant": ("مساعد", list(_EMPLOYEE), 0),
@@ -94,7 +96,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-10-25"
+ROLES_VERSION = "2026-10-25b"
 
 
 @dataclass(frozen=True)
