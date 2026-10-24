@@ -116,6 +116,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     accounts.sync_system_roles(db)
     from ..catalog.search import backfill_search_keys, search as item_search
     backfill_search_keys(db)
+    from ..catalog import card as item_card
+    item_card.ensure_default_categories(db)
     from ..core.autobackup import AutoBackup
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
@@ -257,6 +259,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             accounts.create_organization(db, name=name, owner_username=user,
                                          owner_full_name=str(b.get("full_name") or user).strip(),
                                          owner_password=pw)
+            item_card.ensure_default_categories(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx)}, status_code=201)
@@ -412,6 +415,45 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def my_prefs(req):
         ctx = ctx_of(req)
         return J(people.set_prefs(db, ctx, await body(req)))
+
+    @handler
+    async def item_card_get(req):
+        return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def item_action(req):
+        ctx = ctx_of(req)
+        iid, action = req.path_params["id"], req.path_params["action"]
+        b = await body(req)
+        if action == "shortage":
+            item_card.set_shortage(db, ctx, iid, bool(b.get("on")))
+        elif action == "category":
+            item_card.set_category(db, ctx, [iid], b.get("category_id") or None)
+        elif action == "barcode":
+            if b.get("remove"):
+                item_card.remove_barcode(db, ctx, iid, str(b.get("barcode", "")))
+            else:
+                catalog.add_barcode(db, ctx, iid, str(b.get("barcode", "")))
+        else:
+            raise ValidationFailed("عملية غير معروفة")
+        return J(item_card.card(db, ctx, iid))
+
+    @handler
+    async def categories_list(req):
+        return J({"categories": item_card.list_categories(db, ctx_of(req))})
+
+    @handler
+    async def categories_save(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(item_card.save_category(db, ctx, b, req.path_params.get("id")))
+
+    @handler
+    async def categories_assign(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        n = item_card.set_category(db, ctx, b.get("item_ids") or [], b.get("category_id") or None)
+        return J({"updated": n})
 
     @handler
     async def approvers_list(req):
@@ -1184,6 +1226,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
+        Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/{action}", item_action, methods=["POST"]),
+        Route("/api/categories", categories_list),
+        Route("/api/categories", categories_save, methods=["POST"]),
+        Route("/api/categories/assign", categories_assign, methods=["POST"]),
+        Route("/api/categories/{id}", categories_save, methods=["PATCH"]),
         Route("/api/suppliers", suppliers_list),
         Route("/api/suppliers", suppliers_create, methods=["POST"]),
         Route("/api/purchases", purchases_list),

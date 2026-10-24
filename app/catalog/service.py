@@ -14,7 +14,7 @@ from .normalize import (dedupe_key, normalize_barcode, normalize_form, normalize
 
 ITEM_FIELDS = ("code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
                "manufacturer", "is_drug", "is_imported", "vat_bp", "pack_size",
-               "base_unit_name", "pack_unit_name", "public_price", "min_stock", "location",
+               "base_unit_name", "pack_unit_name", "public_price", "min_stock", "max_stock", "location",
                "status")
 DUPLICATE_SCORE = 0.93
 
@@ -86,7 +86,7 @@ def _clean_item(data: dict) -> dict:
         out["code"] = str(out["code"]).strip()
     if "dosage_form" in out and out["dosage_form"]:
         out["dosage_form"] = normalize_form(out["dosage_form"]) or str(out["dosage_form"]).lower()
-    for k in ("vat_bp", "pack_size", "public_price", "min_stock"):
+    for k in ("vat_bp", "pack_size", "public_price", "min_stock", "max_stock"):
         if k in out and out[k] is not None:
             try:
                 out[k] = int(out[k])

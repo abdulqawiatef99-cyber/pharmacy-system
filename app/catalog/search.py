@@ -13,6 +13,7 @@ import re
 
 from ..core.permissions import Context
 from ..db import Database
+from . import gs1
 from .normalize import normalize_barcode, normalize_text
 
 # Windows Arabic (101) layout: English key -> Arabic character
@@ -73,10 +74,17 @@ def search(db: Database, ctx: Context, q: str, limit: int = 20) -> dict:
         rows = db.all("SELECT * FROM items WHERE org_id=? AND status='active'"
                       " ORDER BY coalesce(name_en, name_ar) LIMIT ?", (ctx.org_id, limit))
         return {"items": [dict(r) for r in rows], "hint": None}
+    code = gs1.parse(q)
+    if code:                                     # 2D code on the pack: GTIN + expiry + batch
+        keys = gs1.gtin_keys(code["gtin"])
+        rows = db.all(f"SELECT DISTINCT i.* FROM item_barcodes b JOIN items i ON i.id=b.item_id WHERE b.org_id=?"
+                      f" AND b.barcode IN ({','.join('?' * len(keys))})", (ctx.org_id, *keys))
+        return {"items": [dict(r) for r in rows], "hint": {"kind": "gs1", **code}}
     bc = normalize_barcode(q)
     if bc and len(bc) >= 6 and bc == q:
-        r = db.one("SELECT i.* FROM item_barcodes b JOIN items i ON i.id=b.item_id"
-                   " WHERE b.org_id=? AND b.barcode=?", (ctx.org_id, bc))
+        keys = gs1.gtin_keys(bc)
+        r = db.one(f"SELECT i.* FROM item_barcodes b JOIN items i ON i.id=b.item_id"
+                   f" WHERE b.org_id=? AND b.barcode IN ({','.join('?' * len(keys))})", (ctx.org_id, *keys))
         if r:
             return {"items": [dict(r)], "hint": None}
     found: dict[str, dict] = {}

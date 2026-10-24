@@ -440,12 +440,22 @@ class Sales:
             if refund_method == "credit" and not s["customer_id"]:
                 raise ValidationFailed("الاسترداد على الحساب يحتاج عميل")
             refund = 0
+            restricted: list[str] = []
             for line_id, qty in lines.items():
                 if not isinstance(qty, int) or qty <= 0:
                     raise ValidationFailed("كمية المرتجع غير صحيحة")
                 l = self.db.one("SELECT * FROM sale_lines WHERE id=? AND sale_id=?", (line_id, sid))
                 if not l:
                     raise NotFound("السطر غير موجود في الفاتورة")
+                nr = self.db.one("SELECT c.name, i.name_en, i.name_ar FROM items i JOIN categories c ON c.id=i.category_id"
+                                 " WHERE i.id=? AND c.no_return=1", (l["item_id"],))
+                if nr:
+                    restricted.append(f"{nr['name_en'] or nr['name_ar']} ({nr['name']})")
+                    if not ctx.allowed("sales.return_restricted"):
+                        raise Forbidden(f"الصنف ده من قسم «{nr['name']}» ومالوش مرتجع ولا استبدال",
+                                        code="approval_required",
+                                        details={"permission": "sales.return_restricted",
+                                                 "label": f"مرتجع صنف من قسم «{nr['name']}»"})
                 allocs = [dict(a) for a in self.db.all(
                     "SELECT * FROM sale_allocations WHERE sale_line_id=? ORDER BY rowid DESC", (line_id,))]
                 remaining_returnable = sum(a["qty_base"] - a["returned_qty"] for a in allocs)
@@ -481,10 +491,11 @@ class Sales:
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines})
-            notify.emit(self.db, ctx, "return", "warning" if age > days or s["created_by"] != ctx.user_id
-                        else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
+            notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
+                        if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
-                        + (" · الفاتورة باعها حد تاني" if s["created_by"] != ctx.user_id else ""), "sale", sid)
+                        + (" · الفاتورة باعها حد تاني" if s["created_by"] != ctx.user_id else "")
+                        + (f" · ⚠ أصناف مالهاش مرتجع: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
 
     def void(self, ctx: Context, sid: str, reason: str) -> dict:

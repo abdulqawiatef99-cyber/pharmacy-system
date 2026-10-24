@@ -33,6 +33,8 @@ def _db(s: config.Settings) -> Database:
     accounts.sync_system_roles(db)
     from app.catalog.search import backfill_search_keys
     backfill_search_keys(db)
+    from app.catalog.card import ensure_default_categories
+    ensure_default_categories(db)
     return db
 
 
