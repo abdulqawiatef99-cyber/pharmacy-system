@@ -80,6 +80,7 @@ const routes = [
   [/^#\/procurement$/, viewProcurement],
   [/^#\/deadstock$/, viewDeadstock],
   [/^#\/sales$/, viewSales],
+  [/^#\/system$/, viewSystem],
   [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
@@ -95,6 +96,7 @@ async function route() {
   }
   $("#topbar").hidden = !ME;
   if (ME) $("#who").textContent = `${ME.user.full_name} — ${ME.organization.name}`;
+  if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
   for (const [re, fn] of routes) {
@@ -845,6 +847,37 @@ async function viewCountSession(id) {
       });
     } catch (err) { toast(err.message, true); }
   });
+}
+
+// ------------------------------------------------------------------ program / update
+async function viewSystem() {
+  if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>الصفحة دي للمالك بس.</p></section>`; return; }
+  app.innerHTML = `<section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">بيتأكد من التحديثات…</p></div></section>`;
+  const st = await api("/api/system/update");
+  $("#sysBox").innerHTML = `
+    <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المتثبتة<b>${esc((st.installed || "غير معروفة").slice(0, 7))}</b></div>
+      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div></div>
+    ${st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
+      ? `<p>فيه تحديث جديد. التحديث بياخد نسخة احتياطية من بياناتك الأول، وبياناتك مش بتتلمس.</p>
+         <button class="btn" id="updGo">حدّث البرنامج دلوقتي</button>`
+      : `<p class="badge b-ok">البرنامج محدّث</p>`}
+    <pre id="updOut" class="muted" hidden></pre>`;
+  $("#updGo")?.addEventListener("click", async () => {
+    const b = $("#updGo"); b.disabled = true; b.textContent = "بيحدّث… (دقيقة أو اتنين)";
+    try {
+      const r = await api("/api/system/update", { method: "POST", body: {} });
+      $("#updOut").hidden = false; $("#updOut").textContent = r.output;
+      if (r.restarting) {
+        b.textContent = "البرنامج بيعيد تشغيل نفسه…";
+        const wait = async () => { try { await fetch("/api/health"); location.reload(true); } catch { setTimeout(wait, 1500); } };
+        setTimeout(wait, 4000);
+      } else { b.textContent = "خلص. اقفل البرنامج وافتحه تاني"; }
+    } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج دلوقتي"; toast(e.message, true); }
+  });
+}
+async function checkUpdateBadge() {
+  if (!ME?.permissions?.includes("settings.manage")) { $("#navSystem")?.setAttribute("hidden", ""); return; }
+  try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
 }
 
 // ------------------------------------------------------------------ sales history / returns

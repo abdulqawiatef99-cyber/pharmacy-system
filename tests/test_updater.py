@@ -68,3 +68,25 @@ class TestUpdater(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from unittest import mock as _mock
+from tests.test_api import APICase, H as _H
+
+
+class TestUpdateAPI(APICase):
+    def test_owner_sees_status_and_can_run_update(self):
+        self.http_login()
+        with _mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": "/nonexistent/t.txt"}):
+            os_env = __import__("os").environ
+            os_env.pop("PHARM_GITHUB_TOKEN", None)
+            st = self.c.get("/api/system/update").json()
+        self.assertIn("error", st)                                  # clear message, no crash
+        done = _mock.Mock(returncode=0, stdout="التحديث خلص بنجاح", stderr="")
+        with _mock.patch("subprocess.run", return_value=done) as run:
+            r = self.c.post("/api/system/update", headers=_H, json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json()["restarting"])                    # not under the launcher
+        self.assertIn("update", run.call_args[0][0])
+        n = self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update'")[0]
+        self.assertEqual(n, 1)

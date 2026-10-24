@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -29,7 +30,7 @@ from starlette.staticfiles import StaticFiles
 
 from .. import config as config_mod
 from ..catalog import service as catalog
-from ..core import accounts
+from ..core import accounts, audit
 from ..core.errors import Conflict, DomainError, Forbidden, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
@@ -252,6 +253,53 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
                         max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
         return resp
+
+    # ------------------------------------------------------------- program update (owner)
+    upd_cache: dict = {}
+
+    def _update_status() -> dict:
+        from ..core import updater
+        from ..version import __version__
+        now = time.time()
+        if upd_cache.get("at", 0) > now - 600:
+            return upd_cache["v"]
+        cur = updater.installed(s.data_dir).get("sha")
+        out = {"version": __version__, "installed": cur, "latest": None, "available": False,
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
+        try:
+            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, "main", updater.read_token())
+            out["available"] = out["latest"] != cur
+        except updater.UpdateError as e:
+            out["error"] = str(e)
+        upd_cache.update(at=now, v=out)
+        return out
+
+    @handler
+    async def system_update_status(req):
+        ctx_of(req).require("settings.manage")
+        return J(await run_in_threadpool(_update_status))
+
+    @handler
+    async def system_update_run(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        import subprocess
+        import sys as _sys
+        root = Path(__file__).resolve().parents[2]
+        proc = await run_in_threadpool(lambda: subprocess.run(
+            [_sys.executable, str(root / "manage.py"), "update"], cwd=os.getcwd(), capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=900,
+            env={**os.environ, "PYTHONUTF8": "1"}))
+        ok = proc.returncode == 0
+        with db.transaction():
+            audit.record(db, ctx, "system.update", "system", None,
+                         after={"ok": ok, "tail": (proc.stdout or "")[-500:]})
+        upd_cache.clear()
+        restart = ok and os.environ.get("PHARM_LAUNCHER") == "1"
+        if restart:          # the launcher starts the new version when we exit with 75
+            threading.Timer(1.5, lambda: os._exit(75)).start()
+        return J({"ok": ok, "restarting": restart,
+                  "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
 
     @handler
     async def logout(req):
@@ -897,6 +945,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/health", health),
         Route("/api/auth/login", login, methods=["POST"]),
         Route("/api/setup", setup_status),
+        Route("/api/system/update", system_update_status),
+        Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),

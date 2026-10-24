@@ -55,7 +55,7 @@ def main() -> int:
     h = home()
     for d in ("data", "backups", "logs"):
         (h / d).mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1",
+    env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
            "PYTHONPATH": str(ROOT)}
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
