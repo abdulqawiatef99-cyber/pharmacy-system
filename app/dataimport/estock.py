@@ -52,6 +52,8 @@ def detect(rows: list[list]) -> str | None:
         if len(t) >= 15 and t[1] == _n("اسم المخزن") and t[14] == _n("الكود") and \
                 t[9] == _n("الكمية"):
             return "stock_by_expiry"
+        if any(c == "الموظف" for c in r[:1]) and len(t) > 22:
+            return "purchases"
         if t[:9] == [_n(x) for x in ("ن.الربح", "إجمالى التكلفة", "إجمالى س.البيع", "سعر البيع",
                                       "الرصيد", "كمية البيع", "الشركة", "إسم الصنف", "ك.الصنف")]:
             return "sales"
@@ -148,6 +150,41 @@ def parse_sales(rows: list[list]) -> tuple[list[list], dict]:
     if int(footer[6]) != len(out) - 1:
         raise ValidationFailed("عدد أصناف تقرير المبيعات لا يطابق", code="estock_totals_mismatch")
     return out, {"items": len(out) - 1, "cost": str(cost), "sale": str(sale)}
+
+
+def parse_purchases(rows: list[list]) -> tuple[list[dict], dict]:
+    """'تقرير فواتير المشتريات بالأصناف': per supplier section, per invoice header
+    (date at col 13, line count at col 20, invoice no at col 22), then item lines
+    (code col 12, name 11, qty 8, bonus 7, cost 3). Line counts are checked per invoice.
+    Supplier 'جرد' = stock adjustments recorded as purchases (flagged, not a purchase)."""
+    lines: list[dict] = []
+    sup = when = inv = None
+    expected: dict[tuple, int] = {}
+    got: dict[tuple, int] = {}
+    for r in rows:
+        r = list(r) + [None] * 25
+        if r[1] == "الاسم" and r[3] == "الكود":
+            sup = str(r[0]).strip()
+        elif r[0] == "الموظف":
+            if not isinstance(r[13], (datetime, date)):
+                raise ValidationFailed("تاريخ فاتورة مش مفهوم في تقرير المشتريات", code="estock_layout")
+            when, inv = r[13], (sup, str(r[22]))
+            expected[inv] = int(r[20] or 0)
+        elif isinstance(r[12], int) and _is_num(r[8]):
+            if inv is None:
+                raise ValidationFailed("سطر صنف قبل رأس الفاتورة", code="estock_layout")
+            got[inv] = got.get(inv, 0) + 1
+            lines.append({"supplier": sup, "date": when, "invoice": inv[1], "code": r[12], "name": r[11],
+                          "qty": r[8], "bonus": r[7], "cost": r[3], "adjustment": sup == "جرد"})
+    if not expected:
+        raise ValidationFailed("مفيش فواتير في الملف", code="estock_layout")
+    bad = [k for k, n in expected.items() if got.get(k, 0) != n]
+    if bad:
+        raise ValidationFailed(f"عدد أصناف {len(bad)} فاتورة مش مطابق لرأسها؛ الملف ناقص",
+                               code="estock_totals_mismatch")
+    dates = [x["date"] for x in lines]
+    return lines, {"invoices": len(expected), "lines": len(lines),
+                   "from": min(dates).date().isoformat(), "to": max(dates).date().isoformat()}
 
 
 def normalize(rows: list[list], kind: str, options: dict | None = None) -> list[list] | None:

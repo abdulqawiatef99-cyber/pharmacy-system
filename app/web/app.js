@@ -71,6 +71,7 @@ const routes = [
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
+  [/^#\/deadstock$/, viewDeadstock],
   [/^#\/pos$/, viewPos],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
 ];
@@ -713,6 +714,58 @@ async function viewCountSession(id) {
         catch (err) { toast(err.message, true); }
       });
     } catch (err) { toast(err.message, true); }
+  });
+}
+
+// ------------------------------------------------------------------ dead stock
+async function viewDeadstock() {
+  app.innerHTML = `
+  <section class="panel">
+    <h1>الرواكد</h1>
+    <p class="muted">لحد ما الكاشير ينتقل للبرنامج، المبيعات على E-Stock. صدّر الـ 3 تقارير دول (Excel - Data Only) وارفعهم هنا. مفيش حاجة بتتحفظ.</p>
+    <form id="dsForm" class="row">
+      <label class="f">1) كميات الأصناف طبقًا لتواريخ الصلاحية<input type="file" name="stock" accept=".xlsx" required></label>
+      <label class="f">2) حركة بيع الأصناف — آخر 12 شهر (عدد الأصناف 99999)<input type="file" name="sales" accept=".xlsx" required></label>
+      <label class="f">3) فواتير المشتريات بالأصناف — نفس الفترة<input type="file" name="purchases" accept=".xlsx" required></label>
+      <label class="f">المخزن<input name="store" value="الصيدلية"></label>
+      <div class="row"><button class="btn" type="submit">احسب</button>
+        <button class="btn secondary" type="button" id="dsXlsx" disabled>تنزيل Excel</button></div>
+    </form>
+  </section>
+  <div id="dsOut"></div>`;
+  const form = $("#dsForm");
+  const SEG = { dead: "ديد ستوك", stagnant: "راكد", slow: "بطيء", new: "جديد" };
+  const HINT = { dead: "ما اتباعش خلال الفترة، وآخر شراء قبل 6 شهور أو أقدم", stagnant: "ما اتباعش، واتشرى من 3 لـ 6 شهور",
+    slow: "بيتباع، بس الرصيد يكفي أكتر من سنة", new: "اتشرى آخر 3 شهور ولسه بياخد فرصته" };
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("#dsOut").innerHTML = `<section class="panel"><p class="muted">بيحسب…</p></section>`;
+    try {
+      const r = await api("/api/procurement/deadstock", { method: "POST", form: new FormData(form) });
+      $("#dsXlsx").disabled = false;
+      const tbl = (rows) => `<div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد</th><th>التكلفة المحبوسة</th>
+        <th>بيع الفترة</th><th>يكفي (شهر)</th><th>أقرب صلاحية</th><th>آخر شراء</th><th>المورد</th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.name)}<div class="raw">${esc(x.company || "")} · ${x.code}</div></td><td>${x.qty}</td>
+        <td><b>${x.value.toFixed(2)}</b></td><td>${x.sold_in_period || 0}</td><td>${x.months_of_cover ?? "—"}</td>
+        <td>${esc(x.nearest_expiry || "غير مسجلة")}</td><td>${esc(x.last_purchase || "قبل الفترة")}</td><td>${esc(x.supplier || x.note || "")}</td></tr>`).join("")}
+        </tbody></table></div>`;
+      $("#dsOut").innerHTML = `
+      <section class="panel"><h2>الملخص — بتاريخ ${esc(r.as_of)} (قيمة المخزون ${r.stock_value.toFixed(2)} ج)</h2>
+        <div class="totals">${r.summary.map((s) => `<div>${esc(s.label)}<b>${s.value.toFixed(0)} ج</b><span class="muted">${s.items} صنف · ${s.share}%</span></div>`).join("")}
+        <div>أخطاء مشتريات<b>${r.purchase_mistakes.value.toFixed(0)} ج</b><span class="muted">${r.purchase_mistakes.items} صنف اتشروا وما اتباعوش</span></div>
+        <div>منتهي<b>${r.expiry.expired_value.toFixed(0)} ج</b><span class="muted">وخلال 6 شهور ${r.expiry.within_6_months_value.toFixed(0)} ج</span></div></div>
+        <p class="muted">الموسمي (برد، حساسية، شمس) والأدوية المزمنة مش متشالين: راجعهم قبل البيع.</p></section>
+      ${Object.keys(SEG).map((k) => `<section class="panel"><details ${k === "dead" ? "open" : ""}><summary><b>${SEG[k]}</b> — ${r.segments[k].length} صنف
+        <span class="muted">(${HINT[k]})</span></summary>${tbl(r.segments[k])}</details></section>`).join("")}`;
+    } catch (err) { $("#dsOut").innerHTML = ""; toast(err.message, true); }
+  });
+  $("#dsXlsx").addEventListener("click", async () => {
+    const res = await fetch("/api/procurement/deadstock?format=xlsx", { method: "POST", body: new FormData(form),
+      headers: { "X-Requested-With": "pharm" }, credentials: "same-origin" });
+    if (!res.ok) { toast("التنزيل فشل", true); return; }
+    const url = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: "الرواكد.xlsx" });
+    document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   });
 }
 

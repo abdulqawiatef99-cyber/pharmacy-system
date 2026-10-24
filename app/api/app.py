@@ -38,6 +38,7 @@ from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
+from ..procurement import deadstock
 from ..sales.service import Sales
 from ..sales.cash import CashDrawer
 from ..printing import service as printing
@@ -636,6 +637,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     qty_unit=fields.get("qty_unit") or "pack",
                                     dry_run=fields.get("apply") != "1"))
 
+    @handler
+    async def proc_deadstock(req):
+        """Dead/slow stock from 3 E-Stock exports (nothing is stored). ?format=xlsx downloads."""
+        ctx = ctx_of(req)
+        ctx.require("inventory.read")
+        ctx.require("costs.read")
+        if "multipart/form-data" not in req.headers.get("content-type", ""):
+            raise ValidationFailed("ارفع الملفات كـ multipart/form-data")
+        form = await req.form(max_files=3, max_fields=4)
+        files = {}
+        for k in ("stock", "sales", "purchases"):
+            up = form.get(k)
+            if up is None or not hasattr(up, "read"):
+                raise ValidationFailed("لازم الـ 3 ملفات: الأرصدة، والمبيعات، والمشتريات")
+            files[k] = await up.read(s.max_upload_bytes + 1)
+            await up.close()
+            if len(files[k]) > s.max_upload_bytes:
+                raise ValidationFailed("حجم الملف أكبر من المسموح")
+        rep = await run_in_threadpool(deadstock.compute, files["stock"], files["sales"], files["purchases"],
+                                      store=str(form.get("store") or "الصيدلية"))
+        if req.query_params.get("format") == "xlsx":
+            return Response(deadstock.to_xlsx(rep), media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                headers={"Content-Disposition": f"attachment; filename=deadstock-{rep['as_of']}.xlsx"})
+        return J(rep)
+
     # ------------------------------------------------------------- sales
     def _int(v, name):
         try:
@@ -856,6 +883,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
+        Route("/api/procurement/deadstock", proc_deadstock, methods=["POST"]),
         Route("/api/sales", sales_create, methods=["POST"]),
         Route("/api/sales/summary", sales_summary),
         Route("/api/sales/{id}", sales_get),
