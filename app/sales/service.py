@@ -24,6 +24,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..safety.engine import Finding, SafetyEngine
+from . import cash
 
 NEAR_EXPIRY_DAYS = 30
 
@@ -84,13 +85,18 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
-    def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None) -> int:
+    def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
+                         method: str = "cash") -> int:
         ctx.require("customers.manage")
         if amount <= 0:
             raise ValidationFailed("المبلغ لازم يكون أكبر من صفر")
+        if method not in ("cash", "card"):
+            raise ValidationFailed("طريقة الدفع غير صحيحة")
         with self.db.transaction():
             if not self.db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (customer_id, ctx.org_id)):
                 raise NotFound("العميل غير موجود")
+            if method == "cash":
+                cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
                             (new_id(), ctx.org_id, customer_id, -amount, note, ctx.user_id))
@@ -282,6 +288,8 @@ class Sales:
         if bad:
             raise Conflict("فيه أصناف غير متاحة أو بدون سعر", code="line_problems",
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
+        if paid_cash and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
+            raise Conflict("الخزنة مقفولة — افتح وردية قبل البيع النقدي", code="no_open_shift")
         if paid_cash + paid_card + on_credit != preview["total"]:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"]})
@@ -324,6 +332,9 @@ class Sales:
             if total != preview["total"]:
                 raise Conflict("السعر اتغير أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
+            shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
+                or cash.open_shift_id(self.db, ctx, s["branch_id"])
+            self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
                             " total=?, paid_cash=?, paid_card=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
@@ -403,6 +414,8 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'return', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -refund, rid, ctx.user_id))
+            if refund_method == "cash":
+                cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines})
         return {"return_id": rid, "refund": refund}
@@ -431,6 +444,7 @@ class Sales:
                 inventory.post_movement(self.db, ctx, item_id=a["item_id"], qty_delta=a["qty_base"],
                                         batch_id=a["batch_id"], movement_type="sale_return",
                                         ref_type="sale_void", ref_id=sid, branch_id=s["branch_id"], note=reason)
+            cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",

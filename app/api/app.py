@@ -39,6 +39,7 @@ from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
 from ..sales.service import Sales
+from ..sales.cash import CashDrawer
 import html as _html
 
 log = logging.getLogger("pharm.api")
@@ -49,6 +50,7 @@ MAX_JSON = 256 * 1024
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
 FEATURE_PREFIXES = (("/api/sales", "sales"), ("/api/customers", "sales"), ("/receipt", "sales"),
+                    ("/api/cash", "sales"),
                     ("/api/purchases", "purchasing"), ("/api/imports", "dataimport"),
                     ("/api/counts", "counting"), ("/api/procurement", "procurement"),
                     ("/api/recalls", "recalls"), ("/api/safety", "safety"))
@@ -715,7 +717,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J({"balance": Sales(db).customer_payment(ctx, req.path_params["id"],
-                                                         _int(b.get("amount"), "amount"), b.get("note"))})
+                                                         _int(b.get("amount"), "amount"), b.get("note"),
+                                                         method=str(b.get("method", "cash")))})
+
+    @handler
+    async def cash_open(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        sid = CashDrawer(db).open(ctx, _int(b.get("opening_cash"), "opening_cash"))
+        return J(CashDrawer(db).summary(ctx, sid), status_code=201)
+
+    @handler
+    async def cash_current(req):
+        return J(CashDrawer(db).summary(ctx_of(req)))
+
+    @handler
+    async def cash_move(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        CashDrawer(db).movement(ctx, _int(b.get("amount"), "amount"), str(b.get("kind", "")), str(b.get("note", "")))
+        return J(CashDrawer(db).summary(ctx))
+
+    @handler
+    async def cash_close(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note")))
 
     @handler
     async def receipt(req):
@@ -818,6 +845,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
         Route("/receipt/{id}", receipt),
+        Route("/api/cash/open", cash_open, methods=["POST"]),
+        Route("/api/cash/current", cash_current),
+        Route("/api/cash/movements", cash_move, methods=["POST"]),
+        Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),

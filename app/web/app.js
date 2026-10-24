@@ -783,7 +783,7 @@ async function viewPos() {
       <div class="row mt"><label class="f grow">العميل (للآجل) <input id="posCust" placeholder="اسم أو تليفون"></label>
         <button class="btn secondary small" id="posCustNew" type="button">عميل جديد</button></div>
       <div id="posCustRes" class="cands"></div>
-      <p class="muted mt"><a href="#" id="posSummary">ملخص اليوم</a></p><div id="posSum"></div>
+      <p class="muted mt"><a href="#" id="posSummary">ملخص اليوم</a> · <a href="#" id="posShift">الخزنة</a></p><div id="posSum"></div>
     </section>
     <section class="panel" id="posCart"></section>
   </div>`;
@@ -818,6 +818,37 @@ async function viewPos() {
     const limit = parseFloat(prompt("حد الآجل بالجنيه (0 = بدون آجل):", "0") || "0");
     try { await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: Math.round(limit * 100) } }); toast("تم إضافة العميل"); }
     catch (er) { toast(er.message, true); }
+  });
+  $("#posShift").addEventListener("click", async (e) => {
+    e.preventDefault();
+    let sh = null;
+    try { sh = await api("/api/cash/current"); } catch { /* no open shift */ }
+    if (!sh) {
+      const v = prompt("الخزنة مقفولة. رصيد بداية الوردية بالجنيه:", "0");
+      if (v === null) return;
+      try { sh = await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(v) || 0 } }); }
+      catch (er) { return toast(er.message, true); }
+    }
+    const k = sh.cash_by_kind || {};
+    $("#posSum").innerHTML = `<div class="totals"><div>بداية<b>${money(sh.opening_cash)}</b></div>
+      <div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div><div>مرتجع/إلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div>
+      <div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div><div>مصروفات<b>${money(k.payout || 0)}</b></div>
+      <div>المفروض في الدرج<b>${money(sh.expected_cash)}</b></div><div>فيزا<b>${money(sh.card_total)}</b></div></div>
+      ${ME.permissions.includes("cash.manage") ? `<div class="row mt"><button class="btn small secondary" id="shPay">مصروف من الدرج</button>
+      <button class="btn small" id="shClose">قفل الوردية</button></div>` : ""}`;
+    $("#shPay")?.addEventListener("click", async () => {
+      const a = prompt("المبلغ بالجنيه:"); const n = a && prompt("السبب:"); if (!n) return;
+      try { await api("/api/cash/movements", { method: "POST", body: { kind: "payout", amount: toPiasters(a), note: n } }); toast("تم"); }
+      catch (er) { toast(er.message, true); }
+    });
+    $("#shClose")?.addEventListener("click", async () => {
+      const c = prompt(`عدّ الفلوس في الدرج واكتب المبلغ (المتوقع ${money(sh.expected_cash)}):`); if (c === null) return;
+      let note = null;
+      if (toPiasters(c) !== sh.expected_cash) { note = prompt("فيه فرق — اكتب السبب:"); if (!note) return; }
+      try { const r = await api("/api/cash/close", { method: "POST", body: { counted_cash: toPiasters(c), note } });
+        toast(`تم قفل الوردية — الفرق ${money(r.difference)}`); $("#posSum").innerHTML = ""; }
+      catch (er) { toast(er.message, true); }
+    });
   });
   $("#posSummary").addEventListener("click", async (e) => {
     e.preventDefault();
@@ -908,6 +939,7 @@ async function complete(findings) {
     btn.disabled = false;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); }
+    if (er.code === "no_open_shift") $("#posShift").click();
   }
 }
 

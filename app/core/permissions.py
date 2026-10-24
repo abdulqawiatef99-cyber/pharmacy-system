@@ -33,6 +33,7 @@ PERMISSIONS: dict[str, str] = {
     "sales.void": "إلغاء فاتورة بيع",
     "sales.return": "مرتجع المبيعات",
     "customers.manage": "إدارة العملاء والآجل",
+    "cash.manage": "قفل الخزنة والمصروفات من الدرج",
     "safety.read": "عرض تنبيهات السلامة الدوائية",
     "safety.manage": "إنشاء وتعطيل قواعد السلامة",
     "safety.approve": "اعتماد قواعد السلامة وربط المواد الفعالة",
@@ -47,6 +48,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
         "purchases.create", "purchases.edit", "purchases.approve",
         "inventory.read", "costs.read", "safety.read", "safety.override", "inventory.count",
         "sales.read", "sales.create", "sales.discount", "sales.return", "customers.manage",
+        "cash.manage",
     ]),
     "assistant": ("مساعد", [
         "items.read", "suppliers.read", "purchases.read", "purchases.create",

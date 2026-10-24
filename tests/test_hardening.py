@@ -65,6 +65,8 @@ class TestSaleIdempotency(DBTestCase):
     def setUp(self):
         super().setUp()
         self.s = Sales(self.db)
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 0)
         self.it = cat.create_item(self.db, self.ctx, {"name_en": "Panadol 500mg 24 tab", "public_price": 4000})
         with self.db.transaction():
             inv.post_movement(self.db, self.ctx, item_id=self.it, qty_delta=5, movement_type="opening",

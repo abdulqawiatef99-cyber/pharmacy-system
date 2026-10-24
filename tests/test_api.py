@@ -199,6 +199,7 @@ class TestSalesAPI(APICase):
             inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=6, movement_type="opening",
                               unit_cost=Decimal("15"))
         self.http_login()
+        self.assertEqual(self.c.post("/api/cash/open", headers=H, json={"opening_cash": 0}).status_code, 201)
         s = self.c.post("/api/sales", headers=H, json={}).json()
         s = self.c.post(f"/api/sales/{s['id']}/lines", headers=H, json={"item_id": self.pan, "packs": 1}).json()
         self.assertEqual(s["total"], 4000)

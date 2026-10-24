@@ -17,6 +17,8 @@ class SalesCase(DBTestCase):
         super().setUp()
         self.s = Sales(self.db)
         self.se = SafetyEngine(self.db)
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 50000)
         # Panadol: pack of 2 strips. Old batch priced 38 EGP, new batch 40 EGP (price rise).
         self.pan = cat.create_item(self.db, self.ctx, {"name_en": "Panadol 500mg 24 tab", "pack_size": 2,
                                                        "public_price": 4000})
