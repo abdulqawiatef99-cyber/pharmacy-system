@@ -76,6 +76,10 @@ All need `sales.totals`; cost values only with `costs.read`; drawer differences 
 (`sales.totals`; any of the chosen kinds; `q` = invoice number, or part of a customer's name/phone (≥4 digits);
 per invoice: item vs contract discount, after-return net, payments, `profit` for `costs.read`; first 3000; voided/held not in totals).
 
+**Screen customization** — `GET /api/settings/ui` (also in `/api/me` as `ui`), `PUT` (`settings.manage`):
+`{nav_main: [screen…≤8], home: [screen…≤8], shortcuts: {"1".."9": screen}, columns: {invoices|items: [hidden column index]}, reset?}`.
+Stored as one JSON value in `org_settings` (key `ui`); audit `settings.ui`. Per person: `PUT /api/me/prefs {help: on|off}`.
+
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.

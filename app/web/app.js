@@ -25,7 +25,7 @@ const normExpiry = (v) => {
   return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
 };
 // ------------------------------------------------------------------ person's screen preferences
-const PREFS_DEFAULT = { theme: "light", accent: null, font: "m", lang: "ar", names: "both" };
+const PREFS_DEFAULT = { theme: "light", accent: null, font: "m", lang: "ar", names: "both", help: "on" };
 const FONT_STEPS = ["s", "m", "l", "xl"];
 let PREFS = { ...PREFS_DEFAULT };
 try { PREFS = { ...PREFS_DEFAULT, ...JSON.parse(localStorage.getItem("prefs") || "{}") }; } catch { /* storage blocked */ }
@@ -307,6 +307,7 @@ const routes = [
   [/^#\/users\/([\w-]+)$/, viewUser],
   [/^#\/notifications$/, viewNotifications],
   [/^#\/me$/, viewMe],
+  [/^#\/customize$/, viewCustomize],
 ];
 
 async function route() {
@@ -327,6 +328,10 @@ async function route() {
     $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
     $("#navAudit").hidden = !ME.permissions.includes("audit.read");
     $("#navSupRet").hidden = !ME.permissions.includes("purchases.read");
+    $("#navOwnerRep").hidden = !ME.permissions.includes("sales.totals");
+    $("#navCustomize").hidden = !ME.permissions.includes("settings.manage");
+    if (!ME.ui) { try { ME.ui = await api("/api/settings/ui"); } catch { ME.ui = null; } }   // login answers without it
+    applyNav();
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -341,6 +346,176 @@ async function route() {
   }
   location.hash = "#/home";
 }
+// ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
+const SCREENS = {
+  pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], purchases: ["الشراء", "purchases.read"],
+  items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الوردية والخزينة", "sales.create"],
+  customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
+  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
+  shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
+  procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
+  import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
+  staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
+  feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
+  customize: ["تخصيص الواجهة", "settings.manage"],
+};
+const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
+const HELP = {
+  home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة، وF9 يتمم البيع، وF2 يفتح فاتورة جديدة.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
+  purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
+  items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
+  "items/1": ["بطاقة الصنف: الرصيد والتشغيلات والأسعار والحركة والمثيل والبديل.", ["التسوية تحتاج إلى سبب، وتظهر في تقرير خسائر المخزون.", "المثيل يظهر عند كتابة المادة الفعالة والتركيز والشكل في تعديل الصنف."]],
+  categories: ["الأقسام تنظّم الأصناف وتحدد ما لا يُقبل إرجاعه.", ["\"اقتراح\" يقترح قسمًا للأصناف التي بدون قسم، وأنت من يعتمد."]],
+  groups: ["المجموعات العلاجية: أنت من يحدد ما هو بديل لما.", ["أضف مواد فعالة أو أصنافًا بعينها إلى المجموعة.", "البرنامج لا يخمّن أي بديل من تلقاء نفسه."]],
+  shift: ["الوردية والخزينة: افتح الوردية برصيد البداية، وأغلقها بعدّ النقدية فئةً فئة.", ["لا يظهر المتوقع للموظف إلا بعد الإغلاق.", "أي فرق يحتاج إلى سبب مكتوب."]],
+  suppliers: ["الموردون: الحسابات والدفعات وكشف الحساب.", ["اضغط على المورد لعرض كشف حسابه وتسجيل دفعة."]],
+  shortages: ["النواقص: ما سُجّل ناقصًا، أو وصل إلى حد الطلب، أو نفد وكان يُباع.", ["تُزال العلامة تلقائيًا عند اعتماد فاتورة شراء الصنف."]],
+  transfers: ["مراجعة التحويلات: قارن كل تحويل برسائل البنك أو المحفظة.", ["حدد \"وصل المبلغ\" أو \"بها مشكلة\" من الفاتورة."]],
+  audit: ["سجل العمليات: كل عملية باسم من قام بها ووقتها، ولا يمكن تعديله.", []],
+  "supplier-returns": ["مرتجعات للموردين: تخرج الكمية من المخزون وتُخصم قيمتها من حساب المورد.", ["اطبع الإذن ليوقّعه مندوب المورد."]],
+  customers: ["العملاء والآجل: الأرصدة والتحصيل والطلب الشهري والتعاقدات.", ["ربط العميل بتعاقد يطبّق الخصم تلقائيًا في شاشة البيع."]],
+  expenses: ["المصروفات: سجّل المصروف واختر مصدره (الخزينة أو خارجها).", ["المصروفات المجدولة تذكّرك قبل موعدها."]],
+  staff: ["الحضور والرواتب: الأيام والغياب والسلف والمكافآت.", []],
+  attendance: ["حضوري: أيام حضورك وساعاتها.", []],
+  feedback: ["الشكاوى والمقترحات: اكتب أي ملاحظة عن البرنامج.", []],
+  reports: ["التقارير: المبيعات، وتحذيرات الأصناف، وخسائر المخزون، والصلاحية.", ["كل تقرير له زر Excel وزر طباعة."]],
+  "owner-reports": ["تقارير المالك: الموظفون، والعملاء، والخزينة، والمرتجعات، والخصومات، والأسعار.", ["اختر التقرير من الأزرار ثم الفترة."]],
+  profit: ["الربح: المبيعات ناقص التكلفة والمصروفات لفترة.", []],
+  import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
+  recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
+  counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
+  procurement: ["الطلبية: الكمية المقترحة لكل صنف مع سببها.", ["لا يطلب البرنامج شيئًا من تلقاء نفسه."]],
+  deadstock: ["الرواكد: من تقارير البرنامج القديم.", []],
+  system: ["البرنامج: التحديث، والنسخ الاحتياطي، وشكل الإيصال، وأجهزة البطاقات.", []],
+  users: ["المستخدمون: الأدوار والصلاحيات وحدود الخصم.", []],
+  notifications: ["الإشعارات: كل ما حدث ويحتاج إلى علمك.", []],
+  me: ["المظهر واللغة ورقمي السري: إعدادات خاصة بك وحدك.", []],
+  customize: ["تخصيص الواجهة لهذه الصيدلية: الشريط العلوي، وأزرار الصفحة الرئيسية، والاختصارات.", ["التغيير يظهر لكل المستخدمين.", "الأعمدة تُضبط من زر \"⚙ الأعمدة\" فوق الجدول."]],
+};
+const helpKey = () => { const p = (location.hash || "#/home").slice(2).split(/[/?]/); const k = p[1] && HELP[`${p[0]}/1`] && p[1] !== "new" ? `${p[0]}/1` : p[0]; return HELP[k] ? k : null; };
+function addHelpLine() {
+  if (!ME || PREFS.help === "off" || $("#app .helpline")) return;
+  const k = helpKey(), h1 = $("#app h1");
+  if (!k || !h1) return;
+  h1.insertAdjacentHTML("afterend", `<p class="helpline noprint">ℹ <span>${esc(HELP[k][0])}</span> <button type="button" class="link" data-help>المزيد ؟</button></p>`);
+  $("#app [data-help]").addEventListener("click", showHelp);
+}
+new MutationObserver(addHelpLine).observe(app, { childList: true });
+function showHelp() {
+  if (!ME) return;
+  const k = helpKey(), [line, tips] = HELP[k] || ["", []];
+  let dlg = $("#helpDlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "helpDlg"; document.body.append(dlg); }
+  const sc = Object.entries(ME.ui?.shortcuts || {}).filter(([, s]) => canScreen(s));
+  dlg.innerHTML = `<form method="dialog" class="helpdlg"><h2>مساعدة: ${esc((SCREENS[(k || "").split("/")[0]] || [k ? "" : "هذه الشاشة"])[0] || "هذه الشاشة")}</h2>
+    ${line ? `<p>${esc(line)}</p>` : ""}${tips.length ? `<ul>${tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+    <h3>الاختصارات</h3><ul class="plain">${sc.map(([n, s]) => `<li><kbd>Alt+${n}</kbd> ${esc(SCREENS[s][0])}</li>`).join("")}<li><kbd>Alt+0</kbd> هذه المساعدة</li></ul>
+    <label class="chk mt"><input type="checkbox" id="helpLineTgl" ${PREFS.help === "off" ? "" : "checked"}> إظهار سطر المساعدة أعلى كل شاشة</label>
+    <div class="row mt">${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/customize">تخصيص الواجهة</a>` : ""}<button class="btn">إغلاق</button></div></form>`;
+  dlg.querySelector("#helpLineTgl").addEventListener("change", async (e) => {
+    try { await savePrefs({ help: e.target.checked ? "on" : "off" }); $("#app .helpline")?.remove(); addHelpLine(); } catch (er) { toast(er.message, true); }
+  });
+  dlg.querySelector("a")?.addEventListener("click", () => dlg.close());
+  dlg.showModal();
+}
+$("#helpBtn")?.addEventListener("click", showHelp);
+document.addEventListener("keydown", (e) => {
+  if (!ME || !e.altKey || e.ctrlKey || e.metaKey || !/^Digit\d$/.test(e.code) || $("dialog[open]")) return;
+  const n = e.code.slice(5);
+  if (n === "0") { e.preventDefault(); showHelp(); return; }
+  const s = ME.ui?.shortcuts?.[n];
+  if (s && canScreen(s)) { e.preventDefault(); location.hash = `#/${s}`; }
+});
+// top bar: the pharmacy's chosen screens first, in its order; the rest stay under "المزيد"
+let NAV_ORDER = null;
+function applyNav() {
+  const nav = $("#topbar nav"), more = $("#navMore"), menu = $("#navMore .menu");
+  if (!nav || !more) return;
+  const all = [...nav.querySelectorAll("a[data-nav]")];
+  NAV_ORDER ||= all.map((a) => a.dataset.nav);
+  const byKey = Object.fromEntries(all.map((a) => [a.dataset.nav, a]));
+  const main = (ME.ui?.nav_main || []).filter((k) => byKey[k]);
+  for (const k of main) nav.insertBefore(byKey[k], more);
+  for (const k of NAV_ORDER) if (!main.includes(k) && byKey[k]) menu.append(byKey[k]);
+}
+// columns the pharmacy hid in a big table (by column key, so a missing column never shifts the others)
+const COLS = {
+  invoices: ["sel", "no", "time", "customer", "seller", "lines", "gross", "item_disc", "cust_disc", "total", "returns", "net", "cash", "card", "transfer", "credit", "profit"],
+  items: ["sel", "name", "category", "pack", "price", "stock", "code"],
+};
+function applyCols(table, key) {
+  if (!table) return;
+  const hide = new Set((ME.ui?.columns?.[key] || []).map((i) => COLS[key][i]));
+  const ths = [...table.querySelectorAll("thead th")];
+  const hiddenIdx = new Set(ths.map((th, i) => (hide.has(th.dataset.c) ? i : -1)).filter((i) => i >= 0));
+  table.querySelectorAll("tr").forEach((tr) => {
+    let col = 0;
+    for (const cell of tr.children) {
+      const span = +(cell.dataset.span || cell.colSpan || 1);
+      cell.dataset.span = span;
+      const covered = [...Array(span).keys()].map((j) => col + j), off = covered.filter((c) => hiddenIdx.has(c)).length;
+      if (off === span) cell.hidden = true; else { cell.hidden = false; cell.colSpan = span - off; }
+      col += span;
+    }
+  });
+}
+function colTools(table, key) {
+  if (!table || !ME.permissions.includes("settings.manage")) return "";
+  return `<details class="cols noprint"><summary class="btn small secondary">⚙ الأعمدة</summary><div class="menu">
+    ${[...table.querySelectorAll("thead th[data-c]")].filter((th) => !["sel", "no", "name"].includes(th.dataset.c)).map((th) => {
+      const i = COLS[key].indexOf(th.dataset.c), off = (ME.ui?.columns?.[key] || []).includes(i);
+      return `<label class="chk"><input type="checkbox" data-ci="${i}" ${off ? "" : "checked"}> ${esc(th.textContent.trim())}</label>`; }).join("")}
+    <p class="muted small">يسري على كل المستخدمين في هذه الصيدلية.</p></div></details>`;
+}
+function wireCols(box, table, key) {
+  box.querySelectorAll("[data-ci]").forEach((cb) => cb.addEventListener("change", async () => {
+    const off = [...box.querySelectorAll("[data-ci]")].filter((x) => !x.checked).map((x) => +x.dataset.ci);
+    try { ME.ui = await api("/api/settings/ui", { method: "PUT", body: { columns: { [key]: off } } }); applyCols(table, key); }
+    catch (er) { toast(er.message, true); cb.checked = !cb.checked; }
+  }));
+}
+
+async function viewCustomize() {
+  if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
+  let ui = await api("/api/settings/ui");
+  const keys = Object.keys(SCREENS);
+  const draw = () => {
+    const pick = (field, max, title, note) => `<section class="panel"><h2>${title}</h2><p class="muted">${note}</p>
+      <ol class="plain order">${ui[field].map((k, i) => `<li><b>${esc(SCREENS[k]?.[0] || k)}</b> <span class="row">
+        <button type="button" class="btn small secondary" data-up="${field}:${i}" ${i ? "" : "disabled"} aria-label="لأعلى">↑</button>
+        <button type="button" class="btn small secondary" data-dn="${field}:${i}" ${i < ui[field].length - 1 ? "" : "disabled"} aria-label="لأسفل">↓</button>
+        <button type="button" class="btn small danger" data-rm="${field}:${i}" aria-label="إزالة">✕</button></span></li>`).join("")}</ol>
+      ${ui[field].length < max ? `<div class="row"><select data-add="${field}"><option value="">أضف شاشة…</option>${keys.filter((k) => !ui[field].includes(k)).map((k) => `<option value="${k}">${esc(SCREENS[k][0])}</option>`).join("")}</select></div>` : `<p class="muted">الحد الأقصى ${max}.</p>`}</section>`;
+    app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/system">← البرنامج</a><h1>تخصيص الواجهة</h1></div>
+        <button class="btn secondary" id="cuReset">رجوع للافتراضي</button></div>
+      <p class="muted">هذه الإعدادات لهذه الصيدلية وتظهر لكل المستخدمين. كل شخص يرى فقط الشاشات المسموحة له.</p></section>
+      ${pick("nav_main", 8, "الشريط العلوي", "الشاشات الظاهرة مباشرة في الشريط العلوي بالترتيب. الباقي تحت \"المزيد\".")}
+      ${pick("home", 8, "أزرار الصفحة الرئيسية", "الأزرار السريعة في الصفحة الرئيسية بالترتيب.")}
+      <section class="panel"><h2>الاختصارات</h2><p class="muted">اضغط Alt مع الرقم من أي مكان للانتقال إلى الشاشة. Alt+0 يفتح المساعدة.</p>
+        <div class="formgrid">${"123456789".split("").map((n) => `<label class="f"><kbd>Alt+${n}</kbd><select data-sc="${n}"><option value="">—</option>
+          ${keys.map((k) => `<option value="${k}" ${ui.shortcuts[n] === k ? "selected" : ""}>${esc(SCREENS[k][0])}</option>`).join("")}</select></label>`).join("")}</div></section>
+      <section class="panel"><h2>الأعمدة</h2><p class="muted">تُضبط من زر "⚙ الأعمدة" فوق جدول فواتير البيع وجدول الأصناف.</p>
+        ${Object.keys(ui.columns).some((t) => ui.columns[t].length) ? `<button class="btn small secondary" id="cuCols">إظهار كل الأعمدة</button>` : `<p class="muted">كل الأعمدة ظاهرة.</p>`}</section>`;
+    const save = async (changes) => {
+      try { ui = ME.ui = await api("/api/settings/ui", { method: "PUT", body: changes }); applyNav(); toast("✓ تم الحفظ"); draw(); }
+      catch (er) { toast(er.message, true); }
+    };
+    const mv = (spec, d) => { const [f, i] = spec.split(":"), a = [...ui[f]], j = +i + d; [a[i], a[j]] = [a[j], a[i]]; save({ [f]: a }); };
+    app.querySelectorAll("[data-up]").forEach((b) => b.addEventListener("click", () => mv(b.dataset.up, -1)));
+    app.querySelectorAll("[data-dn]").forEach((b) => b.addEventListener("click", () => mv(b.dataset.dn, 1)));
+    app.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => { const [f, i] = b.dataset.rm.split(":"); save({ [f]: ui[f].filter((_, j) => j !== +i) }); }));
+    app.querySelectorAll("[data-add]").forEach((s) => s.addEventListener("change", () => { if (s.value) save({ [s.dataset.add]: [...ui[s.dataset.add], s.value] }); }));
+    app.querySelectorAll("[data-sc]").forEach((s) => s.addEventListener("change", () => {
+      const sc = { ...ui.shortcuts }; if (s.value) sc[s.dataset.sc] = s.value; else delete sc[s.dataset.sc]; save({ shortcuts: sc });
+    }));
+    $("#cuCols")?.addEventListener("click", () => save({ columns: Object.fromEntries(Object.keys(ui.columns).map((t) => [t, []])) }));
+    $("#cuReset").addEventListener("click", (e) => { if (confirmInline(e.target)) save({ reset: true }); });
+  };
+  draw();
+}
+
 window.addEventListener("hashchange", route);
 window.addEventListener("hashchange", () => { const m = $("#navMore"); if (m) m.open = false; });
 document.addEventListener("click", (e) => { const m = $("#navMore"); if (m?.open && !m.contains(e.target)) m.open = false; });
@@ -925,11 +1100,13 @@ async function viewItems() {
       <button class="btn small" id="bulkGo">انقلها إلى القسم</button> <button class="btn small secondary" id="bulkLabels">اطبع ملصقًا لكل صنف</button>
       <button class="btn small secondary" data-flag="rx_required">📋 ضع علامة "بوصفة طبية فقط"</button> <button class="btn small secondary" data-flag="misuse_risk">⚠ ضع علامة "يُساء استخدامه"</button>
       <button class="btn small secondary" data-flag="quick_pin">📌 ثبّتها في البيع السريع</button> <button class="btn small secondary" data-flag="quick_pin" data-off="1">أزِلها من البيع السريع</button></div>` : ""}
-    <div class="tablewrap"><table>
-    <thead><tr>${canW() ? `<th><input type="checkbox" id="selAll" aria-label="اختر الكل"></th>` : ""}<th>الاسم</th><th>القسم</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
+    <div class="row end" id="itColsBox"></div>
+    <div class="tablewrap"><table id="itTable">
+    <thead><tr>${canW() ? `<th data-c="sel"><input type="checkbox" id="selAll" aria-label="اختر الكل"></th>` : ""}<th data-c="name">الاسم</th><th data-c="category">القسم</th><th data-c="pack">العبوة</th><th data-c="price">سعر الجمهور</th><th data-c="stock">الرصيد</th><th data-c="code">الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
   let rows = [];
   const sel = new Set();
+  $("#itColsBox").innerHTML = colTools($("#itTable"), "items"); wireCols($("#itColsBox"), $("#itTable"), "items");
   const bulkUi = () => { if (!$("#bulk")) return; $("#bulk").hidden = !sel.size; $("#bulkN").textContent = `${sel.size} صنف مختار`; };
   const load = async () => {
     const cat = $("#qCat").value;
@@ -943,6 +1120,7 @@ async function viewItems() {
       <td>${it.pack_size} ${esc(unitName(it))}</td><td>${money(it.public_price)}</td>
       <td><b>${esc(fmtStock(it.stock_qty, it)) || "0"}</b>${it.min_stock && it.stock_qty != null && it.stock_qty <= it.min_stock ? ` <span class="badge b-warn">⚠ تحت حد الطلب</span>` : ""}</td>
       <td>${esc(it.code || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">لا توجد نتائج</td></tr>`;
+    applyCols($("#itTable"), "items");
     $("#itemsBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", (e) => {
       if (e.target.matches("input[type=checkbox]")) return;
       location.hash = `#/items/${rows[+tr.dataset.i].id}`;
@@ -1834,8 +2012,9 @@ async function viewSalesAdvanced() {
         <div>بطاقة<b>${money(T.paid_card)}</b></div><div>تحويل<b>${money(T.paid_transfer)}</b></div><div>آجل<b>${money(T.on_credit)}</b></div>
         ${cost ? `<div>ربح الأصناف<b>${money(T.profit)}</b>${T.unknown_cost_n ? `<span>${T.unknown_cost_n} فاتورة بها صنف بدون تكلفة</span>` : ""}</div>` : ""}</div>
       <p class="legend noprint"><span class="lg inv-ret">عليها مرتجع</span><span class="lg inv-disc">عليها خصم</span><span class="lg inv-void">ملغاة</span><span class="lg inv-draft">معلقة</span> — <span>اضغط على أي فاتورة لعرض أصنافها أسفل الجدول.</span></p>
-      <div class="tablewrap mt"><table class="inv"><thead><tr><th class="noprint"><input type="checkbox" id="iAll" aria-label="اختر الكل"></th><th>رقم</th><th>الوقت</th><th>العميل</th><th>الموظف</th><th>أصناف</th>
-        <th>قبل الخصم</th><th>خصم الأصناف</th><th>خصم العميل</th><th>بعد الخصم</th><th>المرتجع</th><th>الصافي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th>${cost ? "<th>الربح</th>" : ""}</tr></thead><tbody>
+      <div class="row end" id="iColsBox"></div>
+      <div class="tablewrap mt"><table class="inv" id="iTable"><thead><tr><th class="noprint" data-c="sel"><input type="checkbox" id="iAll" aria-label="اختر الكل"></th><th data-c="no">رقم</th><th data-c="time">الوقت</th><th data-c="customer">العميل</th><th data-c="seller">الموظف</th><th data-c="lines">أصناف</th>
+        <th data-c="gross">قبل الخصم</th><th data-c="item_disc">خصم الأصناف</th><th data-c="cust_disc">خصم العميل</th><th data-c="total">بعد الخصم</th><th data-c="returns">المرتجع</th><th data-c="net">الصافي</th><th data-c="cash">نقدي</th><th data-c="card">بطاقة</th><th data-c="transfer">تحويل</th><th data-c="credit">آجل</th>${cost ? `<th data-c="profit">الربح</th>` : ""}</tr></thead><tbody>
         ${R.rows.map((r, i) => `<tr class="clickable ${cls(r)}" data-i="${i}"><td class="noprint"><input type="checkbox" data-s="${i}" aria-label="اختر"></td>
           <td><b>${r.sale_no ?? "—"}</b>${r.kind === "delivery" ? ` <span class="badge b-info" title="توصيل">🛵</span>` : ""}${r.contract ? ` <span class="chip" title="تعاقد">🤝 ${esc(r.contract)}</span>` : ""}${r.status === "voided" ? ` <span class="badge b-err">ملغاة</span>` : r.status === "draft" ? ` <span class="badge b-warn">معلقة</span>` : ""}</td>
           <td>${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)}</td><td>${esc(r.customer || "—")}</td><td>${esc(r.seller || "")}</td><td>${r.lines}</td>
@@ -1848,6 +2027,7 @@ async function viewSalesAdvanced() {
           <td class="num">${money(T.paid_transfer)}</td><td class="num">${money(T.on_credit)}</td>${cost ? `<td class="num"><b>${money(T.profit)}</b></td>` : ""}</tr></tfoot>` : ""}</table></div>
       <p class="muted"><span>الفواتير الملغاة والمعلقة غير داخلة في الإجماليات. الصافي = بعد الخصم ناقص المرتجع.</span> ${cost ? "<span>الربح = صافي الأصناف التي بقيت مع العميل ناقص تكلفتها (دون رسوم التوصيل).</span>" : ""}</p>`;
     const selUi = () => { document.querySelectorAll("[data-pr=sel], #iShort").forEach((b) => { b.disabled = !sel.size; }); };
+    $("#iColsBox").innerHTML = colTools($("#iTable"), "invoices"); wireCols($("#iColsBox"), $("#iTable"), "invoices"); applyCols($("#iTable"), "invoices");
     $("#iBox").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", (e) => {
       if (e.target.matches("input")) return;
       $("#iBox").querySelectorAll("tr.open").forEach((x) => x.classList.remove("open")); tr.classList.add("open");
@@ -3220,11 +3400,7 @@ async function viewHome() {
   const diff = h.sales && h.sales_week_ago ? Math.round((h.sales.total - h.sales_week_ago) / h.sales_week_ago * 100) : null;
   app.innerHTML = `<section class="panel"><h1>${greet} يا ${esc(ME.user.full_name)}</h1>
     <div class="quick">
-      ${can("sales.create") ? `<a class="btn big" href="#/pos">شاشة البيع</a>` : ""}
-      ${can("purchases.create") ? `<a class="btn secondary" href="#/purchases">فاتورة شراء</a>` : ""}
-      <a class="btn secondary" href="#/items">الأصناف</a>
-      ${can("inventory.count") ? `<a class="btn secondary" href="#/counts">الجرد</a>` : ""}
-      ${can("sales.create") ? `<a class="btn secondary" href="#/shift">الوردية</a>` : ""}
+      ${(ME.ui?.home || []).filter(canScreen).map((k, i) => `<a class="btn ${i === 0 ? "big" : "secondary"}" href="#/${k}">${esc(SCREENS[k][0])}</a>`).join("")}
       ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
         <span class="muted">${att.open ? `حاضر من ${esc(new Date(att.open.check_in).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }))}` : ""} · <a href="#/attendance">حضوري هذا الشهر (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
   <div class="totals">

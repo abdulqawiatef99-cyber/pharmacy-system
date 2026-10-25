@@ -385,3 +385,15 @@ table.inv tfoot td { font-weight: 700; border-top: 2px solid var(--ink); backgro
 .legend .lg.inv-void::before { background: var(--err-bg); } .legend .lg.inv-draft::before { background: var(--zebra); }
 .inv-print { break-inside: avoid; margin-bottom: 10px; } .inv-print h3 { font-size: .9rem; margin: 6px 0; }
 @media print { table.inv tr td { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+
+/* help line, help button, column chooser, customize */
+.helpline { margin: 2px 0 10px; padding: 6px 10px; border-inline-start: 3px solid var(--info); background: var(--info-bg); color: var(--ink); border-radius: 6px; font-size: .8125rem; }
+.helpline .link { font-size: inherit; }
+.helpbtn { min-width: 32px; min-height: 32px; border-radius: 999px; border: 1px solid currentColor; background: transparent; color: inherit; font-weight: 700; cursor: pointer; }
+.helpbtn:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.helpdlg ul { padding-inline-start: 18px; } .helpdlg h3 { font-size: .9375rem; margin: 12px 0 4px; }
+.row.end { justify-content: flex-end; }
+details.cols { position: relative; } details.cols > summary { list-style: none; cursor: pointer; } details.cols > summary::-webkit-details-marker { display: none; }
+details.cols .menu { position: absolute; inset-inline-end: 0; z-index: 15; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+  display: flex; flex-direction: column; gap: 4px; min-width: 200px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+ol.order { padding: 0; margin: 0 0 8px; } ol.order li { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
