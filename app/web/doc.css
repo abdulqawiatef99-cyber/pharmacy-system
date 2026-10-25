@@ -9,3 +9,4 @@ table { width: 100%; border-collapse: collapse; }
 th, td { border: 1px solid #555; padding: 2mm 3mm; text-align: right; }
 thead th, tfoot th { background: #eee; }
 .sign { display: flex; justify-content: space-between; margin-top: 18mm; }
+td.n { white-space: nowrap; }

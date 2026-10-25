@@ -117,14 +117,14 @@ ACTION_LABELS = {
     "safety.rule_disable": "تعطيل قاعدة سلامة", "safety.source_add": "مصدر سلامة", "sale.attach": "صورة تحويل",
     "sale.complete": "بيع", "sale.return": "مرتجع", "sale.transfer_review": "مراجعة تحويل", "sale.void": "إلغاء فاتورة بيع",
     "settings.line_order": "ترتيب الفاتورة", "settings.receipt": "شكل الإيصال", "settings.return_window": "مدة المرتجع",
-    "supplier.create": "مورد جديد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الموبايل على الواي فاي",
+    "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الموبايل على الواي فاي",
     "system.update": "تحديث البرنامج", "user.active": "إيقاف/تشغيل مستخدم", "user.create": "مستخدم جديد",
     "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة السر", "user.password_reset": "إعادة كلمة السر",
     "user.permission": "صلاحية شخص", "user.pin_set": "رقم سري", "user.reset_permissions": "رجوع الصلاحيات للافتراضي", "user.role": "تغيير النوع",
 }
 GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الشيفت والدرج", "user": "المستخدمين", "settings": "الإعدادات",
           "item": "الأصناف", "expense": "المصاريف", "supplier": "الموردين", "customer": "العملاء", "count": "الجرد",
-          "payroll": "الرواتب", "auth": "الدخول"}
+          "payroll": "الرواتب", "auth": "الدخول", "stock": "تسويات المخزون"}
 
 
 def listing(db: Database, ctx: Context, date_from: str, date_to: str, user_id: str | None = None,

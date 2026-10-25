@@ -1335,19 +1335,20 @@ async function viewCounts() {
     <h1>الجرد</h1>
     ${canManage ? `<form id="cntForm" class="row">
       <label class="f grow">اسم الجرد <input name="title" required placeholder="مثال: جرد رف A"></label>
-      <label class="f">النطاق <select name="scope"><option value="full">شامل</option><option value="location">مواقع محددة</option></select></label>
+      <label class="f">النطاق <select name="scope"><option value="full">شامل</option><option value="category">قسم واحد (جرد جزئي)</option><option value="location">مواقع محددة</option></select></label>
+      <label class="f">القسم <select name="cat"><option value="">—</option>${(await loadCats()).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label>
       <label class="f">المواقع (لو النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
       <button class="btn" type="submit">بدء جرد</button></form>` : ""}
   </section>
   <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
-    <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${esc(c.scope)}</td>
+    <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${{ full: "شامل", location: "مواقع", items: "أصناف / قسم" }[c.scope] || esc(c.scope)}</td>
       <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(dayOf(c.created_at))}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
   $("#cntForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     try {
-      const r = await api("/api/counts", { method: "POST", body: { title: f.title.value, scope: f.scope.value,
+      const r = await api("/api/counts", { method: "POST", body: { title: f.title.value, scope: f.scope.value, category_id: f.cat.value || null,
         locations: f.locations.value.split(/[,،]/).map((x) => x.trim()).filter(Boolean) } });
       location.hash = `#/counts/${r.id}`;
     } catch (err) { toast(err.message, true); }

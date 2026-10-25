@@ -512,7 +512,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
-            f"<td>{e((l['expiry_date'] or '')[:7])}</td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
+            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
             + (f"<td>{m(l['unit_value'])}</td><td>{m(l['unit_value'] * l['qty_base'])}</td>" if show else "") + "</tr>"
             for i, l in enumerate(r["lines"], 1))
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -1295,8 +1295,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def counts_create(req):
         ctx = ctx_of(req)
         b = await body(req)
-        sid = counting.create(ctx, title=str(b.get("title", "")), scope=b.get("scope", "full"),
-                              locations=b.get("locations"), item_ids=b.get("item_ids"),
+        scope, ids = b.get("scope", "full"), b.get("item_ids")
+        if scope == "category":            # count one section: its items, stored as an items-scope count
+            cid = str(b.get("category_id") or "")
+            ids = [r["id"] for r in db.all("SELECT id FROM items WHERE org_id=? AND status='active' AND category_id=?",
+                                            (ctx.org_id, cid))]
+            if not ids:
+                raise ValidationFailed("القسم ده مفيهوش أصناف")
+            scope = "items"
+        sid = counting.create(ctx, title=str(b.get("title", "")), scope=scope,
+                              locations=b.get("locations"), item_ids=ids,
                               blind=bool(b.get("blind", True)))
         return J({"id": sid}, status_code=201)
 
