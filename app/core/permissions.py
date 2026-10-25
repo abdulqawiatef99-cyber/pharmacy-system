@@ -25,6 +25,7 @@ PERMISSIONS: dict[str, str] = {
     "items.import": "استيراد الأصناف",
     "items.no_return": "تحديد الأقسام اللي مالهاش مرتجع",
     "items.hidden": "رؤية وبيع الأصناف المخفية",
+    "items.groups": "تحديد المجموعات العلاجية (البدائل)",
     "suppliers.read": "عرض الموردين",
     "suppliers.write": "إضافة وتعديل الموردين",
     "suppliers.pay": "تسجيل دفع للموردين",
@@ -72,7 +73,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("اللي يشوفه", ["sales.totals", "costs.read", "cash.see_expected", "notifications.read", "audit.read"]),
     ("الشراء والأصناف", ["purchases.create", "purchases.read", "purchases.edit", "purchases.approve",
                          "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
-                         "suppliers.read", "suppliers.write", "suppliers.pay"]),
+                         "items.groups", "suppliers.read", "suppliers.write", "suppliers.pay"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
     ("الفلوس", ["cash.close", "cash.manage", "expenses.record", "expenses.approve"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
@@ -99,7 +100,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-10-25d"
+ROLES_VERSION = "2026-10-25e"
 
 
 @dataclass(frozen=True)

@@ -351,3 +351,18 @@ textarea { width: 100%; padding: 8px 12px; border: 1px solid #c9c5bc; border-rad
 }
 ul.cols { columns: 3 240px; column-gap: 24px; }
 ul.cols li { break-inside: avoid; }
+
+/* quick-sale buttons and the similar/alternative panel */
+.qsale h2 { margin: 0; }
+.qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+.qbtn { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-height: 64px; padding: 8px 8px 8px 22px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; text-align: start; font: inherit; }
+.qbtn:hover:not(:disabled) { border-color: var(--ink); }
+.qbtn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.qbtn.out { opacity: 0.55; cursor: not-allowed; }
+.qbtn .qn { font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; direction: ltr; text-align: right; }
+.qbtn .qp { font-size: 0.8125rem; color: var(--muted); }
+.qbtn .pin { position: absolute; top: 4px; left: 6px; font-size: 0.75rem; }
+.alts h3 { font-size: 0.9375rem; margin-bottom: 4px; }
+.chip .x { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 2px; }
+@media print { .qsale, #altBox { display: none; } }

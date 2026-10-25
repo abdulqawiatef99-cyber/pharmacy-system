@@ -9,13 +9,13 @@ from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id, row_to_dict
 from . import matching
-from .normalize import (dedupe_key, normalize_barcode, normalize_form, normalize_text,
+from .normalize import (dedupe_key, ingredient_key, normalize_barcode, normalize_form, normalize_text,
                         parse_name, strength_norm, valid_gtin)
 
 ITEM_FIELDS = ("code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
                "manufacturer", "is_drug", "is_imported", "vat_bp", "pack_size",
                "base_unit_name", "pack_unit_name", "public_price", "min_stock", "max_stock", "location",
-               "status", "rx_required", "misuse_risk", "sale_note", "is_service", "hide_on_receipt", "hidden")
+               "status", "rx_required", "misuse_risk", "sale_note", "is_service", "hide_on_receipt", "hidden", "quick_pin")
 DUPLICATE_SCORE = 0.93
 
 
@@ -92,9 +92,11 @@ def _clean_item(data: dict) -> dict:
                 out[k] = int(out[k])
             except (TypeError, ValueError):
                 raise ValidationFailed(f"قيمة غير صحيحة في الحقل {k}")
-    for k in ("rx_required", "misuse_risk", "is_service", "hide_on_receipt", "hidden"):
+    for k in ("rx_required", "misuse_risk", "is_service", "hide_on_receipt", "hidden", "quick_pin"):
         if k in out:
             out[k] = int(bool(out[k]))
+    if "active_ingredient" in out:
+        out["ingredient_key"] = ingredient_key(out["active_ingredient"])
     if "sale_note" in out:
         out["sale_note"] = (str(out["sale_note"] or "").strip()[:200]) or None
     if out.get("pack_size") is not None and out["pack_size"] < 1:

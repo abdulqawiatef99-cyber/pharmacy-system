@@ -60,6 +60,14 @@ while no approved interaction data exists.
 **Recalls** — `POST /api/recalls/extract {text}` → proposed batch numbers · `POST /api/recalls {title, items:[{product_name, batch_numbers}], notice_no?, notice_date?}` ·
 `GET /api/recalls/alerts?status=pending|all` · `POST /api/recalls/alerts/{id} {status: confirmed|not_ours|handled, note}`
 
+**Similar items and alternatives** — `GET /api/items/{id}/alternatives` → `{similar, other_strength, alternatives, groups, missing}`
+(similar = same `ingredient_key` + `strength_norm` + dosage-form group; alternatives only from owner groups; each list ranked:
+in stock → expiring within 180 days → dearer → higher margin; `margin_bp` only with `costs.read`) ·
+`GET /api/ingredients` · `GET|POST /api/therapeutic-groups`, `PUT|DELETE /api/therapeutic-groups/{id}`
+`{name, note?, is_active?, members:[{kind:"ingredient", label} | {kind:"item", ref}]}` (`items.groups`) ·
+`GET /api/pos/quick` → pinned items then the last 30 days' best sellers (24 max) · `POST /api/items/flags {item_ids, quick_pin}`.
+Adding an item already on a draft sale (same discount) increases that line instead of adding a second one.
+
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.

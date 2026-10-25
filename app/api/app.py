@@ -118,6 +118,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     accounts.sync_system_roles(db)
     from ..catalog.search import backfill_search_keys, search as item_search
     backfill_search_keys(db)
+    from ..catalog import alternatives as alts
+    alts.backfill_ingredient_keys(db)
     from ..catalog import card as item_card
     item_card.ensure_default_categories(db)
     from ..sales import channels as pay_channels
@@ -471,7 +473,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ids = b.get("item_ids")
         if not isinstance(ids, list) or not ids or len(ids) > 500:
             raise ValidationFailed("اختار الأصناف (لحد 500 مرة واحدة)")
-        ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk") if k in b}
+        ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk", "quick_pin") if k in b}
         if not ch:
             raise ValidationFailed("اختار العلامة")
         marks = ",".join("?" * len(ids))
@@ -480,6 +482,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                            (*ch.values(), ctx.org_id, *ids)).rowcount
             audit.record(db, ctx, "item.flags", "item", None, after={**ch, "items": n})
         return J({"updated": n})
+
+    @handler
+    async def item_alternatives(req):
+        return J(alts.for_item(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def ingredients_list(req):
+        return J(alts.ingredients(db, ctx_of(req)))
+
+    @handler
+    async def groups_api(req):
+        ctx, gid = ctx_of(req), req.path_params.get("id")
+        if req.method == "GET":
+            return J({"groups": alts.list_groups(db, ctx)})
+        if req.method == "DELETE":
+            return J({"groups": alts.delete_group(db, ctx, gid)})
+        return J({"groups": alts.save_group(db, ctx, await body(req), gid)})
+
+    @handler
+    async def pos_quick(req):
+        return J(alts.quick_items(db, ctx_of(req)))
 
     @handler
     async def warnings_rep(req):
@@ -1905,6 +1928,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/audit", audit_list),
         Route("/api/stock/reasons", stock_reasons),
         Route("/api/items/flags", item_flags, methods=["POST"]),
+        Route("/api/items/{id}/alternatives", item_alternatives),
+        Route("/api/ingredients", ingredients_list),
+        Route("/api/therapeutic-groups", groups_api, methods=["GET", "POST"]),
+        Route("/api/therapeutic-groups/{id}", groups_api, methods=["PUT", "DELETE"]),
+        Route("/api/pos/quick", pos_quick),
         Route("/api/reports/item-warnings", warnings_rep),
         Route("/api/items/{id}/adjust", item_adjust, methods=["POST"]),
         Route("/api/reports/losses", losses_report),

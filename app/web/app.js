@@ -271,6 +271,7 @@ const routes = [
   [/^#\/items\/([\w-]+)\/edit$/, viewItemEdit],
   [/^#\/items\/([\w-]+)$/, viewItem],
   [/^#\/categories$/, viewCategories],
+  [/^#\/groups$/, viewGroups],
   [/^#\/shift$/, viewShift],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
@@ -861,12 +862,53 @@ async function loadCats(force = false) {
 }
 const canW = () => ME.permissions.includes("items.write");
 
+const FORMS = [["tab", "أقراص"], ["cap", "كبسول"], ["eff", "فوار"], ["chew", "أقراص مضغ"], ["lozenge", "استحلاب"], ["syrup", "شراب"],
+  ["susp", "معلق"], ["solution", "محلول"], ["drops", "نقط"], ["eyedrops", "قطرة عين"], ["amp", "أمبول / حقن"], ["vial", "فيال"],
+  ["cream", "كريم"], ["oint", "مرهم"], ["gel", "جل"], ["lotion", "لوشن"], ["shampoo", "شامبو"], ["supp", "لبوس"],
+  ["sachet", "أكياس"], ["powder", "بودرة"], ["spray", "بخاخ"], ["inhaler", "بخاخ استنشاق"]];
+const formName = (c) => (FORMS.find((f) => f[0] === c) || [c, c || ""])[1];
+
+// المثيل والبديل: one panel for the cashier and the item card. onAdd(item, packs, units) adds to the sale.
+async function altPanel(itemId, box, onAdd = null) {
+  box.innerHTML = `<p class="muted">بدوّر…</p>`;
+  let r;
+  try { r = await api(`/api/items/${itemId}/alternatives`); } catch (er) { box.innerHTML = ""; toast(er.message, true); return; }
+  const row = (x) => {
+    const can = x.stock_qty > 0 || x.is_service || x.stock_qty == null;
+    return `<div class="res ${can ? "" : "out"}"><div class="grow"><b>${itemHtml(x)}</b>
+      <div class="muted">${esc(x.strength_norm || "")}${x.dosage_form ? ` · ${esc(formName(x.dosage_form))}` : ""}${x.manufacturer ? ` · ${esc(x.manufacturer)}` : ""}
+        ${x.stock_qty != null ? ` · <span>رصيد:</span> <b>${esc(fmtStock(x.stock_qty, x) || "0")}</b>` : ""}</div>
+      <div class="row tags">${x.expiry_soon ? `<span class="badge b-warn" title="بيخلص خلال ${Math.round(r.soon_days / 30)} شهور: يتباع الأول">⚠ صلاحيته ${esc(x.next_expiry.slice(0, 7))}</span>` : ""}
+        ${x.margin_bp != null ? `<span class="badge ${x.margin_bp >= 0 ? "b-ok" : "b-err"}">ربح ${pct(x.margin_bp)}%</span>` : ""}
+        ${(x.groups || []).map((g) => `<span class="chip">${esc(g)}</span>`).join("")}</div></div>
+      <b class="price">${money(x.public_price)} ج</b>
+      ${onAdd && can ? `<button class="btn small" data-aa="${esc(x.id)}" data-k="pack">علبة</button>${x.pack_size > 1 ? `<button class="btn small secondary" data-aa="${esc(x.id)}" data-k="unit">${esc(unitName(x))}</button>` : ""}`
+        : onAdd ? `<span class="badge b-err">✕ ناقص</span>` : `<a class="btn small secondary" href="#/items/${esc(x.id)}">الكارت</a>`}</div>`;
+  };
+  const all = [...r.similar, ...r.other_strength, ...r.alternatives];
+  const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
+  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${esc(r.item.name_en || r.item.name_ar)}</h2>
+      <button class="btn small secondary" data-aclose>✕ اقفل</button></div>
+    ${r.missing.includes("ingredient") ? `<p class="badge b-warn">⚠ المادة الفعالة مش مكتوبة في كارت الصنف ده، فمش هنقدر نلاقي المثيل. ${canW() ? `<a href="#/items/${esc(r.item.id)}/edit">اكتبها</a>` : "اطلب من المدير يكتبها."}</p>` : ""}
+    ${r.missing.includes("strength") ? `<p class="badge b-warn">⚠ التركيز مش مكتوب، فالمثيل بيتقارن من غير تركيز.</p>` : ""}
+    <p class="muted"><span>الترتيب: اللي ليه رصيد الأول، وبعدها اللي صلاحيته قربت تخلص، وبعدها الأغلى</span>${ME.permissions.includes("costs.read") ? "<span>، وبعدها الأعلى ربح</span>" : ""}.</p>
+    ${sec("المثيل: نفس المادة والتركيز والشكل", r.similar, r.missing.includes("ingredient") ? "—" : "مفيش مثيل متسجل")}
+    ${r.other_strength.length ? sec("نفس المادة بتركيز أو شكل تاني", r.other_strength, "") : ""}
+    ${sec("البديل: من المجموعات العلاجية", r.alternatives, r.groups.length ? "مفيش أصناف تانية في المجموعة" : `الصنف ده مش في أي مجموعة علاجية.${ME.permissions.includes("items.groups") ? ` <a href="#/groups">حدد المجموعات</a>` : ""}`)}
+    </div>`;
+  box.querySelector("[data-aclose]").addEventListener("click", () => { box.innerHTML = ""; });
+  box.querySelectorAll("[data-aa]").forEach((b) => b.addEventListener("click", () => {
+    const x = all.find((y) => y.id === b.dataset.aa); onAdd(x, b.dataset.k === "pack" ? 1 : 0, b.dataset.k === "unit" ? 1 : 0);
+  }));
+}
+
 async function viewItems() {
   const cats = await loadCats(true);
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>الأصناف</h1>
       <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}
+      <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
       <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
@@ -877,7 +919,8 @@ async function viewItems() {
     ${canW() ? `<div class="row bulk" id="bulk" hidden><b id="bulkN"></b> <select id="bulkCat"><option value="">— اختار قسم —</option>
       ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}<option value="none">شيلهم من أي قسم</option></select>
       <button class="btn small" id="bulkGo">حطهم في القسم</button> <button class="btn small secondary" id="bulkLabels">اطبع ملصق لكل واحد</button>
-      <button class="btn small secondary" data-flag="rx_required">📋 علّمهم "بروشتة بس"</button> <button class="btn small secondary" data-flag="misuse_risk">⚠ علّمهم "بيساء استخدامه"</button></div>` : ""}
+      <button class="btn small secondary" data-flag="rx_required">📋 علّمهم "بروشتة بس"</button> <button class="btn small secondary" data-flag="misuse_risk">⚠ علّمهم "بيساء استخدامه"</button>
+      <button class="btn small secondary" data-flag="quick_pin">📌 ثبّتهم في البيع السريع</button> <button class="btn small secondary" data-flag="quick_pin" data-off="1">شيلهم من البيع السريع</button></div>` : ""}
     <div class="tablewrap"><table>
     <thead><tr>${canW() ? `<th><input type="checkbox" id="selAll" aria-label="اختار الكل"></th>` : ""}<th>الاسم</th><th>القسم</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
@@ -911,7 +954,7 @@ async function viewItems() {
   $("#bulkLabels")?.addEventListener("click", () => window.open(`/labels?items=${[...sel].map((x) => `${encodeURIComponent(x)}:1`).join(",")}`, "_blank"));
   document.querySelectorAll("[data-flag]").forEach((b) => b.addEventListener("click", async () => {
     if (!sel.size) return toast("اختار الأصناف الأول", true);
-    try { const r = await api("/api/items/flags", { method: "POST", body: { item_ids: [...sel], [b.dataset.flag]: true } }); toast(`✓ اتعلّم ${r.updated} صنف`); load(); }
+    try { const r = await api("/api/items/flags", { method: "POST", body: { item_ids: [...sel], [b.dataset.flag]: !b.dataset.off } }); toast(`✓ اتعدّل ${r.updated} صنف`); load(); }
     catch (err) { toast(err.message, true); }
   }));
   $("#bulkGo")?.addEventListener("click", async () => {
@@ -943,6 +986,7 @@ async function viewItem(id) {
       <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}${c.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${c.hidden ? `<span class="badge b-warn">🔒 مخفي</span>` : ""}${c.hide_on_receipt ? `<span class="badge">🙈 مش في الإيصال</span>` : ""}${c.rx_required ? `<span class="badge b-err">📋 بروشتة بس</span>` : ""}${c.misuse_risk ? `<span class="badge b-warn">⚠ بيساء استخدامه</span>` : ""}${c.sale_note ? `<span class="badge b-info">📝 ${esc(c.sale_note)}</span>` : ""}
         ${c.no_return ? `<span class="chip mk-nr">✕ مالوش مرتجع ولا استبدال</span>` : ""}
         ${c.manufacturer ? `<span class="chip">${esc(c.manufacturer)}</span>` : ""}${c.code ? `<span class="chip">كود ${esc(c.code)}</span>` : ""}
+        ${c.active_ingredient ? `<span class="chip"><bdi dir="ltr">${esc(c.active_ingredient)}</bdi></span>` : ""}${c.strength_norm || c.dosage_form ? `<span class="chip"><bdi dir="ltr">${esc(c.strength_norm || "")}</bdi> ${esc(formName(c.dosage_form))}</span>` : ""}${c.quick_pin ? `<span class="chip">📌 بيع سريع</span>` : ""}
         ${c.shortage_at ? `<span class="badge b-warn">⚠ متعلّم ناقص من ${esc(c.shortage_at)}${c.shortage_by_name ? ` — ${esc(c.shortage_by_name)}` : ""}</span>` : ""}</div></div>
     ${canW() ? `<div class="row"><a class="btn" href="#/items/${esc(id)}/edit">تعديل</a>
       <span class="row"><input id="lbN" type="number" min="1" max="500" value="1" class="narrow" title="عدد الملصقات"><button class="btn secondary" id="lbGo">اطبع ملصق باركود</button></span>
@@ -976,6 +1020,7 @@ async function viewItem(id) {
           <td>${esc(sp.last_date || "")}</td><td>${sp.discount_bp != null ? pct(sp.discount_bp) + "%" : "—"}</td><td>${money(sp.unit_net_price)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لسه مفيش شراء متسجل</td></tr>`}</tbody></table>` : ""}
       ${c.price_history?.length ? `<h2 class="mt">آخر تغييرات السعر</h2><ul class="plain">${c.price_history.map((h) => `<li>${esc(dayOf(h.observed_at))}: ${h.previous_price != null ? `${money(h.previous_price)} ← ` : ""}<b>${money(h.public_price)}</b> <span class="muted">${h.source === "manual" ? "يدوي" : h.source === "purchase_invoice" ? "من فاتورة شراء" : "استيراد"}</span></li>`).join("")}</ul>` : ""}
     </section></div>
+  ${c.is_service ? "" : `<div id="altBox"></div>`}
   ${ME.permissions.includes("inventory.adjust") && c.batches ? `<section class="panel" id="adjBox"><h2>تسوية الرصيد (تصفير، تالف، منتهي، مفقود…)</h2>
     <form id="adjForm" class="row"><label class="f">التشغيلة <select name="b"><option value="">كل التشغيلات (الأقرب صلاحية الأول)</option>${c.batches.filter((b) => b.qty > 0).map((b) => `<option value="${esc(b.batch_id || "")}">${esc(b.batch_no || "من غير تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — ${esc(packs(b.qty, c))}</option>`).join("")}</select></label>
       <label class="f">العملية <select name="mode"><option value="out">نقص كمية</option><option value="zero">تصفير</option><option value="in">زيادة كمية</option></select></label>
@@ -985,6 +1030,7 @@ async function viewItem(id) {
     <p class="muted">المنتهي والتالف بيتسجلوا "إعدام". كل تسوية بتتسجل بسببها واسمك، وبتظهر في تقرير خسائر المخزون.</p></section>` : ""}
   ${ME.permissions.includes("inventory.read") ? `<section class="panel" id="mvRep"><div class="row between"><h2>حركة الصنف لفترة</h2>${reportTools("mv")}</div>${rangeBar("mvRange")}<div id="mvBox"></div></section>` : ""}`;
   document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+  if ($("#altBox")) altPanel(id, $("#altBox"));
   if ($("#adjForm")) {
     const f = $("#adjForm"), R = await stockReasons();
     const sync = () => { const up = f.mode.value === "in"; f.why.innerHTML = reasonOpts(R.adjust, up ? "found" : "expired", up); f.q.disabled = f.mode.value === "zero"; };
@@ -1040,7 +1086,10 @@ async function viewItemEdit(id) {
       <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
       <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
       <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
-      <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}"></label>
+      <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}" placeholder="Amoxicillin + Clavulanic acid">
+        <span class="muted">بالإنجليزي زي ما على العلبة. منها بنلاقي المثيل.</span></label>
+      <label class="f">التركيز <input name="strength" dir="ltr" value="${esc(it.strength || it.strength_norm || "")}" placeholder="500 mg"></label>
+      <label class="f">الشكل <select name="dosage_form"><option value="">—</option>${(it.dosage_form && !FORMS.some((x) => x[0] === it.dosage_form) ? [[it.dosage_form, it.dosage_form], ...FORMS] : FORMS).map(([c, t]) => `<option value="${esc(c)}" ${c === it.dosage_form ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
       <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
       <label class="f">القسم <select name="category_id"><option value="">— من غير قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}</select></label>
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
@@ -1056,7 +1105,8 @@ async function viewItemEdit(id) {
     <h2 class="mt">نوع الصنف</h2>
     <div class="row"><label class="chk"><input type="checkbox" name="is_service" ${it.is_service ? "checked" : ""}> 🛎 خدمة (بتتباع من غير رصيد: توصيل، قياس ضغط، حقنة…)</label>
       <label class="chk"><input type="checkbox" name="hide_on_receipt" ${it.hide_on_receipt ? "checked" : ""}> 🙈 اسمه مايظهرش في الإيصال المطبوع</label>
-      ${ME.permissions.includes("items.hidden") ? `<label class="chk"><input type="checkbox" name="hidden" ${it.hidden ? "checked" : ""}> 🔒 صنف مخفي (يظهر ويتباع للي معاه صلاحية "الأصناف المخفية" بس)</label>` : ""}</div>
+      ${ME.permissions.includes("items.hidden") ? `<label class="chk"><input type="checkbox" name="hidden" ${it.hidden ? "checked" : ""}> 🔒 صنف مخفي (يظهر ويتباع للي معاه صلاحية "الأصناف المخفية" بس)</label>` : ""}
+      <label class="chk"><input type="checkbox" name="quick_pin" ${it.quick_pin ? "checked" : ""}> 📌 زرار ثابت في البيع السريع</label></div>
     <h2 class="mt">تحذير للصيدلي وقت البيع</h2>
     <div class="row"><label class="chk"><input type="checkbox" name="rx_required" ${it.rx_required ? "checked" : ""}> 📋 بيتصرف بروشتة بس (عليه غرامة)</label>
       <label class="chk"><input type="checkbox" name="misuse_risk" ${it.misuse_risk ? "checked" : ""}> ⚠ بيساء استخدامه</label>
@@ -1094,6 +1144,7 @@ async function viewItemEdit(id) {
     const pack = +(v("pack_size") ?? it.pack_size) || 1;
     const data = { name_en: v("name_en") || null, name_ar: v("name_ar") || null, manufacturer: v("manufacturer") || null,
       active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
+      strength: v("strength") || null, dosage_form: f.dosage_form.value || null, quick_pin: f.quick_pin.checked,
       pack_unit_name: v("pack_unit_name") || "علبة", base_unit_name: v("base_unit_name") || "وحدة",
       min_stock: v("min_packs") ? +v("min_packs") * pack : 0, max_stock: v("max_packs") ? +v("max_packs") * pack : null,
       rx_required: f.rx_required.checked, misuse_risk: f.misuse_risk.checked, sale_note: v("sale_note") || null,
@@ -1103,6 +1154,8 @@ async function viewItemEdit(id) {
     if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
     if (id && data.public_price === it.public_price) delete data.public_price;
     if (id && data.pack_size === it.pack_size) delete data.pack_size;
+    if (id && (data.strength || "") === (it.strength || it.strength_norm || "")) delete data.strength;     // untouched: don't rewrite
+    if (id && (data.dosage_form || "") === (it.dosage_form || "")) delete data.dosage_form;
     try {
       let iid = id;
       if (id) await api(`/api/items/${id}`, { method: "PATCH", body: data });
@@ -1123,6 +1176,71 @@ async function viewItemEdit(id) {
 }
 
 // ------------------------------------------------------------------ sections (أقسام)
+// المجموعات العلاجية: الصاحب بيحدد إيه بديل لإيه (مفيش تخمين)
+async function viewGroups() {
+  const can = ME.permissions.includes("items.groups");
+  const [{ groups }, ing] = await Promise.all([api("/api/therapeutic-groups"), api("/api/ingredients")]);
+  app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/items">← الأصناف</a><h1>المجموعات العلاجية (البدائل)</h1></div>
+      ${can ? `<button class="btn" id="gNew">+ مجموعة جديدة</button>` : ""}</div>
+    <p class="muted">كل مجموعة فيها مواد فعالة أو أصناف بتعتبرها بديل لبعض (مثال: Omeprazole وEsomeprazole وPantoprazole).
+      الصنف اللي مادته في مجموعة، البرنامج بيعرض الباقيين كبديل في الكاشير وفي كارت الصنف. البرنامج مش بيخمّن أي بديل لوحده.</p>
+    ${ing.without_ingredient ? `<p class="badge b-warn">⚠ ${ing.without_ingredient} صنف دوا مالوش مادة فعالة مكتوبة، فمش هيظهر ليهم مثيل ولا بديل بالمادة. اكتبها من "تعديل الصنف".</p>` : ""}
+    <div id="gForm"></div></section>
+  <section class="panel"><div class="tablewrap"><table><thead><tr><th>المجموعة</th><th>المواد والأصناف</th><th>الحالة</th>${can ? "<th></th>" : ""}</tr></thead><tbody>
+    ${groups.map((g, i) => `<tr><td><b>${esc(g.name)}</b>${g.note ? `<div class="muted">${esc(g.note)}</div>` : ""}</td>
+      <td>${g.members.map((m) => m.kind === "ingredient" ? `<span class="chip"><bdi dir="ltr">${esc(m.label)}</bdi> <span class="muted">(${m.items} صنف)</span></span>`
+        : `<span class="chip">📦 ${itemHtml({ name_en: m.name_en, name_ar: m.name_ar })}</span>`).join(" ")}</td>
+      <td>${g.is_active ? `<span class="badge b-ok">✓ شغالة</span>` : `<span class="badge">موقوفة</span>`}</td>
+      ${can ? `<td><button class="btn small secondary" data-ge="${i}">تعديل</button> <button class="btn small danger" data-gd="${esc(g.id)}">حذف</button></td>` : ""}</tr>`).join("")
+      || `<tr><td colspan="4" class="muted">لسه مفيش مجموعات</td></tr>`}</tbody></table></div></section>`;
+  const form = (g) => {
+    let mem = (g?.members || []).map((m) => ({ kind: m.kind, ref: m.ref, label: m.kind === "ingredient" ? m.label : (m.name_en || m.name_ar) }));
+    const draw = () => {
+      $("#gForm").innerHTML = `<form class="panel mt" id="gF"><h2>${g ? "تعديل مجموعة" : "مجموعة جديدة"}</h2>
+        <div class="formgrid"><label class="f">اسم المجموعة <input name="name" value="${esc(g?.name || "")}" placeholder="مثال: مثبطات مضخة البروتون"></label>
+          <label class="f">ملاحظة <input name="note" value="${esc(g?.note || "")}"></label>
+          <label class="chk"><input type="checkbox" name="active" ${!g || g.is_active ? "checked" : ""}> شغالة</label></div>
+        <div class="row mt"><label class="f grow">ضيف مادة فعالة <input id="gIng" dir="ltr" list="gIngL" autocomplete="off" placeholder="Omeprazole"></label>
+          <datalist id="gIngL">${ing.ingredients.map((x) => `<option value="${esc(x.label)}">${x.items} صنف</option>`).join("")}</datalist>
+          <button type="button" class="btn small secondary" id="gIngAdd">ضيف المادة</button></div>
+        <div class="row"><label class="f grow">أو ضيف صنف بعينه <input id="gItem" autocomplete="off" placeholder="اسم الصنف"></label></div><div id="gItemRes" class="cands"></div>
+        <div class="row tags mt">${mem.map((m, i) => `<span class="chip">${m.kind === "item" ? "📦 " : ""}<bdi dir="ltr">${esc(m.label)}</bdi> <button type="button" class="x" data-mr="${i}" aria-label="شيل">✕</button></span>`).join("") || `<span class="muted">ضيف مادتين أو صنفين على الأقل</span>`}</div>
+        <div class="row mt"><button class="btn">احفظ</button> <button type="button" class="btn secondary" id="gCancel">إلغاء</button></div></form>`;
+      const f = $("#gF");
+      const addIng = () => { const v = $("#gIng").value.trim(); if (!v) return; keep(); mem.push({ kind: "ingredient", label: v }); draw(); $("#gIng").focus(); };
+      let vals = null;
+      const keep = () => { vals = { name: f.name.value, note: f.note.value, active: f.active.checked }; g = { ...(g || {}), name: vals.name, note: vals.note, is_active: vals.active ? 1 : 0, members: g?.members || [] }; };
+      $("#gIngAdd").addEventListener("click", addIng);
+      $("#gIng").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addIng(); } });
+      $("#gCancel").addEventListener("click", () => { $("#gForm").innerHTML = ""; });
+      f.querySelectorAll("[data-mr]").forEach((b) => b.addEventListener("click", () => { keep(); mem.splice(+b.dataset.mr, 1); draw(); }));
+      let t;
+      $("#gItem").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(async () => {
+        const v = e.target.value.trim(); if (v.length < 2) { $("#gItemRes").innerHTML = ""; return; }
+        const r = (await findItems(v, 8)).items;
+        $("#gItemRes").innerHTML = r.map((x, i) => `<button type="button" class="btn small secondary" data-gi="${i}">${itemHtml(x)}</button>`).join("") || `<p class="muted">مفيش نتائج</p>`;
+        $("#gItemRes").querySelectorAll("[data-gi]").forEach((b) => b.addEventListener("click", () => {
+          const x = r[+b.dataset.gi]; keep(); if (!mem.some((m) => m.kind === "item" && m.ref === x.id)) mem.push({ kind: "item", ref: x.id, label: x.name_en || x.name_ar }); draw(); }));
+      }, 250); });
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const body = { name: f.name.value, note: f.note.value || null, is_active: f.active.checked,
+          members: mem.map((m) => (m.kind === "item" ? { kind: "item", ref: m.ref } : { kind: "ingredient", label: m.label })) };
+        try { await api(g?.id ? `/api/therapeutic-groups/${g.id}` : "/api/therapeutic-groups", { method: g?.id ? "PUT" : "POST", body }); toast("✓ اتحفظت"); viewGroups(); }
+        catch (err) { toast(err.message, true); }
+      });
+    };
+    draw();
+  };
+  $("#gNew")?.addEventListener("click", () => form(null));
+  document.querySelectorAll("[data-ge]").forEach((b) => b.addEventListener("click", () => form(groups[+b.dataset.ge])));
+  document.querySelectorAll("[data-gd]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirmInline(b)) return;
+    try { await api(`/api/therapeutic-groups/${b.dataset.gd}`, { method: "DELETE" }); toast("اتحذفت"); viewGroups(); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+
 async function viewCategories() {
   const cats = await loadCats(true), owner = ME.permissions.includes("items.no_return");
   app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/items">← الأصناف</a><h1>الأقسام</h1></div></div>
@@ -1934,13 +2052,14 @@ async function viewPos() {
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
         <input id="posQ" class="big" autocomplete="off" autofocus></label>
       <div id="posRes" class="results"></div>
+      <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
       <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F2</kbd> فاتورة جديدة</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
   <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزنة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a></p><div id="posSum"></div>`;
-  renderCart(); renderSide();
+  renderCart(); renderSide(); renderQuick();
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
     if (e.target.dataset.close) return;
     await openDraft(b.dataset.tab); viewPos();
@@ -1959,8 +2078,8 @@ async function viewPos() {
     const v = q.value.trim(); if (!v) return;
     const found = await findItems(v); res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
-    if (res.length === 1 && scanned) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
-    if (res.length === 1 && !found.hint) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
+    if (res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ الكود المربع ده مش متسجل على أي صنف. افتح كارت الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
       + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
@@ -1968,9 +2087,11 @@ async function viewPos() {
         <b class="price">${money(r.public_price)} ج</b>
         ${r.stock_qty ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>
         ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}`
-        : `<span class="badge b-err">✕ ناقص</span>`}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
+        : `<span class="badge b-err">✕ ناقص</span>`}
+        ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
+    $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
   };
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
@@ -1983,6 +2104,31 @@ async function viewPos() {
     search(e.shiftKey).catch((er) => toast(er.message, true));
   });
   bindPosExtras();
+}
+
+
+// أزرار البيع السريع: اللي الصاحب ثبّتها، وبعدها الأكتر بيعًا آخر 30 يوم
+let QUICK = null;
+const quickOpen = () => { try { return localStorage.getItem("posQuick") !== "0"; } catch { return true; } };
+async function renderQuick() {
+  const box = $("#posQuick"); if (!box) return;
+  const open = quickOpen();
+  if (open && !QUICK) { try { QUICK = await api("/api/pos/quick"); } catch { QUICK = { items: [] }; } }
+  if (!$("#posQuick")) return;
+  const list = QUICK?.items || [];
+  box.innerHTML = `<section class="panel qsale"><div class="row between"><h2>⚡ البيع السريع</h2>
+      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl">${open ? "اخفي" : "اظهر"}</button></span></div>
+    ${open ? (list.length ? `<div class="qgrid">${list.map((x, i) => {
+      const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
+      return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
+        ${x.pinned ? `<span class="pin" aria-label="متثبت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">ناقص</span>`}</button>`; }).join("")}</div>
+      <p class="muted small">كل ضغطة بتضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
+      : `<p class="muted">لسه مفيش أصناف اتباعت آخر ${QUICK?.days || 30} يوم.${canW() ? ` ثبّت الأصناف اللي عايزها من "تعديل الصنف".` : ""}</p>`) : ""}</section>`;
+  $("#qkTgl").addEventListener("click", () => { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } renderQuick(); });
+  $("#qkRef")?.addEventListener("click", () => { QUICK = null; renderQuick(); });
+  box.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => {
+    const x = list[+b.dataset.q]; addItem(x, x.is_service || x.pack_size === 1 ? 0 : 1, x.is_service || x.pack_size === 1 ? 1 : 0);
+  }));
 }
 
 async function newTab() {
@@ -2206,6 +2352,7 @@ async function complete(findings) {
               confirm_below_cost: !!SALE.confirm_below_cost } });
     try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 && done.kind !== "delivery" } }); }
     catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
+    QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: الفلوس مع اللي بيوصّل لحد ما يسلمها)" : ""}`);
     SALE = null; viewPos();
   } catch (er) {

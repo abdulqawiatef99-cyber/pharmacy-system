@@ -246,6 +246,27 @@ def strength_norm(text: str | None) -> str | None:
     return p.strength or normalize_text(text).replace(" ", "")
 
 
+_UNIT_WORDS = {"mg", "mcg", "ug", "µg", "g", "gm", "gram", "grams", "ml", "iu", "u", "unit", "units", "%", "mmol",
+               "مجم", "ملجم", "مللجم", "جم", "جرام", "مل", "ملل", "وحده"}
+_ING_SPLIT = re.compile(r"\+|/|,|،|&|;|\s+and\s+|\s+with\s+|\s+و\s+", re.I)
+
+
+def ingredient_key(text: str | None) -> str | None:
+    """The active ingredient(s) in one comparable form: order, case, spelling marks and strengths
+    are ignored, so 'Amoxicillin 875mg + Clavulanic Acid 125mg' == 'clavulanic acid / amoxicillin'.
+    Deterministic, no synonyms: 'paracetamol' and 'acetaminophen' stay different (the owner can put
+    them in one therapeutic group)."""
+    if not text:
+        return None
+    parts = set()
+    for p in _ING_SPLIT.split(text):
+        toks = [t for t in normalize_text(p).split()
+                if not re.fullmatch(r"[\d.]+%?", t) and t not in _UNIT_WORDS and t.strip("%/'")]
+        if toks:
+            parts.add(" ".join(toks))
+    return "+".join(sorted(parts)) or None
+
+
 def normalize_form(text: str | None) -> str | None:
     if not text:
         return None
