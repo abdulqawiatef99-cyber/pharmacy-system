@@ -779,7 +779,7 @@ class Sales:
         """Completed/voided invoices of one local day (default today), newest first;
         or one invoice by its number."""
         ctx.require("sales.read")
-        q = ("SELECT s.id, s.sale_no, s.status, s.total, s.paid_cash, s.paid_card, s.on_credit,"
+        q = ("SELECT s.id, s.sale_no, s.status, s.total, s.paid_cash, s.paid_card, s.paid_transfer, s.on_credit,"
              " s.returned_total, s.completed_at, s.voided_at, c.name customer,"
              " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
              " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"

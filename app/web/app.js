@@ -472,6 +472,8 @@ async function viewPurchases() {
     <div id="puBox"></div>
   </section>`;
   let rows = list, sub = "";
+  // an approved invoice counts with what was posted to the supplier (computed); a draft shows the paper total
+  const amt = (i) => (i.status === "approved" ? i.computed_total ?? i.declared_total : i.declared_total ?? i.computed_total);
   const drawList = () => {
     const ok = rows.filter((i) => i.status === "approved");
     $("#puBox").innerHTML = `<div class="tablewrap"><table class="list">
@@ -480,11 +482,11 @@ async function viewPurchases() {
       <tbody>${rows.map((i) => `<tr>
         <td><a href="#/purchases/${esc(i.id)}">${esc(i.supplier_name || "— غير محدد —")}</a></td>
         <td>${esc(i.invoice_no || "")}</td><td>${esc(i.invoice_date || dayOf(i.created_at))}</td><td>${i.lines}</td>
-        <td>${money(i.declared_total ?? i.computed_total)}</td>
+        <td>${money(amt(i))}</td>
         <td><span class="badge ${STATUS[i.status][1]}">${STATUS[i.status][0]}</span></td>
         <td>${esc(i.source_type)}</td></tr>`).join("") ||
         `<tr><td colspan="7" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
-    </table></div>${ok.length ? `<p><b>المعتمد: ${ok.length} فاتورة — ${money(ok.reduce((a, i) => a + (i.computed_total ?? i.declared_total ?? 0), 0))} ج</b></p>` : ""}`;
+    </table></div>${ok.length ? `<p><b>المعتمد: ${ok.length} فاتورة — ${money(ok.reduce((a, i) => a + (amt(i) || 0), 0))} ج</b></p>` : ""}`;
   };
   const loadList = async (f, t) => {
     const qs = new URLSearchParams({ from: f, to: t }); if ($("#puSup").value) qs.set("supplier", $("#puSup").value); if ($("#puSt").value) qs.set("status", $("#puSt").value);
@@ -494,7 +496,7 @@ async function viewPurchases() {
   ["#puSup", "#puSt"].forEach((id) => $(id).addEventListener("change", () => loadList(...getRange()).catch((e) => toast(e.message, true))));
   wireTools("pur", () => ({ title: "فواتير الشراء", subtitle: sub + ($("#puSup").value ? ` — ${$("#puSup").selectedOptions[0].text}` : ""), el: $("#puRep"), sheets: [
     { name: "فواتير الشراء", columns: [Tx("المورد"), Tx("رقم الفاتورة"), Dt("التاريخ"), N("الأصناف"), M("الإجمالي"), Tx("الحالة")],
-      rows: rows.map((i) => [i.supplier_name || "", i.invoice_no || "", i.invoice_date || dayOf(i.created_at), i.lines, i.declared_total ?? i.computed_total, STATUS[i.status][0]]) }] }));
+      rows: rows.map((i) => [i.supplier_name || "", i.invoice_no || "", i.invoice_date || dayOf(i.created_at), i.lines, amt(i), STATUS[i.status][0]]) }] }));
   $("#addSup").addEventListener("click", async () => {
     const name = $("#newSup").value.trim(); if (!name) return;
     try { await api("/api/suppliers", { method: "POST", body: { name } }); toast("المورد اتضاف"); viewPurchases(); }
@@ -970,18 +972,18 @@ async function viewItem(id) {
   document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
   if ($("#mvRep")) {
     let mv = null;
-    const q = (n) => `${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
+    const q = (n) => `${n < 0 ? "−" : ""}${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
     wireRange("mvRange", async (f, t) => {
       try {
         mv = await api(`/api/items/${id}/movements?from=${f}&to=${t}`);
         $("#mvBox").innerHTML = `<div class="totals"><div>الرصيد أول المدة<b>${esc(q(mv.opening))}</b></div>
-          ${mv.totals.map((x) => `<div>${esc(x.label)}<b>${x.qty < 0 ? "− " : "+ "}${esc(q(x.qty))}</b></div>`).join("")}
+          ${mv.totals.map((x) => `<div>${esc(x.label)}<b>${x.qty < 0 ? "" : "+ "}${esc(q(x.qty))}</b></div>`).join("")}
           <div>الرصيد آخر المدة<b>${esc(q(mv.closing))}</b></div></div>
           <div class="tablewrap mt"><table><thead><tr><th>اليوم والوقت</th><th>الحركة</th><th>المرجع</th><th>التشغيلة</th><th>وارد</th><th>صادر</th><th>الرصيد</th><th>مين</th></tr></thead><tbody>
           ${mv.rows.map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td>${esc(r.label)}</td>
             <td>${r.sale_no ? `فاتورة بيع ${r.sale_no}` : r.invoice_no ? `فاتورة ${esc(r.invoice_no)} — ${esc(r.supplier || "")}` : esc(r.note || "")}</td>
             <td>${esc(r.batch_no || "")}${r.expiry_date ? ` <span class="muted">${esc(r.expiry_date.slice(0, 7))}</span>` : ""}</td>
-            <td>${r.qty_delta > 0 ? esc(q(r.qty_delta)) : ""}</td><td>${r.qty_delta < 0 ? esc(q(r.qty_delta)) : ""}</td><td>${esc(q(r.balance))}</td><td>${esc(r.by_name || "")}</td></tr>`).join("")
+            <td>${r.qty_delta > 0 ? esc(q(r.qty_delta)) : ""}</td><td>${r.qty_delta < 0 ? esc(q(-r.qty_delta)) : ""}</td><td>${esc(q(r.balance))}</td><td>${esc(r.by_name || "")}</td></tr>`).join("")
             || `<tr><td colspan="8" class="muted">مفيش حركة في الفترة دي</td></tr>`}</tbody></table></div>`;
       } catch (err) { toast(err.message, true); }
     });
@@ -1615,7 +1617,7 @@ async function viewSales() {
       <button class="btn secondary" id="sGo">عرض</button></div></section>
   <section class="panel" id="sRep"><div class="row between"><h2 id="sTitle"></h2>${reportTools("sales-list")}</div>
     <div class="tablewrap"><table><thead><tr><th>رقم</th><th>اليوم</th><th>الوقت</th><th>العميل</th><th>الأصناف</th>
-    <th>الإجمالي</th><th>نقدي/فيزا/آجل</th><th>مرتجع</th><th>الحالة</th></tr></thead><tbody id="sBody"></tbody></table></div><p id="sSum"></p></section>`;
+    <th>الإجمالي</th><th>نقدي/فيزا/تحويل/آجل</th><th>مرتجع</th><th>الحالة</th></tr></thead><tbody id="sBody"></tbody></table></div><p id="sSum"></p></section>`;
   let rows = [], sub = "";
   const load = async (f, t) => {
     const no = $("#sNo").value.trim();
@@ -1624,16 +1626,17 @@ async function viewSales() {
     $("#sTitle").textContent = sub;
     $("#sBody").innerHTML = rows.map((r) => `<tr class="clickable" data-id="${r.id}"><td><b>${r.sale_no ?? ""}</b></td>
       <td>${esc(dayOf(r.completed_at))}</td><td>${hhmm(r.completed_at)}</td><td>${esc(r.customer || "—")}</td><td>${r.lines}</td><td><b>${money(r.total)}</b></td>
-      <td>${money(r.paid_cash)} / ${money(r.paid_card)} / ${money(r.on_credit)}</td><td>${r.returned_total ? money(r.returned_total) : ""}</td>
+      <td>${money(r.paid_cash)} / ${money(r.paid_card)} / ${money(r.paid_transfer || 0)} / ${money(r.on_credit)}</td><td>${r.returned_total ? money(r.returned_total) : ""}</td>
       <td>${r.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : SALE_ST[r.status]}</td></tr>`).join("")
       || `<tr><td colspan="9" class="muted">مفيش فواتير</td></tr>`;
     const ok = rows.filter((r) => r.status !== "voided");
-    $("#sSum").innerHTML = rows.length ? `<b>${ok.length} فاتورة — ${money(ok.reduce((a, r) => a + r.total, 0))} ج</b>` : "";
+    const tot = ok.reduce((a, r) => a + r.total, 0), ret = ok.reduce((a, r) => a + (r.returned_total || 0), 0);
+    $("#sSum").innerHTML = rows.length ? `<b>${ok.length} فاتورة — ${money(tot)} ج${ret ? ` · مرتجع ${money(ret)} · الصافي ${money(tot - ret)} ج` : ""}</b>` : "";
     $("#sBody").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/sales/${tr.dataset.id}`; }));
   };
   wireTools("sales-list", () => ({ title: "فواتير البيع", subtitle: sub, el: $("#sRep"), sheets: [
-    { name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("العميل"), N("الأصناف"), M("الإجمالي"), M("نقدي"), M("فيزا"), M("آجل"), M("مرتجع"), Tx("الحالة")],
-      rows: rows.map((r) => [r.sale_no, `${dayOf(r.completed_at)} ${hhmm(r.completed_at)}`, r.customer || "", r.lines, r.total, r.paid_cash, r.paid_card, r.on_credit, r.returned_total || 0, r.status === "voided" ? "ملغاة" : "تمام"]) }] }));
+    { name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("العميل"), N("الأصناف"), M("الإجمالي"), M("نقدي"), M("فيزا"), M("تحويل"), M("آجل"), M("مرتجع"), Tx("الحالة")],
+      rows: rows.map((r) => [r.sale_no, `${dayOf(r.completed_at)} ${hhmm(r.completed_at)}`, r.customer || "", r.lines, r.total, r.paid_cash, r.paid_card, r.paid_transfer || 0, r.on_credit, r.returned_total || 0, r.status === "voided" ? "ملغاة" : "تمام"]) }] }));
   if (all) {
     const get = wireRange("sRange", (f, t) => { $("#sNo").value = ""; load(f, t).catch((e) => toast(e.message, true)); });
     $("#sGo").addEventListener("click", () => load(...get()).catch((e) => toast(e.message, true)));
@@ -2348,7 +2351,7 @@ async function viewSupplier(id) {
     try {
       st = await api(`/api/suppliers/${id}/statement?from=${f}&to=${t}`);
       $("#ssBox").innerHTML = `<div class="totals"><div>رصيد أول المدة<b>${money(st.opening)}</b></div><div>مسحوبات<b>${money(st.purchases)}</b><span>${st.invoices} فاتورة</span></div>
-        <div>مرتجع<b>${money(st.returns)}</b></div><div class="t-ok">المدفوع<b>${money(st.payments)}</b><span>${st.by_method.map((m) => `${esc(m.label)} ${money(m.amount)}`).join(" · ")}</span></div>
+        <div>مرتجع<b>${money(st.returns)}</b></div>${st.adjustments ? `<div>تسويات / إلغاء<b>${money(st.adjustments)}</b></div>` : ""}<div class="t-ok">المدفوع<b>${money(st.payments)}</b><span>${st.by_method.map((m) => `${esc(m.label)} ${money(m.amount)}`).join(" · ")}</span></div>
         <div class="${st.closing > 0 ? "t-warn" : "t-ok"}">رصيد آخر المدة<b>${money(st.closing)}</b><span>${st.closing > 0 ? "علينا له" : st.closing < 0 ? "ليه عندنا" : "خالص"}</span></div></div>
         <div class="tablewrap mt"><table><thead><tr><th>التاريخ</th><th>البيان</th><th>عليه (مسحوبات)</th><th>له (دفع/مرتجع)</th><th>الرصيد</th></tr></thead><tbody>
         <tr><td>${esc(st.from)}</td><td>رصيد أول المدة</td><td></td><td></td><td class="num"><b>${money(st.opening)}</b></td></tr>
@@ -2360,7 +2363,7 @@ async function viewSupplier(id) {
     { name: "كشف الحساب", columns: [Dt("التاريخ"), Tx("البيان"), Tx("رقم الفاتورة"), Tx("طريقة الدفع"), Tx("رقم الشيك/التحويل"), M("عليه"), M("له"), M("الرصيد")],
       rows: [[st.from, "رصيد أول المدة", "", "", "", null, null, st.opening], ...st.lines.map((l) => [l.day, LEDGER_KIND[l.kind] || l.kind, l.invoice_no || "", l.pay_method ? PAY_M[l.pay_method] || l.pay_method : "", l.pay_ref || "",
         l.amount > 0 ? l.amount : null, l.amount < 0 ? -l.amount : null, l.balance])],
-      total: ["", "رصيد آخر المدة", "", "", "", st.purchases, st.payments + st.returns, st.closing] },
+      total: ["", "رصيد آخر المدة", "", "", "", st.lines.reduce((x, l) => x + Math.max(0, l.amount), 0), st.lines.reduce((x, l) => x + Math.max(0, -l.amount), 0), st.closing] },
     { name: "طرق الدفع", columns: [Tx("الطريقة"), M("المبلغ")], rows: st.by_method.map((m) => [m.label, m.amount]) }] }));
 }
 
@@ -2856,8 +2859,9 @@ function printPreview(el, title, subtitle = "") {
 }
 // wire both buttons of a reportTools(key): spec() returns {title, subtitle, el, sheets}
 function wireTools(key, spec) {
-  document.querySelectorAll(`[data-xl="${key}"]`).forEach((b) => b.addEventListener("click", () => { const s = spec(); exportXlsx(s.title, s.subtitle, s.sheets); }));
-  document.querySelectorAll(`[data-pv="${key}"]`).forEach((b) => b.addEventListener("click", () => { const s = spec(); printPreview(s.el, s.title, s.subtitle); }));
+  const get = () => { try { return spec(); } catch { toast("استنى التقرير يخلص تحميل", true); return null; } };
+  document.querySelectorAll(`[data-xl="${key}"]`).forEach((b) => b.addEventListener("click", () => { const s = get(); if (s) exportXlsx(s.title, s.subtitle, s.sheets); }));
+  document.querySelectorAll(`[data-pv="${key}"]`).forEach((b) => b.addEventListener("click", () => { const s = get(); if (s) printPreview(s.el, s.title, s.subtitle); }));
 }
 const M = (label) => ({ label, type: "money" }), N = (label) => ({ label, type: "int" }), Tx = (label) => ({ label }), Dt = (label) => ({ label, type: "date" });
 const rangeText = (f, t) => (f === t ? `يوم ${f}` : `من ${f} لحد ${t}`);
