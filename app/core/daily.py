@@ -71,7 +71,8 @@ def run(db: Database, today: date | None = None) -> int:
                 "  WHERE x.org_id=? AND x.status='completed' AND x.completed_at>=? GROUP BY l.item_id)"
                 " SELECT s.*, i.name_en, i.name_ar, i.pack_size, coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.item_id=s.item_id"
                 "  AND b.org_id=?),0) stock FROM s JOIN items i ON i.id=s.item_id"
-                " WHERE s.recent >= 5 AND s.recent >= 3 * (s.before / 8.0) AND s.before > 0", (lo7, lo7, o["id"], lo63, o["id"]))
+                " WHERE s.recent >= 5 AND s.recent >= 3 * (s.before / 8.0) AND s.before > 0 AND i.is_service=0",
+                (lo7, lo7, o["id"], lo63, o["id"]))         # a service (delivery...) never runs short
             notified = st.get("spikes", {})
             for r in spikes:
                 last = notified.get(r["item_id"])

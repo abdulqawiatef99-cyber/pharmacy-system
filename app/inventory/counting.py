@@ -180,15 +180,14 @@ class Counting:
             out.append(r)
         counted_items = {r["item_id"] for r in out}
         uncounted = []
-        for it in self.db.all("SELECT i.* FROM items i WHERE i.org_id=? AND i.status='active'",
-                              (ctx.org_id,)):
+        # one grouped query (not one per item): 20,000 items stay quick on a weak PC
+        for it in self.db.all("SELECT i.id, i.name_en, i.name_ar, i.location, sum(sb.qty) q FROM items i"
+                              " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+                              " WHERE i.org_id=? AND i.status='active' GROUP BY i.id HAVING sum(sb.qty) <> 0",
+                              (s["branch_id"], ctx.org_id)):
             if it["id"] in counted_items or not self._in_scope(s, dict(it)):
                 continue
-            q = self.db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND"
-                            " branch_id=? AND item_id=?", (ctx.org_id, s["branch_id"], it["id"]))["q"]
-            if q:
-                uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"],
-                                  "system_qty": q})
+            uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"], "system_qty": it["q"]})
         out.sort(key=lambda r: abs(r["difference"]), reverse=True)
         return {"session": s, "lines": out, "uncounted_with_stock": uncounted,
                 "summary": {"counted_lines": len(out),

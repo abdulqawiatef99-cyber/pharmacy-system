@@ -20,7 +20,7 @@ from .. import config as config_mod
 from ..catalog import matching, service as catalog
 from ..catalog.normalize import normalize_text
 from ..core import accounts, audit, notify
-from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.errors import Conflict, DomainError, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
@@ -569,8 +569,9 @@ class Purchasing:
                 if l["raw_barcode"] and l["match_status"] == "confirmed":
                     try:
                         catalog.add_barcode(self.db, ctx, item["id"], l["raw_barcode"])
-                    except Exception:
-                        pass   # barcode belongs to another item -> leave for manual review
+                    except DomainError:
+                        pass   # barcode belongs to another item (or no items.write) -> leave for manual review;
+                        # these errors are raised before anything is written, so the invoice stays whole
             now = accounts.iso(accounts.utcnow())
             self.db.execute("UPDATE purchase_invoices SET status='approved', approved_by=?,"
                             " approved_at=?, computed_total=?, version=version+1 WHERE id=?",
