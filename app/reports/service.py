@@ -43,7 +43,9 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
     top = []
     for r in db.all(
             "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, sum(a.qty_base - a.returned_qty) qty,"
-            " sum(CAST(round((a.qty_base - a.returned_qty) * a.unit_price * (10000 - l.discount_bp) / 10000.0) AS INTEGER)) revenue,"
+            " sum(CAST(round((CASE WHEN a.pack_price IS NOT NULL AND a.pack_size > 1"
+            "   THEN ((a.qty_base - a.returned_qty) / a.pack_size) * a.pack_price + ((a.qty_base - a.returned_qty) % a.pack_size) * a.unit_price"
+            "   ELSE (a.qty_base - a.returned_qty) * a.unit_price END) * (10000 - l.discount_bp) / 10000.0) AS INTEGER)) revenue,"
             " sum((a.qty_base - a.returned_qty) * coalesce(CAST(a.unit_cost AS REAL), 0) * 100) cost,"
             " sum(a.unit_cost IS NULL) unknown"
             " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id JOIN items i ON i.id=l.item_id"

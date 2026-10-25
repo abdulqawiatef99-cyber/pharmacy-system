@@ -94,6 +94,26 @@ def local_today() -> date:
     return datetime.now().astimezone().date()
 
 
+def alloc_gross(qty: int, a: dict) -> int:
+    """Price of `qty` units of one allocation: whole packs at the pack price, the rest at the unit
+    price. So 3 units of a 100.00 pack of 3 cost exactly 100.00, not 3 x 33.33."""
+    ps, pp = a.get("pack_size") or 1, a.get("pack_price")
+    if pp is None or ps <= 1:
+        return a["unit_price"] * qty
+    return (qty // ps) * pp + (qty % ps) * a["unit_price"]
+
+
+def discount_of(gross: int, bp: int) -> int:
+    """Discount in piasters, rounded half up (the same everywhere: screen, sale, return)."""
+    return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
+
+
+def kept_value(allocs: list[dict], kept: dict, bp: int) -> int:
+    """Net value of the units of a line the customer still keeps (after discount)."""
+    g = sum(alloc_gross(kept[a["id"]], a) for a in allocs)
+    return g - discount_of(g, bp)
+
+
 def unit_price(pack_price: int, pack_size: int) -> int:
     """Piasters per base unit, rounded half-up."""
     return int((Decimal(pack_price) / pack_size).quantize(Decimal("1"), ROUND_HALF_UP))
@@ -257,6 +277,7 @@ class Sales:
             plan.append({"batch_id": b["batch_key"] or None, "batch_no": b["batch_no"],
                          "expiry_date": b["expiry_date"], "qty": take,
                          "unit_price": unit_price(pack_price, item["pack_size"]) if pack_price is not None else None,
+                         "pack_price": pack_price, "pack_size": item["pack_size"],
                          "price_source": "batch" if b["public_price"] is not None else "item"})
             need -= take
         if need:
@@ -297,8 +318,8 @@ class Sales:
             l["allocations"] = plan
             if any(a.get("unit_price") is None for a in plan):
                 l["problem"] = "no_price"
-            gross = sum((a["unit_price"] or 0) * a["qty"] for a in plan)
-            disc = round(gross * l["discount_bp"] / 10000)
+            gross = sum(alloc_gross(a["qty"], a) for a in plan if a.get("unit_price") is not None)
+            disc = discount_of(gross, l["discount_bp"])
             l["gross"], l["discount"], l["net"] = gross, disc, gross - disc
             if any(a.get("expiry_date") and (date.fromisoformat(a["expiry_date"]) - self.today).days
                    < NEAR_EXPIRY_DAYS for a in plan):
@@ -418,11 +439,11 @@ class Sales:
                                             unit_cost=None, ref_type="sale", ref_id=sid,
                                             ref_line_id=l["id"], branch_id=s["branch_id"])
                     self.db.execute("INSERT INTO sale_allocations (id, sale_line_id, batch_id, qty_base,"
-                                    " unit_price, unit_cost) VALUES (?,?,?,?,?,?)",
+                                    " unit_price, unit_cost, pack_price, pack_size) VALUES (?,?,?,?,?,?,?,?)",
                                     (new_id(), l["id"], a["batch_id"], a["qty"], a["unit_price"],
-                                     cost_row["avg_cost"] if cost_row else None))
-                    gross += a["unit_price"] * a["qty"]
-                net = gross - round(gross * l["discount_bp"] / 10000)
+                                     cost_row["avg_cost"] if cost_row else None, a["pack_price"], a["pack_size"]))
+                    gross += alloc_gross(a["qty"], a)
+                net = gross - discount_of(gross, l["discount_bp"])
                 if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
                     if Decimal(net) < cost:
@@ -684,6 +705,8 @@ class Sales:
                 if qty > remaining_returnable:
                     raise Conflict(f"أقصى كمية ممكن ترجع {remaining_returnable}", code="return_exceeds")
                 left = qty
+                kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+                before = kept_value(allocs, kept, l["discount_bp"])
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -695,11 +718,13 @@ class Sales:
                                             branch_id=s["branch_id"], note=reason)
                     self.db.execute("UPDATE sale_allocations SET returned_qty=returned_qty+? WHERE id=?",
                                     (take, a["id"]))
-                    gross = a["unit_price"] * take
-                    refund += gross - round(gross * l["discount_bp"] / 10000)
+                    kept[a["id"]] -= take
                     left -= take
                     if left == 0:
                         break
+                # refund = what the kept units were worth before minus after: all the returns of a
+                # line add up to exactly what was paid for it, never a piaster more or less
+                refund += before - kept_value(allocs, kept, l["discount_bp"])
             rid = new_id()
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
                             " created_by) VALUES (?,?,?,?,?,?,?)",
