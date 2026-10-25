@@ -2434,5 +2434,21 @@ window.I18N_EN = {
 "لا يمكن إخفاء كل الأعمدة": "All columns cannot be hidden",
 "؟": "?",
 "المرتجع هنا هو ما أُرجع من فواتير هذه الفترة؛ أما تقرير المرتجعات في تقارير المالك فيعرض كل مرتجع بتاريخ إرجاعه.": "Returns here are those made on this period's invoices; the returns report in Owner reports shows every return by the day it was made.",
-"كل مرتجع بتاريخ إرجاعه، حتى لو كانت الفاتورة من فترة سابقة.": "Each return is listed by the day it was made, even if the invoice is from an earlier period."
+"كل مرتجع بتاريخ إرجاعه، حتى لو كانت الفاتورة من فترة سابقة.": "Each return is listed by the day it was made, even if the invoice is from an earlier period.",
+"طابعة الملصقات": "Label printer",
+"من المتصفح (أي طابعة)": "From the browser (any printer)",
+"مكان الطابعة": "Printer location",
+"دقة الطابعة": "Printer resolution",
+"203 (الأشهر)": "203 (most common)",
+"المسافة بين الملصقات (مم)": "Gap between labels (mm)",
+"اسم طابعة ويندوز كما يظهر في \"الأجهزة والطابعات\". الطباعة المباشرة لم تُجرَّب بعد على طابعة حقيقية؛ وعند أي مشكلة تُفتح صفحة الطباعة من المتصفح.": "The Windows printer name as shown in \"Devices and Printers\". Direct printing has not been tried on a real printer yet; on any problem the browser print page opens.",
+"أُرسل": "Sent",
+"ملصق إلى الطابعة": "labels to the printer",
+"نوع طابعة الملصقات غير صحيح": "Invalid label printer type",
+"عنوان الطابعة غير صحيح؛ مثال: tcp:192.168.1.50:9100 أو win:Xprinter XP-365B": "Invalid printer address; e.g. tcp:192.168.1.50:9100 or win:Xprinter XP-365B",
+"دقة الطابعة 203 أو 300": "Printer resolution is 203 or 300",
+"المسافة بين الملصقات من 0 إلى 10 مم": "Gap between labels is 0 to 10 mm",
+"طابعة الملصقات مضبوطة على الطباعة من المتصفح": "The label printer is set to print from the browser",
+"الكود أطول من عرض الملصق؛ اختر مقاسًا أعرض": "The code is longer than the label width; choose a wider size",
+"اختر نوع طابعة الملصقات (TSPL أو ZPL)": "Choose the label printer type (TSPL or ZPL)"
 };

@@ -80,6 +80,10 @@ per invoice: item vs contract discount, after-return net, payments, `profit` for
 `{nav_main: [screen…≤8], home: [screen…≤8], shortcuts: {"1".."9": screen}, columns: {invoices|items: [hidden column index]}, reset?}`.
 Stored as one JSON value in `org_settings` (key `ui`); audit `settings.ui`. Per person: `PUT /api/me/prefs {help: on|off}`.
 
+**Label printers** — `PUT /api/settings/receipt {label_lang: browser|tspl|zpl, label_target: "tcp:IP:PORT"|"win:NAME", label_dpi: 203|300, label_gap: 0..10}`
+(`settings.manage`; never a file path from the screen) · `POST /api/print/labels {items:[{id, count}], size?}` (`items.read`, ≤500 labels):
+each label drawn as a 1-bit image and sent as TSPL `BITMAP` or ZPL `^GFA`; `labels_in_browser` when not set up, `print_failed` → browser page.
+
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.

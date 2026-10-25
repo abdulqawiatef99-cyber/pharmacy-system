@@ -1081,6 +1081,16 @@ async function altPanel(itemId, box, onAdd = null) {
   }));
 }
 
+// barcode labels: straight to the label printer when one is set up, else the browser page
+let LABEL_CFG = null;
+async function printLabels(list) {
+  const page = () => window.open(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`, "_blank");
+  try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
+  if (LABEL_CFG.label_lang === "browser") return page();
+  try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
+  catch (er) { toast(er.message, true); if (er.code === "print_failed") page(); }
+}
+
 async function viewItems() {
   const cats = await loadCats(true);
   app.innerHTML = `
@@ -1133,7 +1143,7 @@ async function viewItems() {
     document.querySelectorAll("[data-sel]").forEach((cb) => { cb.checked = e.target.checked; const id = rows[+cb.dataset.sel].id; cb.checked ? sel.add(id) : sel.delete(id); });
     bulkUi();
   });
-  $("#bulkLabels")?.addEventListener("click", () => window.open(`/labels?items=${[...sel].map((x) => `${encodeURIComponent(x)}:1`).join(",")}`, "_blank"));
+  $("#bulkLabels")?.addEventListener("click", () => printLabels([...sel].map((x) => [x, 1])));
   document.querySelectorAll("[data-flag]").forEach((b) => b.addEventListener("click", async () => {
     if (!sel.size) return toast("اختر الأصناف أولًا", true);
     try { const r = await api("/api/items/flags", { method: "POST", body: { item_ids: [...sel], [b.dataset.flag]: !b.dataset.off } }); toast(`✓ تم تعديل ${r.updated} صنف`); load(); }
@@ -1249,7 +1259,7 @@ async function viewItem(id) {
           r.sale_no ? `فاتورة بيع ${r.sale_no}` : r.invoice_no ? `فاتورة ${r.invoice_no} — ${r.supplier || ""}` : r.note || "", r.batch_no || "", r.expiry_date || "", r.qty_delta, r.balance, r.by_name || ""])],
         total: ["", "الرصيد آخر المدة", "", "", "", null, mv.closing, ""] }] }));
   }
-  $("#lbGo")?.addEventListener("click", () => window.open(`/labels?items=${encodeURIComponent(id)}:${+$("#lbN").value || 1}`, "_blank"));
+  $("#lbGo")?.addEventListener("click", () => printLabels([[id, Math.min(500, Math.max(1, +$("#lbN").value || 1))]]));
   $("#shortBtn")?.addEventListener("click", async () => {
     try { await api(`/api/items/${id}/shortage`, { method: "POST", body: { on: !c.shortage_at } }); viewItem(id); }
     catch (err) { toast(err.message, true); }
@@ -1871,14 +1881,23 @@ async function renderReceiptCfg(c) {
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
     <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
+    <fieldset class="lblp"><legend>طابعة الملصقات</legend>
+      <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option>
+        <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
+      <label class="f">مكان الطابعة <input name="label_target" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
+      <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
+      <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
+      <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". الطباعة المباشرة لم تُجرَّب بعد على طابعة حقيقية؛ وعند أي مشكلة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
+  LABEL_CFG = c;
   $("#rcForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
-      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, label_lang: f.label_lang.value, label_target: f.label_target.value.trim(),
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });

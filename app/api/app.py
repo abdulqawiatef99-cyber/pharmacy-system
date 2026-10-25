@@ -1882,6 +1882,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
+    async def print_labels_api(req):
+        from ..printing import service as ps
+        ctx = ctx_of(req)
+        b = await body(req)
+        wanted = []
+        for x in (b.get("items") or [])[:200]:
+            if isinstance(x, dict) and x.get("id"):
+                wanted.append((str(x["id"]), x.get("count", 1)))
+        return J(await run_in_threadpool(ps.print_labels, db, ctx, wanted, size=b.get("size")))
+
+    @handler
     async def receipt_settings(req):
         from ..printing import settings as rs
         ctx = ctx_of(req)
@@ -2053,6 +2064,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
+        Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),
