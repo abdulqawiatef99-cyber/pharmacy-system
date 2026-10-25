@@ -123,7 +123,7 @@ def home(db: Database, ctx: Context) -> dict:
         if short:
             out["alerts"].append({"level": "warning", "text": f"{short} صنف مسجل ناقصًا", "link": "#/shortages"})
     d = db.one("SELECT count(*) n, coalesce(sum(cash_due),0) c FROM sale_deliveries WHERE org_id=? AND status IN ('out','delivered')",
-               (ctx.org_id,))
+               (ctx.org_id,)) if ctx.can("sales.create") else {"n": 0}
     if d["n"]:
         out["alerts"].append({"level": "info", "text": f"{d['n']} توصيلة مفتوحة — {d['c'] / 100:,.2f} ج مع مندوب التوصيل", "link": "#/pos"})
     if ctx.can("expenses.approve"):
@@ -139,7 +139,8 @@ def home(db: Database, ctx: Context) -> dict:
                                       "text": f"{sc['name']} {when} ({n['due']})", "link": "#/expenses"})
     soon5 = (today + timedelta(days=5)).isoformat()
     r = db.one("SELECT count(DISTINCT customer_id) c FROM customer_refills WHERE org_id=? AND"
-               " date(coalesce(last_at, created_at), '+' || every_days || ' days') <= ?", (ctx.org_id, soon5))["c"]
+               " date(coalesce(last_at, created_at), '+' || every_days || ' days') <= ?", (ctx.org_id, soon5))["c"] \
+        if ctx.can("sales.read") else 0
     if r:
         out["alerts"].append({"level": "info", "text": f"{r} عميل اقترب موعد طلبهم الشهري", "link": "#/customers"})
     if ctx.can("notifications.read"):

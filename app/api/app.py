@@ -1331,7 +1331,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- recalls
     @handler
     async def recall_extract(req):
-        ctx_of(req)
+        ctx_of(req).require("items.read")
         b = await body(req)
         return J({"batches": extract_batches(str(b.get("text", ""))[:20000])})
 
