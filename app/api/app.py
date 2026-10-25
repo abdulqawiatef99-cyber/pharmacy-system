@@ -505,6 +505,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(alts.quick_items(db, ctx_of(req)))
 
     @handler
+    async def invoices_report(req):
+        from ..reports import invoices
+        qp = req.query_params
+        return J(invoices.report(db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
+                                 types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
+                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
+
+    @handler
     async def owner_report(req):
         from ..reports import owner
         fn = owner.REPORTS.get(req.path_params["kind"])
@@ -1944,6 +1952,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/pos/quick", pos_quick),
         Route("/api/reports/item-warnings", warnings_rep),
         Route("/api/reports/owner/{kind}", owner_report),
+        Route("/api/reports/invoices", invoices_report),
         Route("/api/items/{id}/adjust", item_adjust, methods=["POST"]),
         Route("/api/reports/losses", losses_report),
         Route("/api/supplier-returns", supplier_returns_api, methods=["GET", "POST"]),
