@@ -110,7 +110,7 @@ class Purchasing:
             "SELECT pi.id FROM purchase_invoices pi JOIN source_files f ON f.id=pi.source_file_id"
             " WHERE pi.org_id=? AND f.sha256=? AND pi.status<>'cancelled'", (ctx.org_id, sha))
         if dup:
-            raise Conflict("الملف ده اتسجل قبل كده كفاتورة", code="duplicate_file",
+            raise Conflict("هذا الملف سُجّل من قبل كفاتورة", code="duplicate_file",
                            details={"invoice_id": dup["id"]})
 
         extracted = files.extract_structured(kind, data)
@@ -142,7 +142,7 @@ class Purchasing:
                               " AND invoice_no=? AND status<>'cancelled'",
                               (ctx.org_id, supplier_id, ex.invoice_no))
             if dup:
-                raise Conflict("فاتورة بنفس الرقم من نفس المورد متسجلة قبل كده",
+                raise Conflict("توجد فاتورة بالرقم نفسه من المورد نفسه مسجلة من قبل",
                                code="duplicate_invoice", details={"invoice_id": dup["id"]})
         inv_id = new_id()
         with self.db.transaction():
@@ -298,7 +298,7 @@ class Purchasing:
         if inv["status"] != "draft":
             raise Conflict("الفاتورة معتمدة أو ملغاة ولا يمكن تعديلها", code="not_draft")
         if version is not None and inv["version"] != version:
-            raise Conflict("الفاتورة اتعدلت من مستخدم آخر، حدّث الصفحة", code="stale_version",
+            raise Conflict("عُدّلت الفاتورة من مستخدم آخر، حدّث الصفحة", code="stale_version",
                            details={"current_version": inv["version"]})
         return dict(inv)
 
@@ -331,7 +331,7 @@ class Purchasing:
                     self.db.execute(f"UPDATE purchase_invoices SET {sets} WHERE id=?",
                                     (*clean.values(), inv_id))
                 except sqlite3.IntegrityError as e:
-                    raise Conflict("فاتورة بنفس الرقم من نفس المورد متسجلة قبل كده",
+                    raise Conflict("توجد فاتورة بالرقم نفسه من المورد نفسه مسجلة من قبل",
                                    code="duplicate_invoice") from e
                 self._refresh_totals(ctx, inv_id)
                 self._bump(inv_id)
@@ -592,7 +592,7 @@ class Purchasing:
                             "، ".join(cost_ups[:4]) + (" …" if len(cost_ups) > 4 else ""), "purchase_invoice", inv_id)
             if price_changes:
                 notify.emit(self.db, ctx, "price_change", "info",
-                            f"سعر الجمهور اتغير من فاتورة شراء ({len(price_changes)} صنف)",
+                            f"تغيّر سعر الجمهور من فاتورة شراء ({len(price_changes)} صنف)",
                             "، ".join(price_changes[:4]) + (" …" if len(price_changes) > 4 else ""),
                             "purchase_invoice", inv_id)
         matching.invalidate(ctx.org_id)
@@ -614,7 +614,7 @@ class Purchasing:
             if not inv:
                 raise NotFound("الفاتورة غير موجودة")
             if version is not None and inv["version"] != version:
-                raise Conflict("الفاتورة اتعدلت، حدّث الصفحة", code="stale_version")
+                raise Conflict("عُدّلت الفاتورة، حدّث الصفحة", code="stale_version")
             if inv["status"] == "cancelled":
                 raise Conflict("الفاتورة ملغاة بالفعل")
             if inv["status"] == "approved":

@@ -94,19 +94,19 @@ def list_for_entity(db: Database, ctx: Context, entity_type: str, entity_id: str
 
 
 ACTION_LABELS = {
-    "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري غلط",
-    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الدرج", "cash.shift_close": "قفل شيفت",
-    "cash.shift_open": "فتح شيفت", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
+    "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري خاطئ",
+    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الخزينة", "cash.shift_close": "إغلاق وردية",
+    "cash.shift_open": "فتح وردية", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
     "count.create": "بدء جرد", "customer.create": "عميل جديد", "customer.payment": "تحصيل من عميل",
-    "customer.refill_remove": "شيل من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
+    "customer.refill_remove": "إزالة من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
     "customer.whatsapp_reminder": "تذكير واتساب", "customer.contract": "ربط عميل بتعاقد",
     "contract.create": "تعاقد جديد", "contract.update": "تعديل تعاقد", "entitlement.set": "تفعيل خاصية", "expense.approve": "قرار مصروف",
     "expense.record": "تسجيل مصروف", "expense_schedule.create": "بند مصروف مجدول", "expense_schedule.skip": "تخطي مصروف مجدول",
     "expense_schedule.update": "تعديل مصروف مجدول", "import.analyze": "تحليل ملف استيراد", "import.apply": "تطبيق استيراد",
     "import.decide": "قرار في الاستيراد", "import.discard": "إلغاء استيراد", "item.alias_remap": "ربط اسم صنف",
-    "item.barcode_add": "إضافة باركود", "item.barcode_remove": "شيل باركود", "item.category": "تغيير قسم صنف",
+    "item.barcode_add": "إضافة باركود", "item.barcode_remove": "إزالة باركود", "item.category": "تغيير قسم صنف",
     "item.create": "صنف جديد", "item.flags": "علامات أصناف", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
-    "payment_channel.save": "مكنة / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
+    "payment_channel.save": "جهاز / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
     "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال",
     "procurement.consumption_import": "رفع مبيعات للطلبية", "procurement.offer_eval": "تقييم عرض", "purchase.approve": "اعتماد فاتورة شراء",
     "purchase.cancel": "إلغاء فاتورة شراء", "purchase.header_edit": "تعديل رأس فاتورة شراء", "purchase.import": "رفع فاتورة شراء",
@@ -119,13 +119,13 @@ ACTION_LABELS = {
     "settings.line_order": "ترتيب الفاتورة", "settings.receipt": "شكل الإيصال", "settings.return_window": "مدة المرتجع",
     "therapeutic_group.create": "مجموعة بدائل جديدة", "therapeutic_group.update": "تعديل مجموعة بدائل",
     "therapeutic_group.delete": "حذف مجموعة بدائل",
-    "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الموبايل على الواي فاي",
+    "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الهاتف على الشبكة",
     "system.update": "تحديث البرنامج", "user.active": "إيقاف/تشغيل مستخدم", "user.create": "مستخدم جديد",
     "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة السر", "user.password_reset": "إعادة كلمة السر",
     "user.permission": "صلاحية شخص", "user.pin_set": "رقم سري", "user.reset_permissions": "رجوع الصلاحيات للافتراضي", "user.role": "تغيير النوع",
 }
-GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الشيفت والدرج", "user": "المستخدمين", "settings": "الإعدادات",
-          "item": "الأصناف", "expense": "المصاريف", "supplier": "الموردين", "customer": "العملاء", "count": "الجرد",
+GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الوردية والخزينة", "user": "المستخدمين", "settings": "الإعدادات",
+          "item": "الأصناف", "expense": "المصروفات", "supplier": "الموردون", "customer": "العملاء", "count": "الجرد",
           "payroll": "الرواتب", "auth": "الدخول", "stock": "تسويات المخزون"}
 
 
@@ -140,7 +140,7 @@ def listing(db: Database, ctx: Context, date_from: str, date_to: str, user_id: s
     try:
         d1, d2 = _d.fromisoformat(date_from), _d.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     q = ("SELECT a.at, a.action, a.entity_type, a.entity_id, a.before_json, a.after_json, a.ip, u.full_name user_name"
          " FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.at>=? AND a.at<?")
     p: list = [ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]]

@@ -45,12 +45,12 @@ def check(db: Database, ctx: Context, action: str, source: str = "pc") -> dict:
     with db.transaction():
         if action == "in":
             if st["open"]:
-                raise Conflict("انت مسجل حضور بالفعل", code="already_in")
+                raise Conflict("أنت مسجل حضورًا بالفعل", code="already_in")
             db.execute("INSERT INTO attendance (id, org_id, user_id, day, check_in, source) VALUES (?,?,?,?,?,?)",
                        (new_id(), ctx.org_id, ctx.user_id, st["today"], _now(), source[:10]))
         else:
             if not st["open"]:
-                raise Conflict("مفيش حضور مفتوح", code="not_in")
+                raise Conflict("لا يوجد حضور مفتوح", code="not_in")
             db.execute("UPDATE attendance SET check_out=? WHERE id=?", (_now(), st["open"]["id"]))
     return status(db, ctx)
 
@@ -100,7 +100,7 @@ def set_pay(db: Database, ctx: Context, uid: str, monthly_salary: int, work_days
     ctx.require("payroll.manage")
     _member(db, ctx, uid)
     if not isinstance(monthly_salary, int) or monthly_salary < 0 or not isinstance(work_days, int) or not 1 <= work_days <= 31:
-        raise ValidationFailed("المرتب أو أيام الشغل غير صحيحة")
+        raise ValidationFailed("الراتب أو أيام العمل غير صحيحة")
     with db.transaction():
         db.execute("INSERT INTO staff_pay (org_id, user_id, monthly_salary, work_days) VALUES (?,?,?,?) ON CONFLICT(org_id, user_id)"
                    " DO UPDATE SET monthly_salary=excluded.monthly_salary, work_days=excluded.work_days",
@@ -140,7 +140,7 @@ def fix_attendance(db: Database, ctx: Context, uid: str, day: str, check_in: str
     except (ValueError, TypeError):
         raise ValidationFailed("اليوم أو الساعة غير صحيحة")
     if t_out and t_out <= t_in:
-        raise ValidationFailed("الانصراف لازم يبقى بعد الحضور")
+        raise ValidationFailed("يجب أن يكون الانصراف بعد الحضور")
     if len((note or "").strip()) < 3:
         raise ValidationFailed("اكتب سبب التعديل")
     f = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -160,7 +160,7 @@ def approve(db: Database, ctx: Context, uid: str, month: str, bonus: int = 0, de
     if not p:
         raise NotFound("الموظف غير موجود")
     if p["payroll"] and p["payroll"]["status"] == "paid":
-        raise Conflict("المرتب ده اتصرف بالفعل")
+        raise Conflict("هذا الراتب صُرف بالفعل")
     if not isinstance(bonus, int) or not isinstance(deduction, int) or bonus < 0 or deduction < 0:
         raise ValidationFailed("المبالغ غير صحيحة")
     c = compute(p["monthly_salary"], p["work_days"], p["days_present"], p["advances"], bonus, deduction)
@@ -180,9 +180,9 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
     ctx.require("payroll.manage")
     pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
     if not pr:
-        raise ValidationFailed("اعتمد المرتب الأول")
+        raise ValidationFailed("اعتمد الراتب أولًا")
     if pr["status"] == "paid":
-        raise Conflict("المرتب ده اتصرف بالفعل")
+        raise Conflict("هذا الراتب صُرف بالفعل")
     from . import expenses as fin
     cat = db.one("SELECT id FROM expense_categories WHERE org_id=? AND name LIKE 'رواتب%' ORDER BY sort LIMIT 1", (ctx.org_id,))
     if not cat:
@@ -206,6 +206,6 @@ def _pay_tx(db: Database, ctx: Context, pr, name: str, cat_id: str, month: str, 
         # advances were already paid out when given: book them as salary expense of that month too
         if pr["advances"]:
             fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
-                       note=f"سلف {name} — {month} (اتصرفت قبل كده)", spent_on=spent)
+                       note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
     db.execute("UPDATE payroll SET status='paid', paid_at=?, expense_id=? WHERE id=?", (_now(), eid, pr["id"]))
     audit.record(db, ctx, "payroll.pay", "user", uid, after={"month": month, "net": pr["net"], "from": paid_from})

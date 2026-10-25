@@ -75,7 +75,7 @@ def account(db: Database, ctx: Context, sid: str) -> dict:
     return out
 
 
-PAY_METHODS = {"drawer": "نقدي من الدرج", "cash": "نقدي من برّه الدرج", "bank": "تحويل بنكي",
+PAY_METHODS = {"drawer": "نقدًا من الخزينة", "cash": "نقدًا من خارج الخزينة", "bank": "تحويل بنكي",
                "cheque": "شيك", "wallet": "إنستاباي / محفظة"}
 
 
@@ -89,7 +89,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
     if method not in PAY_METHODS:
-        raise ValidationFailed("اختار طريقة الدفع")
+        raise ValidationFailed("اختر طريقة الدفع")
     ref = (str(ref or "").strip()[:60]) or None
     if method == "cheque" and not ref:
         raise ValidationFailed("اكتب رقم الشيك")
@@ -105,7 +105,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
         if method == "drawer":
             cash.record(db, ctx, -amount, "payout", lid, f"دفع للمورد {s['name']}")
         audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method, "ref": ref})
-        notify.emit(db, ctx, "supplier_payment", "info", f"دفع {amount / 100:,.2f} ج لـ {s['name']}",
+        notify.emit(db, ctx, "supplier_payment", "info", f"دفع {amount / 100:,.2f} ج إلى {s['name']}",
                     PAY_METHODS[method] + (f" {ref}" if ref else ""), "supplier", sid)
     return account(db, ctx, sid)
 
@@ -132,7 +132,7 @@ def _period(date_from: str, date_to: str) -> tuple[str, str]:
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة (من / لحد)")
+        raise ValidationFailed("اختر الفترة (من / إلى)")
     if d2 < d1:
         raise ValidationFailed("تاريخ النهاية قبل البداية")
     return d1.isoformat(), d2.isoformat()
@@ -168,7 +168,7 @@ def statement(db: Database, ctx: Context, sid: str, date_from: str, date_to: str
     return {"supplier": dict(s), "from": lo, "to": hi, "opening": opening, "closing": run, "lines": lines,
             "purchases": tot["purchase"], "returns": -tot["return"], "payments": -tot["payment"],
             "adjustments": tot["adjustment"] + tot["opening"], "invoices": sum(1 for r in period if r["kind"] == "purchase"),
-            "by_method": [{"method": k, "label": PAY_METHODS.get(k, "مش متسجلة"), "amount": v} for k, v in by_method.items()]}
+            "by_method": [{"method": k, "label": PAY_METHODS.get(k, "غير مسجلة"), "amount": v} for k, v in by_method.items()]}
 
 
 def statements(db: Database, ctx: Context, date_from: str, date_to: str, supplier_type: str | None = None) -> dict:

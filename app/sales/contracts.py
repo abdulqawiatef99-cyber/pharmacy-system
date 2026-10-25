@@ -34,10 +34,10 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
             v[k] = data[k]
     v["name"] = str(v.get("name") or "").strip()[:80]
     if len(v["name"]) < 2:
-        raise ValidationFailed("اكتب اسم الجهة (شركة، نقابة، نادي…)")
+        raise ValidationFailed("اكتب اسم الجهة (شركة، نقابة، نادٍ…)")
     for k in ("discount_local_bp", "discount_imported_bp"):
         if not isinstance(v[k], int) or not 0 <= v[k] <= MAX_BP:
-            raise ValidationFailed("الخصم من 0 لـ 50%")
+            raise ValidationFailed("الخصم من 0 إلى 50%")
     v["note"] = (str(v.get("note") or "").strip()[:200]) or None
     v["is_active"] = int(bool(v["is_active"]))
     cols = ("name", "discount_local_bp", "discount_imported_bp", "note", "is_active")
@@ -53,7 +53,7 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
                 audit.record(db, ctx, "contract.create", "contract", cid, after={k: v[k] for k in cols})
         except Exception as e:
             if "UNIQUE" in str(e):
-                raise Conflict("فيه تعاقد بنفس الاسم") from e
+                raise Conflict("يوجد تعاقد بالاسم نفسه") from e
             raise
     return listing(db, ctx)
 
@@ -97,7 +97,7 @@ def report(db: Database, ctx: Context, contract_id: str, date_from: str, date_to
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     rows = [dict(r) for r in db.all(
         "SELECT s.id, s.sale_no, s.completed_at, s.total, s.discount_total, s.returned_total, s.on_credit, c.name customer"
         " FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.org_id=? AND s.contract_id=? AND s.status='completed'"

@@ -100,7 +100,7 @@ def _clean_item(data: dict) -> dict:
     if "sale_note" in out:
         out["sale_note"] = (str(out["sale_note"] or "").strip()[:200]) or None
     if out.get("pack_size") is not None and out["pack_size"] < 1:
-        raise ValidationFailed("عدد الوحدات في العبوة لازم يكون 1 أو أكثر")
+        raise ValidationFailed("عدد الوحدات في العبوة يجب أن يكون 1 أو أكثر")
     if out.get("public_price") is not None and out["public_price"] < 0:
         raise ValidationFailed("السعر لا يكون بالسالب")
     return out

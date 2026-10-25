@@ -69,14 +69,14 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     if not branch_id:
         raise ValidationFailed("لا يوجد فرع محدد")
     if not isinstance(qty_delta, int) or qty_delta == 0:
-        raise ValidationFailed("الكمية لازم تكون رقم صحيح غير صفري")
+        raise ValidationFailed("الكمية يجب أن تكون عددًا صحيحًا غير صفري")
     if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
         raise NotFound("الصنف غير موجود")
     if not db.one("SELECT 1 FROM branches WHERE id=? AND org_id=?", (branch_id, ctx.org_id)):
         raise NotFound("الفرع غير موجود")
     current_batch = batch_qty(db, ctx.org_id, branch_id, item_id, batch_id)
     if qty_delta < 0 and current_batch + qty_delta < 0 and not allow_negative:
-        raise Conflict("الكمية غير متاحة في المخزون (ربما اتباعت)", code="insufficient_stock",
+        raise Conflict("الكمية غير متاحة في المخزون (ربما بيعت)", code="insufficient_stock",
                        details={"item_id": item_id, "available": current_batch,
                                 "requested": -qty_delta})
     item_qty_before = _item_qty(db, ctx.org_id, branch_id, item_id)

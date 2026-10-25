@@ -34,7 +34,7 @@ class TestDaily(Base):
         daily.run(self.db, T)
         n = [x for x in notify.listing(self.db, self.ctx)["items"] if x["kind"] == "sales_spike"]
         self.assertEqual(len(n), 1)
-        self.assertIn("زاد قوي", n[0]["title"])
+        self.assertIn("زاد كثيرًا", n[0]["title"])
 
 
 class TestDailyNoNoise(Base):

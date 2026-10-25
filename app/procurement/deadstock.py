@@ -28,7 +28,7 @@ def _rows(data: bytes) -> list[list]:
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:  # noqa: BLE001 - any unreadable workbook
-        raise ValidationFailed("الملف مش Excel سليم (صدّره XLSX Data Only)") from e
+        raise ValidationFailed("الملف ليس Excel سليم (صدّره XLSX Data Only)") from e
     return [list(r) for r in wb.active.iter_rows(values_only=True)]
 
 
@@ -39,11 +39,11 @@ def compute(stock: bytes, sales: bytes, purchases: bytes, *, as_of: date | None 
     for k, rows in files.items():
         got = estock.detect(rows)
         if got != kinds[k]:
-            raise ValidationFailed(f"الملف المرفوع مكان '{k}' مش التقرير الصح (لقيته: {got or 'غير معروف'})",
+            raise ValidationFailed(f"الملف المرفوع مكان '{k}' ليس التقرير الصحيح (وُجد: {got or 'غير معروف'})",
                                    code="wrong_report")
     table, ssum = estock.parse_stock(files["stock"], {store})
     if store not in ssum["stores"]:
-        raise ValidationFailed(f"المخزن '{store}' مش موجود في ملف الأرصدة")
+        raise ValidationFailed(f"المخزن '{store}' غير موجود في ملف الأرصدة")
     sales_t, sales_sum = estock.parse_sales(files["sales"])
     plines, psum = estock.parse_purchases(files["purchases"])
     as_of = as_of or date.today()
@@ -83,7 +83,7 @@ def compute(stock: bytes, sales: bytes, purchases: bytes, *, as_of: date | None 
                "nearest_expiry": min(it["exps"]).strftime("%m/%Y") if it["exps"] else None,
                "last_purchase": lb[0].date().isoformat() if lb else None,
                "supplier": lb[1] if lb else None,
-               "note": "دخل من جرد بس" if code in adj_only and not lb else None}
+               "note": "دخل من الجرد فقط" if code in adj_only and not lb else None}
         if not s:
             seg = "new" if lb and lb[0].date() >= cut3 else ("stagnant" if lb and lb[0].date() >= cut6 else "dead")
         elif row["months_of_cover"] > 12:
@@ -120,11 +120,11 @@ def to_xlsx(rep: dict) -> bytes:
         ws.append([s["label"], s["items"], s["value"], s["share"]])
     ws.append([])
     ws.append(["قيمة المخزون بالتكلفة", None, rep["stock_value"]])
-    ws.append(["اتشرت خلال الفترة وما اتباعتش (أخطاء مشتريات)", rep["purchase_mistakes"]["items"],
+    ws.append(["اشتُريت خلال الفترة ولم تُبع (أخطاء مشتريات)", rep["purchase_mistakes"]["items"],
                rep["purchase_mistakes"]["value"]])
     ws.append(["منتهي الصلاحية", None, rep["expiry"]["expired_value"]])
-    ws.append(["هيخلص خلال 6 شهور", None, rep["expiry"]["within_6_months_value"]])
-    ws.append([f"بتاريخ {rep['as_of']} — مخزن {rep['store']}. الموسمي والمزمن مش متشالين: راجعهم قبل البيع."])
+    ws.append(["ستنتهي خلال 6 أشهر", None, rep["expiry"]["within_6_months_value"]])
+    ws.append([f"بتاريخ {rep['as_of']} — مخزن {rep['store']}. الأصناف الموسمية والمزمنة غير مستبعدة: راجعها قبل البيع."])
     head = ["الكود", "الصنف", "الشركة", "الرصيد (علبة)", "التكلفة المحبوسة", "بيع الفترة", "الرصيد يكفي (شهر)",
             "أقرب صلاحية", "آخر شراء", "المورد", "ملاحظة"]
     for k, lbl in SEGMENTS:
@@ -137,7 +137,7 @@ def to_xlsx(rep: dict) -> bytes:
     w = wb.create_sheet("منتهي وقريب")
     w.append(["الكود", "الصنف", "الكمية", "التكلفة", "الصلاحية", "الحالة"])
     for b in rep["expiry_batches"]:
-        w.append([b["code"], b["name"], b["qty"], b["value"], b["expiry"], "منتهي" if b["expired"] else "خلال 6 شهور"])
+        w.append([b["code"], b["name"], b["qty"], b["value"], b["expiry"], "منتهي" if b["expired"] else "خلال 6 أشهر"])
     for w in wb.worksheets:
         w.sheet_view.rightToLeft = True
         for c in w[1]:

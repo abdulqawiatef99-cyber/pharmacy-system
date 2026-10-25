@@ -21,7 +21,7 @@ def _sniff(data: bytes) -> tuple[str, str]:
             return v
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp", ".webp"
-    raise ValidationFailed("الملف لازم يكون صورة (JPG / PNG / WEBP) أو PDF")
+    raise ValidationFailed("يجب أن يكون الملف صورة (JPG / PNG / WEBP) أو PDF")
 
 
 def _sale(db: Database, ctx: Context, sale_id: str) -> dict:
@@ -40,7 +40,7 @@ def attach(db: Database, upload_dir: Path, ctx: Context, sale_id: str, data: byt
     if s["status"] == "voided":
         raise Conflict("الفاتورة ملغاة")
     if not data:
-        raise ValidationFailed("الملف فاضي")
+        raise ValidationFailed("الملف فارغ")
     if len(data) > MAX_BYTES:
         raise ValidationFailed("الصورة أكبر من 8 ميجا")
     mime, ext = _sniff(data)
@@ -54,7 +54,7 @@ def attach(db: Database, upload_dir: Path, ctx: Context, sale_id: str, data: byt
         tmp.replace(path)
     if db.one("SELECT 1 FROM sale_attachments a JOIN source_files f ON f.id=a.file_id WHERE a.sale_id=? AND f.sha256=?",
               (sale_id, sha)):
-        raise Conflict("الصورة دي متسجلة مع الفاتورة دي قبل كده")
+        raise Conflict("هذه الصورة مسجلة مع هذه الفاتورة من قبل")
     other = db.one("SELECT s.sale_no FROM sale_attachments a JOIN source_files f ON f.id=a.file_id JOIN sales s ON s.id=a.sale_id"
                    " WHERE a.org_id=? AND f.sha256=? AND a.sale_id<>?", (ctx.org_id, sha, sale_id))
     aid, fid = new_id(), new_id()
@@ -66,8 +66,8 @@ def attach(db: Database, upload_dir: Path, ctx: Context, sale_id: str, data: byt
                    (aid, ctx.org_id, sale_id, fid, "transfer", (note or "").strip()[:200] or None, ctx.user_id))
         audit.record(db, ctx, "sale.attach", "sale", sale_id, after={"file": fid, "size": len(data)})
         if other:   # the same screenshot used for two invoices
-            notify.emit(db, ctx, "transfer_duplicate", "error", f"نفس صورة التحويل اتسجلت مع فاتورتين ({other['sale_no']} و{s['sale_no']})",
-                        "راجع التحويل: ممكن تكون نفس الفلوس محسوبة مرتين", "sale", sale_id)
+            notify.emit(db, ctx, "transfer_duplicate", "error", f"صورة التحويل نفسها سُجّلت مع فاتورتين ({other['sale_no']} و{s['sale_no']})",
+                        "راجع التحويل: قد يكون المبلغ نفسه محسوبًا مرتين", "sale", sale_id)
     return {"attachments": listing(db, ctx, sale_id), "duplicate_of": other["sale_no"] if other else None}
 
 
@@ -90,7 +90,7 @@ def file(db: Database, upload_dir: Path, ctx: Context, att_id: str) -> tuple[byt
     if not p.exists():
         p = upload_dir / r["org_id"] / "transfers" / p.name
     if not p.exists():
-        raise NotFound("ملف الصورة مش موجود على الجهاز ده")
+        raise NotFound("ملف الصورة غير موجود على هذا الجهاز")
     return p.read_bytes(), r["mime_type"]
 
 
@@ -101,7 +101,7 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
         raise NotFound("المرفق غير موجود")
     note = (note or "").strip()[:200] or None
     if not ok and not note:
-        raise ValidationFailed("اكتب المشكلة (مثال: الفلوس موصلتش / المبلغ أقل)")
+        raise ValidationFailed("اكتب المشكلة (مثال: المبلغ لم يصل / المبلغ أقل)")
     with db.transaction():
         db.execute("UPDATE sale_attachments SET review=?, review_note=?, reviewed_by=?, reviewed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
                    " WHERE id=?", ("ok" if ok else "problem", note, ctx.user_id, att_id))
@@ -121,7 +121,7 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     rows = [dict(r) for r in db.all(
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"

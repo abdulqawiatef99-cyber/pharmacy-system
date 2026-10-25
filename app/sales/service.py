@@ -64,7 +64,7 @@ def sort_lines(lines: list[dict], order: str, names: str = "en") -> list[dict]:
 
 
 def discount_denied(ctx: Context, discount_bp: int) -> Forbidden:
-    return Forbidden(f"الخصم المسموح لك {ctx.discount_limit_bp / 100:g}% بس", code="approval_required",
+    return Forbidden(f"الخصم المسموح لك {ctx.discount_limit_bp / 100:g}% فقط", code="approval_required",
                      details={"permission": "discount", "label": f"خصم {discount_bp / 100:g}%",
                               "requested_bp": discount_bp, "limit_bp": ctx.discount_limit_bp})
 
@@ -105,10 +105,10 @@ def item_warnings(db: Database, item_ids: list[str]) -> list[Finding]:
         name = it["name_en"] or it["name_ar"]
         if it["rx_required"]:
             out.append(Finding(code="item_rx", severity="high", item_ids=[iid], requires="acknowledge", basis="owner",
-                               message=f"{name}: بيتصرف بروشتة بس (عليه غرامة لو اتصرف من غير روشتة). اتأكد من الروشتة."))
+                               message=f"{name}: يُصرف بوصفة طبية فقط (عليه غرامة إذا صُرف دون وصفة طبية). تأكد من الوصفة الطبية."))
         if it["misuse_risk"]:
             out.append(Finding(code="item_misuse", severity="moderate", item_ids=[iid], requires="acknowledge", basis="owner",
-                               message=f"{name}: صنف بيساء استخدامه. اتأكد من الحاجة والكمية."))
+                               message=f"{name}: صنف يُساء استخدامه. تأكد من الحاجة إليه والكمية."))
         if it["sale_note"]:
             out.append(Finding(code="item_note", severity="info", item_ids=[iid], requires="acknowledge", basis="owner",
                                message=f"{name}: {it['sale_note']}"))
@@ -121,7 +121,7 @@ def warnings_report(db: Database, ctx: Context, date_from: str, date_to: str) ->
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     rows = [dict(r) for r in db.all(
         "SELECT e.at, e.finding_code, e.message, e.reason, u.full_name by_name, s.id sale_id, s.sale_no, s.status"
         " FROM safety_events e LEFT JOIN users u ON u.id=e.user_id LEFT JOIN sales s ON s.id=e.context_id"
@@ -195,7 +195,7 @@ class Sales:
                          method: str = "cash") -> int:
         ctx.require("customers.manage")
         if amount <= 0:
-            raise ValidationFailed("المبلغ لازم يكون أكبر من صفر")
+            raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
         if method not in ("cash", "card"):
             raise ValidationFailed("طريقة الدفع غير صحيحة")
         with self.db.transaction():
@@ -346,7 +346,7 @@ class Sales:
                          "price_source": "batch" if b["public_price"] is not None else "item"})
             need -= take
         if need:
-            raise Conflict("الكمية لم تعد متاحة (ربما اتباعت من شاشة أخرى)", code="insufficient_stock")
+            raise Conflict("الكمية لم تعد متاحة (ربما بيعت من شاشة أخرى)", code="insufficient_stock")
         return plan
 
     def get(self, ctx: Context, sid: str) -> dict:
@@ -464,17 +464,17 @@ class Sales:
         if preview["status"] != "draft":
             raise Conflict("الفاتورة مكتملة أو ملغاة", code="not_draft")
         if version is not None and preview["version"] != version:
-            raise Conflict("الفاتورة اتعدلت، حدّث الشاشة", code="stale_version")
+            raise Conflict("عُدّلت الفاتورة، حدّث الشاشة", code="stale_version")
         if not preview["lines"]:
-            raise ValidationFailed("الفاتورة فاضية")
+            raise ValidationFailed("الفاتورة فارغة")
         bad = [l for l in preview["lines"] if l.get("problem")]
         if bad:
-            raise Conflict("فيه أصناف غير متاحة أو بدون سعر", code="line_problems",
+            raise Conflict("توجد أصناف غير متاحة أو بدون سعر", code="line_problems",
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
         if paid_cash and not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزنة مقفولة — افتح شيفت قبل البيع النقدي", code="no_open_shift")
+            raise Conflict("الخزينة مغلقة — افتح وردية قبل البيع النقدي", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
-            raise ValidationFailed("فاتورة التوصيل محتاجة العنوان أو رقم الموبايل", code="delivery_details")
+            raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
         if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"]})
@@ -493,7 +493,7 @@ class Sales:
         with self.db.transaction():
             s = self._draft(ctx, sid)
             if s["version"] != preview["version"]:
-                raise Conflict("الفاتورة اتعدلت أثناء الإتمام", code="stale_version")
+                raise Conflict("عُدّلت الفاتورة أثناء الإتمام", code="stale_version")
             total = 0
             below_cost = []
             for l in preview["lines"]:
@@ -524,11 +524,11 @@ class Sales:
             if below_cost:
                 ctx.require("sales.below_cost")
                 if not confirm_below_cost:
-                    raise Conflict("الخصم بينزّل السعر تحت التكلفة — البيع ده بخسارة", code="below_cost_confirm",
+                    raise Conflict("الخصم ينزل بالسعر عن التكلفة — هذا البيع بخسارة", code="below_cost_confirm",
                                    details={"lines": below_cost})
             total += s["delivery_fee"] or 0
             if total != preview["total"]:
-                raise Conflict("السعر اتغير أثناء الإتمام، راجع الفاتورة", code="price_changed")
+                raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
             if delivery:              # the courier carries the cash until he hands it in
                 shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
@@ -595,7 +595,7 @@ class Sales:
             if m in ("card", "transfer"):
                 kinds = [c for c in channels.values() if c["kind"] == m]
                 if kinds and (ch not in channels or channels[ch]["kind"] != m):
-                    raise ValidationFailed("اختار " + ("المكنة" if m == "card" else "المحفظة / طريقة التحويل"),
+                    raise ValidationFailed("اختر " + ("الجهاز" if m == "card" else "المحفظة / طريقة التحويل"),
                                            code="channel_required", details={"method": m})
                 if not kinds:
                     ch = None
@@ -621,9 +621,9 @@ class Sales:
         with self.db.transaction():
             s = self._draft(ctx, sid)
             if s["created_by"] != ctx.user_id:
-                raise Forbidden("الفاتورة دي مفتوحة باسم حد تاني")
+                raise Forbidden("هذه الفاتورة مفتوحة باسم شخص آخر")
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=? WHERE id=?",
-                            (ctx.user_id, _now(), "تبويب اتقفل قبل البيع", sid))
+                            (ctx.user_id, _now(), "تبويب أُغلق قبل البيع", sid))
             self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=?", (sid,))
 
     def set_details(self, ctx: Context, sid: str, data: dict) -> dict:
@@ -651,7 +651,7 @@ class Sales:
             if isinstance(d, dict):
                 kind = self.db.one("SELECT kind FROM sales WHERE id=?", (sid,))["kind"]
                 if kind != "delivery":
-                    raise ValidationFailed("الفاتورة مش توصيل")
+                    raise ValidationFailed("الفاتورة ليست توصيلًا")
                 fee = d.get("fee", None)
                 if fee is not None:
                     if not isinstance(fee, int) or not 0 <= fee <= 100000:
@@ -709,9 +709,9 @@ class Sales:
                 raise NotFound("فاتورة التوصيل غير موجودة")
             order = ["out", "delivered", "settled"]
             if d["status"] not in order or order.index(status) <= order.index(d["status"]):
-                raise Conflict("الحالة دي اتسجلت قبل كده", code="delivery_state")
+                raise Conflict("هذه الحالة سُجّلت من قبل", code="delivery_state")
             if status == "settled":
-                cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم فلوس توصيل فاتورة {d['sale_no']}",
+                cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم مبلغ توصيل الفاتورة {d['sale_no']}",
                             branch_id=d["branch_id"])
                 self.db.execute("UPDATE sale_deliveries SET status='settled', settled_at=?, settled_by=?,"
                                 " delivered_at=coalesce(delivered_at, ?) WHERE sale_id=?",
@@ -766,7 +766,7 @@ class Sales:
                 if nr:
                     restricted.append(f"{nr['name_en'] or nr['name_ar']} ({nr['name']})")
                     if not ctx.allowed("sales.return_restricted"):
-                        raise Forbidden(f"الصنف ده من قسم «{nr['name']}» ومالوش مرتجع ولا استبدال",
+                        raise Forbidden(f"هذا الصنف من قسم «{nr['name']}» ولا يُقبل إرجاعه ولا استبداله",
                                         code="approval_required",
                                         details={"permission": "sales.return_restricted",
                                                  "label": f"مرتجع صنف من قسم «{nr['name']}»"})
@@ -775,7 +775,7 @@ class Sales:
                 is_service = bool(self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"])
                 remaining_returnable = sum(a["qty_base"] - a["returned_qty"] for a in allocs)
                 if qty > remaining_returnable:
-                    raise Conflict(f"أقصى كمية ممكن ترجع {remaining_returnable}", code="return_exceeds")
+                    raise Conflict(f"أقصى كمية يمكن إرجاعها {remaining_returnable}", code="return_exceeds")
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
                 before = kept_value(allocs, kept, l["discount_bp"])
@@ -814,8 +814,8 @@ class Sales:
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
                         if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
-                        + (" · الفاتورة باعها حد تاني" if s["created_by"] != ctx.user_id else "")
-                        + (f" · ⚠ أصناف مالهاش مرتجع: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
+                        + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
+                        + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
 
     def return_receipt(self, ctx: Context, rid: str) -> dict:
@@ -893,7 +893,7 @@ class Sales:
             params.append(sale_no)
         elif date_from and date_to:
             if mine_only:
-                raise Forbidden("فواتير الأيام اللي فاتت للمدير والصاحب بس", code="forbidden",
+                raise Forbidden("فواتير الأيام السابقة للمدير والمالك فقط", code="forbidden",
                                 details={"permission": "sales.totals"})
             try:
                 d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
@@ -907,7 +907,7 @@ class Sales:
         else:
             d = date.fromisoformat(day) if day else local_today()
             if mine_only and d != local_today():
-                raise Forbidden("فواتير الأيام اللي فاتت للمدير والصاحب بس", code="forbidden",
+                raise Forbidden("فواتير الأيام السابقة للمدير والمالك فقط", code="forbidden",
                                 details={"permission": "sales.totals"})
             lo, hi = local_day_bounds(d)
             q += " AND s.completed_at>=? AND s.completed_at<?"
@@ -919,7 +919,7 @@ class Sales:
     def day_summary(self, ctx: Context, day: str | None = None) -> dict:
         ctx.require("sales.read")
         if not ctx.can("sales.totals"):
-            raise Forbidden("إجمالي المبيعات للمدير والصاحب بس", code="forbidden",
+            raise Forbidden("إجمالي المبيعات للمدير والمالك فقط", code="forbidden",
                             details={"permission": "sales.totals"})
         d = date.fromisoformat(day) if day else local_today()
         lo, hi = local_day_bounds(d)

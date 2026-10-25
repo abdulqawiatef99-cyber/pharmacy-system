@@ -11,8 +11,8 @@ from ..db import Database, new_id
 from ..inventory import service as inv
 from ..inventory.adjust import avg_cost
 
-REASONS = {"expired": "منتهي الصلاحية", "near_expiry": "قرب ينتهي", "damaged": "تالف / مكسور",
-           "wrong_item": "صنف غلط / مش مطلوب", "overstock": "زيادة / راكد", "recall": "سحب من هيئة الدواء", "other": "سبب تاني"}
+REASONS = {"expired": "منتهي الصلاحية", "near_expiry": "قارب على الانتهاء", "damaged": "تالف / مكسور",
+           "wrong_item": "صنف خاطئ / غير مطلوب", "overstock": "زيادة / راكد", "recall": "سحب من هيئة الدواء", "other": "سبب آخر"}
 MAX_LINES = 200
 
 
@@ -35,7 +35,7 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
     if not sup:
         raise NotFound("المورد غير موجود")
     if not isinstance(lines, list) or not lines or len(lines) > MAX_LINES:
-        raise ValidationFailed("ضيف الأصناف اللي راجعة")
+        raise ValidationFailed("أضف الأصناف المرتجعة")
     clean = []
     for ln in lines:
         item_id, batch_id = str(ln.get("item_id") or ""), (ln.get("batch_id") or None)
@@ -43,11 +43,11 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
         if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
             raise NotFound("صنف غير موجود")
         if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
-            raise NotFound("التشغيلة مش بتاعة الصنف")
+            raise NotFound("التشغيلة لا تخص الصنف")
         if not isinstance(qty, int) or qty <= 0:
             raise ValidationFailed("الكمية غير صحيحة")
         if reason not in REASONS:
-            raise ValidationFailed("اختار سبب المرتجع لكل صنف")
+            raise ValidationFailed("اختر سبب المرتجع لكل صنف")
         value = ln.get("unit_value")
         if value is None:
             value = suggest_value(db, ctx, item_id, batch_id)
@@ -95,7 +95,7 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
                                                           f"مرتجع رقم {no}", ctx.user_id))
         audit.record(db, ctx, "supplier.return", "supplier_return", rid,
                      after={"supplier": supplier_id, "no": no, "total": total, "lines": len(clean)})
-        notify.emit(db, ctx, "supplier_return", "info", f"مرتجع رقم {no} لـ {sup['name']} — {total / 100:,.2f} ج",
+        notify.emit(db, ctx, "supplier_return", "info", f"مرتجع رقم {no} إلى {sup['name']} — {total / 100:,.2f} ج",
                     f"{len(clean)} صنف", "supplier_return", rid)
     return get(db, ctx, rid)
 
@@ -124,7 +124,7 @@ def listing(db: Database, ctx: Context, date_from: str, date_to: str, supplier_i
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     q = ("SELECT r.id, r.return_no, r.total, r.created_at, r.note, s.name supplier, u.full_name by_name,"
          " (SELECT count(*) FROM supplier_return_lines l WHERE l.return_id=r.id) lines FROM supplier_returns r"
          " JOIN suppliers s ON s.id=r.supplier_id LEFT JOIN users u ON u.id=r.created_by"

@@ -40,7 +40,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     if hi < lo:
         raise ValidationFailed("النهاية قبل البداية")
     if (datetime.strptime(hi, _F) - datetime.strptime(lo, _F)).days > 400:
-        raise ValidationFailed("الفترة سنة على الأكتر")
+        raise ValidationFailed("الفترة سنة على الأكثر")
     types = [t for t in (types or []) if t in TYPES]
     drafts = "draft" in types
     when = "s.created_at" if drafts else "s.completed_at"

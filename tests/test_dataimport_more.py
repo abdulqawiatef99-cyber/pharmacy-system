@@ -101,7 +101,7 @@ class TestParties(DBTestCase):
         self.assertEqual(self.di.get(self.ctx, run2)["rows"][0]["action"], "review")
 
     def test_customers_balances_and_dedupe(self):
-        data = xlsx([["اسم العميل", "موبايل", "حد الائتمان", "الرصيد"],
+        data = xlsx([["اسم العميل", "هاتف", "حد الائتمان", "الرصيد"],
                      ["أحمد علي", "01012345678", 1000, 250],
                      ["أحمد علي", "01012345678", 1000, 250],          # duplicate row in file
                      ["منى", None, 0, 0]])

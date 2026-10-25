@@ -171,7 +171,7 @@ class TestReturns(People):
         self.assertEqual(e.exception.details["permission"], "sales.return_late")
         Sales(self.db, today=T + timedelta(days=14)).return_items(
             self.ph, sale["id"], self._line(sale), refund_method="cash", reason="في المدة")
-        later.return_items(self.ctx, sale["id"], self._line(sale), refund_method="cash", reason="الصاحب")
+        later.return_items(self.ctx, sale["id"], self._line(sale), refund_method="cash", reason="المالك")
 
 
 class TestVisibility(People):
@@ -236,6 +236,6 @@ class TestPeopleAPI(APICase):
         r = a.post("/api/approvals/check", json={"permission": "sales.void"}, headers=hdr)
         self.assertEqual(r.json()["ok"], True)
         me = self.c.get("/api/me").json()
-        self.assertEqual((me["role"], me["role_name"]), ("owner", "الصاحب"))
+        self.assertEqual((me["role"], me["role_name"]), ("owner", "المالك"))
         r = self.c.put("/api/settings/sales", json={"return_window_days": 7}, headers=H)
         self.assertEqual(r.json()["return_window_days"], 7)

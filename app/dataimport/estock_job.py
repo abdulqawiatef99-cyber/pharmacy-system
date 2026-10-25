@@ -43,7 +43,7 @@ def read_packs(path: Path) -> dict[str, int]:
         ni = next(i for i, h in enumerate(head) if "القرار" in h) if any("القرار" in h for h in head) \
             else next(i for i, h in enumerate(head) if "عدد الوحدات" in h)
     except (ValueError, StopIteration):
-        raise ValidationFailed("ملف عدد الوحدات لازم يكون فيه عمود 'الكود' وعمود 'القرار'")
+        raise ValidationFailed("ملف عدد الوحدات يجب أن يحتوي على عمود 'الكود' وعمود 'القرار'")
     out = {}
     for r in rows[1:]:
         if len(r) > max(ci, ni) and r[ci] not in (None, "") and r[ni] not in (None, ""):
@@ -65,7 +65,7 @@ def run(db: Database, ctx: Context, *, catalog_file: Path, stock_file: Path, pac
                         source_system="estock")
     reviews = db.all("SELECT id, data FROM import_rows WHERE run_id=? AND action='review'", (run_id,))
     if reviews and not keep_duplicates:
-        raise ValidationFailed(f"{len(reviews)} صنف بنفس الاسم محتاجين قرار؛ راجعهم من الشاشة")
+        raise ValidationFailed(f"{len(reviews)} صنفًا بالاسم نفسه تحتاج إلى قرار؛ راجعها من الشاشة")
     for r in reviews:
         di.decide(ctx, run_id, r["id"], "create")
     a = di.apply(ctx, run_id)

@@ -1,6 +1,6 @@
 // Service worker: caches the app shell only. API responses are never cached
 // (financial/stock data must always be live; offline writes are a later phase).
-const CACHE = "pharm-shell-v56";
+const CACHE = "pharm-shell-v57";
 const SHELL = ["/", "/static/app.css", "/static/app.js", "/static/i18n-en.js", "/static/manifest.json", "/static/icon.svg"];
 
 self.addEventListener("install", (e) => {

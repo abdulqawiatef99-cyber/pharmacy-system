@@ -334,10 +334,10 @@ def with_approval(db: Database, ctx: Context, approver_id: str, pin: str) -> Con
     permissions. Visibility (ctx.can) stays the actor's own."""
     from . import people
     if approver_id == ctx.user_id:
-        raise ValidationFailed("الموافقة لازم تبقى من حد تاني")
+        raise ValidationFailed("يجب أن تكون الموافقة من شخص آخر")
     access = effective_access(db, ctx.org_id, approver_id)
     if access["role_code"] not in APPROVER_ROLES:
-        raise Forbidden("الموافقة من الصاحب أو المدير بس", code="approver_invalid")
+        raise Forbidden("الموافقة من المالك أو المدير فقط", code="approver_invalid")
     people.verify_pin(db, approver_id, pin, org_id=ctx.org_id)
     return replace(ctx, approver_id=approver_id, approver_permissions=access["permissions"],
                    approver_discount_bp=access["max_discount_bp"])

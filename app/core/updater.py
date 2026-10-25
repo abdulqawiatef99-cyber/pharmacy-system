@@ -42,7 +42,7 @@ def read_token() -> str:
         return t.strip()
     p = token_path()
     if not p.exists():
-        raise UpdateError(f"مفتاح GitHub مش موجود. احفظه في الملف: {p}")
+        raise UpdateError(f"مفتاح GitHub غير موجود. احفظه في الملف: {p}")
     return p.read_text(encoding="utf-8").strip()
 
 
@@ -54,10 +54,10 @@ def _get(url: str, token: str, accept: str) -> bytes:
             return r.read()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403, 404):
-            raise UpdateError("GitHub رفض الطلب: المفتاح غلط أو انتهى أو مالوش صلاحية على المستودع") from e
+            raise UpdateError("GitHub رُفض الطلب: المفتاح خاطئ أو منتهٍ أو ليس له صلاحية على المستودع") from e
         raise UpdateError(f"خطأ من GitHub: {e.code}") from e
     except OSError as e:
-        raise UpdateError(f"مفيش اتصال بـ GitHub: {e}") from e
+        raise UpdateError(f"لا يوجد اتصال بـ GitHub: {e}") from e
 
 
 def latest_sha(repo: str, ref: str, token: str) -> str:
@@ -80,11 +80,11 @@ def _members(z: zipfile.ZipFile) -> tuple[str, list[zipfile.ZipInfo]]:
     """Single top folder that contains manage.py and app/; no absolute or '..' paths."""
     tops = {n.split("/", 1)[0] for n in z.namelist() if n.strip("/")}
     if len(tops) != 1:
-        raise UpdateError("ملف التحديث شكله غلط (أكتر من فولدر رئيسي)")
+        raise UpdateError("ملف التحديث بصيغة غير صحيحة (أكثر من مجلد رئيسي)")
     top = tops.pop()
     names = set(z.namelist())
     if f"{top}/manage.py" not in names or not any(n.startswith(f"{top}/app/") for n in names):
-        raise UpdateError("ملف التحديث مش بتاع البرنامج ده")
+        raise UpdateError("ملف التحديث لا يخص هذا البرنامج")
     out = []
     for info in z.infolist():
         rel = info.filename[len(top) + 1:]

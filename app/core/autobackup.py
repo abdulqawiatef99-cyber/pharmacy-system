@@ -119,7 +119,7 @@ class AutoBackup:
         new = dict(cfg)
         if "interval_min" in changes:
             if changes["interval_min"] not in INTERVALS:
-                raise ValidationFailed("اختار ربع ساعة أو نص ساعة أو ساعة أو 6 ساعات")
+                raise ValidationFailed("اختر ربع ساعة أو نصف ساعة أو ساعة أو 6 ساعات")
             new["interval_min"] = changes["interval_min"]
         for k, lo, hi in (("keep_last", 1, 100), ("keep_daily", 0, 60), ("keep_weekly", 0, 52)):
             if k in changes:
@@ -128,7 +128,7 @@ class AutoBackup:
                 except (TypeError, ValueError):
                     raise ValidationFailed("رقم غير صحيح")
                 if not lo <= v <= hi:
-                    raise ValidationFailed(f"الرقم لازم يبقى من {lo} لـ {hi}")
+                    raise ValidationFailed(f"يجب أن يكون الرقم من {lo} إلى {hi}")
                 new[k] = v
         if "on_shift_close" in changes:
             new["on_shift_close"] = bool(changes["on_shift_close"])
@@ -137,9 +137,9 @@ class AutoBackup:
             if d:
                 p = Path(d)
                 if not p.is_absolute():
-                    raise ValidationFailed("اكتب المسار كامل، مثلًا E:\\نسخ الصيدلية")
+                    raise ValidationFailed("اكتب المسار كاملًا، مثلًا E:\\نسخ الصيدلية")
                 if p.resolve() == self.backup_dir.resolve():
-                    raise ValidationFailed("ده نفس فولدر النسخ على الجهاز؛ اختار فلاشة أو هارد تاني")
+                    raise ValidationFailed("هذا هو مجلد النسخ نفسه على الجهاز؛ اختر ذاكرة فلاش أو قرصًا آخر")
             new["offsite_dir"] = d
         with self.db.transaction():
             self._write(self.cfg_path, new)
@@ -184,7 +184,7 @@ class AutoBackup:
             except Exception as e:                   # never let a failed backup take the program down
                 log.exception("automatic backup failed")
                 st.update(last_ok=False, last_error=str(e)[:300], last_fail_at=datetime.now().isoformat(timespec="seconds"))
-                self._notify_once(st, "fail_notified", "error", "النسخة الاحتياطية الأوتوماتيك فشلت",
+                self._notify_once(st, "fail_notified", "error", "فشلت النسخة الاحتياطية التلقائية",
                                   str(e)[:200], hours=6)
             self._write(self.state_path, st)
             return st
@@ -196,7 +196,7 @@ class AutoBackup:
         folder = Path(d)
         try:
             if not folder.exists():
-                raise FileNotFoundError("الفولدر مش موجود — الفلاشة أو الهارد مش متوصل؟")
+                raise FileNotFoundError("المجلد غير موجود — هل ذاكرة الفلاش أو القرص غير متصل؟")
             part = folder / (newest.name + ".part")
             shutil.copyfile(newest, part)
             part.replace(folder / newest.name)
@@ -207,8 +207,8 @@ class AutoBackup:
             st["offsite_error"] = str(e)[:300]
             last = st.get("offsite_at")
             if not last or datetime.fromisoformat(last) < datetime.now() - timedelta(days=OFFSITE_STALE_DAYS):
-                self._notify_once(st, "offsite_notified", "warning", "النسخة اللي برّه الجهاز قديمة",
-                                  f"آخر نسخة برّه الجهاز: {last[:10] if last else 'مفيش'} — وصّل الفلاشة أو الهارد",
+                self._notify_once(st, "offsite_notified", "warning", "النسخة الموجودة خارج الجهاز قديمة",
+                                  f"آخر نسخة خارج الجهاز: {last[:10] if last else 'لا يوجد'} — وصّل ذاكرة الفلاش أو القرص",
                                   hours=24)
 
     def _notify_once(self, st: dict, key: str, severity: str, title: str, body: str, *, hours: int) -> None:

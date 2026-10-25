@@ -80,7 +80,7 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
     if len(v["name"]) < 2:
         raise ValidationFailed("اكتب اسم البند (مثال: إيجار الصيدلية)")
     if not db.one("SELECT 1 FROM expense_categories WHERE id=? AND org_id=?", (v.get("category_id"), ctx.org_id)):
-        raise ValidationFailed("اختار بند المصروف")
+        raise ValidationFailed("اختر بند المصروف")
     if v["amount"] in ("", 0):
         v["amount"] = None
     if v["amount"] is not None and (not isinstance(v["amount"], int) or v["amount"] < 0):
@@ -90,13 +90,13 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
     except (TypeError, ValueError, KeyError):
         raise ValidationFailed("اكتب يوم الاستحقاق وعدد أيام التذكير")
     if not 1 <= v["day_of_month"] <= 31:
-        raise ValidationFailed("يوم الاستحقاق من 1 لـ 31")
+        raise ValidationFailed("يوم الاستحقاق من 1 إلى 31")
     if v["every_months"] not in EVERY:
         raise ValidationFailed("التكرار غير صحيح")
     if not 0 <= v["remind_days"] <= 60:
-        raise ValidationFailed("التذكير من 0 لـ 60 يوم قبل الميعاد")
+        raise ValidationFailed("التذكير من 0 إلى 60 يومًا قبل الموعد")
     if v["paid_from"] not in ("drawer", "outside"):
-        raise ValidationFailed("اختار بيتدفع منين")
+        raise ValidationFailed("اختر مصدر الدفع")
     try:
         date.fromisoformat(str(v["start_month"]) + "-01")
     except ValueError:
@@ -131,12 +131,12 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
     nxt = next_open(db, s, date.today())
     period = period or (nxt or {}).get("period")
     if not period:
-        raise ValidationFailed("مفيش ميعاد مفتوح للبند ده")
+        raise ValidationFailed("لا يوجد موعد مفتوح لهذا البند")
     amount = amount if amount is not None else s["amount"]
     if not amount:
-        raise ValidationFailed("اكتب المبلغ المرة دي")
+        raise ValidationFailed("اكتب المبلغ هذه المرة")
     if db.one("SELECT 1 FROM expenses WHERE schedule_id=? AND schedule_period=? AND status<>'rejected'", (sid, period)):
-        raise ValidationFailed("الشهر ده اتسجل قبل كده")
+        raise ValidationFailed("هذا الشهر سُجّل من قبل")
     with db.transaction():
         e = fin.record(db, ctx, category_id=s["category_id"], amount=amount, paid_from=paid_from or s["paid_from"],
                        note=(note or s["name"]) + f" ({period})")
@@ -175,10 +175,10 @@ def remind(db: Database, ctx: Context, today: date, state: dict) -> int:
         amt = f" — {s['amount'] / 100:,.2f} ج" if s["amount"] else ""
         with db.transaction():
             if n["state"] == "late":
-                notify.emit(db, ctx, "expense_due", "error", f"ميعاد {s['name']} عدّى ومتسجلش{amt}",
+                notify.emit(db, ctx, "expense_due", "error", f"موعد {s['name']} فات ولم يُسجَّل{amt}",
                             f"كان يوم {n['due']}", "expense_schedule", s["id"])
             else:
-                when = "النهارده" if n["days"] == 0 else "بكره" if n["days"] == 1 else f"بعد {n['days']} يوم"
+                when = "اليوم" if n["days"] == 0 else "غدًا" if n["days"] == 1 else f"بعد {n['days']} يوم"
                 notify.emit(db, ctx, "expense_due", "warning", f"{s['name']} ميعاده {when}{amt}",
                             f"يوم {n['due']}", "expense_schedule", s["id"])
         seen[key] = today.isoformat()

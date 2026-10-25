@@ -6,7 +6,7 @@ from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 
-DEFAULTS = [("card", "مكنة الفيزا"), ("transfer", "إنستاباي"), ("transfer", "فودافون كاش")]
+DEFAULTS = [("card", "جهاز البطاقات"), ("transfer", "إنستاباي"), ("transfer", "فودافون كاش")]
 
 
 def ensure_defaults(db: Database) -> None:
@@ -38,7 +38,7 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
                        (name or row["name"], int(bool(data.get("is_active", row["is_active"]))), cid))
         else:
             if kind not in ("card", "transfer") or len(name) < 2:
-                raise ValidationFailed("اكتب الاسم واختار النوع")
+                raise ValidationFailed("اكتب الاسم واختر النوع")
             try:
                 db.execute("INSERT INTO payment_channels (id, org_id, kind, name, sort) VALUES (?,?,?,?,"
                            " (SELECT coalesce(max(sort),0)+1 FROM payment_channels WHERE org_id=?))",

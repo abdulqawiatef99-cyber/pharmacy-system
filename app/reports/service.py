@@ -17,7 +17,7 @@ def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
     except ValueError:
         raise ValidationFailed("الفترة غير صحيحة")
     if d2 < d1 or (d2 - d1).days > 400:
-        raise ValidationFailed("الفترة غير صحيحة (سنة على الأكتر)")
+        raise ValidationFailed("الفترة غير صحيحة (سنة على الأكثر)")
     return d1, d2, local_day_bounds(d1)[0], local_day_bounds(d2)[1]
 
 
@@ -79,7 +79,7 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
         exp.append(d)
     out["expiring"] = exp
     if ctx.can("costs.read"):
-        rows = db.all("SELECT coalesce(c.name, 'من غير قسم') category, sum(sb.qty * coalesce(CAST(ic.avg_cost AS REAL),0) * 100) cost,"
+        rows = db.all("SELECT coalesce(c.name, 'بدون قسم') category, sum(sb.qty * coalesce(CAST(ic.avg_cost AS REAL),0) * 100) cost,"
                       " sum(sb.qty * coalesce(i.public_price,0) * 1.0 / i.pack_size) retail, count(DISTINCT i.id) items"
                       " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
                       " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
@@ -108,7 +108,7 @@ def home(db: Database, ctx: Context) -> dict:
     sh = db.one("SELECT id, opened_at FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'", (ctx.org_id, ctx.branch_id))
     out["shift_open"] = bool(sh)
     if not sh:
-        out["alerts"].append({"level": "warning", "text": "مفيش شيفت مفتوح — البيع النقدي مقفول", "link": "#/shift"})
+        out["alerts"].append({"level": "warning", "text": "لا توجد وردية مفتوحة — البيع النقدي متوقف", "link": "#/shift"})
     if ctx.can("inventory.read"):
         soon = (today + timedelta(days=30)).isoformat()
         n = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=?"
@@ -116,32 +116,32 @@ def home(db: Database, ctx: Context) -> dict:
         expired = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=?"
                          " AND sb.qty>0 AND b.expiry_date IS NOT NULL AND b.expiry_date<?", (ctx.org_id, ctx.branch_id, today.isoformat()))["c"]
         if expired:
-            out["alerts"].append({"level": "error", "text": f"{expired} تشغيلة صلاحيتها خلصت وفيها رصيد — شيلها من الرف", "link": "#/reports"})
+            out["alerts"].append({"level": "error", "text": f"{expired} تشغيلة انتهت صلاحيتها وبها رصيد — ارفعها من الرف", "link": "#/reports"})
         if n - expired > 0:
-            out["alerts"].append({"level": "warning", "text": f"{n - expired} تشغيلة صلاحيتها بتخلص خلال 30 يوم", "link": "#/reports"})
+            out["alerts"].append({"level": "warning", "text": f"{n - expired} تشغيلة تنتهي صلاحيتها خلال 30 يومًا", "link": "#/reports"})
         short = db.one("SELECT count(*) c FROM items WHERE org_id=? AND shortage_at IS NOT NULL", (ctx.org_id,))["c"]
         if short:
-            out["alerts"].append({"level": "warning", "text": f"{short} صنف متعلّم ناقص", "link": "#/shortages"})
+            out["alerts"].append({"level": "warning", "text": f"{short} صنف مسجل ناقصًا", "link": "#/shortages"})
     d = db.one("SELECT count(*) n, coalesce(sum(cash_due),0) c FROM sale_deliveries WHERE org_id=? AND status IN ('out','delivered')",
                (ctx.org_id,))
     if d["n"]:
-        out["alerts"].append({"level": "info", "text": f"{d['n']} توصيلة مفتوحة — {d['c'] / 100:,.2f} ج مع الدليفري", "link": "#/pos"})
+        out["alerts"].append({"level": "info", "text": f"{d['n']} توصيلة مفتوحة — {d['c'] / 100:,.2f} ج مع مندوب التوصيل", "link": "#/pos"})
     if ctx.can("expenses.approve"):
         e = db.one("SELECT count(*) n FROM expenses WHERE org_id=? AND status='pending'", (ctx.org_id,))["n"]
         if e:
-            out["alerts"].append({"level": "warning", "text": f"{e} مصروف مستني موافقتك", "link": "#/expenses"})
+            out["alerts"].append({"level": "warning", "text": f"{e} مصروف بانتظار موافقتك", "link": "#/expenses"})
         from ..finance import schedules
         for sc in schedules.listing(db, ctx, today):
             n = sc["next"]
             if n and n["state"] != "later":
-                when = "عدّى ميعاده" if n["state"] == "late" else "ميعاده النهارده" if n["days"] == 0 else f"ميعاده بعد {n['days']} يوم"
+                when = "فات موعده" if n["state"] == "late" else "موعده اليوم" if n["days"] == 0 else f"موعده بعد {n['days']} يوم"
                 out["alerts"].append({"level": "error" if n["state"] == "late" else "warning",
                                       "text": f"{sc['name']} {when} ({n['due']})", "link": "#/expenses"})
     soon5 = (today + timedelta(days=5)).isoformat()
     r = db.one("SELECT count(DISTINCT customer_id) c FROM customer_refills WHERE org_id=? AND"
                " date(coalesce(last_at, created_at), '+' || every_days || ' days') <= ?", (ctx.org_id, soon5))["c"]
     if r:
-        out["alerts"].append({"level": "info", "text": f"{r} عميل طلبهم الشهري قرّب", "link": "#/customers"})
+        out["alerts"].append({"level": "info", "text": f"{r} عميل اقترب موعد طلبهم الشهري", "link": "#/customers"})
     if ctx.can("notifications.read"):
         out["notifications_unread"] = notify.unread_count(db, ctx)
     return out

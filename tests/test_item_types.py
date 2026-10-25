@@ -13,7 +13,7 @@ PW = "Staff-Pass-2026"
 
 class TestTypes(Base):
     def test_service_item_sells_without_stock(self):
-        d = cat.create_item(self.db, self.ctx, {"name_ar": "توصيل للبيت", "public_price": 2000, "is_service": True})
+        d = cat.create_item(self.db, self.ctx, {"name_ar": "توصيل للمنزل", "public_price": 2000, "is_service": True})
         self.cd.open(self.ctx, 0)
         sid = self.s.create(self.ctx)
         x = self.s.add_line(self.ctx, sid, d, units=3)                   # 3 deliveries, no stock at all

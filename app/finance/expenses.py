@@ -15,8 +15,8 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..sales import cash
 
-DEFAULT_CATEGORIES = ["إيجار", "كهربا ومياه", "رواتب وأجور", "مستهلكات (أكياس، إيصالات، حبر)", "نظافة",
-                      "صيانة", "مواصلات وتوصيل", "تليفون وإنترنت", "ضرايب ورسوم", "أخرى"]
+DEFAULT_CATEGORIES = ["إيجار", "كهرباء ومياه", "رواتب وأجور", "مستهلكات (أكياس، إيصالات، حبر)", "نظافة",
+                      "صيانة", "مواصلات وتوصيل", "تليفون وإنترنت", "ضرائب ورسوم", "أخرى"]
 MANAGER_LIMIT_DEFAULT = 50000          # 500 EGP
 
 
@@ -72,7 +72,7 @@ def record(db: Database, ctx: Context, *, category_id: str, amount: int, paid_fr
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
     if paid_from not in ("drawer", "outside"):
-        raise ValidationFailed("اختار الفلوس اتدفعت منين")
+        raise ValidationFailed("اختر مصدر المبلغ المدفوع")
     try:
         day = date.fromisoformat(spent_on).isoformat() if spent_on else date.today().isoformat()
     except ValueError:
@@ -94,8 +94,8 @@ def record(db: Database, ctx: Context, *, category_id: str, amount: int, paid_fr
         audit.record(db, ctx, "expense.record", "expense", eid,
                      after={"amount": amount, "category": cat["name"], "from": paid_from, "approved": auto})
         if not auto:
-            notify.emit(db, ctx, "expense_pending", "warning", f"مصروف مستني موافقتك: {amount / 100:,.2f} ج — {cat['name']}",
-                        (note or "") + (" · من الدرج" if paid_from == "drawer" else ""), "expense", eid)
+            notify.emit(db, ctx, "expense_pending", "warning", f"مصروف بانتظار موافقتك: {amount / 100:,.2f} ج — {cat['name']}",
+                        (note or "") + (" · من الخزينة" if paid_from == "drawer" else ""), "expense", eid)
     return get(db, ctx, eid)
 
 
@@ -134,10 +134,10 @@ def listing(db: Database, ctx: Context, *, status: str | None = None, month: str
 def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | None = None) -> dict:
     e = get(db, ctx, eid)
     if e["status"] != "pending":
-        raise Conflict("المصروف ده اتقرر قبل كده")
+        raise Conflict("سبق اتخاذ قرار في هذا المصروف")
     if not _can_approve(db, ctx, e["amount"]):
         if ctx.allowed("expenses.approve"):
-            raise Forbidden(f"المبلغ أكبر من حد المدير ({manager_limit(db, ctx.org_id) / 100:,.0f} ج) — محتاج الصاحب",
+            raise Forbidden(f"المبلغ أكبر من حد المدير ({manager_limit(db, ctx.org_id) / 100:,.0f} ج) — يحتاج إلى المالك",
                             code="approval_required", details={"permission": "users.manage", "label": "اعتماد مصروف كبير"})
         ctx.require("expenses.approve")
     if not approve and len((reason or "").strip()) < 3:
@@ -149,7 +149,7 @@ def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | No
         audit.record(db, ctx, "expense.approve" if approve else "expense.reject", "expense", eid,
                      after={"amount": e["amount"], "reason": reason})
         if not approve and e["paid_from"] == "drawer":
-            notify.emit(db, ctx, "expense_rejected", "error", f"مصروف اترفض بعد ما اتصرف من الدرج: {e['amount'] / 100:,.2f} ج",
+            notify.emit(db, ctx, "expense_rejected", "error", f"مصروف رُفض بعد صرفه من الخزينة: {e['amount'] / 100:,.2f} ج",
                         f"{e['category']} — سجّله {e['by_name']} · السبب: {reason.strip()}", "expense", eid)
     return get(db, ctx, eid)
 

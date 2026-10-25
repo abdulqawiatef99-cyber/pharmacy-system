@@ -12,7 +12,7 @@ KINDS = {"complaint": "شكوى", "suggestion": "اقتراح", "bug": "مشكل
 
 def add(db: Database, ctx: Context, kind: str, text: str, screen: str | None = None) -> dict:
     if kind not in KINDS:
-        raise ValidationFailed("اختار النوع")
+        raise ValidationFailed("اختر النوع")
     text = (text or "").strip()
     if len(text) < 5:
         raise ValidationFailed("اكتب الملاحظة")

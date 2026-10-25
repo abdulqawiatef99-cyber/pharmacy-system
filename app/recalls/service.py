@@ -156,7 +156,7 @@ class Recalls:
         if status not in ("confirmed", "not_ours", "handled"):
             raise ValidationFailed("حالة غير صحيحة")
         if status == "not_ours" and len((note or "").strip()) < 3:
-            raise ValidationFailed("اكتب سبب إن التشغيلة مش بتاعتنا")
+            raise ValidationFailed("اكتب سبب أن التشغيلة لا تخصنا")
         with self.db.transaction():
             n = self.db.execute("UPDATE recall_matches SET status=?, note=?, decided_by=?, decided_at=?"
                                 " WHERE id=? AND org_id=?",

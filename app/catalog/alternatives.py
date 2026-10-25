@@ -187,10 +187,10 @@ def save_group(db: Database, ctx: Context, data: dict, gid: str | None = None) -
         else:
             raise ValidationFailed("نوع العضو غير صحيح")
     if len(clean) < 2:
-        raise ValidationFailed("المجموعة محتاجة مادتين أو صنفين على الأقل عشان يبقوا بدايل لبعض")
+        raise ValidationFailed("تحتاج المجموعة إلى مادتين أو صنفين على الأقل ليكونا بديلين لبعضهما")
     dup = db.one("SELECT id FROM therapeutic_groups WHERE org_id=? AND name_norm=?", (ctx.org_id, norm))
     if dup and dup["id"] != gid:
-        raise ValidationFailed("فيه مجموعة بنفس الاسم")
+        raise ValidationFailed("توجد مجموعة بالاسم نفسه")
     active = int(bool(data.get("is_active", True)))
     note = (str(data.get("note") or "").strip()[:200]) or None
     with db.transaction():

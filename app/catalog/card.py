@@ -10,7 +10,7 @@ from ..db import Database, new_id
 from .normalize import valid_gtin
 
 DEFAULT_CATEGORIES = [            # name, no_return, mark — the owner edits these freely
-    ("أدوية", 0, None), ("حقن", 0, "injection"), ("تلاجة", 1, "fridge"),
+    ("أدوية", 0, None), ("حقن", 0, "injection"), ("ثلاجة", 1, "fridge"),
     ("عناية واستعمال شخصي", 1, None), ("مستحضرات تجميل", 0, None),
     ("مستلزمات طبية", 0, None), ("ألبان وأغذية أطفال", 0, None),
 ]
@@ -70,13 +70,13 @@ def save_category(db: Database, ctx: Context, data: dict, cat_id: str | None = N
                            (cat_id, ctx.org_id, name, no_return, mark, ctx.org_id))
         except Exception as e:
             if "UNIQUE" in str(e):
-                raise Conflict("فيه قسم بنفس الاسم") from e
+                raise Conflict("يوجد قسم بالاسم نفسه") from e
             raise
         after = {"name": name, "no_return": no_return, "mark": mark, "is_active": active}
         audit.record(db, ctx, "category.save", "category", cat_id, before=before, after=after)
         if (before["no_return"] if before else 0) != no_return:
             notify.emit(db, ctx, "no_return_change", "warning",
-                        f"قسم «{name}» بقى {'مالوش مرتجع' if no_return else 'ليه مرتجع عادي'}", None, "category", cat_id)
+                        f"قسم «{name}» أصبح {'لا يُقبل إرجاعه' if no_return else 'يُقبل إرجاعه عاديًا'}", None, "category", cat_id)
     return dict(db.one("SELECT * FROM categories WHERE id=?", (cat_id,)))
 
 
@@ -85,7 +85,7 @@ def set_category(db: Database, ctx: Context, item_ids: list[str], cat_id: str | 
     what can be returned, so that needs the owner's permission."""
     ctx.require("items.write")
     if not isinstance(item_ids, list) or not item_ids or len(item_ids) > 500:
-        raise ValidationFailed("اختار الأصناف (لحد 500 مرة واحدة)")
+        raise ValidationFailed("اختر الأصناف (حتى 500 مرة واحدة)")
     target = None
     if cat_id:
         target = db.one("SELECT * FROM categories WHERE id=? AND org_id=? AND is_active=1", (cat_id, ctx.org_id))
@@ -95,7 +95,7 @@ def set_category(db: Database, ctx: Context, item_ids: list[str], cat_id: str | 
     rows = db.all(f"SELECT i.id, coalesce(c.no_return,0) nr FROM items i LEFT JOIN categories c ON c.id=i.category_id"
                   f" WHERE i.org_id=? AND i.id IN ({marks})", (ctx.org_id, *item_ids))
     if len(rows) != len(set(item_ids)):
-        raise NotFound("فيه صنف مش موجود")
+        raise NotFound("يوجد صنف غير موجود")
     new_nr = target["no_return"] if target else 0
     if any(r["nr"] != new_nr for r in rows):
         ctx.require("items.no_return")
@@ -187,7 +187,7 @@ def remove_barcode(db: Database, ctx: Context, item_id: str, barcode: str) -> No
         n = db.execute("DELETE FROM item_barcodes WHERE org_id=? AND item_id=? AND barcode=?",
                        (ctx.org_id, item_id, barcode)).rowcount
         if not n:
-            raise NotFound("الباركود مش متسجل على الصنف ده")
+            raise NotFound("الباركود غير مسجل على هذا الصنف")
         audit.record(db, ctx, "item.barcode_remove", "item", item_id, before={"barcode": barcode})
 
 
@@ -207,7 +207,7 @@ def movements(db: Database, ctx: Context, item_id: str, date_from: str, date_to:
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     if d2 < d1:
         raise ValidationFailed("تاريخ النهاية قبل البداية")
     lo, hi = local_day_bounds(d1)[0], local_day_bounds(d2)[1]

@@ -214,7 +214,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                          status_code=status)
             except Exception:   # never leak internals
                 log.exception("unhandled error on %s %s", req.method, req.url.path)
-                return J({"error": {"code": "internal", "message": "حصل خطأ غير متوقع"}},
+                return J({"error": {"code": "internal", "message": "حدث خطأ غير متوقع"}},
                          status_code=500)
         return wrapped
 
@@ -253,17 +253,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         import os as _os
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
-            raise Forbidden("الإعداد الأول بيتعمل من جهاز الصيدلية نفسه بس")
+            raise Forbidden("الإعداد الأول يتم من جهاز الصيدلية نفسه فقط")
         login_limiter.check(client_ip(req))
         if not _setup_needed():
-            raise Conflict("البرنامج متجهز بالفعل؛ سجّل دخول", code="already_setup")
+            raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
         b = await body(req)
         name, user, pw = (str(b.get(k, "")).strip() for k in ("pharmacy", "username", "password"))
         if len(name) < 2 or len(user) < 3:
-            raise ValidationFailed("اكتب اسم الصيدلية واسم مستخدم (3 حروف على الأقل)")
+            raise ValidationFailed("اكتب اسم الصيدلية واسم المستخدم (3 حروف على الأقل)")
         with setup_lock:
             if not _setup_needed():
-                raise Conflict("البرنامج متجهز بالفعل؛ سجّل دخول", code="already_setup")
+                raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
             accounts.create_organization(db, name=name, owner_username=user,
                                          owner_full_name=str(b.get("full_name") or user).strip(),
                                          owner_password=pw)
@@ -331,18 +331,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         restart, when no database connection is open."""
         from ..core import backup as backup_mod
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
-            raise Forbidden("الاسترجاع بيتعمل من جهاز الصيدلية نفسه بس")
+            raise Forbidden("الاسترجاع يتم من جهاز الصيدلية نفسه فقط")
         if not _setup_needed():
-            raise Conflict("البرنامج فيه بيانات بالفعل؛ الاسترجاع من هنا لأول تشغيل بس", code="already_setup")
+            raise Conflict("البرنامج به بيانات بالفعل؛ الاسترجاع من هنا لأول تشغيل فقط", code="already_setup")
         if os.environ.get("PHARM_LAUNCHER") != "1":
-            raise ValidationFailed("الاسترجاع من هنا بيشتغل في النسخة المتثبتة بس. استخدم أمر restore")
+            raise ValidationFailed("الاسترجاع من هنا يعمل في النسخة المثبتة فقط. استخدم الأمر restore")
         # a backup of a real pharmacy is far above the normal upload limit: stream it to disk
         if "multipart/form-data" not in req.headers.get("content-type", ""):
-            raise ValidationFailed("اختار ملف النسخة الاحتياطية")
+            raise ValidationFailed("اختر ملف النسخة الاحتياطية")
         form = await req.form(max_files=1, max_fields=2)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):
-            raise ValidationFailed("اختار ملف النسخة الاحتياطية")
+            raise ValidationFailed("اختر ملف النسخة الاحتياطية")
         s.data_dir.mkdir(parents=True, exist_ok=True)
         pending = s.data_dir / "pending_restore.zip"
         size, limit = 0, 4 * 1024 ** 3
@@ -361,10 +361,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         try:
             info = await run_in_threadpool(backup_mod.verify_archive, pending)
         except Exception as e:  # noqa: BLE001 - not a zip / unreadable
-            info = {"problems": [f"الملف مش نسخة احتياطية ({type(e).__name__})"]}
+            info = {"problems": [f"الملف ليس نسخة احتياطية ({type(e).__name__})"]}
         if info["problems"]:
             pending.unlink(missing_ok=True)
-            raise ValidationFailed("ملف النسخة الاحتياطية مش سليم: " + "؛ ".join(info["problems"][:3]))
+            raise ValidationFailed("ملف النسخة الاحتياطية غير سليم: " + "؛ ".join(info["problems"][:3]))
         threading.Timer(1.0, lambda: os._exit(75)).start()
         return J({"ok": True, "restarting": True})
 
@@ -386,7 +386,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _local_only(req):
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 os.environ.get("PHARM_ALLOW_REMOTE_QUICK") != "1":
-            raise Forbidden("الدخول السريع من جهاز الصيدلية بس", code="local_only")
+            raise Forbidden("الدخول السريع من جهاز الصيدلية فقط", code="local_only")
 
     @handler
     async def quick_users(req):
@@ -401,7 +401,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         users = {u["id"]: u for u in people.quick_users(db)}
         u = users.get(str(b.get("user_id", "")))
         if not u:
-            raise Unauthorized("الرقم السري غلط", code="invalid_pin")
+            raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
         res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", ""))[:6], ip=client_ip(req),
                                user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
@@ -417,7 +417,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
         from ..core import security as _sec
         if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
-            raise ValidationFailed("كلمة المرور غلط")
+            raise ValidationFailed("كلمة المرور غير صحيحة")
         people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
         return J({"ok": True})
 
@@ -472,10 +472,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         ids = b.get("item_ids")
         if not isinstance(ids, list) or not ids or len(ids) > 500:
-            raise ValidationFailed("اختار الأصناف (لحد 500 مرة واحدة)")
+            raise ValidationFailed("اختر الأصناف (حتى 500 مرة واحدة)")
         ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk", "quick_pin") if k in b}
         if not ch:
-            raise ValidationFailed("اختار العلامة")
+            raise ValidationFailed("اختر العلامة")
         marks = ",".join("?" * len(ids))
         with db.transaction():
             n = db.execute(f"UPDATE items SET {', '.join(f'{k}=?' for k in ch)} WHERE org_id=? AND id IN ({marks})",
@@ -907,7 +907,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """The approver typed his PIN: confirm it before the screen retries the action."""
         ctx = ctx_of(req)
         if not ctx.approver_id:
-            raise ValidationFailed("اختار مين هيوافق")
+            raise ValidationFailed("اختر من سيوافق")
         perm = str((await body(req)).get("permission", ""))
         ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == "discount"
         return J({"ok": ok, "discount_limit_bp": ctx.discount_limit_bp})
@@ -997,7 +997,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             b = await body(req)
             if "line_order" in b:
                 if b["line_order"] not in LINE_ORDERS:
-                    raise ValidationFailed("اختار ترتيب الأصناف")
+                    raise ValidationFailed("اختر ترتيب الأصناف")
                 with db.transaction():
                     before = line_order(db, ctx.org_id)
                     db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'line_order', ?)"
@@ -1011,7 +1011,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             except (TypeError, ValueError):
                 raise ValidationFailed("اكتب عدد الأيام")
             if not 0 <= days <= 365:
-                raise ValidationFailed("مدة المرتجع من 0 لـ 365 يوم")
+                raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
             with db.transaction():
                 before = return_window_days(db, ctx.org_id)
                 db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
@@ -1366,7 +1366,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             ids = [r["id"] for r in db.all("SELECT id FROM items WHERE org_id=? AND status='active' AND category_id=?",
                                             (ctx.org_id, cid))]
             if not ids:
-                raise ValidationFailed("القسم ده مفيهوش أصناف")
+                raise ValidationFailed("هذا القسم ليس به أصناف")
             scope = "items"
         sid = counting.create(ctx, title=str(b.get("title", "")), scope=scope,
                               locations=b.get("locations"), item_ids=ids,
@@ -1469,7 +1469,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         for k in ("stock", "sales", "purchases"):
             up = form.get(k)
             if up is None or not hasattr(up, "read"):
-                raise ValidationFailed("لازم الـ 3 ملفات: الأرصدة، والمبيعات، والمشتريات")
+                raise ValidationFailed("يلزم الملفات الثلاثة: الأرصدة، والمبيعات، والمشتريات")
             files[k] = await up.read(s.max_upload_bytes + 1)
             await up.close()
             if len(files[k]) > s.max_upload_bytes:
@@ -1501,7 +1501,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         qp = req.query_params
         no = qp.get("no")
         if no is not None and not no.isdigit():
-            raise ValidationFailed("رقم الفاتورة لازم يكون رقم")
+            raise ValidationFailed("رقم الفاتورة يجب أن يكون رقمًا")
         return J(Sales(db).list_sales(ctx_of(req), day=qp.get("day") or None, sale_no=int(no) if no else None,
                                       date_from=qp.get("from") or None, date_to=qp.get("to") or None))
 
@@ -1675,26 +1675,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
                 ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
-                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الدرج", k.get("payout", 0)), ("إيداع", k.get("deposit", 0))]
+                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0))]
         cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
-        ch_rows = "".join(f"<tr><td>{'فيزا' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
+        ch_rows = "".join(f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
                           for c in r["by_channel"])
         den = r["counted_detail"] or {}
         den_rows = "".join(f"<tr><td>{d / 100:g} × {den[str(d)]}</td><td>{m(d * den[str(d)])}</td></tr>"
                            for d in DENOMINATIONS if den.get(str(d)))
         diff = r["difference"]
         res = ("" if r["status"] != "closed" else
-               f"<tr class='t'><td>{'✓ مظبوط' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
+               f"<tr class='t'><td>{'✓ مطابق' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>تقفيل الشيفت</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الوردية</title>
 <link rel="stylesheet" href="/static/receipt.css"></head><body>
-<div class="r"><h1>{e(org)}</h1><p>تقرير تقفيل الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
-لحد {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
+<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الوردية<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
+إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
 {f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
-<table>{cash_rows}<tr class="t"><td>المفروض في الدرج</td><td>{m(r['expected_cash'])}</td></tr></table>
+<table>{cash_rows}<tr class="t"><td>المتوقع في الخزينة</td><td>{m(r['expected_cash'])}</td></tr></table>
 {f"<hr><table>{den_rows}</table>" if den_rows else ""}
 <table><tr class="t"><td>المعدود</td><td>{m(r['counted_cash'])}</td></tr>{res}</table>
 {f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
@@ -1740,9 +1740,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                        for l in x["lines"])
         when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدي من الدرج", "card": "على الفيزا", "credit": "على حساب العميل"}
+        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
-        info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"اتباعت <bdi dir='ltr'>{sold}</bdi> · اترجعت <bdi dir='ltr'>{when}</bdi>",
+        info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
         if sale.get("customer"):
             info.append(f"العميل: {e(sale['customer']['name'])}")
@@ -1751,7 +1751,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>اترد</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
+<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -1799,28 +1799,28 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             star = " ✱" if l["item"].get("no_return") else ""
             rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
                         f"<td>{m(l['line_total'])}</td></tr>")
-        MET = {"cash": "نقدي", "card": "فيزا", "transfer": "تحويل", "credit": "آجل"}
+        MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
         pays = sale.get("payments") or []
         pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
                       for p in pays)
         if not pays:
             pay = "".join(f"<tr><td>{lbl}</td><td>{m(sale[k])}</td></tr>" for k, lbl in
-                          (("paid_cash", "نقدي"), ("paid_card", "فيزا"), ("on_credit", "آجل")) if sale.get(k))
+                          (("paid_cash", "نقدي"), ("paid_card", "بطاقة"), ("on_credit", "آجل")) if sale.get(k))
         cashier = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],))
         d = sale.get("delivery") or {}
         head = "".join(f"<p>{e(x)}</p>" for x in cfg["lines"] if x)
         when = accounts.parse_iso(sale['completed_at']).astimezone().strftime('%Y-%m-%d %H:%M')
         info = [f"فاتورة رقم {sale['sale_no']}", when]
         if cfg["show_cashier"] and cashier:
-            info.append(f"الكاشير: {e(cashier['full_name'])}")
+            info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
             info.append(f"العميل: {e(sale['customer']['name'])}")
         if sale.get("kind") == "delivery":
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يوم بالفاتورة دي"
-            policy += " · الأصناف اللي عليها ✱ مالهاش مرتجع ولا استبدال</p>" if restricted else "</p>"
+            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يومًا بهذه الفاتورة"
+            policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
 <link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
@@ -1863,7 +1863,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             cell = f'<div class="lb"><div class="n">{nm}</div><div class="b">{mark}</div><div class="c"><span>{e(str(value))}</span><b>{price}</b></div></div>'
             cells += [cell] * n
         if not cells:
-            raise ValidationFailed("اختار الأصناف")
+            raise ValidationFailed("اختر الأصناف")
         with db.transaction():
             audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": size})
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملصقات باركود</title>

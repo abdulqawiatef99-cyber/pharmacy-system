@@ -89,7 +89,7 @@ class Counting:
         if mode not in ("set", "add"):
             raise ValidationFailed("وضع غير صحيح")
         if not isinstance(qty, int) or qty < 0:
-            raise ValidationFailed("الكمية لازم تكون رقم صحيح موجب")
+            raise ValidationFailed("الكمية يجب أن تكون عددًا صحيحًا موجبًا")
         with self.db.transaction():
             s = self._session(ctx, sid, open_only=True)
             item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
@@ -110,7 +110,7 @@ class Counting:
                 if mode == "add" and live["counted_by"] == ctx.user_id:
                     new_qty = live["qty"] + qty
                 elif live["counted_by"] != ctx.user_id and not recount:
-                    raise Conflict("الصنف ده اتجرد قبل كده في نفس المكان", code="already_counted",
+                    raise Conflict("هذا الصنف جُرد من قبل في المكان نفسه", code="already_counted",
                                    details={"qty": live["qty"], "counted_at": live["counted_at"]})
             eid = new_id()
             seq = self.db.one("SELECT coalesce(max(rowid),0) s FROM stock_movements")["s"]
@@ -204,7 +204,7 @@ class Counting:
         from . import adjust
         ctx.require("inventory.adjust")
         if zero_uncounted and len((reason or "").strip()) < 5:
-            raise ValidationFailed("تصفير الأصناف غير المجرودة يحتاج سبب مكتوب")
+            raise ValidationFailed("تصفير الأصناف غير المجرودة يحتاج إلى سبب مكتوب")
         reasons = reasons or {}
         for code in [shortage_reason, zero_reason, *reasons.values()]:
             if code not in adjust.REASONS:
@@ -214,7 +214,7 @@ class Counting:
             v = self.variances(ctx, sid)
             bad = [r for r in v["lines"] if r.get("problem")]
             if bad:
-                raise Conflict("فيه أصناف محتاجة مراجعة قبل الاعتماد", code="count_problems",
+                raise Conflict("توجد أصناف تحتاج إلى مراجعة قبل الاعتماد", code="count_problems",
                                details={"lines": bad})
             posted = 0
             for r in v["lines"]:

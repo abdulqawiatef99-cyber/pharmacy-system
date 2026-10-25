@@ -45,8 +45,8 @@ def run(db: Database, today: date | None = None) -> int:
             last_exp = st.get("expired_at")
             if expired and (expired != st.get("expired_count") or not last_exp
                             or date.fromisoformat(last_exp) <= today - timedelta(days=7)):
-                notify.emit(db, ctx, "expired_stock", "error", f"{expired} تشغيلة صلاحيتها خلصت ولسه ليها رصيد",
-                            "البيع منها ممنوع أوتوماتيك — شيلها من الرف وسجّلها (مرتجع للمورد أو إعدام)", "report", "expiry")
+                notify.emit(db, ctx, "expired_stock", "error", f"{expired} تشغيلة انتهت صلاحيتها وما زال لها رصيد",
+                            "البيع منها ممنوع تلقائيًا — ارفعها من الرف وسجّلها (مرتجع للمورد أو إعدام)", "report", "expiry")
                 st["expired_at"] = today.isoformat()
                 sent += 1
             st["expired_count"] = expired
@@ -57,8 +57,8 @@ def run(db: Database, today: date | None = None) -> int:
                 " AND sb.qty>0 AND b.expiry_date>=? AND b.expiry_date<=?", (o["id"], today.isoformat(), soon))}
             new_soon = soon_ids - set(st.get("soon_ids", []))
             if new_soon:
-                notify.emit(db, ctx, "expiry_soon", "warning", f"{len(new_soon)} تشغيلة جديدة صلاحيتها بتخلص خلال 30 يوم",
-                            f"كلهم دلوقتي {len(soon_ids)} تشغيلة — قدّم بيعها أو رجّعها للمورد قبل ما تخلص", "report", "expiry")
+                notify.emit(db, ctx, "expiry_soon", "warning", f"{len(new_soon)} تشغيلة جديدة تنتهي صلاحيتها خلال 30 يومًا",
+                            f"كلها الآن {len(soon_ids)} تشغيلة — قدّم بيعها أو أرجعها للمورد قبل انتهائها", "report", "expiry")
                 sent += 1
             st["soon_ids"] = sorted(soon_ids)
             st.pop("soon_count", None)
@@ -79,9 +79,9 @@ def run(db: Database, today: date | None = None) -> int:
                     continue
                 weekly = r["before"] / 8.0
                 days_left = r["stock"] / (r["recent"] / 7.0) if r["recent"] else None
-                notify.emit(db, ctx, "sales_spike", "warning", f"بيع {r['name_en'] or r['name_ar']} زاد قوي عن المعتاد",
-                            f"آخر 7 أيام: {r['recent']} وحدة، والمعتاد حوالي {weekly:.0f} في الأسبوع"
-                            + (f" · الرصيد يكفي حوالي {days_left:.0f} يوم" if days_left is not None else ""), "item", r["item_id"])
+                notify.emit(db, ctx, "sales_spike", "warning", f"بيع {r['name_en'] or r['name_ar']} زاد كثيرًا عن المعتاد",
+                            f"آخر 7 أيام: {r['recent']} وحدة، والمعتاد نحو {weekly:.0f} في الأسبوع"
+                            + (f" · الرصيد يكفي نحو {days_left:.0f} يوم" if days_left is not None else ""), "item", r["item_id"])
                 notified[r["item_id"]] = today.isoformat()
                 sent += 1
             st["spikes"] = {k: v for k, v in notified.items() if date.fromisoformat(v) > today - timedelta(days=30)}

@@ -12,7 +12,7 @@ class TestSuggest(DBTestCase):
                "x": mk("ZZZ"), "ar": mk(None, "سرنجة 5 سم")}
         r = sg.suggest(self.db, self.ctx)
         where = {it["id"]: g["category"] for g in r["groups"] for it in g["items"]}
-        self.assertEqual(where[ids["ins"]], "تلاجة")
+        self.assertEqual(where[ids["ins"]], "ثلاجة")
         self.assertEqual(where[ids["amp"]], "حقن")
         self.assertEqual(where[ids["milk"]], "ألبان وأغذية أطفال")
         self.assertEqual(where[ids["sh"]], "عناية واستعمال شخصي")

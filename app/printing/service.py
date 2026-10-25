@@ -47,7 +47,7 @@ def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = No
     """Opening the drawer without a sale is sensitive: permission + reason + audit."""
     ctx.require("cash.manage")
     if len((reason or "").strip()) < 3:
-        raise ValidationFailed("اكتب سبب فتح الدرج")
+        raise ValidationFailed("اكتب سبب فتح الخزينة")
     try:
         escpos.send(target or printer_target(), escpos.INIT + escpos.DRAWER_KICK)
     except escpos.PrinterError as e:

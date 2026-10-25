@@ -50,7 +50,7 @@ class TestReceiptAndLabelsAPI(APICase):
                                                                  "safety_decisions": {str(i): "ok" for i in range(n)}}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         page = self.c.get(f"/receipt/{sid}").text
-        for s in ("شارع الجلاء", "الكاشير", "صلاحية", "المرتجع خلال 14 يوم", "نقدي"):
+        for s in ("شارع الجلاء", "البائع", "صلاحية", "المرتجع خلال 14 يوم", "نقدي"):
             self.assertIn(s, page)
         self.assertIn("receipt-58.css", self.c.get(f"/receipt/{sid}?w=58").text)
         lab = self.c.get("/labels", params={"items": f"{self.pan}:3", "size": "50x30"}).text

@@ -35,14 +35,14 @@ def xlsx(spec: dict) -> bytes:
     from openpyxl.utils import get_column_letter
     sheets = spec.get("sheets")
     if not isinstance(sheets, list) or not 1 <= len(sheets) <= MAX_SHEETS:
-        raise ValidationFailed("مفيش جدول للتصدير")
+        raise ValidationFailed("لا يوجد جدول للتصدير")
     wb = Workbook()
     wb.remove(wb.active)
     used: set[str] = set()
     for sh in sheets:
         cols, rows = sh.get("columns") or [], sh.get("rows") or []
         if not cols or len(rows) > MAX_ROWS:
-            raise ValidationFailed("الجدول فاضي أو كبير قوي")
+            raise ValidationFailed("الجدول فارغ أو كبير جدًا")
         cols = [{"label": str(c.get("label", ""))[:80], "type": c.get("type") if c.get("type") in TYPES else "text"} for c in cols]
         ws = wb.create_sheet(_sheet_name(sh.get("name"), used))
         ws.sheet_view.rightToLeft = True

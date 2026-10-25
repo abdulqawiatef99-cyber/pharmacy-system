@@ -27,9 +27,9 @@ def _member(db: Database, ctx: Context, user_id: str) -> dict:
 
 def _check_pin_format(pin: str) -> None:
     if not pin.isdigit() or not 4 <= len(pin) <= 6:
-        raise ValidationFailed("الرقم السري من 4 لـ 6 أرقام")
+        raise ValidationFailed("الرقم السري من 4 إلى 6 أرقام")
     if len(set(pin)) == 1 or pin in WEAK_PINS:
-        raise ValidationFailed("الرقم السري ده سهل يتخمّن، اختار غيره")
+        raise ValidationFailed("هذا الرقم السري سهل التخمين، اختر غيره")
 
 
 # -------------------------------------------------------------------------- PIN
@@ -49,13 +49,13 @@ def verify_pin(db: Database, user_id: str, pin: str, *, org_id: str) -> dict:
     """Raises on a wrong PIN; 5 wrong tries lock the PIN for 15 minutes."""
     u = db.one("SELECT u.* FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
                " WHERE u.id=? AND u.is_active=1 AND m.is_active=1", (org_id, user_id))
-    generic = Unauthorized("الرقم السري غلط", code="invalid_pin")
+    generic = Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
     if u is None or not u["pin_hash"]:
         security.dummy_verify(str(pin))
         raise generic
     now = accounts.utcnow()
     if u["pin_locked_until"] and accounts.parse_iso(u["pin_locked_until"]) > now:
-        raise Unauthorized("الرقم السري اتقفل مؤقتًا بسبب محاولات غلط، استنى ربع ساعة", code="pin_locked")
+        raise Unauthorized("أُوقف الرقم السري مؤقتًا بسبب محاولات خاطئة، انتظر ربع ساعة", code="pin_locked")
     if not security.verify_password(str(pin), u["pin_hash"]):
         with db.transaction():
             failed = u["pin_failed"] + 1
@@ -76,7 +76,7 @@ def pin_login(db: Database, org_id: str, user_id: str, pin: str, *, ip: str | No
     verify_pin(db, user_id, pin, org_id=org_id)
     org = db.one("SELECT status FROM organizations WHERE id=?", (org_id,))
     if not org or org["status"] != "active":
-        raise Unauthorized("الرقم السري غلط", code="invalid_pin")
+        raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
     with db.transaction():
         return accounts._new_session(db, user_id, org_id, ip, user_agent, "auth.pin_login")
 
@@ -157,7 +157,7 @@ def access_matrix(db: Database, ctx: Context, user_id: str) -> dict:
 
 def _guard_owner(m: dict) -> None:
     if m["role_code"] == "owner":
-        raise Forbidden("الصاحب صلاحياته كاملة ومحدش يقدر يغيّرها", code="owner_locked")
+        raise Forbidden("للمالك كل الصلاحيات ولا يستطيع أحد تغييرها", code="owner_locked")
 
 
 def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str) -> dict:
@@ -166,7 +166,7 @@ def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str
     if perm not in PERMISSIONS or mode not in ("grant", "deny", "default"):
         raise ValidationFailed("بيانات غير صحيحة")
     if perm == "users.manage" and mode == "grant":
-        raise Forbidden("إدارة المستخدمين للصاحب بس", code="owner_only")
+        raise Forbidden("إدارة المستخدمين للمالك فقط", code="owner_only")
     m = _member(db, ctx, user_id)
     _guard_owner(m)
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
@@ -204,7 +204,7 @@ def _bp(v) -> int | None:
     except (TypeError, ValueError):
         raise ValidationFailed("نسبة الخصم غير صحيحة")
     if not 0 <= v <= 10000:
-        raise ValidationFailed("نسبة الخصم من 0 لـ 100%")
+        raise ValidationFailed("نسبة الخصم من 0 إلى 100%")
     return v
 
 
@@ -236,7 +236,7 @@ def set_role_discount(db: Database, ctx: Context, role_code: str, max_discount_b
 def set_role(db: Database, ctx: Context, user_id: str, role_code: str) -> dict:
     ctx.require("users.manage")
     if role_code == "owner":
-        raise Forbidden("الصيدلية ليها صاحب واحد بس", code="one_owner")
+        raise Forbidden("للصيدلية مالك واحد فقط", code="one_owner")
     m = _member(db, ctx, user_id)
     _guard_owner(m)
     r = db.one("SELECT id FROM roles WHERE org_id=? AND code=?", (ctx.org_id, role_code))
@@ -268,7 +268,7 @@ def reset_password(db: Database, ctx: Context, user_id: str, password: str) -> N
     ctx.require("users.manage")
     m = _member(db, ctx, user_id)
     if m["role_code"] == "owner" and user_id != ctx.user_id:
-        raise Forbidden("كلمة سر الصاحب بيغيرها هو بس", code="owner_locked")
+        raise Forbidden("كلمة سر المالك يغيّرها هو فقط", code="owner_locked")
     problems = security.check_password_policy(password)
     if problems:
         raise ValidationFailed("؛ ".join(problems))
@@ -284,7 +284,7 @@ def reset_password(db: Database, ctx: Context, user_id: str, password: str) -> N
 def add_user(db: Database, ctx: Context, *, username: str, full_name: str, password: str,
              role_code: str, pin: str | None = None) -> str:
     if role_code == "owner":
-        raise Forbidden("الصيدلية ليها صاحب واحد بس", code="one_owner")
+        raise Forbidden("للصيدلية مالك واحد فقط", code="one_owner")
     if pin:
         _check_pin_format(str(pin))
     uid = accounts.add_user(db, ctx, username=username, full_name=full_name, password=password,
@@ -342,7 +342,7 @@ def set_prefs(db: Database, ctx: Context, changes: dict) -> dict:
                     raise ValidationFailed("اللون غير صحيح")
                 cr = contrast_with_white(v)
                 if cr < 4.5:
-                    raise ValidationFailed(f"اللون ده فاتح: الكلام الأبيض عليه مش هيتقري (التباين {cr} والمطلوب 4.5 على الأقل)",
+                    raise ValidationFailed(f"هذا اللون فاتح: لن يُقرأ النص الأبيض عليه (التباين {cr} والمطلوب 4.5 على الأقل)",
                                            code="low_contrast", details={"contrast": cr})
                 new["accent"] = v
     with db.transaction():

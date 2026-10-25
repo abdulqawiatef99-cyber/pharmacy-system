@@ -63,9 +63,9 @@ PARTY_HEADERS: dict[str, list[str]] = {
     "name": ["الاسم", "اسم المورد", "المورد", "اسم العميل", "العميل", "name", "supplier",
              "supplier name", "customer", "customer name"],
     "code": ["كود", "الكود", "كود المورد", "كود العميل", "رقم", "code", "id"],
-    "phone": ["التليفون", "تليفون", "الموبايل", "موبايل", "الهاتف", "رقم الهاتف", "phone", "mobile", "tel"],
-    "phone2": ["موبايل 2", "موبايل2", "تليفون 2", "تليفون2", "الموبايل 2", "رقم اخر", "phone 2", "phone2", "mobile 2"],
-    "phone3": ["موبايل 3", "موبايل3", "تليفون 3", "تليفون3", "الموبايل 3", "phone 3", "phone3", "mobile 3"],
+    "phone": ["التليفون", "تليفون", "الهاتف", "هاتف", "الهاتف", "رقم الهاتف", "phone", "mobile", "tel"],
+    "phone2": ["هاتف 2", "موبايل2", "تليفون 2", "تليفون2", "الموبايل 2", "رقم اخر", "phone 2", "phone2", "mobile 2"],
+    "phone3": ["هاتف 3", "موبايل3", "تليفون 3", "تليفون3", "الموبايل 3", "phone 3", "phone3", "mobile 3"],
     "name_alt": ["الاسم الانجليزي", "اسم انجليزي", "الاسم التاني", "اسم اخر", "english name", "name en", "name 2"],
     "address1": ["العنوان", "عنوان", "العنوان 1", "عنوان 1", "address", "address 1", "address1"],
     "address2": ["العنوان 2", "عنوان 2", "عنوان اخر", "address 2", "address2"],
@@ -101,8 +101,8 @@ LABELS_AR = {"code": "الكود", "name_en": "اسم الصنف", "name_ar": "�
              "min_stock": "حد الطلب", "is_imported": "محلي/مستورد", "is_drug": "دواء/غير دواء",
              "location": "الموقع", "name": "الاسم", "phone": "التليفون", "supplier_type": "نوع المورد",
              "discount_local": "خصم محلي", "discount_imported": "خصم مستورد", "balance": "الرصيد",
-             "credit_limit": "حد الائتمان", "notes": "ملاحظات", "phone2": "موبايل 2", "phone3": "موبايل 3",
-             "name_alt": "اسم تاني", "address1": "العنوان", "address2": "العنوان 2"}
+             "credit_limit": "حد الائتمان", "notes": "ملاحظات", "phone2": "هاتف 2", "phone3": "هاتف 3",
+             "name_alt": "اسم آخر", "address1": "العنوان", "address2": "العنوان 2"}
 
 
 def _detect(rows: list[list], kind: str = "items") -> tuple[int, dict[int, str]] | None:
@@ -156,8 +156,8 @@ def template_xlsx(kind: str) -> bytes:
     ws.append([LABELS_AR[f] for f in order])
     ins = wb.create_sheet("تعليمات")
     req = {f for g in REQUIRED[kind] for f in g}
-    notes = {"qty": "بالعلبة افتراضيًا (أو بالوحدة الصغرى لو اخترت ذلك عند الرفع)",
-             "expiry": "مثال: 05/2027 أو 31/05/2027 — لو مش معروفة سيبها فاضية (ممنوع التخمين)",
+    notes = {"qty": "بالعلبة افتراضيًا (أو بالوحدة الصغرى إذا اخترت ذلك عند الرفع)",
+             "expiry": "مثال: 05/2027 أو 31/05/2027 — إذا لم تكن معروفة فاتركها فارغة (ممنوع التخمين)",
              "cost": "تكلفة العلبة (أو الوحدة حسب اختيارك)", "public_price": "بالجنيه للعلبة",
              "balance": "بالجنيه — للمورد: المستحق له علينا. للعميل: المستحق عليه لنا",
              "pack_size": "عدد الشرائط/الوحدات في العلبة", "is_imported": "محلي أو مستورد",
@@ -167,7 +167,7 @@ def template_xlsx(kind: str) -> bytes:
     for f in order:
         ins.append([LABELS_AR[f], "نعم" if f in req else "لا", notes.get(f, "")])
     ins.append([])
-    ins.append(["ممكن ترفع ملف التصدير من البرنامج القديم كما هو؛ لو أسماء الأعمدة مختلفة هتظهرلك صفحة لربطها مرة واحدة."])
+    ins.append(["يمكنك رفع ملف التصدير من البرنامج القديم كما هو؛ وإذا اختلفت أسماء الأعمدة ستظهر لك صفحة لربطها مرة واحدة."])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -215,7 +215,7 @@ class DataImport:
             ctx.require("customers.manage")
         options = {"qty_unit": "pack", **(options or {})}
         if options["qty_unit"] not in ("pack", "base"):
-            raise ValidationFailed("وحدة الكمية لازم تكون pack أو base")
+            raise ValidationFailed("وحدة الكمية يجب أن تكون pack أو base")
         rows = _read(data, filename, None if mapping else kind)
         if source_system == "estock" and not mapping:
             rows = estock.normalize(rows, kind, options) or rows
@@ -244,7 +244,7 @@ class DataImport:
         sha = hashlib.sha256(data).hexdigest()
         if self.db.one("SELECT 1 FROM import_runs WHERE org_id=? AND kind=? AND file_sha256=?"
                        " AND status='applied'", (ctx.org_id, kind, sha)):
-            raise Conflict("الملف ده اتستورد قبل كده", code="already_applied")
+            raise Conflict("هذا الملف استُورد من قبل", code="already_applied")
 
         run_id = new_id()
         planned = []
@@ -604,7 +604,7 @@ class DataImport:
             if _whole_units(Decimal(d["qty"]), pack, mue) is None:
                 return "error", item_id, [{"code": "fractional_qty_needs_pack_size",
                                            "qty": d["qty"], "pack_size": pack,
-                                           "hint": "حدد عدد الوحدات (الشرايط) في العلبة للصنف ده الأول"}]
+                                           "hint": "حدد عدد الوحدات (الشرايط) في العلبة لهذا الصنف أولًا"}]
             exact = Decimal(d["qty"]) * pack
             if abs(exact - exact.to_integral_value(ROUND_HALF_UP)) > Decimal("0.0006") * pack:
                 issues.append({"code": "rounded_units", "from": str(exact),
@@ -671,7 +671,7 @@ class DataImport:
         if not row:
             raise NotFound("السطر غير موجود")
         if row["action"] == "error" and decision != "skip":
-            raise ValidationFailed("السطر فيه خطأ؛ صحح الملف أو تجاهل السطر")
+            raise ValidationFailed("السطر به خطأ؛ صحّح الملف أو تجاهل السطر")
         if decision.startswith("link:"):
             target_table = {"suppliers": "suppliers", "customers": "customers"}.get(run["kind"], "items")
             if not self.db.one(f"SELECT 1 FROM {target_table} WHERE id=? AND org_id=?",
@@ -708,14 +708,14 @@ class DataImport:
                 "SELECT * FROM import_rows WHERE run_id=? ORDER BY row_no", (run_id,))]
             pending = [r["row_no"] for r in rows if r["action"] == "review" and not r["decision"]]
             if pending:
-                raise Conflict("فيه أسطر محتاجة قرار قبل التطبيق", code="pending_review",
+                raise Conflict("توجد أسطر تحتاج إلى قرار قبل التطبيق", code="pending_review",
                                details={"rows": pending[:50], "count": len(pending)})
             if run["kind"] == "opening_stock":
                 frac = [r["row_no"] for r in rows if r["decision"] != "skip" and any(
                     i["code"] == "fractional_qty_needs_pack_size" for i in json.loads(r["issues"]))]
                 if frac:
-                    raise ValidationFailed("فيه أصناف كميتها كسور والعبوة مش متحدد فيها عدد الوحدات؛"
-                                           " حدد عدد الوحدات أو تجاهل الأسطر دي صراحة",
+                    raise ValidationFailed("توجد أصناف كميتها كسور وعدد الوحدات في عبوتها غير محدد؛"
+                                           " حدد عدد الوحدات أو تجاهل هذه الأسطر صراحةً",
                                            code="fractional_qty", details={"rows": frac[:50],
                                                                           "count": len(frac)})
             options = json.loads(run["options"])

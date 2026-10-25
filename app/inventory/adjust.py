@@ -18,11 +18,11 @@ from . import service as inv
 REASONS = {
     "expired": "منتهي الصلاحية",
     "damaged": "تالف / هالك",
-    "lost": "مفقود / مش موجود",
-    "entry_error": "غلط في الإدخال",
-    "found": "زيادة لقيناها",
+    "lost": "مفقود / غير موجود",
+    "entry_error": "خطأ في الإدخال",
+    "found": "زيادة وُجدت",
     "recall": "سحب من هيئة الدواء",
-    "other": "سبب تاني",
+    "other": "سبب آخر",
 }
 DESTROY = ("expired", "damaged")          # stock that is physically destroyed
 UP_OK = ("found", "entry_error", "other")  # reasons that can add stock
@@ -39,11 +39,11 @@ def avg_cost(db: Database, org_id: str, branch_id: str, item_id: str) -> Decimal
 
 def check_reason(reason: str, note: str | None, up: bool) -> str | None:
     if reason not in REASONS:
-        raise ValidationFailed("اختار السبب")
+        raise ValidationFailed("اختر السبب")
     if up and reason not in UP_OK:
-        raise ValidationFailed("السبب ده لنقص الرصيد بس")
+        raise ValidationFailed("هذا السبب لنقص الرصيد فقط")
     if not up and reason == "found":
-        raise ValidationFailed("السبب ده لزيادة الرصيد بس")
+        raise ValidationFailed("هذا السبب لزيادة الرصيد فقط")
     note = (note or "").strip()[:200] or None
     if reason == "other" and not note:
         raise ValidationFailed("اكتب السبب")
@@ -85,7 +85,7 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
     if not item:
         raise NotFound("الصنف غير موجود")
     if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
-        raise NotFound("التشغيلة مش بتاعة الصنف ده")
+        raise NotFound("التشغيلة لا تخص هذا الصنف")
     current = inv.batch_qty(db, ctx.org_id, ctx.branch_id, item_id, batch_id) if batch_id else \
         db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND branch_id=? AND item_id=?",
                (ctx.org_id, ctx.branch_id, item_id))["q"]
@@ -94,7 +94,7 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
             raise ValidationFailed("الرصيد الجديد غير صحيح")
         qty_delta = set_to - current
     if not isinstance(qty_delta, int) or qty_delta == 0:
-        raise ValidationFailed("مفيش تغيير في الرصيد")
+        raise ValidationFailed("لا يوجد تغيير في الرصيد")
     note = check_reason(reason, note, qty_delta > 0)
     name = item["name_en"] or item["name_ar"]
     with db.transaction():
@@ -123,7 +123,7 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
     try:
         d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
     except (TypeError, ValueError):
-        raise ValidationFailed("اختار الفترة")
+        raise ValidationFailed("اختر الفترة")
     rows = db.all(
         "SELECT m.created_at, m.movement_type, m.reason, m.qty_delta, m.unit_cost, m.note, m.ref_type, m.ref_id,"
         " i.id item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, b.batch_no, b.expiry_date, u.full_name by_name,"

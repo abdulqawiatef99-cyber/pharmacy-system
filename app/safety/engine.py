@@ -136,7 +136,7 @@ class SafetyEngine:
         if severity not in ("critical", "high", "moderate", "low"):
             raise ValidationFailed("مستوى خطورة غير صحيح")
         if rule_type in ("interaction", "max_qty", "split_policy") and not source_id:
-            raise ValidationFailed("القواعد السريرية لازم يكون لها مرجع موثق", code="source_required")
+            raise ValidationFailed("القواعد السريرية يجب أن يكون لها مرجع موثق", code="source_required")
         if source_id and not self.db.one("SELECT 1 FROM knowledge_sources WHERE id=? AND"
                                          " (org_id IS NULL OR org_id=?)", (source_id, ctx.org_id)):
             raise NotFound("المرجع غير موجود")
@@ -192,7 +192,7 @@ class SafetyEngine:
                     " m.is_active=1 AND u.is_active=1", (ctx.org_id, ctx.user_id))
                     if "safety.approve" in json.loads(m["permissions"])]
                 if others:
-                    raise Forbidden("لازم مستخدم آخر مخوّل يعتمد القاعدة (مراجعة رباعية العين)",
+                    raise Forbidden("يجب أن يعتمد القاعدة مستخدم آخر مخوّل (مراجعة رباعية العين)",
                                     code="four_eyes")
                 if len((self_approval_reason or "").strip()) < 10:
                     raise ValidationFailed("أنت الوحيد المخوّل؛ اكتب سبب الاعتماد الذاتي ومن راجع القاعدة",

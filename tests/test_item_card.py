@@ -40,7 +40,7 @@ class TestCard(Base):
         self.ph = self.login("pharm", PW)
 
     def test_defaults_and_card(self):
-        self.assertTrue(self.cats["تلاجة"]["no_return"] and self.cats["تلاجة"]["mark"] == "fridge")
+        self.assertTrue(self.cats["ثلاجة"]["no_return"] and self.cats["ثلاجة"]["mark"] == "fridge")
         self.assertEqual(self.cats["حقن"]["mark"], "injection")
         c = card.card(self.db, self.ctx, self.pan)
         self.assertEqual(c["stock_qty"], 20)
@@ -53,7 +53,7 @@ class TestCard(Base):
 
     def test_sections_need_owner_for_no_return(self):
         with self.assertRaises(Forbidden):                     # into a no-return section
-            card.set_category(self.db, self.ph, [self.pan], self.cats["تلاجة"]["id"])
+            card.set_category(self.db, self.ph, [self.pan], self.cats["ثلاجة"]["id"])
         card.set_category(self.db, self.ph, [self.pan], self.cats["أدوية"]["id"])      # ordinary: fine
         with self.assertRaises(Forbidden):
             card.save_category(self.db, self.ph, {"no_return": 1}, self.cats["أدوية"]["id"])
@@ -63,7 +63,7 @@ class TestCard(Base):
         self.assertIn("no_return_change", kinds)
 
     def test_no_return_blocks_returns_even_for_the_seller(self):
-        card.set_category(self.db, self.ctx, [self.pan], self.cats["تلاجة"]["id"])
+        card.set_category(self.db, self.ctx, [self.pan], self.cats["ثلاجة"]["id"])
         self.cd.open(self.ctx, 0)
         sale = self.sell(ctx=self.ph)
         line = {sale["lines"][0]["id"]: 1}
@@ -88,9 +88,9 @@ class TestCardAPI(APICase):
         card.ensure_default_categories(self.db)
         self.http_login()
         cats = self.c.get("/api/categories").json()["categories"]
-        fridge = next(c for c in cats if c["name"] == "تلاجة")
+        fridge = next(c for c in cats if c["name"] == "ثلاجة")
         r = self.c.post(f"/api/items/{self.pan}/category", json={"category_id": fridge["id"]}, headers=H)
-        self.assertEqual(r.json()["category"], "تلاجة")
+        self.assertEqual(r.json()["category"], "ثلاجة")
         r = self.c.post(f"/api/items/{self.pan}/barcode", json={"barcode": "6221025099998"}, headers=H)
         self.assertEqual(len(r.json()["barcodes"]), 1)
         r = self.c.post(f"/api/items/{self.pan}/barcode", json={"barcode": "6221025099998", "remove": True}, headers=H)

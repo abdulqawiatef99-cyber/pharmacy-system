@@ -10,11 +10,12 @@ import re
 from ..core.permissions import Context
 from ..db import Database
 
+OLD_NAMES = {"ثلاجة": "تلاجة"}
 W = lambda *ws: re.compile(r"(?<![A-Z])(?:" + "|".join(ws) + r")(?![A-Z])")  # noqa: E731
 
 # (default section name, English-name pattern, Arabic-name pattern, dosage forms) — first match wins
 RULES = [
-    ("تلاجة", W("INSULIN", "LANTUS", "LEVEMIR", "TOUJEO", "MIXTARD", "INSULATARD", "ACTRAPID", "NOVORAPID", "NOVOMIX",
+    ("ثلاجة", W("INSULIN", "LANTUS", "LEVEMIR", "TOUJEO", "MIXTARD", "INSULATARD", "ACTRAPID", "NOVORAPID", "NOVOMIX",
                "HUMALOG", "HUMULIN", "APIDRA", "TRESIBA", "RYZODEG", "OZEMPIC", "VICTOZA", "TRULICITY", "SAXENDA",
                "VACCINE", "VACC", "ERYTHROPOIETIN", "EPREX", "RECORMON", "NEUPOGEN", "CLEXANE", "INNOHEP"),
      re.compile(r"انسولين|أنسولين|فاكسين|مصل|طعم"), ()),
@@ -45,6 +46,9 @@ def suggest(db: Database, ctx: Context, show: int = 300) -> dict:
     ctx.require("items.write")
     cats = {r["name"]: dict(r) for r in db.all("SELECT id, name, no_return, mark FROM categories WHERE org_id=? AND is_active=1",
                                                 (ctx.org_id,))}
+    for new, old in OLD_NAMES.items():             # sections created before the wording change keep working
+        if new not in cats and old in cats:
+            cats[new] = cats[old]
     groups: dict[str, list] = {}
     left = 0
     for it in db.all("SELECT id, name_en, name_ar, dosage_form FROM items WHERE org_id=? AND status='active' AND category_id IS NULL",
@@ -62,7 +66,7 @@ def suggest(db: Database, ctx: Context, show: int = 300) -> dict:
             continue
         groups.setdefault(hit, []).append({"id": it["id"], "name_en": it["name_en"], "name_ar": it["name_ar"]})
     # every id (to apply), but only the first `show` names to review on screen (light on weak computers)
-    out = [{"category_id": cats[n]["id"], "category": n, "no_return": cats[n]["no_return"], "mark": cats[n]["mark"],
+    out = [{"category_id": cats[n]["id"], "category": cats[n]["name"], "no_return": cats[n]["no_return"], "mark": cats[n]["mark"],
             "count": len(groups[n]), "ids": [x["id"] for x in groups[n]], "items": groups[n][:show]}
            for n, *_ in RULES if n in groups]
     return {"groups": out, "unmatched": left}

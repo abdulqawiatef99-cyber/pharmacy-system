@@ -23,7 +23,7 @@ def clean_phone(v) -> str | None:
     if not s:
         return None
     if not re.fullmatch(r"\+?\d{3,15}", s):
-        raise ValidationFailed(f"رقم الموبايل مش صحيح: {v}")
+        raise ValidationFailed(f"رقم الهاتف غير صحيح: {v}")
     return s
 
 
@@ -102,7 +102,7 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
                 db.execute(f"UPDATE customers SET {', '.join(f'{k}=?' for k in ch)} WHERE id=?", (*ch.values(), cid))
             except Exception as e:
                 if "UNIQUE" in str(e):
-                    raise Conflict("رقم الموبايل مسجل لعميل تاني") from e
+                    raise Conflict("رقم الهاتف مسجل لعميل آخر") from e
                 raise
             audit.record(db, ctx, "customer.update", "customer", cid, before={k: c[k] for k in ch}, after=ch)
     return profile(db, ctx, cid)
@@ -185,7 +185,7 @@ def prepare_refill(db: Database, ctx: Context, cid: str) -> str:
             continue                     # not enough stock: left out, the screen shows it as missing
     if not added:
         s.discard(ctx, sid)
-        raise Conflict("مفيش ولا صنف من الطلب الشهري متوفر", code="nothing_in_stock")
+        raise Conflict("لا يتوفر أي صنف من الطلب الشهري", code="nothing_in_stock")
     return sid
 
 
@@ -198,7 +198,7 @@ def mark_refilled(db: Database, sale_id: str) -> None:
                " (SELECT item_id FROM sale_lines WHERE sale_id=?)", (s["completed_at"], s["customer_id"], sale_id))
 
 
-REMINDER_TEXT = "أهلاً {name}، {when}. تحب نجهزهولك؟ ابعتلنا هنا ونوصلهولك."
+REMINDER_TEXT = "أهلًا {name}، {when}. هل تحب أن نجهّزه لك؟ راسلنا هنا ونوصله إليك."
 
 
 def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None = None) -> dict:
@@ -209,17 +209,17 @@ def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None =
     ctx.require("customers.manage")
     p = profile(db, ctx, cid, today)
     if not p["whatsapp_ok"]:
-        raise Conflict("العميل مش موافق على رسايل واتساب")
+        raise Conflict("العميل لا يوافق على رسائل واتساب")
     if not p["wa"]:
-        raise ValidationFailed("مفيش رقم موبايل صالح للواتساب")
+        raise ValidationFailed("لا يوجد رقم هاتف صالح لواتساب")
     from ..printing import settings as ps
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))
     pharmacy = ps.get(db, ctx.org_id).get("title") or (org["name"] if org else "الصيدلية")
     due = min((r["due"] for r in p["refills"]), default=None)
     today = today or date.today()
-    base = f"ميعاد طلبك الشهري من {pharmacy}"
-    when = (f"النهارده {base}" if due == today.isoformat() else f"{base} عدّى" if due and due < today.isoformat()
-            else f"{base} يوم {due}" if due else f"{base} قرّب")
+    base = f"موعد طلبك الشهري من {pharmacy}"
+    when = (f"اليوم {base}" if due == today.isoformat() else f"{base} مرّ" if due and due < today.isoformat()
+            else f"{base} يوم {due}" if due else f"{base} اقترب")
     text = REMINDER_TEXT.format(name=p["name"].strip(), when=when)
     with db.transaction():
         db.execute("UPDATE customers SET reminded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (cid,))

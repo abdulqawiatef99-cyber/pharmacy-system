@@ -13,7 +13,7 @@ class V2(Base):
         super().setUp()
         channels.ensure_defaults(self.db)
         ch = {c["name"]: c["id"] for c in channels.listing(self.db, self.ctx)}
-        self.visa, self.insta = ch["مكنة الفيزا"], ch["إنستاباي"]
+        self.visa, self.insta = ch["جهاز البطاقات"], ch["إنستاباي"]
         self.cd.open(self.ctx, 10000)
 
     def draft(self, ctx=None, units=2):
@@ -33,11 +33,11 @@ class TestPayments(V2):
         r = self.done(d, [{"method": "cash", "amount": 1000}, {"method": "card", "amount": 2000, "channel_id": self.visa},
                           {"method": "transfer", "amount": 1000, "channel_id": self.insta}])
         self.assertEqual((r["paid_cash"], r["paid_card"], r["paid_transfer"]), (1000, 2000, 1000))
-        self.assertEqual([p["channel"] for p in r["payments"]], [None, "مكنة الفيزا", "إنستاباي"])
+        self.assertEqual([p["channel"] for p in r["payments"]], [None, "جهاز البطاقات", "إنستاباي"])
         sm = self.cd.summary(self.ctx)
         self.assertEqual(sm["expected_cash"], 11000)                     # only cash in the drawer
         self.assertEqual({(b["method"], b["channel"]): b["amount"] for b in sm["by_channel"]},
-                         {("card", "مكنة الفيزا"): 2000, ("transfer", "إنستاباي"): 1000})
+                         {("card", "جهاز البطاقات"): 2000, ("transfer", "إنستاباي"): 1000})
 
     def test_machine_or_wallet_required_and_totals_must_match(self):
         d = self.draft()
@@ -157,5 +157,5 @@ class TestShiftAPI(APICase):
         r = self.c.post("/api/cash/close", json={"denominations": {"5000": 1}}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         page = self.c.get(f"/shift-report/{r.json()['id']}")
-        self.assertIn("تقرير تقفيل الشيفت", page.text)
-        self.assertIn("مظبوط", page.text)
+        self.assertIn("تقرير إغلاق الوردية", page.text)
+        self.assertIn("مطابق", page.text)
