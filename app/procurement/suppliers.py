@@ -214,7 +214,7 @@ def shortages(db: Database, ctx: Context, today: date | None = None) -> list[dic
         "  (SELECT sp.name FROM purchase_invoice_lines pl JOIN purchase_invoices p ON p.id=pl.invoice_id JOIN suppliers sp"
         "   ON sp.id=p.supplier_id WHERE pl.item_id=i.id AND p.status='approved' ORDER BY p.approved_at DESC LIMIT 1) last_supplier"
         " FROM items i LEFT JOIN st ON st.item_id=i.id LEFT JOIN sold ON sold.item_id=i.id"
-        " WHERE i.org_id=? AND i.status='active' AND (i.shortage_at IS NOT NULL OR (i.min_stock>0 AND coalesce(st.q,0)<=i.min_stock)"
+        " WHERE i.org_id=? AND i.status='active' AND i.is_service=0 AND (i.shortage_at IS NOT NULL OR (i.min_stock>0 AND coalesce(st.q,0)<=i.min_stock)"
         "  OR (coalesce(st.q,0)<=0 AND coalesce(sold.q,0)>0))"
         " ORDER BY i.shortage_at IS NULL, coalesce(sold.q,0) DESC LIMIT 500",
         (ctx.org_id, ctx.branch_id, ctx.org_id, since, ctx.org_id))

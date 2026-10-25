@@ -940,7 +940,7 @@ async function viewItem(id) {
     <div><a href="#/items">← الأصناف</a>
       <h1 class="ltr-name">${esc(c.name_en || c.name_ar)}</h1>
       ${c.name_en && c.name_ar ? `<p class="muted">${esc(c.name_ar)}</p>` : ""}
-      <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}${c.rx_required ? `<span class="badge b-err">📋 بروشتة بس</span>` : ""}${c.misuse_risk ? `<span class="badge b-warn">⚠ بيساء استخدامه</span>` : ""}${c.sale_note ? `<span class="badge b-info">📝 ${esc(c.sale_note)}</span>` : ""}
+      <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}${c.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${c.hidden ? `<span class="badge b-warn">🔒 مخفي</span>` : ""}${c.hide_on_receipt ? `<span class="badge">🙈 مش في الإيصال</span>` : ""}${c.rx_required ? `<span class="badge b-err">📋 بروشتة بس</span>` : ""}${c.misuse_risk ? `<span class="badge b-warn">⚠ بيساء استخدامه</span>` : ""}${c.sale_note ? `<span class="badge b-info">📝 ${esc(c.sale_note)}</span>` : ""}
         ${c.no_return ? `<span class="chip mk-nr">✕ مالوش مرتجع ولا استبدال</span>` : ""}
         ${c.manufacturer ? `<span class="chip">${esc(c.manufacturer)}</span>` : ""}${c.code ? `<span class="chip">كود ${esc(c.code)}</span>` : ""}
         ${c.shortage_at ? `<span class="badge b-warn">⚠ متعلّم ناقص من ${esc(c.shortage_at)}${c.shortage_by_name ? ` — ${esc(c.shortage_by_name)}` : ""}</span>` : ""}</div></div>
@@ -1053,6 +1053,10 @@ async function viewItemEdit(id) {
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
     </div>
+    <h2 class="mt">نوع الصنف</h2>
+    <div class="row"><label class="chk"><input type="checkbox" name="is_service" ${it.is_service ? "checked" : ""}> 🛎 خدمة (بتتباع من غير رصيد: توصيل، قياس ضغط، حقنة…)</label>
+      <label class="chk"><input type="checkbox" name="hide_on_receipt" ${it.hide_on_receipt ? "checked" : ""}> 🙈 اسمه مايظهرش في الإيصال المطبوع</label>
+      ${ME.permissions.includes("items.hidden") ? `<label class="chk"><input type="checkbox" name="hidden" ${it.hidden ? "checked" : ""}> 🔒 صنف مخفي (يظهر ويتباع للي معاه صلاحية "الأصناف المخفية" بس)</label>` : ""}</div>
     <h2 class="mt">تحذير للصيدلي وقت البيع</h2>
     <div class="row"><label class="chk"><input type="checkbox" name="rx_required" ${it.rx_required ? "checked" : ""}> 📋 بيتصرف بروشتة بس (عليه غرامة)</label>
       <label class="chk"><input type="checkbox" name="misuse_risk" ${it.misuse_risk ? "checked" : ""}> ⚠ بيساء استخدامه</label>
@@ -1092,7 +1096,9 @@ async function viewItemEdit(id) {
       active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
       pack_unit_name: v("pack_unit_name") || "علبة", base_unit_name: v("base_unit_name") || "وحدة",
       min_stock: v("min_packs") ? +v("min_packs") * pack : 0, max_stock: v("max_packs") ? +v("max_packs") * pack : null,
-      rx_required: f.rx_required.checked, misuse_risk: f.misuse_risk.checked, sale_note: v("sale_note") || null };
+      rx_required: f.rx_required.checked, misuse_risk: f.misuse_risk.checked, sale_note: v("sale_note") || null,
+      is_service: f.is_service.checked, hide_on_receipt: f.hide_on_receipt.checked, ...(f.hidden ? { hidden: f.hidden.checked } : {}) };
+    if (data.is_service && !id && ["شريط", "وحدة"].includes(data.base_unit_name)) { data.base_unit_name = "مرة"; data.pack_unit_name = "خدمة"; }
     if (v("pack_size") !== undefined) data.pack_size = pack;
     if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
     if (id && data.public_price === it.public_price) delete data.public_price;
@@ -2014,7 +2020,7 @@ function renderCart(findings = null) {
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
       <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""} ${l.line_no === lastNo && s.lines.length > 1 ? "just-added" : ""}">
         <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
-          ${l.item.rx_required ? `<span class="badge b-err" title="بيتصرف بروشتة بس">📋 روشتة</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="بيساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
+          ${l.item.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${l.item.hide_on_receipt ? `<span class="badge" title="اسمه مش هيظهر في الإيصال">🙈</span>` : ""}${l.item.rx_required ? `<span class="badge b-err" title="بيتصرف بروشتة بس">📋 روشتة</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="بيساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية مش متاحة"}</span>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زود">+</button></div></td>

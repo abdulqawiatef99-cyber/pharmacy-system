@@ -130,7 +130,7 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
     ctx.require("items.read")
     it = db.one("SELECT i.*, c.name category, c.no_return, c.mark FROM items i LEFT JOIN categories c"
                 " ON c.id=i.category_id WHERE i.id=? AND i.org_id=?", (item_id, ctx.org_id))
-    if not it:
+    if not it or (it["hidden"] and not ctx.can("items.hidden")):
         raise NotFound("الصنف غير موجود")
     out = dict(it)
     out["barcodes"] = [{"code": b["barcode"], "gtin": valid_gtin(b["barcode"])} for b in db.all(

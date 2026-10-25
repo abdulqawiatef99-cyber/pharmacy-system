@@ -164,7 +164,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None)
     out += [("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
     for l in sale["lines"]:
         it = l["item"]
-        name = (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
+        name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
         out.append(("row", name, m(l["line_total"])))
         out.append(("small", f"{l['qty_base']} {it['base_unit']}", ""))
     out.append(("rule", "", ""))

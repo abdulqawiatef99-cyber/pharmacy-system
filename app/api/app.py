@@ -1691,6 +1691,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
 
         def name(it):
+            if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
+                return "—"
             if cfg["names"] == "ar":
                 return e(it.get("name_ar") or it["name"])
             return e(it.get("name_en") or it["name"])
@@ -1730,6 +1732,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
 
         def name(it):
+            if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
+                return "—"
             if cfg["names"] == "ar":
                 return e(it.get("name_ar") or it["name"])
             if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):

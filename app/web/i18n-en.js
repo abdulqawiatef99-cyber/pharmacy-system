@@ -1503,5 +1503,14 @@ window.I18N_EN = {
 "لسه مفتوحة": "Still open",
 "بيتصرف بروشتة بس": "Prescription only",
 "بيساء استخدامه": "Often misused",
-"بروشتة بس": "Prescription only"
+"بروشتة بس": "Prescription only",
+"نوع الصنف": "Item type",
+"🛎 خدمة (بتتباع من غير رصيد: توصيل، قياس ضغط، حقنة…)": "🛎 Service (sold without stock: delivery, blood pressure, injection…)",
+"🙈 اسمه مايظهرش في الإيصال المطبوع": "🙈 Name not shown on the printed receipt",
+"🛎 خدمة": "🛎 Service",
+"🔒 مخفي": "🔒 Hidden",
+"🙈 مش في الإيصال": "🙈 Not on receipt",
+"اسمه مش هيظهر في الإيصال": "Its name will not show on the receipt",
+"رؤية وبيع الأصناف المخفية": "See and sell hidden items",
+"🔒 صنف مخفي (يظهر ويتباع للي معاه صلاحية \"الأصناف المخفية\" بس)": "🔒 Hidden item (seen and sold only by people with the \"hidden items\" permission)"
 };

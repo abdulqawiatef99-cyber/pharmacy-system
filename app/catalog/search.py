@@ -76,7 +76,15 @@ def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None
 
 
 def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
-    """{'items': [...], 'hint': None | {'kind': 'layout', 'query': 'aspocid'}}"""
+    """{'items': [...], 'hint': None | {'kind': 'layout', 'query': 'aspocid'}}.
+    Hidden items are left out for people without items.hidden."""
+    r = _search(db, ctx, q, limit, category)
+    if not ctx.can("items.hidden"):
+        r["items"] = [i for i in r["items"] if not i.get("hidden")]
+    return r
+
+
+def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
     ctx.require("items.read")
     q = (q or "").strip()[:100]
     if not q:

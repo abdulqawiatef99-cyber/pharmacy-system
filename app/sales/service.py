@@ -269,10 +269,12 @@ class Sales:
                                (item_id, ctx.org_id))
             if not item:
                 raise NotFound("الصنف غير موجود")
+            if item["hidden"] and not ctx.allowed("items.hidden"):
+                raise NotFound("الصنف غير موجود")
             qty = packs * item["pack_size"] + units
             already = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=?"
                                   " AND item_id=?", (sid, item_id))["q"]
-            sellable, expired = self._available(ctx, s["branch_id"], item_id)
+            sellable, expired = (10 ** 9, 0) if item["is_service"] else self._available(ctx, s["branch_id"], item_id)
             if already + qty > sellable:
                 msg = f"الكمية المتاحة للبيع {sellable} وحدة"
                 if expired:
@@ -307,6 +309,11 @@ class Sales:
     # ------------------------------------------------------------ pricing preview
     def _plan(self, ctx: Context, s: dict, line: dict, item: dict) -> list[dict]:
         need = line["qty_base"]
+        if item.get("is_service"):          # sold without stock: one allocation, no batch, no movement
+            pp = item["public_price"]
+            return [{"batch_id": None, "batch_no": None, "expiry_date": None, "qty": need,
+                     "unit_price": unit_price(pp, item["pack_size"]) if pp is not None else None,
+                     "pack_price": pp, "pack_size": item["pack_size"], "price_source": "item"}]
         plan = []
         for b in self._sellable(ctx, s["branch_id"], line["item_id"]):
             if need == 0:
@@ -343,7 +350,8 @@ class Sales:
                          "base_unit": item["base_unit_name"], "pack_unit": item["pack_unit_name"],
                          "active_ingredient": item["active_ingredient"],
                          "rx_required": bool(item.get("rx_required")), "misuse_risk": bool(item.get("misuse_risk")),
-                         "sale_note": item.get("sale_note"),
+                         "sale_note": item.get("sale_note"), "is_service": bool(item.get("is_service")),
+                         "hide_on_receipt": bool(item.get("hide_on_receipt")),
                          "mark": cat["mark"] if cat else None, "no_return": bool(cat["no_return"]) if cat else False}
             if s["status"] == "draft":
                 try:
@@ -476,10 +484,11 @@ class Sales:
                                        " AND item_id=?", (ctx.org_id, s["branch_id"], l["item_id"]))
                 gross = 0
                 for a in plan:
-                    inventory.post_movement(self.db, ctx, item_id=l["item_id"], qty_delta=-a["qty"],
-                                            batch_id=a["batch_id"], movement_type="sale",
-                                            unit_cost=None, ref_type="sale", ref_id=sid,
-                                            ref_line_id=l["id"], branch_id=s["branch_id"])
+                    if not item["is_service"]:
+                        inventory.post_movement(self.db, ctx, item_id=l["item_id"], qty_delta=-a["qty"],
+                                                batch_id=a["batch_id"], movement_type="sale",
+                                                unit_cost=None, ref_type="sale", ref_id=sid,
+                                                ref_line_id=l["id"], branch_id=s["branch_id"])
                     self.db.execute("INSERT INTO sale_allocations (id, sale_line_id, batch_id, qty_base,"
                                     " unit_price, unit_cost, pack_price, pack_size) VALUES (?,?,?,?,?,?,?,?)",
                                     (new_id(), l["id"], a["batch_id"], a["qty"], a["unit_price"],
@@ -649,7 +658,8 @@ class Sales:
                     raise ValidationFailed("الكمية غير صحيحة")
                 others = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=? AND"
                                      " item_id=? AND id<>?", (sid, l["item_id"], line_id))["q"]
-                sellable, _ = self._available(ctx, s["branch_id"], l["item_id"])
+                svc = self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"]
+                sellable, _ = (10 ** 9, 0) if svc else self._available(ctx, s["branch_id"], l["item_id"])
                 if others + qty_base > sellable:
                     raise Conflict(f"الكمية المتاحة للبيع {sellable} وحدة", code="insufficient_stock",
                                    details={"available": sellable})
@@ -743,6 +753,7 @@ class Sales:
                                                  "label": f"مرتجع صنف من قسم «{nr['name']}»"})
                 allocs = [dict(a) for a in self.db.all(
                     "SELECT * FROM sale_allocations WHERE sale_line_id=? ORDER BY rowid DESC", (line_id,))]
+                is_service = bool(self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"])
                 remaining_returnable = sum(a["qty_base"] - a["returned_qty"] for a in allocs)
                 if qty > remaining_returnable:
                     raise Conflict(f"أقصى كمية ممكن ترجع {remaining_returnable}", code="return_exceeds")
@@ -754,10 +765,11 @@ class Sales:
                     take = min(can, left)
                     if take <= 0:
                         continue
-                    inventory.post_movement(self.db, ctx, item_id=l["item_id"], qty_delta=take,
-                                            batch_id=a["batch_id"], movement_type="sale_return",
-                                            ref_type="sale", ref_id=sid, ref_line_id=line_id,
-                                            branch_id=s["branch_id"], note=reason)
+                    if not is_service:
+                        inventory.post_movement(self.db, ctx, item_id=l["item_id"], qty_delta=take,
+                                                batch_id=a["batch_id"], movement_type="sale_return",
+                                                ref_type="sale", ref_id=sid, ref_line_id=line_id,
+                                                branch_id=s["branch_id"], note=reason)
                     self.db.execute("UPDATE sale_allocations SET returned_qty=returned_qty+? WHERE id=?",
                                     (take, a["id"]))
                     kept[a["id"]] -= take
@@ -820,7 +832,8 @@ class Sales:
             if s["returned_total"]:
                 raise Conflict("الفاتورة عليها مرتجع؛ لا يمكن إلغاؤها")
             for a in self.db.all("SELECT a.*, l.item_id FROM sale_allocations a JOIN sale_lines l"
-                                 " ON l.id=a.sale_line_id WHERE l.sale_id=?", (sid,)):
+                                 " ON l.id=a.sale_line_id JOIN items i ON i.id=l.item_id WHERE l.sale_id=? AND i.is_service=0",
+                                 (sid,)):
                 inventory.post_movement(self.db, ctx, item_id=a["item_id"], qty_delta=a["qty_base"],
                                         batch_id=a["batch_id"], movement_type="sale_return",
                                         ref_type="sale_void", ref_id=sid, branch_id=s["branch_id"], note=reason)
