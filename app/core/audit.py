@@ -116,7 +116,7 @@ ACTION_LABELS = {
     "safety.ingredients_verify": "اعتماد مواد فعالة", "safety.rule_approve": "اعتماد قاعدة سلامة", "safety.rule_create": "قاعدة سلامة",
     "safety.rule_disable": "تعطيل قاعدة سلامة", "safety.source_add": "مصدر سلامة", "sale.attach": "صورة تحويل",
     "sale.complete": "بيع", "sale.return": "مرتجع", "sale.transfer_review": "مراجعة تحويل", "sale.void": "إلغاء فاتورة بيع",
-    "settings.line_order": "ترتيب الفاتورة", "settings.receipt": "شكل الإيصال", "settings.return_window": "مدة المرتجع",
+    "settings.line_order": "ترتيب الفاتورة", "settings.receipt": "شكل الإيصال", "settings.return_window": "مدة المرتجع", "settings.ui": "تخصيص الواجهة",
     "therapeutic_group.create": "مجموعة بدائل جديدة", "therapeutic_group.update": "تعديل مجموعة بدائل",
     "therapeutic_group.delete": "حذف مجموعة بدائل",
     "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الهاتف على الشبكة",

@@ -380,7 +380,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def me(req):
         ctx = ctx_of(req)
-        return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx)})
+        from ..core import ui_settings
+        return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx),
+                  "ui": ui_settings.get(db, ctx.org_id)})
+
+    @handler
+    async def ui_settings_api(req):
+        from ..core import ui_settings
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(ui_settings.save(db, ctx, await body(req)))
+        return J(ui_settings.get(db, ctx.org_id))
 
     # ------------------------------------------------------------- people: PIN, approval, users
     def _local_only(req):
@@ -1918,6 +1928,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications", notifications_list),
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
+        Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
         Route("/api/attachments/{id}", attachment_get),
         Route("/api/attachments/{id}/review", attachment_review, methods=["POST"]),
