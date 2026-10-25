@@ -876,7 +876,8 @@ async function viewItems() {
   <section class="panel"><div id="itemsHint"></div>
     ${canW() ? `<div class="row bulk" id="bulk" hidden><b id="bulkN"></b> <select id="bulkCat"><option value="">— اختار قسم —</option>
       ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (مالوش مرتجع)" : ""}</option>`).join("")}<option value="none">شيلهم من أي قسم</option></select>
-      <button class="btn small" id="bulkGo">حطهم في القسم</button> <button class="btn small secondary" id="bulkLabels">اطبع ملصق لكل واحد</button></div>` : ""}
+      <button class="btn small" id="bulkGo">حطهم في القسم</button> <button class="btn small secondary" id="bulkLabels">اطبع ملصق لكل واحد</button>
+      <button class="btn small secondary" data-flag="rx_required">📋 علّمهم "بروشتة بس"</button> <button class="btn small secondary" data-flag="misuse_risk">⚠ علّمهم "بيساء استخدامه"</button></div>` : ""}
     <div class="tablewrap"><table>
     <thead><tr>${canW() ? `<th><input type="checkbox" id="selAll" aria-label="اختار الكل"></th>` : ""}<th>الاسم</th><th>القسم</th><th>العبوة</th><th>سعر الجمهور</th><th>الرصيد</th><th>الكود</th></tr></thead>
     <tbody id="itemsBody"></tbody></table></div></section>`;
@@ -908,6 +909,11 @@ async function viewItems() {
     bulkUi();
   });
   $("#bulkLabels")?.addEventListener("click", () => window.open(`/labels?items=${[...sel].map((x) => `${encodeURIComponent(x)}:1`).join(",")}`, "_blank"));
+  document.querySelectorAll("[data-flag]").forEach((b) => b.addEventListener("click", async () => {
+    if (!sel.size) return toast("اختار الأصناف الأول", true);
+    try { const r = await api("/api/items/flags", { method: "POST", body: { item_ids: [...sel], [b.dataset.flag]: true } }); toast(`✓ اتعلّم ${r.updated} صنف`); load(); }
+    catch (err) { toast(err.message, true); }
+  }));
   $("#bulkGo")?.addEventListener("click", async () => {
     const v = $("#bulkCat").value; if (!v) return toast("اختار القسم", true);
     try { const r = await api("/api/categories/assign", { method: "POST", body: { item_ids: [...sel], category_id: v === "none" ? null : v } });
@@ -934,7 +940,7 @@ async function viewItem(id) {
     <div><a href="#/items">← الأصناف</a>
       <h1 class="ltr-name">${esc(c.name_en || c.name_ar)}</h1>
       ${c.name_en && c.name_ar ? `<p class="muted">${esc(c.name_ar)}</p>` : ""}
-      <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}
+      <div class="row tags">${c.category ? `<span class="chip">${esc(c.category)}</span>` : `<span class="chip">من غير قسم</span>`}${markChip(c.mark)}${c.rx_required ? `<span class="badge b-err">📋 بروشتة بس</span>` : ""}${c.misuse_risk ? `<span class="badge b-warn">⚠ بيساء استخدامه</span>` : ""}${c.sale_note ? `<span class="badge b-info">📝 ${esc(c.sale_note)}</span>` : ""}
         ${c.no_return ? `<span class="chip mk-nr">✕ مالوش مرتجع ولا استبدال</span>` : ""}
         ${c.manufacturer ? `<span class="chip">${esc(c.manufacturer)}</span>` : ""}${c.code ? `<span class="chip">كود ${esc(c.code)}</span>` : ""}
         ${c.shortage_at ? `<span class="badge b-warn">⚠ متعلّم ناقص من ${esc(c.shortage_at)}${c.shortage_by_name ? ` — ${esc(c.shortage_by_name)}` : ""}</span>` : ""}</div></div>
@@ -1047,6 +1053,11 @@ async function viewItemEdit(id) {
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
     </div>
+    <h2 class="mt">تحذير للصيدلي وقت البيع</h2>
+    <div class="row"><label class="chk"><input type="checkbox" name="rx_required" ${it.rx_required ? "checked" : ""}> 📋 بيتصرف بروشتة بس (عليه غرامة)</label>
+      <label class="chk"><input type="checkbox" name="misuse_risk" ${it.misuse_risk ? "checked" : ""}> ⚠ بيساء استخدامه</label>
+      <label class="f grow">ملاحظة تظهر للصيدلي <input name="sale_note" value="${esc(it.sale_note || "")}" placeholder="مثال: اسأل عن الحمل / ممنوع للأطفال تحت سنتين"></label></div>
+    <p class="muted">أي علامة هنا بتطلع للصيدلي في الكاشير ولازم يأكدها قبل البيع، والتأكيد بيتسجل باسمه (تقرير "تحذيرات الأصناف").</p>
     <h2 class="mt">الباركود والكود الدولي</h2>
     <p class="muted">امسح الباركود أو الكود المربع اللي على العلبة هنا. الكود المربع بيتحفظ بالكود الدولي اللي جواه.</p>
     <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
@@ -1080,7 +1091,8 @@ async function viewItemEdit(id) {
     const data = { name_en: v("name_en") || null, name_ar: v("name_ar") || null, manufacturer: v("manufacturer") || null,
       active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
       pack_unit_name: v("pack_unit_name") || "علبة", base_unit_name: v("base_unit_name") || "وحدة",
-      min_stock: v("min_packs") ? +v("min_packs") * pack : 0, max_stock: v("max_packs") ? +v("max_packs") * pack : null };
+      min_stock: v("min_packs") ? +v("min_packs") * pack : 0, max_stock: v("max_packs") ? +v("max_packs") * pack : null,
+      rx_required: f.rx_required.checked, misuse_risk: f.misuse_risk.checked, sale_note: v("sale_note") || null };
     if (v("pack_size") !== undefined) data.pack_size = pack;
     if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
     if (id && data.public_price === it.public_price) delete data.public_price;
@@ -1979,6 +1991,9 @@ document.addEventListener("keydown", (e) => {
 async function addItem(item, packs, units) {
   try {
     SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
+    const added = SALE.lines.find((l) => l.item_id === item.id);
+    if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
+      toast([added.item.rx_required && "📋 بروشتة بس", added.item.misuse_risk && "⚠ بيساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
     $("#posRes").innerHTML = ""; $("#posQ").value = ""; delete $("#posQ").dataset.searched; $("#posQ").focus();
     renderCart(); renderSide();
   } catch (er) { toast(er.message, true); }
@@ -1999,6 +2014,7 @@ function renderCart(findings = null) {
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
       <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""} ${l.line_no === lastNo && s.lines.length > 1 ? "just-added" : ""}">
         <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
+          ${l.item.rx_required ? `<span class="badge b-err" title="بيتصرف بروشتة بس">📋 روشتة</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="بيساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية مش متاحة"}</span>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زود">+</button></div></td>
@@ -2143,7 +2159,7 @@ function refreshTabLabel() {
 function renderFindings(findings) {
   const needs = (f) => ["override", "block", "acknowledge"].includes(f.requires);
   $("#posSafety").innerHTML = `<div class="panel mt"><h2>فحص السلامة الدوائية</h2>
-    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${SEV[f.severity][0]}</span> ${esc(f.message)}
+    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${{ item_rx: "📋 بروشتة بس", item_misuse: "⚠ بيساء استخدامه", item_note: "📝 ملاحظة" }[f.code] || SEV[f.severity][0]}</span> ${esc(f.message)}
       ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
       ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
       ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يتسجل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
@@ -2999,7 +3015,7 @@ async function viewReports() {
   app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1>${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والصاحب.</p>`}
     <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
-  <div id="rSales"></div>${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
+  <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف اللي اتأكدت وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   const sales = async (f, t) => {
     const r = await api(`/api/reports/sales?from=${f}&to=${t}`);
@@ -3024,6 +3040,22 @@ async function viewReports() {
         rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));
   };
   if (can("sales.totals")) wireRange("rRange", (f, t) => sales(f, t).catch((e) => toast(e.message, true)));
+  if (can("sales.totals")) {
+    let W = null;
+    const WL = { item_rx: "📋 بروشتة بس", item_misuse: "⚠ بيساء استخدامه", item_note: "📝 ملاحظة" };
+    wireRange("warnRange", async (f, t) => {
+      try {
+        W = await api(`/api/reports/item-warnings?from=${f}&to=${t}`);
+        $("#warnBox").innerHTML = `<div class="totals">${Object.entries(WL).map(([k, v]) => `<div>${v}<b>${W.counts[k] || 0}</b></div>`).join("")}</div>
+          <div class="tablewrap mt"><table><thead><tr><th>الوقت</th><th>التحذير</th><th>الصيدلي</th><th>اللي كتبه</th><th>الفاتورة</th></tr></thead><tbody>
+          ${W.rows.map((r) => `<tr><td>${esc(dayOf(r.at))} ${hhmm(r.at)}</td><td><span class="badge">${WL[r.finding_code]}</span> ${esc(r.message)}</td><td>${esc(r.by_name || "")}</td><td>${esc(r.reason || "")}</td>
+            <td>${r.sale_no ? `<a href="#/sales/${esc(r.sale_id)}">${r.sale_no}</a>` : r.status === "draft" ? "لسه مفتوحة" : "—"}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">مفيش</td></tr>`}</tbody></table></div>`;
+      } catch (err) { toast(err.message, true); }
+    });
+    wireTools("warn", () => ({ title: "تحذيرات الأصناف", subtitle: rangeText(W.from, W.to), el: $("#rWarn"), sheets: [
+      { name: "التحذيرات", columns: [Tx("الوقت"), Tx("النوع"), Tx("التحذير"), Tx("الصيدلي"), Tx("اللي كتبه"), N("الفاتورة")],
+        rows: W.rows.map((r) => [`${dayOf(r.at)} ${hhmm(r.at)}`, WL[r.finding_code].slice(2), r.message, r.by_name || "", r.reason || "", r.sale_no]) }] }));
+  }
   if (can("costs.read")) {
     let L = null;
     wireRange("lossRange", async (f, t) => {

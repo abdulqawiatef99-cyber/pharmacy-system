@@ -463,6 +463,31 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                qp.get("group") or None))
 
     @handler
+    async def item_flags(req):
+        """Mark many items at once: prescription only / often misused (items.write)."""
+        ctx = ctx_of(req)
+        ctx.require("items.write")
+        b = await body(req)
+        ids = b.get("item_ids")
+        if not isinstance(ids, list) or not ids or len(ids) > 500:
+            raise ValidationFailed("اختار الأصناف (لحد 500 مرة واحدة)")
+        ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk") if k in b}
+        if not ch:
+            raise ValidationFailed("اختار العلامة")
+        marks = ",".join("?" * len(ids))
+        with db.transaction():
+            n = db.execute(f"UPDATE items SET {', '.join(f'{k}=?' for k in ch)} WHERE org_id=? AND id IN ({marks})",
+                           (*ch.values(), ctx.org_id, *ids)).rowcount
+            audit.record(db, ctx, "item.flags", "item", None, after={**ch, "items": n})
+        return J({"updated": n})
+
+    @handler
+    async def warnings_rep(req):
+        from ..sales.service import warnings_report
+        qp = req.query_params
+        return J(warnings_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+
+    @handler
     async def stock_reasons(req):
         from ..inventory import adjust
         from ..procurement import returns
@@ -1875,6 +1900,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
         Route("/api/stock/reasons", stock_reasons),
+        Route("/api/items/flags", item_flags, methods=["POST"]),
+        Route("/api/reports/item-warnings", warnings_rep),
         Route("/api/items/{id}/adjust", item_adjust, methods=["POST"]),
         Route("/api/reports/losses", losses_report),
         Route("/api/supplier-returns", supplier_returns_api, methods=["GET", "POST"]),

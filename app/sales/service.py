@@ -94,6 +94,45 @@ def local_today() -> date:
     return datetime.now().astimezone().date()
 
 
+def item_warnings(db: Database, item_ids: list[str]) -> list[Finding]:
+    """The owner's own marks on items: the pharmacist must confirm each one before the sale
+    completes, and the confirmation is logged with his name (safety_events)."""
+    out = []
+    for iid in dict.fromkeys(item_ids):
+        it = db.one("SELECT id, name_en, name_ar, rx_required, misuse_risk, sale_note FROM items WHERE id=?", (iid,))
+        if not it:
+            continue
+        name = it["name_en"] or it["name_ar"]
+        if it["rx_required"]:
+            out.append(Finding(code="item_rx", severity="high", item_ids=[iid], requires="acknowledge", basis="owner",
+                               message=f"{name}: بيتصرف بروشتة بس (عليه غرامة لو اتصرف من غير روشتة). اتأكد من الروشتة."))
+        if it["misuse_risk"]:
+            out.append(Finding(code="item_misuse", severity="moderate", item_ids=[iid], requires="acknowledge", basis="owner",
+                               message=f"{name}: صنف بيساء استخدامه. اتأكد من الحاجة والكمية."))
+        if it["sale_note"]:
+            out.append(Finding(code="item_note", severity="info", item_ids=[iid], requires="acknowledge", basis="owner",
+                               message=f"{name}: {it['sale_note']}"))
+    return out
+
+
+def warnings_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
+    """Who confirmed which item warning on which sale (owner / manager)."""
+    ctx.require("sales.totals")
+    try:
+        d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    except (TypeError, ValueError):
+        raise ValidationFailed("اختار الفترة")
+    rows = [dict(r) for r in db.all(
+        "SELECT e.at, e.finding_code, e.message, e.reason, u.full_name by_name, s.id sale_id, s.sale_no, s.status"
+        " FROM safety_events e LEFT JOIN users u ON u.id=e.user_id LEFT JOIN sales s ON s.id=e.context_id"
+        " WHERE e.org_id=? AND e.finding_code IN ('item_rx','item_misuse','item_note') AND e.decision='acknowledged'"
+        " AND e.at>=? AND e.at<? ORDER BY e.at DESC", (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))]
+    by = {}
+    for r in rows:
+        by[r["finding_code"]] = by.get(r["finding_code"], 0) + 1
+    return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows, "counts": by}
+
+
 def alloc_gross(qty: int, a: dict) -> int:
     """Price of `qty` units of one allocation: whole packs at the pack price, the rest at the unit
     price. So 3 units of a 100.00 pack of 3 cost exactly 100.00, not 3 x 33.33."""
@@ -303,6 +342,8 @@ class Sales:
                          "form": item["dosage_form"], "pack_size": item["pack_size"],
                          "base_unit": item["base_unit_name"], "pack_unit": item["pack_unit_name"],
                          "active_ingredient": item["active_ingredient"],
+                         "rx_required": bool(item.get("rx_required")), "misuse_risk": bool(item.get("misuse_risk")),
+                         "sale_note": item.get("sale_note"),
                          "mark": cat["mark"] if cat else None, "no_return": bool(cat["no_return"]) if cat else False}
             if s["status"] == "draft":
                 try:
@@ -361,9 +402,10 @@ class Sales:
     # ------------------------------------------------------------ safety + complete
     def safety_check(self, ctx: Context, sid: str) -> list[Finding]:
         s = self.get(ctx, sid)
-        return self.safety.check(ctx, [{"item_id": l["item_id"], "base_qty": l["qty_base"],
-                                        "partial_pack": bool(l["partial_pack"])} for l in s["lines"]],
-                                 context_type="sale", context_id=sid)
+        found = self.safety.check(ctx, [{"item_id": l["item_id"], "base_qty": l["qty_base"],
+                                         "partial_pack": bool(l["partial_pack"])} for l in s["lines"]],
+                                  context_type="sale", context_id=sid)
+        return item_warnings(self.db, [l["item_id"] for l in s["lines"]]) + found   # the owner's marks first
 
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,

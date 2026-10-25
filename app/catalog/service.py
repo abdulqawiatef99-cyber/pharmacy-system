@@ -15,7 +15,7 @@ from .normalize import (dedupe_key, normalize_barcode, normalize_form, normalize
 ITEM_FIELDS = ("code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
                "manufacturer", "is_drug", "is_imported", "vat_bp", "pack_size",
                "base_unit_name", "pack_unit_name", "public_price", "min_stock", "max_stock", "location",
-               "status")
+               "status", "rx_required", "misuse_risk", "sale_note")
 DUPLICATE_SCORE = 0.93
 
 
@@ -92,6 +92,11 @@ def _clean_item(data: dict) -> dict:
                 out[k] = int(out[k])
             except (TypeError, ValueError):
                 raise ValidationFailed(f"قيمة غير صحيحة في الحقل {k}")
+    for k in ("rx_required", "misuse_risk"):
+        if k in out:
+            out[k] = int(bool(out[k]))
+    if "sale_note" in out:
+        out["sale_note"] = (str(out["sale_note"] or "").strip()[:200]) or None
     if out.get("pack_size") is not None and out["pack_size"] < 1:
         raise ValidationFailed("عدد الوحدات في العبوة لازم يكون 1 أو أكثر")
     if out.get("public_price") is not None and out["public_price"] < 0:

@@ -105,7 +105,7 @@ ACTION_LABELS = {
     "expense_schedule.update": "تعديل مصروف مجدول", "import.analyze": "تحليل ملف استيراد", "import.apply": "تطبيق استيراد",
     "import.decide": "قرار في الاستيراد", "import.discard": "إلغاء استيراد", "item.alias_remap": "ربط اسم صنف",
     "item.barcode_add": "إضافة باركود", "item.barcode_remove": "شيل باركود", "item.category": "تغيير قسم صنف",
-    "item.create": "صنف جديد", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
+    "item.create": "صنف جديد", "item.flags": "علامات تحذير أصناف", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
     "payment_channel.save": "مكنة / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
     "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال",
     "procurement.consumption_import": "رفع مبيعات للطلبية", "procurement.offer_eval": "تقييم عرض", "purchase.approve": "اعتماد فاتورة شراء",
