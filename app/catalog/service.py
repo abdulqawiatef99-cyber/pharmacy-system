@@ -161,8 +161,8 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
         for bc in barcodes or []:
             add_barcode(db, ctx, item_id, bc)
         if d.get("public_price") is not None:
-            db.execute("INSERT INTO item_price_history (id, org_id, item_id, public_price, source)"
-                       " VALUES (?,?,?,?,?)", (new_id(), ctx.org_id, item_id, d["public_price"], source))
+            db.execute("INSERT INTO item_price_history (id, org_id, item_id, public_price, source, changed_by)"
+                       " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, item_id, d["public_price"], source, ctx.user_id))
         audit.record(db, ctx, "item.create", "item", item_id, after=d)
     matching.invalidate(ctx.org_id)
     return item_id
@@ -232,8 +232,8 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
 def record_price(db: Database, ctx: Context, item_id: str, new_price: int, old_price: int | None,
                  source: str, ref_id: str | None = None) -> None:
     db.execute("INSERT INTO item_price_history (id, org_id, item_id, public_price, previous_price,"
-               " source, ref_id) VALUES (?,?,?,?,?,?,?)",
-               (new_id(), ctx.org_id, item_id, new_price, old_price, source, ref_id))
+               " source, ref_id, changed_by) VALUES (?,?,?,?,?,?,?,?)",
+               (new_id(), ctx.org_id, item_id, new_price, old_price, source, ref_id, ctx.user_id))
 
 
 def add_barcode(db: Database, ctx: Context, item_id: str, barcode: str) -> str:

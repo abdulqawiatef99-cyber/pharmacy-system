@@ -33,7 +33,7 @@ from starlette.staticfiles import StaticFiles
 from .. import config as config_mod
 from ..catalog import service as catalog
 from ..core import accounts, audit, notify, people
-from ..core.errors import Conflict, DomainError, Forbidden, Unauthorized, ValidationFailed
+from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
@@ -503,6 +503,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def pos_quick(req):
         return J(alts.quick_items(db, ctx_of(req)))
+
+    @handler
+    async def owner_report(req):
+        from ..reports import owner
+        fn = owner.REPORTS.get(req.path_params["kind"])
+        if not fn:
+            raise NotFound("التقرير غير موجود")
+        qp = req.query_params
+        return J(fn(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def warnings_rep(req):
@@ -1934,6 +1943,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/therapeutic-groups/{id}", groups_api, methods=["PUT", "DELETE"]),
         Route("/api/pos/quick", pos_quick),
         Route("/api/reports/item-warnings", warnings_rep),
+        Route("/api/reports/owner/{kind}", owner_report),
         Route("/api/items/{id}/adjust", item_adjust, methods=["POST"]),
         Route("/api/reports/losses", losses_report),
         Route("/api/supplier-returns", supplier_returns_api, methods=["GET", "POST"]),

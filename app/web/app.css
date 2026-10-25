@@ -366,3 +366,5 @@ ul.cols li { break-inside: avoid; }
 .alts h3 { font-size: 0.9375rem; margin-bottom: 4px; }
 .chip .x { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 2px; }
 @media print { .qsale, #altBox { display: none; } }
+.seg2.wrap { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin: 8px 0; }
+.seg2.wrap button { padding: 0 10px; }

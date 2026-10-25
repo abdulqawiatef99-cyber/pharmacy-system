@@ -68,6 +68,10 @@ in stock → expiring within 180 days → dearer → higher margin; `margin_bp` 
 `GET /api/pos/quick` → pinned items then the last 30 days' best sellers (24 max) · `POST /api/items/flags {item_ids, quick_pin}`.
 Adding an item already on a draft sale (same discount) increases that line instead of adding a second one.
 
+**Owner reports** — `GET /api/reports/owner/{kind}?from&to` (local days, up to 400 days, first 5000 rows) with kind:
+`staff` · `customers` · `shifts` (`cash.see_expected`) · `returns` · `discounts` · `prices` · `units` · `unsold` (+`inventory.read`).
+All need `sales.totals`; cost values only with `costs.read`; drawer differences only with `cash.see_expected`.
+
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.

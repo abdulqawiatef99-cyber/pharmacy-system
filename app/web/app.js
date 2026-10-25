@@ -286,6 +286,7 @@ const routes = [
   [/^#\/attendance$/, viewAttendance],
   [/^#\/feedback$/, viewFeedback],
   [/^#\/reports$/, viewReports],
+  [/^#\/owner-reports$/, viewOwnerReports],
   [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
@@ -1779,7 +1780,7 @@ async function checkUpdateBadge() {
 // ------------------------------------------------------------------ sales history / returns
 const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
 const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "");
+const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(I18N.on ? "en-GB" : "ar-EG", { hour: "2-digit", minute: "2-digit" }) : "");
 const dayOf = (iso) => (iso ? isoDay(new Date(iso)) : "");   // local day of a UTC timestamp
 
 async function viewSales() {
@@ -3163,9 +3164,142 @@ function wireTools(key, spec) {
 const M = (label) => ({ label, type: "money" }), N = (label) => ({ label, type: "int" }), Tx = (label) => ({ label }), Dt = (label) => ({ label, type: "date" });
 const rangeText = (f, t) => (f === t ? `يوم ${f}` : `من ${f} لحد ${t}`);
 
+// ------------------------------------------------------------------ owner reports (من تاريخ لتاريخ)
+const Pc = (label) => ({ label, type: "num" });
+const pctTxt = (bp) => (bp == null ? "—" : `${(bp / 100).toFixed(1)}%`);
+const stamp = (iso) => (iso ? `${dayOf(iso)} ${hhmm(iso)}` : "");
+const itq = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
+const OWNER_REPORTS = [
+  { key: "staff", title: "أداء الموظفين", perm: "sales.totals",
+    html: (r) => `<div class="tablewrap"><table><thead><tr><th>الموظف</th><th>الفواتير</th><th>المبيعات</th><th>متوسط الفاتورة</th><th>أصناف/فاتورة</th>
+      <th>الخصم</th><th>نسبة الخصم</th><th>مرتجع عمله</th><th>مرتجع من فواتيره</th><th>فواتير لغاها</th><th>ورديات قفلها</th>${r.see_cash ? "<th>فرق الدرج</th>" : ""}
+      <th>تحذيرات أكدها</th><th>تجاوز سلامة</th><th>ساعات الحضور</th><th>مبيعات/ساعة</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td><b>${esc(x.name)}</b> <span class="muted">${esc(x.role || "")}</span></td><td>${x.n}</td><td class="num"><b>${money(x.total)}</b></td>
+        <td class="num">${money(x.avg)}</td><td>${x.items_per_sale}</td><td class="num">${money(x.discount)}</td><td>${pctTxt(x.discount_bp)}</td>
+        <td class="num">${x.returns_n ? `${x.returns_n} · ${money(x.returns)}` : "—"}</td><td class="num">${x.returned_on_his ? money(x.returned_on_his) : "—"}</td>
+        <td class="num">${x.voids_n ? `${x.voids_n} · ${money(x.voids)}` : "—"}</td><td>${x.shifts || "—"}</td>
+        ${r.see_cash ? `<td class="num">${x.difference ? `<span class="badge ${x.difference < 0 ? "b-err" : "b-warn"}">${money(x.difference)}</span>${x.short_n ? ` <span class="muted">(${x.short_n} عجز)</span>` : ""}` : "—"}</td>` : ""}
+        <td>${x.warnings || "—"}</td><td>${x.overrides || "—"}</td><td>${x.hours ?? "—"}</td><td class="num">${x.per_hour != null ? money(x.per_hour) : "—"}</td></tr>`).join("")
+        || `<tr><td colspan="16" class="muted">مفيش شغل في الفترة دي</td></tr>`}</tbody></table></div>
+      <p class="muted">"مرتجع من فواتيره" = اللي رجع من فواتير هو باعها (مين ما رجّعه). ساعات الحضور من شاشة الحضور. الفرق السالب = عجز في الدرج.</p>`,
+    sheets: (r) => [{ name: "أداء الموظفين", columns: [Tx("الموظف"), N("الفواتير"), M("المبيعات"), M("متوسط الفاتورة"), Pc("أصناف/فاتورة"), M("الخصم"), Pc("نسبة الخصم %"),
+      N("مرتجعات عملها"), M("قيمتها"), M("مرتجع من فواتيره"), N("فواتير لغاها"), M("قيمتها"), N("ورديات قفلها"), ...(r.see_cash ? [M("فرق الدرج")] : []), N("تحذيرات أكدها"), N("تجاوز سلامة"), Pc("ساعات الحضور")],
+      rows: r.rows.map((x) => [x.name, x.n, x.total, x.avg, x.items_per_sale, x.discount, x.discount_bp / 100, x.returns_n, x.returns, x.returned_on_his, x.voids_n, x.voids, x.shifts, ...(r.see_cash ? [x.difference] : []), x.warnings, x.overrides, x.hours]) }] },
+  { key: "customers", title: "مبيعات العملاء", perm: "sales.totals",
+    html: (r) => `<div class="totals"><div>عملاء اشتروا<b>${r.totals.customers}</b></div><div>صافي المبيعات<b>${money(r.totals.net)}</b></div>
+      <div>من غير عميل<b>${money(r.walk_in ? r.walk_in.total - r.walk_in.returns : 0)}</b><span>${r.walk_in ? `${r.walk_in.n} فاتورة` : ""}</span></div><div>آجل في الفترة<b>${money(r.totals.credit)}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>العميل</th><th>الفواتير</th><th>قبل الخصم</th><th>الخصم</th><th>المرتجع</th><th>الصافي</th><th>متوسط الفاتورة</th><th>آجل</th><th>آخر شراء</th><th>رصيده دلوقتي</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td><a href="#/customers/${esc(x.customer_id)}">${esc(x.name)}</a> <span class="muted">${esc(x.phone || "")}</span></td><td>${x.n}</td><td class="num">${money(x.gross)}</td>
+        <td class="num">${money(x.discount)}</td><td class="num">${money(x.returns)}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${money(x.avg)}</td>
+        <td class="num">${money(x.credit)}</td><td>${esc(dayOf(x.last_at))}</td><td class="num">${x.balance ? `<span class="badge b-warn">${money(x.balance)}</span>` : "0.00"}</td></tr>`).join("")
+        || `<tr><td colspan="10" class="muted">مفيش فواتير على عملاء في الفترة دي</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "مبيعات العملاء", columns: [Tx("العميل"), Tx("الموبايل"), N("الفواتير"), M("قبل الخصم"), M("الخصم"), M("المرتجع"), M("الصافي"), M("آجل"), Dt("آخر شراء"), M("رصيده دلوقتي")],
+      rows: [...r.rows.map((x) => [x.name, x.phone || "", x.n, x.gross, x.discount, x.returns, x.net, x.credit, dayOf(x.last_at), x.balance]),
+        ...(r.walk_in ? [["من غير عميل", "", r.walk_in.n, r.walk_in.gross, r.walk_in.discount, r.walk_in.returns, r.walk_in.net, 0, "", null]] : [])],
+      total: ["الإجمالي", "", r.totals.n, r.totals.gross, r.totals.discount, r.totals.returns, r.totals.net, r.totals.credit, "", null] }] },
+  { key: "shifts", title: "تقفيلات الدرج", perm: "cash.see_expected",
+    html: (r) => `<div class="totals"><div>ورديات اتقفلت<b>${r.totals.n}</b></div><div class="${r.totals.short ? "t-err" : ""}">العجز<b>${money(r.totals.short)}</b><span>${r.totals.short_n} <span>وردية</span></span></div>
+      <div>الزيادة<b>${money(r.totals.over)}</b><span>${r.totals.over_n} <span>وردية</span></span></div><div>الصافي<b>${money(r.totals.net)}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>اتفتحت</th><th>اتقفلت</th><th>فتحها</th><th>قفلها</th><th>البداية</th><th>فواتير</th><th>بيع نقدي</th><th>مرتجع/إلغاء</th><th>مصروف من الدرج</th><th>المفروض</th><th>المعدود</th><th>الفرق</th><th>السبب</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${esc(stamp(x.opened_at))}</td><td>${esc(stamp(x.closed_at))}</td><td>${esc(x.opened_by_name || "")}</td><td>${esc(x.closed_by_name || "")}</td>
+        <td class="num">${money(x.opening_cash)}</td><td>${x.sales_n}</td><td class="num">${money(x.cash_sales)}</td><td class="num">${money(x.refunds)}</td><td class="num">${money(x.payouts)}</td>
+        <td class="num">${money(x.expected_cash)}</td><td class="num">${money(x.counted_cash)}</td>
+        <td class="num">${x.difference ? `<span class="badge ${x.difference < 0 ? "b-err" : "b-warn"}">${money(x.difference)}</span>` : `<span class="badge b-ok">✓ مظبوط</span>`}</td><td>${esc(x.close_note || "")}</td></tr>`).join("")
+        || `<tr><td colspan="13" class="muted">مفيش ورديات اتقفلت في الفترة دي</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "تقفيلات الدرج", columns: [Tx("اتفتحت"), Tx("اتقفلت"), Tx("فتحها"), Tx("قفلها"), M("البداية"), N("فواتير"), M("بيع نقدي"), M("مرتجع/إلغاء"), M("مصروف من الدرج"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("السبب")],
+      rows: r.rows.map((x) => [stamp(x.opened_at), stamp(x.closed_at), x.opened_by_name || "", x.closed_by_name || "", x.opening_cash, x.sales_n, x.cash_sales, x.refunds, x.payouts, x.expected_cash, x.counted_cash, x.difference, x.close_note || ""]),
+      total: ["الإجمالي", "", "", "", null, null, null, null, null, null, null, r.totals.net, ""] }] },
+  { key: "returns", title: "المرتجعات", perm: "sales.totals",
+    html: (r) => `<div class="totals"><div>المرتجعات<b>${money(r.totals.total)}</b><span>${r.totals.n} <span>مرة</span></span></div><div>من المبيعات<b>${pctTxt(r.totals.pct_bp)}</b></div>
+      ${Object.entries(r.totals.by_method).map(([m, v]) => `<div>${esc({ cash: "نقدي", card: "فيزا", credit: "على الحساب" }[m] || m)}<b>${money(v)}</b></div>`).join("")}
+      <div class="${r.totals.late_n ? "t-err" : ""}">بعد مدة المرتجع<b>${r.totals.late_n}</b><span><span>المدة</span> ${r.window_days} <span>يوم</span></span></div><div>فاتورة حد تاني<b>${r.totals.other_n}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>الوقت</th><th>الفاتورة</th><th>العميل</th><th>الأصناف</th><th>المبلغ</th><th>رجع إزاي</th><th>السبب</th><th>رجّعه</th><th>باعه</th><th></th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${esc(stamp(x.at))}</td><td><a href="#/sales/${esc(x.sale_id)}">${x.sale_no}</a></td><td>${esc(x.customer || "—")}</td>
+        <td>${x.items.map((i) => `${itemHtml(i)} × ${esc(fmtStock(i.qty, itq(i)))}`).join("<br>")}</td><td class="num"><b>${money(x.total)}</b></td><td>${esc(x.method_label)}</td><td>${esc(x.reason)}</td>
+        <td>${esc(x.by_name || "")}</td><td>${esc(x.sold_by_name || "")}</td><td>${x.late ? `<span class="badge b-err">بعد ${x.age_days} يوم</span>` : ""}${x.other_seller ? ` <span class="badge b-warn">فاتورة حد تاني</span>` : ""}</td></tr>`).join("")
+        || `<tr><td colspan="10" class="muted">✓ مفيش مرتجعات في الفترة دي</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "المرتجعات", columns: [Tx("الوقت"), N("الفاتورة"), Tx("العميل"), Tx("الأصناف"), M("المبلغ"), Tx("رجع إزاي"), Tx("السبب"), Tx("رجّعه"), Tx("باعه"), N("بعد كام يوم")],
+      rows: r.rows.map((x) => [stamp(x.at), x.sale_no, x.customer || "", x.items.map((i) => `${i.name_en || i.name_ar} × ${i.qty}`).join(" / "), x.total, x.method_label, x.reason, x.by_name || "", x.sold_by_name || "", x.age_days]),
+      total: ["الإجمالي", null, "", "", r.totals.total, "", "", "", "", null] }] },
+  { key: "discounts", title: "الخصومات", perm: "sales.totals",
+    html: (r) => `<div class="totals"><div>نسبة الخصم من المبيعات<b>${pctTxt(r.totals.discount_bp)}</b></div><div>الخصم<b>${money(r.totals.discount)}</b></div>
+      <div>قبل الخصم<b>${money(r.totals.gross)}</b></div><div>فواتير عليها خصم<b>${r.totals.n_disc}</b><span><span>من أصل</span> ${r.totals.n}</span></div></div>
+      <div class="grid2 mt"><section class="panel"><h2>مين اللي عمل الخصم</h2><table><thead><tr><th></th><th>أسطر</th><th>قبل الخصم</th><th>الخصم</th><th>النسبة</th><th>بموافقة</th></tr></thead><tbody>
+        ${r.by_who.map((g) => `<tr><td>${esc(g.name)}</td><td>${g.lines}</td><td class="num">${money(g.gross)}</td><td class="num"><b>${money(g.discount)}</b></td><td>${pctTxt(g.discount_bp)}</td><td>${g.approved_lines || "—"}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش</td></tr>`}</tbody></table></section>
+      <section class="panel"><h2>يوم بيوم</h2><table><thead><tr><th>اليوم</th><th>فواتير</th><th>قبل الخصم</th><th>الخصم</th><th>النسبة</th></tr></thead><tbody>
+        ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num">${money(d.gross)}</td><td class="num">${money(d.discount)}</td><td>${pctTxt(d.discount_bp)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">مفيش</td></tr>`}</tbody></table></section></div>
+      <h2 class="mt">الفواتير اللي عليها خصم (الأكبر الأول)</h2><div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>الوقت</th><th>العميل</th><th>باعها</th><th>قبل الخصم</th><th>الخصم</th><th>النسبة</th><th>الصافي</th></tr></thead><tbody>
+        ${r.rows.map((x) => `<tr><td><a href="#/sales/${esc(x.id)}">${x.sale_no}</a></td><td>${esc(stamp(x.completed_at))}</td><td>${esc(x.customer || "—")}</td><td>${esc(x.by_name || "")}</td>
+          <td class="num">${money(x.gross)}</td><td class="num"><b>${money(x.discount)}</b></td><td>${pctTxt(x.discount_bp)}</td><td class="num">${money(x.total)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">مفيش</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [
+      { name: "مين عمل الخصم", columns: [Tx(""), N("أسطر"), M("قبل الخصم"), M("الخصم"), Pc("النسبة %"), N("بموافقة")], rows: r.by_who.map((g) => [g.name, g.lines, g.gross, g.discount, g.discount_bp / 100, g.approved_lines]) },
+      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("قبل الخصم"), M("الخصم"), Pc("النسبة %")], rows: r.daily.map((d) => [d.day, d.n, d.gross, d.discount, d.discount_bp / 100]),
+        total: ["الإجمالي", r.totals.n, r.totals.gross, r.totals.discount, r.totals.discount_bp / 100] },
+      { name: "الفواتير", columns: [N("الفاتورة"), Tx("الوقت"), Tx("العميل"), Tx("باعها"), M("قبل الخصم"), M("الخصم"), Pc("النسبة %"), M("الصافي")],
+        rows: r.rows.map((x) => [x.sale_no, stamp(x.completed_at), x.customer || "", x.by_name || "", x.gross, x.discount, x.discount_bp / 100, x.total]) }] },
+  { key: "prices", title: "تغيير الأسعار", perm: "sales.totals",
+    html: (r) => `<div class="totals"><div>تغييرات<b>${r.totals.n}</b><span>${r.totals.items} صنف</span></div><div>زيادة<b>${r.totals.up}</b></div><div>نقص<b>${r.totals.down}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>الوقت</th><th>الصنف</th><th>القديم</th><th>الجديد</th><th>التغيير</th><th>منين</th><th>مين</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${esc(stamp(x.at))}</td><td><a href="#/items/${esc(x.item_id)}">${itemHtml(x)}</a></td><td class="num">${money(x.old)}</td><td class="num"><b>${money(x.new)}</b></td>
+        <td><span class="badge ${x.change > 0 ? "b-warn" : "b-ok"}">${x.change > 0 ? "▲" : "▼"} ${pctTxt(Math.abs(x.change_bp))}</span></td>
+        <td>${esc(x.source_label)}${x.invoice_no ? ` — فاتورة ${esc(x.invoice_no)} ${esc(x.supplier || "")}` : ""}</td><td>${esc(x.by_name || "—")}</td></tr>`).join("")
+        || `<tr><td colspan="7" class="muted">مفيش تغيير أسعار في الفترة دي</td></tr>`}</tbody></table></div>
+      <p class="muted">سعر الجمهور للعبوة. التغييرات القديمة قبل التحديث ده مش متسجل مين عملها.</p>`,
+    sheets: (r) => [{ name: "تغيير الأسعار", columns: [Tx("الوقت"), Tx("الصنف"), M("القديم"), M("الجديد"), Pc("التغيير %"), Tx("منين"), Tx("مين")],
+      rows: r.rows.map((x) => [stamp(x.at), x.name_en || x.name_ar, x.old, x.new, x.change_bp / 100, `${x.source_label}${x.invoice_no ? ` — فاتورة ${x.invoice_no} ${x.supplier || ""}` : ""}`, x.by_name || ""]) }] },
+  { key: "units", title: "تغيير وحدات البيع", perm: "sales.totals",
+    html: (r) => `<div class="tablewrap"><table><thead><tr><th>الوقت</th><th>الصنف</th><th>اللي اتغير</th><th>مين</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${esc(stamp(x.at))}</td><td><a href="#/items/${esc(x.item_id)}">${itemHtml(x)}</a></td>
+        <td>${x.changes.map((c) => `${esc(c.label)}: <bdi>${esc(c.before ?? "—")}</bdi> ← <b><bdi>${esc(c.after ?? "—")}</bdi></b>`).join("<br>")}</td><td>${esc(x.by_name || "")}</td></tr>`).join("")
+        || `<tr><td colspan="4" class="muted">مفيش تغيير في وحدات البيع في الفترة دي</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "تغيير الوحدات", columns: [Tx("الوقت"), Tx("الصنف"), Tx("اللي اتغير"), Tx("مين")],
+      rows: r.rows.map((x) => [stamp(x.at), x.name_en || x.name_ar, x.changes.map((c) => `${c.label}: ${c.before ?? "—"} ← ${c.after ?? "—"}`).join(" / "), x.by_name || ""]) }] },
+  { key: "unsold", title: "أصناف ما اتباعتش", perm: "sales.totals",
+    html: (r) => `<div class="totals"><div>أصناف ليها رصيد وما اتباعتش<b>${r.totals.n}</b></div>${r.totals.cost_value != null ? `<div>قيمتها بالتكلفة<b>${money(r.totals.cost_value)}</b>${r.totals.unknown_cost ? `<span>${r.totals.unknown_cost} من غير تكلفة</span>` : ""}</div>` : ""}
+      <div>قيمتها بسعر الجمهور<b>${money(r.totals.price_value)}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>الصنف</th><th>القسم</th><th>الرصيد</th>${r.totals.cost_value != null ? "<th>بالتكلفة</th>" : ""}<th>بسعر الجمهور</th><th>أقرب صلاحية</th><th>آخر بيع (أي وقت)</th><th>آخر دخول</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td><a href="#/items/${esc(x.item_id)}">${itemHtml(x)}</a></td><td>${esc(x.category || "—")}</td><td>${esc(fmtStock(x.qty, itq(x)))}</td>
+        ${r.totals.cost_value != null ? `<td class="num">${x.cost_value != null ? money(x.cost_value) : "—"}</td>` : ""}<td class="num">${money(x.price_value)}</td>
+        <td>${esc((x.expiry || "—").slice(0, 7))}</td><td>${x.last_sold ? esc(dayOf(x.last_sold)) : `<span class="badge b-warn">عمره ما اتباع</span>`}</td><td>${esc(dayOf(x.last_in) || "—")}</td></tr>`).join("")
+        || `<tr><td colspan="8" class="muted">✓ كل الأصناف اللي ليها رصيد اتباعت في الفترة دي</td></tr>`}</tbody></table></div>
+      <p class="muted">الأصناف اللي ليها رصيد دلوقتي ومفيش منها ولا بيعة في الفترة. الأغلى قيمة الأول.</p>`,
+    sheets: (r) => [{ name: "ما اتباعتش", columns: [Tx("الصنف"), Tx("القسم"), N("الرصيد بالوحدة"), ...(r.totals.cost_value != null ? [M("بالتكلفة")] : []), M("بسعر الجمهور"), Dt("أقرب صلاحية"), Dt("آخر بيع"), Dt("آخر دخول")],
+      rows: r.rows.map((x) => [x.name_en || x.name_ar, x.category || "", x.qty, ...(r.totals.cost_value != null ? [x.cost_value] : []), x.price_value, x.expiry || "", dayOf(x.last_sold) || "", dayOf(x.last_in) || ""]),
+      total: ["الإجمالي", "", null, ...(r.totals.cost_value != null ? [r.totals.cost_value] : []), r.totals.price_value, "", "", ""] }] },
+];
+
+async function viewOwnerReports() {
+  const list = OWNER_REPORTS.filter((x) => ME.permissions.includes(x.perm));
+  if (!list.length) { app.innerHTML = `<section class="panel"><p>التقارير دي للصاحب والمدير.</p></section>`; return; }
+  let cur = (() => { try { return localStorage.getItem("ownerRep"); } catch { return null; } })();
+  if (!list.some((x) => x.key === cur)) cur = list[0].key;
+  app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/reports">← التقارير</a><h1>تقارير الصاحب</h1></div>${reportTools("own")}</div>
+    <nav class="seg2 wrap noprint" aria-label="التقرير">${list.map((x) => `<button type="button" data-or="${x.key}" class="${x.key === cur ? "on" : ""}">${x.title}</button>`).join("")}</nav>
+    ${rangeBar("orRange")}</section><section class="panel" id="orBox"></section>`;
+  let R = null, F = null, T = null;
+  const load = async () => {
+    if (!F) return;
+    const rep = list.find((x) => x.key === cur);
+    $("#orBox").innerHTML = `<p class="muted">بيحمّل…</p>`; R = null;
+    try {
+      const r = await api(`/api/reports/owner/${cur}?from=${F}&to=${T}`);
+      if (rep.key !== cur) return;
+      R = r;
+      $("#orBox").innerHTML = `<h2><span>${rep.title}</span> — <span>${esc(rangeText(r.from, r.to))}</span></h2>${r.truncated ? `<p class="badge b-warn">⚠ أول 5000 سطر بس — صغّر الفترة</p>` : ""}${rep.html(r)}`;
+    } catch (err) { $("#orBox").innerHTML = ""; toast(err.message, true); }
+  };
+  document.querySelectorAll("[data-or]").forEach((b) => b.addEventListener("click", () => {
+    cur = b.dataset.or; try { localStorage.setItem("ownerRep", cur); } catch { /* per-viewer only */ }
+    document.querySelectorAll("[data-or]").forEach((x) => x.classList.toggle("on", x === b)); load();
+  }));
+  wireRange("orRange", (f, t) => { F = f; T = t; load(); });
+  wireTools("own", () => { const rep = list.find((x) => x.key === cur); if (!R) throw new Error("loading");
+    return { title: rep.title, subtitle: rangeText(R.from, R.to), el: $("#orBox"), sheets: rep.sheets(R) }; });
+}
+
 async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1>${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${can("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير الصاحب: الموظفين، العملاء، الدرج، المرتجعات، الخصومات، الأسعار…</a>` : ""}${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والصاحب.</p>`}
     <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف اللي اتأكدت وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
