@@ -62,7 +62,7 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
                   unit_cost: Decimal | None = None, ref_type: str | None = None,
                   ref_id: str | None = None, ref_line_id: str | None = None,
                   note: str | None = None, allow_negative: bool = False,
-                  branch_id: str | None = None) -> str:
+                  branch_id: str | None = None, reason: str | None = None) -> str:
     """Must be called inside db.transaction() together with the business
     document that causes it."""
     branch_id = branch_id or ctx.branch_id
@@ -84,10 +84,10 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     mid = new_id()
     cost_str = str(unit_cost.quantize(COST_Q, ROUND_HALF_UP)) if unit_cost is not None else None
     db.execute("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta,"
-               " unit_cost, movement_type, ref_type, ref_id, ref_line_id, note, created_by)"
-               " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               " unit_cost, movement_type, ref_type, ref_id, ref_line_id, note, created_by, reason)"
+               " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (mid, ctx.org_id, branch_id, item_id, batch_id, qty_delta, cost_str, movement_type,
-                ref_type, ref_id, ref_line_id, note, ctx.user_id))
+                ref_type, ref_id, ref_line_id, note, ctx.user_id, reason))
     db.execute("INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty)"
                " VALUES (?,?,?,?,?) ON CONFLICT(org_id, branch_id, item_id, batch_key)"
                " DO UPDATE SET qty = qty + excluded.qty",

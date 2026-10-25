@@ -197,10 +197,18 @@ class Counting:
                             "uncounted_items": len(uncounted)}}
 
     def approve(self, ctx: Context, sid: str, *, zero_uncounted: bool = False,
-                reason: str | None = None) -> dict:
+                reason: str | None = None, reasons: dict | None = None,
+                shortage_reason: str = "lost", zero_reason: str = "lost") -> dict:
+        """reasons: {"item_id|batch_key": reason code} for single lines; others take
+        shortage_reason (less than the system) or "found" (more than the system)."""
+        from . import adjust
         ctx.require("inventory.adjust")
         if zero_uncounted and len((reason or "").strip()) < 5:
             raise ValidationFailed("تصفير الأصناف غير المجرودة يحتاج سبب مكتوب")
+        reasons = reasons or {}
+        for code in [shortage_reason, zero_reason, *reasons.values()]:
+            if code not in adjust.REASONS:
+                raise ValidationFailed("سبب غير معروف")
         with self.db.transaction():
             s = self._session(ctx, sid, open_only=True)
             v = self.variances(ctx, sid)
@@ -213,14 +221,17 @@ class Counting:
                 diff = r["difference"]
                 if diff == 0:
                     continue
-                self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid)
+                why = reasons.get(f"{r['item_id']}|{r['batch_key'] or ''}") or ("found" if diff > 0 else shortage_reason)
+                adjust.check_reason(why, "تسوية جرد" if why == "other" else None, diff > 0)
+                self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid, why)
                 posted += 1
             if zero_uncounted:
                 for u in v["uncounted_with_stock"]:
-                    self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid)
+                    self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid, zero_reason)
                     posted += 1
             report = {"summary": v["summary"], "adjustment_lines": posted,
-                      "zero_uncounted": zero_uncounted, "reason": reason}
+                      "zero_uncounted": zero_uncounted, "reason": reason, "shortage_reason": shortage_reason,
+                      "zero_reason": zero_reason if zero_uncounted else None, "line_reasons": reasons or None}
             self.db.execute("UPDATE count_sessions SET status='approved', approved_by=?, approved_at=?,"
                             " report=? WHERE id=?",
                             (ctx.user_id, _now(), json.dumps(report, ensure_ascii=False), sid))
@@ -228,29 +239,18 @@ class Counting:
         return report
 
     def _post_adjust(self, ctx: Context, s: dict, item_id: str, batch_id: str | None, diff: int,
-                     sid: str) -> None:
-        if batch_id or diff > 0:
+                     sid: str, why: str = "lost") -> None:
+        from . import adjust
+        if diff > 0:
             inventory.post_movement(self.db, ctx, item_id=item_id, qty_delta=diff, batch_id=batch_id,
                                     movement_type="adjustment", ref_type="count_session", ref_id=sid,
-                                    branch_id=s["branch_id"], note="تسوية جرد")
+                                    branch_id=s["branch_id"], note="تسوية جرد", reason=why,
+                                    unit_cost=adjust.avg_cost(self.db, ctx.org_id, s["branch_id"], item_id))
             return
-        # item-level shortage: take it from batches, earliest expiry first
-        remaining = -diff
-        rows = self.db.all(
-            "SELECT sb.batch_key, sb.qty FROM stock_balances sb LEFT JOIN batches b"
-            " ON b.id = nullif(sb.batch_key,'') WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=?"
-            " AND sb.qty > 0 ORDER BY b.expiry_date IS NULL, b.expiry_date",
-            (ctx.org_id, s["branch_id"], item_id))
-        for r in rows:
-            take = min(remaining, r["qty"])
-            inventory.post_movement(self.db, ctx, item_id=item_id, qty_delta=-take,
-                                    batch_id=r["batch_key"] or None, movement_type="adjustment",
-                                    ref_type="count_session", ref_id=sid, branch_id=s["branch_id"],
-                                    note="تسوية جرد")
-            remaining -= take
-            if remaining == 0:
-                break
-        if remaining:
+        try:   # shortage: from the counted batch, or the earliest expiry first
+            adjust.take(self.db, ctx, item_id, -diff, batch_id=batch_id, reason=why, note="تسوية جرد",
+                        ref_type="count_session", ref_id=sid, branch_id=s["branch_id"])
+        except Conflict:
             raise Conflict("العجز أكبر من الرصيد المسجل", code="shortage_exceeds_stock")
 
     def cancel(self, ctx: Context, sid: str) -> None:

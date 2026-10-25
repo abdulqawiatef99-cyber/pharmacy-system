@@ -277,6 +277,7 @@ const routes = [
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
   [/^#\/audit$/, viewAudit],
+  [/^#\/supplier-returns(?:\/(new|[\w-]+))?(?:\?.*)?$/, viewSupplierReturns],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
   [/^#\/home$/, viewHome],
@@ -320,6 +321,7 @@ async function route() {
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
     $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
     $("#navAudit").hidden = !ME.permissions.includes("audit.read");
+    $("#navSupRet").hidden = !ME.permissions.includes("purchases.read");
     $("#bell").hidden = !ME.permissions.includes("notifications.read");
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
@@ -968,8 +970,28 @@ async function viewItem(id) {
           <td>${esc(sp.last_date || "")}</td><td>${sp.discount_bp != null ? pct(sp.discount_bp) + "%" : "—"}</td><td>${money(sp.unit_net_price)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لسه مفيش شراء متسجل</td></tr>`}</tbody></table>` : ""}
       ${c.price_history?.length ? `<h2 class="mt">آخر تغييرات السعر</h2><ul class="plain">${c.price_history.map((h) => `<li>${esc(dayOf(h.observed_at))}: ${h.previous_price != null ? `${money(h.previous_price)} ← ` : ""}<b>${money(h.public_price)}</b> <span class="muted">${h.source === "manual" ? "يدوي" : h.source === "purchase_invoice" ? "من فاتورة شراء" : "استيراد"}</span></li>`).join("")}</ul>` : ""}
     </section></div>
+  ${ME.permissions.includes("inventory.adjust") && c.batches ? `<section class="panel" id="adjBox"><h2>تسوية الرصيد (تصفير، تالف، منتهي، مفقود…)</h2>
+    <form id="adjForm" class="row"><label class="f">التشغيلة <select name="b"><option value="">كل التشغيلات (الأقرب صلاحية الأول)</option>${c.batches.filter((b) => b.qty > 0).map((b) => `<option value="${esc(b.batch_id || "")}">${esc(b.batch_no || "من غير تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — ${esc(packs(b.qty, c))}</option>`).join("")}</select></label>
+      <label class="f">العملية <select name="mode"><option value="out">نقص كمية</option><option value="zero">تصفير</option><option value="in">زيادة كمية</option></select></label>
+      <label class="f">الكمية (وحدة) <input name="q" type="number" min="1" step="1" class="narrow"></label>
+      <label class="f">السبب <select name="why"></select></label><label class="f grow">ملاحظة <input name="note"></label>
+      <button class="btn small">سجّل</button>${ME.permissions.includes("purchases.approve") ? ` <a class="btn small secondary" href="#/supplier-returns/new?item=${esc(id)}">مرتجع للمورد</a>` : ""}</form>
+    <p class="muted">المنتهي والتالف بيتسجلوا "إعدام". كل تسوية بتتسجل بسببها واسمك، وبتظهر في تقرير خسائر المخزون.</p></section>` : ""}
   ${ME.permissions.includes("inventory.read") ? `<section class="panel" id="mvRep"><div class="row between"><h2>حركة الصنف لفترة</h2>${reportTools("mv")}</div>${rangeBar("mvRange")}<div id="mvBox"></div></section>` : ""}`;
   document.querySelectorAll(".bars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+  if ($("#adjForm")) {
+    const f = $("#adjForm"), R = await stockReasons();
+    const sync = () => { const up = f.mode.value === "in"; f.why.innerHTML = reasonOpts(R.adjust, up ? "found" : "expired", up); f.q.disabled = f.mode.value === "zero"; };
+    f.mode.addEventListener("change", sync); sync();
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const body = { batch_id: f.b.value || null, reason: f.why.value, note: f.note.value || null };
+      if (f.mode.value === "zero") body.set_to = 0; else body.qty_delta = (f.mode.value === "in" ? 1 : -1) * (+f.q.value || 0);
+      if (!confirmInline(f.querySelector("button"))) return;
+      try { const r = await api(`/api/items/${id}/adjust`, { method: "POST", body }); toast(`✓ الرصيد بقى ${r.after} وحدة`); viewItem(id); }
+      catch (err) { toast(err.message, true); }
+    });
+  }
   if ($("#mvRep")) {
     let mv = null;
     const q = (n) => `${n < 0 ? "−" : ""}${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
@@ -1407,7 +1429,7 @@ async function viewCountSession(id) {
   });
   $("#cntVar")?.addEventListener("click", async () => {
     try {
-      const v = await api(`/api/counts/${id}/variances`);
+      const [v, R] = await Promise.all([api(`/api/counts/${id}/variances`), stockReasons()]);
       const box = $("#cntVarBox");
       box.className = "";
       box.innerHTML = `<div class="row between"><h2>تقرير الجرد والفروق</h2>${reportTools("count")}</div><div class="totals"><div>أصناف مجرودة<b>${v.summary.counted_lines}</b></div>
@@ -1416,22 +1438,37 @@ async function viewCountSession(id) {
         <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد بالنظام</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
         <tbody>${v.lines.map((l) => `<tr class="${l.difference ? "has-err" : ""}"><td>${esc(l.label)}</td><td>${l.system_qty}</td>
           <td>${l.counted}</td><td>${l.moves_after_count}</td><td>${l.difference}</td><td>${esc(l.value ?? "")}</td>
-          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : "رصيد سالب"}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>
-        <div class="row mt"><button class="btn" id="cntApprove">اعتماد التسويات</button></div>`;
+          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : "رصيد سالب"}</span>`
+            : l.difference < 0 ? `<select data-why="${esc(l.item_id)}|${esc(l.batch_key || "")}" class="noprint"><option value="">السبب: زي الافتراضي</option>${reasonOpts(R.adjust, null, false)}</select>` : l.difference > 0 ? "زيادة لقيناها" : ""}</td></tr>`).join("")}</tbody></table></div>
+        <div class="row mt noprint"><label class="f">سبب العجز (الافتراضي لكل الأصناف) <select id="cntWhy">${reasonOpts(R.adjust, "lost", false)}</select></label>
+          ${v.summary.uncounted_items ? `<label class="f">الأصناف اللي ماتجردتش (${v.summary.uncounted_items}) <select id="cntZero"><option value="">سيبها زي ما هي</option>${reasonOpts(R.adjust, null, false).replace(/<option value="/g, '<option value="zero:')}</select></label>` : ""}
+          <button class="btn" id="cntApprove">اعتماد التسويات</button></div>`;
       wireTools("count", () => ({ title: "تقرير الجرد", subtitle: `عجز ${v.summary.shortage_units} وحدة · زيادة ${v.summary.excess_units} وحدة · لم يُجرد ${v.summary.uncounted_items} صنف`, el: box, sheets: [
         { name: "الجرد", columns: [Tx("الصنف"), N("الرصيد بالنظام"), N("المجرود"), N("مباع أثناء الجرد"), N("الفرق"), { label: "القيمة (ج)", type: "num" }, Tx("ملاحظة")],
           rows: v.lines.map((l) => [l.label, l.system_qty, l.counted, l.moves_after_count, l.difference, l.value ?? "", l.problem || ""]) }] }));
       $("#cntApprove").addEventListener("click", async () => {
-        let zero = false, reason = null;
-        if (v.summary.uncounted_items && confirm(`${v.summary.uncounted_items} صنف لم يُجرد ولهم رصيد. هل تريد تصفيرهم؟ (إلغاء = تركهم كما هم)`)) {
-          zero = true; reason = prompt("سبب التصفير:"); if (!reason) return;
-        }
+        const reasons = {};
+        box.querySelectorAll("[data-why]").forEach((sel) => { if (sel.value) reasons[sel.dataset.why] = sel.value; });
+        const z = $("#cntZero")?.value || "", zero = z.startsWith("zero:");
+        let reason = null;
+        if (zero) { reason = prompt(`هيتصفّر ${v.summary.uncounted_items} صنف ماتجردش. اكتب ملاحظة (5 حروف على الأقل):`); if (!reason) return; }
         if (!confirm("اعتماد الجرد وتسجيل التسويات في المخزون؟")) return;
-        try { await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason } }); toast("تم اعتماد الجرد"); location.hash = "#/counts"; }
-        catch (err) { toast(err.message, true); }
+        try {
+          await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason, reasons, shortage_reason: $("#cntWhy").value, zero_reason: zero ? z.slice(5) : "lost" } });
+          toast("تم اعتماد الجرد"); location.hash = "#/counts";
+        } catch (err) { toast(err.message, true); }
       });
     } catch (err) { toast(err.message, true); }
   });
+}
+
+// ------------------------------------------------------------------ stock reasons (أسباب تغيير الرصيد)
+let STOCK_REASONS = null;
+async function stockReasons() { return (STOCK_REASONS ||= await api("/api/stock/reasons")); }
+// options for a reason <select>; up=true shows only reasons that can add stock, false only the ones that remove
+function reasonOpts(map, selected, up) {
+  return Object.entries(map).filter(([k]) => up == null || (up ? ["found", "entry_error", "other"].includes(k) : k !== "found"))
+    .map(([k, t]) => `<option value="${k}" ${k === selected ? "selected" : ""}>${esc(t)}</option>`).join("");
 }
 
 // ------------------------------------------------------------------ program / update
@@ -2367,6 +2404,96 @@ async function viewSupplier(id) {
     { name: "طرق الدفع", columns: [Tx("الطريقة"), M("المبلغ")], rows: st.by_method.map((m) => [m.label, m.amount]) }] }));
 }
 
+// ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
+async function viewSupplierReturns(arg) {
+  if (arg && arg !== "new") return viewSupplierReturn(arg);
+  const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
+  const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
+  app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
+      <div class="row"><label class="f">المورد <select id="srSup"><option value="">— اختار —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
+        <label class="f grow">الصنف <input id="srQ" placeholder="اسم أو باركود" autocomplete="off"></label></div>
+      <div id="srRes" class="cands"></div>
+      <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الكمية (وحدة)</th><th>السبب</th>${money_ ? "<th>قيمة الوحدة (ج)</th>" : ""}<th></th></tr></thead><tbody id="srLines"></tbody></table></div>
+      <div class="row mt"><label class="f grow">ملاحظة (اسم المندوب مثلًا) <input id="srNote"></label><b id="srTot"></b><button class="btn" id="srGo">سجّل المرتجع واطبع الإذن</button></div>
+      <p class="muted">الكمية بتخرج من المخزون، وقيمتها بتتخصم من حساب المورد. القيمة المقترحة هي سعر شراء التشغيلة دي، وتقدر تغيّرها لو المورد هيحسبها بسعر تاني.</p></section>` : ""}
+    <section class="panel" id="srRep"><div class="row between"><h2>المرتجعات للموردين</h2>${reportTools("sr")}</div>${rangeBar("srRange")}<div id="srBox"></div></section>`;
+  // ---- new return
+  const lines = [];
+  const draw = () => {
+    if (!$("#srLines")) return;
+    $("#srLines").innerHTML = lines.map((l, i) => `<tr><td>${itemHtml(l.item)}</td>
+      <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "من غير تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
+      <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
+      <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
+      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
+      <td><button class="btn small danger" data-sx="${i}" aria-label="شيل">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">دوّر على الصنف وضيفه</td></tr>`;
+    if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
+    const val = async (l) => { try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* keep */ } draw(); };
+    document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
+    document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
+    document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sv].unit_value = toPiasters(x.value) || 0; draw(); }));
+    document.querySelectorAll("[data-sx]").forEach((x) => x.addEventListener("click", () => { lines.splice(+x.dataset.sx, 1); draw(); }));
+  };
+  const addItem = async (itemId) => {
+    const c = await api(`/api/items/${itemId}/card`);
+    const batches = (c.batches || []).filter((b) => b.qty > 0);
+    if (!batches.length) { toast("الصنف ده مالوش رصيد", true); return; }
+    const b = batches[0], l = { item: c, batches, batch_id: b.batch_id || null, qty_base: Math.min(b.qty, c.pack_size || 1), reason: (b.expiry_date || "9") < isoDay(new Date()) ? "expired" : "near_expiry", unit_value: 0 };
+    lines.push(l); draw();
+    try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${c.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* zero */ }
+    draw();
+  };
+  if ($("#srQ")) {
+    let t;
+    $("#srQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => {
+      const v = $("#srQ").value.trim(); if (v.length < 2) { $("#srRes").innerHTML = ""; return; }
+      const r = await findItems(v, 8);
+      $("#srRes").innerHTML = r.items.map((it) => `<button class="btn small secondary" data-pick="${esc(it.id)}">${itemHtml(it)}</button>`).join("") || `<p class="muted">مفيش</p>`;
+      document.querySelectorAll("[data-pick]").forEach((x) => x.addEventListener("click", () => { $("#srRes").innerHTML = ""; $("#srQ").value = ""; addItem(x.dataset.pick).catch((e) => toast(e.message, true)); }));
+    }, 250); });
+    $("#srGo").addEventListener("click", async () => {
+      if (!$("#srSup").value) { toast("اختار المورد", true); return; }
+      if (!lines.length) { toast("ضيف صنف على الأقل", true); return; }
+      const w = window.open("", "_blank");
+      try {
+        const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: $("#srSup").value, note: $("#srNote").value || null,
+          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ ? { unit_value: l.unit_value } : {}) })) } });
+        toast(`✓ مرتجع رقم ${r.return_no} اتسجل`);
+        if (w) w.location = `/supplier-return/${r.id}`;
+        location.hash = "#/supplier-returns";
+      } catch (err) { w?.close(); toast(err.message, true); }
+    });
+    const pre = new URLSearchParams(location.hash.split("?")[1] || "").get("item");
+    if (pre) addItem(pre).catch((e) => toast(e.message, true));
+    draw();
+  }
+  // ---- list
+  let data = null;
+  wireRange("srRange", async (f, t) => {
+    try {
+      data = await api(`/api/supplier-returns?from=${f}&to=${t}`);
+      $("#srBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>رقم</th><th>اليوم</th><th>المورد</th><th>أصناف</th>${data.total != null ? "<th>القيمة</th>" : ""}<th>سجّله</th><th></th></tr></thead><tbody>
+        ${data.rows.map((r) => `<tr><td><b>${r.return_no}</b></td><td>${esc(dayOf(r.created_at))}</td><td>${esc(r.supplier)}</td><td>${r.lines}</td>${data.total != null ? `<td class="num">${money(r.total)}</td>` : ""}
+          <td>${esc(r.by_name || "")}</td><td><a href="#/supplier-returns/${esc(r.id)}">افتح</a> · <a href="/supplier-return/${esc(r.id)}" target="_blank">🖨 الإذن</a></td></tr>`).join("") || `<tr><td colspan="7" class="muted">مفيش مرتجعات في الفترة دي</td></tr>`}</tbody></table></div>
+        ${data.total != null && data.rows.length ? `<p><b>الإجمالي: ${money(data.total)} ج</b></p>` : ""}`;
+    } catch (err) { toast(err.message, true); }
+  });
+  wireTools("sr", () => ({ title: "المرتجعات للموردين", subtitle: rangeText(data.from, data.to), el: $("#srRep"), sheets: [
+    { name: "المرتجعات", columns: [N("رقم"), Dt("اليوم"), Tx("المورد"), N("أصناف"), ...(data.total != null ? [M("القيمة")] : []), Tx("سجّله"), Tx("ملاحظة")],
+      rows: data.rows.map((r) => [r.return_no, dayOf(r.created_at), r.supplier, r.lines, ...(data.total != null ? [r.total] : []), r.by_name || "", r.note || ""]) }] }));
+}
+async function viewSupplierReturn(id) {
+  const r = await api(`/api/supplier-returns/${id}`);
+  app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><div class="row between"><h1>مرتجع رقم ${r.return_no} — ${esc(r.supplier)}</h1>
+    <a class="btn secondary" href="/supplier-return/${esc(r.id)}" target="_blank">🖨 اطبع الإذن</a></div>
+    <p class="muted">${esc(dayOf(r.created_at))} ${hhmm(r.created_at)} · سجّله ${esc(r.by_name || "")}${r.note ? ` · ${esc(r.note)}` : ""}</p>
+    <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>السبب</th>${r.total != null ? "<th>قيمة الوحدة</th><th>القيمة</th>" : ""}</tr></thead><tbody>
+    ${r.lines.map((l) => `<tr><td>${itemHtml(l)}</td><td>${esc(l.batch_no || "")}</td><td>${esc((l.expiry_date || "").slice(0, 7))}</td><td>${esc(fmtStock(l.qty_base, l))}</td><td>${esc(l.reason_label)}</td>
+      ${r.total != null ? `<td class="num">${money(l.unit_value)}</td><td class="num">${money(l.unit_value * l.qty_base)}</td>` : ""}</tr>`).join("")}</tbody></table>
+    ${r.total != null ? `<p><b>الإجمالي اللي اتخصم من حساب المورد: ${money(r.total)} ج</b></p>` : ""}</section>`;
+}
+
 // ------------------------------------------------------------------ transfers review (مراجعة التحويلات)
 const TR_ST = { missing: ["b-warn", "⚠ مفيش صورة"], pending: ["b-info", "ℹ مستنية مراجعة"], ok: ["b-ok", "✓ اتراجعت"], problem: ["b-err", "✕ فيها مشكلة"], voided: ["b-plain", "ملغاة"] };
 async function viewTransfers() {
@@ -2870,8 +2997,8 @@ async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1>${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والصاحب.</p>`}
-    <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
-  <div id="rSales"></div><div id="rStock"></div>`;
+    <p class="muted noprint">تقارير تانية: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصاريف</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
+  <div id="rSales"></div>${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   const sales = async (f, t) => {
     const r = await api(`/api/reports/sales?from=${f}&to=${t}`);
@@ -2896,6 +3023,26 @@ async function viewReports() {
         rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));
   };
   if (can("sales.totals")) wireRange("rRange", (f, t) => sales(f, t).catch((e) => toast(e.message, true)));
+  if (can("costs.read")) {
+    let L = null;
+    wireRange("lossRange", async (f, t) => {
+      try {
+        L = await api(`/api/reports/losses?from=${f}&to=${t}`);
+        const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
+        $("#lossBox").innerHTML = `<div class="totals"><div class="${L.total < 0 ? "t-err" : "t-ok"}">صافي الخسارة بالتكلفة<b>${money(-L.total)}</b></div>
+          ${L.groups.map((g) => `<div>${esc(g.label)}<b>${money(-g.value)}</b><span>${g.qty_out ? `خرج ${g.qty_out} وحدة` : ""}${g.qty_in ? ` · دخل ${g.qty_in}` : ""}${g.unknown_cost ? ` · ${g.unknown_cost} من غير تكلفة` : ""}</span></div>`).join("")}</div>
+          <div class="tablewrap mt"><table><thead><tr><th>اليوم</th><th>الصنف</th><th>التشغيلة</th><th>السبب</th><th>الكمية</th><th>القيمة</th><th>مين</th></tr></thead><tbody>
+          ${L.rows.map((r) => `<tr><td>${esc(dayOf(r.created_at))}</td><td>${itemHtml(r)}</td><td>${esc(r.batch_no || "")}${r.expiry_date ? ` <span class="muted">${esc(r.expiry_date.slice(0, 7))}</span>` : ""}</td>
+            <td>${esc(r.reason_label)}${r.supplier ? ` — ${esc(r.supplier)}` : ""}</td><td>${r.qty_delta > 0 ? "+" : "−"}${esc(fmtStock(Math.abs(r.qty_delta), it(r)))}</td><td class="num">${r.value != null ? money(-r.value) : "—"}</td><td>${esc(r.by_name || "")}</td></tr>`).join("")
+            || `<tr><td colspan="7" class="muted">✓ مفيش خسائر في الفترة دي</td></tr>`}</tbody></table></div>
+          <p class="muted">القيمة بمتوسط التكلفة وقت التسوية. المرتجع للمورد مش خسارة (قيمته بتتخصم من حسابه)، وظاهر هنا عشان الصورة تكمل.</p>`;
+      } catch (err) { toast(err.message, true); }
+    });
+    wireTools("loss", () => ({ title: "خسائر المخزون", subtitle: rangeText(L.from, L.to), el: $("#rLoss"), sheets: [
+      { name: "الملخص", columns: [Tx("السبب"), N("خرج (وحدة)"), N("دخل (وحدة)"), M("القيمة بالتكلفة")], rows: L.groups.map((g) => [g.label, g.qty_out, g.qty_in, -g.value]), total: ["صافي الخسارة", null, null, -L.total] },
+      { name: "التفاصيل", columns: [Dt("اليوم"), Tx("الصنف"), Tx("التشغيلة"), Dt("الصلاحية"), Tx("السبب"), Tx("المورد"), N("الكمية بالوحدة"), M("القيمة"), Tx("مين"), Tx("ملاحظة")],
+        rows: L.rows.map((r) => [dayOf(r.created_at), r.name_en || r.name_ar, r.batch_no || "", r.expiry_date || "", r.reason_label, r.supplier || "", r.qty_delta, r.value != null ? -r.value : null, r.by_name || "", r.note || ""]) }] }));
+  }
   if (can("inventory.read")) {
     const s = await api("/api/reports/stock");
     $("#rStock").innerHTML = `${s.value_by_category ? `<section class="panel mt" id="rValBox"><div class="row between"><h2>قيمة المخزون</h2>${reportTools("value")}</div><div class="totals"><div>بالتكلفة<b>${money(s.value_cost)}</b></div><div>بسعر الجمهور<b>${money(s.value_retail)}</b></div></div>

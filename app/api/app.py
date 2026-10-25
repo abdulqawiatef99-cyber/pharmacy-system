@@ -463,6 +463,72 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                qp.get("group") or None))
 
     @handler
+    async def stock_reasons(req):
+        from ..inventory import adjust
+        from ..procurement import returns
+        ctx_of(req)
+        return J({"adjust": adjust.REASONS, "supplier_return": returns.REASONS, "up": list(adjust.UP_OK)})
+
+    @handler
+    async def item_adjust(req):
+        from ..inventory import adjust
+        b = await body(req)
+        qd, st = b.get("qty_delta"), b.get("set_to")
+        return J(adjust.adjust(db, ctx_of(req), req.path_params["id"], qty_delta=_int(qd, "qty") if qd not in (None, "") else None,
+                               set_to=_int(st, "qty") if st not in (None, "") else None, batch_id=b.get("batch_id") or None,
+                               reason=str(b.get("reason") or ""), note=b.get("note")))
+
+    @handler
+    async def losses_report(req):
+        from ..inventory import adjust
+        qp = req.query_params
+        return J(adjust.loss_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+
+    @handler
+    async def supplier_returns_api(req):
+        from ..procurement import returns
+        ctx = ctx_of(req)
+        rid = req.path_params.get("id")
+        if req.method == "GET":
+            qp = req.query_params
+            if rid == "suggest":
+                return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None)})
+            if rid:
+                return J(returns.get(db, ctx, rid))
+            return J(returns.listing(db, ctx, qp.get("from", ""), qp.get("to", ""), qp.get("supplier") or None))
+        b = await body(req)
+        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
+
+    @handler
+    async def supplier_return_page(req):
+        """Printable return slip (A4) for the supplier's representative to sign."""
+        from ..procurement import returns
+        ctx = ctx_of(req)
+        r = returns.get(db, ctx, req.path_params["id"])
+        org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
+        e = _html.escape
+        m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
+        show = "total" in r
+        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        rows = "".join(
+            f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
+            f"<td>{e((l['expiry_date'] or '')[:7])}</td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
+            + (f"<td>{m(l['unit_value'])}</td><td>{m(l['unit_value'] * l['qty_base'])}</td>" if show else "") + "</tr>"
+            for i, l in enumerate(r["lines"], 1))
+        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع للمورد {r['return_no']}</title>
+<link rel="stylesheet" href="/static/doc.css"></head><body><main class="doc">
+<header><h1>{e(org)}</h1><h2>إذن مرتجع للمورد رقم {r['return_no']}</h2>
+<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}</p></header>
+<table><thead><tr><th>#</th><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية (وحدة)</th><th>السبب</th>
+{'<th>سعر الوحدة</th><th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
+{f'<tfoot><tr><th colspan="7">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
+{f'<p>ملاحظة: {e(r["note"])}</p>' if r.get('note') else ''}
+<div class="sign"><p>توقيع الصيدلية: ................</p><p>توقيع مندوب المورد: ................</p></div>
+</main><script src="/static/print.js"></script></body></html>"""
+        return Response(page, media_type="text/html; charset=utf-8")
+
+    @handler
     async def item_moves(req):
         qp = req.query_params
         return J(item_card.movements(db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
@@ -1255,8 +1321,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def counts_approve(req):
         ctx = ctx_of(req)
         b = await body(req)
+        reasons = b.get("reasons") if isinstance(b.get("reasons"), dict) else None
         return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=bool(b.get("zero_uncounted")),
-                                  reason=b.get("reason")))
+                                  reason=b.get("reason"), reasons=reasons,
+                                  shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost"))
 
     @handler
     async def counts_cancel(req):
@@ -1798,6 +1866,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}/card", item_card_get),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
+        Route("/api/stock/reasons", stock_reasons),
+        Route("/api/items/{id}/adjust", item_adjust, methods=["POST"]),
+        Route("/api/reports/losses", losses_report),
+        Route("/api/supplier-returns", supplier_returns_api, methods=["GET", "POST"]),
+        Route("/api/supplier-returns/{id}", supplier_returns_api),
+        Route("/supplier-return/{id}", supplier_return_page),
         Route("/api/categories/suggest", sections_suggest),
         Route("/api/contracts", contracts_api, methods=["GET", "POST"]),
         Route("/api/contracts/{id}", contracts_api, methods=["POST"]),

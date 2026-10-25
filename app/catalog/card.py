@@ -138,7 +138,7 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
     branch = ctx.branch_id
     if ctx.can("inventory.read") and branch:
         out["batches"] = [dict(r) for r in db.all(
-            "SELECT sb.qty, b.batch_no, b.expiry_date, b.public_price,"
+            "SELECT sb.qty, nullif(sb.batch_key,'') batch_id, b.batch_no, b.expiry_date, b.public_price,"
             " (SELECT s.name FROM stock_movements m JOIN purchase_invoices p ON p.id=m.ref_id"
             "  JOIN suppliers s ON s.id=p.supplier_id WHERE m.batch_id=b.id AND m.movement_type='purchase'"
             "  ORDER BY m.rowid DESC LIMIT 1) supplier"
