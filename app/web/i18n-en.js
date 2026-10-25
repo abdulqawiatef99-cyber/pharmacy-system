@@ -2432,5 +2432,7 @@ window.I18N_EN = {
 "الاختصارات: اختيار غير صحيح": "Shortcuts: invalid choice",
 "الأعمدة: اختيار غير صحيح": "Columns: invalid choice",
 "لا يمكن إخفاء كل الأعمدة": "All columns cannot be hidden",
-"؟": "?"
+"؟": "?",
+"المرتجع هنا هو ما أُرجع من فواتير هذه الفترة؛ أما تقرير المرتجعات في تقارير المالك فيعرض كل مرتجع بتاريخ إرجاعه.": "Returns here are those made on this period's invoices; the returns report in Owner reports shows every return by the day it was made.",
+"كل مرتجع بتاريخ إرجاعه، حتى لو كانت الفاتورة من فترة سابقة.": "Each return is listed by the day it was made, even if the invoice is from an earlier period."
 };

@@ -2025,7 +2025,7 @@ async function viewSalesAdvanced() {
         ${R.rows.length ? `<tfoot><tr><td class="noprint"></td><td colspan="5"><b>الإجمالي (${T.n})</b></td><td class="num">${money(T.subtotal)}</td><td class="num">${money(T.item_discount)}</td><td class="num">${money(T.customer_discount)}</td>
           <td class="num"><b>${money(T.total)}</b></td><td class="num">${money(T.returned_total)}</td><td class="num"><b>${money(T.net)}</b></td><td class="num">${money(T.paid_cash)}</td><td class="num">${money(T.paid_card)}</td>
           <td class="num">${money(T.paid_transfer)}</td><td class="num">${money(T.on_credit)}</td>${cost ? `<td class="num"><b>${money(T.profit)}</b></td>` : ""}</tr></tfoot>` : ""}</table></div>
-      <p class="muted"><span>الفواتير الملغاة والمعلقة غير داخلة في الإجماليات. الصافي = بعد الخصم ناقص المرتجع.</span> ${cost ? "<span>الربح = صافي الأصناف التي بقيت مع العميل ناقص تكلفتها (دون رسوم التوصيل).</span>" : ""}</p>`;
+      <p class="muted"><span>الفواتير الملغاة والمعلقة غير داخلة في الإجماليات. الصافي = بعد الخصم ناقص المرتجع.</span> ${cost ? "<span>الربح = صافي الأصناف التي بقيت مع العميل ناقص تكلفتها (دون رسوم التوصيل).</span>" : ""} <span>المرتجع هنا هو ما أُرجع من فواتير هذه الفترة؛ أما تقرير المرتجعات في تقارير المالك فيعرض كل مرتجع بتاريخ إرجاعه.</span></p>`;
     const selUi = () => { document.querySelectorAll("[data-pr=sel], #iShort").forEach((b) => { b.disabled = !sel.size; }); };
     $("#iColsBox").innerHTML = colTools($("#iTable"), "invoices"); wireCols($("#iColsBox"), $("#iTable"), "invoices"); applyCols($("#iTable"), "invoices");
     $("#iBox").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", (e) => {
@@ -3546,7 +3546,8 @@ const OWNER_REPORTS = [
       ${r.rows.map((x) => `<tr><td>${esc(stamp(x.at))}</td><td><a href="#/sales/${esc(x.sale_id)}">${x.sale_no}</a></td><td>${esc(x.customer || "—")}</td>
         <td>${x.items.map((i) => `${itemHtml(i)} × ${esc(fmtStock(i.qty, itq(i)))}`).join("<br>")}</td><td class="num"><b>${money(x.total)}</b></td><td>${esc(x.method_label)}</td><td>${esc(x.reason)}</td>
         <td>${esc(x.by_name || "")}</td><td>${esc(x.sold_by_name || "")}</td><td>${x.late ? `<span class="badge b-err">بعد ${x.age_days} يوم</span>` : ""}${x.other_seller ? ` <span class="badge b-warn">فاتورة شخص آخر</span>` : ""}</td></tr>`).join("")
-        || `<tr><td colspan="10" class="muted">✓ لا توجد مرتجعات في هذه الفترة</td></tr>`}</tbody></table></div>`,
+        || `<tr><td colspan="10" class="muted">✓ لا توجد مرتجعات في هذه الفترة</td></tr>`}</tbody></table></div>
+      <p class="muted">كل مرتجع بتاريخ إرجاعه، حتى لو كانت الفاتورة من فترة سابقة.</p>`,
     sheets: (r) => [{ name: "المرتجعات", columns: [Tx("الوقت"), N("الفاتورة"), Tx("العميل"), Tx("الأصناف"), M("المبلغ"), Tx("طريقة الاسترداد"), Tx("السبب"), Tx("سجّل الإرجاع"), Tx("باعه"), N("بعد كم يوم")],
       rows: r.rows.map((x) => [stamp(x.at), x.sale_no, x.customer || "", x.items.map((i) => `${i.name_en || i.name_ar} × ${i.qty}`).join(" / "), x.total, x.method_label, x.reason, x.by_name || "", x.sold_by_name || "", x.age_days]),
       total: ["الإجمالي", null, "", "", r.totals.total, "", "", "", "", null] }] },
