@@ -368,3 +368,20 @@ ul.cols li { break-inside: avoid; }
 @media print { .qsale, #altBox { display: none; } }
 .seg2.wrap { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin: 8px 0; }
 .seg2.wrap button { padding: 0 10px; }
+
+/* advanced sales invoices */
+.chip.tgl { cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink); min-height: 32px; font: inherit; font-size: .8125rem; }
+.chip.tgl.on { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); font-weight: 700; }
+.chip.tgl.on::before { content: "✓ "; }
+table.inv tr.inv-ret td { background: var(--warn-bg); }
+table.inv tr.inv-disc td { background: var(--info-bg); }
+table.inv tr.inv-void td { background: var(--err-bg); text-decoration: line-through; text-decoration-color: var(--err); }
+table.inv tr.inv-draft td { background: var(--zebra); font-style: italic; }
+table.inv tr.open td { outline: 2px solid var(--brand); outline-offset: -2px; }
+table.inv tfoot td { font-weight: 700; border-top: 2px solid var(--ink); background: var(--panel); }
+.legend .lg { display: inline-flex; align-items: center; gap: 4px; }
+.legend .lg::before { content: ""; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line); }
+.legend .lg.inv-ret::before { background: var(--warn-bg); } .legend .lg.inv-disc::before { background: var(--info-bg); }
+.legend .lg.inv-void::before { background: var(--err-bg); } .legend .lg.inv-draft::before { background: var(--zebra); }
+.inv-print { break-inside: avoid; margin-bottom: 10px; } .inv-print h3 { font-size: .9rem; margin: 6px 0; }
+@media print { table.inv tr td { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }

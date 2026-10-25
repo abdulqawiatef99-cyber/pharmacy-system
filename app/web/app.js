@@ -103,12 +103,14 @@ function loadScript(src) {
 }
 async function setLanguage(lang) {
   const h = document.documentElement;
+  I18N.want = lang;                       // the latest choice wins, even if the dictionary is still loading
   if (lang !== "en") {
     if (I18N.on) { I18N.on = false; I18N.obs?.disconnect(); location.reload(); }
     h.lang = "ar"; h.dir = "rtl"; return;
   }
   if (!I18N.map) {
     try { await loadScript("/static/i18n-en.js"); } catch { toast("ملف الإنجليزي مش موجود", true); return; }
+    if (I18N.want !== "en") return;
     const dict = window.I18N_EN || {};
     I18N.map = new Map(Object.entries(dict));
     for (const [k, v] of Object.entries(dict)) {           // "⚠ نص" also known as "نص"
@@ -316,7 +318,7 @@ async function route() {
   }
   $("#topbar").hidden = !ME;
   if (ME) {
-    if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on) setLanguage(ME.prefs.lang); }
+    if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
     $("#navUsers").hidden = !ME.permissions.includes("users.manage");
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
@@ -1784,6 +1786,155 @@ const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(I18N.on ? "en-GB" 
 const dayOf = (iso) => (iso ? isoDay(new Date(iso)) : "");   // local day of a UTC timestamp
 
 async function viewSales() {
+  if (ME.permissions.includes("sales.totals")) return viewSalesAdvanced();
+  return viewSalesSimple();
+}
+
+// تقرير فواتير المبيعات المتقدم: فلاتر بالنوع والساعة والصنف، ألوان، إجماليات، تفاصيل تحت الجدول، طباعة مختصر/كامل/المحدد
+const INV_TYPES = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "تحويل"], ["credit", "آجل"], ["delivery", "توصيل"], ["contract", "تعاقد"],
+  ["returned", "عليها مرتجع"], ["discounted", "عليها خصم"], ["voided", "ملغاة"], ["draft", "معلقة (لسه مفتوحة)"]];
+async function viewSalesAdvanced() {
+  const can = (p) => ME.permissions.includes(p);
+  const now = new Date(), dt = (d, h) => `${isoDay(d)}T${h}`;
+  const sel = new Set(), types = new Set();
+  let R = null, item = null, open = null;
+  app.innerHTML = `<section class="panel noprint"><div class="row between"><h1>فواتير البيع</h1><a href="#/owner-reports">تقارير الصاحب ←</a></div>
+    <div class="row range"><div class="seg2 small">${Object.entries(periodPresets()).map(([k, [t]]) => `<button type="button" data-ip="${k}" class="${k === "today" ? "on" : ""}">${t}</button>`).join("")}</div>
+      <label class="f">من <input type="datetime-local" id="iF" value="${dt(now, "00:00")}"></label><label class="f">لحد <input type="datetime-local" id="iT" value="${dt(now, "23:59")}"></label></div>
+    <div class="row tags mt" role="group" aria-label="نوع الفاتورة">${INV_TYPES.map(([k, t]) => `<button type="button" class="chip tgl" data-it="${k}" aria-pressed="false">${t}</button>`).join("")}</div>
+    <p class="muted small">من غير اختيار = كل الفواتير المكتملة. لو اخترت أكتر من نوع بيطلع أي فاتورة منهم. "ملغاة" و"معلقة" كل واحدة لوحدها.</p>
+    <div class="row"><label class="f grow">رقم الفاتورة أو اسم العميل أو موبايله <input id="iQ" autocomplete="off" placeholder="مثال: 125 أو منى أو 0101"></label>
+      <label class="f grow">فيها صنف <input id="iItem" autocomplete="off" placeholder="اكتب اسم الصنف"></label>
+      <label class="f">الموظف <select id="iUser"><option value="">الكل</option></select></label>
+      <button class="btn" id="iGo">اعرض</button></div><div id="iItemRes" class="cands"></div><div id="iItemChip"></div></section>
+  <section class="panel" id="iRep"><div id="iBox"><p class="muted">بيحمّل…</p></div></section><div id="iDetail"></div>`;
+  const load = async () => {
+    const f = $("#iF").value, t = $("#iT").value;
+    if (!f || !t) return toast("اختار الفترة", true);
+    $("#iBox").innerHTML = `<p class="muted">بيحمّل…</p>`; $("#iDetail").innerHTML = ""; sel.clear(); open = null;
+    const qs = new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
+    try { R = await api(`/api/reports/invoices?${qs}`); } catch (er) { $("#iBox").innerHTML = ""; return toast(er.message, true); }
+    if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
+    draw();
+  };
+  const sub = () => `${R.from.replace("T", " ")} ← ${R.to.replace("T", " ")}`;
+  const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
+  const draw = () => {
+    const T = R.totals, cost = R.show_cost;
+    $("#iBox").innerHTML = `<div class="row between"><h2><span>فواتير البيع</span> <span class="muted">${esc(sub())}</span></h2>
+      <span class="row noprint"><button class="btn small secondary" id="iXl">⬇ Excel</button><button class="btn small secondary" data-pr="short">🖨 مختصر</button>
+        <button class="btn small secondary" data-pr="full">🖨 كامل بالأصناف</button><button class="btn small secondary" data-pr="sel" disabled>🖨 المحدد</button>
+        ${can("items.write") ? `<button class="btn small secondary" id="iShort" disabled>📝 ضيف أصناف المحدد للنواقص</button>` : ""}</span></div>
+      ${R.truncated ? `<p class="badge b-warn">⚠ أول 3000 فاتورة بس — صغّر الفترة</p>` : ""}
+      <div class="totals"><div>الفواتير<b>${T.n}</b><span>${T.returned_n} <span>عليها مرتجع</span> · ${T.discounted_n} <span>عليها خصم</span></span></div><div>قبل الخصم<b>${money(T.subtotal)}</b></div>
+        <div>خصم الأصناف<b>${money(T.item_discount)}</b></div><div>خصم العميل (تعاقد)<b>${money(T.customer_discount)}</b></div><div>بعد الخصم<b>${money(T.total)}</b>${T.delivery_fee ? `<span>منها توصيل ${money(T.delivery_fee)}</span>` : ""}</div>
+        <div>المرتجع<b>${money(T.returned_total)}</b></div><div class="t-ok">الصافي<b>${money(T.net)}</b></div><div>النقدي<b>${money(T.paid_cash)}</b></div>
+        <div>فيزا<b>${money(T.paid_card)}</b></div><div>تحويل<b>${money(T.paid_transfer)}</b></div><div>آجل<b>${money(T.on_credit)}</b></div>
+        ${cost ? `<div>ربح الأصناف<b>${money(T.profit)}</b>${T.unknown_cost_n ? `<span>${T.unknown_cost_n} فاتورة فيها صنف من غير تكلفة</span>` : ""}</div>` : ""}</div>
+      <p class="legend noprint"><span class="lg inv-ret">عليها مرتجع</span><span class="lg inv-disc">عليها خصم</span><span class="lg inv-void">ملغاة</span><span class="lg inv-draft">معلقة</span> — <span>اضغط على أي فاتورة تشوف أصنافها تحت الجدول.</span></p>
+      <div class="tablewrap mt"><table class="inv"><thead><tr><th class="noprint"><input type="checkbox" id="iAll" aria-label="اختار الكل"></th><th>رقم</th><th>الوقت</th><th>العميل</th><th>الموظف</th><th>أصناف</th>
+        <th>قبل الخصم</th><th>خصم الأصناف</th><th>خصم العميل</th><th>بعد الخصم</th><th>المرتجع</th><th>الصافي</th><th>نقدي</th><th>فيزا</th><th>تحويل</th><th>آجل</th>${cost ? "<th>الربح</th>" : ""}</tr></thead><tbody>
+        ${R.rows.map((r, i) => `<tr class="clickable ${cls(r)}" data-i="${i}"><td class="noprint"><input type="checkbox" data-s="${i}" aria-label="اختار"></td>
+          <td><b>${r.sale_no ?? "—"}</b>${r.kind === "delivery" ? ` <span class="badge b-info" title="توصيل">🛵</span>` : ""}${r.contract ? ` <span class="chip" title="تعاقد">🤝 ${esc(r.contract)}</span>` : ""}${r.status === "voided" ? ` <span class="badge b-err">ملغاة</span>` : r.status === "draft" ? ` <span class="badge b-warn">معلقة</span>` : ""}</td>
+          <td>${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)}</td><td>${esc(r.customer || "—")}</td><td>${esc(r.seller || "")}</td><td>${r.lines}</td>
+          <td class="num">${money(r.subtotal)}</td><td class="num">${r.item_discount ? money(r.item_discount) : ""}</td><td class="num">${r.customer_discount ? money(r.customer_discount) : ""}</td>
+          <td class="num"><b>${money(r.total)}</b></td><td class="num">${r.returned_total ? money(r.returned_total) : ""}</td><td class="num"><b>${money(r.net)}</b></td>
+          <td class="num">${r.paid_cash ? money(r.paid_cash) : ""}</td><td class="num">${r.paid_card ? money(r.paid_card) : ""}</td><td class="num">${r.paid_transfer ? money(r.paid_transfer) : ""}</td><td class="num">${r.on_credit ? money(r.on_credit) : ""}</td>
+          ${cost ? `<td class="num">${r.status === "completed" ? `${money(r.profit)}${r.unknown_cost ? " ⚠" : ""}` : ""}</td>` : ""}</tr>`).join("") || `<tr><td colspan="17" class="muted">مفيش فواتير بالفلاتر دي</td></tr>`}</tbody>
+        ${R.rows.length ? `<tfoot><tr><td class="noprint"></td><td colspan="5"><b>الإجمالي (${T.n})</b></td><td class="num">${money(T.subtotal)}</td><td class="num">${money(T.item_discount)}</td><td class="num">${money(T.customer_discount)}</td>
+          <td class="num"><b>${money(T.total)}</b></td><td class="num">${money(T.returned_total)}</td><td class="num"><b>${money(T.net)}</b></td><td class="num">${money(T.paid_cash)}</td><td class="num">${money(T.paid_card)}</td>
+          <td class="num">${money(T.paid_transfer)}</td><td class="num">${money(T.on_credit)}</td>${cost ? `<td class="num"><b>${money(T.profit)}</b></td>` : ""}</tr></tfoot>` : ""}</table></div>
+      <p class="muted"><span>الملغاة والمعلقة مش داخلة في الإجماليات. الصافي = بعد الخصم ناقص المرتجع.</span> ${cost ? "<span>الربح = صافي الأصناف اللي فضلت مع العميل ناقص تكلفتها (من غير رسوم التوصيل).</span>" : ""}</p>`;
+    const selUi = () => { document.querySelectorAll("[data-pr=sel], #iShort").forEach((b) => { b.disabled = !sel.size; }); };
+    $("#iBox").querySelectorAll("tr.clickable").forEach((tr) => tr.addEventListener("click", (e) => {
+      if (e.target.matches("input")) return;
+      $("#iBox").querySelectorAll("tr.open").forEach((x) => x.classList.remove("open")); tr.classList.add("open");
+      detail(R.rows[+tr.dataset.i]);
+    }));
+    $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
+    $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
+    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", sub(), sheets()));
+    $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
+    $("#iShort")?.addEventListener("click", async () => {
+      const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
+      if (!ids.length || !confirmInline($("#iShort"))) return;
+      let n = 0;
+      for (const id of ids) { try { await api(`/api/items/${id}/shortage`, { method: "POST", body: { on: true } }); n++; } catch { /* keep going */ } }
+      toast(`✓ اتعلّم ${n} صنف ناقص`);
+    });
+  };
+  const detail = (r) => {
+    open = r;
+    $("#iDetail").innerHTML = `<section class="panel" id="iDet"><div class="row between"><h2>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(r.customer || "من غير عميل")}</h2>
+      <span class="row noprint">${r.status !== "draft" ? `<a class="btn small secondary" href="#/sales/${esc(r.id)}">افتح الفاتورة</a>` : ""}<button class="btn small secondary" id="iDetClose">✕ اقفل</button></span></div>
+      <p class="muted">${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} · ${esc(r.seller || "")}${r.void_reason ? ` · سبب الإلغاء: ${esc(r.void_reason)}` : ""}</p>
+      <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>رجع منها</th><th>قبل الخصم</th><th>الخصم</th><th>بعد الخصم</th>${can("items.write") ? `<th class="noprint"></th>` : ""}</tr></thead><tbody>
+      ${(r.items || []).map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.gross)}</td>
+        <td>${x.discount_bp ? `${pct(x.discount_bp)}%${x.contract ? " (تعاقد)" : ""}` : ""}</td><td class="num"><b>${money(x.net)}</b></td>
+        ${can("items.write") ? `<td class="noprint">${x.name_en === "—" ? "" : `<button class="btn small secondary" data-sh="${esc(x.item_id)}">📝 ضيف للنواقص</button>`}</td>` : ""}</tr>`).join("")}</tbody></table></div></section>`;
+    $("#iDetClose").addEventListener("click", () => { $("#iDetail").innerHTML = ""; });
+    $("#iDetail").querySelectorAll("[data-sh]").forEach((b) => b.addEventListener("click", async () => {
+      try { await api(`/api/items/${b.dataset.sh}/shortage`, { method: "POST", body: { on: true } }); b.disabled = true; b.textContent = "✓ اتضاف"; }
+      catch (er) { toast(er.message, true); }
+    }));
+    $("#iDet").scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const sheets = () => {
+    const cost = R.show_cost, T = R.totals;
+    return [{ name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("الحالة"), Tx("العميل"), Tx("الموظف"), N("أصناف"), M("قبل الخصم"), M("خصم الأصناف"), M("خصم العميل"), M("بعد الخصم"),
+        M("المرتجع"), M("الصافي"), M("نقدي"), M("فيزا"), M("تحويل"), M("آجل"), ...(cost ? [M("الربح")] : [])],
+      rows: R.rows.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
+        r.customer || "", r.seller || "", r.lines, r.subtotal, r.item_discount, r.customer_discount, r.total, r.returned_total, r.net, r.paid_cash, r.paid_card, r.paid_transfer, r.on_credit, ...(cost ? [r.status === "completed" ? r.profit : null] : [])]),
+      total: ["الإجمالي", "", "", "", "", null, T.subtotal, T.item_discount, T.customer_discount, T.total, T.returned_total, T.net, T.paid_cash, T.paid_card, T.paid_transfer, T.on_credit, ...(cost ? [T.profit] : [])] },
+    { name: "الأصناف", columns: [N("رقم الفاتورة"), Tx("الصنف"), N("الكمية بالوحدة"), N("رجع منها"), M("قبل الخصم"), Tx("الخصم"), M("بعد الخصم")],
+      rows: R.rows.flatMap((r) => (r.items || []).map((x) => [r.sale_no, x.name_en || x.name_ar, x.qty, x.returned, x.gross, x.discount_bp ? `${pct(x.discount_bp)}%` : "", x.net])) }];
+  };
+  const printInv = (mode) => {
+    const rows = mode === "sel" ? [...sel].sort((a, b) => a - b).map((i) => R.rows[i]) : R.rows;
+    const box = document.createElement("div");
+    if (mode === "full") {
+      box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "من غير عميل")} — ${esc(r.seller || "")}</h3>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>رجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${esc(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
+    } else {
+      const copy = $("#iBox").cloneNode(true);
+      if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); }
+      box.append(copy);
+    }
+    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", sub());
+  };
+  document.querySelectorAll("[data-ip]").forEach((b) => b.addEventListener("click", () => {
+    const [, a, z] = periodPresets()[b.dataset.ip];
+    document.querySelectorAll("[data-ip]").forEach((x) => x.classList.toggle("on", x === b));
+    $("#iF").value = dt(a, "00:00"); $("#iT").value = dt(z, "23:59"); load();
+  }));
+  ["#iF", "#iT"].forEach((k) => $(k).addEventListener("change", () => document.querySelectorAll("[data-ip]").forEach((x) => x.classList.remove("on"))));
+  document.querySelectorAll("[data-it]").forEach((b) => b.addEventListener("click", () => {
+    const k = b.dataset.it, solo = ["voided", "draft"];
+    if (types.has(k)) types.delete(k);
+    else { if (solo.includes(k)) types.clear(); else solo.forEach((x) => types.delete(x)); types.add(k); }
+    document.querySelectorAll("[data-it]").forEach((x) => { const on = types.has(x.dataset.it); x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
+    load();
+  }));
+  $("#iGo").addEventListener("click", load);
+  $("#iQ").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+  $("#iUser").addEventListener("change", load);
+  let tm;
+  $("#iItem").addEventListener("input", (e) => { clearTimeout(tm); tm = setTimeout(async () => {
+    const v = e.target.value.trim(); if (v.length < 2) { $("#iItemRes").innerHTML = ""; return; }
+    const r = (await findItems(v, 8)).items;
+    $("#iItemRes").innerHTML = r.map((x, i) => `<button type="button" class="btn small secondary" data-ii="${i}">${itemHtml(x)}</button>`).join("") || `<p class="muted">مفيش نتائج</p>`;
+    $("#iItemRes").querySelectorAll("[data-ii]").forEach((b) => b.addEventListener("click", () => {
+      item = r[+b.dataset.ii]; $("#iItemRes").innerHTML = ""; $("#iItem").value = "";
+      $("#iItemChip").innerHTML = `<span class="chip"><span>فيها:</span> ${itemHtml(item)} <button type="button" class="x" id="iItemX" aria-label="شيل">✕</button></span>`;
+      $("#iItemX").addEventListener("click", () => { item = null; $("#iItemChip").innerHTML = ""; load(); });
+      load();
+    }));
+  }, 250); });
+  load();
+}
+
+async function viewSalesSimple() {
   const all = ME.permissions.includes("sales.totals");
   app.innerHTML = `
   <section class="panel"><h1>فواتير البيع</h1>

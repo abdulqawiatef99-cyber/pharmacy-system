@@ -72,6 +72,10 @@ Adding an item already on a draft sale (same discount) increases that line inste
 `staff` · `customers` · `shifts` (`cash.see_expected`) · `returns` · `discounts` · `prices` · `units` · `unsold` (+`inventory.read`).
 All need `sales.totals`; cost values only with `costs.read`; drawer differences only with `cash.see_expected`.
 
+**Sales invoices report** — `GET /api/reports/invoices?from=YYYY-MM-DDTHH:MM&to=…&types=cash,card,transfer,credit,delivery,contract,returned,discounted|voided|draft&q&item&user&lines=1`
+(`sales.totals`; any of the chosen kinds; `q` = invoice number, or part of a customer's name/phone (≥4 digits);
+per invoice: item vs contract discount, after-return net, payments, `profit` for `costs.read`; first 3000; voided/held not in totals).
+
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.
