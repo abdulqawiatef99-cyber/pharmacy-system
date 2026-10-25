@@ -35,3 +35,17 @@ class TestDaily(Base):
         n = [x for x in notify.listing(self.db, self.ctx)["items"] if x["kind"] == "sales_spike"]
         self.assertEqual(len(n), 1)
         self.assertIn("زاد قوي", n[0]["title"])
+
+
+class TestDailyNoNoise(Base):
+    def test_same_batches_not_repeated_next_day(self):
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, self.pan, "SOON", (T + timedelta(days=12)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=4, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("15"))
+            old = inv.get_or_create_batch(self.db, self.ctx, self.pan, "OLD", (T - timedelta(days=3)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=4, batch_id=old, movement_type="purchase",
+                              unit_cost=Decimal("15"))
+        self.assertEqual(daily.run(self.db, T), 2)
+        self.assertEqual(daily.run(self.db, T + timedelta(days=1)), 0)        # nothing new: no noise
+        self.assertEqual(daily.run(self.db, T + timedelta(days=7)), 1)        # expired still there: weekly reminder

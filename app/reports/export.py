@@ -14,6 +14,12 @@ MAX_ROWS = 50_000
 MAX_SHEETS = 8
 
 
+def _text(cell, v) -> None:
+    """Always plain text: a name like "=HYPERLINK(...)" must never become an Excel formula."""
+    cell.value = str(v)[:500]
+    cell.data_type = "s"
+
+
 def _sheet_name(n: str, used: set[str]) -> str:
     n = re.sub(r"[\[\]:*?/\\]", " ", str(n or "Sheet")).strip()[:28] or "Sheet"
     base, i = n, 2
@@ -43,12 +49,15 @@ def xlsx(spec: dict) -> bytes:
         r0 = 1
         for line in (spec.get("title"), spec.get("subtitle")):
             if line:
-                ws.cell(r0, 1, str(line)[:200]).font = Font(bold=r0 == 1, size=13 if r0 == 1 else 10)
+                c0 = ws.cell(r0, 1)
+                _text(c0, str(line)[:200])
+                c0.font = Font(bold=r0 == 1, size=13 if r0 == 1 else 10)
                 r0 += 1
         if r0 > 1:
             r0 += 1
         for j, c in enumerate(cols, 1):
-            cell = ws.cell(r0, j, c["label"])
+            cell = ws.cell(r0, j)
+            _text(cell, c["label"])
             cell.font = Font(bold=True)
             cell.fill = PatternFill("solid", fgColor="E8E6DF")
             cell.alignment = Alignment(horizontal="center")
@@ -72,9 +81,9 @@ def xlsx(spec: dict) -> bytes:
                     elif t == "date" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)):
                         cell.value, cell.number_format = datetime.strptime(str(v), "%Y-%m-%d").date(), "yyyy-mm-dd"
                     else:
-                        cell.value = str(v)[:500]
+                        _text(cell, v)
                 except (TypeError, ValueError):
-                    cell.value = str(v)[:500]
+                    _text(cell, v)
                 widths[j - 1] = max(widths[j - 1], min(60, len(str(v)) + 2))
         if sh.get("total"):
             tr = r0 + len(rows) + 1
@@ -84,8 +93,10 @@ def xlsx(spec: dict) -> bytes:
                 cell = ws.cell(tr, j)
                 if cols[j - 1]["type"] == "money" and isinstance(v, int):
                     cell.value, cell.number_format = round(v / 100, 2), "#,##0.00"
+                elif isinstance(v, (int, float)):
+                    cell.value = v
                 else:
-                    cell.value = v if isinstance(v, (int, float)) else str(v)
+                    _text(cell, v)
                 cell.font = Font(bold=True)
         for j, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(j)].width = w

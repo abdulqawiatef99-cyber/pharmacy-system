@@ -923,7 +923,7 @@ async function viewItem(id) {
   const c = await api(`/api/items/${id}/card`), cats = await loadCats();
   const low = c.min_stock && c.stock_qty != null && c.stock_qty <= c.min_stock;
   const maxM = Math.max(1, ...c.monthly.map((m) => m.qty));
-  const today = new Date().toISOString().slice(0, 10), soon = new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10);
+  const today = isoDay(new Date()), soon = isoDay(new Date(Date.now() + 90 * 864e5));
   const expCls = (d) => (!d ? "b-plain" : d < today ? "b-err" : d < soon ? "b-warn" : "b-ok");
   app.innerHTML = `
   <section class="panel"><div class="row between">
@@ -2633,7 +2633,7 @@ async function viewExpenses(period) {
     <div class="formgrid"><label class="f">البند <select name="cat">${r.categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
       <label class="f">المبلغ (ج) <input name="a" type="number" step="0.25" min="0" required></label>
       <label class="f">الفلوس طلعت منين <select name="from"><option value="drawer">من درج الشيفت</option><option value="outside">من برّه الدرج</option></select></label>
-      <label class="f">التاريخ <input name="d" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
+      <label class="f">التاريخ <input name="d" type="date" value="${isoDay(new Date())}"></label>
       <label class="f">ملاحظة <input name="n" placeholder="مثال: أكياس + بكرة إيصالات"></label></div>
     <button class="btn mt">سجّل</button>
     <p class="muted">${ME.role === "owner" ? "مصاريفك بتتعتمد على طول." : `المصروف بيستنى موافقة ${canA ? "الصاحب لو أكبر من " + money(r.manager_limit) + " ج" : "المدير أو الصاحب"} قبل ما يتحسب.`}</p></form>
@@ -2948,7 +2948,7 @@ async function viewFeedback() {
   $("#fbDl")?.addEventListener("click", () => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(items.map((f) => ({ kind: f.kind, text: f.text, screen: f.screen, by: f.by_name, at: f.created_at, status: f.status })), null, 1)], { type: "application/json" }));
-    a.download = `ملاحظات-البرنامج-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    a.download = `ملاحظات-البرنامج-${isoDay(new Date())}.json`; a.click();
   });
 }
 
@@ -2961,7 +2961,7 @@ async function viewAttendance() {
     ${a.rows.map((r) => `<tr><td>${esc(r.day)}</td><td>${tm(r.check_in)}</td><td>${tm(r.check_out)}</td><td>${r.source === "phone" ? "موبايل" : r.source === "owner" ? "تعديل الصاحب" : "الكمبيوتر"}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">مفيش</td></tr>`}</tbody></table></section>`;
 }
 async function viewStaff(month) {
-  month = month || new Date().toISOString().slice(0, 7);
+  month = month || isoDay(new Date()).slice(0, 7);
   const r = await api(`/api/staff?month=${month}`);
   const post = async (body) => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("اتحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } };
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>

@@ -64,14 +64,15 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     if q.strip():
         sql += f" AND ({SEARCH_SQL})"
         params += [f"%{q.strip()}%"] * SEARCH_N
-    sql += " ORDER BY c.name LIMIT 300"
-    rows = [dict(r) for r in db.all(sql, tuple(params))]
-    soon = (today + timedelta(days=5)).isoformat()
+    # the filter runs before the 300 limit, so a big customer list never hides a debtor
+    sql = f"SELECT * FROM ({sql}) WHERE 1=1"
     if only == "debt":
-        rows = [r for r in rows if r["balance"] > 0]
+        sql += " AND balance > 0"
     elif only == "refill":
-        rows = [r for r in rows if r["next_refill"] and r["next_refill"] <= soon]
-    return rows
+        sql += " AND next_refill IS NOT NULL AND next_refill <= ?"
+        params.append((today + timedelta(days=5)).isoformat())
+    sql += " ORDER BY " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
+    return [dict(r) for r in db.all(sql, tuple(params))]
 
 
 def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
@@ -197,7 +198,7 @@ def mark_refilled(db: Database, sale_id: str) -> None:
                " (SELECT item_id FROM sale_lines WHERE sale_id=?)", (s["completed_at"], s["customer_id"], sale_id))
 
 
-REMINDER_TEXT = "أهلاً {name}، معاد طلبك الشهري من {pharmacy} {date}. تحب نجهزهولك؟ ابعتلنا هنا ونوصلهولك."
+REMINDER_TEXT = "أهلاً {name}، {when}. تحب نجهزهولك؟ ابعتلنا هنا ونوصلهولك."
 
 
 def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None = None) -> dict:
@@ -216,8 +217,10 @@ def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None =
     pharmacy = ps.get(db, ctx.org_id).get("title") or (org["name"] if org else "الصيدلية")
     due = min((r["due"] for r in p["refills"]), default=None)
     today = today or date.today()
-    when = "النهارده" if due == today.isoformat() else ("خلص" if due and due < today.isoformat() else f"يوم {due}" if due else "قرّب")
-    text = REMINDER_TEXT.format(name=p["name"].split()[0], pharmacy=pharmacy, date=when)
+    base = f"ميعاد طلبك الشهري من {pharmacy}"
+    when = (f"النهارده {base}" if due == today.isoformat() else f"{base} عدّى" if due and due < today.isoformat()
+            else f"{base} يوم {due}" if due else f"{base} قرّب")
+    text = REMINDER_TEXT.format(name=p["name"].strip(), when=when)
     with db.transaction():
         db.execute("UPDATE customers SET reminded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (cid,))
         audit.record(db, ctx, "customer.whatsapp_reminder", "customer", cid)

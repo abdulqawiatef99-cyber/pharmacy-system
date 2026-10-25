@@ -60,3 +60,14 @@ class TestLineOrder(Base):
         self.assertEqual([l["line_no"] for l in s["lines"]], [1, 2, 3])
         self.assertEqual(s["line_order"], "entry")
         self.assertEqual(sort_lines([], "alpha"), [])
+
+
+class TestDebtFilterBeyondLimit(Base):
+    def test_debtor_after_300_names_still_listed(self):
+        with self.db.transaction():
+            for i in range(305):
+                self.db.execute("INSERT INTO customers (id, org_id, name) VALUES (?,?,?)", (f"c{i:03d}", self.ctx.org_id, f"أ {i:03d}"))
+            self.db.execute("INSERT INTO customers (id, org_id, name) VALUES ('zz', ?, 'ي آخر واحد')", (self.ctx.org_id,))
+            self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, created_by) VALUES"
+                            " ('l1', ?, 'zz', 5000, 'adjustment', ?)", (self.ctx.org_id, self.ctx.user_id))
+        self.assertEqual([c["id"] for c in cu.listing(self.db, self.ctx, only="debt")], ["zz"])

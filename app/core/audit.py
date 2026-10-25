@@ -148,8 +148,8 @@ def listing(db: Database, ctx: Context, date_from: str, date_to: str, user_id: s
     if group:
         if group not in GROUPS:
             raise ValidationFailed("نوع غير معروف")
-        q += " AND (a.action LIKE ? OR a.action LIKE ?)"
-        p += [group + ".%", group + "_%"]
+        q += " AND (a.action LIKE ? ESCAPE '\\' OR a.action LIKE ? ESCAPE '\\')"
+        p += [group + ".%", group + "\\_%"]
     q += " ORDER BY a.at DESC LIMIT 5000"
     rows = []
     for r in db.all(q, tuple(p)):

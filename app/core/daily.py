@@ -38,21 +38,30 @@ def run(db: Database, today: date | None = None) -> int:
             continue
         ctx = Context(user_id="system", org_id=o["id"], branch_id=None)
         with db.transaction():
-            expired = db.one("SELECT count(*) c, coalesce(sum(sb.qty),0) q FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+            expired = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
                              " WHERE sb.org_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL AND b.expiry_date<?",
-                             (o["id"], today.isoformat()))
-            if expired["c"]:
-                notify.emit(db, ctx, "expired_stock", "error", f"{expired['c']} تشغيلة صلاحيتها خلصت ولسه ليها رصيد",
+                             (o["id"], today.isoformat()))["c"]
+            # expired stock still on the shelf: when the number changes, and again once a week while it stays
+            last_exp = st.get("expired_at")
+            if expired and (expired != st.get("expired_count") or not last_exp
+                            or date.fromisoformat(last_exp) <= today - timedelta(days=7)):
+                notify.emit(db, ctx, "expired_stock", "error", f"{expired} تشغيلة صلاحيتها خلصت ولسه ليها رصيد",
                             "البيع منها ممنوع أوتوماتيك — شيلها من الرف وسجّلها (مرتجع للمورد أو إعدام)", "report", "expiry")
+                st["expired_at"] = today.isoformat()
                 sent += 1
+            st["expired_count"] = expired
+            # batches entering the last 30 days: one notice for the ones that are new since last time
             soon = (today + timedelta(days=30)).isoformat()
-            new_soon = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=?"
-                              " AND sb.qty>0 AND b.expiry_date>=? AND b.expiry_date<=?", (o["id"], today.isoformat(), soon))["c"]
-            if new_soon and new_soon != st.get("soon_count"):
-                notify.emit(db, ctx, "expiry_soon", "warning", f"{new_soon} تشغيلة صلاحيتها بتخلص خلال 30 يوم",
-                            "قدّم بيعها أو رجّعها للمورد قبل ما تخلص", "report", "expiry")
+            soon_ids = {r["batch_key"] for r in db.all(
+                "SELECT DISTINCT sb.batch_key FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=?"
+                " AND sb.qty>0 AND b.expiry_date>=? AND b.expiry_date<=?", (o["id"], today.isoformat(), soon))}
+            new_soon = soon_ids - set(st.get("soon_ids", []))
+            if new_soon:
+                notify.emit(db, ctx, "expiry_soon", "warning", f"{len(new_soon)} تشغيلة جديدة صلاحيتها بتخلص خلال 30 يوم",
+                            f"كلهم دلوقتي {len(soon_ids)} تشغيلة — قدّم بيعها أو رجّعها للمورد قبل ما تخلص", "report", "expiry")
                 sent += 1
-            st["soon_count"] = new_soon
+            st["soon_ids"] = sorted(soon_ids)
+            st.pop("soon_count", None)
             # selling much faster than usual: last 7 days vs the 8 weeks before
             lo7, _ = local_day_bounds(today - timedelta(days=7))
             lo63, _ = local_day_bounds(today - timedelta(days=63))

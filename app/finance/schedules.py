@@ -148,6 +148,10 @@ def skip(db: Database, ctx: Context, sid: str, period: str) -> list[dict]:
     """"Not this time" for one period (rent paid yearly in advance, a month without a bill)."""
     ctx.require("expenses.approve")
     s = _get(db, ctx, sid)
+    try:
+        date.fromisoformat(f"{period}-01")
+    except (TypeError, ValueError):
+        raise ValidationFailed("الشهر غير صحيح")
     sk = set(json.loads(s["skipped"] or "[]")) | {period}
     with db.transaction():
         db.execute("UPDATE expense_schedules SET skipped=? WHERE id=?", (json.dumps(sorted(sk)), sid))
