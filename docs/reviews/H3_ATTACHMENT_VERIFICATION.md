@@ -1,21 +1,54 @@
-# H3 — attachment verification proposal and regression tests
-Status: tests/design only; awaiting owner approval before changing app/core/backup.py.
-Baseline: 69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0; branch codex/backup-attachment-verification.
-No application code or restore replacement algorithm changed in this checkpoint.
+# H3 — التحقق من مرفقات النسخ الاحتياطية
+الحالة: إصلاح محدود مختبر، بانتظار مراجعة المالك؛ غير مدمج أو منشور.
+التفويض: موافقة المالك «اعمل الصح» بعد سؤال إصلاح فحص المرفقات فقط.
+الفرع codex/backup-attachment-verification، مبني على main الأصلي 69e3c4a.
 
-Scope proposed: verify registered source_files against ZIP members, SHA-256 and size from the snapshot DB.
-Use the existing schema and formats 1/2; no new archive format, encryption, migration or data deletion.
-Resolve only archive members under the correct organization and known original/transfer layouts.
-Normalize stored Windows paths as metadata; never open the old absolute path during archive verification.
-Check quick_check too, because automatic backups use it. Reject duplicate ZIP entries.
-Keep restore's existing order, so rejecting a broken archive happens before touching live data.
+## ما تغير
+verify_archive وquick_check يقارنان المرفقات المسجلة في source_files داخل snapshot DB
+بأعضاء ZIP المتوقعة في مجلد الصيدلية الصحيح، والحجم وSHA-256، ويرفضان الأعضاء المكررة.
+لا يكفي CRC: الاختبارات تعيد إنشاء CRC صحيح لملف معدل، منها تعديل بنفس الحجم.
+المسار المخزن يفسر كmetadata فقط، مع تطبيع فواصل Windows؛ لا يفتح أي مسار قديم خارج الأرشيف.
+يدعم موضعي الكتابة الموجودين: org/name وorg/transfers/name.
 
-Compatibility requirement: do not make create() unconditionally reject missing live uploads in this limited fix.
-The existing recovery test intentionally restores when the current uploads are missing; a pre-restore snapshot
-must still be possible. Distinguish an incomplete pre-restore safety copy from a verified complete recovery backup.
-Do not claim that a damaged current state can never be snapshotted or that file replacement is already atomic.
+**ملف التطبيق الوحيد المعدل app/core/backup.py.** لا مخطط أو migration أو مكتبة أو صيغة أرشيف جديدة.
+الصيغتان 1 (pharmacy.db) و2 (pharmacy.db.xz) تظلان مدعومتين.
+create وآلية استبدال ملفات restore لم تتغيرا؛ restore يرفض النسخة التي تفشل بوابة التحقق
+قبل النسخة السابقة أو أي استبدال حي. لم تُنفذ أي عملية على بيانات صيدلية حقيقية.
 
-Tests cover: missing/changed invoice, cross-tenant substitution, duplicate entries, quick-check integrity,
-legacy format 1, current format 2, Windows stored paths, transfer subfolder and rejection before live replacement.
-Only synthetic temporary files/databases are used. H1 fix is a separate PR #2; this branch is based on main.
-H2 remains open. No merge, deployment or production backup/restore is authorized by this checkpoint.
+## التحقق
+- قبل الإصلاح: 12 حالة قبول، 8 فشل و4 نجاح، تؤكد الفجوة.
+- أضيفت حالة تعديل بنفس الحجم لفحص SHA-256 دون الاعتماد على فرق الحجم.
+- بعد الإصلاح: 28/28 حالة مرتبطة بالنسخ والاستعادة ناجحة في 4.047 ثانية
+  (13 جديدة + 15 موجودة).
+- المجموعة الكاملة: **387/387 ناجحة، لا فشل ولا أخطاء ولا تجاوز** في 38.311 ثانية.
+- بيئة Linux/Python 3.12.14 ونفس venv الاختبار المسجل في PR #1/environment-final.txt.
+  reportlab مثبتة للاختبارات فقط؛ requirements لم يتغير.
+- أوامر: python -m unittest tests.test_backup_attachments tests.test_backup_resilience tests.test_autobackup -v
+  ثم python -m unittest discover -s tests -t . -v .
+- التشغيلان الأوليان للاختبارات المرتبطة قُطعا عند TestClient تحت قيود sockets؛ لم يُحتسبا نجاحًا.
+  النتيجة النهائية أعلاه من تشغيل مكتمل بصلاحيات sockets للاختبارات المحلية.
+- فاحص الأسرار التقريبي لم يجد نتائج في الملفين؛ ليس ضمانًا شاملًا.
+
+التغطية: مرفق مفقود، محتوى معدل وCRC صحيح، تعديل بنفس الحجم، استبدال عبر صيدلية أخرى،
+عضو ZIP مكرر، صيغة 1 سليمة/ناقصة، صيغة 2، بيانات مسار Windows، مجلد transfers،
+quick_check الناقص/المعدل، ورفض restore قبل تغيير الحالة الحالية.
+اختبارات round-trip الموجودة نجحت، بما فيها الاستعادة عندما ملفات الحالة الحالية مفقودة.
+
+## الحدود المهمة
+- هذه سلامة مقابل سجل الملفات في snapshot DB، وليست توقيعًا لإثبات منشئ النسخة؛ من يغيّر
+  DB وmanifest والمرفقات كلها يستطيع إعادة حساب hashes. التشفير/التوثيق وإدارة المفاتيح مهمة مستقلة.
+- التحقق الجديد لا يعد بأن create لا يستطيع أخذ snapshot لحالة ناقصة. نحتاج ذلك عند أخذ
+  نسخة أمان قبل إصلاح حالة كانت ملفاتها مفقودة أصلًا. نسخة ناقصة ليست recovery backup معتمدة؛
+  callers الذين يستخدمون verify_archive/quick_check سيكشفون النقص.
+- الملفات غير المسجلة في source_files تظل محفوظة كما كان، دون ادعاء hash موثق لها في DB.
+- quick_check أصبح يقرأ snapshot DB ويحسب hashes للمرفقات أيضًا؛ زمن النسخ على ملفات صيدلية كبيرة
+  يحتاج قياسًا على نسخة اختبار مصرح بها، ولم نختبره على الجهاز الحقيقي.
+- المسارات غير المعروفة تُرفض بدل التخمين؛ موضعا الكتابة الحاليان راجعا في الكود.
+- Windows الفعلي والطابعات وانقطاع كهرباء حقيقي لم يختبروا هنا.
+- H2 (ذرية التحديث/rollback) ما زالت مفتوحة. H1 له PR #2 مستقل، ولم تتضمن هذه المجموعة إصلاح H1.
+- اجتياز الاختبارات لا يعتمد الإنتاج. لا merge أو نشر أو استعادة بيانات حقيقية دون المالك.
+
+## استكمال Claude
+راجع فرق backup.py والاختبارات الجديدة قبل لمس نفس الملف، واحتفظ بتوافق الصيغ القديمة.
+هذا الفرع لا يكرر كود PR #2، وكلاهما مبني على main الأصلي.
+قبل إطلاقهما معًا يلزم فحص تجميعي وإقرار المالك؛ لا تجعل قراءة نسخة سليمة تصريحًا لاستعادة على الإنتاج.

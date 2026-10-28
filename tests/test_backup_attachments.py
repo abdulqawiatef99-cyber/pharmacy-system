@@ -40,7 +40,7 @@ class TestBackupAttachmentIntegrity(DBTestCase):
                     if missing:
                         continue
                     if changed:
-                        data = b"changed original source"
+                        data = b"X" * len(data) if changed == "same_size" else b"changed original source"
                     if other_org:
                         name = name.replace(self.ctx.org_id, "foreign-organization")
                 if legacy and name == "pharmacy.db.xz":
@@ -68,6 +68,9 @@ class TestBackupAttachmentIntegrity(DBTestCase):
 
     def test_same_content_in_another_tenant_folder_cannot_replace_attachment(self):
         self.assertTrue(backup.verify_archive(self.rewrite(other_org=True))["problems"])
+
+    def test_same_length_modified_original_is_rejected_by_checksum(self):
+        self.assertTrue(backup.verify_archive(self.rewrite(changed="same_size"))["problems"])
 
     def test_duplicate_zip_member_is_rejected(self):
         self.assertTrue(backup.verify_archive(self.rewrite(duplicate=True))["problems"])
@@ -100,7 +103,7 @@ class TestBackupAttachmentIntegrity(DBTestCase):
         self.assertTrue(backup.quick_check(self.rewrite(missing=True)))
 
     def test_quick_check_rejects_changed_original(self):
-        self.assertTrue(backup.quick_check(self.rewrite(changed=True)))
+        self.assertTrue(backup.quick_check(self.rewrite(changed="same_size")))
 
     def test_restore_rejects_missing_original_before_touching_live_data(self):
         broken = self.rewrite(missing=True)
