@@ -3,7 +3,7 @@ name: Local candidate Windows validation
 on:
   push:
     branches: [codex/local-release-candidate]
-    paths-ignore: ["docs/**", "**.md"]
+    paths-ignore: ["docs/**", "**.md", ".github/workflows/build-local-candidate.yml"]
 
 permissions:
   contents: read
