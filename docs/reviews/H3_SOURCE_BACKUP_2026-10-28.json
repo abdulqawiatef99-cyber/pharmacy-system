@@ -1,0 +1,27 @@
+{
+  "source_ref": "100600dca808fd1ca48b2f12f9612a754312c385",
+  "files": 243,
+  "bytes": 2520107,
+  "verified": true,
+  "archive": "pharmacy-h3-fix-source-2026-10-28-100600dca808.zip",
+  "sha256": "bcc9d39d60161847d3463d3c6149ba791d463185582fb196a0bff8395363063a",
+  "restored_files_verified": 243,
+  "tests": {
+    "passed": 387,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 38.311
+  },
+  "merged": false,
+  "production_deployed": false,
+  "external_copy_confirmed": false,
+  "full_git_history": false,
+  "review_pr": "https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/3",
+  "notes": [
+    "Source-only unmerged H3 branch snapshot; all 243 files verified against Git and restored in a temporary folder.",
+    "No production data, uploaded invoices, secrets, virtualenv or full Git history.",
+    "The ZIP is local to this workspace until the owner downloads/stores an independent copy.",
+    "Separate temporary integration check with H1 and review access tests passed 403 cases; this ZIP is H3 only."
+  ]
+}
