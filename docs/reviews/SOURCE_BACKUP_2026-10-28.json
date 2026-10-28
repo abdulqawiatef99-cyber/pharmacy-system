@@ -1,23 +1,34 @@
 {
-  "source_ref": "c83396c47649c9fe3c10858e9af2433c2aa82991",
-  "files": 249,
-  "bytes": 2546535,
+  "source_ref": "4f39c3663a796872111464d186f73f5559d9d8a8",
+  "files": 254,
+  "bytes": 2565259,
   "verified": true,
-  "restored_files_verified": 249,
-  "changed_content_rejected": true,
-  "unexpected_path_rejected": true,
-  "duplicate_entry_rejected": true,
-  "archive_name": "pharmacy-source-2026-10-28-c83396c47649.zip",
-  "archive_bytes": 1040370,
-  "archive_sha256": "e1595926afc05568eda4a4e2905780b5341a4b8b88e5deb4f8125131a95ccce6",
+  "restored_files_verified": 254,
+  "archive_name": "pharmacy-source-2026-10-28-4f39c3663a79.zip",
+  "archive_bytes": 1048849,
+  "archive_sha256": "dc1d30049b193fd1e1e6905e1faa2f6fcb9806e5c34df0a860a0c186c625113f",
   "source_only": true,
   "full_git_history": false,
   "external_copy_confirmed": false,
-  "verification_command": "python docs/reviews/verify_source_backup.py /path/to/pharmacy-source-2026-10-28-c83396c47649.zip",
+  "latest_full_suite": {
+    "run": 378,
+    "passed": 378,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 36.086
+  },
+  "known_defect_probes": {
+    "run": 4,
+    "expected_failures_observed": 4
+  },
+  "selftest_quick": "PASSED (Linux, no physical printer)",
+  "verification_command": "python docs/reviews/verify_source_backup.py /path/to/pharmacy-source-2026-10-28-4f39c3663a79.zip",
   "notes": [
-    "Source snapshot at source_ref; later backup receipt and handoff updates are intentionally outside this archive.",
-    "Source and documentation only; no production database, uploaded invoices, API credentials, virtualenv, or complete Git history.",
-    "Archive is local to this workspace until the owner downloads and stores an independent copy.",
-    "Read docs/reviews/CODEX_REVIEW_2026-10-28.md: baseline has known H1/H2 defects; this is a recovery snapshot, not an approved release."
+    "Snapshot contains the source tree at source_ref, including handoff, release plan, review evidence and added access tests.",
+    "The receipt update itself is saved after source_ref; it is intentionally outside its own archive.",
+    "No production data, uploaded invoices, secrets, virtual environments or complete Git history.",
+    "Archive is local to this workspace until downloaded and stored independently by the owner.",
+    "Known H1/H2/H3 defects remain open; this backup is not an approved production release."
   ]
 }
