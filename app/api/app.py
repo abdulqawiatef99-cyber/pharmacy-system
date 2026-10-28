@@ -34,6 +34,7 @@ from .. import config as config_mod
 from ..catalog import service as catalog
 from ..core import accounts, audit, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
+from ..core.numbers import whole_number
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
@@ -1495,7 +1496,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- sales
     def _int(v, name):
         try:
-            return int(v or 0)
+            return whole_number(0 if v is None or v == "" else v)
         except (TypeError, ValueError):
             raise ValidationFailed(f"قيمة غير صحيحة: {name}")
 
