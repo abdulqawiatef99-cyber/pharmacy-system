@@ -25,6 +25,8 @@ def get_or_create_batch(db: Database, ctx: Context, item_id: str, batch_no: str 
                         expiry_date: str | None, expiry_precision: str | None = None) -> str | None:
     """Returns a batch id, or None when neither batch number nor expiry is known
     (untracked stock)."""
+    if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
+        raise NotFound("الصنف غير موجود")
     batch_no = (batch_no or "").strip().upper()
     if not batch_no and not expiry_date:
         return None
@@ -74,6 +76,9 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
         raise NotFound("الصنف غير موجود")
     if not db.one("SELECT 1 FROM branches WHERE id=? AND org_id=?", (branch_id, ctx.org_id)):
         raise NotFound("الفرع غير موجود")
+    if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND org_id=? AND item_id=?",
+                               (batch_id, ctx.org_id, item_id)):
+        raise NotFound("التشغيلة لا تخص هذا الصنف")
     current_batch = batch_qty(db, ctx.org_id, branch_id, item_id, batch_id)
     if qty_delta < 0 and current_batch + qty_delta < 0 and not allow_negative:
         raise Conflict("الكمية غير متاحة في المخزون (ربما بيعت)", code="insufficient_stock",

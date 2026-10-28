@@ -30,8 +30,10 @@ class TestUpdater(unittest.TestCase):
         z = archive({"manage.py": "new", "app/x.py": "new", "app/y.py": "added",
                      "data/pharmacy.db": "EVIL", "backups/x": "EVIL", ".venv/x": "EVIL"})
         res = updater.apply_zip(z, self.root)
-        self.assertEqual((self.root / "app" / "x.py").read_text(encoding="utf-8"), "new")
-        self.assertTrue((self.root / "app" / "y.py").exists())
+        selected = Path(res["release"])
+        self.assertEqual((self.root / "app" / "x.py").read_text(encoding="utf-8"), "old")
+        self.assertEqual((selected / "app" / "x.py").read_text(encoding="utf-8"), "new")
+        self.assertTrue((selected / "app" / "y.py").exists())
         self.assertEqual((self.root / "data" / "pharmacy.db").read_text(encoding="utf-8"), "REAL DATA")
         self.assertFalse((self.root / "backups").exists())
         self.assertEqual(res["files"], 3)
@@ -47,8 +49,10 @@ class TestUpdater(unittest.TestCase):
 
     def test_snapshot_is_a_valid_update_archive_for_rollback(self):
         snap = updater.snapshot(self.root, self.root / "backups")
-        updater.apply_zip(archive({"manage.py": "new", "app/x.py": "new"}), self.root)
-        updater.apply_zip(snap.read_bytes(), self.root)                         # roll back
+        candidate = updater.apply_zip(archive({"manage.py": "new", "app/x.py": "new"}), self.root)
+        self.assertEqual((Path(candidate["release"]) / "manage.py").read_text(), "new")
+        previous = updater.apply_zip(snap.read_bytes(), self.root)  # prepare previous complete code
+        self.assertEqual((Path(previous["release"]) / "manage.py").read_text(), "old")
         self.assertEqual((self.root / "manage.py").read_text(encoding="utf-8"), "old")
         with zipfile.ZipFile(snap) as z:
             self.assertFalse(any("data/" in n for n in z.namelist()))           # data never in code zip

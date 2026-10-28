@@ -22,7 +22,7 @@ import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ..db import Database
 
@@ -73,6 +73,48 @@ def _extract_db(z: zipfile.ZipFile, tmp: str) -> Path:
     else:
         z.extract("pharmacy.db", tmp)
     return target
+
+
+def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
+    """Check originals against the snapshot's registry, including legacy ZIPs.
+
+    Stored paths are metadata only: never open an old machine's absolute path.
+    Both writers use org/name or org/transfers/name beneath the upload root.
+    """
+    names = z.namelist()
+    if len(names) != len(set(names)):
+        return ["duplicate members in backup archive"]
+    problems = []
+    for row in db.all("SELECT id, org_id, storage_path, size_bytes, sha256 FROM source_files"):
+        org = str(row["org_id"])
+        stored = PurePosixPath(str(row["storage_path"]).replace("\\", "/"))
+        parent = stored.parent
+        if (not org or org in (".", "..") or "/" in org or "\\" in org
+                or stored.name in ("", ".", "..")):
+            problems.append(f"invalid attachment path for source {row['id']}")
+            continue
+        if parent.name == org:
+            member = f"uploads/{org}/{stored.name}"
+        elif parent.name == "transfers" and parent.parent.name == org:
+            member = f"uploads/{org}/transfers/{stored.name}"
+        else:
+            problems.append(f"unknown attachment layout for source {row['id']}")
+            continue
+        try:
+            info = z.getinfo(member)
+        except KeyError:
+            problems.append(f"missing original attachment for source {row['id']}")
+            continue
+        if info.is_dir() or info.file_size != row["size_bytes"]:
+            problems.append(f"attachment size mismatch for source {row['id']}")
+            continue
+        digest = hashlib.sha256()
+        with z.open(info) as src:
+            while chunk := src.read(1 << 20):
+                digest.update(chunk)
+        if digest.hexdigest() != row["sha256"]:
+            problems.append(f"attachment checksum mismatch for source {row['id']}")
+    return problems
 
 
 def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> Path:
@@ -134,6 +176,7 @@ def verify_archive(archive: Path) -> dict:
             db = Database(snap)
             try:
                 problems += integrity_problems(db)
+                problems += _attachment_problems(db, z)
                 if _counts(db) != manifest.get("counts"):
                     problems.append("record counts differ from the manifest")
             finally:
@@ -191,12 +234,19 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
 
 
 def quick_check(archive: Path) -> list[str]:
-    """Cheap check right after writing: zip CRCs + the database matches its checksum."""
+    """Check ZIP CRCs, snapshot checksum and registered originals after writing."""
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
         bad = z.testzip()
         if bad:
             return [f"corrupt member in zip: {bad}"]
         manifest = json.loads(z.read("manifest.json"))
-        if _sha256(_extract_db(z, tmp)) != manifest.get("db_sha256"):
+        snap = _extract_db(z, tmp)
+        if _sha256(snap) != manifest.get("db_sha256"):
             return ["database checksum does not match the manifest"]
-    return []
+        db = Database(snap)
+        try:
+            return _attachment_problems(db, z)
+        except sqlite3.DatabaseError as e:
+            return [f"database unreadable: {e}"]
+        finally:
+            db.close()
