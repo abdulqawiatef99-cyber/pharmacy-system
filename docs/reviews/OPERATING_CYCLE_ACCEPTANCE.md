@@ -25,3 +25,7 @@ Log SHA256: 72211b805959af56682ae4fb116f345482eba09025e4012254b0da9456c9ea3c
 No real invoice, E-Stock, patient, Windows installation, browser automation, printer or scanner/drawer hardware was used. HTTP TestClient exercises server APIs, not a human-operated GUI. Passing does not approve production or imply every financial route is retry-safe. Main lacks fixes in PR #2/#3/#4/#5; owner approval is required for merging.
 
 Next: test this scenario against the isolated composition of saved fixes and refresh the shared handoff. Windows/hardware acceptance and owner GO/NO-GO remain external gates. Overall project completion remains unmeasured; no approved requirement denominator exists.
+
+## Combined candidate verification
+Local composition of PR #2, #3, #4, #5, four independent access tests and this cycle: 431 passed, zero failures/skips, 40.317 seconds. No Git merge or production operation.
+Log SHA256: 1682cbb0c3f5040d2638ede83daf6d77650a3118b13e2519d80d9fe7593787f9
