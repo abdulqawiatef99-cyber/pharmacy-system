@@ -1,0 +1,31 @@
+Python: 3.12.14
+Platform: Linux
+Full suite: 378 passed, 0 failures, 0 errors, 0 skipped (36.086 seconds)
+Application code baseline: 69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0
+Four added access tests; reportlab installed only in isolated test environment.
+Review-only environment record; not an application dependency-change proposal.
+
+anyio==4.15.1
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+cryptography==50.0.2
+et_xmlfile==2.0.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+openpyxl==3.1.5
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==13.0.0
+pycparser==3.12
+pypdfium2==5.14.0
+python-multipart==0.0.32
+reportlab==5.1.0
+requests==2.34.2
+starlette==1.10.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
