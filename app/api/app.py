@@ -180,7 +180,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
         # This database-only route commits its action and replay record together.
-        if req.method == "POST" and req.url.path == "/api/cash/movements":
+        if req.method == "POST" and (req.url.path == "/api/cash/movements" or
+                (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
         if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
@@ -1636,10 +1637,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def customers_pay(req):
         ctx = ctx_of(req)
+        ctx.require("customers.manage")
         b = await body(req)
-        return J({"balance": Sales(db).customer_payment(ctx, req.path_params["id"],
-                                                         _int(b.get("amount"), "amount"), b.get("note"),
-                                                         method=str(b.get("method", "cash")))})
+        raw = await req.body()
+        key = req.headers.get("idempotency-key", "").strip()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+
+        def perform():
+            resp = J({"balance": Sales(db).customer_payment(
+                ctx, req.path_params["id"], _int(b.get("amount"), "amount"), b.get("note"),
+                method=str(b.get("method", "cash")))})
+            return resp.status_code, resp.body.decode("utf-8")
+
+        # Database-only operation; no await or external effect inside this transaction.
+        status, payload, replayed = idempotency.run(
+            db, ctx, key=key, method=req.method, path=req.url.path,
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+        resp = Response(payload, status_code=status, media_type="application/json")
+        if replayed:
+            resp.headers["Idempotent-Replay"] = "true"
+        return resp
 
     @handler
     async def cash_open(req):

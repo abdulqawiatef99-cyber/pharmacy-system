@@ -2,7 +2,7 @@
 
 Callers must authorize the current actor before invoking this helper. The action
 and response serialization must be synchronous, with no await or external side
-effects. This currently serves only the manual cash movement HTTP route.
+effects. Used by manual cash movements and customer collections.
 """
 from __future__ import annotations
 
