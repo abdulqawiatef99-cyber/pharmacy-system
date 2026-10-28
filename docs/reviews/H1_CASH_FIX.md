@@ -1,22 +1,73 @@
-# H1 — scoped cash movement fix (in progress)
-Owner authorization: 2026-10-28, "اعمل الصح", following the explicit approval question about the limited H1 fix.
-Baseline: 69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0.
-Branch: codex/fix-cash-idempotency. No merge or production deployment authorized.
+# H1 — منع تكرار حركة الخزينة عند إعادة الطلب
+الحالة: إصلاح محدود مختبر، جاهز لمراجعة المالك؛ غير مدمج وغير منشور.
+التفويض: موافقة المالك «اعمل الصح» بتاريخ 2026-10-28 بعد سؤال الإصلاح المحدد.
+الفرع: codex/fix-cash-idempotency؛ الأصل main عند 69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0.
 
-Reserved in this isolated branch: app/api/app.py; new app/core/idempotency.py;
-new tests/test_cash_idempotency.py; this document.
-No evidence of another published code branch was found; this does not establish Claude's unpublished local state.
-Claude must reconcile this small PR before editing the same API handler. No original migration will be changed.
+## المشكلة والسلوك الجديد
+سابقًا POST /api/cash/movements كان يسجل الصرف ويعتمد معاملته قبل حفظ مفتاح إعادة الطلب.
+عند فشل الحفظ، الرد 500 مع حركة مسجلة؛ إعادة نفس المفتاح قد تسجل حركة ثانية.
+الآن قراءة المفتاح وحركة النقدية والتدقيق وتجهيز الرد وحفظ نتيجة الطلب تتم في معاملة واحدة.
+فشل الحفظ أو تجهيز الرد يرجع العملية كلها؛ إعادة طلب معتمد بنفس المفتاح تعيد نتيجته دون حركة جديدة.
+الصرف والإيداع مدعومان، دون تغيير مبالغ أو صلاحيات أدوار أو قواعد خصم/تكلفة/مرتجع.
 
-Implementation plan: special-case only POST /api/cash/movements out of the generic post-commit response cache.
-Read the request before starting a transaction. A synchronous helper, using the existing idempotency_keys
-table, rechecks the key and executes the drawer change, audit, response serialization and key insertion in
-one BEGIN IMMEDIATE transaction. Do not await while a transaction is open.
-Authorize cash.manage and sales.read before serving cached responses.
-Keep key namespace, fingerprint, 7-day cleanup and invalid/absent-key behavior compatible.
+## التنفيذ المحدود
+- app/core/idempotency.py: helper متزامن لعمليات DB فقط، يستخدم idempotency_keys الموجود.
+- app/api/app.py: إخراج مسار حركات الخزينة فقط من التخزين العام بعد التنفيذ؛ قراءة body قبل المعاملة،
+  والتحقق من cash.manage وsales.read قبل الرد حتى عند replay.
+- app/sales/cash.py: استخراج نفس إخفاء أرقام العدّ إلى redact_summary لإعادة استخدامه مع الرد المحفوظ.
+  إذا سُحبت cash.see_expected لا يكشف الرد المخزن الأرقام القديمة.
+- لا await داخل معاملة helper، ولا طباعة/شبكة/آثار خارجية داخلها.
+- BEGIN IMMEDIATE يعيد فحص المفتاح داخل الحماية من التزامن، بما فيها اتصالات DB مستقلة.
+- لا جدول أو migration جديد؛ التغيير في schema صفر.
+- ملفات محجوزة لهذه الدفعة في فرع Codex فقط: الملفان الأصليان أعلاه، helper والاختبارات وهذا التقرير.
+  لا نفترض غياب عمل Claude غير المنشور؛ يلزم مراجعة فرق API معه قبل الدمج.
 
-Financial amounts, limits, return policy and cost rules stay unchanged. No new tables or migrations.
-Test failure before cache persistence, response-generation failure, concurrent requests, mismatched keys,
-permission revocation, cached replay and separate actions without a key.
-This fixes only this cash movement route; other generic financial POSTs are not claimed safe by extension.
-H2/H3 remain open. Before completion, record red/green results, run the applicable suite and publish a review PR.
+## دليل الاختبارات
+قبل التنفيذ: 8 اختبارات، 4 نجاح و4 فشل؛ الفشل في rollback عند حفظ المفتاح، تجهيز الرد،
+التزامن، وسحب صلاحية النقدية.
+بعد التنفيذ وتوسيع حالات القبول: **12/12 ناجحة** في 1.325 ثانية.
+المجموعة الكاملة على هذا الفرع: **386/386 ناجحة، صفر أخطاء وفشل وتجاوز** في 40.255 ثانية.
+تضم 374 حالة الأصل و12 حالة الإصلاح؛ الاختبارات الأربعة في فرع المراجعة الآخر ليست مدمجة هنا.
+بيئة Linux/Python 3.12.14، المكتبات نفسها المسجلة في PR #1/environment-final.txt، ومنها reportlab 5.1.0
+في venv الاختبار فقط. لم يتغير requirements.txt، ولم يشغّل Windows محليًا.
+
+حالات القبول:
+1. فشل INSERT للمفتاح يرجع الخزينة والتدقيق، ثم retry يسجل مرة واحدة.
+2. فشل إنشاء ملخص الرد لا يترك حركة غير مؤكدة.
+3. replay يعيد الرد نفسه مع Idempotent-Replay ومن دون حركة أو audit إضافيين.
+4. محتوى مختلف بنفس المفتاح يرفض بidempotency_mismatch.
+5. سحب cash.manage يمنع الرد المحفوظ.
+6. طلبان متزامنان عبر كائنَي Database مستقلين ينشئان حركة واحدة.
+7. سحب رؤية المتوقع يحجب الأرقام القديمة من الرد المحفوظ.
+8. إغلاق اتصالات DB وإعادة فتحها لا يفقد الحماية المعتمدة.
+9. الإيداع مع نفس المفتاح لا يتكرر.
+10. إيقاف عملية فرعية بos._exit(9) بعد حركة داخل المعاملة وقبل المفتاح لا يعتمد الصرف.
+    هذه تجربة موت عملية على SQLite مؤقتة، وليست قطع كهرباء فعليًا.
+11. namespace المفتاح مشترك مع POST آخر كما كان؛ الطلب المختلف يرفض.
+12. طلبان بلا مفتاح يظلان عمليتين منفصلتين.
+
+الأوامر:
+python -m unittest tests.test_cash_idempotency -v
+python -m unittest discover -s tests -t . -v
+
+فاحص الأسرار التقريبي الموجود بالمشروع لم يجد نتائج في الملفات المعدلة؛ ليس فحص تاريخ أسرار شاملًا.
+فُحص AST للhelper للتأكد من غياب await. الاختبارات كلها ببيانات مؤقتة ومصطنعة.
+
+## الحدود التي لا يجوز إخفاؤها
+- الحماية تخص مسار حركات الخزينة بهذا الإصلاح؛ بقية POSTs العامة لم تنتقل إلى هذا التصميم.
+- لا نعتبر كل H1 أو باب المال مغلقًا قبل تدقيق بقية العمليات المالية واعتماد المالك.
+- يلزم نفس Idempotency-Key صالح (1–100 حرف بعد trim). المفاتيح الجديدة تعني طلبات جديدة.
+  واجهة api الحالية تعيد نفس المفتاح خلال retries الشبكة، لكنها تنشئ مفتاحًا جديدًا لكل استدعاء جديد؛
+  ضغطتان مستقلتان على نموذج الصرف لم تُحلّا هنا، وهما مهمة UX مستقلة.
+- مدة تنظيف cache الحالية 7 أيام لم تتغير؛ ليس منع تكرار أبديًا.
+- callers المباشرون لCashDrawer.movement دون معرف عملية لا يكتسبون حماية تلقائيًا.
+- التزامن مع مسارات عامة أخرى بنفس المفتاح خارج نطاق الاختبار/الإصلاح.
+- H2 (تحديث جزئي) وH3 (مرفقات النسخ) ما زالتا مفتوحتين.
+- دليل PR #1 القديم يثبت الحالة الأصلية ويتوقع وسيطًا قديمًا؛ معيار قبول الإصلاح هو الاختبارات الجديدة،
+  وليس الادعاء بأن كل اختبارات الإثبات القديمة يجب أن تنجح على تصميم rollback الجديد.
+
+## الدمج والتشغيل والاستكمال
+لا merge أو تحديث لجهاز الصيدلية من Codex. main الحالي قد ينشر مثبتًا تلقائيًا عند دفع كود إليه.
+لا استعادة DB أو تعديل بيانات مطلوب لهذا الإصلاح. قرار النشر والرجوع للمالك بعد مراجعة Claude.
+احتفظ بسجل SHA والاختبارات. أي تحديث للبيانات الحقيقية أو تغيير updater/restore يحتاج موافقة مستقلة.
+الخطوة التالية: مراجعة PR ثم تدقيق بقية مسارات تكرار العمليات؛ إصلاح H3 بفرع مستقل بعد اعتماد تصميم توافق النسخ.

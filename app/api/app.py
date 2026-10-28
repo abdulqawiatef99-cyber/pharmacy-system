@@ -32,7 +32,7 @@ from starlette.staticfiles import StaticFiles
 
 from .. import config as config_mod
 from ..catalog import service as catalog
-from ..core import accounts, audit, notify, people
+from ..core import accounts, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..db import Database
 from ..inventory import service as inventory
@@ -44,7 +44,7 @@ from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
 from ..procurement import deadstock
 from ..sales.service import Sales
-from ..sales.cash import CashDrawer
+from ..sales.cash import CashDrawer, redact_summary
 from ..printing import service as printing
 import html as _html
 
@@ -179,6 +179,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
+        # This database-only route commits its action and replay record together.
+        if req.method == "POST" and req.url.path == "/api/cash/movements":
+            return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
         if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
             return await fn(req)
@@ -1652,9 +1655,29 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def cash_move(req):
         ctx = ctx_of(req)
+        # Recheck permissions even when the response was cached before revocation.
+        ctx.require("cash.manage")
+        ctx.require("sales.read")
         b = await body(req)
-        CashDrawer(db).movement(ctx, _int(b.get("amount"), "amount"), str(b.get("kind", "")), str(b.get("note", "")))
-        return J(CashDrawer(db).summary(ctx))
+        raw = await req.body()
+        key = req.headers.get("idempotency-key", "").strip()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+
+        def perform():
+            drawer = CashDrawer(db)
+            drawer.movement(ctx, _int(b.get("amount"), "amount"), str(b.get("kind", "")), str(b.get("note", "")))
+            resp = J(drawer.summary(ctx))
+            return resp.status_code, resp.body.decode("utf-8")
+
+        # All awaits are above: the transaction below never spans an async yield.
+        status, payload, replayed = idempotency.run(
+            db, ctx, key=key, method=req.method, path=req.url.path,
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+        # A stored response must not restore visibility removed since the write.
+        resp = J(redact_summary(ctx, json.loads(payload)), status_code=status)
+        if replayed:
+            resp.headers["Idempotent-Replay"] = "true"
+        return resp
 
     @handler
     async def cash_close(req):
