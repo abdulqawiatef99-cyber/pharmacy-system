@@ -19,7 +19,11 @@ def package(files):
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as z:
         for name, body in files.items():
-            z.writestr("release/" + name, body)
+            info = zipfile.ZipInfo("release/" + name)
+            # Keep deliberately invalid archive bytes on Windows too; ZipInfo's
+            # constructor otherwise normalizes backslashes before writing.
+            info.filename = "release/" + name
+            z.writestr(info, body)
     return data.getvalue()
 
 
@@ -27,7 +31,7 @@ class TestAtomicReleases(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name)
+        self.base = Path(self.tmp.name).resolve()
         self.root = self.base / "program"
         self.home = self.base / "home" / "data" / "code-releases"
         (self.root / "app" / "migrations").mkdir(parents=True)

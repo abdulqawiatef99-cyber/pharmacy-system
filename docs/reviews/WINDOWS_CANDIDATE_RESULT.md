@@ -1,7 +1,8 @@
-# Windows validation status
-Run: https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/40743463128
-Tested source commit: 83d3e48b374b9c79836a53b63b06137256e82b7c. Runtime code matches unified candidate 09fd8bde17f5e60f28120127f9a26646d5ff056f; the later commit adds only validation workflow.
-The job checks Python 3.13 on windows-latest using synthetic temporary data. No installer/release publication, repository write token, production machine or real data.
-Status at this checkpoint: running; setup and dependencies succeeded. Do not claim Windows success until the job and saved report confirm it.
-This hosted runner is not the owner's Windows 10 PC, embedded installer or printer/hardware acceptance.
-Linux: 447 tests passed previously; synthetic restore drill additionally passed. Candidate source-only ZIP has been Git-blob and SHA256 verified locally (SOURCE_CANDIDATE_BACKUP.json); it is not an offsite backup, full Git history or pharmacy database backup.
+# Windows candidate validation
+First run: https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/40743463128
+Commit 83d3e48b374b9c79836a53b63b06137256e82b7c, Windows Server 2025 10.0.26100, Python 3.13.16.
+447 discovered: 439 passed, 3 failures, 5 skipped (158.442 seconds). Validator correctly stopped before selftest/init/verify.
+Two failures compared short Windows temp-directory names against resolved long names for the same folder. Normalize the test fixture base with resolve(), preserving assertions.
+The third test's ZIP fixture normalized backslashes during ZipInfo creation on Windows. Preserve deliberate raw invalid member bytes in the fixture and inspect orig_filename before staging, since Windows ZipInfo may already normalize filename. No unsafe archive was installed or activated; no production incident is claimed.
+Local targeted check after these bounded changes: 24 tests passed. A new complete Windows run is required; do not treat this as Windows success.
+Prior synthetic restore drill passed on Linux. This hosted Windows server is not the owner's Windows 10 machine, embedded installer or physical printer/hardware acceptance.

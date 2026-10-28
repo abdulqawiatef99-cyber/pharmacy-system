@@ -100,6 +100,9 @@ def _members(z: zipfile.ZipFile) -> tuple[str, list[zipfile.ZipInfo]]:
     out, seen, prefixes = [], set(), {}
     devices = {"con", "prn", "aux", "nul"} | {f"{kind}{n}" for kind in ("com", "lpt") for n in range(1, 10)}
     for info in z.infolist():
+        # ZipInfo may normalize Windows separators before filename is inspected.
+        if "\\" in info.orig_filename or "\x00" in info.orig_filename:
+            raise UpdateError("Unsafe original update member name")
         rel = info.filename[len(top) + 1:]
         if not rel or info.is_dir():
             continue
