@@ -1904,7 +1904,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def health(req):
         from ..version import __version__
         last = db.one("SELECT max(version) v FROM schema_migrations")["v"]
-        return J({"ok": True, "version": __version__, "schema": last})
+        return J({"ok": True, "version": __version__, "schema": last,
+                  "boot_id": os.environ.get("PHARM_BOOT_ID")})
 
     async def index(req):
         return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})

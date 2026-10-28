@@ -18,6 +18,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Embedded Windows Python ignores PYTHONPATH; choose code before importing app.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+if __name__ == "__main__":
+    from release_bootstrap import run_selected
+    run_selected(Path(__file__).resolve().parent)
+
 from app import config
 from app.core import accounts
 from app.db import Database
@@ -220,11 +226,23 @@ def cmd_import_estock(a, s):
 
 
 def cmd_update(a, s):
-    """Update the program code from GitHub (or a local zip), keeping data/ untouched."""
+    """Stage immutable code and atomically select it; never migrate the live DB here."""
     import subprocess
+    import tempfile
+    import zipfile
     from app.core import backup, updater
+    import release_bootstrap as releases
     root = Path(__file__).resolve().parent
+    home = releases.code_home(s.data_dir)
     try:
+        if a.rollback:
+            if a.from_zip or a.check:
+                raise updater.UpdateError("--rollback cannot be combined with --from-zip or --check")
+            releases.rollback(home)
+            print("Previous code selected. Restart the program; no database restore was performed.")
+            return
+        state = releases.read_state(home)
+        expected_active = (state.get("active") or {}).get("id")
         if a.from_zip:
             data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
         else:
@@ -238,36 +256,37 @@ def cmd_update(a, s):
             if a.check:
                 return
             data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
-        if s.db_path.exists():                 # 1) verified data backup
-            db = _db(s)
-            out = backup.create(db, s.upload_dir, Path(a.backup_dir))
-            if backup.verify_archive(out)["problems"]:
-                sys.exit("النسخة الاحتياطية فشلت؛ التحديث اتلغى ومفيش حاجة اتغيرت")
-            db.close()
+        staged = updater.apply_zip(data, root, code_home=home)
+        candidate = Path(staged["release"])
+        releases.check_compatible(releases.current_root(root, home), candidate)
+        # A candidate check must not open/migrate the real pharmacy database.
+        with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
+            isolated = Path(tmp)
+            env = {**os.environ, "PHARM_RELEASE_CANDIDATE": "1", "PHARM_DATA_DIR": str(isolated),
+                   "PHARM_DB_PATH": str(isolated / "test.db"), "PHARM_UPLOAD_DIR": str(isolated / "uploads"),
+                   "PHARM_BACKUP_DIR": str(isolated / "backups"), "PHARM_PRINTER": "none",
+                   "PYTHONUTF8": "1"}
+            check = subprocess.run([sys.executable, str(candidate / "manage.py"), "selftest", "--quick"],
+                                   cwd=candidate, env=env, timeout=120)
+            if check.returncode:
+                raise updater.UpdateError("Candidate selftest failed; the selected code is unchanged")
+        if s.db_path.exists():
+            db = Database(s.db_path)  # read/snapshot only; do NOT call _db or migrate
+            try:
+                out = backup.create(db, s.upload_dir, Path(a.backup_dir))
+                if backup.verify_archive(out)["problems"]:
+                    raise updater.UpdateError("Backup verification failed; the selected code is unchanged")
+            finally:
+                db.close()
             print("نسخة احتياطية للبيانات:", out)
-        req = root / "requirements.txt"
-        req_before = req.read_bytes() if req.exists() else b""
-        snap = updater.snapshot(root, Path(a.backup_dir))      # 2) code rollback point
-        print("نسخة من البرنامج الحالي (للرجوع):", snap)
-        res = updater.apply_zip(data, root)                       # 3) new code
-        updater.record(s.data_dir, sha, source)
-        print(f"اتحدث {res['files']} ملف")
-    except updater.UpdateError as e:
-        sys.exit(f"التحديث فشل: {e}")
-    # 4) packages + migrations + check, in a fresh process running the NEW code
-    steps = [[sys.executable, str(root / "manage.py"), "verify"],
-             [sys.executable, str(root / "manage.py"), "selftest", "--quick"]]
-    if req.read_bytes() != req_before:          # packages only when the list changed
-        import importlib.util
-        if importlib.util.find_spec("pip") is None:   # installed build (embedded Python, no pip)
-            print("تنبيه: التحديث ده محتاج مكتبات جديدة. نزّل ملف التثبيت الجديد وشغّله (بياناتك مش هتتلمس).")
-        else:
-            steps.insert(0, [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)])
-    for cmd in steps:
-        if subprocess.run(cmd, cwd=root).returncode != 0:
-            sys.exit("خطوة بعد التحديث فشلت. للرجوع للنسخة القديمة:\n"
-                     f"  python manage.py update --from-zip \"{snap}\"")
-    print("التحديث خلص بنجاح. شغّل البرنامج من جديد.")
+        releases.activate(root, home, staged["id"],
+                          {"sha": sha, "source": source, "at": datetime.now().isoformat()},
+                          expected_active=expected_active)
+        print(f"Prepared {staged['files']} files; restart to check the selected release.")
+        print("Previous code is retained. No pip install or database migration was run.")
+    except (updater.UpdateError, releases.ReleaseError, OSError, zipfile.BadZipFile,
+            subprocess.TimeoutExpired) as exc:
+        sys.exit(f"التحديث فشل: {exc}")
 
 
 def cmd_feature(a, s):
@@ -325,6 +344,7 @@ def main(argv=None):
     ie.add_argument("--backup-dir", default="backups")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
+    up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
     up.add_argument("--ref", default="main")
