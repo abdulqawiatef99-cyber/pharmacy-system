@@ -1,37 +1,113 @@
-# Independent review — checkpoint 1
+# مراجعة Codex المستقلة — الدفعة 1
 
-Date: 2026-10-28 (Africa/Cairo).
-Baseline: `69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0`.
-Reviewer: Codex. Primary developer: Claude. Owner approves material decisions.
+التاريخ: 2026-10-28 بتوقيت القاهرة.
+الإصدار المفحوص: `69e3c4a6c90b76c6f6c239bd8cfe98bfc2b884d0`.
+Claude المطوّر الأساسي؛ Codex مراجع مستقل؛ صاحب المشروع يعتمد القرارات الجوهرية.
 
-## Scope and safety
-- Review and test an isolated source snapshot with synthetic, temporary databases.
-- No production/E-Stock access, migrations on real data, paid integrations, or changes to main.
-- This branch preserves review work; do not run its contents on the pharmacy computer.
-- Work in bounded batches to conserve usage. Save a checkpoint after each completed batch.
-- No application changes in this checkpoint.
+## النتيجة التنفيذية
+المشروع متقدم وظيفيًا وله أساس معقول للاستكمال، لكن نجاح الاختبارات الحالية لا يكفي لاعتماده ككاشير إنتاج.
+التقدير النوعي السابق 60–70% (نحو 65%) يخص اكتمال نطاق المنصة، وليس نسبة أمان أو جاهزية تشغيل.
+لم يتغير هذا التقدير إلى قياس حسابي بعد؛ يلزم اعتماد قائمة قبول وأوزان قبل تقديم نسبة أدق.
 
-## Verified so far
-- GitHub main still points to the baseline above; branch protection is disabled (read-only observation).
-- Source tree: 241 files; 33 numbered SQL migrations; 52 test modules.
-- Static source contains 367 test method definitions; this is NOT the executed test count.
-- GitHub Windows installer workflow run 40203671697 succeeded, including Tests (Windows),
-  embedded-build smoke test and installer build. Physical printers remain unverified.
-- PROJECT.md and parts of FUTURE_REQUIREMENTS.md lag behind implemented code.
-- Local isolated environment is being prepared; the baseline suite has NOT yet completed here.
+- جُلبت 241 ملفًا من GitHub إلى مجلد معزول، وتحقق تطابق كل ملف مع Git blob SHA-1 الأصلي.
+- هذه نسخة مصدر مثبتة وليست clone بكامل التاريخ؛ لا توجد بيانات صيدلية محلية أو وصول لـ E-Stock.
+- 33 migration و52 ملف اختبارات. 367 تعريف دالة اختبار في المصدر لا تساوي عدد الحالات المنفذة بسبب الوراثة.
+- راجعت التوثيق والبنية وعينات من الخدمات والاختبارات؛ لم تكتمل مراجعة كل سطر أو كل متطلب.
+- لم أعدّل منطق التطبيق، أو main، أو إعدادات GitHub، أو بيانات حقيقية. الملفات الجديدة تقرير وأدلة إعادة إنتاج فقط.
 
-## Priority review candidates (not reproduced defects yet)
-1. API idempotency response persistence happens after the handler's committed business change.
-   Reproduce a crash at that boundary, using a synthetic cash operation, before proposing a fix.
-2. Updater copies files in place; staged extraction does not make replacement atomic.
-   Reproduce partial file-copy failure and inspect rollback behavior.
-3. Permission and isolation sweeps test status codes and selected table counts; inspect
-   whether valid request bodies and unchanged existing values need stronger assertions.
-4. Audit SHA-256 chaining provides limited tamper evidence; do not describe it as
-   protection against an attacker who controls the entire database and can recompute hashes.
+## الاختبارات المنفذة فعليًا
+بيئة معزولة: Linux، Python 3.12.14، SQLite مؤقت، إصدارات المكتبات في الملف المجاور
+`environment-baseline.txt`. المشروع يذكر Python 3.13؛ لم أختبره محليًا على 3.13 أو Windows.
 
-## Resume
-1. Finish materializing and verifying every file against Git blob SHA-1.
-2. Run baseline unittest suite in the isolated environment; record versions, pass/fail/skip counts.
-3. Save the result here before broadening the review.
-4. Request owner review before applying material fixes, changing business rules or deploying.
+الأمر من جذر المشروع:
+```sh
+python -m unittest discover -s tests -t . -v
+```
+النتيجة: **374 حالة: 373 ناجحة، صفر فشل، صفر أخطاء، حالة متجاوزة واحدة**، في 35.582 ثانية.
+الحالة المتجاوزة: `tests.test_purchasing.TestPdfText.test_text_pdf_imported_without_ai`،
+لغياب مكتبة reportlab الاختيارية اللازمة لإنشاء عينة PDF. لا يجوز احتسابها ناجحة.
+التشغيل الأول قُطع عندما علق TestClient تحت قيود الشبكة؛ اكتمل التشغيل بعد إتاحة sockets للاختبارات.
+الاختبارات تستخدم طابعات شبكة وهمية محلية، وليس أجهزة فعلية؛ مفتاح الذكاء الاصطناعي فارغ.
+
+تشغيل منفصل للأدلة الجديدة:
+```sh
+python -m unittest docs.reviews.reproduce_known_defects -v
+```
+**اختباران، وفشلان متوقعان في تأكيد السلوك الآمن**، وليسا فشلين في المجموعة الأصلية.
+الملف خارج اكتشاف `tests/` عمدًا؛ هذه أدلة مشكلات مفتوحة، وليست إصلاحًا ولا حزمة سليمة للدمج.
+لا تُشغّل الأدلة على الإنتاج. كل قواعدها ومجلداتها مؤقتة ومصطنعة.
+
+## H1 — عالية: تكرار الصرف عند فشل حفظ نتيجة الطلب
+المكان: `app/api/app.py:179`؛ تنفيذ handler في السطر 196،
+وحفظ `idempotency_keys` لاحقًا في السطر 201.
+
+إعادة الإنتاج:
+1. افتح خزينة مصطنعة برصيد 10000 قرش (100 جنيه).
+2. أرسل صرف 1000 قرش بمفتاح طلب ثابت.
+3. احقن OSError فقط عند إدخال سجل idempotency بعد نجاح حركة الصرف.
+4. الرد 500، لكن الرصيد بالفعل 9000 قرش.
+5. أعد نفس الطلب بنفس المفتاح والجسم؛ ينجح الرد ويصبح الرصيد **8000 بدل 9000**.
+
+اختبار: `IdempotencyCrashBoundary.test_retried_cash_payout_must_not_post_twice`.
+هذا حقن فشل عند حد المعاملة، وليس محاكاة انقطاع كهرباء فعلي.
+يثبت الخلل في الصرف المختبر؛ لا نعممه على كل العمليات، وبعض إتمام البيع له حماية domain إضافية.
+
+الإصلاح المقترح: جعل أثر العملية ومفتاحها ونتيجتها ذرّيين، مع إعادة فحص المفتاح داخل الحماية من التزامن.
+يلزم فحص تداخل المعاملات وطلبات الرفع والآثار الخارجية قبل تعميم المعاملة حول handlers.
+بديل محدود: معرّف عملية فريد لحركات النقدية مع تحقق إعادة الاستخدام داخل نفس transaction.
+**لم ينفذ الإصلاح**؛ يمس مسارًا ماليًا ويحتاج مراجعة الحل قبل التطبيق.
+
+معيار الإغلاق: اختبار الفشل بعد الحركة لا يسمح بصرف ثانٍ، والطلب المختلف بنفس المفتاح يُرفض،
+وطلبان متزامنان لا يسجلان سوى حركة واحدة، وتظل الحسابات والتدقيق متطابقة.
+
+## H2 — عالية: التحديث قد يترك ملفات بإصدارات مختلطة
+المكان: `app/core/updater.py:114–136` (نسخ `shutil.copy2` في السطر 134).
+`manage.py` ينشئ snapshot، لكن لا يعيد الملفات تلقائيًا عند فشل النسخ.
+
+إعادة الإنتاج:
+1. أنشئ مجلد برنامج مؤقتًا بملفين محتواهما old.
+2. جهز تحديثًا بمحتوى new.
+3. اسمح بأول copy2، واجعل الثانية ترفع OSError.
+4. النتيجة المؤكدة: `manage.py=new` و`app/x.py=old`.
+
+اختبار: `UpdaterPartialReplacement.test_copy_failure_must_not_leave_mixed_program_versions`.
+اختبار فشل نسخ مصطنع على Linux؛ ليس اختبار Windows أو انقطاع كهرباء.
+وجود نسخة رجوع يدوية لا يساوي rollback تلقائيًا.
+الإصلاح المقترح: تجهيز إصدار كامل منفصل والتحقق منه، ثم تبديل مرجع الإصدار بعد إيقاف الخدمة؛
+هذا تغيير تشغيل جوهري. الحل المحدود بالاسترجاع عند OSError لا يغطي موت العملية أثناء النسخ.
+**لم ينفذ الإصلاح**.
+
+معيار الإغلاق: فشل النسخ/التحقق يبقي إصدارًا كاملًا صالحًا؛ وتجربة rollback للكود والبيانات على نسخة
+اختبار، دون استرجاع البيانات تلقائيًا بما قد يفقد معاملات أحدث.
+
+## ملاحظات مؤكدة أخرى وحدود المراجعة
+- main غير محمي حسب GitHub؛ لا تعديل للإعدادات. تفعيل الحماية وفصل مراجعة/دمج صاحب المشروع قرار لاحق.
+- آخر GitHub run رقم 40203671697 نجح على Windows، ويشمل الاختبارات وبناء المثبت.
+  هذا يصحح الادعاء القديم بعدم أي اختبار Windows، ولا يثبت سلامة الطابعات الفعلية.
+- PROJECT.md ما زال يذكر 208؛ PROGRESS.md يجمع أرقامًا وتواريخ تاريخية.
+- FUTURE_REQUIREMENTS.md يضع الأدوية الشهرية والمصاريف وبعض مرتجعات الموردين في المستقبل،
+  بينما توجد خدمات ومخططات واختبارات لها. ARCHITECTURE.md يضع cash shifts ضمن المخطط رغم تنفيذها.
+- ملفات كبيرة (app.js نحو 386 كيلوبايت وAPI نحو 102 كيلوبايت): خطر صيانة، لا مبرر لإعادة البناء.
+- حدود المكتبات في requirements.txt مفتوحة من أعلى؛ البيئة الحالية ليست حتمية دون تسجيل الإصدارات.
+- SECURITY.md يقر بفجوات TLS والتشفير وMFA. لم أجر فحص اختراق شاملًا أو مراجعة اعتماديات.
+- سلسلة التدقيق SHA-256 غير مرتبطة بمرساة خارجية؛ لا يصح اعتبارها حماية مطلقة ضد مالك ملف DB.
+- اختبارات العزل والصلاحيات الموجودة نجحت، لكنها لا تثبت خلو كل المسارات من تسريب.
+- OCR الحقيقي والطابعات والباركود الفعلي والمزامنة والمحتوى الطبي المرخص لم تُختبر في هذه الدفعة.
+
+## الدفعة التالية المقترحة — لا تبدأ تلقائيًا
+1. مراجعة صاحب المشروع/Claude للحل المحدود لـ H1 ثم اختبار وإصلاح مستقل.
+2. تدقيق الصلاحيات بمدخلات صحيحة وتحقق من قيم الصفوف، وليس أعدادها فقط.
+3. مطابقة المتطلبات المستقبلية بالتنفيذ دون تعديل خارطة Claude بالتوازي.
+4. تصميم تحديث/rollback آمن منفصل؛ لا تحديث لجهاز الصيدلية.
+5. تقرير قبول مختصر لكل دفعة، وحفظه على هذا الفرع؛ لا merge دون موافقة.
+
+بيانات/قرارات لاحقة: نماذج موردين منزوعة الهوية، موديلات الطابعات وتجربة المالك، بيئة Windows،
+قرار مصدر طبي مرخص ومراجعة صيدلي، ومراجعة قانونية متخصصة للخصوصية الصحية في مصر.
+لا خدمات مدفوعة أو مفاتيح أو بيانات مرضى مطلوبة لهذه الدفعة.
+
+## أدلة محلية
+`/workspace/pharmacy-review-results/baseline.log`
+SHA-256: `f9b7fa8d4d88d4d9b5babe44ae539a7a8742c3be1a3a26af4521ed9ad9648e0f`
+`/workspace/pharmacy-review-results/reproductions.log`
+SHA-256: `455c8c04b4006a40e9c02d9ada34b6e1797002013ac8028d05c5c49487fec21e`
+النتائج والخطوات محفوظة على GitHub؛ السجلات التفصيلية محلية ولا يُفترض استمرار بيئة العمل.
