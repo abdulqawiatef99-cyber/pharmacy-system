@@ -1,0 +1,3 @@
+# Project collaboration instructions
+
+Read docs/DELIVERY_CONTROL.md and docs/HANDOFF.md first, then docs/PROJECT.md, docs/DECISIONS.md and the applicable specifications. Inspect current Git/PR state; do not rely on historic reports. Preserve Claude's existing implementation. Work in small independent branches and coordinate file ownership before editing. Save reviewable checkpoints to GitHub and update the handoff. No automatic merge or deployment. Obtain owner approval for material financial/clinical/business-rule changes and production operations. No real pharmacy/patient data or secrets in tests, commits or source backups. Known review reproductions intentionally fail; read docs/reviews/CODEX_REVIEW_2026-10-28.md before interpreting test results.
