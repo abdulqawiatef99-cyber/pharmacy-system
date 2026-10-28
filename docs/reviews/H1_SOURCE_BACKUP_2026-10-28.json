@@ -1,0 +1,28 @@
+{
+  "source_ref": "ea5a3034b2da57e46d547e40f0f4f7faf63e9d96",
+  "files": 244,
+  "bytes": 2526926,
+  "verified": true,
+  "archive": "pharmacy-h1-fix-source-2026-10-28-ea5a3034b2da.zip",
+  "sha256": "37a6358ef1a3c415dca17dc89829a2667f58251e7af1d0ad799fdf52a1baeb26",
+  "restored_files_verified": 244,
+  "tests": {
+    "passed": 386,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 40.255
+  },
+  "merged": false,
+  "production_deployed": false,
+  "external_copy_confirmed": false,
+  "full_git_history": false,
+  "review_pr": "https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/2",
+  "notes": [
+    "Source-only recovery snapshot of the unmerged H1 fix branch, based on main; separate from the review snapshot.",
+    "Verified against Git blobs and restored all 244 files into a temporary folder.",
+    "No production data, secrets, virtualenv or complete Git history included.",
+    "No physical Windows or printer validation in this batch.",
+    "The owner must download/store an external copy; GitHub stores this receipt and source commits, not the ZIP archive."
+  ]
+}
