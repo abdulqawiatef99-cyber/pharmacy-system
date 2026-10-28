@@ -41,6 +41,35 @@ jobs:
             }
             exit 1
           }
+      - name: Smoke test embedded Windows Python (no installer publication)
+        shell: pwsh
+        env:
+          PHARM_DATA_DIR: ${{ runner.temp }}\pharm-embedded-check
+          PHARM_DB_PATH: ${{ runner.temp }}\pharm-embedded-check\synthetic.db
+          PHARM_UPLOAD_DIR: ${{ runner.temp }}\pharm-embedded-check\uploads
+          PHARM_BACKUP_DIR: ${{ runner.temp }}\pharm-embedded-check\backups
+          PHARM_PRINTER: none
+          ANTHROPIC_API_KEY: ""
+          PYTHONUTF8: "1"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $env:RUNNER_TEMP 'pharmacy-embedded-build'
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          $v = python -c "import platform; print(platform.python_version())"
+          Invoke-WebRequest "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" -OutFile "$bundle/python.zip"
+          Expand-Archive "$bundle/python.zip" -DestinationPath "$bundle/python"
+          $pth = Get-ChildItem "$bundle/python" -Filter 'python*._pth' | Select-Object -First 1
+          $lines = (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site'
+          $lines += 'Lib\site-packages'
+          $lines += '..\program'
+          Set-Content $pth.FullName $lines
+          python -m pip install -r requirements.txt --target "$bundle/python/Lib/site-packages" --only-binary=:all: --no-compile
+          git archive --format=zip HEAD -o "$bundle/program.zip"
+          Expand-Archive "$bundle/program.zip" -DestinationPath "$bundle/program"
+          & "$bundle/python/python.exe" "$bundle/program/manage.py" selftest --quick
+          & "$bundle/python/python.exe" "$bundle/program/manage.py" init --pharmacy synthetic --username synthetic-owner --password ([guid]::NewGuid().ToString())
+          & "$bundle/python/python.exe" "$bundle/program/manage.py" verify
       - name: Preserve synthetic validation evidence
         if: always()
         uses: actions/upload-artifact@v4
