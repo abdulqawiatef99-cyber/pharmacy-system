@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "scope": "synthetic Linux restore drill only",
+  "tables_equal_before_continuation": {
+    "sales": 2,
+    "sale_returns": 1,
+    "customer_ledger": 2,
+    "supplier_ledger": 1,
+    "stock_movements": 4,
+    "cash_shifts": 1,
+    "cash_movements": 3,
+    "audit_log": 15
+  },
+  "attachments_equal": [
+    {
+      "sha256": "efa9db1be0a815b657f25457245b714ccf2e14f776bc7720da76917611603ce2",
+      "bytes": 5226
+    }
+  ],
+  "archive_sha256": "89643efcd696a5fe223cf624c230267bcea820def67f2362facc4d4f4de56e77",
+  "continued_sale_cash": 4000,
+  "restored_stock_after_sale": 18,
+  "source_stock_unchanged": 20,
+  "real_data_accessed": false,
+  "windows_tested": false
+}
