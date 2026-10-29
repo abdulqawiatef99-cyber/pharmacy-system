@@ -2459,15 +2459,15 @@ async function viewPos() {
   let res = [], liveSeq = 0, liveT = null;
   // live = while typing: only lists results, never adds; a live answer that arrives after newer typing or an Enter
   // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
-  const search = async (unit, live = false) => {
-    const v = q.value.trim(); if (!v) return;
+  const search = async (unit, live = false, given = null) => {
+    const v = given ?? q.value.trim(); if (!v) return;
     const mine = live ? ++liveSeq : null;
     const found = await findItems(v);
     if (live && mine !== liveSeq) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null); return; }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
       + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
@@ -2499,7 +2499,13 @@ async function viewPos() {
     if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
-    q.dataset.searched = q.value.trim();
+    const v = q.value.trim();
+    if (/^\d{6,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
+      q.value = ""; delete q.dataset.searched;
+      search(e.shiftKey, false, v).catch((er) => toast(er.message, true));
+      return;
+    }
+    q.dataset.searched = v;
     search(e.shiftKey).catch((er) => toast(er.message, true));
   });
   bindPosExtras();
@@ -2539,13 +2545,16 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
 });
 
-async function addItem(item, packs, units) {
+// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
+async function addItem(item, packs, units, scanned = false) {
   try {
     SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
     const added = SALE.lines.find((l) => l.item_id === item.id);
     if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
       toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
-    $("#posRes").innerHTML = ""; $("#posQ").value = ""; delete $("#posQ").dataset.searched; $("#posQ").focus();
+    $("#posRes").innerHTML = "";
+    if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
+    $("#posQ").focus();
     renderCart(); renderSide();
   } catch (er) { toast(er.message, true); }
 }

@@ -81,10 +81,10 @@ const { chromium } = require('playwright');
   await p.locator('#posQ').fill('1');
   await p.waitForTimeout(1800);                                            // its answer has arrived by now
   const staleShown = await p.locator('#posRes .res').count();
-  // Codex P1 on #42: two scans before the first lookup returns -> both items reach the sale
+  // Codex P1 on #42 + #48: two scans before the first lookup returns, nobody touching the field in between
+  // (a scanner just types) -> both items reach the sale
   await p.locator('#posQ').fill('');
   await p.locator('#posQ').pressSequentially(code, { delay: 5 }); await p.keyboard.press('Enter');
-  await p.locator('#posQ').fill('');
   await p.locator('#posQ').pressSequentially(code2, { delay: 5 }); await p.keyboard.press('Enter');
   await p.waitForTimeout(3500);
   const linesAfterTwoScans = await p.locator('table.cart [data-minus]').count();
