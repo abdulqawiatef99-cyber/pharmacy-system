@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import alloc_gross
+from ..sales.service import line_gross
 from .service import _period
 
 MAX_ROWS = 5000
@@ -229,7 +229,7 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
                     " LEFT JOIN users ub ON ub.id=l.discount_by LEFT JOIN users ua ON ua.id=l.discount_approved_by"
                     " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
                     " AND l.discount_bp>0", (o, b, lo, hi)):
-        gross = sum(alloc_gross(a["qty_base"], dict(a)) for a in db.all(
+        gross = line_gross((a["qty_base"], dict(a)) for a in db.all(
             "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],)))
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
         key = "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?")

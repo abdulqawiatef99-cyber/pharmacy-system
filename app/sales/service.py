@@ -142,6 +142,17 @@ def alloc_gross(qty: int, a: dict) -> int:
     return (qty // ps) * pp + (qty % ps) * a["unit_price"]
 
 
+def line_gross(parts) -> int:
+    """Price of a line from its (qty, allocation) parts. Allocations with the same price (a pack
+    split over two batches by FEFO) are priced as one quantity, so a whole pack is still exactly
+    the pack price; parts at different batch prices are priced each at its own."""
+    groups: dict[tuple, list] = {}
+    for qty, a in parts:
+        g = groups.setdefault((a["unit_price"], a.get("pack_price"), a.get("pack_size") or 1), [0, a])
+        g[0] += qty
+    return sum(alloc_gross(q, a) for q, a in groups.values())
+
+
 def discount_of(gross: int, bp: int) -> int:
     """Discount in piasters, rounded half up (the same everywhere: screen, sale, return)."""
     return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
@@ -149,7 +160,7 @@ def discount_of(gross: int, bp: int) -> int:
 
 def kept_value(allocs: list[dict], kept: dict, bp: int) -> int:
     """Net value of the units of a line the customer still keeps (after discount)."""
-    g = sum(alloc_gross(kept[a["id"]], a) for a in allocs)
+    g = line_gross((kept[a["id"]], a) for a in allocs)
     return g - discount_of(g, bp)
 
 
@@ -386,7 +397,7 @@ class Sales:
             l["allocations"] = plan
             if any(a.get("unit_price") is None for a in plan):
                 l["problem"] = "no_price"
-            gross = sum(alloc_gross(a["qty"], a) for a in plan if a.get("unit_price") is not None)
+            gross = line_gross((a["qty"], a) for a in plan if a.get("unit_price") is not None)
             disc = discount_of(gross, l["discount_bp"])
             l["gross"], l["discount"], l["net"] = gross, disc, gross - disc
             if any(a.get("expiry_date") and (date.fromisoformat(a["expiry_date"]) - self.today).days
@@ -501,7 +512,6 @@ class Sales:
                 plan = self._plan(ctx, s, l, item)          # re-plan inside the transaction
                 cost_row = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=?"
                                        " AND item_id=?", (ctx.org_id, s["branch_id"], l["item_id"]))
-                gross = 0
                 for a in plan:
                     if not item["is_service"]:
                         inventory.post_movement(self.db, ctx, item_id=l["item_id"], qty_delta=-a["qty"],
@@ -512,7 +522,7 @@ class Sales:
                                     " unit_price, unit_cost, pack_price, pack_size) VALUES (?,?,?,?,?,?,?,?)",
                                     (new_id(), l["id"], a["batch_id"], a["qty"], a["unit_price"],
                                      cost_row["avg_cost"] if cost_row else None, a["pack_price"], a["pack_size"]))
-                    gross += alloc_gross(a["qty"], a)
+                gross = line_gross((a["qty"], a) for a in plan)
                 net = gross - discount_of(gross, l["discount_bp"])
                 if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
