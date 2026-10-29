@@ -2426,13 +2426,14 @@ async function viewPos() {
   }));
   $("#tabNew").addEventListener("click", newTab);
   const q = $("#posQ");
-  let res = [], seq = 0, liveT = null;
-  // live = while typing: only lists results, never adds; an answer that arrives after newer typing or an Enter is dropped
+  let res = [], liveSeq = 0, liveT = null;
+  // live = while typing: only lists results, never adds; a live answer that arrives after newer typing or an Enter
+  // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
   const search = async (unit, live = false) => {
     const v = q.value.trim(); if (!v) return;
-    const mine = ++seq;
+    const mine = live ? ++liveSeq : null;
     const found = await findItems(v);
-    if (mine !== seq) return;
+    if (live && mine !== liveSeq) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
@@ -2453,7 +2454,7 @@ async function viewPos() {
   };
   q.addEventListener("input", () => {
     clearTimeout(liveT);
-    seq++;                                                              // any answer still on its way is for other text
+    liveSeq++;                                                          // any suggestion still on its way is for other text
     const v = q.value.trim();
     if (v.length < 2 || /^\d+$/.test(v)) {                             // digits: a barcode scanner's Enter follows
       $("#posRes").innerHTML = ""; delete q.dataset.searched; return;
@@ -2463,7 +2464,7 @@ async function viewPos() {
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    clearTimeout(liveT);
+    clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
     if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;

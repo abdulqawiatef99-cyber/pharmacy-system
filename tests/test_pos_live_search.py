@@ -43,17 +43,17 @@ class TestLiveSearchSource(unittest.TestCase):
         self.assertIn('q.addEventListener("input"', body)
         self.assertRegex(body, r"search\(false, true\)")                        # live search
         self.assertIn("if (!live && res.length === 1", body)                     # live never auto-adds
-        self.assertIn("if (mine !== seq) return;", body)                         # stale answers dropped
+        self.assertIn("if (live && mine !== liveSeq) return;", body)             # only stale suggestions are dropped
         self.assertRegex(body, r"/\^\\d\+\$/\.test\(v\)\) \{")                 # digits wait for the scanner's Enter
         # Codex on #42: every keystroke drops answers still on their way (also when no new search starts)
         handler = body[body.index('q.addEventListener("input"'):body.index('q.addEventListener("keydown"')]
-        self.assertLess(handler.index("seq++"), handler.index("if (v.length < 2"))
+        self.assertLess(handler.index("liveSeq++"), handler.index("if (v.length < 2"))
 
 
 SCRIPT = r"""
 const { chromium } = require('playwright');
 (async () => {
-  const [base, user, pw, code] = process.argv.slice(1);
+  const [base, user, pw, code, code2] = process.argv.slice(1);
   const b = await chromium.launch();
   const p = await b.newPage();
   await p.goto(base + '/');
@@ -81,7 +81,15 @@ const { chromium } = require('playwright');
   await p.locator('#posQ').fill('1');
   await p.waitForTimeout(1800);                                            // its answer has arrived by now
   const staleShown = await p.locator('#posRes .res').count();
-  console.log(JSON.stringify({ listed, linesAfterTyping, linesAfterScan, qty, staleShown }));
+  // Codex P1 on #42: two scans before the first lookup returns -> both items reach the sale
+  await p.locator('#posQ').fill('');
+  await p.locator('#posQ').pressSequentially(code, { delay: 5 }); await p.keyboard.press('Enter');
+  await p.locator('#posQ').fill('');
+  await p.locator('#posQ').pressSequentially(code2, { delay: 5 }); await p.keyboard.press('Enter');
+  await p.waitForTimeout(3500);
+  const linesAfterTwoScans = await p.locator('table.cart [data-minus]').count();
+  const qtys = await p.locator('table.cart tbody tr .qty b').allInnerTexts();
+  console.log(JSON.stringify({ listed, linesAfterTyping, linesAfterScan, qty, staleShown, linesAfterTwoScans, qtys }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -93,9 +101,14 @@ class TestLiveSearchInBrowser(APICase):
         import uvicorn
         it = cat.create_item(self.db, self.ctx, {"name_en": "Test Item", "name_ar": "صنف تجربة", "public_price": 1000})
         cat.add_barcode(self.db, self.ctx, it, "6221043010359")
+        it2 = cat.create_item(self.db, self.ctx, {"name_en": "Second Item", "public_price": 2000})
+        cat.add_barcode(self.db, self.ctx, it2, "6221043010366")
         with self.db.transaction():
             b = inv.get_or_create_batch(self.db, self.ctx, it, "B1", (date.today() + timedelta(days=400)).isoformat())
             inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=10, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+            b2 = inv.get_or_create_batch(self.db, self.ctx, it2, "B2", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it2, qty_delta=10, batch_id=b2, movement_type="purchase",
                               unit_cost=Decimal("5"))
         CashDrawer(self.db).open(self.ctx, 0)
         with socket.socket() as sock:
@@ -110,7 +123,7 @@ class TestLiveSearchInBrowser(APICase):
                     break
                 time.sleep(0.05)
             r = subprocess.run([shutil.which("node"), "-e", SCRIPT, f"http://127.0.0.1:{port}", "owner", OWNER_PW,
-                                "6221043010359"], capture_output=True, text=True, timeout=90, cwd=str(Path(__file__).parent))
+                                "6221043010359", "6221043010366"], capture_output=True, text=True, timeout=90, cwd=str(Path(__file__).parent))
         finally:
             server.should_exit = True
             t.join(10)
@@ -121,6 +134,8 @@ class TestLiveSearchInBrowser(APICase):
         self.assertEqual(out["linesAfterScan"], 1)              # the scan added it once
         self.assertTrue(re.match(r"^1\b", out["qty"]), out["qty"])
         self.assertEqual(out["staleShown"], 0)                  # an old answer never shows for new text
+        self.assertEqual(out["linesAfterTwoScans"], 2)          # two quick scans: both items are in the sale
+        self.assertEqual(sorted(int(re.match(r"\d+", q).group()) for q in out["qtys"]), [1, 2], out["qtys"])
 
 
 if __name__ == "__main__":
