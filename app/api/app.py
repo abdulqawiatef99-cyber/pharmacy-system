@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 
+import functools
 import hashlib
 import json
 import logging
@@ -51,6 +52,12 @@ import html as _html
 
 log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+@functools.lru_cache(maxsize=None)
+def _static_v(name: str) -> str:
+    """/static/<name>?v=<content hash>, so a browser never keeps an old copy after an update."""
+    return f"/static/{name}?v={hashlib.sha256((WEB_DIR / name).read_bytes()).hexdigest()[:10]}"
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
 
@@ -1762,7 +1769,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                f"<tr class='t'><td>{'✓ مطابق' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الوردية</title>
-<link rel="stylesheet" href="/static/receipt.css"></head><body>
+<link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
 <div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الوردية<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
 إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
@@ -1823,7 +1830,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append(f"العميل: {e(sale['customer']['name'])}")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع {sale['sale_no']}</title>
-<link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
+<link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
 <tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
@@ -1898,7 +1905,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
-<link rel="stylesheet" href="/static/receipt.css">{'<link rel="stylesheet" href="/static/receipt-58.css">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
+<link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
