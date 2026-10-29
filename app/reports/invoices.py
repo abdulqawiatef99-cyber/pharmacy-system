@@ -12,7 +12,7 @@ from decimal import Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import alloc_gross, kept_value
+from ..sales.service import kept_value, line_gross
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -99,7 +99,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
                         " WHERE l.sale_id=? ORDER BY l.line_no", (r["id"],)):
             allocs = [dict(a) for a in db.all("SELECT id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
                                               " FROM sale_allocations WHERE sale_line_id=?", (l["id"],))]
-            gross = sum(alloc_gross(a["qty_base"], a) for a in allocs)
+            gross = line_gross((a["qty_base"], a) for a in allocs)
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net
             if l["discount_source"] == "contract":
