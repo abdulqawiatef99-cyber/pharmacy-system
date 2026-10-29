@@ -187,6 +187,36 @@ def rollback(home: Path, expected_id: str | None = None) -> None:
                     {**state, "active": previous, "previous": None, "pending": False})
 
 
+def adopt_installer(legacy: Path, home: Path) -> dict | None:
+    """A newly installed program (build_info.json, written by the installer build) runs instead of a
+    release selected by an older in-app update. Once per installer build: a later in-app update stays
+    selected. Returns the build info when it was adopted now, else None."""
+    try:
+        build = json.loads((legacy / "build_info.json").read_text(encoding="utf-8"))
+        sha = build["sha"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    marker = home / "installer.json"
+    try:
+        if json.loads(marker.read_text(encoding="utf-8")).get("sha") == sha:
+            return None
+    except (OSError, ValueError, AttributeError):
+        pass
+    with locked(home):
+        try:
+            state = read_state(home)
+        except ReleaseError:                 # the installer is the recovery path for a damaged state
+            state = {"damaged": True}
+        if state:
+            atomic_json(home / "active-release.json",
+                        {"protocol": PROTOCOL, "legacy_root": str(legacy.resolve()),
+                         "active": None, "previous": None, "pending": False})
+        atomic_json(marker, {"sha": sha, "ref": build.get("ref")})
+    return {"sha": sha, "ref": build.get("ref")}
+
+
 def run_selected(root: Path) -> None:
     # Explicit candidate checks must not redirect back to the currently active code.
     # Recovery must remain callable even if the selected release was damaged.
