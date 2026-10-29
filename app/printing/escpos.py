@@ -2,7 +2,8 @@
 
 Why an image: most thermal printers have no Arabic code page, and the ones
 that do don't shape/join Arabic letters. So the receipt is rendered as a
-bitmap (Pillow + libraqm for correct right-to-left shaping) and sent with the
+bitmap (Pillow + libraqm for correct right-to-left shaping; on Windows Pillow's raqm
+needs fribidi-0.dll next to python.exe, which the installer ships) and sent with the
 standard ESC/POS raster command `GS v 0`, which practically every 80 mm
 ESC/POS printer supports. The drawer is opened by the printer's kick pulse.
 
@@ -12,7 +13,7 @@ access to USB devices. Transports:
   tcp:IP:PORT        network printers (usually port 9100)       — tested with a fake socket printer
   win:PRINTER NAME   Windows print queue, RAW data (pywin32)     — NOT tested (needs Windows)
   file:PATH          write bytes to a device/file (/dev/usb/lp0) — tested with a file
-Configure with PHARM_PRINTER; PHARM_RECEIPT_FONT points to a TTF with Arabic.
+Chosen in Settings → receipt (falls back to PHARM_PRINTER); PHARM_RECEIPT_FONT points to a TTF with Arabic.
 """
 from __future__ import annotations
 
@@ -116,7 +117,7 @@ def receipt_job(img: Image.Image, open_drawer: bool = False) -> bytes:
 # ---------------------------------------------------------------- transports
 def send(target: str, data: bytes, timeout: float = 5.0) -> None:
     if not target or target == "none":
-        raise PrinterError("لم يتم ضبط الطابعة (PHARM_PRINTER)")
+        raise PrinterError("لم يتم اختيار طابعة الإيصال (الإعدادات ← الإيصال)")
     kind, _, rest = target.partition(":")
     try:
         if kind == "tcp":
@@ -134,6 +135,16 @@ def send(target: str, data: bytes, timeout: float = 5.0) -> None:
         raise
     except (OSError, ValueError) as e:
         raise PrinterError(f"تعذر الوصول للطابعة: {e}") from e
+
+
+def windows_printers() -> list[str]:   # pragma: no cover - needs Windows
+    """Printer names as Windows lists them (local and shared); empty off Windows."""
+    try:
+        import win32print  # type: ignore
+    except ImportError:
+        return []
+    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+    return sorted({p[2] for p in win32print.EnumPrinters(flags, None, 1)})
 
 
 def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover - needs Windows

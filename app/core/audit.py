@@ -107,7 +107,7 @@ ACTION_LABELS = {
     "item.barcode_add": "إضافة باركود", "item.barcode_remove": "إزالة باركود", "item.category": "تغيير قسم صنف",
     "item.create": "صنف جديد", "item.flags": "علامات أصناف", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
     "payment_channel.save": "جهاز / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
-    "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال",
+    "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال", "print.test": "تجربة طابعة",
     "procurement.consumption_import": "رفع مبيعات للطلبية", "procurement.offer_eval": "تقييم عرض", "purchase.approve": "اعتماد فاتورة شراء",
     "purchase.cancel": "إلغاء فاتورة شراء", "purchase.header_edit": "تعديل رأس فاتورة شراء", "purchase.import": "رفع فاتورة شراء",
     "purchase.issue_ack": "قبول فرق في فاتورة شراء", "purchase.line_add": "إضافة سطر شراء", "purchase.line_delete": "حذف سطر شراء",

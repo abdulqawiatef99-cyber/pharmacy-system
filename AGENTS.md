@@ -68,6 +68,9 @@ cost, dosing). Everything else: decide, document the decision (`docs/DECISIONS.m
 ## 6. New ideas
 Do not interrupt the active task. Add or update an entry in `docs/FUTURE_REQUIREMENTS.md`
 (description, value, modules, design impact). Future features are outside the first-release percentage.
+At a checkpoint (after a merge, before a new Issue) spend ~5 minutes on the relevant entries and class them:
+**A** small, low-risk, clear benefit, fits current work → a scoped Issue now; **B** a minimal preparation now
+saves real rework later → only that preparation; **C** everything else → after launch. Launch blockers come first.
 
 ## 7. End of every task or session (also before hitting a usage limit)
 Save as you go (owner's rule): the owner's usage limit can end a session without warning, so after every
@@ -78,5 +81,39 @@ what is unfinished, exact next step) → update the Issue. Never claim work will
 unless a real scheduler was configured.
 
 ## 8. Efficiency
-Read targeted files; do not re-scan the whole repository or re-run passing suites without a change.
-Reports to the owner: short Egyptian Arabic, facts separated from assumptions.
+- Read targeted files; do not re-scan the whole repository or re-run passing suites without a change.
+  Targeted tests while implementing; the full suite once before each push that goes to a PR.
+- Small, independently verifiable tasks; one Issue/branch/PR each. A fresh session for an independent task
+  when practical; save `HANDOFF.md` before context is cleared. Never depend on chat history.
+- Subagents, new tools, libraries or services only when they clearly cut real work; assess architecture fit,
+  security, licence, cost and test effort first. Paid services or new orchestration need the owner (§5).
+  Non-essential tooling waits until after launch.
+- Efficiency claims need evidence (rework avoided, CI failures, tasks verified). Never invent token or time savings.
+- Scheduling/queued continuation only where actually configured; never claim it otherwise (§7).
+
+## 9. Reports to the owner
+Short Egyptian Arabic, facts separated from assumptions, details stay in GitHub. After each milestone:
+- **الإنجاز** — what was actually completed. **الدليل** — PR/commit, test counts.
+- **نسبة الإطلاق** — X% by the `STATUS.md` formula, change since the last milestone (0 if no evidence level
+  changed), remaining 100−X%; code-complete gates kept separate from Windows, hardware and owner acceptance.
+  Never raise the percentage because more code was written; weights, levels and criteria change only with the owner.
+- **الكفاءة** — only a verified improvement. **العوائق** — important blockers, ranked. **التالي** — next task.
+- **تم تلقائيًا** — owner-facing actions done and verified. **مطلوب منك:** — only what the owner alone can do,
+  with exact steps; never hand the owner a step an agent can do.
+
+## 10. Lead role and coordination
+- Claude Code leads and is accountable; it judges proposals (the owner's, Codex's, its own earlier ones) on
+  evidence, says when a better option exists and recommends one; it does not argue trivia.
+- One accountable agent per Issue (claimed on the Issue); no overlapping branches. Codex reviews every PR
+  (§2a) and may take a whole Issue; the owner of the Issue integrates.
+- Second opinion (Codex security/code review, or a second agent) is required for money, stock integrity,
+  migrations, permissions/isolation, backup/restore and architectural decisions; not for routine low-risk work.
+- Disagreement: summarise, compare evidence and risk, decide routine points yourself, escalate consequential
+  ones to the owner; record real decisions in `DECISIONS.md` or the Issue. Never claim a review that did not happen.
+
+## 11. Unattended work and alerts (zero extra cost)
+- Only mechanisms verified end to end count; `HANDOFF.md` lists each as automated / partial / manual.
+- Alerts reach the owner as a Claude push notification. GitHub @mentions do **not** notify the owner: agent
+  comments are posted from the owner's own account. Alert only when the owner must act or work stopped: what stopped, cause,
+  what was tried, exact action, link.
+- Retries only for transient failures, bounded; never retry authentication, usage-limit or destructive failures.
