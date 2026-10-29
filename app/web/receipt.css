@@ -1,13 +1,18 @@
-@page { size: 80mm auto; margin: 3mm; }
+/* An 80 mm thermal head prints only ~72 mm (58 mm prints ~48 mm) and the printer driver decides
+   where that window sits. Content is centred and narrow enough (80: 64 mm, 58: 38 mm) to stay
+   inside the window whichever side the driver clips — the amounts sit at the left edge (RTL). */
+@page { size: 80mm auto; margin: 2mm 0; }
 body { margin: 0; font-family: Tahoma, "Noto Sans Arabic", sans-serif; font-size: 12px; color: #000; background: #fff; }
-.r { width: 74mm; margin: 0 auto; }
-body.w58 .r { width: 52mm; font-size: 11px; }
+.r { width: 64mm; margin: 0 auto; }
+body.w58 .r { width: 38mm; font-size: 10px; }
 h1 { font-size: 15px; text-align: center; margin: 4px 0; }
 p { text-align: center; margin: 3px 0; }
 p.s { font-size: 10px; }
-table { width: 100%; border-collapse: collapse; }
-td { padding: 2px 0; vertical-align: top; }
-td:last-child { text-align: left; white-space: nowrap; direction: ltr; padding-inline-start: 6px; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+td { padding: 2px 0; vertical-align: top; overflow-wrap: anywhere; }
+td:last-child { width: 23mm; text-align: left; white-space: nowrap; direction: ltr; padding-inline-start: 4px; }
+body.w58 td:last-child { width: 17mm; }
+body.w58 .t td { font-size: 12px; }
 small { color: #222; }
 .t td { font-weight: bold; font-size: 14px; border-top: 1px dashed #000; }
 .f { margin-top: 8px; font-weight: bold; }
