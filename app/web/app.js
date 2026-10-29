@@ -2265,11 +2265,14 @@ async function viewSale(id) {
     catch (e) { toast(e.message, true); }
   });
 }
-// two-click confirmation without browser dialogs
-function confirmInline(btn) {
-  if (btn.dataset.armed) return true;
-  btn.dataset.armed = "1"; const t = btn.textContent; btn.textContent = "متأكد؟ اضغط مرة أخرى";
-  setTimeout(() => { delete btn.dataset.armed; btn.textContent = t; }, 4000);
+// two-click confirmation without browser dialogs: 10 s to confirm; the confirmed click disarms at once,
+// so a third quick click is a new first click (never the same action twice)
+function confirmInline(btn, ms = 10000) {
+  clearTimeout(btn._confirmT);
+  const restore = () => { delete btn.dataset.armed; btn.textContent = btn.dataset.label; };
+  if (btn.dataset.armed) { restore(); return true; }
+  btn.dataset.armed = "1"; btn.dataset.label = btn.textContent; btn.textContent = "متأكد؟ اضغط مرة أخرى";
+  btn._confirmT = setTimeout(restore, ms);
   return false;
 }
 
