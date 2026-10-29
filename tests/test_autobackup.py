@@ -3,6 +3,7 @@ import json
 import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from app.catalog import service as cat
 from app.core import autobackup, backup, notify, people
@@ -94,6 +95,30 @@ class TestAutoBackup(DBTestCase):
         kinds = [n["kind"] for n in notify.listing(self.db, self.ctx)["items"]]
         self.assertEqual(kinds.count("backup"), 1)                          # once a day, not every run
         self.assertTrue(self.ab.status(self.ctx)["offsite_stale"])
+
+    def test_offsite_copy_is_verified_and_a_bad_copy_is_not_kept(self):
+        """A failing USB stick must not leave a broken file that looks like a good backup."""
+        usb = self.tmp / "usb"
+        usb.mkdir()
+        self.ab.update_settings(self.ctx, {"offsite_dir": str(usb)})
+        real_copy = autobackup.shutil.copyfile
+
+        def corrupting_copy(src, dst):
+            real_copy(src, dst)
+            with open(dst, "r+b") as f:          # one flipped byte, as a bad flash cell would do
+                f.seek(100)
+                b = f.read(1)
+                f.seek(100)
+                f.write(bytes([b[0] ^ 0xFF]))
+
+        with patch.object(autobackup.shutil, "copyfile", side_effect=corrupting_copy):
+            st = self.ab.run(force=True)
+        self.assertTrue(st["last_ok"])                       # the backup on the PC itself is fine
+        self.assertIn("تطابق", st["offsite_error"])
+        self.assertEqual(list(usb.iterdir()), [])            # neither the bad copy nor a .part remains
+        st = self.ab.run(force=True)                         # a healthy drive works again
+        self.assertIsNone(st["offsite_error"])
+        self.assertEqual(backup._sha256(usb / st["last_file"]), backup._sha256(self.bdir / st["last_file"]))
 
     def test_settings_validation_and_owner_only(self):
         for bad in ({"interval_min": 45}, {"keep_last": 0}, {"offsite_dir": "relative/path"},
