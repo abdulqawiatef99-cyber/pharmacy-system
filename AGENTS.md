@@ -18,6 +18,10 @@ If something here conflicts with an older document, this file wins.
 - Merge into `develop` only when: CI is green, the diff was re-read, the Issue's acceptance criteria
   are met, and there are no conflicts. Merge commits, no force-push on shared branches.
 - Never close or overwrite another agent's open PR without checking its content is preserved elsewhere.
+- GitHub Free has no branch protection for this private repo, so `.github/workflows/branch-guard.yml`
+  stands in for it: `main` and `develop` change only by merging a PR whose `CI / linux` is green, never by
+  direct or force push. A violation opens an Issue (force push: old tip kept as `guard/<branch>-<sha>`),
+  and an unverified push to `main` does not build or publish `installer-latest`.
 
 ## 2a. Review loop (Claude Code implements, Codex reviews)
 1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)

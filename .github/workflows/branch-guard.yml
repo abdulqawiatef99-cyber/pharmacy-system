@@ -1,0 +1,66 @@
+name: Branch guard
+
+# Free substitute for branch protection (GitHub Free has none for private repos).
+# It cannot block a push, so it makes every bad push visible and recoverable:
+# - force push / deletion of main or develop: the old tip is kept as branch guard/<branch>-<sha>
+# - push not coming from a merged PR with a green "CI / linux": an Issue is opened
+# The installer publish gate (windows-installer.yml) uses the same check.
+
+on:
+  push:
+    branches: [main, develop]
+  delete:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+  checks: read
+
+jobs:
+  guard:
+    if: github.event_name == 'push' || (github.event.ref_type == 'branch' && (github.event.ref == 'main' || github.event.ref == 'develop'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Check and record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          BRANCH: ${{ github.event_name == 'push' && github.ref_name || github.event.ref }}
+          SHA: ${{ github.event.after }}
+          BEFORE: ${{ github.event.before }}
+          FORCED: ${{ github.event.forced }}
+          DELETED: ${{ github.event.deleted }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          zero=0000000000000000000000000000000000000000
+          problem=""
+          if [ "$EVENT" = "delete" ] || [ "$DELETED" = "true" ]; then
+            problem="branch $BRANCH was deleted"
+          else
+            problem=$(.github/scripts/verify_push.sh) && { echo "$problem"; exit 0; }
+          fi
+          backup=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "$zero" ] && { [ "$FORCED" = "true" ] || [ "$DELETED" = "true" ]; }; then
+            backup="guard/$BRANCH-${BEFORE:0:12}"
+            gh api "repos/$REPO/git/refs" -f ref="refs/heads/$backup" -f sha="$BEFORE" >/dev/null || backup="(backup failed)"
+          fi
+          body="Branch guard: $problem.
+
+          - branch: \`$BRANCH\`
+          - by: $ACTOR
+          - before: \`$BEFORE\`
+          - after: \`$SHA\`
+          - old tip kept as: ${backup:-not needed}
+
+          Rule (AGENTS.md section 2): main and develop change only by merging a PR whose \"CI / linux\" is green; no force push.
+          Check what changed. To restore the old tip: reset the branch to the backup branch above."
+          gh issue create --repo "$REPO" --title "Branch guard: $problem" --body "$body"
+          echo "::error title=Branch guard::$problem"
+          exit 1
