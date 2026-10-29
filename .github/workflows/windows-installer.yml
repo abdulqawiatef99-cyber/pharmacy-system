@@ -27,6 +27,23 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Pillow's Windows wheels have raqm (Arabic shaping) but load FriBiDi at run time; without it the
+      # receipt cannot be drawn and the drawer never opens (trial 2026-10-29, #36). Built from source by
+      # vcpkg (preinstalled on the runner), shipped next to python.exe, where Pillow looks for it.
+      - name: FriBiDi for Arabic shaping
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install fribidi:x64-windows
+          $dll = Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -Filter "fribidi*.dll"
+          if (-not $dll) { throw "fribidi dll not built" }
+          New-Item -ItemType Directory fribidi -Force | Out-Null
+          $dll | Copy-Item -Destination fribidi
+          Get-ChildItem fribidi
+          # the Python that runs the tests gets it too, so the printing tests run on Windows instead of skipping
+          Copy-Item fribidi\* (Split-Path (Get-Command python).Source)
+
       - name: Tests (Windows)
         shell: pwsh
         env:
@@ -61,6 +78,7 @@ jobs:
           $lines += '..\program'
           Set-Content $pth.FullName $lines
           python -m pip install -r requirements.txt --target build/python/Lib/site-packages --only-binary=:all: --no-compile
+          Copy-Item fribidi\* build/python
 
       - name: Program files
         shell: pwsh
@@ -80,6 +98,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # every shipped library imports in the embedded runtime (win32print = Windows printer queue)
           build/python/python.exe -c "import win32print, PIL, pdfplumber, openpyxl, starlette, uvicorn, multipart, requests, httpx"
+          # Arabic shaping works in the shipped runtime (direct receipt printing + labels depend on it)
+          build/python/python.exe -c "from PIL import features; assert features.check('raqm') and features.check('fribidi'), 'raqm/fribidi missing'"
+          build/python/python.exe -c "import sys; sys.path.insert(0, 'build/program'); from app.printing import escpos; print(escpos.render_receipt([('title', '\u0635\u064a\u062f\u0644\u064a\u0629', ''), ('row', '\u0628\u0627\u0646\u0627\u062f\u0648\u0644', '40.00')]).size)"
           build/python/python.exe build/program/manage.py selftest --quick
           build/python/python.exe build/program/manage.py init --pharmacy smoke --username owner --password Smoke-Pass-2026
           build/python/python.exe build/program/manage.py verify
