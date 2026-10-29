@@ -33,7 +33,7 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests -t . *> test-out.txt
@@ -78,6 +78,8 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
+          # every shipped library imports in the embedded runtime (win32print = Windows printer queue)
+          build/python/python.exe -c "import win32print, PIL, pdfplumber, openpyxl, starlette, uvicorn, multipart, requests, httpx"
           build/python/python.exe build/program/manage.py selftest --quick
           build/python/python.exe build/program/manage.py init --pharmacy smoke --username owner --password Smoke-Pass-2026
           build/python/python.exe build/program/manage.py verify
