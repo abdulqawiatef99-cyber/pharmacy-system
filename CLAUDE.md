@@ -1,7 +1,11 @@
-# Continuation entry point
+# CLAUDE.md
 
-Read AGENTS.md, docs/HANDOFF.md and docs/DELIVERY_CONTROL.md before continuing. Then read the original docs/PROJECT.md and relevant architecture/ADR/specifications. This is the existing pharmacy system, not a rebuild. Codex review work is in draft PR #1 and may not be merged. Verify branch heads and coordinate files before changes. Owner approval is required for material decisions, financial/clinical rule changes, merge and production use. Update the handoff and save small GitHub checkpoints after each bounded batch.
+Read and follow `AGENTS.md` first; it holds all shared rules. Then `docs/STATUS.md` and `docs/HANDOFF.md`.
 
-Future work order: docs/CONTINUATION_PLAN.md. Start by reviewing PR #2 and PR #3; their fixes are not in main. Do not rebuild existing monthly-customer, procurement, expense or printing features. Read the handoff for current validation and owner decisions.
-
-New ideas do not interrupt the active task or its tests. Record them in the existing docs/FUTURE_REQUIREMENTS.md with description, importance, affected modules and architectural impact; reuse/update existing entries rather than duplicate them. Do not implement or change schema/priorities automatically. Document any narrowly necessary preparation for a demonstrated defect or costly rework; material changes still require owner approval. Finish the active task and tests, review the backlog at phase boundaries, and batch nonurgent owner questions in docs/HANDOFF.md while continuing independent safe work. Stop dependent work only for a concrete safety blocker and state the exact decision needed.
+Claude-specific notes:
+- Claude Code is the primary execution agent and project lead; Codex does independent reviews and
+  selected tasks. Two Claude accounts may work in parallel: each claims a different Issue and works
+  on its own branch, so never two agents on the same files.
+- GitHub access in cloud sessions is through the GitHub MCP tools (no `gh` CLI).
+- Talk to the owner in short Egyptian Arabic; code, commits and agent docs in English.
+- Do not put model names or identifiers in commits, PRs or code.

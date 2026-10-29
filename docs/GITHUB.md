@@ -1,22 +1,11 @@
-# ربط المشروع بـ GitHub (مستودع خاص)
+# GitHub (مستودع خاص)
 
-## الحالة الحالية (اتأكدت يوم 2026-10-24)
-- المشروع **فيه git محلي**، وكل التاريخ محفوظ فيه. التفاصيل في `git log`.
-- **GitHub مش متصل.** بيئة العمل هنا مفيهاش حساب GitHub مربوط، وجربت 3 طرق وكلهم فشلوا: (`gh auth status` ← token غير صالح، وأداة قائمة المستودعات ← "no GitHub account linked"). **مفيش أي حاجة اترفعت.**
-- `.gitignore` بيمنع رفع: قواعد البيانات، وملفات WAL، والنسخ الاحتياطية، وملفات الفواتير والصور، وملفات Excel/CSV/PDF، وأي ملف `.env` أو مفاتيح.
-- فيه حماية قبل كل commit (`scripts/check_secrets.py`) بتوقف أي commit فيه ملف بيانات أو حاجة شكلها مفتاح API. اتجربت على مفتاح مزروع وقفلته.
-
-## الخطوة الوحيدة المطلوبة منك (اختار طريقة)
-**أ) من Claude (الأسهل):** اربط GitHub من إعدادات claude.ai ← Connectors، واعمل مستودع **Private** فاضي (مثلًا `pharmacy-platform`) **من غير README**، وابعتلي اسمه بالشكل ده: `اسم-الحساب/pharmacy-platform`. أنا هعمل الباقي.
-
-**ب) من جهازك:** اعمل المستودع Private فاضي، وبعدين جوه مجلد المشروع:
-```bash
-git remote add origin https://github.com/<حسابك>/pharmacy-platform.git
-git push -u origin main
-python scripts/check_secrets.py --install     # الحماية على جهازك كمان
-```
-
-## قواعد ثابتة
-- **ممنوع** ترفع `data/` أو `backups/` أو فواتير حقيقية أو ملف تصدير E-Stock. الفواتير الحقيقية اللي هنختبر بيها هتتحط في مجلد `real_invoices/` **برّا المستودع**، والمجلد ده متجاهل أصلًا.
-- مفتاح `ANTHROPIC_API_KEY` بيتحط في متغيرات البيئة على الجهاز بس، **وعمره ما يتكتب في الكود**.
-- لما نحتاج سجل تغييرات وإصدارات (F13): نستخدم tags بالشكل ده `v0.3.0` وGitHub Releases.
+- المستودع: `abdulqawiatef99-cyber/pharmacy-system` (Private)، متصل ومرفوع بتاريخه كامل منذ 2026-10-24.
+- **الفروع:** `main` = قناة تحديث الصيدلية (زرار "تحديث" في البرنامج بيسحب `main`، وأي push عليه بينشر `installer-latest`)،
+  فمبيتحركش غير بموافقة المالك. `develop` = الدمج اليومي. فروع الشغل: `claude/<issue>-…` و`codex/<issue>-…`. القواعد في `AGENTS.md`.
+- **CI:** `.github/workflows/ci.yml` (اختبارات Linux + فحص الأسرار على كل PR؛ Windows على PRs لـ main وعلى develop) و
+  `windows-installer.yml` (بناء المثبّت؛ النشر من `main` بس، والتشغيل اليدوي على فرع تاني بيطلع artifact من غير نشر).
+- **ممنوع** ترفع `data/` أو `backups/` أو فواتير أو بيانات حقيقية أو ملفات تصدير E-Stock؛ `.gitignore` و`scripts/check_secrets.py` بيمنعوها
+  (فعّل الحماية على جهازك: `python scripts/check_secrets.py --install`).
+- مفتاح `ANTHROPIC_API_KEY` ومفتاح التحديث في متغيرات البيئة أو ملف على الجهاز بس، عمره ما يتكتب في الكود.
+- الإصدارات: tag بالشكل `v0.4.0` عند كل دمج معتمد في `main`.
