@@ -19,6 +19,31 @@ If something here conflicts with an older document, this file wins.
   are met, and there are no conflicts. Merge commits, no force-push on shared branches.
 - Never close or overwrite another agent's open PR without checking its content is preserved elsewhere.
 
+## 2a. Review loop (Claude Code implements, Codex reviews)
+1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)
+   and comments `@codex review` on it.
+2. Codex reviews on GitHub. Its findings are the record; nothing is passed through chat.
+3. The implementing agent fixes every P0/P1 finding, or replies on the thread with the reason it does
+   not apply, then pushes. CI must be green on the final head.
+4. Merge into `develop` (rules in §2), close the Issue with the evidence, update `docs/HANDOFF.md`,
+   take the next Issue (§1).
+If Codex does not answer within a working day, merge on green CI plus your own re-read, and note
+"no Codex review" in the PR. Codex taking an implementation task works the same way with the
+roles swapped: Claude reviews.
+
+## Code Review Rules
+(Read by Codex code review. Flag these as P0/P1; ignore style.)
+- Money must stay integer piastres and quantities integer base units; any float, truncation or
+  rounding other than `discount_of` (half up) is a defect.
+- Stock ledger and audit log are append-only; writes happen inside `db.transaction()` together with
+  their audit record.
+- Every query touching pharmacy data filters by `org_id`; every service checks `ctx.require(...)`.
+- Money-moving POSTs must not post twice on a retry (Idempotency-Key path in `app/api/app.py`).
+- No change to `app/migrations/*.sql` files that are already applied; no edit to `requirements.txt`
+  without saying it ships only through the installer.
+- No secrets, real pharmacy, patient or customer data in code, tests or fixtures.
+- A behaviour change without a test that fails before it is a defect.
+
 ## 3. Definition of done (per task)
 Code + targeted tests + full suite (`python -m unittest discover -s tests -t .`) green + docs touched by
 the change + PR merged into `develop` + `docs/HANDOFF.md` updated + Issue closed with the evidence
