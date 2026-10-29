@@ -16,8 +16,17 @@ class PrintFailed(DomainError):
     code = "print_failed"
 
 
-def printer_target() -> str:
-    return os.environ.get("PHARM_PRINTER", "none").strip()
+def printer_target(db: Database | None = None, org_id: str | None = None) -> str:
+    """The receipt printer: chosen in the settings screen ("browser" = browser printing on purpose),
+    else PHARM_PRINTER (older installs)."""
+    if db is not None and org_id:
+        from . import settings as rs
+        chosen = rs.get(db, org_id).get("receipt_target")
+        if chosen == "browser":
+            return "none"
+        if chosen:
+            return chosen
+    return os.environ.get("PHARM_PRINTER", "none").strip() or "none"
 
 
 def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool = False,
@@ -30,17 +39,37 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         ctx.require("sales.create")
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
     when = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+    from . import settings as rs
+    cfg = rs.get(db, ctx.org_id)
+    dest = target or printer_target(db, ctx.org_id)
+    if dest == "none":                      # browser printing chosen: not an error to show the cashier
+        raise PrintFailed("لم يتم اختيار طابعة الإيصال", code="no_printer")
+    rendered = False
     try:
-        from . import settings as rs
-        cfg = rs.get(db, ctx.org_id)
         img = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg),
                                     width=escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM)
-        escpos.send(target or printer_target(), escpos.receipt_job(img, open_drawer))
+        rendered = True
+        escpos.send(dest, escpos.receipt_job(img, open_drawer))
     except escpos.PrinterError as e:
-        raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
+        # The receipt could not be drawn here (no Arabic shaping / font) but the printer may be fine:
+        # the cash drawer still opens, and the browser prints the receipt instead.
+        drawer = open_drawer and not rendered and _kick(db, ctx, dest, sale_id)
+        raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك",
+                          details={"drawer_opened": bool(drawer)}) from e
     with db.transaction():
         audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer})
     return {"ok": True}
+
+
+def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
+    try:
+        escpos.send(dest, escpos.INIT + escpos.DRAWER_KICK)
+    except escpos.PrinterError:
+        return False
+    with db.transaction():
+        audit.record(db, ctx, "cash.drawer_open", "sale", sale_id,
+                     after={"reason": "بيع نقدي — الإيصال من المتصفح"})
+    return True
 
 
 def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = None) -> dict:
@@ -49,11 +78,35 @@ def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = No
     if len((reason or "").strip()) < 3:
         raise ValidationFailed("اكتب سبب فتح الخزينة")
     try:
-        escpos.send(target or printer_target(), escpos.INIT + escpos.DRAWER_KICK)
+        escpos.send(target or printer_target(db, ctx.org_id), escpos.INIT + escpos.DRAWER_KICK)
     except escpos.PrinterError as e:
         raise PrintFailed(str(e)) from e
     with db.transaction():
         audit.record(db, ctx, "cash.drawer_open", "cash_drawer", None, after={"reason": reason.strip()})
+    return {"ok": True}
+
+
+def printers(db: Database, ctx: Context) -> dict:
+    """What the settings screen offers: the Windows printers on this PC and whether Arabic can be drawn."""
+    ctx.require("settings.manage")
+    return {"printers": escpos.windows_printers(), "shaping": escpos.shaping_available(),
+            "env": os.environ.get("PHARM_PRINTER", "none").strip() or "none"}
+
+
+def print_test(db: Database, ctx: Context, target: str | None = None) -> dict:
+    """A short Arabic test receipt on the printer being set up (no sale, no drawer)."""
+    from . import settings as rs
+    ctx.require("settings.manage")
+    dest = rs.check_target(target, allow_browser=True) if target else printer_target(db, ctx.org_id)
+    dest = "none" if dest == "browser" else dest
+    try:
+        img = escpos.render_receipt([("title", "اختبار الطابعة", ""), ("row", "سطر عربي", "12.50"),
+                                     ("small", "إذا ظهر النص مقروءًا فالطباعة سليمة", "")])
+        escpos.send(dest, escpos.receipt_job(img))
+    except escpos.PrinterError as e:
+        raise PrintFailed(str(e)) from e
+    with db.transaction():
+        audit.record(db, ctx, "print.test", "printer", None, after={"target": dest})
     return {"ok": True}
 
 

@@ -73,6 +73,10 @@ IDEMPOTENCY_TTL_DAYS = 7
 CSP = ("default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self';"
        " object-src 'none'; frame-src 'self' blob:; base-uri 'none'; frame-ancestors 'none';"
        " form-action 'self'")
+# Printable pages may be framed by the app itself: the cashier prints them from a hidden frame,
+# which no pop-up blocker stops. Everything else stays unframeable.
+PRINT_PAGES = ("/receipt/", "/return-receipt/", "/shift-report/", "/labels")
+CSP_PRINT = CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'")
 
 
 def _json_default(o):
@@ -91,10 +95,11 @@ class J(JSONResponse):
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         resp = await call_next(request)
-        resp.headers.setdefault("Content-Security-Policy", CSP)
+        printable = request.url.path.startswith(PRINT_PAGES)
+        resp.headers.setdefault("Content-Security-Policy", CSP_PRINT if printable else CSP)
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
-        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN" if printable else "DENY"
         resp.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
         if request.url.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
@@ -1799,6 +1804,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(printing.open_drawer, db, ctx, str(b.get("reason", ""))))
 
     @handler
+    async def print_printers(req):
+        return J(await run_in_threadpool(printing.printers, db, ctx_of(req)))
+
+    @handler
+    async def print_test(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(printing.print_test, db, ctx, b.get("target") or None))
+
+    @handler
     async def return_receipt(req):
         """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
         from ..printing import settings as rs
@@ -2136,6 +2151,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
+        Route("/api/print/printers", print_printers),
+        Route("/api/print/test", print_test, methods=["POST"]),
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
