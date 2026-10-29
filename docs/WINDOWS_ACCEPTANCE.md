@@ -20,7 +20,11 @@
 | R8 | **تحديث ورجوع (تقني، 10 دقايق، ممكن أعمله أنا معاك):** اقفل البرنامج، وبعدين افتح `cmd` واكتب الأوامر اللي تحت السطر ده | بعد التحديث البرنامج يفتح والإصدار اتغير؛ وبعد `--rollback` يرجع للإصدار الأول، **والبيانات زي ما هي** | |
 | R9 | الطابعة والقارئ والدرج: البنود 4–7 و54–56 تحت | إيصال مقروء، والصنف يتضاف مرة واحدة، والدرج يفتح، والملصق مقروء | |
 
-أوامر R8 (`candidate.zip` = "Download ZIP" لـ commit أحدث من `develop`، **بنفس `requirements.txt` والـ migrations**؛ أنا هقولك أنهي commit):
+أوامر R8: نزّل `candidate.zip` من الرابط ده (وإنت داخل على GitHub بحسابك):
+`https://github.com/abdulqawiatef99-cyber/pharmacy-system/archive/refs/tags/v0.4.0rc1.zip`،
+واحفظه في `Downloads` باسم `candidate.zip`. ده الإصدار 0.4.0rc1، وفيه نفس المكتبات والـ migrations.
+**اتجربت الخطوات دي كلها على Linux بنفس الشكل** (2026-10-29): التحديث، ثم التشغيل من المشغّل، وفحص الصحة، والتأكيد، والرجوع لـ 0.3.0، و`verify` = OK.
+على Windows المفروض: بعد التحديث وفتح البرنامج يظهر الإصدار 0.4.0rc1 في صفحة "البرنامج"، وبعد `--rollback` يرجع 0.3.0.
 ```bat
 cd /d "%LOCALAPPDATA%\PharmacyPlatform"
 set PHARM_DATA_DIR=%LOCALAPPDATA%\PharmacyPlatform\data
