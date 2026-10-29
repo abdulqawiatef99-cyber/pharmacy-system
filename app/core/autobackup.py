@@ -198,8 +198,14 @@ class AutoBackup:
             if not folder.exists():
                 raise FileNotFoundError("المجلد غير موجود — هل ذاكرة الفلاش أو القرص غير متصل؟")
             part = folder / (newest.name + ".part")
-            shutil.copyfile(newest, part)
-            part.replace(folder / newest.name)
+            try:
+                shutil.copyfile(newest, part)
+                # read the copy back: a failing USB stick must not keep a broken "backup"
+                if backup._sha256(part) != backup._sha256(newest):
+                    raise OSError("النسخة على ذاكرة الفلاش أو القرص لا تطابق الأصل — جرّب ذاكرة أخرى")
+                part.replace(folder / newest.name)
+            finally:
+                part.unlink(missing_ok=True)
             prune(folder, cfg)
             st.update(offsite_at=datetime.now().isoformat(timespec="seconds"), offsite_error=None,
                       offsite_notified=None)
