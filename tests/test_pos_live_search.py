@@ -44,7 +44,10 @@ class TestLiveSearchSource(unittest.TestCase):
         self.assertRegex(body, r"search\(false, true\)")                        # live search
         self.assertIn("if (!live && res.length === 1", body)                     # live never auto-adds
         self.assertIn("if (mine !== seq) return;", body)                         # stale answers dropped
-        self.assertRegex(body, r"/\^\\d\+\$/\.test\(v\)\) return;")              # digits wait for the scanner's Enter
+        self.assertRegex(body, r"/\^\\d\+\$/\.test\(v\)\) \{")                 # digits wait for the scanner's Enter
+        # Codex on #42: every keystroke drops answers still on their way (also when no new search starts)
+        handler = body[body.index('q.addEventListener("input"'):body.index('q.addEventListener("keydown"')]
+        self.assertLess(handler.index("seq++"), handler.index("if (v.length < 2"))
 
 
 SCRIPT = r"""
@@ -70,7 +73,15 @@ const { chromium } = require('playwright');
   await p.waitForTimeout(800);
   const linesAfterScan = await p.locator('table.cart [data-minus]').count();
   const qty = await p.locator('table.cart tbody tr .qty b').first().innerText();
-  console.log(JSON.stringify({ listed, linesAfterTyping, linesAfterScan, qty }));
+  // Codex on #42: a slow answer for "صنف" arrives after the text became "1" -> it must not show
+  await p.route('**/api/items?q=*', async (route) => { await new Promise((r) => setTimeout(r, 1200)); await route.continue(); });
+  await p.locator('#posQ').fill('');
+  await p.locator('#posQ').pressSequentially('صنف', { delay: 30 });
+  await p.waitForTimeout(400);                                             // the search for "صنف" has started
+  await p.locator('#posQ').fill('1');
+  await p.waitForTimeout(1800);                                            // its answer has arrived by now
+  const staleShown = await p.locator('#posRes .res').count();
+  console.log(JSON.stringify({ listed, linesAfterTyping, linesAfterScan, qty, staleShown }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -109,6 +120,7 @@ class TestLiveSearchInBrowser(APICase):
         self.assertEqual(out["linesAfterTyping"], 0)            # and nothing was added
         self.assertEqual(out["linesAfterScan"], 1)              # the scan added it once
         self.assertTrue(re.match(r"^1\b", out["qty"]), out["qty"])
+        self.assertEqual(out["staleShown"], 0)                  # an old answer never shows for new text
 
 
 if __name__ == "__main__":

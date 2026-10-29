@@ -2453,9 +2453,11 @@ async function viewPos() {
   };
   q.addEventListener("input", () => {
     clearTimeout(liveT);
+    seq++;                                                              // any answer still on its way is for other text
     const v = q.value.trim();
-    if (!v) { seq++; $("#posRes").innerHTML = ""; delete q.dataset.searched; return; }
-    if (v.length < 2 || /^\d+$/.test(v)) return;                       // digits: a barcode scanner's Enter follows
+    if (v.length < 2 || /^\d+$/.test(v)) {                             // digits: a barcode scanner's Enter follows
+      $("#posRes").innerHTML = ""; delete q.dataset.searched; return;
+    }
     liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
   });
   q.addEventListener("keydown", (e) => {
