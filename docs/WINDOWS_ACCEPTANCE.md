@@ -21,7 +21,7 @@
 | R9 | الطابعة والقارئ والدرج: البنود 4–7 و54–56 تحت | إيصال مقروء، والصنف يتضاف مرة واحدة، والدرج يفتح، والملصق مقروء | |
 
 أوامر R8: نزّل `candidate.zip` من الرابط ده (وإنت داخل على GitHub بحسابك):
-`https://github.com/abdulqawiatef99-cyber/pharmacy-system/archive/refs/tags/v0.4.0rc1.zip`،
+`https://github.com/abdulqawiatef99-cyber/pharmacy-system/archive/c15023be221cb4561abfc673a749cf47c19dc8a0.zip`،
 واحفظه في `Downloads` باسم `candidate.zip`. ده الإصدار 0.4.0rc1، وفيه نفس المكتبات والـ migrations.
 **اتجربت الخطوات دي كلها على Linux بنفس الشكل** (2026-10-29): التحديث، ثم التشغيل من المشغّل، وفحص الصحة، والتأكيد، والرجوع لـ 0.3.0، و`verify` = OK.
 على Windows المفروض: بعد التحديث وفتح البرنامج يظهر الإصدار 0.4.0rc1 في صفحة "البرنامج"، وبعد `--rollback` يرجع 0.3.0.
