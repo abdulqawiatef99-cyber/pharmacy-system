@@ -78,5 +78,20 @@ what is unfinished, exact next step) → update the Issue. Never claim work will
 unless a real scheduler was configured.
 
 ## 8. Efficiency
-Read targeted files; do not re-scan the whole repository or re-run passing suites without a change.
-Reports to the owner: short Egyptian Arabic, facts separated from assumptions.
+- Read targeted files; do not re-scan the whole repository or re-run passing suites without a change.
+  Targeted tests while implementing; the full suite once before each push that goes to a PR.
+- Small, independently verifiable tasks; one Issue/branch/PR each. A fresh session for an independent task
+  when practical; save `HANDOFF.md` before context is cleared. Never depend on chat history.
+- Subagents, new tools, libraries or services only when they clearly cut real work; assess architecture fit,
+  security, licence, cost and test effort first. Paid services or new orchestration need the owner (§5).
+  Non-essential tooling waits until after launch.
+- Efficiency claims need evidence (rework avoided, CI failures, tasks verified). Never invent token or time savings.
+- Scheduling/queued continuation only where actually configured; never claim it otherwise (§7).
+
+## 9. Reports to the owner
+Short Egyptian Arabic, facts separated from assumptions, details stay in GitHub. After each milestone:
+- **الإنجاز** — what was actually completed. **الدليل** — PR/commit, test counts.
+- **نسبة الإطلاق** — X% by the `STATUS.md` formula, change since the last milestone (0 if no evidence level
+  changed), remaining 100−X%; code-complete gates kept separate from Windows, hardware and owner acceptance.
+  Never raise the percentage because more code was written; weights, levels and criteria change only with the owner.
+- **الكفاءة** — only a verified improvement. **العوائق** — important blockers, ranked. **التالي** — next task.
