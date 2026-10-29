@@ -1893,9 +1893,9 @@ async function renderReceiptCfg(c) {
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
     <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
-      <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="فارغ = الطباعة من المتصفح"></label>
-      <datalist id="prnList">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
-      <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع كل بيع نقدي. فارغ = الإيصال يُطبع من المتصفح والدرج لا يُفتح.</p>
+      <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
+      <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
+      <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع كل بيع نقدي. browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
       ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: الإيصال سيُطبع من المتصفح، والدرج سيُفتح فقط لو الطابعة مختارة. الحل: إعادة التثبيت بآخر مثبّت.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>

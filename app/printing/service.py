@@ -17,10 +17,13 @@ class PrintFailed(DomainError):
 
 
 def printer_target(db: Database | None = None, org_id: str | None = None) -> str:
-    """The receipt printer: chosen in the settings screen, else PHARM_PRINTER (older installs)."""
+    """The receipt printer: chosen in the settings screen ("browser" = browser printing on purpose),
+    else PHARM_PRINTER (older installs)."""
     if db is not None and org_id:
         from . import settings as rs
         chosen = rs.get(db, org_id).get("receipt_target")
+        if chosen == "browser":
+            return "none"
         if chosen:
             return chosen
     return os.environ.get("PHARM_PRINTER", "none").strip() or "none"
@@ -94,7 +97,8 @@ def print_test(db: Database, ctx: Context, target: str | None = None) -> dict:
     """A short Arabic test receipt on the printer being set up (no sale, no drawer)."""
     from . import settings as rs
     ctx.require("settings.manage")
-    dest = rs.check_target(target) if target else printer_target(db, ctx.org_id)
+    dest = rs.check_target(target, allow_browser=True) if target else printer_target(db, ctx.org_id)
+    dest = "none" if dest == "browser" else dest
     try:
         img = escpos.render_receipt([("title", "اختبار الطابعة", ""), ("row", "سطر عربي", "12.50"),
                                      ("small", "إذا ظهر النص مقروءًا فالطباعة سليمة", "")])

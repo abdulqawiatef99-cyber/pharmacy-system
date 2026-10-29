@@ -31,6 +31,16 @@ class TestReceiptPrinterSetting(DBTestCase):
         with mock.patch.dict(os.environ, {"PHARM_PRINTER": ""}):
             self.assertEqual(printing.printer_target(self.db, self.ctx.org_id), "none")
 
+    def test_browser_on_purpose_beats_the_env_printer(self):
+        # Codex on #37: clearing the field falls back to PHARM_PRINTER, so "browser" must exist on its own
+        with mock.patch.dict(os.environ, {"PHARM_PRINTER": "tcp:10.0.0.9:9100"}):
+            rs.save(self.db, self.ctx, {"receipt_target": ""})
+            self.assertEqual(printing.printer_target(self.db, self.ctx.org_id), "tcp:10.0.0.9:9100")
+            self.assertEqual(rs.save(self.db, self.ctx, {"receipt_target": "browser"})["receipt_target"], "browser")
+            self.assertEqual(printing.printer_target(self.db, self.ctx.org_id), "none")
+        with self.assertRaises(ValidationFailed):                     # only the receipt printer takes it
+            rs.save(self.db, self.ctx, {"label_target": "browser"})
+
 
 class TestDrawerWithoutDirectReceipt(DBTestCase):
     def setUp(self):
@@ -94,7 +104,7 @@ class TestDrawerWithoutDirectReceipt(DBTestCase):
 
     def test_drawer_button_uses_saved_printer(self):
         out = self.tmp / "drawer"
-        with mock.patch.object(rs, "check_target", side_effect=lambda v, e="": str(v)):   # a file only in this test
+        with mock.patch.object(rs, "check_target", side_effect=lambda v, *a, **k: str(v)):   # a file only in this test
             rs.save(self.db, self.ctx, {"receipt_target": f"file:{out}"})
         printing.open_drawer(self.db, self.ctx, "تجربة الدرج")
         self.assertEqual(out.read_bytes(), escpos.INIT + escpos.DRAWER_KICK)

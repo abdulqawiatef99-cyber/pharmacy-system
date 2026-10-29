@@ -26,10 +26,13 @@ def get(db: Database, org_id: str) -> dict:
     return {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
 
 
-def check_target(value, example: str = "win:POS-80C") -> str:
+def check_target(value, example: str = "win:POS-80C", allow_browser: bool = False) -> str:
     """A printer typed or picked on the screen: only a network printer or a Windows printer name,
-    never a file path (the server would write wherever it was told)."""
+    never a file path (the server would write wherever it was told). "browser" (receipt only) means
+    browser printing on purpose, even where PHARM_PRINTER is set."""
     t = str(value or "").strip()
+    if allow_browser and t == "browser":
+        return t
     if t and not re.fullmatch(r"tcp:[A-Za-z0-9.\-]{1,64}:\d{2,5}|win:[^\x00-\x1f]{1,80}", t):
         raise ValidationFailed(f"عنوان الطابعة غير صحيح؛ مثال: tcp:192.168.1.50:9100 أو {example}")
     return t
@@ -58,7 +61,7 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         new["label_lang"] = data["label_lang"]
     for k, example in (("label_target", "win:Xprinter XP-365B"), ("receipt_target", "win:POS-80C")):
         if k in data:
-            new[k] = check_target(data[k], example)
+            new[k] = check_target(data[k], example, allow_browser=k == "receipt_target")
     if "label_dpi" in data:
         if data["label_dpi"] not in (203, 300):
             raise ValidationFailed("دقة الطابعة 203 أو 300")
