@@ -70,6 +70,9 @@ Do not interrupt the active task. Add or update an entry in `docs/FUTURE_REQUIRE
 (description, value, modules, design impact). Future features are outside the first-release percentage.
 
 ## 7. End of every task or session (also before hitting a usage limit)
+Save as you go (owner's rule): the owner's usage limit can end a session without warning, so after every
+meaningful step (a finding, a decision, a test result, a device fact) commit and push it to `docs/HANDOFF.md`
+on your branch right away; do not wait for the end of the task or for the owner to read your messages.
 Commit verified work → push → update `docs/HANDOFF.md` (task, branch, last SHA, tests run and results,
 what is unfinished, exact next step) → update the Issue. Never claim work will resume automatically
 unless a real scheduler was configured.
