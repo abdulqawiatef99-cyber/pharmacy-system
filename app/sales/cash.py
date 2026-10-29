@@ -66,6 +66,18 @@ def count_total(detail: dict) -> tuple[int, dict]:
     return sum(int(k) * n for k, n in clean.items()), clean
 
 
+def redact_summary(ctx: Context, summary: dict) -> dict:
+    """Apply current blind-count visibility to a fresh or cached summary."""
+    if ctx.can("cash.see_expected"):
+        return summary
+    out = dict(summary)
+    for key in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
+                "by_channel"):
+        out.pop(key, None)
+    out["blind"] = True
+    return out
+
+
 class CashDrawer:
     def __init__(self, db: Database):
         self.db = db
@@ -108,13 +120,7 @@ class CashDrawer:
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
                else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
                "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier}
-        if not ctx.can("cash.see_expected"):
-            # blind count: the person closing the drawer must not know the target number
-            for k in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
-                      "by_channel"):
-                out.pop(k, None)
-            out["blind"] = True
-        return out
+        return redact_summary(ctx, out)
 
     def _expected(self, shift_id: str) -> int:
         s = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=?", (shift_id,))

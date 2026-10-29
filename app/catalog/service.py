@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id, row_to_dict
 from . import matching
@@ -89,7 +90,7 @@ def _clean_item(data: dict) -> dict:
     for k in ("vat_bp", "pack_size", "public_price", "min_stock", "max_stock"):
         if k in out and out[k] is not None:
             try:
-                out[k] = int(out[k])
+                out[k] = whole_number(out[k])
             except (TypeError, ValueError):
                 raise ValidationFailed(f"قيمة غير صحيحة في الحقل {k}")
     for k in ("rx_required", "misuse_risk", "is_service", "hide_on_receipt", "hidden", "quick_pin"):

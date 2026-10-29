@@ -1,0 +1,80 @@
+name: Build local candidate installer
+
+on:
+  push:
+    branches: [codex/local-release-candidate]
+    paths: [.github/workflows/build-local-candidate.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-local-candidate
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 20
+      - name: Require the validated application source
+        shell: pwsh
+        run: |
+          git diff --exit-code 6756d5cab26a169e95b27517b210e924643c4357 HEAD -- app tests scripts installer manage.py launcher.py release_bootstrap.py release_protocol.json requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Application changed since successful Windows validation' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build existing embedded runtime and program layout
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $v = python -c "import platform; print(platform.python_version())"
+          Invoke-WebRequest "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath build/python
+          $pth = Get-ChildItem build/python -Filter 'python*._pth' | Select-Object -First 1
+          $lines = (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site'
+          $lines += 'Lib\site-packages'
+          $lines += '..\program'
+          Set-Content $pth.FullName $lines
+          python -m pip install -r requirements.txt --target build/python/Lib/site-packages --only-binary=:all: --no-compile
+          git archive --format=zip HEAD -o program.zip
+          Expand-Archive program.zip -DestinationPath build/program
+          $ver = build/python/python.exe -c "from app.version import __version__; print(__version__)"
+          "APP_VERSION=$ver" >> $env:GITHUB_ENV
+      - name: Smoke check the exact build before packaging
+        shell: pwsh
+        env:
+          PHARM_DATA_DIR: ${{ runner.temp }}\candidate-build-smoke
+          PHARM_DB_PATH: ${{ runner.temp }}\candidate-build-smoke\synthetic.db
+          PHARM_UPLOAD_DIR: ${{ runner.temp }}\candidate-build-smoke\uploads
+          PHARM_BACKUP_DIR: ${{ runner.temp }}\candidate-build-smoke\backups
+          PHARM_PRINTER: none
+          ANTHROPIC_API_KEY: ""
+          PYTHONUTF8: "1"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          build/python/python.exe build/program/manage.py selftest --quick
+          build/python/python.exe build/program/manage.py init --pharmacy synthetic --username synthetic-owner --password ([guid]::NewGuid().ToString())
+          build/python/python.exe build/program/manage.py verify
+      - name: Compile existing installer (do not install or publish)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe')) { choco install innosetup -y --no-progress }
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer/pharmacy.iss
+          $hash = (Get-FileHash dist/PharmacySetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  PharmacySetup.exe" | Set-Content dist/PharmacySetup.exe.sha256
+          "Review artifact only. Source: $env:GITHUB_SHA. No automatic installation or production approval." | Set-Content dist/CANDIDATE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PharmacySetup-candidate
+          path: dist/
+          retention-days: 14
