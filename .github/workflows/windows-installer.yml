@@ -88,6 +88,10 @@ jobs:
           New-Item -ItemType Directory build/program | Out-Null
           git archive --format=zip HEAD -o program.zip
           Expand-Archive program.zip -DestinationPath build/program
+          # what this installer contains: the launcher adopts it once over an older in-app update (#45),
+          # and the update badge compares it with main
+          @{ sha = "$env:GITHUB_SHA"; ref = "$env:GITHUB_REF_NAME" } | ConvertTo-Json -Compress |
+            Set-Content -Encoding ascii build/program/build_info.json
 
       - name: Smoke test of the embedded build
         shell: pwsh

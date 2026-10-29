@@ -327,9 +327,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         now = time.time()
         if upd_cache.get("at", 0) > now - 600:
             return upd_cache["v"]
-        cur = updater.installed(s.data_dir).get("sha")
+        info = updater.installed(s.data_dir)
+        cur = info.get("sha")
         out = {"version": __version__, "installed": cur, "latest": None, "available": False,
                "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
+        if info.get("source") == "installer" and info.get("ref") not in (None, "main"):
+            out["candidate"] = info["ref"]        # a test installer from another branch: main is not an update
+            upd_cache.update(at=now, v=out)
+            return out
         try:
             out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, "main", updater.read_token())
             out["available"] = out["latest"] != cur
