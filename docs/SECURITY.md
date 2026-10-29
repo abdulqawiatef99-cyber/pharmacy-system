@@ -27,6 +27,14 @@
 | Feature switches | a disabled tool answers 403 without affecting others | `test_feature_switch` |
 | Backup integrity | backups verified on write and before restore; restore refuses tampered archives and keeps a pre-restore copy | `test_backup_resilience.py` |
 
+## Review 2026-10-29 (LAN mode, local-only routes): no new defect
+- First-run setup, first-run restore and PIN quick login accept only the PC itself (`req.client.host`,
+  the TCP peer; uvicorn trusts forwarded headers only from 127.0.0.1). LAN mode is off by default,
+  owner-only, audited, and its screen says not to enable it on a Wi-Fi open to customers.
+- Retried money POSTs can no longer post twice (generic Idempotency-Key reservation, #23).
+- Still open, see gaps below: plain HTTP in LAN mode (session cookies readable by anyone on the same
+  Wi-Fi), no encryption at rest, no MFA.
+
 ## Known gaps (must close before multi-pharmacy / internet exposure)
 1. **No HTTPS yet on the LAN.** Fine on `127.0.0.1`; phones on Wi-Fi need TLS (reverse proxy
    with a certificate) before use, also required for camera access.
