@@ -140,9 +140,12 @@ begin
               'اقفلها (أو من Task Manager اقفل Python) وبعدين شغّل المثبّت تاني.';
 end;
 
-function InitializeUninstall(): Boolean;
+{ Only after the owner confirmed removal: InitializeUninstall runs before that question. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  Result := True;
-  StopProgram(False);
-  Sleep(1500);
+  if CurUninstallStep = usUninstall then
+  begin
+    StopProgram(False);
+    Sleep(1500);
+  end;
 end;

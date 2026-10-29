@@ -13,7 +13,10 @@ CODE = ISS[ISS.index("[Code]"):]
 class TestInstallerStopsServer(unittest.TestCase):
     def test_stops_before_install_and_uninstall(self):
         self.assertRegex(CODE, r"function PrepareToInstall\(var NeedsRestart: Boolean\): String;")
-        self.assertRegex(CODE, r"function InitializeUninstall\(\): Boolean;")
+        # uninstall: only after the removal was confirmed (InitializeUninstall runs before the question)
+        self.assertNotRegex(CODE, r"function InitializeUninstall")
+        self.assertRegex(CODE, r"procedure CurUninstallStepChanged\(CurUninstallStep: TUninstallStep\);\s+begin\s+"
+                               r"if CurUninstallStep = usUninstall then\s+begin\s+StopProgram\(False\);")
 
     def test_only_python_from_the_program_folder(self):
         self.assertIn("Lowercase(AddBackslash(ExpandConstant('{app}')) + 'python\\')", CODE)
