@@ -1,21 +1,54 @@
-# Project collaboration instructions
+# AGENTS.md — shared rules for every coding agent (Claude Code accounts, Codex, others)
 
-Read docs/DELIVERY_CONTROL.md and docs/HANDOFF.md first, then docs/PROJECT.md, docs/DECISIONS.md and the applicable specifications. Inspect current Git/PR state; do not rely on historic reports. Preserve Claude's existing implementation. Work in small independent branches and coordinate file ownership before editing. Save reviewable checkpoints to GitHub and update the handoff. No automatic merge or deployment. Obtain owner approval for material financial/clinical/business-rule changes and production operations. No real pharmacy/patient data or secrets in tests, commits or source backups. Known review reproductions intentionally fail; read docs/reviews/CODEX_REVIEW_2026-10-28.md before interpreting test results.
+This file is the permanent memory of the project's working rules. Chat history is not.
+If something here conflicts with an older document, this file wins.
 
-New ideas do not interrupt the active task or its tests. Record them in the existing docs/FUTURE_REQUIREMENTS.md with description, importance, affected modules and architectural impact; reuse/update existing entries rather than duplicate them. Do not implement or change schema/priorities automatically. Document any narrowly necessary preparation for a demonstrated defect or costly rework; material changes still require owner approval. Finish the active task and tests, review the backlog at phase boundaries, and batch nonurgent owner questions in docs/HANDOFF.md while continuing independent safe work. Stop dependent work only for a concrete safety blocker and state the exact decision needed.
+## 1. Start of every session (in this order, nothing else first)
+1. `git fetch origin` and read `docs/STATUS.md` (release gates, progress) and `docs/HANDOFF.md` (current work).
+2. List open PRs and open Issues labelled `launch-critical`. Do not trust counts or SHAs in old reports.
+3. Pick the highest-priority open Issue whose dependencies are done and that nobody is assigned to.
+   Claim it (assign yourself or comment `claimed by <agent>`), then start. One task at a time.
 
-## Owner operating policy — 2026-10-28 (latest)
+## 2. Branches and merging
+- `main` = the pharmacy's update channel. The in-app updater installs whatever is on `main`, and a
+  push to `main` publishes `installer-latest`. **Nobody merges into `main` without the owner's explicit approval.**
+- `develop` = integration branch. All work goes to `develop` through PRs.
+- Work branches: `claude/<issue>-<slug>` or `codex/<issue>-<slug>` from the latest `develop`
+  (a session may be given a fixed branch name; use it). Never push to another agent's branch.
+- Merge into `develop` only when: CI is green, the diff was re-read, the Issue's acceptance criteria
+  are met, and there are no conflicts. Merge commits, no force-push on shared branches.
+- Never close or overwrite another agent's open PR without checking its content is preserved elsewhere.
 
-This section clarifies/supersedes earlier broad approval wording for routine development.
+## 3. Definition of done (per task)
+Code + targeted tests + full suite (`python -m unittest discover -s tests -t .`) green + docs touched by
+the change + PR merged into `develop` + `docs/HANDOFF.md` updated + Issue closed with the evidence
+(commit SHA, test counts). "Implemented" is not "verified on Windows" or "accepted by the owner";
+record each level separately in `docs/STATUS.md`.
 
-- Work on one primary task at a time. Split large tasks into small finishable steps. Finish code, appropriate tests, documentation and a GitHub checkpoint/PR before switching, unless a concrete blocker is recorded. Do not re-audit or rerun passing checks without a change, failure or unresolved concern.
-- Read the current HANDOFF once and inspect relevant branch/PR/file state. Preserve Claude's work and use separate branches; coordinate overlapping files and never assume unpublished work is absent. Do not rebuild existing modules.
-- Owner preauthorizes project-local reads, code/tests/docs edits, safe non-production bug fixes, required trusted dependencies within environment permissions, tests, branches and commits. Do not ask again for these routine actions. Earlier requests to approve a financial/clinical file do not apply merely because that file is touched: changes to financial/clinical BUSINESS RULES or material operational decisions still require owner review.
-- No destructive deletion, real pharmacy/patient data modification, production deployment or main merge without explicit owner approval. Never bypass mandatory platform security approvals. If permission is unavailable, try a safe alternative, record the blocker and continue independent authorized work.
-- Use the available model and appropriate reasoning depth. Auto selection is allowed only if actually supported; do not claim to switch the conversation model or know usage balance/reset times without telemetry. Mention manual model changes only for substantial benefit.
-- Prioritize correctness of core pharmacy operations, isolation, money, stock, backup and update recovery before enhancements. Use targeted tests during development and the applicable broader suite before task delivery; do not use real patient data.
-- Keep GitHub as the shared source. Use clear commits on independent branches, verify the remote SHA after saving, and provide a reviewable PR. Never merge automatically. Remember the existing main workflow may publish installer-latest for non-documentation changes, including tests.
-- Update the short status in docs/HANDOFF.md with task, completion criteria, tests, source SHAs, PR, completed/pending work and the exact next step. The historical 65% and unapproved 28% score must NOT be reported as reliable current project completion. Report overall progress only from an explicit stable requirements list; otherwise say it is not yet measured. Give task percentages only when acceptance criteria justify them.
-- Speak concise Egyptian Arabic. Send a short report at meaningful milestones: current task, its estimated completion, measurable project progress if available, pass/fail/skip counts, next task and only blockers needing owner action. Never claim live/background progress unsupported by tools.
-- Record new ideas in docs/FUTURE_REQUIREMENTS.md without interrupting the active task or automatically changing schema/priorities. Batch nonurgent decisions in the handoff; stop dependent work only for a specific substantive safety blocker.
-- Conserve usage: avoid redundant reads, analysis and tests. If usage telemetry is available and limits approach, save a checkpoint and next step. Do not invent remaining quota or renewal dates.
+## 4. Hard rules
+- Money is integer piastres, stock is integer units, the stock ledger and audit log are append-only,
+  every query is filtered by `org_id`. AI reads and suggests; it never decides money, stock or doses.
+  (Details: `docs/PROJECT.md` §2, `docs/DECISIONS.md`.)
+- Never edit an applied migration; add a new one. Note: the protocol-1 in-app updater refuses releases
+  that change `requirements.txt` or migrations; those ship through the installer (`docs/UPDATE.md`).
+- No real pharmacy, patient or customer data and no secrets in code, tests, commits, logs or chat.
+  CI runs `scripts/check_secrets.py` on every PR.
+- Never skip, disable or weaken a test to get green. Never invent test results or percentages.
+
+## 5. Needs the owner's explicit approval
+Merge to `main` / any release or deployment; touching real data or migrating it; new recurring costs or
+paid APIs; irreversible operations; changes to agreed business rules (pricing, discounts, returns,
+cost, dosing). Everything else: decide, document the decision (`docs/DECISIONS.md` if architectural), continue.
+
+## 6. New ideas
+Do not interrupt the active task. Add or update an entry in `docs/FUTURE_REQUIREMENTS.md`
+(description, value, modules, design impact). Future features are outside the first-release percentage.
+
+## 7. End of every task or session (also before hitting a usage limit)
+Commit verified work → push → update `docs/HANDOFF.md` (task, branch, last SHA, tests run and results,
+what is unfinished, exact next step) → update the Issue. Never claim work will resume automatically
+unless a real scheduler was configured.
+
+## 8. Efficiency
+Read targeted files; do not re-scan the whole repository or re-run passing suites without a change.
+Reports to the owner: short Egyptian Arabic, facts separated from assumptions.
