@@ -80,10 +80,13 @@ class TestDrawerWithoutDirectReceipt(DBTestCase):
         self.assertFalse(cm.exception.details["drawer_opened"])
 
     def test_printer_down_is_not_tried_twice(self):
-        with mock.patch.object(escpos, "send", side_effect=escpos.PrinterError("off")) as send:
+        from PIL import Image
+        # the receipt is drawn (shaping or not on this machine); only the printer is unreachable
+        with mock.patch.object(escpos, "render_receipt", return_value=Image.new("L", (8, 8), 255)), \
+                mock.patch.object(escpos, "send", side_effect=escpos.PrinterError("off")) as send:
             with self.assertRaises(printing.PrintFailed) as cm:
                 printing.print_receipt(self.db, self.ctx, self.sid, open_drawer=True, target="tcp:127.0.0.1:1")
-        self.assertEqual(send.call_count, 1 if escpos.shaping_available() else 2)
+        self.assertEqual(send.call_count, 1)
         self.assertFalse(cm.exception.details["drawer_opened"])
         self.assertEqual(self.audits("cash.drawer_open"), 0)
 
