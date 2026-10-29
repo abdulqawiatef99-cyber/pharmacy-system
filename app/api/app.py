@@ -190,23 +190,47 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         raw = await req.body()
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
-        hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?",
-                     (ctx.org_id, ctx.user_id, key))
+        ident = (ctx.org_id, ctx.user_id, key)
+        # Reserve the key (status 0) before running, in one write transaction: a retry that
+        # arrives while the first attempt runs, or after it committed but could not store its
+        # response, finds the reservation and is refused instead of posting a second time.
+        with db.transaction():
+            hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
+            if not hit:
+                db.execute("DELETE FROM idempotency_keys WHERE created_at < datetime('now', ?)",
+                           (f"-{IDEMPOTENCY_TTL_DAYS} days",))
+                db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
+                           " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
+                           (*ident, req.method, req.url.path, rhash))
         if hit:
             if hit["request_hash"] != rhash:
                 raise ValidationFailed("نفس مفتاح الطلب استُخدم لطلب مختلف", code="idempotency_mismatch")
+            if hit["status"] == 0:
+                raise Conflict("هذه العملية أُرسلت من قبل ولم تتأكد نتيجتها بعد. راجعها (الفواتير/الخزينة/الحساب)"
+                               " قبل إعادتها", code="idempotency_unconfirmed")
             resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
             resp.headers["Idempotent-Replay"] = "true"
             return resp
-        resp = await fn(req)
-        if 200 <= resp.status_code < 300 and resp.media_type == "application/json":
+
+        def release():
             with db.transaction():
-                db.execute("DELETE FROM idempotency_keys WHERE created_at < datetime('now', ?)",
-                           (f"-{IDEMPOTENCY_TTL_DAYS} days",))
-                db.execute("INSERT OR IGNORE INTO idempotency_keys (org_id, user_id, key, method, path,"
-                           " request_hash, status, response) VALUES (?,?,?,?,?,?,?,?)",
-                           (ctx.org_id, ctx.user_id, key, req.method, req.url.path, rhash,
-                            resp.status_code, resp.body.decode("utf-8")))
+                db.execute("DELETE FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=? AND status=0",
+                           ident)
+
+        try:
+            resp = await fn(req)
+        except DomainError:
+            release()            # refused by a rule before any write: the same key may run again
+            raise
+        # Any other exception keeps the reservation: it may have come after a commit, so a retry
+        # with this key is refused rather than risk a second posting (a new click uses a new key).
+        if 200 <= resp.status_code < 300 and resp.media_type == "application/json":
+            # If this write fails, the reservation stays and a retry is refused (never re-run).
+            with db.transaction():
+                db.execute("UPDATE idempotency_keys SET status=?, response=? WHERE org_id=? AND user_id=? AND key=?",
+                           (resp.status_code, resp.body.decode("utf-8"), *ident))
+        else:
+            release()            # only successful JSON answers are replayed, as before
         return resp
 
     def handler(fn):

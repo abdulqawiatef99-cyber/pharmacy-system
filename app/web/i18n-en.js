@@ -1155,6 +1155,7 @@ window.I18N_EN = {
 "لا يوجد": "None",
 "لا يوجد اتصال بالخادم": "No connection to the server",
 "لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار": "No connection to the server — saving was not confirmed, check before repeating",
+"هذه العملية أُرسلت من قبل ولم تتأكد نتيجتها بعد. راجعها (الفواتير/الخزينة/الحساب) قبل إعادتها": "This operation was already sent and its result is not confirmed yet. Check it (invoices / cash / account) before repeating it",
 "لا يوجد ملف مرفق": "No attached file",
 "مطلوب للشيك": "Required for a cheque",
 "لازم للشيك": "Required for a cheque",
