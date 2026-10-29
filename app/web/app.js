@@ -2456,13 +2456,18 @@ async function viewPos() {
   }));
   $("#tabNew").addEventListener("click", newTab);
   const q = $("#posQ");
-  let res = [];
-  const search = async (unit) => {
+  let res = [], liveSeq = 0, liveT = null;
+  // live = while typing: only lists results, never adds; a live answer that arrives after newer typing or an Enter
+  // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
+  const search = async (unit, live = false) => {
     const v = q.value.trim(); if (!v) return;
-    const found = await findItems(v); res = found.items;
+    const mine = live ? ++liveSeq : null;
+    const found = await findItems(v);
+    if (live && mine !== liveSeq) return;
+    res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
       + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
@@ -2475,10 +2480,21 @@ async function viewPos() {
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
+    if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
   };
+  q.addEventListener("input", () => {
+    clearTimeout(liveT);
+    liveSeq++;                                                          // any suggestion still on its way is for other text
+    const v = q.value.trim();
+    if (v.length < 2 || /^\d+$/.test(v)) {                             // digits: a barcode scanner's Enter follows
+      $("#posRes").innerHTML = ""; delete q.dataset.searched; return;
+    }
+    liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
+  });
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
+    clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
     if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
