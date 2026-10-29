@@ -54,7 +54,8 @@ class TestItemsImport(DBTestCase):
         self.assertEqual(by_no["101"]["data"]["barcode"], "6221025012345")   # float-safe
 
     def test_review_required_then_apply_is_atomic_and_once(self):
-        run = self.di.analyze(self.ctx, sheet(ITEMS), "estock_items.xlsx")
+        data = sheet(ITEMS)          # one file: openpyxl stamps the second it was written
+        run = self.di.analyze(self.ctx, data, "estock_items.xlsx")
         with self.assertRaises(Conflict) as e:
             self.di.apply(self.ctx, run)
         self.assertEqual(e.exception.code, "pending_review")
@@ -72,7 +73,7 @@ class TestItemsImport(DBTestCase):
         with self.assertRaises(Conflict):
             self.di.apply(self.ctx, run)
         with self.assertRaises(Conflict):        # same file again
-            self.di.analyze(self.ctx, sheet(ITEMS), "again.xlsx")
+            self.di.analyze(self.ctx, data, "again.xlsx")
 
     def test_reimport_updates_by_code_never_duplicates(self):
         run = self.di.analyze(self.ctx, sheet(ITEMS[:3]), "a.xlsx")

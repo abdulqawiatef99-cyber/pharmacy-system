@@ -9,7 +9,6 @@ python -m venv .venv || (echo could not create virtual environment & pause & exi
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt || (echo package install failed & pause & exit /b 1)
-pip install pywin32
 echo.
 echo ---- self test (uses a temporary database, real data is not touched) ----
 python manage.py selftest
