@@ -211,3 +211,48 @@ class ClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BundleTests(DBTestCase):
+    def test_bundle_round_trip_is_idempotent_and_checked(self):
+        import zipfile
+        from app.db import Database
+        ref.import_pages(self.db, [page(CONGESTAL, drug("np", "No price 10 tabs", price=None))])
+        ref.import_pages(self.db, [page(drug("np", "No price 10 tabs", price=12))])
+        path = self.tmp / "ref.zip"
+        man = ref.export_bundle(self.db, path)
+        self.assertEqual((man["products"], man["prices"]), (2, 2))
+        other = Database(self.tmp / "second.db")
+        other.migrate()
+        try:
+            r1 = ref.import_bundle(other, path)
+            r2 = ref.import_bundle(other, path)
+            self.assertEqual((r1["products_created"], r1["prices_added"]), (2, 2))
+            self.assertEqual((r2["products_created"], r2["products_updated"], r2["prices_added"]), (0, 0, 0))
+            self.assertEqual(ref.by_barcode(other, "6221051011317")[0]["source_id"], "congestal-20-tabs")
+            self.assertEqual(ref.summary(other), ref.summary(self.db))
+            bad = self.tmp / "bad.zip"
+            with zipfile.ZipFile(path) as z, zipfile.ZipFile(bad, "w") as w:
+                w.writestr("manifest.json", z.read("manifest.json"))
+                w.writestr("products.jsonl", z.read("products.jsonl").replace(b"5000", b"9000") + b" ")
+            with self.assertRaises(ValueError):
+                ref.import_bundle(other, bad)
+        finally:
+            other.close()
+
+    def test_sync_full_then_changes_then_reload(self):
+        from tests.test_reference_catalog import FakeResponse, FakeSession
+        full = page(CONGESTAL)
+        full["meta"]["generated_at"] = "2026-10-30T00:00:00Z"
+        ev = {"data": [{"id": 1, "type": "price_changed", "drug_id": CONGESTAL["id"], "detected_at": "2026-10-30T05:00:00Z",
+                        "data": {}, "drug": drug("congestal-20-tabs", "Congestal 20 tabs", price=60, eff="2026-10-30")}],
+              "page": {"next_cursor": None}}
+        too_old = FakeResponse(400, {"error": {"code": "since_too_old"}})
+        s = FakeSession([FakeResponse(200, full), FakeResponse(200, ev), too_old, FakeResponse(200, full)])
+        c = ref.DwapriceClient(api_key="dp_live_x", session=s, sleep=lambda x: None)
+        self.assertEqual(ref.sync(self.db, c)["mode"], "full")
+        self.assertEqual(ref.sync_state(self.db)["latest_detected_at"], "2026-10-30T00:00:00Z")
+        r = ref.sync(self.db, c)
+        self.assertEqual((r["mode"], r["events"]["applied"]), ("changes", 1))
+        self.assertEqual(ref.sync(self.db, c)["mode"], "full")              # window expired -> reload
+        self.assertEqual([h["price"] for h in ref.price_history(self.db, "congestal-20-tabs")], [5000, 6000])

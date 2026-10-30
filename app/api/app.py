@@ -1914,6 +1914,96 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return FileResponse(WEB_DIR / "sw.js", media_type="text/javascript",
                             headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
+    # ------------------------------------------------------------- reference catalog (CATALOG_DATA_PLAN.md)
+    from ..catalog import reference as refcat, reffile, reflink, refprices
+
+    @handler
+    async def ref_summary(req):
+        ctx = ctx_of(req)
+        ctx.require("items.read")
+        sources = [r["source"] for r in db.all("SELECT DISTINCT source FROM ref_products ORDER BY source")]
+        return J({"sources": {s: refcat.summary(db, s) for s in sources}, "sync": refcat.sync_state(db),
+                  "coverage": reflink.coverage(db, ctx)})
+
+    @handler
+    async def ref_links_suggest(req):
+        ctx = ctx_of(req)
+        ctx.require("items.write")
+        b = await body(req)
+        return J(await run_in_threadpool(lambda: reflink.suggest(db, ctx, source=b.get("source") or None)))
+
+    @handler
+    async def ref_links_list(req):
+        q = req.query_params
+        return J(reflink.queue(db, ctx_of(req), status=q.get("status") or "suggested", strength=q.get("strength"),
+                               limit=int(q.get("limit") or 200), offset=int(q.get("offset") or 0)))
+
+    @handler
+    async def ref_links_decide(req):
+        ctx = ctx_of(req)
+        ctx.require("items.write")
+        b = await body(req)
+        return J(reflink.decide(db, ctx, str(b.get("item_id") or ""), str(b.get("ref_id") or ""),
+                                str(b.get("decision") or ""), fill_empty_details=b.get("fill_empty_details") is True))
+
+    @handler
+    async def ref_links_unlink(req):
+        ctx = ctx_of(req)
+        ctx.require("items.write")
+        b = await body(req)
+        reflink.unlink(db, ctx, str(b.get("item_id") or ""), str(b.get("ref_id") or ""))
+        return J({"ok": True})
+
+    @handler
+    async def ref_links_approve_strong(req):
+        ctx = ctx_of(req)
+        ctx.require("items.write")
+        b = await body(req)
+        return J(reflink.approve_all_strong(db, ctx, source=b.get("source") or None))
+
+    @handler
+    async def ref_prices_propose(req):
+        return J(refprices.propose(db, ctx_of(req)))
+
+    @handler
+    async def ref_prices_pending(req):
+        q = req.query_params
+        return J(refprices.pending(db, ctx_of(req), limit=int(q.get("limit") or 500), offset=int(q.get("offset") or 0)))
+
+    @handler
+    async def ref_prices_apply(req):
+        ctx = ctx_of(req)
+        ctx.require("items.price")
+        b = await body(req)
+        return J(refprices.apply(db, ctx, b.get("ids"), accept_conflicts=b.get("accept_conflicts") is True))
+
+    @handler
+    async def ref_prices_reject(req):
+        ctx = ctx_of(req)
+        ctx.require("items.price")
+        b = await body(req)
+        return J({"rejected": refprices.reject(db, ctx, b.get("ids"))})
+
+    @handler
+    async def ref_prices_batches(req):
+        return J({"batches": refprices.batches(db, ctx_of(req))})
+
+    @handler
+    async def ref_prices_rollback(req):
+        return J(refprices.rollback(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def ref_prices_stale(req):
+        return J(refprices.stale(db, ctx_of(req), older_than_days=int(req.query_params.get("days") or 30)))
+
+    @handler
+    async def ref_import_file(req):
+        ctx = ctx_of(req)
+        ctx.require("items.import")
+        data, name, fields = await _upload(req)
+        return J(await run_in_threadpool(reffile.import_file, db, data, name, fields.get("label") or ""),
+                 status_code=201)
+
     routes = [
         Route("/api/health", health),
         Route("/api/auth/login", login, methods=["POST"]),
@@ -1972,6 +2062,20 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/ingredients", ingredients_list),
         Route("/api/therapeutic-groups", groups_api, methods=["GET", "POST"]),
         Route("/api/therapeutic-groups/{id}", groups_api, methods=["PUT", "DELETE"]),
+        Route("/api/reference/summary", ref_summary),
+        Route("/api/reference/links", ref_links_list),
+        Route("/api/reference/links/suggest", ref_links_suggest, methods=["POST"]),
+        Route("/api/reference/links/decide", ref_links_decide, methods=["POST"]),
+        Route("/api/reference/links/unlink", ref_links_unlink, methods=["POST"]),
+        Route("/api/reference/links/approve-strong", ref_links_approve_strong, methods=["POST"]),
+        Route("/api/reference/prices/propose", ref_prices_propose, methods=["POST"]),
+        Route("/api/reference/prices/pending", ref_prices_pending),
+        Route("/api/reference/prices/apply", ref_prices_apply, methods=["POST"]),
+        Route("/api/reference/prices/reject", ref_prices_reject, methods=["POST"]),
+        Route("/api/reference/prices/batches", ref_prices_batches),
+        Route("/api/reference/prices/batches/{id}/rollback", ref_prices_rollback, methods=["POST"]),
+        Route("/api/reference/prices/stale", ref_prices_stale),
+        Route("/api/reference/import-file", ref_import_file, methods=["POST"]),
         Route("/api/pos/quick", pos_quick),
         Route("/api/reports/item-warnings", warnings_rep),
         Route("/api/reports/owner/{kind}", owner_report),

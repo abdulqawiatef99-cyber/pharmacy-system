@@ -15,7 +15,8 @@ from ..sales.service import alloc_gross
 from .service import _period
 
 MAX_ROWS = 5000
-SOURCES = {"manual": "يدوي", "purchase_invoice": "فاتورة شراء", "import": "استيراد"}
+SOURCES = {"manual": "يدوي", "purchase_invoice": "فاتورة شراء", "import": "استيراد",
+           "reference": "مصدر مرجعي (باعتماد)", "reference_rollback": "تراجع عن تحديث مرجعي"}
 UNIT_FIELDS = {"pack_size": "عدد الوحدات في العبوة", "pack_unit_name": "اسم العبوة", "base_unit_name": "اسم الوحدة"}
 METHODS = {"cash": "نقدي", "card": "بطاقة", "credit": "على الحساب"}
 

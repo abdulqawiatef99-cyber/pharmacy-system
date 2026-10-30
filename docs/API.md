@@ -87,3 +87,13 @@ each label drawn as a 1-bit image and sent as TSPL `BITMAP` or ZPL `^GFA`; `labe
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.
+
+**Reference catalog** (`docs/CATALOG_DATA_PLAN.md`; nothing here changes an item without approval) —
+`GET /api/reference/summary` (items.read) · `POST /api/reference/import-file` (multipart `file`, `label`; items.import) ·
+`POST /api/reference/links/suggest {source?}` (items.write) · `GET /api/reference/links?status=suggested|approved|rejected&strength=strong|weak&limit=&offset=` ·
+`POST /api/reference/links/decide {item_id, ref_id, decision: approve|reject, fill_empty_details?}` ·
+`POST /api/reference/links/unlink {item_id, ref_id}` · `POST /api/reference/links/approve-strong {source?}` ·
+`POST /api/reference/prices/propose` (items.price) · `GET /api/reference/prices/pending` ·
+`POST /api/reference/prices/apply {ids, accept_conflicts?}` → `{batch_id, applied, skipped_changed, skipped_conflict}` ·
+`POST /api/reference/prices/reject {ids}` · `GET /api/reference/prices/batches` ·
+`POST /api/reference/prices/batches/{id}/rollback` · `GET /api/reference/prices/stale?days=30` (items.read)

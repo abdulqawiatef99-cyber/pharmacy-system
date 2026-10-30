@@ -102,16 +102,28 @@ _COLS = ("name_en", "name_ar", "name_norm", "scientific_name", "ingredient_key",
 
 
 def upsert_drug(db: Database, d: Any, observed_at: str, origin: str = "catalog") -> dict:
-    """Store one record. Returns {'status': created|updated|unchanged, 'price_added': bool, 'ref_id'}."""
-    p = parse_drug(d)
+    """Store one Dwaprice record. Returns {'status': created|updated|unchanged, 'price_added': bool, 'ref_id'}."""
+    return upsert_parsed(db, SOURCE, parse_drug(d), observed_at, origin)
+
+
+def upsert_parsed(db: Database, source: str, p: dict, observed_at: str, origin: str = "catalog",
+                  country: str = COUNTRY) -> dict:
+    """Store one record already in our shape (see parse_drug). Any source: Dwaprice, a supplier file…"""
+    for c in _COLS:
+        p.setdefault(c, None)
+    p.setdefault("barcodes", [])
+    p.setdefault("ingredients", [])
+    p.setdefault("price", None)
+    if not p.get("source_id") or not p.get("name_norm"):
+        raise ValueError("السجل من غير معرّف أو اسم")
     with db.transaction():
         row = db.one("SELECT id, raw_json FROM ref_products WHERE source=? AND country_code=? AND source_id=?",
-                     (SOURCE, COUNTRY, p["source_id"]))
+                     (source, country, p["source_id"]))
         if row is None:
             ref_id, status = new_id(), "created"
             db.execute(f"INSERT INTO ref_products (id, source, country_code, source_id, {', '.join(_COLS)},"
                        f" raw_json, first_seen_at, last_seen_at) VALUES (?,?,?,?,{','.join('?' * len(_COLS))},?,?,?)",
-                       (ref_id, SOURCE, COUNTRY, p["source_id"], *[p[c] for c in _COLS],
+                       (ref_id, source, country, p["source_id"], *[p[c] for c in _COLS],
                         p["raw_json"], observed_at, observed_at))
         elif row["raw_json"] == p["raw_json"]:
             ref_id, status = row["id"], "unchanged"
@@ -234,16 +246,16 @@ def by_barcode(db: Database, barcode: str) -> list[dict]:
         " ORDER BY p.removed_at IS NOT NULL, p.source_id", (bc,))]
 
 
-def price_history(db: Database, source_id: str) -> list[dict]:
+def price_history(db: Database, source_id: str, source: str = SOURCE) -> list[dict]:
     return [dict(r) for r in db.all(
         "SELECT r.price, r.currency, r.effective_date, r.observed_at, r.verified, r.origin FROM ref_prices r"
         " JOIN ref_products p ON p.id=r.ref_id WHERE p.source=? AND p.source_id=?"
-        " ORDER BY coalesce(r.effective_date, ''), r.observed_at", (SOURCE, source_id))]
+        " ORDER BY coalesce(r.effective_date, ''), r.observed_at", (source, source_id))]
 
 
-def summary(db: Database) -> dict:
+def summary(db: Database, source: str = SOURCE) -> dict:
     """Coverage numbers, measured from what is stored (never estimated)."""
-    one = lambda sql: db.one(sql, (SOURCE, COUNTRY))["n"]  # noqa: E731
+    one = lambda sql: db.one(sql, (source, COUNTRY))["n"]  # noqa: E731
     base = "FROM ref_products p WHERE p.source=? AND p.country_code=? AND p.removed_at IS NULL"
     return {
         "products": one(f"SELECT count(*) n {base}"),
@@ -254,12 +266,14 @@ def summary(db: Database) -> dict:
                                " ON p.id=b.ref_id WHERE p.source=? AND p.country_code=? AND p.removed_at IS NULL"
                                " GROUP BY b.barcode HAVING count(*) > 1)"),
         "removed": db.one("SELECT count(*) n FROM ref_products WHERE source=? AND country_code=?"
-                          " AND removed_at IS NOT NULL", (SOURCE, COUNTRY))["n"],
+                          " AND removed_at IS NOT NULL", (source, COUNTRY))["n"],
     }
 
 
 class DwapriceError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class DwapriceClient:
@@ -300,7 +314,8 @@ class DwapriceClient:
             err = (r.json() or {}).get("error") or {}
         except ValueError:
             err = {}
-        raise DwapriceError(f"{r.status_code} {err.get('code') or ''} {err.get('message') or ''}".strip())
+        raise DwapriceError(f"{r.status_code} {err.get('code') or ''} {err.get('message') or ''}".strip(),
+                            code=err.get("code"))
 
     def pages(self, path: str, params: dict, max_pages: int) -> Iterator[dict]:
         params = {**params, "limit": PAGE_LIMIT}
@@ -317,3 +332,127 @@ class DwapriceClient:
 
     def changes(self, since: str, max_pages: int) -> Iterator[dict]:
         return self.pages("/sample/price-changes" if self.sample else "/price-changes", {"since": since}, max_pages)
+
+
+def sync(db: Database, client: DwapriceClient, max_pages: int = 200) -> dict:
+    """One sync run, as the source documents it: the first run loads the whole catalogue and remembers its
+    time; later runs read only the changes since then. If the saved time is older than the plan's window
+    (since_too_old), the catalogue is reloaded. Needs a paid key except in sample mode."""
+    st = sync_state(db) or {}
+    since = st.get("latest_detected_at")
+    if since:
+        try:
+            events = [e for pg in client.changes(since, max_pages) for e in (pg.get("data") or [])]
+            return {"mode": "changes", "since": since, "events": apply_events(db, events),
+                    "requests": client.requests_made}
+        except DwapriceError as e:
+            if e.code != "since_too_old":
+                raise
+    pages = list(client.catalog(max_pages))
+    if pages and ((pages[-1].get("page") or {}).get("has_more")):
+        raise DwapriceError("الكتالوج أكبر من حد الصفحات؛ زوّد --max-pages", code="too_many_pages")
+    rep = import_pages(db, pages)
+    gen = next((((pg.get("meta") or {}).get("generated_at")) for pg in pages if (pg.get("meta") or {}).get("generated_at")), None)
+    if gen:
+        _save_state(db, latest_detected_at=gen)
+    return {"mode": "full", "reloaded_after": since, "catalog": rep, "requests": client.requests_made}
+
+
+# ---------------------------------------------------------------- moving the catalogue between own pharmacies
+BUNDLE_FORMAT = "pharm-ref-bundle/1"
+
+
+def export_bundle(db: Database, path, sources: list[str] | None = None) -> dict:
+    """Zip of the reference catalogue (products with their raw records and full price history) so a second
+    pharmacy of the SAME owner can receive updates without holding the API key. Licence note: Dwaprice data
+    may not be passed outside the licensee's organisation (docs/CATALOG_DATA_PLAN.md)."""
+    import hashlib
+    import zipfile
+    where, args = "", ()
+    if sources:
+        where = f" WHERE source IN ({','.join('?' * len(sources))})"
+        args = tuple(sources)
+    lines, n_prices = [], 0
+    for p in db.all(f"SELECT * FROM ref_products{where} ORDER BY source, source_id", args):
+        rec = {k: p[k] for k in p.keys() if k != "id"}
+        rec["barcodes"] = [r["barcode"] for r in db.all("SELECT barcode FROM ref_barcodes WHERE ref_id=?", (p["id"],))]
+        rec["ingredients"] = [dict(r) for r in db.all(
+            "SELECT position, name_en, name_ar, strength, atc_code FROM ref_ingredients WHERE ref_id=? ORDER BY position",
+            (p["id"],))]
+        rec["prices"] = [dict(r) for r in db.all(
+            "SELECT price, currency, effective_date, source_recorded_at, observed_at, verified, origin FROM ref_prices"
+            " WHERE ref_id=?", (p["id"],))]
+        n_prices += len(rec["prices"])
+        lines.append(json.dumps(rec, ensure_ascii=False, sort_keys=True))
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    manifest = {"format": BUNDLE_FORMAT, "created_at": now_iso(), "products": len(lines), "prices": n_prices,
+                "sources": sorted({json.loads(x)["source"] for x in lines}), "sha256": hashlib.sha256(body).hexdigest()}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+        z.writestr("products.jsonl", body)
+    return manifest
+
+
+_BUNDLE_COLS = ("source", "country_code", "source_id", *_COLS, "replaced_by", "removed_at", "raw_json")
+
+
+def import_bundle(db: Database, path) -> dict:
+    """Idempotent: products are matched by (source, country, source id); prices by value + effective date."""
+    import hashlib
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        if names != {"manifest.json", "products.jsonl"}:
+            raise ValueError("ملف التحديث مش بالشكل المتوقع")
+        manifest = json.loads(z.read("manifest.json"))
+        body = z.read("products.jsonl")
+    if manifest.get("format") != BUNDLE_FORMAT:
+        raise ValueError("إصدار ملف التحديث مش مدعوم")
+    if hashlib.sha256(body).hexdigest() != manifest.get("sha256"):
+        raise ValueError("ملف التحديث تالف (البصمة مش مطابقة)")
+    obs = now_iso()
+    rep = {"products_created": 0, "products_updated": 0, "products_unchanged": 0, "prices_added": 0}
+    with db.transaction():
+        for line in body.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if not rec.get("source") or not rec.get("source_id") or not rec.get("name_norm"):
+                raise ValueError("سجل ناقص في ملف التحديث")
+            row = db.one("SELECT id, raw_json, removed_at, replaced_by FROM ref_products WHERE source=? AND country_code=?"
+                         " AND source_id=?", (rec["source"], rec.get("country_code") or COUNTRY, rec["source_id"]))
+            vals = [rec.get(c) for c in _BUNDLE_COLS]
+            if row is None:
+                ref_id = new_id()
+                db.execute(f"INSERT INTO ref_products (id, {', '.join(_BUNDLE_COLS)}, first_seen_at, last_seen_at)"
+                           f" VALUES (?,{','.join('?' * len(_BUNDLE_COLS))},?,?)",
+                           (ref_id, *vals, rec.get("first_seen_at") or obs, rec.get("last_seen_at") or obs))
+                rep["products_created"] += 1
+                changed = True
+            else:
+                ref_id = row["id"]
+                changed = (row["raw_json"], row["removed_at"], row["replaced_by"]) != \
+                    (rec.get("raw_json"), rec.get("removed_at"), rec.get("replaced_by"))
+                if changed:
+                    db.execute(f"UPDATE ref_products SET {', '.join(c + '=?' for c in _BUNDLE_COLS)}, last_seen_at=?"
+                               " WHERE id=?", (*vals, rec.get("last_seen_at") or obs, ref_id))
+                rep["products_updated" if changed else "products_unchanged"] += 1
+            if changed:
+                db.execute("DELETE FROM ref_barcodes WHERE ref_id=?", (ref_id,))
+                for bc in rec.get("barcodes") or []:
+                    db.execute("INSERT OR IGNORE INTO ref_barcodes (ref_id, barcode) VALUES (?,?)", (ref_id, bc))
+                db.execute("DELETE FROM ref_ingredients WHERE ref_id=?", (ref_id,))
+                for ing in rec.get("ingredients") or []:
+                    db.execute("INSERT INTO ref_ingredients (ref_id, position, name_en, name_ar, strength, atc_code)"
+                               " VALUES (?,?,?,?,?,?)", (ref_id, ing["position"], ing.get("name_en"), ing.get("name_ar"),
+                                                         ing.get("strength"), ing.get("atc_code")))
+            for pr in rec.get("prices") or []:
+                cur = db.execute("INSERT OR IGNORE INTO ref_prices (id, ref_id, price, currency, effective_date,"
+                                 " source_recorded_at, observed_at, verified, origin) VALUES (?,?,?,?,?,?,?,?,?)",
+                                 (new_id(), ref_id, int(pr["price"]), pr.get("currency") or "EGP",
+                                  pr.get("effective_date"), pr.get("source_recorded_at"), pr.get("observed_at") or obs,
+                                  1 if pr.get("verified") else 0,
+                                  pr.get("origin") if pr.get("origin") in ("catalog", "event") else "catalog"))
+                rep["prices_added"] += cur.rowcount == 1
+    rep["manifest"] = manifest
+    return rep

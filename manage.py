@@ -243,7 +243,10 @@ def cmd_ref_dwaprice(a, s):
         else:
             client = ref.DwapriceClient(base_url=a.base_url, sample=a.sample,
                                         api_key=None if a.sample else os.environ.get("DWAPRICE_API_KEY"))
-            if a.changes_since:
+            if a.with_key and not a.changes_since:      # normal scheduled run: full first time, then changes
+                rep["sync"] = ref.sync(target, client, max_pages=a.max_pages)
+                rep["catalog"], rep["events"] = rep["sync"].get("catalog"), rep["sync"].get("events")
+            elif a.changes_since:
                 events = [e for pg in client.changes(a.changes_since, a.max_pages) for e in (pg.get("data") or [])]
                 rep["events"] = ref.apply_events(target, events)
             else:
@@ -270,6 +273,31 @@ def cmd_ref_dwaprice(a, s):
     print(f"الكتالوج المرجعي: {sm['products']} صنف، بسعر {sm['with_price']}، بباركود {sm['with_barcode']}، "
           f"بمادة فعالة {sm['with_ingredients']}، باركود مشترك {sm['shared_barcodes']}")
     print("التقرير الكامل:", rpath)
+
+
+def cmd_ref_bundle(a, s):
+    """Move the reference catalogue to another pharmacy of the same owner (no API key there)."""
+    from app.catalog import reference as ref
+    db = _db(s)
+    if a.export:
+        m = ref.export_bundle(db, Path(a.export))
+        print(f"اتصدّر: {m['products']} صنف، {m['prices']} سعر → {a.export}")
+    else:
+        r = ref.import_bundle(db, Path(a.import_))
+        print(f"اتستورد: جديد {r['products_created']}، اتحدث {r['products_updated']}، زي ما هو "
+              f"{r['products_unchanged']}، أسعار جديدة {r['prices_added']}")
+
+
+def cmd_ref_file(a, s):
+    """A supplier/distributor price list (Excel/CSV) into the reference catalogue. Never edits items."""
+    from app.catalog import reffile
+    db = _db(s)
+    f = Path(a.file)
+    if not f.exists():
+        sys.exit(f"الملف مش موجود: {f}")
+    r = reffile.import_file(db, f.read_bytes(), f.name, a.label)
+    print(f"{r['source']}: جديد {r['created']}، اتحدث {r['updated']}، زي ما هو {r['unchanged']}، "
+          f"أسعار جديدة {r['prices_added']}، من غير سعر {r['no_price']}، مرفوض {len(r['rejected'])}")
 
 
 def cmd_update(a, s):
@@ -382,9 +410,17 @@ def main(argv=None):
     g.add_argument("--with-key", action="store_true", help="بالمفتاح من DWAPRICE_API_KEY (اشتراك مدفوع)")
     g.add_argument("--from-file", help="ملف JSON محفوظ (صفحة أو قايمة صفحات)")
     rd.add_argument("--changes-since", help="بدل الكتالوج: التغييرات من التاريخ ده (ISO)")
-    rd.add_argument("--max-pages", type=int, default=3, help="حد أقصى للصفحات (100 صنف للصفحة)")
+    rd.add_argument("--max-pages", type=int, default=3,
+                    help="حد أقصى للصفحات (100 صنف للصفحة). الكتالوج الكامل محتاج حوالي 150")
     rd.add_argument("--base-url", default=os.environ.get("DWAPRICE_BASE_URL", "https://api.dwaprice.com/v1"))
     rd.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
+    rb = sub.add_parser("ref-bundle", help="export/import the reference catalogue between own pharmacies")
+    gb = rb.add_mutually_exclusive_group(required=True)
+    gb.add_argument("--export", help="مسار ملف zip للتصدير")
+    gb.add_argument("--import", dest="import_", help="مسار ملف zip للاستيراد")
+    rf = sub.add_parser("ref-file", help="supplier price list (Excel/CSV) into the reference catalogue")
+    rf.add_argument("file")
+    rf.add_argument("--label", required=True, help="اسم المصدر، مثال: ابن سينا")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
@@ -396,7 +432,8 @@ def main(argv=None):
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update, "ref-dwaprice": cmd_ref_dwaprice}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "update": cmd_update, "ref-dwaprice": cmd_ref_dwaprice,
+     "ref-bundle": cmd_ref_bundle, "ref-file": cmd_ref_file}[a.cmd](a, s)
 
 
 if __name__ == "__main__":
