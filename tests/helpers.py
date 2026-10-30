@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,28 @@ from app.db import Database
 security.set_cost(2 ** 10)  # fast hashing in tests only
 
 OWNER_PW = "Owner-Pass-2026"
+
+_BROWSER_PROBE = ("const {chromium} = require('playwright');"
+                  " process.exit(require('fs').existsSync(chromium.executablePath()) ? 0 : 3)")
+
+
+def _browser_missing() -> str | None:
+    """Why a real browser test cannot run here, or None. Node, the Playwright module and its
+    Chromium must all exist (a module without the browser failed instead of skipping, #70)."""
+    node = shutil.which("node")
+    if not node:
+        return "Node not available"
+    r = subprocess.run([node, "-e", _BROWSER_PROBE], capture_output=True, timeout=30, check=False,
+                       cwd=str(Path(__file__).parent))
+    if r.returncode == 3:
+        return "Playwright's Chromium is not installed"
+    return "Node Playwright not available" if r.returncode else None
+
+
+def needs_browser(cls):
+    """Skip where no browser exists, except where PHARM_REQUIRE_BROWSER=1 (CI): there it must run."""
+    why = None if os.environ.get("PHARM_REQUIRE_BROWSER") == "1" else _browser_missing()
+    return unittest.skipIf(why is not None, f"{why} (runs in CI)")(cls)
 
 
 class DBTestCase(unittest.TestCase):
