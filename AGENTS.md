@@ -67,6 +67,9 @@ record each level separately in `docs/STATUS.md`.
 - Never skip, disable or weaken a test to get green. Never invent test results or percentages.
 
 ## 5. Needs the owner's explicit approval
+**Universal cost gate (owner decision, 2026-10-30):** Before ANY action that may create or increase a financial cost — including paid APIs, token usage billed separately, subscriptions, cloud/CI runners beyond free allowances, hosting, third-party tools, hardware purchases, and one-time or recurring fees — STOP. Present the estimated price, currency, billing basis, expected usage, maximum exposure/limit, free alternative, and why the cost is necessary. Obtain the owner's explicit approval for that specific expense BEFORE activation, purchase, configuration, or execution. Silence, general project approval, or approval of this policy is NOT spending authorization. If the cost cannot be bounded or verified, do not activate it. Existing included subscription usage may continue only where no additional charge is incurred; avoid unnecessary quota consumption and warn before high-usage operations. This rule applies to Claude, Codex, ChatGPT and any other agent, including automated dispatchers.
+
+## 5. Needs the owner's explicit approval
 Merge to `main` / any release or deployment; touching real data or migrating it; new recurring costs or
 paid APIs; irreversible operations; changes to agreed business rules (pricing, discounts, returns,
 cost, dosing). Everything else: decide, document the decision (`docs/DECISIONS.md` if architectural), continue.
