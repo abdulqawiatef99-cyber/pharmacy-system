@@ -22,10 +22,10 @@
 | R10 | (#38) والبرنامج **شغال**، شغّل المثبّت الجديد | رسالة "منصة الصيدلية شغالة… OK للإغلاق"، وبعد OK يكمّل التثبيت من غير "unable to automatically close" ومن غير Task Manager، والبرنامج يفتح تاني بنفس البيانات. لو `start.bat` قديم شغال: المثبّت يقف برسالة تقول اقفله | |
 
 أوامر R8: نزّل `candidate.zip` من الرابط ده (وإنت داخل على GitHub بحسابك):
-`https://github.com/abdulqawiatef99-cyber/pharmacy-system/archive/c15023be221cb4561abfc673a749cf47c19dc8a0.zip`،
-واحفظه في `Downloads` باسم `candidate.zip`. ده الإصدار 0.4.0rc1، وفيه نفس المكتبات والـ migrations.
+`https://github.com/abdulqawiatef99-cyber/pharmacy-system/archive/d1fe1cc63606bca505acb9a8cab66c41234867da.zip`،
+واحفظه في `Downloads` باسم `candidate.zip`. ده **نفس كود المثبّت run 69 (`1fef1d0`) والإصدار بس اتغير لـ 0.4.0rc2**، بنفس المكتبات والـ migrations (2026-10-30). (الرابط القديم `c15023b` بقى أقدم من المثبّت: كان هيرجّع كود قديم بنفس رقم الإصدار.)
 **اتجربت الخطوات دي كلها على Linux بنفس الشكل** (2026-10-29): التحديث، ثم التشغيل من المشغّل، وفحص الصحة، والتأكيد، والرجوع لـ 0.3.0، و`verify` = OK.
-على Windows المفروض: بعد التحديث وفتح البرنامج يظهر الإصدار 0.4.0rc1 في صفحة "البرنامج"، وبعد `--rollback` يرجع 0.3.0.
+على Windows المفروض: بعد التحديث وفتح البرنامج يظهر الإصدار **0.4.0rc2** في صفحة "البرنامج"، وبعد `--rollback` وفتحه تاني يرجع **0.4.0rc1**، والبيانات زي ما هي. (نفس الخطوات بتتجرب أوتوماتيك في بناء المثبّت على Windows من غير فتح البرنامج.)
 ```bat
 cd /d "%LOCALAPPDATA%\PharmacyPlatform"
 set PHARM_DATA_DIR=%LOCALAPPDATA%\PharmacyPlatform\data
