@@ -90,7 +90,25 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
             dropped.append(k)
     if on["barcode"] and bar_room() < dots(MIN_BAR_MM, dpi):
         raise PrinterError("مقاس الملصق لا يتسع للحقول المختارة مع باركود مقروء؛ أوقف بعض الحقول أو اختر مقاسًا أكبر")
+    if on["barcode"]:
+        bar_module(str(data["value"]), w_mm, dpi)     # every path, browser too (Codex on #90): never too narrow
     return on, dropped
+
+
+def bar_bits(value: str) -> str:
+    try:
+        return bc.ean13_modules(value)
+    except ValueError:
+        return bc.code128_modules(value)
+
+
+def bar_module(value: str, w_mm: float, dpi: int) -> int:
+    """Width of one bar in dots across the label (quiet zones of 10 modules); refuses below 0.25 mm."""
+    W = dots(w_mm, dpi)
+    module = (W - 2 * max(3, dots(0.6, dpi))) // (len(bar_bits(value)) + 20)
+    if module < max(2, dots(MIN_MODULE_MM, dpi)):
+        raise PrinterError("الكود أطول من عرض الملصق؛ اختر مقاسًا أعرض")
+    return module
 
 
 def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: dict | None = None,
@@ -131,15 +149,8 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     bottom_y = H - pad - row if (on["code"] or on["digits"] or on["expiry"] or on["price"]) else H - pad
     name_y = bottom_y - row if on["name"] else bottom_y
     if on["barcode"]:
-        value = str(data["value"])
-        try:
-            bits = bc.ean13_modules(value)
-        except ValueError:
-            bits = bc.code128_modules(value)
-        quiet = 10
-        module = (W - 2 * pad) // (len(bits) + 2 * quiet)
-        if module < max(2, dots(MIN_MODULE_MM, dpi)):
-            raise PrinterError("الكود أطول من عرض الملصق؛ اختر مقاسًا أعرض")
+        bits = bar_bits(str(data["value"]))
+        module = bar_module(str(data["value"]), w_mm, dpi)
         x0 = (W - module * len(bits)) // 2
         for i, b in enumerate(bits):
             if b == "1":

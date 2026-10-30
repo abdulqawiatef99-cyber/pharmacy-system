@@ -150,6 +150,7 @@ class TestLabelData(Base):
 class TestLabelPages(APICase):
     def setUp(self):
         super().setUp()
+        cat.add_barcode(self.db, self.ctx, self.pan, "6221025012340")
         self.http_login()
 
     def test_browser_page_custom_size_fields_and_a4(self):
@@ -174,6 +175,15 @@ class TestLabelPages(APICase):
                 self.assertTrue(w * c <= 210 and h * r <= 297, (c, r))
         r = self.c.post("/api/print/labels", json={"items": [{"id": self.pan, "count": 1}]}, headers=H)
         self.assertEqual(r.json()["error"]["code"], "labels_in_browser")     # A4 sheets print from the browser
+
+    def test_browser_page_refuses_a_barcode_too_narrow_to_scan(self):
+        # Codex on #90: 20 mm wide would stretch an EAN-13 to ~0.16 mm bars in the browser
+        rs.save(self.db, self.ctx, {"label_size": "20x25"})
+        r = self.c.get("/labels", params={"items": f"{self.pan}:1"})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("أعرض", r.json()["error"]["message"])
+        rs.save(self.db, self.ctx, {"label_fields": {"barcode": False}})       # text-only labels still print
+        self.assertEqual(self.c.get("/labels", params={"items": f"{self.pan}:1"}).status_code, 200)
 
     def test_preview_png_and_dropped_fields(self):
         r = self.c.post("/api/print/label-preview", json={"label_size": "38x10", "label_fields": ALL, "label_phone": "0100"}, headers=H)
