@@ -38,7 +38,10 @@ One accountable agent per Issue (`AGENTS.md` §10). If two agents could touch th
 ## 4. Freeze until #20 is done
 
 Allowed PRs: (a) ones that close or unblock #18, #19 or #20, including fixes for failures they find;
-(b) fixes for red CI on `develop`; (c) updates to `HANDOFF.md`/`STATUS.md` that record evidence.
+(b) fixes for red CI on `develop`; (c) updates to `HANDOFF.md`/`STATUS.md` that record evidence;
+(d) **owner exception, 2026-10-30:** the written assessment of the independent-pharmacy federation (F20 in
+`docs/FUTURE_REQUIREMENTS.md`) as `docs/FEDERATION_ASSESSMENT.md`. Docs only: no code, no migrations, no
+change to app files. It must not take device-test time or touch files of an open #18/#19/#20 PR.
 **Everything else waits** and goes to `docs/FUTURE_REQUIREMENTS.md` class C (`AGENTS.md` §6). That includes
 #76 (agent auto-continuation), new process docs, refactors, new features and tooling.
 
