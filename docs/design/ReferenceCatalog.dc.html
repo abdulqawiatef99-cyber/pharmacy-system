@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>الكتالوج المرجعي — الربط وتحديث الأسعار (تصميم للموافقة)</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+table{border-collapse:collapse;width:100%}
+th,td{padding:10px 8px;border-bottom:1px solid #ECEAE4;text-align:right;font-size:15px;vertical-align:middle}
+th{color:#5B6168;font-weight:600;font-size:14px}
+.b{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600}
+.ok{background:#E3F2EA;color:#17603A}.warn{background:#FFF1DF;color:#9A4A00}.err{background:#FDE7E7;color:#A12626}.info{background:#E6EFFA;color:#1D4F8C}
+.btn{min-height:44px;padding:0 16px;border-radius:10px;border:1px solid #C9C5BC;background:#FFFFFF;font:inherit;cursor:pointer}
+.pri{border:0;background:#0F5E54;color:#FFFFFF;font-weight:600}
+.card{background:#FFFFFF;border:1px solid #D9D6CE;border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px}
+.muted{color:#5B6168;font-size:14px}
+.tab{padding:10px 18px;border-radius:10px 10px 0 0;border:1px solid #D9D6CE;border-bottom:0;background:#ECEAE4;font-weight:600}
+.tab.on{background:#FFFFFF}
+.num{font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div dir="rtl" style="min-height:1900px;background:#F5F4F0;color:#1F2328;font-family:'IBM Plex Sans Arabic',Tahoma,sans-serif;padding:24px 32px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+    <div>
+      <h1 style="margin:0;font-size:26px;font-weight:700">الكتالوج المرجعي</h1>
+      <div class="muted">بيانات الأصناف والأسعار من مصادر برّه الصيدلية. <b>مفيش أي صنف أو سعر بيتغير غير لما توافق.</b></div>
+    </div>
+    <span class="b info">ℹ صلاحية: تعديل الأصناف للربط، وتحديث سعر الجمهور للأسعار</span>
+  </div>
+
+  <div style="display:flex;gap:6px;margin-bottom:-17px">
+    <div class="tab on">١. المصادر والتغطية</div><div class="tab">٢. مراجعة الربط <span class="b warn">412</span></div><div class="tab">٣. تحديث الأسعار <span class="b warn">96</span></div>
+  </div>
+
+  <!-- 1. sources -->
+  <section class="card">
+    <h2 style="margin:0;font-size:20px">١. المصادر والتغطية</h2>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px">
+      <div class="card" style="padding:14px"><div class="muted">أصناف الصيدلية النشطة</div><div class="num" style="font-size:28px;font-weight:700">30,470</div></div>
+      <div class="card" style="padding:14px"><div class="muted">مربوطة ومعتمدة</div><div class="num" style="font-size:28px;font-weight:700;color:#17603A">✓ 0</div></div>
+      <div class="card" style="padding:14px"><div class="muted">اقتراح قوي مستني</div><div class="num" style="font-size:28px;font-weight:700;color:#9A4A00">412</div></div>
+      <div class="card" style="padding:14px"><div class="muted">اقتراح ضعيف بس</div><div class="num" style="font-size:28px;font-weight:700">—</div></div>
+    </div>
+    <table>
+      <tr><th>المصدر</th><th>الأصناف</th><th>بسعر</th><th>بباركود</th><th>آخر تحديث</th><th>الحالة</th><th></th></tr>
+      <tr><td>دوا برايس (عينة مجانية)</td><td class="num">50</td><td class="num">50</td><td class="num">—</td><td>31/10 10:00</td><td><span class="b warn">⚠ عينة بس — الاشتراك متأجل</span></td><td><button class="btn">تحديث العينة</button></td></tr>
+      <tr><td>ملف: ابن سينا</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td>—</td><td><span class="b info">ℹ مستني ملف</span></td><td><button class="btn">⬆ ارفع ملف أسعار</button></td></tr>
+    </table>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn pri">🔍 دوّر على اقتراحات ربط</button>
+      <span class="muted">بياخد حوالي دقيقة ونص لـ 30 ألف صنف. ممكن تكمل شغلك عادي.</span>
+    </div>
+  </section>
+
+  <!-- 2. links -->
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:20px">٢. مراجعة الربط</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn">القوي بس</button><button class="btn">الضعيف</button><button class="btn">المعتمد</button><button class="btn">المرفوض</button>
+        <button class="btn pri">✓ اعتمد كل القوي (412)</button>
+      </div>
+    </div>
+    <div class="muted">"قوي" = الاسم شبه متطابق والتركيز والشكل والعبوة بالظبط. أي اختلاف بيظهر بالأحمر ومايتعتمدش جماعي.</div>
+    <table>
+      <tr><th>صنفك</th><th>الصنف المرجعي</th><th>الطريقة</th><th>القوة</th><th>سعرك ← المرجعي</th><th>ملاحظات</th><th></th></tr>
+      <tr><td>Panadol 500mg 24 tab</td><td>Panadol 500mg 24 tabs<div class="muted">GSK · باراسيتامول</div></td><td>باركود</td><td><span class="b ok">✓ قوي</span></td><td class="num">38.00 ← 40.00</td><td>—</td>
+        <td style="white-space:nowrap"><button class="btn pri">اعتماد</button> <button class="btn">رفض</button></td></tr>
+      <tr><td>Omega Plus 3 1000mg 30 caps</td><td>Omega Plus 3 1000mg 30 caps<div class="muted">أوميجا 3</div></td><td>اسم</td><td><span class="b ok">✓ قوي</span></td><td class="num">190.00 ← 200.00</td><td><label><input type="checkbox"> املا المادة الفعالة (الخانة فاضية)</label></td>
+        <td style="white-space:nowrap"><button class="btn pri">اعتماد</button> <button class="btn">رفض</button></td></tr>
+      <tr><td>Nexium 40mg 14 caps</td><td>Nexium 40mg 14 tabs</td><td>اسم</td><td><span class="b warn">⚠ ضعيف</span></td><td class="num">— ← 150.00</td><td><span class="b err">✕ الشكل مختلف: كبسول / أقراص</span></td>
+        <td style="white-space:nowrap"><button class="btn">اعتماد</button> <button class="btn">رفض</button></td></tr>
+      <tr><td>Augmentin 1g 14 tab</td><td>Augmentin 1g 14 tabs · و Augmentin 1g 20 tabs</td><td>باركود</td><td><span class="b warn">⚠ ضعيف</span></td><td class="num">—</td><td><span class="b warn">⚠ الباركود على عبوتين — اختار</span></td>
+        <td style="white-space:nowrap"><button class="btn">اختار…</button></td></tr>
+    </table>
+  </section>
+
+  <!-- 3. prices -->
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:20px">٣. تحديث الأسعار</h2>
+      <div style="display:flex;gap:8px"><button class="btn">↻ احسب الاقتراحات</button><button class="btn">رفض المحدد</button><button class="btn pri">✓ طبّق المحدد (2)</button></div>
+    </div>
+    <div class="muted">بيتغير <b>سعر الجمهور للبيع الجاي بس</b>. الفواتير القديمة والمخزون مابيتلمسوش. لو حد غيّر السعر بعد الاقتراح، الاقتراح بيتساب.</div>
+    <table>
+      <tr><th><input type="checkbox" checked></th><th>الصنف</th><th>الحالي</th><th>الجديد</th><th>التغيير</th><th>تاريخ السعر</th><th>المصدر</th><th>ملاحظات</th></tr>
+      <tr><td><input type="checkbox" checked></td><td>Panadol 500mg 48 tabs</td><td class="num">70.00</td><td class="num"><b>75.00</b></td><td class="num" style="color:#9A4A00">▲ 7.14%</td><td>2024-06-06</td><td>دوا برايس</td><td><span class="b ok">✓ متحقق منه</span></td></tr>
+      <tr><td><input type="checkbox" checked></td><td>Cetal 500mg 20 tabs</td><td class="num">—</td><td class="num"><b>25.00</b></td><td>صنف من غير سعر</td><td>—</td><td>ملف: فارما أوفرسيز</td><td><span class="b info">ℹ مش متحقق منه</span></td></tr>
+      <tr><td><input type="checkbox"></td><td>Augmentin 1g 14 tabs</td><td class="num">120.00</td><td class="num"><b>132.00</b></td><td class="num" style="color:#9A4A00">▲ 10.00%</td><td>2026-10-28</td><td>دوا برايس</td><td><span class="b err">✕ تعارض: ابن سينا 128.00 — لازم توافق على التعارض</span></td></tr>
+    </table>
+    <h3 style="margin:8px 0 0;font-size:17px">الدفعات اللي اتطبقت</h3>
+    <table>
+      <tr><th>التاريخ</th><th>مين</th><th>عدد الأصناف</th><th>الحالة</th><th></th></tr>
+      <tr><td>31/10 11:20</td><td>د. عبد القوي</td><td class="num">54</td><td><span class="b ok">✓ مطبقة</span></td><td><button class="btn">↶ تراجع عن الدفعة</button></td></tr>
+    </table>
+    <div class="muted">التراجع بيرجّع السعر القديم، إلا للأصناف اللي حد غيّر سعرها يدوي بعد الدفعة (بتظهر في التقرير).</div>
+  </section>
+
+  <section class="card" style="background:#FFF1DF;border-color:#F0C98F">
+    <b>⚠ أسعار محتاجة نظرة</b>
+    <div>12 صنف سعرهم عندك أقدم من السعر المرجعي · مصدر "ملف ابن سينا" ما اتحدثش من 45 يوم</div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
