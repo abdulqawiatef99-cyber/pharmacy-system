@@ -120,6 +120,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     backfill_search_keys(db)
     from ..catalog import alternatives as alts
     alts.backfill_ingredient_keys(db)
+    alts.refresh_group_ingredient_refs(db)
     from ..catalog import card as item_card
     item_card.ensure_default_categories(db)
     from ..sales import channels as pay_channels

@@ -6,6 +6,7 @@
   python manage.py backup [--dest backups/]
   python manage.py verify                      (ledger vs balances consistency)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
+  python manage.py ref-dwaprice --sample            # free 50-drug sample, dry run on a copy
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
 """
@@ -219,6 +220,58 @@ def cmd_import_estock(a, s):
     print("التقرير الكامل:", rpath)
 
 
+def cmd_ref_dwaprice(a, s):
+    """External reference catalog (docs/CATALOG_DATA_PLAN.md). Dry run on a copy unless --apply.
+    Never touches the pharmacy's items, prices or stock."""
+    import json
+    import shutil
+    import tempfile
+    from app.catalog import reference as ref
+    db = _db(s)
+    tmp, target = None, db
+    if not a.apply:
+        tmp = Path(tempfile.mkdtemp(prefix="ref-dry-"))
+        db.backup_to(tmp / "copy.db")
+        target = Database(tmp / "copy.db")
+        print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
+    rep: dict = {"source": "dwaprice", "mode": "file" if a.from_file else ("sample" if a.sample else "key")}
+    try:
+        if a.from_file:
+            data = json.loads(Path(a.from_file).read_text(encoding="utf-8"))
+            pages = data if isinstance(data, list) else [data]
+            rep["catalog"] = ref.import_pages(target, pages)
+        else:
+            client = ref.DwapriceClient(base_url=a.base_url, sample=a.sample,
+                                        api_key=None if a.sample else os.environ.get("DWAPRICE_API_KEY"))
+            if a.changes_since:
+                events = [e for pg in client.changes(a.changes_since, a.max_pages) for e in (pg.get("data") or [])]
+                rep["events"] = ref.apply_events(target, events)
+            else:
+                rep["catalog"] = ref.import_pages(target, client.catalog(a.max_pages))
+            rep["requests"] = client.requests_made
+        rep["summary"] = ref.summary(target)
+    except ref.DwapriceError as e:
+        sys.exit(f"المصدر رفض الطلب: {e}")
+    finally:
+        if tmp:
+            target.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+    rdir = s.data_dir / "reports"
+    rdir.mkdir(parents=True, exist_ok=True)
+    rpath = rdir / f"ref-dwaprice-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}.json"
+    rpath.write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    sm, c = rep["summary"], rep.get("catalog") or {}
+    if c:
+        print(f"سجلات اتقرت: {c['seen']} — جديد {c['created']}، اتحدث {c['updated']}، زي ما هو {c['unchanged']}، "
+              f"أسعار جديدة {c['prices_added']}، من غير سعر {c['no_price']}، مرفوض {len(c['rejected'])}")
+    if rep.get("events"):
+        ev = rep["events"]
+        print(f"تغييرات: اتطبق {ev['applied']}، مكرر اتجاهل {ev['skipped_duplicate']}، مرفوض {len(ev['rejected'])}")
+    print(f"الكتالوج المرجعي: {sm['products']} صنف، بسعر {sm['with_price']}، بباركود {sm['with_barcode']}، "
+          f"بمادة فعالة {sm['with_ingredients']}، باركود مشترك {sm['shared_barcodes']}")
+    print("التقرير الكامل:", rpath)
+
+
 def cmd_update(a, s):
     """Update the program code from GitHub (or a local zip), keeping data/ untouched."""
     import subprocess
@@ -323,6 +376,15 @@ def main(argv=None):
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default="backups")
+    rd = sub.add_parser("ref-dwaprice", help="external reference catalog from Dwaprice (never edits items)")
+    g = rd.add_mutually_exclusive_group(required=True)
+    g.add_argument("--sample", action="store_true", help="العينة المجانية (50 صنف، من غير مفتاح)")
+    g.add_argument("--with-key", action="store_true", help="بالمفتاح من DWAPRICE_API_KEY (اشتراك مدفوع)")
+    g.add_argument("--from-file", help="ملف JSON محفوظ (صفحة أو قايمة صفحات)")
+    rd.add_argument("--changes-since", help="بدل الكتالوج: التغييرات من التاريخ ده (ISO)")
+    rd.add_argument("--max-pages", type=int, default=3, help="حد أقصى للصفحات (100 صنف للصفحة)")
+    rd.add_argument("--base-url", default=os.environ.get("DWAPRICE_BASE_URL", "https://api.dwaprice.com/v1"))
+    rd.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
@@ -334,7 +396,7 @@ def main(argv=None):
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "update": cmd_update, "ref-dwaprice": cmd_ref_dwaprice}[a.cmd](a, s)
 
 
 if __name__ == "__main__":

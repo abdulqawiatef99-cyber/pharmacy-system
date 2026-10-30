@@ -262,6 +262,24 @@ def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
     return {"items": rows, "days": QUICK_DAYS, "limit": QUICK_LIMIT}
 
 
+def refresh_group_ingredient_refs(db: Database) -> int:
+    """Owner-defined groups store the ingredient key computed when they were saved. When the key rules
+    get stricter (e.g. Omega-3 vs Omega-6), recompute from the label the owner wrote."""
+    rows = db.all("SELECT group_id, ref, label FROM therapeutic_group_members WHERE kind='ingredient'"
+                  " AND label IS NOT NULL AND label <> ''")
+    n = 0
+    with db.transaction():
+        for r in rows:
+            k = ingredient_key(r["label"])
+            if k and k != r["ref"]:
+                db.execute("DELETE FROM therapeutic_group_members WHERE group_id=? AND kind='ingredient' AND ref=?",
+                           (r["group_id"], r["ref"]))
+                db.execute("INSERT OR IGNORE INTO therapeutic_group_members (group_id, kind, ref, label)"
+                           " VALUES (?, 'ingredient', ?, ?)", (r["group_id"], k, r["label"]))
+                n += 1
+    return n
+
+
 def backfill_ingredient_keys(db: Database) -> int:
     rows = db.all("SELECT id, active_ingredient FROM items WHERE ingredient_key IS NULL AND active_ingredient IS NOT NULL"
                   " AND active_ingredient <> ''")

@@ -249,6 +249,11 @@ def strength_norm(text: str | None) -> str | None:
 _UNIT_WORDS = {"mg", "mcg", "ug", "µg", "g", "gm", "gram", "grams", "ml", "iu", "u", "unit", "units", "%", "mmol",
                "مجم", "ملجم", "مللجم", "جم", "جرام", "مل", "ملل", "وحده"}
 _ING_SPLIT = re.compile(r"\+|/|,|،|&|;|\s+and\s+|\s+with\s+|\s+و\s+", re.I)
+# Numbers that are part of an ingredient's NAME, not its strength: "Omega-3", "Omega 6", "PEG-3350",
+# "Factor-8". Without this the number was dropped as a strength and Omega-3 == Omega-6.
+# Keeping it errs on the safe side: at worst two spellings stop matching, never two different things match.
+_NAME_NUM_WORDS = {"omega", "اوميجا", "اوميغا", "peg", "factor", "il", "interleukin"}
+_NAME_NUM_HYPHEN = re.compile(r"([A-Za-z\u0621-\u064A]{2,})\s*-\s*\d")
 
 
 def ingredient_key(text: str | None) -> str | None:
@@ -258,10 +263,15 @@ def ingredient_key(text: str | None) -> str | None:
     them in one therapeutic group)."""
     if not text:
         return None
+    bound = _NAME_NUM_WORDS | {normalize_text(m.group(1)) for m in _NAME_NUM_HYPHEN.finditer(text)}
     parts = set()
     for p in _ING_SPLIT.split(text):
-        toks = [t for t in normalize_text(p).split()
-                if not re.fullmatch(r"[\d.]+%?", t) and t not in _UNIT_WORDS and t.strip("%/'")]
+        toks: list[str] = []
+        for t in normalize_text(p).split():
+            if re.fullmatch(r"\d+", t) and toks and toks[-1] in bound:
+                toks[-1] += t                       # omega 3 -> omega3 (a name, not a strength)
+            elif not re.fullmatch(r"[\d.]+%?", t) and t not in _UNIT_WORDS and t.strip("%/'"):
+                toks.append(t)
         if toks:
             parts.add(" ".join(toks))
     return "+".join(sorted(parts)) or None

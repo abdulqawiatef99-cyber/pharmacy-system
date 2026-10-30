@@ -104,3 +104,10 @@ Official Business Account. Unofficial tools that log into a personal account are
 of service, credential exposure). Therefore: an internal inbox (photo/file upload, quick forms,
 optional import of WhatsApp's own "Export chat" file) turns items into drafts routed to the right
 module for human review.
+
+## ADR-017 External reference catalog is separate from pharmacy items (2026-10-30)
+Outside drug data (first: Dwaprice) goes into platform-wide `ref_*` tables with source, source id, raw record and
+price history. It never edits a pharmacy's items, prices, stock or invoices; linking (M2) and price proposals (M3)
+need human approval. The API key stays on the syncing machine (env var), never in the database, and is not copied
+to other pharmacies' machines (licence: no key sharing) — multi-pharmacy sync goes through a server later.
+Plan and timeline: `docs/CATALOG_DATA_PLAN.md`.
