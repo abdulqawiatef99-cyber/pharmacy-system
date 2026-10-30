@@ -134,6 +134,12 @@ jobs:
           build/python/python.exe build/program/manage.py selftest --quick
           build/python/python.exe build/program/manage.py init --pharmacy smoke --username owner --password Smoke-Pass-2026
           build/python/python.exe build/program/manage.py verify
+          # R8 on Windows with the shipped runtime: stage and select a candidate from a local zip (same
+          # requirements/migrations), then roll back; the data still verifies. The owner repeats it on the PC.
+          git archive --format=zip --prefix=candidate/ HEAD -o "$env:RUNNER_TEMP\candidate.zip"
+          build/python/python.exe build/program/manage.py update --from-zip "$env:RUNNER_TEMP\candidate.zip" --backup-dir "$env:RUNNER_TEMP\upd-backups"
+          build/python/python.exe build/program/manage.py update --rollback
+          build/python/python.exe build/program/manage.py verify
 
       - name: Build installer (Inno Setup)
         shell: pwsh
