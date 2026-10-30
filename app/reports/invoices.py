@@ -12,7 +12,7 @@ from decimal import Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import kept_value, line_gross
+from ..sales.service import kept_value, line_gross_as_sold
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -99,7 +99,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
                         " WHERE l.sale_id=? ORDER BY l.line_no", (r["id"],)):
             allocs = [dict(a) for a in db.all("SELECT id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
                                               " FROM sale_allocations WHERE sale_line_id=?", (l["id"],))]
-            gross = line_gross((a["qty_base"], a) for a in allocs)
+            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"])
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net
             if l["discount_source"] == "contract":
@@ -109,7 +109,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
             returned = sum(a["returned_qty"] for a in allocs)
             if show_cost and r["status"] == "completed":
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                value = kept_value(allocs, kept, l["discount_bp"])
+                value = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
                 cost = sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)

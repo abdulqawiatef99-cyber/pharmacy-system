@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross
+from ..sales.service import line_gross_as_sold
 from .service import _period
 
 MAX_ROWS = 5000
@@ -229,8 +229,9 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
                     " LEFT JOIN users ub ON ub.id=l.discount_by LEFT JOIN users ua ON ua.id=l.discount_approved_by"
                     " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
                     " AND l.discount_bp>0", (o, b, lo, hi)):
-        gross = line_gross((a["qty_base"], dict(a)) for a in db.all(
-            "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],)))
+        gross = line_gross_as_sold([dict(a) for a in db.all(
+            "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],))],
+            l["discount_bp"], l["line_total"])
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
         key = "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?")
         g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (l["by_name"] or "—"),
