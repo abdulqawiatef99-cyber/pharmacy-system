@@ -264,6 +264,17 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   return data;
 }
 
+// A hidden frame prints the page (print.js prints on load): no new tab, so a pop-up blocker cannot stop it
+// even after an await. The frame stays until the next print, so the print dialog keeps its document.
+function printInFrame(url) {
+  document.getElementById("printFrame")?.remove();
+  const f = document.createElement("iframe");
+  f.id = "printFrame";
+  f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  f.src = url;
+  document.body.appendChild(f);
+}
+
 // ------------------------------------------------------------------ routing
 const routes = [
   [/^#\/login$/, viewLogin],
@@ -1084,7 +1095,7 @@ async function altPanel(itemId, box, onAdd = null) {
 // barcode labels: straight to the label printer when one is set up, else the browser page
 let LABEL_CFG = null;
 async function printLabels(list) {
-  const page = () => window.open(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`, "_blank");
+  const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   if (LABEL_CFG.label_lang === "browser") return page();
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
@@ -1871,6 +1882,7 @@ function renderLan(n) {
 }
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
+  const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الإيصال <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
@@ -1880,11 +1892,17 @@ async function renderReceiptCfg(c) {
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
+    <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
+      <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
+      <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
+      <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع كل بيع نقدي. browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
+      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: الإيصال سيُطبع من المتصفح، والدرج سيُفتح فقط لو الطابعة مختارة. الحل: إعادة التثبيت بآخر مثبّت.</b></p>`}
+      <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
     <fieldset class="lblp"><legend>طابعة الملصقات</legend>
       <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option>
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
-      <label class="f">مكان الطابعة <input name="label_target" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
+      <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
       <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
       <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". الطباعة المباشرة لم تُجرَّب بعد على طابعة حقيقية؛ وعند أي مشكلة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
@@ -1896,7 +1914,7 @@ async function renderReceiptCfg(c) {
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
-      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, label_lang: f.label_lang.value, label_target: f.label_target.value.trim(),
+      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
       label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
@@ -1905,7 +1923,16 @@ async function renderReceiptCfg(c) {
     e.preventDefault();
     const last = (await api("/api/sales"))[0];
     if (!last) return toast("لا توجد فواتير اليوم", true);
-    window.open(`/receipt/${last.id}`, "_blank");
+    printInFrame(`/receipt/${last.id}`);
+  });
+  $("#rcTest").addEventListener("click", async () => {
+    try { await api("/api/print/test", { method: "POST", body: { target: $("#rcForm").receipt_target.value.trim() } }); toast("تم الإرسال للطابعة"); }
+    catch (err) { toast(err.message, true); }
+  });
+  $("#rcKick").addEventListener("click", async () => {
+    // the drawer opens on the SAVED printer (the one the cashier will use)
+    try { await api("/api/print/drawer", { method: "POST", body: { reason: "تجربة الدرج من الإعدادات" } }); toast("تم إرسال أمر فتح الدرج"); }
+    catch (err) { toast(err.message, true); }
   });
 }
 function renderChannels(list) {
@@ -2238,11 +2265,14 @@ async function viewSale(id) {
     catch (e) { toast(e.message, true); }
   });
 }
-// two-click confirmation without browser dialogs
-function confirmInline(btn) {
-  if (btn.dataset.armed) return true;
-  btn.dataset.armed = "1"; const t = btn.textContent; btn.textContent = "متأكد؟ اضغط مرة أخرى";
-  setTimeout(() => { delete btn.dataset.armed; btn.textContent = t; }, 4000);
+// two-click confirmation without browser dialogs: 10 s to confirm; the confirmed click disarms at once,
+// so a third quick click is a new first click (never the same action twice)
+function confirmInline(btn, ms = 10000) {
+  clearTimeout(btn._confirmT);
+  const restore = () => { delete btn.dataset.armed; btn.textContent = btn.dataset.label; };
+  if (btn.dataset.armed) { restore(); return true; }
+  btn.dataset.armed = "1"; btn.dataset.label = btn.textContent; btn.textContent = "متأكد؟ اضغط مرة أخرى";
+  btn._confirmT = setTimeout(restore, ms);
   return false;
 }
 
@@ -2426,13 +2456,18 @@ async function viewPos() {
   }));
   $("#tabNew").addEventListener("click", newTab);
   const q = $("#posQ");
-  let res = [];
-  const search = async (unit) => {
-    const v = q.value.trim(); if (!v) return;
-    const found = await findItems(v); res = found.items;
+  let res = [], liveSeq = 0, liveT = null;
+  // live = while typing: only lists results, never adds; a live answer that arrives after newer typing or an Enter
+  // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
+  const search = async (unit, live = false, given = null) => {
+    const v = given ?? q.value.trim(); if (!v) return;
+    const mine = live ? ++liveSeq : null;
+    const found = await findItems(v);
+    if (live && mine !== liveSeq) return;
+    res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0); return; }
+    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null); return; }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
       + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
@@ -2445,15 +2480,32 @@ async function viewPos() {
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
+    if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
   };
+  q.addEventListener("input", () => {
+    clearTimeout(liveT);
+    liveSeq++;                                                          // any suggestion still on its way is for other text
+    const v = q.value.trim();
+    if (v.length < 2 || /^\d+$/.test(v)) {                             // digits: a barcode scanner's Enter follows
+      $("#posRes").innerHTML = ""; delete q.dataset.searched; return;
+    }
+    liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
+  });
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
+    clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
     if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
-    q.dataset.searched = q.value.trim();
+    const v = q.value.trim();
+    if (/^\d{6,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
+      q.value = ""; delete q.dataset.searched;
+      search(e.shiftKey, false, v).catch((er) => toast(er.message, true));
+      return;
+    }
+    q.dataset.searched = v;
     search(e.shiftKey).catch((er) => toast(er.message, true));
   });
   bindPosExtras();
@@ -2493,13 +2545,16 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
 });
 
-async function addItem(item, packs, units) {
+// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
+async function addItem(item, packs, units, scanned = false) {
   try {
     SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
     const added = SALE.lines.find((l) => l.item_id === item.id);
     if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
       toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
-    $("#posRes").innerHTML = ""; $("#posQ").value = ""; delete $("#posQ").dataset.searched; $("#posQ").focus();
+    $("#posRes").innerHTML = "";
+    if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
+    $("#posQ").focus();
     renderCart(); renderSide();
   } catch (er) { toast(er.message, true); }
 }
@@ -2704,7 +2759,7 @@ async function complete(findings) {
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id,
               confirm_below_cost: !!SALE.confirm_below_cost } });
     try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 && done.kind !== "delivery" } }); }
-    catch (pe) { window.open(`/receipt/${done.id}`, "_blank"); if (pe.code === "print_failed") toast(pe.message, true); }
+    catch (pe) { printInFrame(`/receipt/${done.id}`); if (pe.code === "print_failed") toast(pe.message, true); }
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`);
     SALE = null; viewPos();
@@ -2817,7 +2872,7 @@ async function viewShift() {
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
         <div class="totals"><div>المفروض<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
         <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح وردية جديدة</a></div></section>`;
-      window.open(`/shift-report/${r.id}`, "_blank");
+      printInFrame(`/shift-report/${r.id}`);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
       if (err.code === "difference_note_required") e.target.note.focus();

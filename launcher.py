@@ -95,6 +95,10 @@ def main() -> int:
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     code_home = releases.code_home(h / "data")
+    build = releases.adopt_installer(ROOT, code_home)        # a new PharmacySetup.exe was just installed
+    if build:
+        (h / "data" / "installed_version.json").write_text(json.dumps({**build, "source": "installer"}),
+                                                           encoding="utf-8")
     while True:
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
