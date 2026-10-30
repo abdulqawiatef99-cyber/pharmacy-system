@@ -4,7 +4,8 @@ This file is the permanent memory of the project's working rules. Chat history i
 If something here conflicts with an older document, this file wins.
 
 ## 1. Start of every session (in this order, nothing else first)
-1. `git fetch origin` and read `docs/STATUS.md` (release gates, progress) and `docs/HANDOFF.md` (current work).
+1. `git fetch origin` and read `docs/LAUNCH_PLAN.md` (priorities, roles, freeze), then `docs/STATUS.md` (release gates, progress)
+   and `docs/HANDOFF.md` (current work).
 2. List open PRs and open Issues labelled `launch-critical`. Do not trust counts or SHAs in old reports.
 3. Pick the highest-priority open Issue whose dependencies are done and that nobody is assigned to.
    Claim it (assign yourself or comment `claimed by <agent>`), then start. One task at a time.
