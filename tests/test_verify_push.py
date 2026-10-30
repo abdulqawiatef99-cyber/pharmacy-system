@@ -27,12 +27,13 @@ jq -r "$expr" "$f"
 """
 
 
+@unittest.skipIf(os.name == "nt", "the guard runs only on ubuntu runners (branch-guard.yml, the installer gate)")
 @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq needed (present on CI runners)")
 class TestVerifyPush(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, True)
-        (self.dir / "gh").write_text(FAKE_GH)
+        (self.dir / "gh").write_bytes(FAKE_GH.encode())          # LF line endings whatever the OS (Codex on #53)
         (self.dir / "gh").chmod(0o755)
 
     def answers(self, pulls=None, checks=None):
@@ -42,7 +43,7 @@ class TestVerifyPush(unittest.TestCase):
             (self.dir / "checks.json").write_text(json.dumps({"check_runs": checks}))
 
     def run_guard(self, branch="main", forced="false"):
-        env = {**os.environ, "PATH": f"{self.dir}:{os.environ['PATH']}", "FAKE_DIR": str(self.dir),
+        env = {**os.environ, "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}", "FAKE_DIR": str(self.dir),
                "REPO": "o/r", "BRANCH": branch, "SHA": SHA, "FORCED": forced, "RETRY_SLEEP": "0", "GH_TOKEN": "x"}
         r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30)
         return r.returncode, r.stdout.strip()
