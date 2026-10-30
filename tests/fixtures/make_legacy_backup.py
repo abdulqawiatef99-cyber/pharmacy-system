@@ -1,13 +1,12 @@
-"""SYNTHETIC backup produced by an older release, for tests/test_legacy_restore.py.
+"""SYNTHETIC backup written by the release pharmacies run, for tests/test_legacy_restore.py.
 
-Run it from a checkout of the release that pharmacies run (the code that writes the
-backup must be the old code, not this branch's):
+It must run on the OLD code, so the test calls it with the release checkout first on the
+path (CI checks out main into _release and sets PHARM_RELEASE_SRC):
 
-    git worktree add /tmp/rel origin/main
-    cd /tmp/rel && PYTHONPATH=. python <this repo>/tests/fixtures/make_legacy_backup.py <out dir>
+    cd <release checkout> && PYTHONPATH=. python <this repo>/tests/fixtures/make_legacy_backup.py <out dir>
 
-then copy the ZIP to tests/fixtures/legacy_backup_<commit>.zip. No real pharmacy data:
-one test pharmacy, one item, one cash sale with a transfer screenshot, a closed shift.
+No real pharmacy data: one test pharmacy, one item, one cash sale with a transfer
+screenshot, a closed shift. Nothing is committed: the repository refuses data files.
 """
 import base64
 import sys
