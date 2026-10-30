@@ -51,6 +51,9 @@ const { chromium } = require('playwright');
   let popups = 0;
   ctx.on('page', () => { popups += 1; });
   await p.goto(base + '/');
+  // the app's first check (no session -> 401 -> #/login) must finish before we log in and change the hash,
+  // or its late answer sends the page back to the login screen (seen once on CI, #91)
+  await p.waitForSelector('#loginForm');
   const st = await p.evaluate(async ([u, w]) => (await fetch('/api/auth/login', { method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ username: u, password: w }) })).status, [user, pw]);
   await p.goto(base + '/#/system');
