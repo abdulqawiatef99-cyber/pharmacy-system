@@ -13,8 +13,21 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
             "show_return_policy": True, "label_size": "38x25",
             "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
-            "receipt_target": ""}
+            "receipt_target": "",
+            # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
+            # independently of the receipt (direct ESC/POS printers only).
+            "auto_receipt": False, "auto_receipt_min": 0, "drawer_on_cash": True, "drawer_timing": "after",
+            "time_format": "12", "header": "", "tax_no": "", "cr_no": "", "copies": 1}
 LABEL_SIZES = ("38x25", "50x30", "58x40")
+DRAWER_TIMINGS = ("before", "with", "after")
+
+
+def fmt_when(dt, time_format: str = "12") -> str:
+    """Date and time on a receipt: 12-hour with ص/م (the default) or 24-hour."""
+    if time_format == "24":
+        return dt.strftime("%Y-%m-%d %H:%M")
+    h = dt.hour % 12 or 12
+    return f"{dt:%Y-%m-%d} {h}:{dt:%M} {'ص' if dt.hour < 12 else 'م'}"
 
 
 def get(db: Database, org_id: str) -> dict:
@@ -70,14 +83,34 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if not isinstance(data["label_gap"], int) or not 0 <= data["label_gap"] <= 10:
             raise ValidationFailed("المسافة بين الملصقات من 0 إلى 10 مم")
         new["label_gap"] = data["label_gap"]
-    for k in ("title", "footer"):
+    for k in ("title", "footer", "header"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:80]
+    for k in ("tax_no", "cr_no"):
+        if k in data:
+            new[k] = str(data[k] or "").strip()[:30]
+    if "auto_receipt_min" in data:
+        v = data["auto_receipt_min"]
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 100_000_000:
+            raise ValidationFailed("الحد الأدنى للإيصال مبلغ صحيح غير سالب (بالقرش)")
+        new["auto_receipt_min"] = v
+    if "drawer_timing" in data:
+        if data["drawer_timing"] not in DRAWER_TIMINGS:
+            raise ValidationFailed("توقيت فتح الدرج: قبل أو مع أو بعد الإيصال")
+        new["drawer_timing"] = data["drawer_timing"]
+    if "time_format" in data:
+        if data["time_format"] not in ("12", "24"):
+            raise ValidationFailed("نظام الساعة 12 أو 24")
+        new["time_format"] = data["time_format"]
+    if "copies" in data:
+        if data["copies"] not in (1, 2, 3):
+            raise ValidationFailed("عدد النسخ من 1 إلى 3")
+        new["copies"] = data["copies"]
     if "lines" in data:
         if not isinstance(data["lines"], list):
             raise ValidationFailed("بيانات غير صحيحة")
         new["lines"] = [str(x or "").strip()[:60] for x in data["lines"][:3]]
-    for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy"):
+    for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash"):
         if k in data:
             new[k] = bool(data[k])
     with db.transaction():

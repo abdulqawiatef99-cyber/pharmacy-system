@@ -196,13 +196,23 @@ class CashDrawer:
             " WHERE x.shift_id=? AND x.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
         names = {u["id"]: u["full_name"] for u in self.db.all(
             "SELECT id, full_name FROM users WHERE id IN (?,?)", (s["opened_by"], s["closed_by"] or ""))}
+        # drawer-open commands (#81): manual ones with their reason, apart from the automatic checkout pulses.
+        # A command sent is not proof the drawer physically opened (the printer cannot report it).
+        manual = [{"at": r["at"], "by": r["full_name"], **json.loads(r["after_json"] or "{}")} for r in self.db.all(
+            "SELECT a.at, a.after_json, u.full_name FROM audit_log a LEFT JOIN users u ON u.id=a.user_id"
+            " WHERE a.org_id=? AND a.action='cash.drawer_open' AND a.entity_type='cash_shift' AND a.entity_id=?"
+            " ORDER BY a.at", (ctx.org_id, shift_id))]
+        auto = self.db.one("SELECT count(*) n FROM audit_log a JOIN sales x ON x.id=a.entity_id AND x.org_id=a.org_id"
+                           " WHERE a.org_id=? AND a.action='cash.drawer_auto' AND a.entity_type='sale' AND x.shift_id=?"
+                           " AND json_extract(a.after_json, '$.outcome')='sent'", (ctx.org_id, shift_id))["n"]
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
                     transfer_total=sales["transfer"], credit_total=sales["credit"], discount_total=sales["discount"],
                     voided_count=voided, returns_count=returns["n"], returns_total=returns["t"], by_channel=by_channel,
                     expected_cash=expected, opened_by_name=names.get(s["opened_by"]),
                     closed_by_name=names.get(s["closed_by"]),
-                    counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None)
+                    counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None,
+                    drawer_manual=manual, drawer_manual_count=len(manual), drawer_auto_count=auto)
         return full
 
     def recent(self, ctx: Context, limit: int = 30) -> list[dict]:
