@@ -2,6 +2,7 @@
 barcode, internal code, expiry, price) as toggles, the barcode never shrunk below scannable, and fields
 dropped (phone, then pharmacy name) when the size cannot hold them. Synthetic data only."""
 import re
+from pathlib import Path
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -70,6 +71,9 @@ class TestSizes(Base):
         self.assertEqual(rs.save(self.db, self.ctx, {"label_size": "38x12.5"})["label_size"], "38x12.5")
         with self.assertRaises(ValidationFailed):
             rs.save(self.db, self.ctx, {"label_size": "38x5"})
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        for name in ("label_w", "label_h"):                                    # 38 x 12.3 can be typed and saved
+            self.assertRegex(js, rf'name="{name}" type="number" min="\d+" max="\d+" step="0.1"')
 
     def test_fields_defaults_partial_save_and_a4(self):
         c = rs.get(self.db, self.ctx.org_id)
@@ -183,7 +187,9 @@ class TestLabelPages(APICase):
         self.assertEqual(r.status_code, 422)
         self.assertIn("أعرض", r.json()["error"]["message"])
         rs.save(self.db, self.ctx, {"label_fields": {"barcode": False}})       # text-only labels still print
-        self.assertEqual(self.c.get("/labels", params={"items": f"{self.pan}:1"}).status_code, 200)
+        page = self.c.get("/labels", params={"items": f"{self.pan}:1"})
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn('class="b"', page.text)                               # no empty 4 mm barcode box (Codex on #90)
 
     def test_preview_png_and_dropped_fields(self):
         r = self.c.post("/api/print/label-preview", json={"label_size": "38x10", "label_fields": ALL, "label_phone": "0100"}, headers=H)
@@ -191,5 +197,7 @@ class TestLabelPages(APICase):
         self.assertEqual(r.headers["content-type"], "image/png")
         self.assertTrue(r.content.startswith(b"\x89PNG"))
         self.assertEqual(r.headers["x-label-dropped"], "phone,pharmacy")
+        r = self.c.post("/api/print/label-preview", json={"label_lang": "a4", "label_a4": "6x24"}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)                            # the default A4 grid previews (valid EAN-13 sample)
         r = self.c.post("/api/print/label-preview", json={"label_size": "20x10", "label_fields": ALL}, headers=H)
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (422, "label_too_small"))

@@ -217,7 +217,7 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012343", "code": "8130", "price": "40.00 ج",
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     try:
         img, dropped = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])

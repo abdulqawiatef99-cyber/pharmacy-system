@@ -1997,7 +1997,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             phone = e(data["phone"]) if on["phone"] else ""
             pharmacy = f'<span dir="rtl">{e(data["pharmacy"])}</span>' if on["pharmacy"] else ""
             top = f'<div class="t"><span>{phone}</span>{pharmacy}</div>' if on["phone"] or on["pharmacy"] else ""
-            mark = f'<div class="b">{bc.svg(data["value"])[0]}</div>' if on["barcode"] else '<div class="b"></div>'
+            mark = f'<div class="b">{bc.svg(data["value"])[0]}</div>' if on["barcode"] else ""   # text-only: no 4 mm box
             name = f'<div class="n">{e(data["name"][:40])}</div>' if on["name"] else ""
             left = data["code"] if on["code"] else data["value"] if on["digits"] else ""
             bottom = (f'<div class="c"><span>{e(left)}</span><span>{e(data["expiry"]) if on["expiry"] else ""}</span>'

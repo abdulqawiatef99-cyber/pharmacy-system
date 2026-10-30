@@ -1914,8 +1914,8 @@ async function renderReceiptCfg(c) {
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
       <label class="f">المقاس <select name="label_preset">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}<option value="custom" ${["38x25", "50x30", "58x40"].includes(c.label_size) ? "" : "selected"}>مقاس آخر (اكتبه)</option></select></label>
-      <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.5" value="${esc(c.label_size.split("x")[0])}"></label>
-        <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.5" value="${esc(c.label_size.split("x")[1])}"></label></div>
+      <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.1" value="${esc(c.label_size.split("x")[0])}"></label>
+        <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.1" value="${esc(c.label_size.split("x")[1])}"></label></div>
       <p class="muted">قِس ملصقًا واحدًا من البكرة (بدون المسافة بينه وبين اللي بعده). المسافة بين الملصقات تحت في «طابعة الملصقات».</p>
       <div>${[["pharmacy", "اسم الصيدلية"], ["phone", "التليفون"], ["name", "اسم الصنف"], ["barcode", "الباركود"], ["digits", "أرقام الباركود"], ["code", "كود الصنف الداخلي"], ["expiry", "الصلاحية (أقرب تشغيلة)"], ["price", "السعر"]]
         .map(([k, t]) => `<label class="chk"><input type="checkbox" data-lf="${k}" ${c.label_fields[k] ? "checked" : ""}> ${t}</label>`).join("")}</div>
