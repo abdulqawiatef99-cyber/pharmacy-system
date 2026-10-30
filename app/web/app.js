@@ -110,7 +110,7 @@ async function setLanguage(lang) {
     h.lang = "ar"; h.dir = "rtl"; return;
   }
   if (!I18N.map) {
-    try { await loadScript("/static/i18n-en.js"); } catch { toast("ملف اللغة الإنجليزية غير موجود", true); return; }
+    try { await loadScript(document.querySelector('meta[name="i18n-src"]')?.content || "/static/i18n-en.js"); } catch { toast("ملف اللغة الإنجليزية غير موجود", true); return; }
     if (I18N.want !== "en") return;
     const dict = window.I18N_EN || {};
     I18N.map = new Map(Object.entries(dict));

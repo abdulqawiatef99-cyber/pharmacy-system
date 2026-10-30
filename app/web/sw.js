@@ -1,6 +1,6 @@
 // Service worker: caches the app shell only. API responses are never cached
 // (financial/stock data must always be live; offline writes are a later phase).
-const CACHE = "pharm-shell-v61";
+const CACHE = "pharm-shell-v62";
 const SHELL = ["/", "/static/app.css", "/static/app.js", "/static/i18n-en.js", "/static/manifest.json", "/static/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -16,10 +16,10 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.pathname.startsWith("/api/")) return;
-  // network first, fall back to cached shell
+  // network first, fall back to cached shell. Shell URLs carry ?v=<hash> (#85); offline, any cached copy will do.
   e.respondWith(fetch(e.request).then((r) => {
     const copy = r.clone();
-    if (r.ok && SHELL.includes(url.pathname)) caches.open(CACHE).then((c) => c.put(e.request, copy));
+    if (r.ok && SHELL.includes(url.pathname)) caches.open(CACHE).then((c) => c.put(url.pathname, copy));
     return r;
-  }).catch(() => caches.match(e.request).then((r) => r || caches.match("/"))));
+  }).catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match("/"))));
 });

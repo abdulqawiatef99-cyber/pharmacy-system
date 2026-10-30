@@ -27,7 +27,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -54,10 +54,28 @@ log = logging.getLogger("pharm.api")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=256)
+def _content_hash(path: Path, mtime_ns: int, size: int) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+
+
 def _static_v(name: str) -> str:
-    """/static/<name>?v=<content hash>, so a browser never keeps an old copy after an update."""
-    return f"/static/{name}?v={hashlib.sha256((WEB_DIR / name).read_bytes()).hexdigest()[:10]}"
+    """/static/<name>?v=<content hash>, so a browser never keeps an old copy after an update.
+    Keyed by mtime and size: a file replaced by an update gets a new hash without a restart (#85)."""
+    path = WEB_DIR / name
+    st = path.stat()
+    return f"/static/{name}?v={_content_hash(path, st.st_mtime_ns, st.st_size)}"
+
+
+# Shell assets referenced by index.html; each gets its content hash in the URL (#85).
+SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
+
+
+def _index_html() -> str:
+    page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    for name in SHELL_ASSETS:
+        page = page.replace(f'"/static/{name}"', f'"{_static_v(name)}"')
+    return page
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
 
@@ -103,6 +121,9 @@ class SecurityHeaders(BaseHTTPMiddleware):
         resp.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
         if request.url.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
+        elif request.url.path.startswith("/static/"):
+            # Revalidate with the ETag on every load: no heuristic caching of an old app.js after an update (#85).
+            resp.headers.setdefault("Cache-Control", "no-cache")
         return resp
 
 
@@ -1999,7 +2020,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID")})
 
     async def index(req):
-        return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
 
     async def sw(req):
         return FileResponse(WEB_DIR / "sw.js", media_type="text/javascript",
