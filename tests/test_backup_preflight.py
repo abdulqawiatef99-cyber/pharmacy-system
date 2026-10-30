@@ -94,6 +94,18 @@ class TestPreflight(Base):
         self.assertEqual(before, (archive.stat().st_mtime_ns, hashlib.sha256(archive.read_bytes()).hexdigest()))
         self.assertEqual(files_before, sorted(p for p in self.tmp.rglob("*")))
 
+    def test_usage_is_looked_up_in_the_files_own_pharmacy(self):
+        _, other = self.second_tenant()
+        fid = self.db.one("SELECT source_file_id f FROM purchase_invoices WHERE invoice_no='INV-2'")["f"]
+        with self.db.transaction():   # a foreign pharmacy's approved invoice pointing at this file
+            self.db.execute("INSERT INTO purchase_invoices (id, org_id, branch_id, invoice_no, status, source_type,"
+                            " source_file_id) VALUES (?,?,?,?,?,?,?)",
+                            (new_id(), other.org_id, other.branch_id, "FOREIGN-9", "approved", "csv", fid))
+        r = backup_preflight.check(backup.create(self.db, self.up, self.tmp / "b2"))
+        a = self.by_name(r)["INV-2.csv"]
+        self.assertEqual(a["importance"], "optional")
+        self.assertNotIn("FOREIGN-9", " ".join(a["used_by"]))
+
     def test_not_a_backup(self):
         bogus = self.tmp / "x.zip"
         with zipfile.ZipFile(bogus, "w") as z:

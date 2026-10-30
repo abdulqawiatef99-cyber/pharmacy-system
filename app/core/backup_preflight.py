@@ -35,18 +35,18 @@ def _status(problem: str | None) -> str:
     return "bad_path"
 
 
-def _uses(db: Database, file_id: str) -> list[tuple[str, str]]:
+def _uses(db: Database, org_id: str, file_id: str) -> list[tuple[str, str]]:
     """[(importance, what)] for everything that points at this file."""
     tables = {r["name"] for r in db.all("SELECT name FROM sqlite_master WHERE type='table'")}
     uses = []
     if "purchase_invoices" in tables:
-        for r in db.all("SELECT invoice_no, supplier_name_raw, status FROM purchase_invoices WHERE source_file_id=?",
-                        (file_id,)):
+        for r in db.all("SELECT invoice_no, supplier_name_raw, status FROM purchase_invoices WHERE org_id=? AND source_file_id=?",
+                        (org_id, file_id)):
             what = f"أصل فاتورة شراء {r['invoice_no'] or '(بدون رقم)'} — {r['supplier_name_raw'] or ''} ({STATE_AR.get(r['status'], r['status'])})"
             uses.append(("financial" if r["status"] == "approved" else "optional", what))
     if "sale_attachments" in tables:
         for r in db.all("SELECT a.kind, s.sale_no, s.status FROM sale_attachments a JOIN sales s ON s.id=a.sale_id"
-                        " WHERE a.file_id=?", (file_id,)):
+                        " AND s.org_id=a.org_id WHERE a.org_id=? AND a.file_id=?", (org_id, file_id)):
             what = f"{'صورة تحويل' if r['kind'] == 'transfer' else 'مرفق'} لفاتورة بيع {r['sale_no'] or '-'} ({STATE_AR.get(r['status'], r['status'])})"
             uses.append(("financial" if r["kind"] == "transfer" and r["status"] == "completed" else "optional", what))
     return uses or [("optional", "ملف غير مرتبط بأي فاتورة")]
@@ -66,7 +66,7 @@ def check(archive: Path) -> dict:
             db = Database(backup._extract_db(z, tmp))
             try:
                 for row, problem in backup._attachment_checks(db, z):
-                    uses = _uses(db, row["id"])
+                    uses = _uses(db, row["org_id"], row["id"])
                     report["attachments"].append({
                         "source_id": row["id"], "filename": row["filename"], "size_bytes": row["size_bytes"],
                         "status": _status(problem), "problem": problem,
