@@ -56,6 +56,12 @@ def _db(s: config.Settings, create: bool = False) -> Database:
     return db
 
 
+def _backups(chosen: str | None, s: config.Settings, sub: str = "") -> Path:
+    """Where a command writes its backup: the folder given, else the backups folder next to the data
+    (installed: %LOCALAPPDATA%\\PharmacyPlatform\\backups), never the current folder (#80)."""
+    return Path(chosen) if chosen else (s.backup_path / sub if sub else s.backup_path)
+
+
 def cmd_init(a, s):
     db = _db(s, create=True)
     pw = a.password or getpass.getpass("كلمة مرور المالك (10 حروف على الأقل): ")
@@ -81,7 +87,7 @@ def cmd_backup(a, s):
     db = _db(s)
     if not db.one("SELECT count(*) n FROM organizations")["n"]:
         sys.exit(f"قاعدة البيانات في {s.db_path} فاضية (لا توجد صيدلية): لم تُعمل نسخة. تأكد من PHARM_DATA_DIR.")
-    out = backup.create(db, s.upload_dir, Path(a.dest) if a.dest else s.backup_path)
+    out = backup.create(db, s.upload_dir, _backups(a.dest, s))
     info = backup.verify_archive(out)
     if info["problems"]:
         print("BACKUP FAILED VERIFICATION:", info["problems"])
@@ -117,7 +123,7 @@ def cmd_restore(a, s):
         print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
         sys.exit(2)
     r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
-                       Path(a.pre_dir) if a.pre_dir else s.backup_path / "pre-restore")
+                       _backups(a.pre_dir, s, "pre-restore"))
     print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
@@ -213,7 +219,7 @@ def cmd_import_estock(a, s):
         target = Database(tmp / "copy.db")
         print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
     else:
-        out = backup.create(db, s.upload_dir, Path(a.backup_dir) if a.backup_dir else s.backup_path)
+        out = backup.create(db, s.upload_dir, _backups(a.backup_dir, s))
         if backup.verify_archive(out)["problems"]:
             sys.exit("النسخة الاحتياطية فشلت؛ مفيش استيراد")
         print("نسخة احتياطية قبل الاستيراد:", out)
@@ -293,7 +299,7 @@ def cmd_update(a, s):
         if s.db_path.exists():
             db = Database(s.db_path)  # read/snapshot only; do NOT call _db or migrate
             try:
-                out = backup.create(db, s.upload_dir, Path(a.backup_dir) if a.backup_dir else s.backup_path)
+                out = backup.create(db, s.upload_dir, _backups(a.backup_dir, s))
                 if backup.verify_archive(out)["problems"]:
                     raise updater.UpdateError("Backup verification failed; the selected code is unchanged")
             finally:

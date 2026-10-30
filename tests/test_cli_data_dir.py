@@ -84,3 +84,64 @@ class TestDefaultDataDir(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
+    """Codex on #91: restore, import-estock --apply and update also back up next to the data by default,
+    and an explicit folder still wins."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pharm-cli-"))
+        self.data = self.tmp / "home" / "data"
+        self.env = mock.patch.dict(os.environ, {"PHARM_DATA_DIR": str(self.data)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        import manage
+        self.manage = manage
+        manage.main(["init", "--pharmacy", "صيدلية تجربة", "--username", "owner", "--password", "Owner-Pass-2026"])
+        self.cwd = os.getcwd()
+        os.chdir(self.tmp)                                      # a relative default would land here
+        self.addCleanup(os.chdir, self.cwd)
+
+    def dests(self, argv):
+        from app.core import backup
+        seen = []
+
+        def stop(db, uploads, dest):
+            seen.append(Path(dest))
+            raise RuntimeError("stop after choosing the folder")
+        with mock.patch.object(backup, "create", side_effect=stop), self.assertRaises(RuntimeError):
+            self.manage.main(argv)
+        return seen
+
+    def test_restore_pre_restore_snapshot(self):
+        r = subprocess.run([sys.executable, str(ROOT / "manage.py"), "backup"], cwd=self.tmp, capture_output=True,
+                           text=True, encoding="utf-8", env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        arch = next((self.tmp / "home" / "backups").glob("*.zip"))
+        r = subprocess.run([sys.executable, str(ROOT / "manage.py"), "restore", str(arch), "--yes"], cwd=self.tmp,
+                           capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONPATH": str(ROOT)},
+                           timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(list((self.tmp / "home" / "backups" / "pre-restore").iterdir()))
+        self.assertFalse((self.tmp / "backups").exists())
+
+    def test_import_estock_apply(self):
+        for name in ("cat.xlsx", "stock.xlsx"):
+            (self.tmp / name).write_bytes(b"")
+        base = ["import-estock", "--catalog", "cat.xlsx", "--stock", "stock.xlsx", "--username", "owner",
+                "--password", "Owner-Pass-2026", "--apply"]
+        self.assertEqual(self.dests(base), [self.tmp / "home" / "backups"])
+        self.assertEqual(self.dests(base + ["--backup-dir", str(self.tmp / "mine")]), [self.tmp / "mine"])
+
+    def test_update_from_zip(self):
+        import subprocess as sp
+        from app.core import updater
+        import release_bootstrap as releases
+        (self.tmp / "u.zip").write_bytes(b"x")
+        staged = {"release": str(self.tmp), "id": "r1", "files": 1}
+        with mock.patch.object(updater, "apply_zip", return_value=staged), \
+                mock.patch.object(releases, "check_compatible"), \
+                mock.patch.object(sp, "run", return_value=SimpleNamespace(returncode=0)):
+            self.assertEqual(self.dests(["update", "--from-zip", "u.zip"]), [self.tmp / "home" / "backups"])
+            self.assertEqual(self.dests(["update", "--from-zip", "u.zip", "--backup-dir", "mine"]), [Path("mine")])
