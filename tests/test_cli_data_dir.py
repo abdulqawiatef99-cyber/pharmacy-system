@@ -93,7 +93,9 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="pharm-cli-"))
         self.data = self.tmp / "home" / "data"
-        self.env = mock.patch.dict(os.environ, {"PHARM_DATA_DIR": str(self.data)})
+        # only this data folder: the Windows release check sets PHARM_DB_PATH / PHARM_BACKUP_DIR for the whole run
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PHARM_")}
+        self.env = mock.patch.dict(os.environ, {**env, "PHARM_DATA_DIR": str(self.data)}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
         import manage
