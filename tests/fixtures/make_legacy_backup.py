@@ -27,11 +27,14 @@ class _Data(Base):
 def main(out: Path) -> Path:
     d = _Data()
     d.setUp()
-    d.cd.open(d.ctx, 10000)
-    sale = d.sell(units=4)
-    attachments.attach(d.db, d.tmp / "uploads", d.ctx, sale["id"], PNG, "transfer.png")
-    d.cd.close(d.ctx, d.cd.summary(d.ctx)["expected_cash"])
-    return backup.create(d.db, d.tmp / "uploads", out)
+    try:
+        d.cd.open(d.ctx, 10000)
+        sale = d.sell(units=4)
+        attachments.attach(d.db, d.tmp / "uploads", d.ctx, sale["id"], PNG, "transfer.png")
+        d.cd.close(d.ctx, d.cd.summary(d.ctx)["expected_cash"])
+        return backup.create(d.db, d.tmp / "uploads", out)
+    finally:
+        d.tearDown()   # the old machine is gone: restore must use the copy inside the backup
 
 
 if __name__ == "__main__":
