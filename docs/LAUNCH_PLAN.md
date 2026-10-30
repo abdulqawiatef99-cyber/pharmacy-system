@@ -14,6 +14,7 @@ is open. What remains is **verification on the real pharmacy PC and the owner's 
 
 | Step | Issue | Where | Who | Done when |
 |---|---|---|---|---|
+| 0 | #18 part A of `DEVICE_RUNBOOK.md` (G2–G6, no hardware) | Home laptop, any time | Local Claude session on the laptop | Results on #18. Takes load and risk (R8 rollback) off the pharmacy night |
 | 1 | #18 device retest: 12 steps + R1–R10 | Pharmacy PC `DESKTOP-5JVH3QD`, after closing hours, backup first | Claude executes; owner does the physical steps (scan, look at the receipt, check the drawer, read the label) | Every line is marked pass or fail with evidence on #18. Each failure is its own `launch-critical` Issue |
 | 2 | Fixes from step 1 (if any) | Cloud | Claude implements, Codex reviews | Merged into `develop`, CI green, new installer run, short retest of the failed lines only |
 | 3 | #19 operating day (synthetic data) | Pharmacy PC | Owner follows `OWNER_TEST_PLAN.md` P1–P2; Claude guides and reconciles the numbers | Cash, stock, invoices and reports agree; owner signs off |
@@ -30,7 +31,7 @@ Each failure found adds about 1 day.
 | **Claude Code: lead and executor** | Owns #18/#19/#20; is the only agent that runs commands on the pharmacy PC; implements fixes; keeps `docs/HANDOFF.md` and `docs/STATUS.md` current; reports to the owner (`AGENTS.md` §9) | Raises the percentage without evidence; merges to `main` without the owner's written go |
 | **Codex: reviewer** | Reviews every PR (`@codex review`); takes a whole isolated code Issue only when Claude assigns it ("Owner: Codex") | Edits `AGENTS.md`, `docs/HANDOFF.md`, `docs/STATUS.md` or this file; starts its own process or automation work; works on the same files as an open PR |
 | **ChatGPT: advisor, read-only** | Answers the owner's questions; may comment on Issues/PRs | Opens branches or PRs or edits repository files, unless the owner assigns a specific Issue in writing |
-| **Home laptop `DESKTOP-0DCSIC2`** | Optional rehearsal only; its results never count as L2 | Running unattended; touching E-Stock or Radmin VPN |
+| **Home laptop `DESKTOP-0DCSIC2`** | A real Windows test device. Under the `STATUS.md` L2 definition it can supply L2 evidence for the gates with no hardware column (G2–G6), **once the owner confirms that it counts**. Never for G7/G8. Runs part A of `DEVICE_RUNBOOK.md` | Running unattended; touching E-Stock or Radmin VPN |
 
 One accountable agent per Issue (`AGENTS.md` §10). If two agents could touch the same file, the lead decides.
 
