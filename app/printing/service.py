@@ -175,31 +175,81 @@ def print_test(db: Database, ctx: Context, target: str | None = None) -> dict:
     return {"ok": True}
 
 
+def label_data(db: Database, ctx: Context, it, cfg: dict) -> dict:
+    """What one item's label can show (#84): names per the receipt setting, the barcode, internal code, public
+    price, the nearest expiry among the batches in stock here, and the pharmacy name / phone."""
+    from . import labels as lb, settings as rs
+    codes = [r["barcode"] for r in db.all("SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?",
+                                          (ctx.org_id, it["id"]))]
+    exp = db.one("SELECT min(b.expiry_date) e FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                 " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL",
+                 (ctx.org_id, ctx.branch_id, it["id"]))["e"]
+    pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
+    name = (it["name_ar"] or it["name_en"]) if cfg["names"] == "ar" else (it["name_en"] or it["name_ar"])
+    return {"name": name or "", "value": str(lb.label_value(dict(it), codes)), "code": it["code"] or "",
+            "price": f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else "",
+            "expiry": f"{exp[5:7]}/{exp[2:4]}" if exp else "", "pharmacy": pharmacy, "phone": phone}
+
+
+def label_size(cfg: dict, size: str | None = None) -> tuple[float, float]:
+    from . import labels as lb, settings as rs
+    if cfg["label_lang"] == "a4":                  # one cell of the A4 sheet grid
+        cols, rows = rs.a4_grid(cfg["label_a4"])
+        return round(210 / cols, 1), round(297 / rows, 1)
+    try:
+        return lb.parse_size(size or cfg["label_size"])
+    except escpos.PrinterError as e:
+        raise ValidationFailed(str(e)) from e
+
+
+def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple[bytes, list[str]]:
+    """The label as it will print, for the settings screen (sample item, the saved fields and size)."""
+    import io
+    from . import labels as lb, settings as rs
+    ctx.require("settings.manage")
+    saved = rs.get(db, ctx.org_id)
+    cfg = {**saved, **{k: v for k, v in (data or {}).items() if k in ("label_pharmacy", "label_phone", "label_lang", "label_a4")}}
+    cfg["label_dpi"] = (data or {}).get("label_dpi") if (data or {}).get("label_dpi") in lb.DPIS else saved["label_dpi"]
+    cfg["label_lang"] = cfg["label_lang"] if cfg["label_lang"] in lb.LANGS else saved["label_lang"]
+    cfg["label_pharmacy"], cfg["label_phone"] = str(cfg["label_pharmacy"] or "")[:40], str(cfg["label_phone"] or "")[:40]
+    if data and "label_size" in data:
+        cfg["label_size"] = rs.label_size_ok(data["label_size"])
+    if data and isinstance(data.get("label_fields"), dict):
+        cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
+    w, h = label_size(cfg)
+    pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012343", "code": "8130", "price": "40.00 ج",
+              "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
+    try:
+        img, dropped = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
+    except escpos.PrinterError as e:
+        raise ValidationFailed(str(e), code="label_too_small") from e
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue(), dropped
+
+
 def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, size: str | None = None,
                  target: str | None = None) -> dict:
     """Barcode labels straight to the label printer (TSPL for Xprinter/TSC, ZPL for Zebra)."""
     from . import labels as lb, settings as rs
     ctx.require("items.read")
     cfg = rs.get(db, ctx.org_id)
-    if cfg["label_lang"] == "browser":
+    if cfg["label_lang"] in ("browser", "a4"):
         raise ValidationFailed("طابعة الملصقات مضبوطة على الطباعة من المتصفح", code="labels_in_browser")
-    size = size or cfg["label_size"]
-    if size not in rs.LABEL_SIZES:
-        raise ValidationFailed("مقاس الملصق غير صحيح")
-    w, h = (int(x) for x in size.split("x"))
+    w, h = label_size(cfg, size)
     total = sum(n for _, n in wanted)
     if not wanted or total > lb.MAX_LABELS or any(not isinstance(n, int) or n < 1 for _, n in wanted):
         raise ValidationFailed(f"عدد الملصقات من 1 إلى {lb.MAX_LABELS}")
-    imgs = []
+    imgs, dropped = [], set()
     try:
         for iid, n in wanted:
             it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
             if not it or (it["hidden"] and not ctx.can("items.hidden")):
                 continue
-            codes = [r["barcode"] for r in db.all("SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, iid))]
-            value = lb.label_value(dict(it), codes)
-            price = f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else ""
-            imgs.append((lb.render(it["name_en"] or it["name_ar"] or "", str(value), price, w, h, cfg["label_dpi"]), n))
+            img, gone = lb.render_label(label_data(db, ctx, it, cfg), w, h, cfg["label_dpi"], cfg["label_fields"])
+            imgs.append((img, n))
+            dropped.update(gone)
         if not imgs:
             raise ValidationFailed("اختر الأصناف")
         escpos.send(target or cfg["label_target"] or "none",
@@ -207,5 +257,6 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
     with db.transaction():
-        audit.record(db, ctx, "print.labels", "item", None, after={"labels": total, "size": size, "lang": cfg["label_lang"]})
-    return {"ok": True, "labels": total}
+        audit.record(db, ctx, "print.labels", "item", None,
+                     after={"labels": total, "size": f"{w:g}x{h:g}", "lang": cfg["label_lang"]})
+    return {"ok": True, "labels": total, "dropped": sorted(dropped)}
