@@ -112,6 +112,10 @@ Short Egyptian Arabic, facts separated from assumptions, details stay in GitHub.
   evidence, says when a better option exists and recommends one; it does not argue trivia.
 - One accountable agent per Issue (claimed on the Issue); no overlapping branches. Codex reviews every PR
   (§2a) and may take a whole Issue; the owner of the Issue integrates.
+- Giving Codex a task: an Issue with the whole task (scope, done-when, rules) marked "Owner: Codex", then an
+  `@codex …` comment on it. Say **base branch `develop`** every time: the Codex cloud environment checks out
+  the default branch (`main`, 374 tests) — `develop` has ~517. Codex works on its own branch and PR into
+  `develop`; Claude reviews it (§2a). Don't wait on it: Claude keeps working on other Issues.
 - Second opinion (Codex security/code review, or a second agent) is required for money, stock integrity,
   migrations, permissions/isolation, backup/restore and architectural decisions; not for routine low-risk work.
 - Disagreement: summarise, compare evidence and risk, decide routine points yourself, escalate consequential
