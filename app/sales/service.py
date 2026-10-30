@@ -158,10 +158,39 @@ def discount_of(gross: int, bp: int) -> int:
     return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
 
 
-def kept_value(allocs: list[dict], kept: dict, bp: int) -> int:
-    """Net value of the units of a line the customer still keeps (after discount)."""
-    g = line_gross((kept[a["id"]], a) for a in allocs)
-    return g - discount_of(g, bp)
+def _per_batch_gross(parts) -> int:
+    """How the release before 0.4 priced a line: each batch on its own (a pack split over two batches
+    by FEFO came to 2 x 33.33 + 33.33 = 99.99). Only for reading sales it recorded (#72)."""
+    return sum(alloc_gross(q, a) for q, a in parts)
+
+
+def _rule_as_sold(allocs: list[dict], bp: int, line_total: int | None):
+    """The pricing rule that produced this line's recorded total, so returns and reports of a sale
+    use the money it was actually sold for; the current rule when the record says nothing."""
+    if line_total is not None:
+        for rule in (line_gross, _per_batch_gross):
+            g = rule((a["qty_base"], a) for a in allocs)
+            if g - discount_of(g, bp) == line_total:
+                return rule
+    return line_gross
+
+
+def line_gross_as_sold(allocs: list[dict], bp: int, line_total: int | None) -> int:
+    """Gross of a whole line under the rule it was sold with."""
+    return _rule_as_sold(allocs, bp, line_total)((a["qty_base"], a) for a in allocs)
+
+
+def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None = None) -> int:
+    """Net value of the units of a line the customer still keeps (after discount), priced the way the
+    line was sold. With the recorded total: the whole line is worth exactly that and never more, so
+    all the returns of a line add up to what was paid for it, not a piaster more or less."""
+    g = _rule_as_sold(allocs, bp, line_total)((kept[a["id"]], a) for a in allocs)
+    value = g - discount_of(g, bp)
+    if line_total is None:
+        return value
+    if all(kept[a["id"]] == a["qty_base"] for a in allocs):
+        return line_total
+    return min(value, line_total)
 
 
 def unit_price(pack_price: int, pack_size: int) -> int:
@@ -788,7 +817,7 @@ class Sales:
                     raise Conflict(f"أقصى كمية يمكن إرجاعها {remaining_returnable}", code="return_exceeds")
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                before = kept_value(allocs, kept, l["discount_bp"])
+                before = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -807,7 +836,7 @@ class Sales:
                         break
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
-                refund += before - kept_value(allocs, kept, l["discount_bp"])
+                refund += before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
             rid = new_id()
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
                             " created_by) VALUES (?,?,?,?,?,?,?)",
