@@ -84,6 +84,7 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool) -> d
     one receipt and never opens the drawer. A failure here never touches the saved sale.
     States: receipt none|sent|browser|failed; drawer none|sent|failed|unsupported (browser printing)."""
     from . import settings as rs
+    ctx.require("sales.create")            # outside the try below: refused, never reported as a printer failure
     cfg = rs.get(db, ctx.org_id)
     delivery = sale.get("kind") == "delivery"
     want_drawer = bool(cfg["drawer_on_cash"]) and (sale.get("paid_cash") or 0) > 0 and not delivery

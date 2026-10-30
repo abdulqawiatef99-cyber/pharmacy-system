@@ -2,6 +2,7 @@
 cash part of a committed store sale with or without a receipt, once per sale; delivery prints one receipt and
 never opens the drawer; reprints never open it; manual opening needs cash.manage and a reason and is
 audited with its shift and outcome; the shift report shows manual and automatic commands apart."""
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from unittest import mock
@@ -175,6 +176,19 @@ class TestCheckoutDrawer(CheckoutCase):
         with mock.patch.object(printing, "print_receipt", side_effect=RuntimeError("boom")):
             out = self.complete(self.draft(), [{"method": "cash", "amount": 3000}], receipt=True)
         self.assertEqual((out["status"], out["devices"]["receipt"]), ("completed", "failed"))
+
+    def test_device_service_checks_its_own_permission(self):
+        # Codex P1 on #89: the service itself requires sales.create, not only the completion before it
+        sid = self.draft()
+        done = self.complete(sid, [{"method": "cash", "amount": 3000}])
+        self.sent.clear()
+        accounts.add_user(self.db, self.ctx, username="viewer", full_name="مشاهد", password="Viewer-Pass-2026",
+                          role_code="assistant")
+        vctx = self.login("viewer", "Viewer-Pass-2026")
+        vctx = replace(vctx, permissions=frozenset(p for p in vctx.permissions if p != "sales.create"))
+        with self.assertRaises(Forbidden):
+            printing.checkout_devices(self.db, vctx, done, False)
+        self.assertEqual(self.sent, [])
 
     def test_browser_printing_cannot_open_the_drawer_and_says_so(self):
         rs.save(self.db, self.ctx, {"receipt_target": "browser"})
