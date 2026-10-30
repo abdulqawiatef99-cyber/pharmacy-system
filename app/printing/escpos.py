@@ -109,9 +109,16 @@ def raster_bytes(img: Image.Image) -> bytes:
     return GS + b"v0" + b"\x00" + bytes([wb & 0xFF, wb >> 8, h & 0xFF, h >> 8]) + bytes(data)
 
 
-def receipt_job(img: Image.Image, open_drawer: bool = False) -> bytes:
-    job = INIT + raster_bytes(img) + b"\n\n\n" + CUT
-    return job + DRAWER_KICK if open_drawer else job
+def receipt_job(img: Image.Image, open_drawer: bool = False, timing: str = "after", copies: int = 1) -> bytes:
+    """One print job; the drawer pulse goes before the receipt, between the image and the cut, or after
+    the cut (the owner's setting, #81), and only once whatever the number of copies."""
+    kick = DRAWER_KICK if open_drawer else b""
+    one = raster_bytes(img) + b"\n\n\n" + CUT
+    if timing == "before":
+        return INIT + kick + one * copies
+    if timing == "with":
+        return INIT + raster_bytes(img) + kick + b"\n\n\n" + CUT + one * (copies - 1)
+    return INIT + one * copies + kick
 
 
 # ---------------------------------------------------------------- transports
@@ -168,10 +175,14 @@ def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover 
 def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None) -> list[tuple[str, str, str]]:
     cfg = cfg or {}
     m = lambda p: f"{p / 100:.2f}"  # noqa: E731
-    out = [("title", cfg.get("title") or org_name, "")]
+    out = [("small", cfg["header"], "")] if cfg.get("header") else []
+    out.append(("title", cfg.get("title") or org_name, ""))
     for ln in cfg.get("lines") or []:
         if ln:
             out.append(("small", ln, ""))
+    for key, label in (("tax_no", "رقم التسجيل الضريبي"), ("cr_no", "السجل التجاري")):
+        if cfg.get(key):
+            out.append(("small", f"{label}: {cfg[key]}", ""))
     out += [("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
     for l in sale["lines"]:
         it = l["item"]

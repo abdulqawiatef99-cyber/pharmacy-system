@@ -1649,13 +1649,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
-        return J(Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
+        done = Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                     confirm_below_cost=bool(b.get("confirm_below_cost")),
-                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None))
+                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
+        if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True)
+        return J(done)
 
     @handler
     async def sales_return(req):
@@ -1798,6 +1801,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         diff = r["difference"]
         res = ("" if r["status"] != "closed" else
                f"<tr class='t'><td>{'✓ مطابق' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
+        # #81: drawer-open commands (the printer cannot confirm the drawer physically opened)
+        drawer = "".join(f"<tr><td><small>{t(d['at'])} {e(d.get('by') or '')} — {e(d.get('reason') or '')}"
+                         f"{(' : ' + e(d['note'])) if d.get('note') else ''}{' (فشل)' if d.get('outcome') == 'failed' else ''}</small></td><td></td></tr>"
+                         for d in r["drawer_manual"])
+        drawer = (f"<hr><table><tr><td>أوامر فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
+                  f"<tr><td>أوامر فتح الدرج يدويًا</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الوردية</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
@@ -1813,21 +1822,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
 {f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr></table>" if r['credit_total'] else ""}
 {f"<p>ملاحظة: {e(r['close_note'])}</p>" if r.get('close_note') else ""}
+{drawer}
 <p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
     async def print_receipt(req):
         ctx = ctx_of(req)
-        b = await body(req)
-        return J(await run_in_threadpool(printing.print_receipt, db, ctx, req.path_params["id"],
-                                         open_drawer=bool(b.get("open_drawer"))))
+        await body(req)
+        # a reprint never opens the drawer (#81): the automatic pulse belongs to the sale's completion only
+        return J(await run_in_threadpool(printing.print_receipt, db, ctx, req.path_params["id"]))
 
     @handler
     async def print_drawer(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(await run_in_threadpool(printing.open_drawer, db, ctx, str(b.get("reason", ""))))
+        return J(await run_in_threadpool(printing.open_drawer, db, ctx, str(b.get("reason", "")),
+                                         note=str(b.get("note", ""))))
 
     @handler
     async def print_printers(req):
@@ -1861,7 +1872,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return e(it.get("name_en") or it["name"])
         rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
                        for l in x["lines"])
-        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
         MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
@@ -1872,7 +1883,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع {sale['sale_no']}</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
-<div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
+<div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
 <tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
@@ -1932,7 +1943,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         cashier = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],))
         d = sale.get("delivery") or {}
         head = "".join(f"<p>{e(x)}</p>" for x in cfg["lines"] if x)
-        when = accounts.parse_iso(sale['completed_at']).astimezone().strftime('%Y-%m-%d %H:%M')
+        head += "".join(f"<p>{lbl}: {e(cfg[k])}</p>" for k, lbl in
+                        (("tax_no", "رقم التسجيل الضريبي"), ("cr_no", "السجل التجاري")) if cfg[k])
+        when = rs.fmt_when(accounts.parse_iso(sale['completed_at']).astimezone(), cfg["time_format"])
         info = [f"فاتورة رقم {sale['sale_no']}", when]
         if cfg["show_cashier"] and cashier:
             info.append(f"البائع: {e(cashier['full_name'])}")
@@ -1947,7 +1960,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
-<div class="r"><h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
+<div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}

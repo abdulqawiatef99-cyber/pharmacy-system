@@ -68,7 +68,7 @@ class TestDrawerWithoutDirectReceipt(DBTestCase):
         self.assertEqual(fp.data, escpos.INIT + escpos.DRAWER_KICK)
         self.assertEqual(cm.exception.code, "print_failed")
         self.assertTrue(cm.exception.details["drawer_opened"])
-        self.assertEqual(self.audits("cash.drawer_open"), 1)
+        self.assertEqual(self.audits("cash.drawer_auto"), 1)
         self.assertEqual(self.audits("print.receipt"), 0)
 
     def test_no_shaping_without_cash_sends_nothing(self):
@@ -88,14 +88,14 @@ class TestDrawerWithoutDirectReceipt(DBTestCase):
                 printing.print_receipt(self.db, self.ctx, self.sid, open_drawer=True, target="tcp:127.0.0.1:1")
         self.assertEqual(send.call_count, 1)
         self.assertFalse(cm.exception.details["drawer_opened"])
-        self.assertEqual(self.audits("cash.drawer_open"), 0)
+        self.assertEqual(self.audits("cash.drawer_auto"), 0)
 
     def test_browser_printing_chosen_is_its_own_code(self):
         with mock.patch.dict(os.environ, {"PHARM_PRINTER": "none"}):
             with self.assertRaises(printing.PrintFailed) as cm:
                 printing.print_receipt(self.db, self.ctx, self.sid, open_drawer=True)
         self.assertEqual(cm.exception.code, "no_printer")
-        self.assertEqual(self.audits("cash.drawer_open"), 0)
+        self.assertEqual(self.audits("cash.drawer_auto"), 0)
 
     @unittest.skipUnless(escpos.shaping_available(), NO_RAQM)
     def test_saved_printer_gets_receipt_and_drawer(self):

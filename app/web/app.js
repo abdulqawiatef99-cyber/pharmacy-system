@@ -373,7 +373,7 @@ const SCREENS = {
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
-  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة، وF9 يتمم البيع، وF2 يفتح فاتورة جديدة.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة، وF9 يتمم البيع، وF4 يختار طباعة الإيصال أو لا، وF2 يفتح فاتورة جديدة، وF8 يفتح الدرج بسبب (لمن له صلاحية الخزينة).", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
   sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
@@ -1886,16 +1886,28 @@ async function renderReceiptCfg(c) {
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الإيصال <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
+    <label class="f">مقدمة الفاتورة (أول سطر، اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
     <label class="f">اسم الصيدلية على الفاتورة (فارغ = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
     <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
     <label class="f">سطر 2 (التليفون) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
+    <label class="f">رقم التسجيل الضريبي (اختياري) <input name="tax_no" dir="ltr" value="${esc(c.tax_no || "")}"></label>
+    <label class="f">رقم السجل التجاري (اختياري) <input name="cr_no" dir="ltr" value="${esc(c.cr_no || "")}"></label>
+    <label class="f">الوقت على الإيصال <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
+    <fieldset class="lblp"><legend>الإيصال والدرج عند إتمام البيع</legend>
+      <p class="muted">الافتراضي: بدون إيصال، والكاشير يختار «🧾 إيصال» (F4) بجانب زر الإتمام. فاتورة التوصيل تطبع إيصالًا واحدًا تلقائيًا.</p>
+      ${chk("auto_receipt", "اختيار الإيصال تلقائيًا حسب قيمة الفاتورة")}
+      <label class="f">من مبلغ (ج) — صفر = كل الفواتير <input name="auto_receipt_min" type="number" min="0" step="0.01" value="${money(c.auto_receipt_min || 0)}"></label>
+      <label class="f">عدد النسخ (الطباعة المباشرة) <select name="copies">${[1, 2, 3].map((n) => `<option value="${n}" ${c.copies === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      ${chk("drawer_on_cash", "افتح الدرج عند تحصيل نقدي (حتى بدون إيصال)")}
+      <label class="f">توقيت فتح الدرج مع الإيصال <select name="drawer_timing"><option value="before" ${c.drawer_timing === "before" ? "selected" : ""}>قبل الإيصال</option><option value="with" ${c.drawer_timing === "with" ? "selected" : ""}>مع الإيصال</option><option value="after" ${(c.drawer_timing || "after") === "after" ? "selected" : ""}>بعد الإيصال (الافتراضي)</option></select></label>
+      <p class="muted">الدرج يُفتح فقط مع الطابعة المباشرة (ESC/POS). مع «browser» لا يمكن فتح الدرج إطلاقًا، والشاشة تقول ذلك للكاشير.</p></fieldset>
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
     <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
-      <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع كل بيع نقدي. browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
+      <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
       ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: الإيصال سيُطبع من المتصفح، والدرج سيُفتح فقط لو الطابعة مختارة. الحل: إعادة التثبيت بآخر مثبّت.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
@@ -1914,6 +1926,8 @@ async function renderReceiptCfg(c) {
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
+      header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
+      auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
       label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("تم الحفظ"); }
@@ -2404,7 +2418,17 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [] };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {} };
+// #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
+// over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
+// A delivery sale always prints one receipt on completion.
+function receiptWanted(sale, cfg, override) {
+  if (sale.kind === "delivery") return true;
+  if (override === true || override === false) return override;
+  return !!(cfg && cfg.auto_receipt && sale.total >= (cfg.auto_receipt_min || 0));
+}
+let RCFG = null;                      // receipt settings, read once per POS visit
+const lastSale = () => { try { return JSON.parse(sessionStorage.getItem("posLast") || "null"); } catch { return null; } };
 const METHODS = [["cash", "نقدي"], ["card", "بطاقة"], ["transfer", "تحويل"], ["credit", "آجل"]];
 // screenshot of the transfer, saved with the invoice for the owner to check (optional)
 const proofInput = (s) => `<label class="f mt proof">📎 صورة التحويل ${(s.attachments || []).length ? `<span class="badge b-ok">✓ ${(s.attachments || []).length} صورة</span>` : `<span class="muted">(اختياري — للمراجعة)</span>`}
@@ -2420,6 +2444,7 @@ async function openDraft(id) {
 
 async function viewPos() {
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
+  RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
   if (!SALE || SALE.status !== "draft" || !drafts.some((d) => d.id === SALE.id)) {
     await openDraft(drafts.length ? drafts[drafts.length - 1].id : null);
@@ -2437,11 +2462,11 @@ async function viewPos() {
       <div id="posRes" class="results"></div>
       <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F2</kbd> فاتورة جديدة</p>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F4</kbd> إيصال · <kbd>F2</kbd> فاتورة جديدة${ME.permissions.includes("cash.manage") ? ` · <kbd>F8</kbd> فتح الدرج` : ""}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
-  <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a></p><div id="posSum"></div>`;
+  <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>`;
   renderCart(); renderSide(); renderQuick();
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
     if (e.target.dataset.close) return;
@@ -2540,10 +2565,42 @@ async function newTab() {
   try { await openDraft(null); viewPos(); } catch (er) { toast(er.message, true); }
 }
 document.addEventListener("keydown", (e) => {
+  // The pharmacy scanner (HH360) sends F12 with each barcode (#81): never open the browser's tools, and on the
+  // sales screen move to the search box so the code lands there wherever the focus was. Capture phase: first.
+  if (e.key === "F12") {
+    e.preventDefault();
+    if (location.hash.startsWith("#/pos") && !$("dialog[open]")) $("#posQ")?.focus();
+  }
+}, true);
+document.addEventListener("keydown", (e) => {
   if (!location.hash.startsWith("#/pos") || $("dialog[open]")) return;
   if (e.key === "F2") { e.preventDefault(); newTab(); }
   if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
+  if (e.key === "F4") { e.preventDefault(); $("#posRcpt")?.click(); }
+  if (e.key === "F8" && ME.permissions.includes("cash.manage")) { e.preventDefault(); drawerDialog(); }
 });
+
+// Manual drawer opening (#81): cash.manage (checked by the server too), a reason, recorded with the shift.
+function drawerDialog() {
+  const d = document.createElement("dialog");
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>فتح الدرج بدون بيع</h2>
+    <label class="f">السبب <select name="reason"><option value="change">فكة</option><option value="cash_check">مراجعة النقدية</option><option value="other">أخرى</option></select></label>
+    <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»"></label>
+    <p class="muted small">يُسجَّل باسمك مع الوردية والوقت والنتيجة. الطابعة لا تؤكد فتح الدرج فعليًا: المسجَّل هو «أمر فتح».</p>
+    <div class="row"><button class="btn" value="ok">إرسال أمر الفتح</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  document.body.append(d);
+  const f = d.querySelector("form");
+  f.reason.addEventListener("change", () => { f.note.required = f.reason.value === "other"; });
+  d.addEventListener("close", async () => {
+    const ok = d.returnValue === "ok", body = { reason: f.reason.value, note: f.note.value.trim() };
+    d.remove(); $("#posQ")?.focus();
+    if (!ok) return;
+    try { await api("/api/print/drawer", { method: "POST", body }); toast("✓ أُرسل أمر فتح الدرج للطابعة"); }
+    catch (er) { toast(er.message, true); }
+  });
+  d.showModal();
+  f.reason.focus();
+}
 
 // scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
 async function addItem(item, packs, units, scanned = false) {
@@ -2649,7 +2706,10 @@ function renderSide() {
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء ببطاقة أو تحويل)</a></p>`}
-      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع وطباعة <kbd>F9</kbd></button>
+      <div class="row rcpt">
+        <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : "اطبع إيصال لهذا البيع (F4)"}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>F4</kbd></label>
+        ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
+      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع <kbd>F9</kbd></button>
     </section>`;
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -2705,6 +2765,11 @@ function renderSide() {
   document.querySelectorAll("[data-pc]").forEach((x) => x.addEventListener("change", () => { POS.parts[+x.dataset.pc].channel_id = x.value; }));
   document.querySelectorAll("[data-pa]").forEach((x) => x.addEventListener("change", () => { POS.parts[+x.dataset.pa].amount = toPiasters(x.value) || 0; renderSide(); }));
   document.querySelectorAll("[data-prm]").forEach((x) => x.addEventListener("click", () => { POS.parts.splice(+x.dataset.prm, 1); renderSide(); }));
+  $("#posRcpt").addEventListener("click", (e) => {
+    if (s.kind === "delivery") { e.preventDefault(); return; }
+    POS.rcpt[s.id] = e.target.checked;              // an explicit choice for this sale, kept when the total changes
+    e.target.closest(".rcpt").querySelector(".muted")?.remove();
+  });
   $("#posDone").addEventListener("click", () => complete(null));
 }
 
@@ -2734,7 +2799,6 @@ function currentPayments() {
 
 async function complete(findings) {
   const payments = currentPayments();
-  const cash = payments.filter((p) => p.method === "cash").reduce((a, p) => a + p.amount, 0);
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
     const blocking = r.findings.filter((f) => ["override", "block", "acknowledge"].includes(f.requires));
@@ -2757,11 +2821,18 @@ async function complete(findings) {
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id,
-              confirm_below_cost: !!SALE.confirm_below_cost } });
-    try { await api(`/api/print/receipt/${done.id}`, { method: "POST", body: { open_drawer: cash > 0 && done.kind !== "delivery" } }); }
-    catch (pe) { printInFrame(`/receipt/${done.id}`); if (pe.code === "print_failed") toast(pe.message, true); }
+              confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
+    // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
+    const dv = done.devices || { receipt: "none", drawer: "none" };
+    delete POS.rcpt[SALE.id];
+    try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
+    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}`);
     QUICK = null;
-    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`);
+    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
+      + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
+    if (dv.receipt === "failed") toast(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`, true);
+    if (dv.drawer === "failed") toast("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح", true);
+    if (dv.drawer === "unsupported") toast("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات", true);
     SALE = null; viewPos();
   } catch (er) {
     toast(er.message, true);
@@ -2778,6 +2849,17 @@ async function complete(findings) {
 
 function bindPosExtras() {
   $("#posShift").addEventListener("click", (e) => { e.preventDefault(); location.hash = "#/shift"; });
+  $("#posKick")?.addEventListener("click", (e) => { e.preventDefault(); drawerDialog(); });
+  // reprint the last sale of THIS tab (this till); never opens the drawer; one request at a time
+  $("#posLast")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const a = e.currentTarget, last = lastSale();
+    if (!last || a.dataset.busy) return;
+    a.dataset.busy = "1";
+    try { await api(`/api/print/receipt/${last.id}`, { method: "POST", body: {} }); toast("✓ أُرسل الإيصال للطابعة"); }
+    catch (er) { printInFrame(`/receipt/${last.id}`); if (er.code === "print_failed") toast(er.message, true); }
+    finally { delete a.dataset.busy; }
+  });
   $("#posDeliv").addEventListener("click", async (e) => {
     e.preventDefault();
     const ds = (await api("/api/deliveries")).deliveries;

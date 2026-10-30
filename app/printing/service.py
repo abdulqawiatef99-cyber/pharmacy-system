@@ -1,6 +1,7 @@
 """Server-side printing for the pharmacy node (printer attached to the PC)."""
 from __future__ import annotations
 
+import logging
 import os
 
 from ..core import accounts, audit
@@ -9,6 +10,8 @@ from ..core.permissions import Context
 from ..db import Database
 from ..sales.service import Sales
 from . import escpos
+
+log = logging.getLogger("pharm.print")
 
 
 class PrintFailed(DomainError):
@@ -31,6 +34,7 @@ def printer_target(db: Database | None = None, org_id: str | None = None) -> str
 
 def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool = False,
                   target: str | None = None) -> dict:
+    """open_drawer is the automatic checkout pulse only (checkout_devices); a reprint never opens the drawer."""
     ctx.require("sales.read")
     sale = Sales(db).get(ctx, sale_id)
     if sale["status"] != "completed":
@@ -38,9 +42,9 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     if open_drawer:
         ctx.require("sales.create")
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
-    when = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
     from . import settings as rs
     cfg = rs.get(db, ctx.org_id)
+    when = rs.fmt_when(accounts.parse_iso(sale["completed_at"]).astimezone(), cfg["time_format"])
     dest = target or printer_target(db, ctx.org_id)
     if dest == "none":                      # browser printing chosen: not an error to show the cashier
         raise PrintFailed("لم يتم اختيار طابعة الإيصال", code="no_printer")
@@ -49,7 +53,7 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         img = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg),
                                     width=escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM)
         rendered = True
-        escpos.send(dest, escpos.receipt_job(img, open_drawer))
+        escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
     except escpos.PrinterError as e:
         # The receipt could not be drawn here (no Arabic shaping / font) but the printer may be fine:
         # the cash drawer still opens, and the browser prints the receipt instead.
@@ -58,32 +62,93 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
                           details={"drawer_opened": bool(drawer)}) from e
     with db.transaction():
         audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer})
+        if open_drawer:
+            audit.record(db, ctx, "cash.drawer_auto", "sale", sale_id, after={"with_receipt": True, "outcome": "sent"})
     return {"ok": True}
 
 
 def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
+    """The automatic checkout pulse alone (no receipt, no feed, no cut)."""
     try:
         escpos.send(dest, escpos.INIT + escpos.DRAWER_KICK)
     except escpos.PrinterError:
         return False
     with db.transaction():
-        audit.record(db, ctx, "cash.drawer_open", "sale", sale_id,
-                     after={"reason": "بيع نقدي — الإيصال من المتصفح"})
+        audit.record(db, ctx, "cash.drawer_auto", "sale", sale_id, after={"with_receipt": False, "outcome": "sent"})
     return True
 
 
-def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = None) -> dict:
-    """Opening the drawer without a sale is sensitive: permission + reason + audit."""
-    ctx.require("cash.manage")
-    if len((reason or "").strip()) < 3:
-        raise ValidationFailed("اكتب سبب فتح الخزينة")
+def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool) -> dict:
+    """After a sale is committed (#81), once: the call site skips replays of the same request_id.
+    The drawer opens on any cash part of a store sale, with or without a receipt; a delivery sale prints
+    one receipt and never opens the drawer. A failure here never touches the saved sale.
+    States: receipt none|sent|browser|failed; drawer none|sent|failed|unsupported (browser printing)."""
+    from . import settings as rs
+    ctx.require("sales.create")            # outside the try below: refused, never reported as a printer failure
+    cfg = rs.get(db, ctx.org_id)
+    delivery = sale.get("kind") == "delivery"
+    want_drawer = bool(cfg["drawer_on_cash"]) and (sale.get("paid_cash") or 0) > 0 and not delivery
+    want_receipt = bool(receipt) or delivery
+    out = {"receipt": "none", "drawer": "none", "message": None}
+    dest = printer_target(db, ctx.org_id)
+    if dest == "none":
+        out["receipt"] = "browser" if want_receipt else "none"
+        out["drawer"] = "unsupported" if want_drawer else "none"
+        return out
     try:
-        escpos.send(target or printer_target(db, ctx.org_id), escpos.INIT + escpos.DRAWER_KICK)
+        if want_receipt:
+            try:
+                print_receipt(db, ctx, sale["id"], open_drawer=want_drawer, target=dest)
+                out["receipt"], out["drawer"] = "sent", "sent" if want_drawer else "none"
+            except PrintFailed as e:
+                out["receipt"], out["message"] = "failed", e.message
+                if want_drawer:
+                    out["drawer"] = "sent" if (e.details or {}).get("drawer_opened") else "failed"
+        elif want_drawer:
+            out["drawer"] = "sent" if _kick(db, ctx, dest, sale["id"]) else "failed"
+    except Exception as e:  # noqa: BLE001 — the sale is saved; report the device problem, never fail the sale
+        log.exception("checkout devices failed for sale %s", sale.get("id"))
+        out["message"] = str(e)
+        out["receipt"] = "failed" if want_receipt else "none"
+        out["drawer"] = "failed" if want_drawer and out["drawer"] == "none" else out["drawer"]
+    if want_drawer and out["drawer"] == "failed":
+        with db.transaction():
+            audit.record(db, ctx, "cash.drawer_auto", "sale", sale["id"], after={"outcome": "failed"})
+    return out
+
+
+DRAWER_REASONS = {"change": "فكة", "cash_check": "مراجعة النقدية", "other": "أخرى"}
+
+
+def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = None, note: str = "") -> dict:
+    """Opening the drawer without a sale is sensitive: permission + reason + audit (the shift, the outcome).
+    reason: change | cash_check | other (+ note), or free text from older screens / the settings test."""
+    ctx.require("cash.manage")
+    reason, note = (reason or "").strip(), (note or "").strip()
+    if reason in DRAWER_REASONS:
+        if reason == "other" and len(note) < 3:
+            raise ValidationFailed("اكتب سبب فتح الدرج")
+        label = DRAWER_REASONS[reason]
+    elif len(reason) < 3:
+        raise ValidationFailed("اكتب سبب فتح الخزينة")
+    else:
+        label = reason
+    from ..sales import cash
+    shift = cash.open_shift_id(db, ctx)
+    dest = target or printer_target(db, ctx.org_id)
+    error = None
+    try:
+        if dest == "none":
+            raise escpos.PrinterError("الطباعة من المتصفح لا تستطيع فتح الدرج — اختر طابعة الإيصال المباشرة في الإعدادات")
+        escpos.send(dest, escpos.INIT + escpos.DRAWER_KICK)
     except escpos.PrinterError as e:
-        raise PrintFailed(str(e)) from e
+        error = str(e)
     with db.transaction():
-        audit.record(db, ctx, "cash.drawer_open", "cash_drawer", None, after={"reason": reason.strip()})
-    return {"ok": True}
+        audit.record(db, ctx, "cash.drawer_open", "cash_shift", shift,
+                     after={"reason": label, "note": note[:200], "outcome": "failed" if error else "sent"})
+    if error:
+        raise PrintFailed(error)
+    return {"ok": True, "sent": True}
 
 
 def printers(db: Database, ctx: Context) -> dict:
