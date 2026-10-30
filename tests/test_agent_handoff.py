@@ -82,6 +82,26 @@ class ClaimTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             checkpoint(state, "test_run_001", "codex", "running", "Resume", [])
 
+    def test_malformed_events_and_absent_active_rejected(self):
+        for events in [None, "bad", {}, ["bad"], [{"phase": "running", "note": "Next"}],
+                       [{"phase": "running", "note": "Next", "evidence": ["bad-url"]}]]:
+            state = reserved()
+            state["runs"]["test_run_001"]["events"] = events
+            with self.subTest(events=events), self.assertRaises(ValueError):
+                validate(state)
+        state = empty()
+        del state["active"]
+        with self.assertRaises(ValueError):
+            validate(state)
+
+    def test_last_event_replay_at_capacity(self):
+        state = reserved()
+        for n in range(50):
+            state = checkpoint(state, "test_run_001", "codex", "running", f"Next: {n}", [])
+        self.assertEqual(checkpoint(state, "test_run_001", "codex", "running", "Next: 49", []), state)
+        with self.assertRaises(ValueError):
+            checkpoint(state, "test_run_001", "codex", "running", "New checkpoint", [])
+
     def test_wrong_owner_and_illegal_transition(self):
         with self.assertRaises(ValueError):
             checkpoint(reserved(), "test_run_001", "claude", "running", "Next", [])
