@@ -165,7 +165,12 @@ class TestLabelPages(APICase):
         self.assertNotIn("40.00", page)
         css = self.c.get("/labels/page.css", params={"w": "38", "h": "13"})
         self.assertIn("@page { size: 38mm 13mm; margin: 0; }", css.text)
-        self.assertIn(".lb { width: 38mm; height: 13mm; }", css.text)
+        self.assertIn(".lb { width: 38mm; height: 13mm; padding: 0.6mm; }", css.text)
+        # Codex on #90: the page's margin is the one the bar-width check uses, and nothing else pads a label
+        self.assertEqual(lb.PAD_MM, 0.6)
+        static = (Path(__file__).resolve().parent.parent / "app" / "web" / "labels.css").read_text(encoding="utf-8")
+        self.assertNotRegex(static.split(".lb .t")[0], r"\.lb \{[^}]*padding")
+        self.assertNotIn("padding", css.text.split("padding: 0.6mm")[1])
         self.assertEqual(self.c.get("/labels/page.css", params={"w": "5", "h": "13"}).status_code, 400)
         rs.save(self.db, self.ctx, {"label_lang": "a4", "label_a4": "6x24"})
         page = self.c.get("/labels", params={"items": f"{self.pan}:1"}).text

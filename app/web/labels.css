@@ -1,7 +1,7 @@
 /* Barcode labels (browser printing). Page and label size come from /labels/page.css (any size, or an A4 grid).
    Layout as in E-Stock (#84): phone · pharmacy name / barcode / item name / code · expiry · price. */
 body { margin: 0; font-family: Tahoma, "Noto Sans Arabic", sans-serif; color: #000; background: #fff; }
-.lb { box-sizing: border-box; display: flex; flex-direction: column; padding: 1mm 1.5mm; page-break-after: always; overflow: hidden; }
+.lb { box-sizing: border-box; display: flex; flex-direction: column; page-break-after: always; overflow: hidden; }
 .lb .t, .lb .c { display: flex; justify-content: space-between; gap: 1mm; font-size: 7pt; direction: ltr; white-space: nowrap; overflow: hidden; }
 .lb .t span[dir="rtl"] { overflow: hidden; text-overflow: ellipsis; }
 .lb .b { flex: 1; display: flex; min-height: 4mm; }

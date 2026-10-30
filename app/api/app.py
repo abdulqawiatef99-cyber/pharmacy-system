@@ -2032,9 +2032,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                    f" grid-auto-rows: {h:g}mm; gap: 0; padding: 0; }}\n.a4 .lb {{ page-break-after: auto; break-inside: avoid; }}\n")
         else:
             css = f"@page {{ size: {w:g}mm {h:g}mm; margin: 0; }}\n"
-        css += f".lb {{ width: {w:g}mm; height: {h:g}mm; }}\n"
+        # the margin the bar-width check assumes (labels.PAD_MM): the barcode is never stretched thinner than checked
+        css += f".lb {{ width: {w:g}mm; height: {h:g}mm; padding: {lb.PAD_MM:g}mm; }}\n"
         if h < 20:
-            css += ".lb { padding: 0.5mm 1mm; } .lb .n, .lb .t, .lb .c { font-size: 6pt; } .lb .c b { font-size: 6.5pt; }\n"
+            css += ".lb .n, .lb .t, .lb .c { font-size: 6pt; } .lb .c b { font-size: 6.5pt; }\n"
         return Response(css, media_type="text/css", headers={"Cache-Control": "no-cache"})
 
     @handler

@@ -54,6 +54,7 @@ DEFAULT_FIELDS = {"pharmacy": False, "phone": False, "name": True, "barcode": Tr
 DROP_ORDER = ("phone", "pharmacy")      # dropped first when the label is too small; the barcode never shrinks
 MIN_BAR_MM = 4.0                        # shortest bars still read easily by a hand scanner
 MIN_MODULE_MM = 0.25                    # narrowest bar: 2 dots at 203 dpi, 3 at 300
+PAD_MM = 0.6                            # label margin: the same in the image and on the browser page (Codex on #90)
 
 
 def _rtl(text: str) -> bool:
@@ -76,7 +77,7 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     H = dots(h_mm, dpi)
     line = max(12, min(dots(h_mm, dpi) // 7, dots(3.2, dpi)))
     row = int(line * 1.2)
-    pad = max(3, dots(0.6, dpi))
+    pad = max(3, dots(PAD_MM, dpi))
     dropped = []
 
     def bar_room():
@@ -105,7 +106,7 @@ def bar_bits(value: str) -> str:
 def bar_module(value: str, w_mm: float, dpi: int) -> int:
     """Width of one bar in dots across the label (quiet zones of 10 modules); refuses below 0.25 mm."""
     W = dots(w_mm, dpi)
-    module = (W - 2 * max(3, dots(0.6, dpi))) // (len(bar_bits(value)) + 20)
+    module = (W - 2 * max(3, dots(PAD_MM, dpi))) // (len(bar_bits(value)) + 20)
     if module < max(2, dots(MIN_MODULE_MM, dpi)):
         raise PrinterError("الكود أطول من عرض الملصق؛ اختر مقاسًا أعرض")
     return module
@@ -127,7 +128,7 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     fp = font_path or find_font()
     line = max(12, min(H // 7, dots(3.2, dpi)))
     row = int(line * 1.2)
-    pad = max(3, dots(0.6, dpi))
+    pad = max(3, dots(PAD_MM, dpi))
     font = ImageFont.truetype(fp, line)
     small = ImageFont.truetype(fp, max(11, int(line * 0.9)))
     y = pad
