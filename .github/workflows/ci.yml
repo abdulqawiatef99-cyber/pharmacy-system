@@ -71,11 +71,31 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: |
-          python scripts/validate_local_release.py --output "$env:RUNNER_TEMP/pharmacy-validation"
-          if ($LASTEXITCODE -ne 0) {
-            Get-ChildItem "$env:RUNNER_TEMP/pharmacy-validation" -Filter *.log | ForEach-Object {
-              Write-Output "--- $($_.Name) ---"
-              Get-Content $_.FullName -Tail 60
+          $ErrorActionPreference = 'Continue'
+          $out = Join-Path $env:RUNNER_TEMP 'pharmacy-validation'
+          $stdout = Join-Path $env:RUNNER_TEMP 'validate-stdout.log'
+          python scripts/validate_local_release.py --output $out *>&1 | Tee-Object -FilePath $stdout
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Job logs are not reachable from agent sessions, so the failure goes into annotations
+            # (readable through the API), one per log that has a failure line.
+            $emitted = 0
+            $logs = @(Get-Item $stdout) + @(Get-ChildItem $out -Filter *.log -ErrorAction SilentlyContinue)
+            foreach ($f in $logs) {
+              if ($f.FullName -ne $stdout) {
+                Write-Output "--- $($f.Name) ---"
+                Get-Content $f.FullName -Tail 60
+              }
+              $lines = @(Get-Content $f.FullName)
+              $hit = $lines | Select-String -Pattern '^(FAIL:|ERROR:|Traceback)|FAILED|\bFAIL\b' | Select-Object -First 1
+              if (-not $hit) { continue }
+              $txt = ($lines | Select-Object -Skip ($hit.LineNumber - 1) -First 150) -join "`n"
+              $txt = $txt.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows validation $($f.BaseName)::$txt"
+              $emitted++
+            }
+            if ($emitted -eq 0) {
+              Write-Output "::error title=Windows validation::exit code $code; no failure line found in the logs"
             }
             exit 1
           }
