@@ -64,6 +64,19 @@ class TestDefaultDataDir(unittest.TestCase):
         with mock.patch.object(config, "os", SimpleNamespace(name="posix", environ={})):
             self.assertEqual(config.default_data_dir(), Path("data"))
 
+    def test_release_bootstrap_uses_the_same_folder(self):
+        # Codex on #91: code selection (active / pending release) reads the same data folder as the commands
+        import release_bootstrap as rb
+        for name, env in (("nt", {"LOCALAPPDATA": "/u/AppData/Local"}), ("posix", {}),
+                          ("nt", {"LOCALAPPDATA": "/u/L", "PHARM_DATA_DIR": "/srv/d"})):
+            fake = SimpleNamespace(name=name, environ=env)
+            with mock.patch.object(config, "os", fake), mock.patch.object(rb, "os", fake), \
+                    mock.patch.dict(os.environ, {k: v for k, v in env.items() if k == "PHARM_DATA_DIR"}, clear=False):
+                if "PHARM_DATA_DIR" not in env:
+                    os.environ.pop("PHARM_DATA_DIR", None)
+                expect = config.load().data_dir if "PHARM_DATA_DIR" in env else config.default_data_dir().resolve()
+                self.assertEqual(rb.data_dir(), expect, (name, env))
+
     def test_env_still_wins(self):
         with mock.patch.dict(os.environ, {"PHARM_DATA_DIR": "/srv/pharm/data"}):
             self.assertEqual(config.load().data_dir, Path("/srv/pharm/data").resolve())

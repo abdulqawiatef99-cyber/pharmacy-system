@@ -217,13 +217,24 @@ def adopt_installer(legacy: Path, home: Path) -> dict | None:
     return {"sha": sha, "ref": build.get("ref")}
 
 
+def data_dir() -> Path:
+    """Same default as app.config.default_data_dir (this module runs before any app code is chosen, so it
+    cannot import it; tests keep the two equal): PHARM_DATA_DIR, else the installed folder on Windows."""
+    if os.environ.get("PHARM_DATA_DIR"):
+        return Path(os.environ["PHARM_DATA_DIR"]).resolve()
+    local = os.environ.get("LOCALAPPDATA")
+    if os.name == "nt" and local:
+        return (Path(local) / "PharmacyPlatform" / "data").resolve()
+    return Path("data").resolve()
+
+
 def run_selected(root: Path) -> None:
     # Explicit candidate checks must not redirect back to the currently active code.
     # Recovery must remain callable even if the selected release was damaged.
     if os.environ.get("PHARM_RELEASE_CANDIDATE") == "1" or (
             len(sys.argv) > 1 and sys.argv[1] == "update" and "--rollback" in sys.argv):
         return
-    home = code_home(Path(os.environ.get("PHARM_DATA_DIR", "data")).resolve())
+    home = code_home(data_dir())        # the installed program's release state too (Codex on #91)
     if (len(sys.argv) > 1 and sys.argv[1] == "serve"
             and read_state(home).get("pending")
             and os.environ.get("PHARM_LAUNCHER") != "1"):
