@@ -75,46 +75,51 @@ def _extract_db(z: zipfile.ZipFile, tmp: str) -> Path:
     return target
 
 
-def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
-    """Check originals against the snapshot's registry, including legacy ZIPs.
+def _attachment_checks(db: Database, z: zipfile.ZipFile) -> list[tuple[dict, str | None]]:
+    """(source row, problem or None) for every registered original, legacy ZIPs included.
 
     Stored paths are metadata only: never open an old machine's absolute path.
     Both writers use org/name or org/transfers/name beneath the upload root.
     """
-    names = z.namelist()
-    if len(names) != len(set(names)):
-        return ["duplicate members in backup archive"]
-    problems = []
-    for row in db.all("SELECT id, org_id, storage_path, size_bytes, sha256 FROM source_files"):
+    out = []
+    for row in db.all("SELECT id, org_id, filename, storage_path, size_bytes, sha256 FROM source_files"):
+        row = dict(row)
         org = str(row["org_id"])
         stored = PurePosixPath(str(row["storage_path"]).replace("\\", "/"))
         parent = stored.parent
         if (not org or org in (".", "..") or "/" in org or "\\" in org
                 or stored.name in ("", ".", "..")):
-            problems.append(f"invalid attachment path for source {row['id']}")
+            out.append((row, f"invalid attachment path for source {row['id']}"))
             continue
         if parent.name == org:
             member = f"uploads/{org}/{stored.name}"
         elif parent.name == "transfers" and parent.parent.name == org:
             member = f"uploads/{org}/transfers/{stored.name}"
         else:
-            problems.append(f"unknown attachment layout for source {row['id']}")
+            out.append((row, f"unknown attachment layout for source {row['id']}"))
             continue
         try:
             info = z.getinfo(member)
         except KeyError:
-            problems.append(f"missing original attachment for source {row['id']}")
+            out.append((row, f"missing original attachment for source {row['id']}"))
             continue
         if info.is_dir() or info.file_size != row["size_bytes"]:
-            problems.append(f"attachment size mismatch for source {row['id']}")
+            out.append((row, f"attachment size mismatch for source {row['id']}"))
             continue
         digest = hashlib.sha256()
         with z.open(info) as src:
             while chunk := src.read(1 << 20):
                 digest.update(chunk)
-        if digest.hexdigest() != row["sha256"]:
-            problems.append(f"attachment checksum mismatch for source {row['id']}")
-    return problems
+        out.append((row, None if digest.hexdigest() == row["sha256"]
+                    else f"attachment checksum mismatch for source {row['id']}"))
+    return out
+
+
+def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
+    names = z.namelist()
+    if len(names) != len(set(names)):
+        return ["duplicate members in backup archive"]
+    return [p for _, p in _attachment_checks(db, z) if p]
 
 
 def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> Path:
