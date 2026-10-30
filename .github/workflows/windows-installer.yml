@@ -18,7 +18,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Publish gate: a push to main builds and publishes only if it is the merge of a PR whose
+  # "CI / linux" passed (free substitute for branch protection; see branch-guard.yml).
+  gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Verify the push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          FORCED: ${{ github.event.forced }}
+        run: .github/scripts/verify_push.sh
+
   build:
+    needs: gate
+    if: ${{ !cancelled() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
