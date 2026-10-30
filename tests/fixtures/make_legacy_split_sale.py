@@ -4,8 +4,8 @@ Run on the OLD code (CI checks out main into _release and sets PHARM_RELEASE_SRC
 
     cd <release checkout> && PYTHONPATH=. python <this repo>/tests/fixtures/make_legacy_split_sale.py <out dir>
 
-One pack of 3 (100.00) sold from two batches of the same price (FEFO: 2 + 1 units), once paid in cash
-and once on a customer's account. The release priced each batch on its own: 2 x 33.33 + 33.33 = 99.99.
+One pack of 3 (100.00) sold from two batches of the same price (FEFO: 2 + 1 units): paid in cash, on a
+customer's account, and in cash with one unit already returned under the release. The release priced each batch on its own: 2 x 33.33 + 33.33 = 99.99.
 Prints the database path; the sale ids are in the JSON file next to it. No real data.
 """
 import json
@@ -31,7 +31,7 @@ def main(out: Path) -> Path:
         d.cd.open(d.ctx, 0)
         cid = d.s.create_customer(d.ctx, name="عميل تجريبي", credit_limit=100000)
         ids = {}
-        for key, customer, credit in (("cash", None, False), ("credit", cid, True)):
+        for key, customer, credit in (("cash", None, False), ("credit", cid, True), ("partial", None, False)):
             it = cat.create_item(d.db, d.ctx, {"name_en": f"Split Pack 3 {key}", "pack_size": 3, "public_price": 10000})
             with d.db.transaction():
                 for no, days, qty in (("A", 200, 2), ("B", 400, 30)):
@@ -44,6 +44,9 @@ def main(out: Path) -> Path:
             d.s.complete(d.ctx, sid, paid_cash=0 if credit else total, paid_card=0, on_credit=total if credit else 0,
                          safety_decisions={i: "ok" for i in range(len(f))})
             ids[key] = sid
+            if key == "partial":
+                line = d.db.one("SELECT id FROM sale_lines WHERE sale_id=?", (sid,))["id"]
+                d.s.return_items(d.ctx, sid, {line: 1}, refund_method="cash", reason="synthetic return")
         out.mkdir(parents=True, exist_ok=True)
         target = out / "legacy-split.db"
         d.db.backup_to(target)

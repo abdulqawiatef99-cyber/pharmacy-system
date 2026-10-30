@@ -95,21 +95,26 @@ class TestLegacySplitSales(unittest.TestCase):
         return self.db.one("SELECT total, returned_total FROM sales WHERE id=?", (self.ids[key],))
 
     def test_release_recorded_99_99(self):
-        self.assertEqual(self.sale()["total"], 9999)
-        self.assertEqual(self.sale("credit")["total"], 9999)
+        for key in ("cash", "credit", "partial"):
+            self.assertEqual(self.sale(key)["total"], 9999, key)
+
+    def drawer(self):
+        return CashDrawer(self.db).summary(self.ctx)["expected_cash"]
 
     def test_full_cash_return_refunds_what_was_paid(self):
+        start = self.drawer()
         r = self.s.return_items(self.ctx, self.ids["cash"], {self.line: 3}, refund_method="cash", reason="synthetic return")
         self.assertEqual(r["refund"], 9999)
         self.assertEqual(self.sale()["returned_total"], 9999)
-        self.assertEqual(CashDrawer(self.db).summary(self.ctx)["expected_cash"], 9999 - 9999)   # opened with 0
+        self.assertEqual(start - self.drawer(), 9999)                            # exactly what was paid
 
     def test_partial_returns_add_up_to_what_was_paid(self):
+        start = self.drawer()
         r1 = self.s.return_items(self.ctx, self.ids["cash"], {self.line: 1}, refund_method="cash", reason="synthetic return")
         r2 = self.s.return_items(self.ctx, self.ids["cash"], {self.line: 2}, refund_method="cash", reason="synthetic return")
         self.assertEqual((r1["refund"], r2["refund"]), (3333, 6666))
         self.assertEqual(self.sale()["returned_total"], 9999)
-        self.assertEqual(CashDrawer(self.db).summary(self.ctx)["expected_cash"], 0)
+        self.assertEqual(start - self.drawer(), 9999)
 
     def test_credit_return_credits_what_was_charged(self):
         line = self.db.one("SELECT id FROM sale_lines WHERE sale_id=?", (self.ids["credit"],))["id"]
@@ -118,6 +123,13 @@ class TestLegacySplitSales(unittest.TestCase):
         cust = self.db.one("SELECT customer_id FROM sales WHERE id=?", (self.ids["credit"],))["customer_id"]
         self.assertEqual(self.db.one("SELECT sum(amount) n FROM customer_ledger WHERE org_id=? AND customer_id=?",
                                      (self.ctx.org_id, cust))["n"], 0)
+
+    def test_rest_of_a_sale_partly_returned_under_the_release(self):
+        self.assertEqual(self.sale("partial")["returned_total"], 3333)            # the release refunded 33.33
+        line = self.db.one("SELECT id FROM sale_lines WHERE sale_id=?", (self.ids["partial"],))["id"]
+        r = self.s.return_items(self.ctx, self.ids["partial"], {line: 2}, refund_method="cash", reason="synthetic return")
+        self.assertEqual(r["refund"], 6666)
+        self.assertEqual(self.sale("partial")["returned_total"], 9999)
 
     def test_reports_keep_the_recorded_value(self):
         d = sales.local_today().isoformat()   # the report works in local days (#52)
