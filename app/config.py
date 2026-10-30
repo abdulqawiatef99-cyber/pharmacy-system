@@ -28,8 +28,17 @@ class Settings:
         return self.backup_dir or self.data_dir.parent / "backups"
 
 
+def default_data_dir() -> Path:
+    """Without PHARM_DATA_DIR: the installed program's data folder on Windows (#80), so a maintenance command
+    run from any folder reaches the real data instead of a new empty one; elsewhere ./data as before."""
+    local = os.environ.get("LOCALAPPDATA")
+    if os.name == "nt" and local:
+        return Path(local) / "PharmacyPlatform" / "data"
+    return Path("data")
+
+
 def load() -> Settings:
-    data = Path(os.environ.get("PHARM_DATA_DIR", "data")).resolve()
+    data = (Path(os.environ["PHARM_DATA_DIR"]) if os.environ.get("PHARM_DATA_DIR") else default_data_dir()).resolve()
     return Settings(
         data_dir=data,
         db_path=Path(os.environ.get("PHARM_DB_PATH", data / "pharmacy.db")),

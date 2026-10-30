@@ -3,8 +3,9 @@
 
   python manage.py init --pharmacy "صيدلية ..." --username owner     (asks for password)
   python manage.py serve [--host 127.0.0.1] [--port 8000]
-  python manage.py backup [--dest backups/]
+  python manage.py backup [--dest DIR]        (default: backups/ next to the data folder)
   python manage.py verify                      (ledger vs balances consistency)
+  (maintenance commands never create a database; only init and serve do — #80)
   python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
@@ -31,7 +32,13 @@ from app.db import Database
 from app.inventory import service as inventory
 
 
-def _db(s: config.Settings) -> Database:
+def _db(s: config.Settings, create: bool = False) -> Database:
+    """Open (and migrate) the pharmacy database. Only init and serve may create a new one (#80): a maintenance
+    command run from the wrong folder or without PHARM_DATA_DIR must stop, not back up an empty database."""
+    if not create and not s.db_path.exists():
+        sys.exit(f"لا توجد قاعدة بيانات في: {s.db_path}\n"
+                 "حدد مكان البيانات: set PHARM_DATA_DIR=%LOCALAPPDATA%\\PharmacyPlatform\\data ثم أعد الأمر. "
+                 "(no database here; nothing was created)")
     s.data_dir.mkdir(parents=True, exist_ok=True)
     db = Database(s.db_path)
     applied = db.migrate()
@@ -50,7 +57,7 @@ def _db(s: config.Settings) -> Database:
 
 
 def cmd_init(a, s):
-    db = _db(s)
+    db = _db(s, create=True)
     pw = a.password or getpass.getpass("كلمة مرور المالك (10 حروف على الأقل): ")
     org = accounts.create_organization(db, name=a.pharmacy, owner_username=a.username,
                                        owner_full_name=a.full_name or a.username,
@@ -65,14 +72,16 @@ def cmd_serve(a, s):
         print("تنبيه: البرنامج مفتوح على شبكة الصيدلية (واي فاي) من غير HTTPS — استخدمه على شبكة الصيدلية المقفولة بباسورد بس.",
               file=sys.stderr)
     os.environ["PHARM_HOST"] = a.host
-    uvicorn.run(create_app(_db(s), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
+    uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
                 server_header=False)
 
 
 def cmd_backup(a, s):
     from app.core import backup
     db = _db(s)
-    out = backup.create(db, s.upload_dir, Path(a.dest))
+    if not db.one("SELECT count(*) n FROM organizations")["n"]:
+        sys.exit(f"قاعدة البيانات في {s.db_path} فاضية (لا توجد صيدلية): لم تُعمل نسخة. تأكد من PHARM_DATA_DIR.")
+    out = backup.create(db, s.upload_dir, Path(a.dest) if a.dest else s.backup_path)
     info = backup.verify_archive(out)
     if info["problems"]:
         print("BACKUP FAILED VERIFICATION:", info["problems"])
@@ -107,7 +116,8 @@ def cmd_restore(a, s):
     if not a.yes:
         print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
         sys.exit(2)
-    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir, Path(a.pre_dir))
+    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
+                       Path(a.pre_dir) if a.pre_dir else s.backup_path / "pre-restore")
     print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
@@ -203,7 +213,7 @@ def cmd_import_estock(a, s):
         target = Database(tmp / "copy.db")
         print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
     else:
-        out = backup.create(db, s.upload_dir, Path(a.backup_dir))
+        out = backup.create(db, s.upload_dir, Path(a.backup_dir) if a.backup_dir else s.backup_path)
         if backup.verify_archive(out)["problems"]:
             sys.exit("النسخة الاحتياطية فشلت؛ مفيش استيراد")
         print("نسخة احتياطية قبل الاستيراد:", out)
@@ -283,7 +293,7 @@ def cmd_update(a, s):
         if s.db_path.exists():
             db = Database(s.db_path)  # read/snapshot only; do NOT call _db or migrate
             try:
-                out = backup.create(db, s.upload_dir, Path(a.backup_dir))
+                out = backup.create(db, s.upload_dir, Path(a.backup_dir) if a.backup_dir else s.backup_path)
                 if backup.verify_archive(out)["problems"]:
                     raise updater.UpdateError("Backup verification failed; the selected code is unchanged")
             finally:
@@ -325,7 +335,7 @@ def main(argv=None):
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
     b = sub.add_parser("backup")
-    b.add_argument("--dest", default="backups")
+    b.add_argument("--dest", default=None, help="default: the backups folder next to the data folder")
     v = sub.add_parser("verify")
     v.add_argument("archive", nargs="?", help="verify a backup .zip instead of the live database")
     pf = sub.add_parser("preflight", help="read-only report on a backup before moving data to another PC")
@@ -338,7 +348,7 @@ def main(argv=None):
     rs = sub.add_parser("restore")
     rs.add_argument("archive")
     rs.add_argument("--yes", action="store_true")
-    rs.add_argument("--pre-dir", default="backups/pre-restore")
+    rs.add_argument("--pre-dir", default=None)
     f = sub.add_parser("feature")
     f.add_argument("org_id")
     f.add_argument("feature")
@@ -354,7 +364,7 @@ def main(argv=None):
     ie.add_argument("--username", required=True)
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
-    ie.add_argument("--backup-dir", default="backups")
+    ie.add_argument("--backup-dir", default=None)
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
@@ -362,7 +372,7 @@ def main(argv=None):
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
     up.add_argument("--ref", default="main")
     up.add_argument("--force", action="store_true")
-    up.add_argument("--backup-dir", default="backups")
+    up.add_argument("--backup-dir", default=None)
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
