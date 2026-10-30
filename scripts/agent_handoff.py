@@ -14,7 +14,8 @@ PHASES = {"claimed", "running", "review", "blocked"}
 
 
 def validate(state):
-    if not isinstance(state, dict) or state.get("version") != 1:
+    if (not isinstance(state, dict) or type(state.get("version")) is not int
+            or state.get("version") != 1 or "active" not in state):
         raise ValueError("Unsupported journal")
     runs = state.get("runs")
     if not isinstance(runs, dict) or len(runs) > 100:
@@ -28,6 +29,15 @@ def validate(state):
         identity(run.get("issue"), run.get("agent"), key, run.get("branch"))
         if (key == active) != (run["phase"] != "released"):
             raise ValueError("Inconsistent active claim")
+        events = run.get("events")
+        if not isinstance(events, list) or len(events) > 50:
+            raise ValueError("Invalid bounded event history")
+        for event in events:
+            if (not isinstance(event, dict) or event.get("phase") not in PHASES | {"released"}
+                    or not isinstance(event.get("note"), str) or not event["note"].strip()
+                    or len(event["note"]) > 2000):
+                raise ValueError("Invalid checkpoint event")
+            evidence_links(event.get("evidence"))
     return state
 
 
@@ -82,6 +92,15 @@ def claim(state, issue, agent, run_id, branch):
     return result
 
 
+def evidence_links(evidence):
+    if not isinstance(evidence, list) or len(evidence) > 10 or any(
+        not isinstance(url, str) or not re.fullmatch(
+            rf"https://github\.com/{re.escape(REPO)}/(?:pull/\d+|commit/[a-f0-9]{{40}}|issues/\d+(?:#issuecomment-\d+)?|actions/runs/\d+)", url
+        ) for url in evidence
+    ):
+        raise ValueError("Use bounded evidence links in this repository")
+
+
 def checkpoint(state, run_id, agent, phase, note, evidence):
     validate(state)
     if state["active"] != run_id or state["runs"][run_id]["agent"] != agent:
@@ -93,19 +112,14 @@ def checkpoint(state, run_id, agent, phase, note, evidence):
         raise ValueError("Invalid transition or missing checkpoint/next step")
     if phase == "review" and not evidence:
         raise ValueError("Review requires a commit or PR evidence URL")
-    if not isinstance(evidence, list) or len(evidence) > 10 or any(
-        not isinstance(url, str) or not re.fullmatch(
-            rf"https://github\.com/{re.escape(REPO)}/(?:pull/\d+|commit/[a-f0-9]{{40}}|issues/\d+(?:#issuecomment-\d+)?|actions/runs/\d+)", url
-        ) for url in evidence
-    ):
-        raise ValueError("Use bounded evidence links in this repository")
-    if len(state["runs"][run_id]["events"]) >= 50:
-        raise ValueError("Receipt event limit reached; reconcile manually")
+    evidence_links(evidence)
     result = copy.deepcopy(state)
     run = result["runs"][run_id]
     event = dict(phase=phase, note=note, evidence=evidence)
     if run["events"] and run["events"][-1] == event:
         return result
+    if len(run["events"]) >= 50:
+        raise ValueError("Receipt event limit reached; reconcile manually")
     run["phase"] = phase
     run["events"].append(event)
     return result
