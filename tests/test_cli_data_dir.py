@@ -91,7 +91,8 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
     and an explicit folder still wins."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="pharm-cli-"))
+        # resolve(): Windows temp paths come as 8.3 short names (RUNNER~1); the app resolves the long one
+        self.tmp = Path(tempfile.mkdtemp(prefix="pharm-cli-")).resolve()
         self.data = self.tmp / "home" / "data"
         # only this data folder: the Windows release check sets PHARM_DB_PATH / PHARM_BACKUP_DIR for the whole run
         env = {k: v for k, v in os.environ.items() if not k.startswith("PHARM_")}
@@ -100,7 +101,11 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         self.addCleanup(self.env.stop)
         import manage
         self.manage = manage
-        manage.main(["init", "--pharmacy", "صيدلية تجربة", "--username", "owner", "--password", "Owner-Pass-2026"])
+        # init in its own process: an open connection here would lock the database files on Windows
+        r = subprocess.run([sys.executable, str(ROOT / "manage.py"), "init", "--pharmacy", "صيدلية تجربة",
+                            "--username", "owner", "--password", "Owner-Pass-2026"], capture_output=True, text=True,
+                           encoding="utf-8", env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.cwd = os.getcwd()
         os.chdir(self.tmp)                                      # a relative default would land here
         self.addCleanup(os.chdir, self.cwd)
