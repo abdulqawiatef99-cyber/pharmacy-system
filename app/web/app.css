@@ -399,3 +399,4 @@ details.cols .menu { position: absolute; inset-inline-end: 0; z-index: 15; backg
 ol.order { padding: 0; margin: 0 0 8px; } ol.order li { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
 fieldset.lblp { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { grid-column: 1 / -1; margin: 0; }
+.lbprev { grid-column: 1 / -1; } .lbprev img { display: block; background: #fff; border: 1px dashed var(--line); image-rendering: pixelated; max-width: 100%; height: auto; }

@@ -1094,10 +1094,12 @@ async function altPanel(itemId, box, onAdd = null) {
 
 // barcode labels: straight to the label printer when one is set up, else the browser page
 let LABEL_CFG = null;
+const labelSize = (f) => (f.label_preset.value === "custom" ? `${+f.label_w.value}x${+f.label_h.value}` : f.label_preset.value);
+const labelFields = (f) => Object.fromEntries([...f.querySelectorAll("[data-lf]")].map((x) => [x.dataset.lf, x.checked]));
 async function printLabels(list) {
   const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
-  if (LABEL_CFG.label_lang === "browser") return page();
+  if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
   catch (er) { toast(er.message, true); if (er.code === "print_failed") page(); }
 }
@@ -1910,9 +1912,20 @@ async function renderReceiptCfg(c) {
       <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
       ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: الإيصال سيُطبع من المتصفح، والدرج سيُفتح فقط لو الطابعة مختارة. الحل: إعادة التثبيت بآخر مثبّت.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
-    <label class="f">مقاس ملصق الباركود <select name="label_size">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}</select></label>
+    <fieldset class="lblp"><legend>شكل الملصق</legend>
+      <label class="f">المقاس <select name="label_preset">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}<option value="custom" ${["38x25", "50x30", "58x40"].includes(c.label_size) ? "" : "selected"}>مقاس آخر (اكتبه)</option></select></label>
+      <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.1" value="${esc(c.label_size.split("x")[0])}"></label>
+        <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.1" value="${esc(c.label_size.split("x")[1])}"></label></div>
+      <p class="muted">قِس ملصقًا واحدًا من البكرة (بدون المسافة بينه وبين اللي بعده). المسافة بين الملصقات تحت في «طابعة الملصقات».</p>
+      <div>${[["pharmacy", "اسم الصيدلية"], ["phone", "التليفون"], ["name", "اسم الصنف"], ["barcode", "الباركود"], ["digits", "أرقام الباركود"], ["code", "كود الصنف الداخلي"], ["expiry", "الصلاحية (أقرب تشغيلة)"], ["price", "السعر"]]
+        .map(([k, t]) => `<label class="chk"><input type="checkbox" data-lf="${k}" ${c.label_fields[k] ? "checked" : ""}> ${t}</label>`).join("")}</div>
+      <label class="f">اسم الصيدلية على الملصق (فارغ = اسمها في الإيصال) <input name="label_pharmacy" value="${esc(c.label_pharmacy || "")}"></label>
+      <label class="f">التليفون على الملصق (فارغ = سطر التليفون في الإيصال) <input name="label_phone" dir="ltr" value="${esc(c.label_phone || "")}"></label>
+      <label class="f">شبكة ورق A4 (أعمدة × صفوف) <input name="label_a4" dir="ltr" value="${esc(c.label_a4 || "6x24")}" placeholder="6x24"></label>
+      <p class="muted">لو المقاس صغير على الحقول المختارة، التليفون يتشال الأول ثم اسم الصيدلية؛ الباركود لا يصغر عن الحد المقروء.</p>
+      <div class="lbprev"><img id="lbPrev" alt="معاينة الملصق"><p id="lbPrevMsg" class="muted small"></p></div></fieldset>
     <fieldset class="lblp"><legend>طابعة الملصقات</legend>
-      <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option>
+      <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option><option value="a4" ${c.label_lang === "a4" ? "selected" : ""}>من المتصفح على ورق A4 (شبكة)</option>
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
       <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
@@ -1921,6 +1934,26 @@ async function renderReceiptCfg(c) {
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
+  const lf = $("#rcForm");
+  const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
+  let prevT = null, prevUrl = null;
+  const preview = () => { clearTimeout(prevT); prevT = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
+        body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
+          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value }) });
+      if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
+      const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      prevUrl = URL.createObjectURL(await r.blob());
+      $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
+      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}` : "المعاينة بنفس شكل الطباعة المباشرة (بيانات تجربة).";
+    } catch { /* preview only */ }
+  }, 300); };
+  showCustom(); preview();
+  lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
+  ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
+  lf.querySelectorAll("[data-lf]").forEach((x) => x.addEventListener("change", preview));
   $("#rcForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -1928,7 +1961,7 @@ async function renderReceiptCfg(c) {
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
-      footer: f.footer.value, names: f.names.value, label_size: f.label_size.value, label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
+      footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
       label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }

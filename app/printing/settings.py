@@ -17,7 +17,9 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
             # independently of the receipt (direct ESC/POS printers only).
             "auto_receipt": False, "auto_receipt_min": 0, "drawer_on_cash": True, "drawer_timing": "after",
-            "time_format": "12", "header": "", "tax_no": "", "cr_no": "", "copies": 1}
+            "time_format": "12", "header": "", "tax_no": "", "cr_no": "", "copies": 1,
+            # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
+            "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24"}
 LABEL_SIZES = ("38x25", "50x30", "58x40")
 DRAWER_TIMINGS = ("before", "with", "after")
 
@@ -36,7 +38,40 @@ def get(db: Database, org_id: str) -> dict:
         stored = json.loads(r["value"]) if r else {}
     except ValueError:
         stored = {}
-    return {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
+    out = {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
+    from .labels import DEFAULT_FIELDS
+    out["label_fields"] = {**DEFAULT_FIELDS, **{k: bool(v) for k, v in (out["label_fields"] or {}).items() if k in DEFAULT_FIELDS}}
+    return out
+
+
+def label_size_ok(size) -> str:
+    from .escpos import PrinterError
+    from .labels import parse_size
+    try:
+        w, h = parse_size(size)
+    except PrinterError as e:
+        raise ValidationFailed(str(e)) from e
+    return f"{w:g}x{h:g}"
+
+
+def a4_grid(value) -> tuple[int, int]:
+    """'6x24' = 6 columns x 24 rows of labels on one A4 sheet."""
+    m = re.fullmatch(r"(\d{1,2})x(\d{1,2})", str(value or ""))
+    c, r = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    if not (1 <= c <= 8 and 1 <= r <= 40):
+        raise ValidationFailed("شبكة A4: من 1 إلى 8 أعمدة ومن 1 إلى 40 صفًا (مثال 6x24)")
+    return c, r
+
+
+def label_identity(db: Database, org_id: str, cfg: dict) -> tuple[str, str]:
+    """Pharmacy name and phone on labels: the label's own values, else the receipt's title and phone line
+    (line 2), else the registered name. Nothing invented."""
+    name = cfg["label_pharmacy"] or cfg["title"]
+    if not name:
+        r = db.one("SELECT name FROM organizations WHERE id=?", (org_id,))
+        name = r["name"] if r else ""
+    lines = cfg["lines"] or []
+    return name, cfg["label_phone"] or (lines[1] if len(lines) > 1 else "")
 
 
 def check_target(value, example: str = "win:POS-80C", allow_browser: bool = False) -> str:
@@ -64,9 +99,18 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
             raise ValidationFailed("اختيار غير صحيح")
         new["names"] = data["names"]
     if "label_size" in data:
-        if data["label_size"] not in LABEL_SIZES:
-            raise ValidationFailed("مقاس الملصق غير صحيح")
-        new["label_size"] = data["label_size"]
+        new["label_size"] = label_size_ok(data["label_size"])       # a preset or the owner's own W x H (#84)
+    if "label_fields" in data:
+        from .labels import DEFAULT_FIELDS
+        if not isinstance(data["label_fields"], dict) or set(data["label_fields"]) - set(DEFAULT_FIELDS):
+            raise ValidationFailed("حقول الملصق غير صحيحة")
+        new["label_fields"] = {**cur["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items()}}
+    for k in ("label_pharmacy", "label_phone"):
+        if k in data:
+            new[k] = str(data[k] or "").strip()[:40]
+    if "label_a4" in data:
+        c, r = a4_grid(data["label_a4"])
+        new["label_a4"] = f"{c}x{r}"
     if "label_lang" in data:
         from .labels import LANGS
         if data["label_lang"] not in LANGS:

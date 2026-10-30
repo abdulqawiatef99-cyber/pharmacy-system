@@ -1971,15 +1971,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def labels_page(req):
-        """Barcode labels: ?items=<id>:<count>,... — name, price, barcode. Sized for label printers."""
-        from ..printing import barcode as bc, settings as rs
+        """Barcode labels for browser printing: ?items=<id>:<count>,... — the owner's fields and size (#84),
+        one label per page on a label roll, or a grid on an A4 sheet."""
+        from ..printing import barcode as bc, labels as lb, service as ps, settings as rs
         ctx = ctx_of(req)
         ctx.require("items.read")
         cfg = rs.get(db, ctx.org_id)
-        size = req.query_params.get("size") or cfg["label_size"]
-        if size not in rs.LABEL_SIZES:
-            raise ValidationFailed("مقاس الملصق غير صحيح")
-        w, h = (int(x) for x in size.split("x"))
+        w, h = ps.label_size(cfg, req.query_params.get("size"))
         wanted = []
         for part in (req.query_params.get("items") or "").split(",")[:200]:
             iid, _, n = part.partition(":")
@@ -1989,23 +1987,64 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         cells = []
         for iid, n in wanted:
             it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
-            if not it:
+            if not it or (it["hidden"] and not ctx.can("items.hidden")):
                 continue
-            codes = [r["barcode"] for r in db.all("SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, iid))]
-            value = next((c for c in codes if len(c) == 13), None) or (codes[0] if codes else None) or it["code"] or iid[-12:]
-            mark, kind = bc.svg(str(value))
-            nm = e((it["name_en"] or it["name_ar"] or "")[:34])
-            price = f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else ""
-            cell = f'<div class="lb"><div class="n">{nm}</div><div class="b">{mark}</div><div class="c"><span>{e(str(value))}</span><b>{price}</b></div></div>'
-            cells += [cell] * n
+            data = ps.label_data(db, ctx, it, cfg)
+            try:
+                on, _dropped = lb.layout(cfg["label_fields"], data, w, h, cfg["label_dpi"])
+            except lb.PrinterError as err:
+                raise ValidationFailed(str(err)) from err
+            phone = e(data["phone"]) if on["phone"] else ""
+            pharmacy = f'<span dir="rtl">{e(data["pharmacy"])}</span>' if on["pharmacy"] else ""
+            top = f'<div class="t"><span>{phone}</span>{pharmacy}</div>' if on["phone"] or on["pharmacy"] else ""
+            mark = f'<div class="b">{bc.svg(data["value"])[0]}</div>' if on["barcode"] else ""   # text-only: no 4 mm box
+            name = f'<div class="n">{e(data["name"][:40])}</div>' if on["name"] else ""
+            left = data["code"] if on["code"] else data["value"] if on["digits"] else ""
+            bottom = (f'<div class="c"><span>{e(left)}</span><span>{e(data["expiry"]) if on["expiry"] else ""}</span>'
+                      f'<b>{e(data["price"]) if on["price"] else ""}</b></div>') if (left or on["expiry"] or on["price"]) else ""
+            cells += [f'<div class="lb">{top}{mark}{name}{bottom}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
         with db.transaction():
-            audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": size})
+            audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": f"{w:g}x{h:g}"})
+        a4 = cfg["label_lang"] == "a4"
+        css = f"/labels/page.css?w={w:g}&h={h:g}" + (f"&a4={cfg['label_a4']}" if a4 else "")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملصقات باركود</title>
-<link rel="stylesheet" href="/static/labels.css"><link rel="stylesheet" href="/static/page-{w}x{h}.css"></head><body class="s{w}x{h}">{''.join(cells)}
+<link rel="stylesheet" href="{_static_v('labels.css')}"><link rel="stylesheet" href="{e(css)}"></head><body class="{'a4' if a4 else 'roll'}">{''.join(cells)}
 <script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
+
+    async def labels_css(req):
+        """Page and label size for the labels page: any size the settings accept, roll or A4 grid (#84)."""
+        from ..printing import labels as lb, settings as rs
+        q = req.query_params
+        try:
+            w, h = lb.parse_size(f"{q.get('w', '')}x{q.get('h', '')}") if not q.get("a4") else (0, 0)
+        except lb.PrinterError:
+            return Response("", status_code=400)
+        if q.get("a4"):
+            try:
+                cols, rows = rs.a4_grid(q["a4"])
+            except ValidationFailed:
+                return Response("", status_code=400)
+            w, h = lb.a4_cell(cols, rows)
+            css = (f"@page {{ size: 210mm 297mm; margin: 0; }}\nbody.a4 {{ display: grid; grid-template-columns: repeat({cols}, {w:g}mm);"
+                   f" grid-auto-rows: {h:g}mm; gap: 0; padding: 0; }}\n.a4 .lb {{ page-break-after: auto; break-inside: avoid; }}\n")
+        else:
+            css = f"@page {{ size: {w:g}mm {h:g}mm; margin: 0; }}\n"
+        # the margin the bar-width check assumes (labels.PAD_MM): the barcode is never stretched thinner than checked
+        css += f".lb {{ width: {w:g}mm; height: {h:g}mm; padding: {lb.PAD_MM:g}mm; }}\n"
+        if h < 20:
+            css += ".lb .n, .lb .t, .lb .c { font-size: 6pt; } .lb .c b { font-size: 6.5pt; }\n"
+        return Response(css, media_type="text/css", headers={"Cache-Control": "no-cache"})
+
+    @handler
+    async def label_preview(req):
+        from ..printing import service as ps
+        ctx = ctx_of(req)
+        b = await body(req)
+        png, dropped = await run_in_threadpool(ps.label_preview, db, ctx, b)
+        return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped)})
 
     @handler
     async def print_labels_api(req):
@@ -2187,12 +2226,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),
+        Route("/labels/page.css", labels_css),
         Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
         Route("/api/print/printers", print_printers),
         Route("/api/print/test", print_test, methods=["POST"]),
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
+        Route("/api/print/label-preview", label_preview, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),
