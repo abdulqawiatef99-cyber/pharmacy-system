@@ -102,6 +102,23 @@ class ClaimTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             checkpoint(state, "test_run_001", "codex", "running", "New checkpoint", [])
 
+    def test_history_cannot_disagree_with_phase_or_resume_blocked(self):
+        running = {"phase": "running", "note": "Next", "evidence": []}
+        blocked = dict(running, phase="blocked")
+        for phase, events in [("running", []), ("claimed", [running]),
+                              ("running", [running, blocked]),
+                              ("running", [blocked, running])]:
+            state = reserved()
+            state["runs"]["test_run_001"].update(phase=phase, events=events)
+            with self.subTest(phase=phase, events=events), self.assertRaises(ValueError):
+                validate(state)
+
+    def test_active_must_be_null_or_a_run_id(self):
+        state = reserved()
+        state["active"] = ["test_run_001"]
+        with self.assertRaises(ValueError):
+            validate(state)
+
     def test_wrong_owner_and_illegal_transition(self):
         with self.assertRaises(ValueError):
             checkpoint(reserved(), "test_run_001", "claude", "running", "Next", [])
