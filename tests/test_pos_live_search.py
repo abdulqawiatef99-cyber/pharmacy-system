@@ -19,15 +19,11 @@ from app.catalog import service as cat
 from app.catalog.search import search
 from app.inventory import service as inv
 from app.sales.cash import CashDrawer
-from tests.helpers import DBTestCase, OWNER_PW
+from tests.helpers import DBTestCase, OWNER_PW, needs_browser
 from tests.test_api import APICase
 
 JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
 
-
-def _playwright() -> bool:
-    node = shutil.which("node")
-    return bool(node) and subprocess.run([node, "-e", "require('playwright')"], capture_output=True).returncode == 0
 
 
 class TestArabicMiddleWord(DBTestCase):
@@ -95,7 +91,7 @@ const { chromium } = require('playwright');
 """
 
 
-@unittest.skipUnless(_playwright(), "Node + Playwright not available here (runs where they are)")
+@needs_browser
 class TestLiveSearchInBrowser(APICase):
     def test_type_without_enter_then_scan(self):
         import uvicorn

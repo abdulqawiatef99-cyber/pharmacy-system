@@ -19,15 +19,11 @@ from pathlib import Path
 from app.inventory import service as inv
 from app.sales.cash import CashDrawer
 from app.sales.service import Sales
-from tests.helpers import OWNER_PW
+from tests.helpers import OWNER_PW, needs_browser
 from tests.test_api import APICase
 
 JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
 
-
-def _playwright() -> bool:
-    node = shutil.which("node")
-    return bool(node) and subprocess.run([node, "-e", "require('playwright')"], capture_output=True).returncode == 0
 
 
 class TestPrintFallbackSource(unittest.TestCase):
@@ -69,7 +65,7 @@ const { chromium } = require('playwright');
 """
 
 
-@unittest.skipUnless(_playwright(), "Node + Playwright not available here (runs where they are)")
+@needs_browser
 class TestPrintFallbackInBrowser(APICase):
     def test_receipt_prints_from_hidden_frame_after_await(self):
         import uvicorn
