@@ -167,6 +167,11 @@ class TestLabelPages(APICase):
         self.assertIn('class="a4"', page)
         css = self.c.get("/labels/page.css", params={"a4": "6x24"}).text
         self.assertIn("grid-template-columns: repeat(6, 35mm)", css)
+        self.assertIn("grid-auto-rows: 12.37mm", css)                          # 24 rows fit in 297 mm (Codex on #90)
+        for c in range(1, 9):
+            for r in range(1, 41):
+                w, h = lb.a4_cell(c, r)
+                self.assertTrue(w * c <= 210 and h * r <= 297, (c, r))
         r = self.c.post("/api/print/labels", json={"items": [{"id": self.pan, "count": 1}]}, headers=H)
         self.assertEqual(r.json()["error"]["code"], "labels_in_browser")     # A4 sheets print from the browser
 

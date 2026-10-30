@@ -10,6 +10,8 @@ Not yet tried on a physical label printer: the owner's printers are the test.
 """
 from __future__ import annotations
 
+import math
+
 from PIL import Image, ImageDraw, ImageFont
 
 from . import barcode as bc
@@ -28,6 +30,12 @@ def parse_size(size: str) -> tuple[float, float]:
     if not (20 <= w <= 110 and 10 <= h <= 80):
         raise PrinterError("مقاس الملصق: العرض من 20 إلى 110 مم والارتفاع من 10 إلى 80 مم")
     return w, h
+
+
+def a4_cell(cols: int, rows: int) -> tuple[float, float]:
+    """One cell of an A4 label sheet, rounded DOWN to 0.01 mm so cols x rows never exceeds 210 x 297 mm
+    (Codex on #90: rounding 297/24 up to 12.4 mm made 24 rows 297.6 mm and drifted down the sheet)."""
+    return math.floor(21000 / cols) / 100, math.floor(29700 / rows) / 100
 
 
 def dots(mm: float, dpi: int) -> int:

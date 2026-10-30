@@ -194,8 +194,7 @@ def label_data(db: Database, ctx: Context, it, cfg: dict) -> dict:
 def label_size(cfg: dict, size: str | None = None) -> tuple[float, float]:
     from . import labels as lb, settings as rs
     if cfg["label_lang"] == "a4":                  # one cell of the A4 sheet grid
-        cols, rows = rs.a4_grid(cfg["label_a4"])
-        return round(210 / cols, 1), round(297 / rows, 1)
+        return lb.a4_cell(*rs.a4_grid(cfg["label_a4"]))
     try:
         return lb.parse_size(size or cfg["label_size"])
     except escpos.PrinterError as e:

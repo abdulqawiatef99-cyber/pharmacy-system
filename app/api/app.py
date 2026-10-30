@@ -2027,7 +2027,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 cols, rows = rs.a4_grid(q["a4"])
             except ValidationFailed:
                 return Response("", status_code=400)
-            w, h = round(210 / cols, 1), round(297 / rows, 1)
+            w, h = lb.a4_cell(cols, rows)
             css = (f"@page {{ size: 210mm 297mm; margin: 0; }}\nbody.a4 {{ display: grid; grid-template-columns: repeat({cols}, {w:g}mm);"
                    f" grid-auto-rows: {h:g}mm; gap: 0; padding: 0; }}\n.a4 .lb {{ page-break-after: auto; break-inside: avoid; }}\n")
         else:
