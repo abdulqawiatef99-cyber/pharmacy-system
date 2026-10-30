@@ -52,9 +52,11 @@ class TestLegacyRestore(unittest.TestCase):
         try:
             db.migrate()
             self.assertEqual(backup.integrity_problems(db), [])
-            self.assertEqual(db.one("SELECT count(*) n FROM sales WHERE status='completed'")["n"], 1)
-            self.assertEqual(db.one("SELECT count(*) n FROM cash_shifts WHERE closed_at IS NOT NULL")["n"], 1)
             ctx = accounts.resolve_session(db, accounts.login(db, "owner", OWNER_PW)["token"])
+            self.assertEqual(db.one("SELECT count(*) n FROM sales WHERE org_id=? AND status='completed'",
+                                    (ctx.org_id,))["n"], 1)
+            self.assertEqual(db.one("SELECT count(*) n FROM cash_shifts WHERE org_id=? AND closed_at IS NOT NULL",
+                                    (ctx.org_id,))["n"], 1)
             att = db.one("SELECT id FROM sale_attachments WHERE org_id=?", (ctx.org_id,))
             data, mime = attachments.file(db, self.up, ctx, att["id"])  # the old machine's path is gone
             self.assertEqual((data, mime), (PNG, "image/png"))
