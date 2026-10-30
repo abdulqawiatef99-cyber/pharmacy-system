@@ -115,9 +115,16 @@ would trigger CI), no Actions run is dispatched, and no dispatcher is enabled.
 No new expense was activated. No full application suite was run from stale local
 source: cloud `git fetch` fails; the isolated workspace contains only new helper
 files/tests and fresh connector-read documents. Existing full CI remains mandatory
-after zero additional CI spending is verified and a PR is authorized. A read-only\nbilling API attempt through gh also failed at the proxy; the connector does not\nexpose account billing. Actual included allowance, remaining minutes and an\nenforced zero-spend cap are all UNKNOWN, not inferred from plan names.
+after zero additional CI spending is verified and a PR is authorized. A read-only
+billing API attempt through gh also failed at the proxy; the connector does not
+expose account billing. Actual included allowance, remaining minutes and an
+enforced zero-spend cap are all UNKNOWN, not inferred from plan names.
 
-Reverification: the original 22 tests passed again. Two additional regression tests\nfirst reproduced inconsistent history acceptance (four subcases) and a malformed\nactive-ID error; both defects are fixed. All 24 offline tests now pass.\n\nValidation: 24 offline tests cover corrupt journals, competing initial/ref writes,
+Reverification: the original 22 tests passed again. Two additional regression tests
+first reproduced inconsistent history acceptance (four subcases) and a malformed
+active-ID error; both defects are fixed. All 24 offline tests now pass.
+
+Validation: 24 offline tests cover corrupt journals, competing initial/ref writes,
 stale heads, run identity, exact replay at capacity, phase/history consistency, eligibility/dependencies,
 blocked/review retention, unauthorized transitions, timeout/auth handling and
 shell-free JSON transport. GitHub race tests use an in-memory Git graph, **not a
