@@ -18,7 +18,8 @@ class TestCliRefusesEmptyDatabase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="pharm-cli-"))
         env = {k: v for k, v in os.environ.items() if not k.startswith("PHARM_")}
-        self.env = {**env, "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1"}
+        # LOCALAPPDATA points into the test folder: on Windows (CI) the default data folder must not exist either
+        self.env = {**env, "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1", "LOCALAPPDATA": str(self.tmp / "local")}
 
     def run_cli(self, *args, cwd=None, **extra):
         return subprocess.run([sys.executable, str(ROOT / "manage.py"), *args], cwd=cwd or self.tmp,
@@ -33,6 +34,7 @@ class TestCliRefusesEmptyDatabase(unittest.TestCase):
             self.assertNotIn("backup written", r.stdout)
             self.assertFalse((self.tmp / "data").exists(), args)              # nothing was created
             self.assertFalse((self.tmp / "backups").exists(), args)
+            self.assertFalse((self.tmp / "local").exists(), args)
 
     def test_init_then_backup_lands_next_to_the_data(self):
         data = self.tmp / "home" / "data"
