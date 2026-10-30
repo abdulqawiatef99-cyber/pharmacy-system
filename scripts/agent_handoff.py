@@ -11,6 +11,8 @@ REPO = "abdulqawiatef99-cyber/pharmacy-system"
 REF = "coordination/active"
 PATH = "state.json"
 PHASES = {"claimed", "running", "review", "blocked"}
+TRANSITIONS = {"claimed": {"running", "blocked"}, "running": {"running", "review", "blocked"},
+               "review": {"review", "blocked"}, "blocked": {"blocked"}}
 
 
 def validate(state):
@@ -21,7 +23,7 @@ def validate(state):
     if not isinstance(runs, dict) or len(runs) > 100:
         raise ValueError("Invalid journal or journal capacity reached")
     active = state.get("active")
-    if active is not None and active not in runs:
+    if active is not None and (not isinstance(active, str) or active not in runs):
         raise ValueError("Missing active receipt")
     for key, run in runs.items():
         if not isinstance(run, dict) or run.get("phase") not in PHASES | {"released"}:
@@ -32,12 +34,24 @@ def validate(state):
         events = run.get("events")
         if not isinstance(events, list) or len(events) > 50:
             raise ValueError("Invalid bounded event history")
+        previous = "claimed"
         for event in events:
             if (not isinstance(event, dict) or event.get("phase") not in PHASES | {"released"}
                     or not isinstance(event.get("note"), str) or not event["note"].strip()
                     or len(event["note"]) > 2000):
                 raise ValueError("Invalid checkpoint event")
             evidence_links(event.get("evidence"))
+            phase = event["phase"]
+            if phase == "released":
+                if run["phase"] != "released" or event is not events[-1]:
+                    raise ValueError("Invalid release history")
+            elif phase not in TRANSITIONS.get(previous, set()):
+                raise ValueError("Invalid historical transition")
+            if phase == "review" and not event["evidence"]:
+                raise ValueError("Review history requires evidence")
+            previous = phase
+        if run["phase"] != "released" and run["phase"] != previous:
+            raise ValueError("Receipt phase disagrees with history")
     return state
 
 
@@ -106,9 +120,7 @@ def checkpoint(state, run_id, agent, phase, note, evidence):
     if state["active"] != run_id or state["runs"][run_id]["agent"] != agent:
         raise ValueError("Not the active claim")
     old = state["runs"][run_id]["phase"]
-    allowed = {"claimed": {"running", "blocked"}, "running": {"running", "review", "blocked"},
-               "review": {"review", "blocked"}, "blocked": {"blocked"}}
-    if phase not in allowed[old] or not isinstance(note, str) or not note.strip() or len(note) > 2000:
+    if phase not in TRANSITIONS[old] or not isinstance(note, str) or not note.strip() or len(note) > 2000:
         raise ValueError("Invalid transition or missing checkpoint/next step")
     if phase == "review" and not evidence:
         raise ValueError("Review requires a commit or PR evidence URL")
