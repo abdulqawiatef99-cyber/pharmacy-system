@@ -5,6 +5,7 @@
   python manage.py serve [--host 127.0.0.1] [--port 8000]
   python manage.py backup [--dest backups/]
   python manage.py verify                      (ledger vs balances consistency)
+  python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
@@ -90,6 +91,15 @@ def cmd_verify(a, s):
         print("PROBLEM:", p)
     print("OK" if not problems else f"{len(problems)} problem(s)")
     sys.exit(1 if problems else 0)
+
+
+def cmd_preflight(a, s):
+    """Read-only: reads the backup ZIP only, never the live data (R5, before moving data)."""
+    import json
+    from app.core import backup_preflight
+    r = backup_preflight.check(Path(a.archive))
+    print(json.dumps(r, ensure_ascii=False, indent=1) if a.json else "\n".join(backup_preflight.render(r)))
+    sys.exit(0 if r["can_restore"] else 1)
 
 
 def cmd_restore(a, s):
@@ -318,6 +328,9 @@ def main(argv=None):
     b.add_argument("--dest", default="backups")
     v = sub.add_parser("verify")
     v.add_argument("archive", nargs="?", help="verify a backup .zip instead of the live database")
+    pf = sub.add_parser("preflight", help="read-only report on a backup before moving data to another PC")
+    pf.add_argument("archive")
+    pf.add_argument("--json", action="store_true")
     st = sub.add_parser("selftest")
     st.add_argument("--quick", action="store_true", help="skip the automated test suite")
     st.add_argument("--print-test", action="store_true", help="print a test receipt on PHARM_PRINTER")
@@ -353,6 +366,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
+     "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
      "import-estock": cmd_import_estock, "update": cmd_update}[a.cmd](a, s)
 
