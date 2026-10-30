@@ -14,7 +14,7 @@ for attempt in 1 2 3 4 5 6; do   # the commit->PR link can lag a few seconds aft
   pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq \
     "[.[] | select(.merged_at != null and .base.ref == \"$BRANCH\" and .merge_commit_sha == \"$SHA\")][0] | select(. != null) | \"\(.number) \(.head.sha)\"") || pr=""
   [ -n "$pr" ] && break
-  sleep 10
+  sleep "${RETRY_SLEEP:-10}"
 done
 if [ -z "$pr" ]; then
   echo "direct push to $BRANCH ($SHA) - not the merge of a pull request"; exit 1

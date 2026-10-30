@@ -5,6 +5,9 @@ name: Branch guard
 # - force push / deletion of main or develop: the old tip is kept as branch guard/<branch>-<sha>
 # - push not coming from a merged PR with a green "CI / linux": an Issue is opened
 # The installer publish gate (windows-installer.yml) uses the same check.
+# Limit (Codex on #32): GitHub runs the workflow from the pushed commit, so a force push back to a
+# commit older than this file runs no guard at all. Only real branch protection (public repo, or a
+# paid plan for a private one) or a watcher outside this repository covers that case (owner decision).
 
 on:
   push:

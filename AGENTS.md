@@ -21,7 +21,9 @@ If something here conflicts with an older document, this file wins.
 - GitHub Free has no branch protection for this private repo, so `.github/workflows/branch-guard.yml`
   stands in for it: `main` and `develop` change only by merging a PR whose `CI / linux` is green, never by
   direct or force push. A violation opens an Issue (force push: old tip kept as `guard/<branch>-<sha>`),
-  and an unverified push to `main` does not build or publish `installer-latest`.
+  and an unverified push to `main` does not build or publish `installer-latest`. Limit: a force push back
+  to a commit older than the guard runs no guard (GitHub uses the pushed commit's workflows); only real
+  branch protection or an outside watcher covers it, which is the owner's decision (#12).
 
 ## 2a. Review loop (Claude Code implements, Codex reviews)
 1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)
