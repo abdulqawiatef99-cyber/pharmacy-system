@@ -143,7 +143,7 @@ class TestLabelData(Base):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "job.bin")
             r = print_labels(self.db, self.ctx, [(self.pan, 3)], target=f"file:{out}")
-            job = open(out, "rb").read()
+            job = Path(out).read_bytes()
         self.assertTrue(job.startswith(b"SIZE 38 mm,12.5 mm\r\nGAP 2 mm,0 mm"))
         m = re.search(rb"BITMAP 0,0,(\d+),(\d+),0,", job)
         self.assertEqual(int(m.group(2)), lb.dots(12.5, 203))                 # the image is exactly one label high
@@ -197,7 +197,10 @@ class TestLabelPages(APICase):
         self.assertNotIn('class="b"', page.text)                               # no empty 4 mm barcode box (Codex on #90)
 
     def test_preview_png_and_dropped_fields(self):
-        r = self.c.post("/api/print/label-preview", json={"label_size": "38x10", "label_fields": ALL, "label_phone": "0100"}, headers=H)
+        r = self.c.post("/api/print/label-preview", json={"label_size": "38x10", "label_fields": ALL, "label_phone": "0100",
+                                                                   # Latin name: on a PC without Arabic shaping
+                                                                   # (Windows CI) an Arabic one is left off first
+                                                                   "label_pharmacy": "Test Pharmacy"}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-type"], "image/png")
         self.assertTrue(r.content.startswith(b"\x89PNG"))
