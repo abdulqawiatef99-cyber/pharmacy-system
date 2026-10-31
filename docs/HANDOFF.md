@@ -1,6 +1,6 @@
 # HANDOFF — الحالة الحالية
 
-آخر تحقق: 2026-10-30 (بالليل) · Claude · أساس الملخص: `develop` @ `7ed130a`. الأولويات والأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
+آخر تحقق: 2026-10-31 · Claude · أساس الملخص: `develop` @ `7190880`. الأولويات والأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md).
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
 
@@ -9,8 +9,8 @@
 - مفيش PR مفتوحة أو Issue كود `launch-critical` وقت التحقق. المفتوح للإطلاق: [#18](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18) ← [#19](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/19) ← [#20](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/20).
 - إصلاحات تجربة الجهاز اتدمجت: #35، #37، #39، #42، #44، #46، #49؛ إعادة التحقق على الأجهزة لسه مطلوبة.
 - مراجعة الإصدار [#68](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/68) اتعملت بالفعل؛ العيب المؤكد [#72](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/72) اتقفل بإصلاح [#73](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/73)، مدمج @ `c9906a9`. المرتجع القديم يحافظ على المدفوع 99.99؛ السجل يثبت 535 اختبار بلا skip ومراجعة Codex سليمة على `de44f90`؛ [CI ناجح](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41031438683). لا تعيد المراجعة أو الإصلاح من الصفر.
-- المثبّت الحالي: [Windows installer run 72](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41031738293)، artifact `PharmacySetup`، كود `c9906a9`؛ بناء واختبارات Windows ناجحة، النشر متخطّى. يشمل `preflight` (#66) وإصلاح #72؛ run 69 و71 قدام.
-- SHA256 لـ `PharmacySetup.exe`: `913ad6027c81d7a32274f4026f82165f28b1c57757adaafbedc7509d722d5dd5`.
+- **المثبّت الحالي: [Windows installer run 75](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41237493804)**، artifact `PharmacySetup` (id 13055634945، digest الـ zip `sha256:3a07be7a…ae18f`)، كود `develop` @ `7190880`؛ اختبارات Windows + smoke + Inno ناجحة، النشر متخطّى. يشمل #85 و#81 و#84 و#80. run 72 (`c9906a9`) بقى قديم.
+- CI على `develop` @ `7190880` أخضر linux + windows ([run 137](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41236971344)).
 - النسبة المسجلة **40%، كل البوابات L1**؛ لا دليل قبول جديد. أرقام الاختبارات والمثبّت القديمة في STATUS تاريخية؛ الدليل الأحدث فوق. لابتوب البيت جهاز Windows حقيقي: حسب تعريف L2 في STATUS ممكن نتايجه تبقى دليل L2 للبوابات اللي مالهاش عمود أجهزة (G2–G6) **بعد تأكيد المالك بس**؛ G7/G8 لازم جهاز الصيدلية.
 - CI: فشل Windows على `0bcba94` (#75) **متذبذب** مش عيب: نفس الكود نجح على `2f47d6c` (#78)، وده تاني مرة النهارده (#67 كمان). من بعد الـ PR ده فشل خطوة Windows في CI بيطلع كـ annotation فيها الاختبار اللي فشل (اللوج نفسه مقفول من جلسات الوكلاء). أول مرة يتكرر: اقرا الـ annotation وصلّح الاختبار المتذبذب بدليل.
 
@@ -19,12 +19,17 @@
 - ❌ [#85](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/85) **launch-critical**: المتصفح بيشغّل `app.js` قديم بعد التثبيت (مفيش Cache-Control على `/static`)، فالخطوة 9 فشلت بالكود القديم. ❌ [#84](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/84): مقاس الملصق غلط (ملصق على اتنين) + تصميم E-Stock. الخطوتين 11 و12 ماتعملوش (مفيش shell).
 - اكتشاف: القارئ HH360 بيبعت **F12** مع الباركود (الحل في #81). القارئ 1D بس؛ في قارئ 2D في الصيدلية يتجرب.
 
-## التالي بالضبط — المثبّت الجاي (Claude، سحابة)
-1. **[#85](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/85) الأول** (صغير، launch-critical).
-2. [#81](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/81) بالتعليقات بتاعته (الإيصال الاختياري، الدرج المستقل + التوقيت + F8، الساعة 12/24 افتراضي 12، F12 للقارئ، بيانات إيصال E-Stock).
-3. [#84](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/84) (مقاس مخصص W×H + حقول الملصق؛ **مقاس البكرة لسه من المالك** — اعمل المقاس المخصص ومتستناش).
-4. [#80](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/80) (أوامر الصيانة متعملش قاعدة فاضية).
-كل واحد PR لـ `develop` بـ CI أخضر ومراجعة Codex، وبعدهم **مثبّت واحد** (Windows installer). خطة التجربة بعده مقسومة **لابتوب / صيدلية** في [تعليق #18](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18#issuecomment-6533052256) (قاعدة المالك). بعد الإطلاق: [#86](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/86).
+## اتعمل (2026-10-30/31) — 4 PRs + إصلاحين CI، كلها بمراجعة Codex
+- #85 ← [#88](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/88): نسخة `app.js` بالـ hash + `no-cache` على `/static`.
+- #81 ← [#89](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/89): إيصال اختياري (F4، قاعدة مبلغ)، درج مستقل مرة واحدة لكل بيع (قبل/مع/بعد)، F8 بسبب ومسجّل في تقرير الوردية، F12 للقارئ، 12/24 ساعة، مقدمة/ضريبي/سجل تجاري، نسخ. **لسه:** باركود رقم الفاتورة + قالب جدول E-Stock.
+- #84 ← [#90](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/90): مقاس مخصص، حقول E-Stock كـ toggles، باركود ≥0.25 مم، شبكة A4، معاينة. كل الحقول بتتسع على 38×13.
+- #80 ← [#91](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/91): أوامر الصيانة متعملش قاعدة فاضية؛ الافتراضي على ويندوز `%LOCALAPPDATA%\PharmacyPlatform\data`.
+- Windows CI على develop وقع مرتين من اختبارات جديدة (مش من التطبيق) واتصلّح: [#92](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/92)، [#93](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/93). درس: شغّل `scripts/validate_local_release.py` محليًا قبل أي اختبار CLI/مسارات.
+
+## التالي بالضبط
+1. المالك: مقاس بكرة الملصق بالظبط (يتكتب في الإعدادات ← شكل الملصق ← مقاس آخر).
+2. إعادة تجربة #18 بـ run 75 حسب [قائمة التعليق](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18#issuecomment-6548642933) (خطوة 9، إيصال/درج، ملصق، قارئ). كل فشل = Issue `launch-critical`.
+3. بعدها #19 ثم #20 بموافقة المالك. بعد الإطلاق: [#86](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/86).
 
 ## المرجع القديم للتجربة
 - [DEVICE_RUNBOOK.md](DEVICE_RUNBOOK.md) (A = لابتوب، B = صيدلية) — التقسيم المحدّث في تعليق #18 أعلاه.
