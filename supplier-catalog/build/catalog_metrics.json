@@ -1,0 +1,32 @@
+{
+  "offers": 20460,
+  "offers_by_supplier": {
+    "wataniya": 4248,
+    "mostafa": 1732,
+    "nahda": 7808,
+    "ibn_khaldun": 3879,
+    "future": 2793
+  },
+  "items": 14418,
+  "items_by_category": {
+    "medicine": 9169,
+    "accessory": 5249
+  },
+  "items_multi_supplier": 3930,
+  "match_methods": {
+    "fuzzy_same_price_subset_words": 1307,
+    "fuzzy_same_price": 4351,
+    "exact_key": 4098,
+    "single": 10604,
+    "fuzzy_no_price": 100
+  },
+  "uncertain_pairs": 2612,
+  "findings": {
+    "offer_count": 5,
+    "very_high_discount_check": 95,
+    "price_tag_in_name_differs_from_public": 301,
+    "nesf_gomla_lower_than_sear_g": 3,
+    "zero_discount": 7,
+    "same_supplier_twice_in_item": 18
+  }
+}
