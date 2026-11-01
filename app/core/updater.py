@@ -13,11 +13,13 @@ outside the program folder (never in the repository, never in backups).
 from __future__ import annotations
 
 import io
+import re
 import json
 import os
 import shutil
 import stat
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -189,3 +191,186 @@ def record(data_dir: Path, sha: str, source: str) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "installed_version.json").write_text(json.dumps(
         {"sha": sha, "source": source, "at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+
+
+# ---------------------------------------------------------------- automatic updates (#96)
+# Channels: "main" is the pharmacy (default); "develop" is for the owner's test PC only. Each channel's
+# installer is published by .github/workflows/windows-installer.yml as a release with a manifest.
+CHANNELS = ("main", "develop")
+INSTALLER_TAGS = {"main": "installer-latest", "develop": "installer-develop"}
+# A change to any of these cannot ship as a code-only release: the installed launcher and bootstrap run
+# from the installed folder, and libraries, migrations and the embedded Python come with the installer.
+INSTALLER_FILES = ("requirements.txt", "release_bootstrap.py", "release_protocol.json", "launcher.py",
+                   ".github/workflows/windows-installer.yml")
+INSTALLER_DIRS = ("app/migrations/", "installer/")
+NEEDS_INSTALLER = 3                     # exit code of `manage.py update` when only the installer can ship it
+MAX_INSTALLER_BYTES = 400 * 1024 * 1024
+
+
+def needs_installer(paths) -> list[str]:
+    """The changed paths that only an installer can deliver."""
+    return sorted(p for p in paths if p in INSTALLER_FILES or p.startswith(INSTALLER_DIRS))
+
+
+def _tree_digest(root: Path) -> dict:
+    out = {}
+    for name in INSTALLER_FILES:
+        p = root / name
+        out[name] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+    for d in INSTALLER_DIRS:
+        base = root / d
+        for p in sorted(base.rglob("*")) if base.is_dir() else ():
+            if p.is_file() and "__pycache__" not in p.parts:
+                out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def installer_reasons(current: Path, candidate: Path) -> list[str]:
+    """Files that differ between the running code and a candidate and need the installer."""
+    a, b = _tree_digest(current), _tree_digest(candidate)
+    return needs_installer(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def _json(url: str, token: str):
+    try:
+        return json.loads(_get(url, token, "application/vnd.github+json"))
+    except ValueError as e:
+        raise UpdateError("رد غير متوقع من GitHub") from e
+
+
+def _subject(message: str) -> str:
+    lines = [ln.strip() for ln in (message or "").splitlines()]
+    first = lines[0] if lines else ""
+    if first.startswith("Merge pull request"):           # GitHub puts the PR title after a blank line
+        body = [ln for ln in lines[1:] if ln]
+        return body[0] if body else ""
+    return first
+
+
+def summarize(commits: list[dict]) -> str:
+    """One short line of what changed: PR titles when there are merges, else commit subjects (newest last)."""
+    msgs = [(c.get("commit") or {}).get("message", "") for c in commits]
+    merges = [_subject(m) for m in msgs if m.startswith("Merge pull request")]
+    picked = [s for s in (merges or [_subject(m) for m in msgs]) if s and not s.startswith("Merge ")]
+    seen = []
+    for s in picked:
+        if s not in seen:
+            seen.append(s)
+    text = " · ".join(seen[-3:])
+    return text[:300]
+
+
+def compare(repo: str, base: str | None, head: str, token: str) -> dict:
+    """What changed from the installed commit to the channel head: files, summary, and whether the list is
+    complete. An unknown base (manual install) returns complete=False, so callers stay conservative."""
+    if not base or not re.fullmatch(r"[0-9a-f]{40}", base):
+        return {"files": [], "summary": "", "complete": False}
+    try:
+        r = _json(f"{API}/repos/{repo}/compare/{base}...{head}", token)
+    except UpdateError:
+        return {"files": [], "summary": "", "complete": False}
+    files = [f.get("filename", "") for f in r.get("files") or []]
+    return {"files": files, "summary": summarize(r.get("commits") or []), "status": r.get("status"),
+            # GitHub lists at most 300 files; a longer diff is treated as needing the installer
+            "complete": len(files) < 300 and r.get("status") in ("ahead", "identical")}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _open(url: str, headers: dict):
+    opener = urllib.request.build_opener(_NoRedirect)
+    return opener.open(urllib.request.Request(url, headers=headers), timeout=120)
+
+
+def _asset(asset_url: str, token: str):
+    """Open a release asset. The token goes to api.github.com only: the redirect to the storage host is
+    followed without it (that URL carries its own signature)."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/octet-stream",
+               "User-Agent": "pharmacy-updater"}
+    try:
+        try:
+            return _open(asset_url, headers)
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308) or not e.headers.get("Location"):
+                raise
+            location = e.headers["Location"]
+            if not location.startswith("https://"):
+                raise UpdateError("رابط تنزيل غير آمن") from e
+            return _open(location, {"User-Agent": "pharmacy-updater", "Accept": "application/octet-stream"})
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise UpdateError("GitHub رُفض تنزيل المثبّت: المفتاح خاطئ أو منتهٍ أو ليس له صلاحية") from e
+        raise UpdateError(f"خطأ من GitHub: {e.code}") from e
+    except OSError as e:
+        raise UpdateError(f"لا يوجد اتصال بـ GitHub: {e}") from e
+
+
+def download_asset(asset_url: str, token: str, dest: Path, *, max_bytes: int = MAX_INSTALLER_BYTES) -> str:
+    """Stream a release asset to dest and return its sha256."""
+    resp = _asset(asset_url, token)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    h, size = hashlib.sha256(), 0
+    try:
+        with resp, open(part, "wb") as out:
+            while chunk := resp.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise UpdateError("ملف المثبّت أكبر من الحد المسموح")
+                h.update(chunk)
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(part, dest)
+    except OSError as e:
+        raise UpdateError(f"تعذّر حفظ المثبّت: {e}") from e
+    finally:
+        part.unlink(missing_ok=True)
+    return h.hexdigest()
+
+
+def installer_release(repo: str, channel: str, token: str) -> dict:
+    """The channel's published installer: manifest (commit, sha256, size) and the exe asset."""
+    try:
+        rel = _json(f"{API}/repos/{repo}/releases/tags/{INSTALLER_TAGS[channel]}", token)
+    except UpdateError as e:
+        raise UpdateError(f"المثبّت الجديد لم يُنشر بعد ({e})") from e
+    assets = {a.get("name"): a for a in rel.get("assets") or []}
+    exe, man = assets.get("PharmacySetup.exe"), assets.get("installer.json")
+    if not exe or not man:
+        raise UpdateError("المثبّت الجديد لم يكتمل نشره بعد")
+    try:
+        with _asset(man["url"], token) as resp:
+            manifest = json.loads(resp.read(65536))
+    except (ValueError, OSError) as e:
+        raise UpdateError("بيانات المثبّت غير صحيحة") from e
+    if not (isinstance(manifest, dict) and re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("sha", "")))
+            and re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("sha256", "")))):
+        raise UpdateError("بيانات المثبّت غير صحيحة")
+    digest = str(exe.get("digest") or "")
+    if digest.startswith("sha256:") and digest[7:] != manifest["sha256"]:
+        raise UpdateError("بصمة المثبّت لا تطابق المنشور على GitHub")
+    return {"sha": manifest["sha"], "ref": manifest.get("ref"), "sha256": manifest["sha256"],
+            "url": exe["url"], "size": exe.get("size")}
+
+
+def installer_args(exe: Path, log: Path) -> str:
+    """cmd.exe line that starts the installer as a separate process. `start` makes the installer an
+    orphan, outside the server's process tree: the installer stops the program's own Python processes
+    with taskkill /T, which would otherwise end the installer too. /RELAUNCH=1 starts the program again
+    when setup ends (pharmacy.iss)."""
+    for p in (exe, log):
+        if any(ch in str(p) for ch in '"%^&|<>'):
+            raise UpdateError("مسار المثبّت يحتوي على رموز غير مسموحة")
+    return (f'start "" "{exe}" /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1 "/LOG={log}"')
+
+
+def run_installer(exe: Path, log: Path) -> None:     # pragma: no cover - Windows only, exercised on the PC
+    if os.name != "nt":
+        raise UpdateError("تحديث المثبّت يعمل على ويندوز فقط")
+    import subprocess
+    subprocess.Popen(f'cmd.exe /d /c {installer_args(exe, log)}', creationflags=0x08000000,
+                     close_fds=True, cwd=str(exe.parent))

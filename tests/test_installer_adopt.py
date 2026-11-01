@@ -3,7 +3,8 @@
 - build_info.json (written by the installer build) → on its first start the launcher selects the
   installed program instead of a release chosen by an older in-app update, and records its SHA.
 - Once per installer build: a later in-app update stays selected.
-- The update badge does not show for main's own build, nor for a candidate built from another branch.
+- The update badge does not show for main's own build, nor for a review build from another branch;
+  a develop build follows the develop channel (#96).
 No real data."""
 import json
 from pathlib import Path
@@ -83,6 +84,7 @@ class TestAdoptInstaller(unittest.TestCase):
         app_home = self.home.parent.parent
         with patch.object(launcher, "ROOT", self.root), patch.object(launcher, "home", return_value=app_home), \
                 patch.object(launcher, "running", return_value=False), \
+                patch.object(launcher, "selftest", return_value=True), \
                 patch.object(launcher.threading, "Thread"), \
                 patch.object(launcher.subprocess, "Popen", return_value=process) as spawn:
             self.assertEqual(launcher.main(), 0)
@@ -97,7 +99,8 @@ class TestUpdateBadge(APICase):
         self.http_login()
         with mock.patch.object(updater, "installed", return_value=info), \
                 mock.patch.object(updater, "read_token", return_value="t"), \
-                mock.patch.object(updater, "latest_sha", return_value=latest):
+                mock.patch.object(updater, "latest_sha", return_value=latest), \
+                mock.patch.object(updater, "compare", return_value={"files": [], "summary": "", "complete": True}):
             return self.c.get("/api/system/update").json()
 
     def test_main_build_is_not_an_update_of_itself(self):
@@ -107,10 +110,16 @@ class TestUpdateBadge(APICase):
     def test_main_moved_on_is_an_update(self):
         self.assertTrue(self.status({"sha": SHA, "ref": "main", "source": "installer"}, SHA2)["available"])
 
-    def test_candidate_from_another_branch_shows_no_update(self):
+    def test_develop_build_follows_the_develop_channel(self):
+        # #96: an installer build of develop is no longer a dead end; it updates itself from develop
         st = self.status({"sha": SHA, "ref": "develop", "source": "installer"}, SHA2)
+        self.assertTrue(st["available"])
+        self.assertEqual(st["channel"], "develop")
+
+    def test_review_build_from_another_branch_shows_no_update(self):
+        st = self.status({"sha": SHA, "ref": "claude/42-review", "source": "installer"}, SHA2)
         self.assertFalse(st["available"])
-        self.assertEqual(st["candidate"], "develop")
+        self.assertEqual(st["candidate"], "claude/42-review")
 
 
 if __name__ == "__main__":

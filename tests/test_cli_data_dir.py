@@ -149,6 +149,7 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         staged = {"release": str(self.tmp), "id": "r1", "files": 1}
         with mock.patch.object(updater, "apply_zip", return_value=staged), \
                 mock.patch.object(releases, "check_compatible"), \
+                mock.patch.object(updater, "installer_reasons", return_value=[]), \
                 mock.patch.object(sp, "run", return_value=SimpleNamespace(returncode=0)):
             self.assertEqual(self.dests(["update", "--from-zip", "u.zip"]), [self.tmp / "home" / "backups"])
             self.assertEqual(self.dests(["update", "--from-zip", "u.zip", "--backup-dir", "mine"]), [Path("mine")])

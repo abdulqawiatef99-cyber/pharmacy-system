@@ -1,12 +1,15 @@
 name: Windows installer
 
 # main is the pharmacy update channel (the in-app updater pulls main), so main only
-# moves with the owner's approval. Only a push to main publishes "installer-latest";
-# a manual run on any other branch builds a review installer artifact and publishes nothing.
+# moves with the owner's approval. A push to main publishes "installer-latest"; a push to develop
+# publishes the test channel "installer-develop" (prerelease, for the owner's test PC only, #96).
+# Each release carries installer.json (commit, branch, sha256, size): the automatic updater downloads
+# PharmacySetup.exe with the read-only token and installs it only when its sha256 matches.
+# A manual run on any other branch builds a review installer artifact and publishes nothing.
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     paths-ignore: ["docs/**", "**.md"]
   workflow_dispatch:
 
@@ -14,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: windows-installer
+  group: windows-installer-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -154,11 +157,25 @@ jobs:
           name: PharmacySetup
           path: dist/PharmacySetup.exe
 
-      - name: Publish as release "installer-latest"
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Publish the channel installer ("installer-latest" for main, "installer-develop" for develop)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete installer-latest --yes --cleanup-tag 2>$null
-          gh release create installer-latest dist/PharmacySetup.exe --title "منصة الصيدلية — آخر نسخة" --notes "ملف التثبيت لآخر نسخة على main (${{ github.sha }}). بياناتك محفوظة في %LOCALAPPDATA%\PharmacyPlatform ومش بتتلمس عند إعادة التثبيت." --target ${{ github.sha }}
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-Item dist/PharmacySetup.exe
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          @{ sha = "$env:GITHUB_SHA"; ref = "$env:GITHUB_REF_NAME"; sha256 = $hash; size = $exe.Length } |
+            ConvertTo-Json -Compress | Set-Content -Encoding ascii dist/installer.json
+          Get-Content dist/installer.json
+          if ("$env:GITHUB_REF_NAME" -eq 'main') {
+            $tag = 'installer-latest'; $title = "منصة الصيدلية — آخر نسخة"; $extra = @()
+          } else {
+            $tag = 'installer-develop'; $title = "منصة الصيدلية — نسخة التجربة (develop)"; $extra = @('--prerelease')
+          }
+          $ErrorActionPreference = 'Continue'
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          $ErrorActionPreference = 'Stop'
+          gh release create $tag dist/PharmacySetup.exe dist/installer.json @extra --title $title --notes "ملف التثبيت لآخر نسخة على $env:GITHUB_REF_NAME ($env:GITHUB_SHA)، sha256 $hash. بياناتك محفوظة في %LOCALAPPDATA%\PharmacyPlatform ومش بتتلمس عند إعادة التثبيت." --target $env:GITHUB_SHA

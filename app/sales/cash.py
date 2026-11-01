@@ -165,8 +165,9 @@ class CashDrawer:
                             f"{'عجز' if diff < 0 else 'زيادة'} في الخزينة {abs(diff) / 100:,.2f} ج",
                             f"إغلاق الوردية: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
                             "cash_shift", sid)
-        from ..core import autobackup
+        from ..core import autobackup, autoupdate
         autobackup.trigger("shift_close")
+        autoupdate.trigger("shift_close")        # a closed shift is a safe moment for a waiting update (#96)
         return self.report(ctx, sid)
 
     def report(self, ctx: Context, shift_id: str) -> dict:

@@ -196,6 +196,7 @@ r.activate(Path({str(self.root)!r}), Path({str(self.home)!r}), {staged['id']!r},
         with patch.object(launcher, "ROOT", self.root), patch.object(launcher, "home", return_value=app_home), \
                 patch.object(launcher, "running", return_value=False), \
                 patch.object(launcher, "candidate_ready", return_value=False), \
+                patch.object(launcher, "selftest", return_value=True), \
                 patch.object(launcher.threading, "Thread"), \
                 patch.object(launcher.subprocess, "Popen", side_effect=[bad, good]) as spawn:
             self.assertEqual(launcher.main(), 0)
@@ -213,6 +214,7 @@ r.activate(Path({str(self.root)!r}), Path({str(self.home)!r}), {staged['id']!r},
                 patch.object(launcher, "home", return_value=self.home.parent.parent), \
                 patch.object(launcher, "running", return_value=False), \
                 patch.object(launcher, "candidate_ready", return_value=True), \
+                patch.object(launcher, "selftest", return_value=True), \
                 patch.object(launcher.threading, "Thread"), \
                 patch.object(launcher.subprocess, "Popen", return_value=process):
             self.assertEqual(launcher.main(), 0)

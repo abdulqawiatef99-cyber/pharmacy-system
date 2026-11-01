@@ -87,7 +87,11 @@ class TestUpdateAPI(APICase):
             st = self.c.get("/api/system/update").json()
         self.assertIn("error", st)                                  # clear message, no crash
         done = _mock.Mock(returncode=0, stdout="التحديث خلص بنجاح", stderr="")
-        with _mock.patch("subprocess.run", return_value=done) as run:
+        with _mock.patch("subprocess.run", return_value=done) as run, \
+                _mock.patch.dict("os.environ", {"PHARM_GITHUB_TOKEN": "t"}), \
+                _mock.patch.object(updater, "latest_sha", return_value="b" * 40), \
+                _mock.patch.object(updater, "compare", return_value={"files": ["app/x.py"], "summary": "",
+                                                                     "complete": True}):
             r = self.c.post("/api/system/update", headers=_H, json={})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(r.json()["restarting"])                    # not under the launcher
