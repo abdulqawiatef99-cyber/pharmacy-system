@@ -100,7 +100,7 @@
 - **مشتريات أصناف من الموردين / فواتير المشتريات** (المورد، الخصم، التاريخ، الكمية) → أساس المورد المقترح، ويتعمل منها طلبية لكل مورد للشيتين (رصيد صفر وليها رصيد).
 - **كل تقرير بنستخدمه من E-Stock يتسجل هنا**: أعمدته، ونواقصه، واللي البرنامج هيعمله أحسن.
 
-## 10. برومبت للتنفيذ
+## 14. برومبت للتنفيذ
 ```
 اقرأ docs/SMART_ORDER_REPORT.md كله، و scripts/prototypes/smart_order_from_estock.py،
 و app/procurement/service.py (Procurement.suggest, supplier_costs, stock_health, evaluate_offer)
