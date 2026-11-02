@@ -125,7 +125,7 @@
 | Q6 | المخزن الكاش يكسب الموزع الآجل بفرق كام نقطة خصم؟ (مقترح 3) | قاعدة الترشيح §5 |
 | Q7 | مخازن تانية غير النهضة وابن خلدون والوطنية ليها شروط مختلفة؟ | جدول §12 |
 
-## 14. برومبت للتنفيذ
+## 18. برومبت للتنفيذ
 ```
 اقرأ docs/SMART_ORDER_REPORT.md كله، و scripts/prototypes/smart_order_from_estock.py،
 و app/procurement/service.py (Procurement.suggest, supplier_costs, stock_health, evaluate_offer)
