@@ -92,7 +92,8 @@ def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
     return img.crop((0, 0, width, min(height, y + 10)))
 
 
-def qr_block(width: int, text: str, caption: str = "", font_path: str | None = None) -> Image.Image:
+def qr_block(width: int, text: str, caption: str = "", font_path: str | None = None,
+             max_w: int | None = None) -> Image.Image:
     """A QR code with its caption under it (F27), so the customer knows what scanning it does."""
     from . import qr
     m = qr.encode(text)
@@ -101,14 +102,21 @@ def qr_block(width: int, text: str, caption: str = "", font_path: str | None = N
     q = qr.image(m, module=module, quiet=4)
     if not caption:
         return q
-    f = ImageFont.truetype(font_path or find_font(), 20 if width >= DOTS_80MM else 18)
+    # the caption never makes the block wider than max_w (Codex P2 on #103): smaller font, then cut with …
+    limit = max(q.width, (max_w or width) - 8)
+    rtl = "rtl" if shaping_available() else None
     probe = ImageDraw.Draw(q)
-    tw = probe.textlength(caption, font=f, direction="rtl" if shaping_available() else None)
+    for size in range(20 if width >= DOTS_80MM else 18, 13, -1):
+        f = ImageFont.truetype(font_path or find_font(), size)
+        if probe.textlength(caption, font=f, direction=rtl) <= limit:
+            break
+    while len(caption) > 1 and probe.textlength(caption, font=f, direction=rtl) > limit:
+        caption = caption[:-2] + "…"
+    tw = probe.textlength(caption, font=f, direction=rtl)
     w = max(q.width, int(tw) + 8)
     img = Image.new("L", (w, q.height + 26), 255)
     img.paste(q, ((w - q.width) // 2, 0))
-    ImageDraw.Draw(img).text(((w - tw) / 2, q.height - 6), caption, font=f, fill=0,
-                             direction="rtl" if shaping_available() else None)
+    ImageDraw.Draw(img).text(((w - tw) / 2, q.height - 6), caption, font=f, fill=0, direction=rtl)
     return img
 
 
@@ -120,10 +128,12 @@ def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "",
     if not logo_png and not qr_text:
         return None
     pad, gap = 8, 16
-    q = qr_block(width, qr_text, qr_caption, font_path) if qr_text else None
+    # beside a logo the code and its caption keep to the left half; alone, the whole width
+    q = qr_block(width, qr_text, qr_caption, font_path,
+                 max_w=(width // 2 - pad) if logo_png else width - 2 * pad) if qr_text else None
     lg = None
     if logo_png:
-        room = width - 2 * pad - ((q.width + gap) if q else 0)
+        room = max(1, width - 2 * pad - ((q.width + gap) if q else 0))
         lg = logo_mod.bitmap(logo_png, room, 200 if width >= DOTS_80MM else 160)
     h = max(x.height for x in (q, lg) if x) + 8
     img = Image.new("L", (width, h), 255)
@@ -140,7 +150,7 @@ def receipt_footer_qr(width: int, text: str, caption: str = "", font_path: str |
     """The optional second code, centred under the receipt (F27)."""
     if not text:
         return None
-    b = qr_block(width, text, caption, font_path)
+    b = qr_block(width, text, caption, font_path, max_w=width - 16)
     img = Image.new("L", (width, b.height + 12), 255)
     img.paste(b, ((width - b.width) // 2, 6))
     return img

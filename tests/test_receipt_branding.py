@@ -224,3 +224,27 @@ class TestBrowserTwoCodes(CheckoutCase):
         self.assertEqual(page.count("<svg"), 2)
         self.assertIn("<figcaption>اطلب على واتساب</figcaption>", page)
         self.assertIn("<figcaption>موقعنا على الخريطة</figcaption>", page)
+
+
+class TestLongCaption(DBTestCase):
+    def test_long_caption_never_pushes_the_code_off_the_paper(self):
+        # Codex P2 on #103: 40 wide letters used to widen the QR block past the receipt
+        png = logo.clean(png_data_url())
+        long = "W" * 40
+        for width in (escpos.DOTS_80MM, escpos.DOTS_58MM):
+            block = escpos.qr_block(width, "https://wa.me/201012345678", long, max_w=width // 2 - 8)
+            self.assertLessEqual(block.width, width // 2 - 8)
+            hdr = escpos.receipt_header(width, png, "https://wa.me/201012345678", long)
+            self.assertEqual(hdr.width, width)
+            self.assertIsNotNone(ImageOps_dark(hdr.crop((width // 2, 0, width, hdr.height))))   # the logo still has room
+            foot = escpos.receipt_footer_qr(width, "https://wa.me/201012345678", long)
+            self.assertEqual(foot.width, width)
+            try:
+                import cv2
+                import numpy as np
+            except ImportError:
+                continue
+            for img in (hdr, foot):
+                printed = Image.frombytes("1", (width, img.height),
+                                          bytes(b ^ 0xFF for b in escpos.raster_bytes(img)[8:])).convert("L")
+                self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(printed))[0], "https://wa.me/201012345678")
