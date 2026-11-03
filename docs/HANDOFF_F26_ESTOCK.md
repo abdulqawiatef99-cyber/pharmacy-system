@@ -7,23 +7,24 @@ Owner prefs: short Egyptian Arabic replies, double-check everything, ask before 
 - Work files (scripts, data, outputs, raw E-Stock exports): `work/f26_2026-11-03/` (see its README).
 - New E-Stock exports from 3/11 are on the pharmacy PC Desktop (`claude_*.xlsx`) — ask the owner to attach them; folder access was denied.
 - Tools: GitHub access to this private repo; Claude in Chrome logged into i'Supply / Ibn Sina portal / Pharma Overseas / WhatsApp Web (owner keeps passwords); Claude desktop app on the pharmacy PC with Computer use for E-Stock.
-- Another Claude account does NOT share this account's memory. Owner rules to apply: masculine Arabic; very short replies; constructive critic; double/triple-check; never assume supplier terms — ask; English text in its own code block (renders garbled inline); big bold fonts in files; warn before heavy usage; keep open questions and re-raise them; list open reminders at the end of each reply until he closes them; supplier files = item name + qty + polite note only.
+- Another Claude account does NOT share this account's memory. Owner rules to apply: masculine Arabic; explain step by step in plain words (he is not technical); very short replies; constructive critic; double/triple-check; never assume supplier terms — ask; English text in its own code block (renders garbled inline); big bold fonts in files; warn before heavy usage; keep open questions and re-raise them; list open reminders at the end of each reply until he closes them; supplier files = item name + qty + polite note only.
 - Supplier WhatsApp chats: Nahda = +20 10 92911028; Ibn Sina = تقي صابر تليسيلز صباحي ابن سينا; Ibn Khaldun = ياسمين محسن سيلز ابن خلدون; Wataniya = عماد المعصراوي سيلز مخزن الوطنية. Nahda cutoff 3:45–4 pm. When sending a PDF: attach → Document (not Photos), clear any draft caption first. The WhatsApp Web in Chrome is the owner's personal account (pharmacy WhatsApp is separate — ask).
 - Supplier sites: https://app.isupply.com.eg — https://customerportal.ibnsina-pharma.com — https://shop.pharmaemarket.com — Drug Eye https://drugeye.pharorg.com/drugeyeapp/android-search/drugeye-android-live-go.aspx
 
 ## Plan and progress
 
-### Phase A — export E-Stock data (computer use on pharmacy PC) — ≈ 60%
+### Phase A — export E-Stock data — ≈ 60%
+**Decision 2026-11-03 18:00:** the owner exports A3–A7 himself (computer use costs too much usage for simple exports). Same chat continues from the Claude desktop app on the pharmacy PC with the new account. Working data (pkl/xlsx) is gitignored and was NOT pushed — the owner must re-send the exports.
 | # | Step | Status |
 |---|---|---|
 | A1 | Purchases → تقرير فواتير المشتريات بالأصناف, 1/11/2025 → 3/11/2026 | ✅ `Desktop\claude_purchases_2025-11-01_to_2026-11-03.xlsx` (837 KB) |
 | A2 | Sales → تقرير مبيعات أصناف عن فترة, one file per month | ✅ Nov-2025 … Jul-2026 → `Desktop\claude_sales_YYYY-MM.xlsx` (9 files) |
-| A3 | Same for Aug, Sep, Oct 2026 | ⏳ (dates for Aug already typed). Older ORDER_8/9/NOV files exist as fallback |
-| A4 | Sales → تقرير كميات أصناف لم تباع (3 and 6 months) | ⏳ |
+| A3 | Same for Aug, Sep, Oct 2026 — **owner, manual** | ⏳ |
+| A4 | Sales → تقرير كميات أصناف لم تباع (3 and 6 months) — **owner, manual** | ⏳ |
 | A5 | Stores → تقرير كميات أصناف المخازن طبقًا لتواريخ الصلاحية (after Ibn Khaldun invoice is entered) | ⏳ |
 | A6 | Items → تقرير أصناف تغيرت أسعارها (6 months) | ⏳ |
 | A7 | Screenshot filter screens only: حركة بيع الأصناف، فواتير المبيعات عن فترة، حركة صنف في المخزن | ⏳ |
-| A8 | Owner attaches the Desktop files in chat (folder-access request was denied) | ⏳ |
+| A8 | Owner sends all `claude_*.xlsx` + ORDER_8/9/NOV + stock-by-expiry 3-11 (or grants Desktop folder access) | ⏳ |
 
 **E-Stock how-to (verified):**
 - Windows PC, app `D:\Modern Soft for Programming\e-Stock Pharmacy\e-Stock\e-Stock.exe` (there is also a C:\ copy — use D:). Screen frame 1269×951.
