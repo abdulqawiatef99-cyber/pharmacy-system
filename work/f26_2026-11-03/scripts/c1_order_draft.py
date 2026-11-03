@@ -2,7 +2,8 @@ import pandas as pd,numpy as np,re
 from openpyxl.styles import Font,Alignment,PatternFill
 T=pd.read_pickle('T.pkl');months=[c for c in T.columns if str(c).startswith('20')]
 # arrivals not yet in E-Stock (Ibn Khaldun 150292 + 150745) by code
-arr={21174:2,29717:1,7214:1,10744:1,30473:1,29489:1,30790:2,5356:1,29743:2,29157:1,9393:1,29279:1}
+# Ibn Sina 3/11 (Taqi chat): Barictomap 1, Servitam 1, Epicopred 5mg 1, Rositor 20 x2 coming; Anafranil 75 out of stock
+arr={29946:1,26571:2,21174:2,29717:1,7214:1,10744:1,30473:1,29489:1,30790:2,5356:1,29743:2,29157:1,9393:1,29279:1}
 S=pd.read_pickle('S.pkl');lastp=S.sort_values('month').groupby('code').price.last();T['price']=T.price.fillna(lastp)
 T['arrived']=pd.Series(arr).reindex(T.index).fillna(0)
 T['stock2']=T.stock+T.arrived
@@ -12,17 +13,17 @@ need=lambda days: np.ceil(np.maximum(T.avg*days/30-T.stock2,0)-1e-9)
 T['wk']=need(7);T['wk2']=need(14);T['mo']=need(30)
 fridge=re.compile(r'ثلاجة|INSUL|MIXTARD|LANTUS|NOVORAPID|NOVOMIX|HUMULIN|HUMALOG|APIDRA|TOUJEO|RYZODEG|TRESIBA|LEVEMIR|VACC|OZEMPIC|SAXENDA|VICTOZA|TRULICITY|MOUNJARO|EPREX|RECORMON|PROLIA|ENBREL|HUMIRA|SYNAGIS|ANTI.?D|RHOPHYLAC|ROTARIX|INFANRIX|ENGERIX|ACTRAPID|INSULATARD|GONAL|MENOPUR|OVITRELLE|CETROTIDE|PUREGON|CHORIOMON|PREGNYL|DIPHERELINE|ZOLADEX|NEUPOGEN|CALCITONIN|MIACALCIC|LIRAGLU|SEMAGLU|DULAGLU|TIRZEP|ERYTHROPO|LATANO|XALATAN|XALACOM|TRAVATAN|LUMIGAN',re.I)
 O=T[T['class'].isin(['منتظم','شبه منتظم'])&(T.wk2>0)].copy()
-K={30494:'ميلاكريست',5342:'فليكتور',5786:'جاست ريج',30390:'اكسيدوجاست',1319:'ازروليد',29147:'اومنيفورا',3195:'بانادول اكيوت',8896:'مكسترد فايل',2149:'كاندالكان (8؟ اتأكد التركيز)',1726:'بيزوكارد (2.5؟ اتأكد التركيز)'}
+K={31226:'دوزوفا ميلاتونين',30494:'ميلاكريست',5342:'فليكتور',5786:'جاست ريج',30390:'اكسيدوجاست',1319:'ازروليد',29147:'اومنيفورا',3195:'بانادول اكيوت',8896:'مكسترد فايل',2149:'كاندالكان (8؟ اتأكد التركيز)',1726:'بيزوكارد (2.5؟ اتأكد التركيز)',748:'انافرانيل 75 (خلص عند ابن سينا)'}
 T['kash']=pd.Series(K).reindex(T.index)
 supp=T.name.str.split('#').str[0].str.contains(r'[\u0600-\u06FF]',na=False)
 O=T[((T['class'].isin(['منتظم','شبه منتظم'])&(T.wk>0))|T.kash.notna())&~supp].copy()
 for c in K: 
-    for q in ['wk','wk2','mo']: O.loc[c,q]=max(O.loc[c,q],1.0)
+    for q in ['wk','wk2','mo']: O.loc[c,q]=max(O.loc[c,q],{1319:2.0,748:5.0}.get(c,1.0))
 pend_ibnsina=r'BARICT|ANAFR.*75|SERVITAM|APICO|ROSITOR\s*20|ROSUTOR\s*20'
 O['تنبيه']=O.kash.apply(lambda k: f'كشكول: {k}. ' if isinstance(k,str) else '')
 O.loc[O.price>=300,'تنبيه']+='غالي ≥300 — موافقتك. '
 O.loc[O.name.str.contains(fridge,na=False),'تنبيه']+='تلاجة؟ — موافقتك. '
-O.loc[O.name.str.contains(pend_ibnsina,case=False,na=False,regex=True),'تنبيه']+='في طلبية ابن سينا 3/11 اللي لسه ما وصلتش. '
+
 O.loc[O['flags']!='','تنبيه']+=O['flags']+'. '
 O.loc[O.name.str.split('#').str[0].str.contains(r'[\u0600-\u06FF]',na=False)&O.kash.isna(),'تنبيه']+='مستلزمات (مؤجلة؟). '
 O['k']=O.kash.notna(); O=O.sort_values(['k','class','q3'],ascending=[False,False,False])
