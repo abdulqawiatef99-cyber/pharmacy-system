@@ -33,7 +33,9 @@ Owner prefs: short Egyptian Arabic replies, double-check everything, ask before 
 - The Claude window can cover dialogs; ask the owner to minimise it. Don't send chat messages mid-batch (the window pops up).
 - Read-only: never save/edit anything in E-Stock.
 
-### Phase B — analysis — 0%
+### Phase B — analysis — 70% (2026-11-03 18:40)
+Done: 12 months sales + purchases + stock-by-expiry received (A3/A5 done; A4 dropped — dead stock derived from 12 months). Scripts `work/f26_2026-11-03/scripts/b1_load.py`, `b3_classify.py`, `b7_excel.py` (run in a folder with the claude_*.xlsx files). Output `تحليل_سنة_2026-11-03.xlsx`. Results: dead (stock>0, no sale Aug–Oct, not bought in 75 days) = 1,592 items ≈ 158,100 EGP; regular 358 items; 61 data-quality flags. Purchases export has NO supplier name column. Two Ibn Khaldun invoices not yet entered in E-Stock: 150292 (2/11, Blink Tears ×2) and 150745 (3/11, 15 lines, 2,239.89) — listed in the Excel; don't re-order those items.
+Left: B6 approval list (≥300, fridge, near expiry) inside the 4/11 order.
 B1 merge 12 months → per item: months sold, qty, last month sold; B2 last purchase (date/supplier/discount/expiry) from A1; B3 classify regular / intermittent / stopped / new / seasonal; B4 precise dead stock (cross-check A4 + B1 + B2 + stock); B5 data-quality flags (§58); B6 approval list: expensive (≥300), fridge, near expiry; B7 send Excel files (big bold font).
 
 ### Phase C — tomorrow 4/11 Nahda order (before 3:30) — 0%
@@ -54,4 +56,4 @@ Only after A–C; owner reviews on screen before Save.
 - Keypad phone + SIM for the delivery person.
 - Electricity meter photo: DONE 3/11.
 
-## Overall ≈ 30% (A 60%, B 0%, C 0%, D 0%, E 30%, F 0%)
+## Overall ≈ 45% (A 100% (A4 dropped, A6/A7 optional), B 70%, C 0%, D 0%, E 30%, F 0%)
