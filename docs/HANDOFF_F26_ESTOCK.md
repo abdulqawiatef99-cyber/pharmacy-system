@@ -3,6 +3,14 @@
 Read first: `docs/SMART_ORDER_REPORT.md` (§47–§58 are the latest). Branch `claude/f26-smart-order`, PR #102 → develop.
 Owner prefs: short Egyptian Arabic replies, double-check everything, ask before expensive/fridge/low-discount items, never message suppliers without his OK on the exact text, never call tele-sales "دكتورة".
 
+## What the next session needs (besides this file)
+- Work files (scripts, data, outputs, raw E-Stock exports): `work/f26_2026-11-03/` (see its README).
+- New E-Stock exports from 3/11 are on the pharmacy PC Desktop (`claude_*.xlsx`) — ask the owner to attach them; folder access was denied.
+- Tools: GitHub access to this private repo; Claude in Chrome logged into i'Supply / Ibn Sina portal / Pharma Overseas / WhatsApp Web (owner keeps passwords); Claude desktop app on the pharmacy PC with Computer use for E-Stock.
+- Another Claude account does NOT share this account's memory. Owner rules to apply: masculine Arabic; very short replies; constructive critic; double/triple-check; never assume supplier terms — ask; English text in its own code block (renders garbled inline); big bold fonts in files; warn before heavy usage; keep open questions and re-raise them; list open reminders at the end of each reply until he closes them; supplier files = item name + qty + polite note only.
+- Supplier WhatsApp chats: Nahda = +20 10 92911028; Ibn Sina = تقي صابر تليسيلز صباحي ابن سينا; Ibn Khaldun = ياسمين محسن سيلز ابن خلدون; Wataniya = عماد المعصراوي سيلز مخزن الوطنية. Nahda cutoff 3:45–4 pm. When sending a PDF: attach → Document (not Photos), clear any draft caption first. The WhatsApp Web in Chrome is the owner's personal account (pharmacy WhatsApp is separate — ask).
+- Supplier sites: https://app.isupply.com.eg — https://customerportal.ibnsina-pharma.com — https://shop.pharmaemarket.com — Drug Eye https://drugeye.pharorg.com/drugeyeapp/android-search/drugeye-android-live-go.aspx
+
 ## Plan and progress
 
 ### Phase A — export E-Stock data (computer use on pharmacy PC) — ≈ 60%
