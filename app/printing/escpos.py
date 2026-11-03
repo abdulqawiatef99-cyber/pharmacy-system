@@ -91,6 +91,44 @@ def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
     return img.crop((0, 0, width, min(height, y + 10)))
 
 
+def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "") -> Image.Image | None:
+    """Logo and/or QR code above the receipt text (F27): logo on the right and QR on the left
+    (Arabic reads right to left), or either one centred. Grayscale; raster_bytes makes it 1-bit."""
+    from . import logo as logo_mod, qr
+    if not logo_png and not qr_text:
+        return None
+    pad, gap = 8, 16
+    q = None
+    if qr_text:
+        m = qr.encode(qr_text)
+        target = 168 if width >= DOTS_80MM else 136          # ~21 / 17 mm at 203 dpi
+        module = max(2, min(6, target // (len(m) + 8)))
+        q = qr.image(m, module=module, quiet=4)
+    lg = None
+    if logo_png:
+        room = width - 2 * pad - ((q.width + gap) if q else 0)
+        lg = logo_mod.bitmap(logo_png, room, 200 if width >= DOTS_80MM else 160)
+    h = max(x.height for x in (q, lg) if x) + 8
+    img = Image.new("L", (width, h), 255)
+    if lg and q:
+        img.paste(lg, (width - pad - lg.width, (h - lg.height) // 2))
+        img.paste(q, (pad, (h - q.height) // 2))
+    else:
+        x = lg or q
+        img.paste(x, ((width - x.width) // 2, (h - x.height) // 2))
+    return img
+
+
+def stack(*parts: Image.Image | None) -> Image.Image:
+    parts = [p for p in parts if p is not None]
+    out = Image.new("L", (max(p.width for p in parts), sum(p.height for p in parts)), 255)
+    y = 0
+    for p in parts:
+        out.paste(p, (0, y))
+        y += p.height
+    return out
+
+
 def raster_bytes(img: Image.Image) -> bytes:
     """ESC/POS `GS v 0` raster image (1 bit per dot, MSB first, black = 1)."""
     bw = img.convert("L").point(lambda p: 255 if p > 160 else 0, mode="1")
@@ -172,7 +210,11 @@ def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover 
         win32print.ClosePrinter(h)
 
 
-def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None) -> list[tuple[str, str, str]]:
+def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
+                  given: int = 0) -> list[tuple[str, str, str]]:
+    """given: what the customer handed over in cash (piastres), printed with the change due when it is
+    more than the cash part of the sale (F27). Shown only on the receipt printed at checkout; it is
+    not stored, so a later reprint has no change line."""
     cfg = cfg or {}
     m = lambda p: f"{p / 100:.2f}"  # noqa: E731
     out = [("small", cfg["header"], "")] if cfg.get("header") else []
@@ -183,13 +225,20 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None)
     for key, label in (("tax_no", "رقم التسجيل الضريبي"), ("cr_no", "السجل التجاري")):
         if cfg.get(key):
             out.append(("small", f"{label}: {cfg[key]}", ""))
-    out += [("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
+    out.append(("small", f"فاتورة رقم {sale['sale_no']}", when))
+    if cashier and cfg.get("show_cashier", True):
+        out.append(("small", f"البائع: {cashier}", ""))
+    out.append(("rule", "", ""))
     for l in sale["lines"]:
         it = l["item"]
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
         out.append(("row", name, m(l["line_total"])))
         out.append(("small", f"{l['qty_base']} {it['base_unit']}", ""))
     out.append(("rule", "", ""))
+    if cfg.get("show_item_count") and sale["lines"]:
+        out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
+    if sale["discount_total"] and sale.get("subtotal"):
+        out.append(("row", "الإجمالي", m(sale["subtotal"])))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
     out.append(("total", "المطلوب", m(sale["total"])))
@@ -197,5 +246,8 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None)
                        ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
         if sale.get(key):
             out.append(("row", label, m(sale[key])))
+    cash = sale.get("paid_cash") or 0
+    if cfg.get("show_change", True) and cash and given > cash:
+        out += [("row", "المدفوع من العميل", m(given)), ("total", "الباقي", m(given - cash))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
     return out

@@ -1649,6 +1649,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
+        # cash_given: what the customer handed over, only to print the change due (F27); never stored.
+        # Checked before the sale is saved so a bad value can never fail an already-saved sale.
+        given = _int(b.get("cash_given"), "المبلغ المدفوع من العميل")
+        if not 0 <= given <= 100_000_000:
+            raise ValidationFailed("المبلغ المدفوع من العميل غير صحيح")
         done = Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
@@ -1657,7 +1662,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     confirm_below_cost=bool(b.get("confirm_below_cost")),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
-            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True)
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
+                                                      given)
         return J(done)
 
     @handler
