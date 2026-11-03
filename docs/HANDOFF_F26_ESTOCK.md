@@ -1,5 +1,7 @@
 # Handoff — F26 smart order + E-Stock data (2026-11-03 17:50 Cairo)
 
+> **Latest (2026-11-03 21:30): read `docs/HANDOFF_ACC2.md` first** — second-account session: full year analysis, sell-off list, 4/11 order allocated to suppliers (Ibn Sina / Ibn Khaldun +1 / Nahda −2 / Wataniya). Files in `work/acc2_2026-11-03/`.
+
 Read first: `docs/SMART_ORDER_REPORT.md` (§47–§58 are the latest). Branch `claude/f26-smart-order`, PR #102 → develop.
 Owner prefs: short Egyptian Arabic replies, double-check everything, ask before expensive/fridge/low-discount items, never message suppliers without his OK on the exact text, never call tele-sales "دكتورة".
 
@@ -72,3 +74,15 @@ Only after A–C; owner reviews on screen before Save.
 - 19:20: Ibn Sina 3/11 printed (Taqi chat): Barictomap 1, Servitam 1, Epicopred 5mg 1, Rositor 20 x2. Anafranil 75 OUT at Ibn Sina → in tomorrow order (qty 5). Kashkool latest: Azrolid 500 x2, Dozova melatonin, Acti-Kola C (new item, not in E-Stock), Candalkan 8 confirmed. Ibn Sina portal needs owner login; Pharma Overseas skipped (same prices as Ibn Sina).
 
 - 20:25: Ibn Sina search (205 items, in-page capture of search-products) + i'Supply best-price offers (Livewire page /best-price/products?id=ID&category=1 rendered in hidden iframe; product search via captured /products/search template). Allocation = highest discount among Ibn Sina / Nahda / Ibn Khaldun / Wataniya; 29.8% at Ibn Sina flagged as likely pre-tax (20% effective). Ibn Sina availability NOT checked yet. Scripts alloc.py, supfiles.py; raw matches ibnsina_match.txt, isup.txt. Lesson: Ibn Sina low-score matches (Orlistat/Maxilase/Vitayami) were different packs, not old prices.
+
+## Progress table (updated 2026-11-03 21:30, acc2)
+| Phase | Status | % |
+|---|---|---|
+| A — E-Stock exports | ✅ all received (A4/A6/A7 dropped or optional) | 100% |
+| B — analysis (12 months, classes, dead stock, data flags) | ✅ | 100% |
+| C — 4/11 order | ⏳ allocated by price (alloc2: Ibn Sina 115, Ibn Khaldun 53, Wataniya 15, Nahda 2, ask 39); pending: Ibn Sina tax (19) + availability, other warehouses' terms, owner approval, message text | 80% |
+| D — price check of sell-off items (Drug Eye / i'Supply) | ❌ not started; sell-off list ready (`2_أصناف_للتصريف.xlsx`, ≈189k EGP) | 20% |
+| D2 — expired-returns terms at Ibn Sina / Pharma Overseas | ❌ not started | 0% |
+| E — platform docs | unchanged | 30% |
+| F — enter invoice from photo | not started | 0% |
+| **Overall** | | **≈ 70%** |
