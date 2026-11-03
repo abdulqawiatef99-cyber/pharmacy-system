@@ -8,7 +8,7 @@ from ..core import audit
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from . import logo, qr
+from . import logo, qr, qrlinks
 
 DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا لزيارتكم — ألف سلامة",
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
@@ -21,7 +21,8 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "time_format": "12", "header": "", "tax_no": "", "cr_no": "", "copies": 1,
             # F27: QR code text (a link / WhatsApp), item count and the change due on the receipt.
             # The logo itself lives under its own key (logo.py); get() reports has_logo.
-            "qr_text": "", "show_item_count": True, "show_change": True,
+            # qr2 = an optional second code at the bottom (e.g. the location); captions blank = from the link
+            "qr_text": "", "qr_caption": "", "qr2_text": "", "qr2_caption": "", "show_item_count": True, "show_change": True,
             # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
             "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24"}
 _KEEP = object()
@@ -161,14 +162,18 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if not isinstance(data["lines"], list):
             raise ValidationFailed("بيانات غير صحيحة")
         new["lines"] = [str(x or "").strip()[:60] for x in data["lines"][:3]]
-    if "qr_text" in data:
-        t = str(data["qr_text"] or "").strip()
-        if t:
-            try:
-                qr.encode(t)
-            except qr.QRTooLong as e:
-                raise ValidationFailed(str(e))
-        new["qr_text"] = t
+    for k in ("qr_text", "qr2_text"):
+        if k in data:
+            t = qrlinks.normalize(data[k])          # a mobile number becomes its WhatsApp link
+            if t:
+                try:
+                    qr.encode(t)
+                except qr.QRTooLong as e:
+                    raise ValidationFailed(str(e))
+            new[k] = t
+    for k in ("qr_caption", "qr2_caption"):
+        if k in data:
+            new[k] = str(data[k] or "").strip()[:40]
     png = _KEEP
     if "logo" in data:              # data URL from the settings page; "" / null removes the logo
         png = logo.clean(data["logo"]) if data["logo"] else None

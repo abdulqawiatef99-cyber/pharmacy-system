@@ -1965,13 +1965,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             png = logo_mod.get_png(db, ctx.org_id)
             if png:
                 hd.append(f'<img alt="" src="data:image/png;base64,{base64.b64encode(png).decode()}">')
-        if cfg["qr_text"]:
-            from ..printing import qr as qr_mod
+        from ..printing import qr as qr_mod, qrlinks
+
+        def qr_fig(text, own):
+            if not text:
+                return ""
             try:
-                hd.append(qr_mod.svg(qr_mod.encode(cfg["qr_text"]), 22 if cfg["paper"] == 80 else 17))
+                code = qr_mod.svg(qr_mod.encode(text), 22 if cfg["paper"] == 80 else 17)
             except qr_mod.QRTooLong:
-                pass
+                return ""
+            cap = qrlinks.caption(text, own)
+            return f"<figure class='qr'>{code}{f'<figcaption>{e(cap)}</figcaption>' if cap else ''}</figure>"
+        if cfg["qr_text"]:
+            hd.append(qr_fig(cfg["qr_text"], cfg["qr_caption"]))
+        hd = [x for x in hd if x]
         header = f'<div class="hd{" one" if len(hd) == 1 else ""}">{"".join(hd)}</div>' if hd else ""
+        bottom_qr = f"<div class='hd one'>{qr_fig(cfg['qr2_text'], cfg['qr2_caption'])}</div>" if cfg["qr2_text"] else ""
         d = sale.get("delivery") or {}
         head = "".join(f"<p>{e(x)}</p>" for x in cfg["lines"] if x)
         head += "".join(f"<p>{lbl}: {e(cfg[k])}</p>" for k, lbl in
@@ -1997,7 +2006,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
 <tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{pay}</table>
-<p class="f">{e(cfg['footer'])}</p>{policy}</div><script src="/static/print.js"></script></body></html>"""
+<p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
@@ -2090,13 +2099,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def receipt_logo(req):
-        """The stored receipt logo, for the settings page preview (F27)."""
+        """The stored receipt logo as it will print (black/white), for the settings page preview (F27)."""
         from ..printing import logo as logo_mod
         ctx = ctx_of(req)
         png = logo_mod.get_png(db, ctx.org_id)
         if not png:
             return Response(status_code=404)
-        return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+        return Response(logo_mod.print_look(png), media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @handler
     async def receipt_settings(req):

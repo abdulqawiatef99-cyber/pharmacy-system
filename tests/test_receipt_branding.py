@@ -163,3 +163,64 @@ class TestCheckoutChange(CheckoutCase):
         self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/png"))
         self.c.put("/api/settings/receipt", headers=H, json={"logo": ""})
         self.assertEqual(self.c.get("/api/settings/receipt/logo").status_code, 404)
+
+
+class TestQRLinks(DBTestCase):
+    def test_mobile_numbers_become_whatsapp_links_and_links_stay(self):
+        from app.printing import qrlinks
+        for typed in ("01012345678", " 010 1234 5678 ", "+201012345678", "00201012345678", "201012345678", "1012345678"):
+            self.assertEqual(qrlinks.normalize(typed), "https://wa.me/201012345678", typed)
+        for kept in ("https://www.facebook.com/x", "0482221234", "01312345678", "https://maps.app.goo.gl/abc", ""):
+            self.assertEqual(qrlinks.normalize(kept), kept.strip())
+        cases = {"https://wa.me/201012345678": "اطلب على واتساب", "https://maps.app.goo.gl/abc": "موقعنا على الخريطة",
+                 "https://www.google.com/maps/place/x": "موقعنا على الخريطة", "https://www.google.com/search?q=x": "",
+                 "https://www.facebook.com/x": "تابعنا على فيسبوك", "https://ipn.eg/S/x": "ادفع بإنستاباي",
+                 "https://example.com": "", "not a link": ""}
+        for link, cap in cases.items():
+            self.assertEqual(qrlinks.auto_caption(link), cap, link)
+        self.assertEqual(qrlinks.caption("https://wa.me/201012345678", " اطلب دواك "), "اطلب دواك")
+
+    def test_settings_normalize_both_codes(self):
+        c = rs.save(self.db, self.ctx, {"qr_text": "0101 234 5678", "qr2_text": " https://maps.app.goo.gl/abc ",
+                                        "qr2_caption": " " + "ك" * 50})
+        self.assertEqual((c["qr_text"], c["qr2_text"]), ("https://wa.me/201012345678", "https://maps.app.goo.gl/abc"))
+        self.assertEqual(len(c["qr2_caption"]), 40)
+        with self.assertRaises(ValidationFailed):
+            rs.save(self.db, self.ctx, {"qr2_text": "x" * 214})
+
+    def test_captioned_codes_print_and_read(self):
+        bare = escpos.qr_block(576, "https://wa.me/201012345678")
+        cap = escpos.qr_block(576, "https://wa.me/201012345678", "اطلب على واتساب")
+        self.assertGreater(cap.height, bare.height)
+        self.assertIsNotNone(ImageOps_dark(cap.crop((0, bare.height, cap.width, cap.height))))   # the caption is drawn
+        self.assertIsNone(escpos.receipt_footer_qr(576, ""))
+        foot = escpos.receipt_footer_qr(576, "https://maps.app.goo.gl/abc", "موقعنا على الخريطة")
+        self.assertEqual(foot.width, 576)
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV not installed (optional cross-check)")
+        printed = Image.frombytes("1", (576, foot.height), bytes(b ^ 0xFF for b in escpos.raster_bytes(foot)[8:])).convert("L")
+        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(printed))[0], "https://maps.app.goo.gl/abc")
+
+    def test_logo_preview_is_exactly_black_and_white(self):
+        # teal text on a navy box: both are dark, so both print black — the preview must show that
+        img = Image.new("RGB", (200, 80), "white")
+        d = ImageDraw.Draw(img)
+        d.rectangle([10, 10, 190, 70], fill=(49, 42, 86))
+        d.rectangle([40, 30, 160, 50], fill=(30, 140, 141))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        look = Image.open(io.BytesIO(logo.print_look(logo.clean(base64.b64encode(buf.getvalue()).decode()))))
+        self.assertEqual(look.convert("L").getextrema(), (0, 0))   # one black block: the teal text is gone on paper
+
+
+class TestBrowserTwoCodes(CheckoutCase):
+    def test_page_has_both_codes_with_captions(self):
+        self.c.put("/api/settings/receipt", headers=H, json={"qr_text": "01012345678", "qr2_text": "https://maps.app.goo.gl/abc"})
+        done = self.complete(self.draft(), [{"method": "cash", "amount": 3000}])
+        page = self.c.get(f"/receipt/{done['id']}").text
+        self.assertEqual(page.count("<svg"), 2)
+        self.assertIn("<figcaption>اطلب على واتساب</figcaption>", page)
+        self.assertIn("<figcaption>موقعنا على الخريطة</figcaption>", page)

@@ -1898,6 +1898,24 @@ function logoDataUrl(file) {
     img.src = url;
   });
 }
+// the logo as the thermal printer will print it: grey above 160 → white, else black (same rule as the server)
+function printLook(dataUrl) {
+  return new Promise((ok) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement("canvas"); cv.width = img.width; cv.height = img.height;
+      const g = cv.getContext("2d"); g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, cv.width, cv.height), p = d.data;
+      for (let i = 0; i < p.length; i += 4) {
+        const v = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000 > 160 ? 255 : 0;
+        p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255;
+      }
+      g.putImageData(d, 0, 0); ok(cv.toDataURL("image/png"));
+    };
+    img.onerror = () => ok(dataUrl);
+    img.src = dataUrl;
+  });
+}
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
   const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
@@ -1952,7 +1970,11 @@ async function renderReceiptCfg(c) {
       <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
         <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
         <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>شيل اللوجو</button></div>
-      <label class="f">نص الكود (لينك صفحة الصيدلية أو واتساب، فارغ = بدون كود) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="https://wa.me/20xxxxxxxxxx"></label>
+      <p class="muted">في كل كود: اكتب <b>رقم موبايل الصيدلية</b> (للواتساب — البرنامج يحوّله لوحده)، أو الصق لينك صفحة الفيسبوك، أو لينك اللوكيشن من خرائط جوجل (مشاركة ← نسخ اللينك)، أو لينك الدفع من أبلكيشن إنستاباي. الكلمة اللي تحت الكود بتتكتب لوحدها حسب اللينك، أو اكتبها بنفسك.</p>
+      <label class="f">الكود اللي فوق (جنب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+      <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
+      <label class="f">كود تاني تحت الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
+      <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">الطابعة الحرارية أبيض وأسود بس: الرمادي الفاتح بيختفي والغامق بيبقى أسود. بعد الحفظ اطبع «آخر فاتورة كتجربة» وجرّب تقرا الكود بالموبايل.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
@@ -1961,8 +1983,8 @@ async function renderReceiptCfg(c) {
   $("#rcLogoFile").addEventListener("change", async (e) => {
     const file = e.target.files[0]; if (!file) return;
     try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
-    $("#rcLogoPrev").src = RC_LOGO; $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
-    $("#rcLogoMsg").textContent = "يتحفظ لما تدوس «احفظ»";
+    $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
+    $("#rcLogoMsg").textContent = "ده شكله على الورق بالظبط (أبيض وأسود). لو جزء اختفى أو بقى أسود، ارفع نسخة أبيض وأسود من اللوجو. يتحفظ لما تدوس «احفظ»";
   });
   $("#rcLogoDel").addEventListener("click", () => {
     RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
@@ -1998,7 +2020,8 @@ async function renderReceiptCfg(c) {
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
       label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
-      qr_text: f.qr_text.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
+      qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
+      qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
       ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });

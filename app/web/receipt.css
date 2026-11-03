@@ -30,3 +30,5 @@ p.sig { margin-top: 18px; text-align: right; }
 body.w58 .hd img { max-width: 20mm; max-height: 18mm; }
 body.w58 .hd.one img { max-width: 36mm; }
 .chg td { font-weight: bold; font-size: 14px; }
+.hd figure.qr { margin: 0; text-align: center; flex: none; }
+.hd figcaption { font-size: 10px; font-weight: bold; margin-top: 1px; }

@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw, ImageFont, features
 DOTS_80MM = 576          # 72 mm printable at 203 dpi (typical 80 mm printer)
 DOTS_58MM = 384          # 48 mm printable (58 mm printer)
 ESC, GS = b"\x1b", b"\x1d"
+THRESHOLD = 160          # grey above this prints white, at or below black (thermal heads have no grey)
 INIT = ESC + b"@"
 CUT = GS + b"V" + b"\x42" + b"\x00"          # feed and partial cut
 DRAWER_KICK = ESC + b"p" + b"\x00" + b"\x19" + b"\xfa"   # pin 2, 50 ms on, 500 ms off
@@ -91,19 +92,35 @@ def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
     return img.crop((0, 0, width, min(height, y + 10)))
 
 
-def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "") -> Image.Image | None:
+def qr_block(width: int, text: str, caption: str = "", font_path: str | None = None) -> Image.Image:
+    """A QR code with its caption under it (F27), so the customer knows what scanning it does."""
+    from . import qr
+    m = qr.encode(text)
+    target = 168 if width >= DOTS_80MM else 136          # ~21 / 17 mm at 203 dpi
+    module = max(2, min(6, target // (len(m) + 8)))
+    q = qr.image(m, module=module, quiet=4)
+    if not caption:
+        return q
+    f = ImageFont.truetype(font_path or find_font(), 20 if width >= DOTS_80MM else 18)
+    probe = ImageDraw.Draw(q)
+    tw = probe.textlength(caption, font=f, direction="rtl" if shaping_available() else None)
+    w = max(q.width, int(tw) + 8)
+    img = Image.new("L", (w, q.height + 26), 255)
+    img.paste(q, ((w - q.width) // 2, 0))
+    ImageDraw.Draw(img).text(((w - tw) / 2, q.height - 6), caption, font=f, fill=0,
+                             direction="rtl" if shaping_available() else None)
+    return img
+
+
+def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "", qr_caption: str = "",
+                   font_path: str | None = None) -> Image.Image | None:
     """Logo and/or QR code above the receipt text (F27): logo on the right and QR on the left
     (Arabic reads right to left), or either one centred. Grayscale; raster_bytes makes it 1-bit."""
-    from . import logo as logo_mod, qr
+    from . import logo as logo_mod
     if not logo_png and not qr_text:
         return None
     pad, gap = 8, 16
-    q = None
-    if qr_text:
-        m = qr.encode(qr_text)
-        target = 168 if width >= DOTS_80MM else 136          # ~21 / 17 mm at 203 dpi
-        module = max(2, min(6, target // (len(m) + 8)))
-        q = qr.image(m, module=module, quiet=4)
+    q = qr_block(width, qr_text, qr_caption, font_path) if qr_text else None
     lg = None
     if logo_png:
         room = width - 2 * pad - ((q.width + gap) if q else 0)
@@ -119,6 +136,16 @@ def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "")
     return img
 
 
+def receipt_footer_qr(width: int, text: str, caption: str = "", font_path: str | None = None) -> Image.Image | None:
+    """The optional second code, centred under the receipt (F27)."""
+    if not text:
+        return None
+    b = qr_block(width, text, caption, font_path)
+    img = Image.new("L", (width, b.height + 12), 255)
+    img.paste(b, ((width - b.width) // 2, 6))
+    return img
+
+
 def stack(*parts: Image.Image | None) -> Image.Image:
     parts = [p for p in parts if p is not None]
     out = Image.new("L", (max(p.width for p in parts), sum(p.height for p in parts)), 255)
@@ -131,7 +158,7 @@ def stack(*parts: Image.Image | None) -> Image.Image:
 
 def raster_bytes(img: Image.Image) -> bytes:
     """ESC/POS `GS v 0` raster image (1 bit per dot, MSB first, black = 1)."""
-    bw = img.convert("L").point(lambda p: 255 if p > 160 else 0, mode="1")
+    bw = img.convert("L").point(lambda p: 255 if p > THRESHOLD else 0, mode="1")
     w, h = bw.size
     wb = (w + 7) // 8
     px = bw.load()

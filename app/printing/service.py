@@ -54,7 +54,7 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
         body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
                                                           given=given), width=width)
-        img = escpos.stack(_header(db, ctx, cfg, width), body)
+        img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
     except escpos.PrinterError as e:
@@ -72,11 +72,22 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
 
 def _header(db: Database, ctx: Context, cfg: dict, width: int):
     """Logo + QR (F27). A broken logo or QR text must never stop the receipt: log it and print without."""
-    from . import logo
+    from . import logo, qrlinks
     try:
-        return escpos.receipt_header(width, logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None, cfg["qr_text"])
+        return escpos.receipt_header(width, logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None, cfg["qr_text"],
+                                     qrlinks.caption(cfg["qr_text"], cfg["qr_caption"]))
     except Exception:  # noqa: BLE001
         log.exception("receipt header (logo/QR) skipped")
+        return None
+
+
+def _footer(cfg: dict, width: int):
+    """The optional second QR code under the receipt (F27); same rule: never stops the receipt."""
+    from . import qrlinks
+    try:
+        return escpos.receipt_footer_qr(width, cfg["qr2_text"], qrlinks.caption(cfg["qr2_text"], cfg["qr2_caption"]))
+    except Exception:  # noqa: BLE001
+        log.exception("receipt footer QR skipped")
         return None
 
 

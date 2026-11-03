@@ -88,3 +88,13 @@ def bitmap(png: bytes, max_w: int, max_h: int) -> Image.Image:
     scale = min(max_w / img.width, max_h / img.height, 2.0)
     size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
     return img.resize(size, Image.LANCZOS) if size != img.size else img
+
+
+def print_look(png: bytes) -> bytes:
+    """The logo exactly as the thermal printer will put it on paper (black/white), for the settings preview:
+    a coloured logo can lose parts (dark-coloured text on a dark box prints as one black block)."""
+    from .escpos import THRESHOLD
+    img = Image.open(io.BytesIO(png)).convert("L").point(lambda p: 255 if p > THRESHOLD else 0)
+    out = io.BytesIO()
+    img.save(out, "PNG")
+    return out.getvalue()
