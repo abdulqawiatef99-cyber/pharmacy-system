@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 
+import base64
 import functools
 import hashlib
 import json
@@ -1947,6 +1948,30 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay = "".join(f"<tr><td>{lbl}</td><td>{m(sale[k])}</td></tr>" for k, lbl in
                           (("paid_cash", "نقدي"), ("paid_card", "بطاقة"), ("on_credit", "آجل")) if sale.get(k))
         cashier = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],))
+        # F27: change due — only on the receipt opened right after checkout (?given=, never stored)
+        try:
+            given = int(req.query_params.get("given") or 0)
+        except ValueError:
+            given = 0
+        cash = sale.get("paid_cash") or 0
+        if cfg["show_change"] and cash and cash < given <= 100_000_000:
+            pay += (f"<tr><td>المدفوع من العميل</td><td>{m(given)}</td></tr>"
+                    f"<tr class='chg'><td>الباقي</td><td>{m(given - cash)}</td></tr>")
+        count = (f"<tr><td>عدد الأصناف</td><td>{len(sale['lines'])}</td></tr>"
+                 if cfg["show_item_count"] and sale["lines"] else "")
+        hd = []
+        if cfg["has_logo"]:
+            from ..printing import logo as logo_mod
+            png = logo_mod.get_png(db, ctx.org_id)
+            if png:
+                hd.append(f'<img alt="" src="data:image/png;base64,{base64.b64encode(png).decode()}">')
+        if cfg["qr_text"]:
+            from ..printing import qr as qr_mod
+            try:
+                hd.append(qr_mod.svg(qr_mod.encode(cfg["qr_text"]), 22 if cfg["paper"] == 80 else 17))
+            except qr_mod.QRTooLong:
+                pass
+        header = f'<div class="hd{" one" if len(hd) == 1 else ""}">{"".join(hd)}</div>' if hd else ""
         d = sale.get("delivery") or {}
         head = "".join(f"<p>{e(x)}</p>" for x in cfg["lines"] if x)
         head += "".join(f"<p>{lbl}: {e(cfg[k])}</p>" for k, lbl in
@@ -1966,8 +1991,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
-<div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
-<table>{''.join(rows)}</table><hr><table>
+<div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}{header}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
+<table>{''.join(rows)}</table><hr><table>{count}
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
@@ -2062,6 +2087,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if isinstance(x, dict) and x.get("id"):
                 wanted.append((str(x["id"]), x.get("count", 1)))
         return J(await run_in_threadpool(ps.print_labels, db, ctx, wanted, size=b.get("size")))
+
+    @handler
+    async def receipt_logo(req):
+        """The stored receipt logo, for the settings page preview (F27)."""
+        from ..printing import logo as logo_mod
+        ctx = ctx_of(req)
+        png = logo_mod.get_png(db, ctx.org_id)
+        if not png:
+            return Response(status_code=404)
+        return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @handler
     async def receipt_settings(req):
@@ -2234,6 +2269,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/labels", labels_page),
         Route("/labels/page.css", labels_css),
         Route("/api/settings/receipt", receipt_settings, methods=["GET", "PUT"]),
+        Route("/api/settings/receipt/logo", receipt_logo),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
         Route("/api/print/printers", print_printers),
