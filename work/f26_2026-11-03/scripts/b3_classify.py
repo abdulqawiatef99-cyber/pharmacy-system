@@ -40,8 +40,7 @@ for c,r in T.iterrows():
     if pd.notna(r.price) and pd.notna(r.cost) and r.price>0 and r.price<r.cost: f.append('سعر البيع أقل من التكلفة')
     d=r.last_disc
     if pd.notna(d):
-        if d>=90: f.append('تكلفة ≈ صفر (بونص متسجل لوحده غالبًا)')
-        elif d<=0: f.append('تكلفة = سعر البيع (اتجاب من صيدلية بسعر الجمهور غالبًا)')
+        if d>=90 or d<=0: pass  # bonus of another item at ~0 cost / bought from a pharmacy at public price: correct data
         elif d<5: f.append(f'خصم {d:.0f}% قليل جدًا')
         elif d>60 and not ED.search(str(r['name'])): f.append(f'خصم {d:.0f}% عالي لصنف مش منشطات')
     fl.append('، '.join(f))

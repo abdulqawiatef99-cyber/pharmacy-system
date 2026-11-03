@@ -14,14 +14,15 @@ fridge=re.compile(r'ثلاجة|INSUL|MIXTARD|LANTUS|NOVORAPID|NOVOMIX|HUMULIN|HU
 O=T[T['class'].isin(['منتظم','شبه منتظم'])&(T.wk2>0)].copy()
 K={30494:'ميلاكريست',5342:'فليكتور',5786:'جاست ريج',30390:'اكسيدوجاست',1319:'ازروليد',29147:'اومنيفورا',3195:'بانادول اكيوت',8896:'مكسترد فايل',2149:'كاندالكان (8؟ اتأكد التركيز)',1726:'بيزوكارد (2.5؟ اتأكد التركيز)'}
 T['kash']=pd.Series(K).reindex(T.index)
-O=T[(T['class'].isin(['منتظم','شبه منتظم'])&(T.wk2>0))|T.kash.notna()].copy()
+supp=T.name.str.split('#').str[0].str.contains(r'[\u0600-\u06FF]',na=False)
+O=T[((T['class'].isin(['منتظم','شبه منتظم'])&(T.wk>0))|T.kash.notna())&~supp].copy()
 for c in K: 
     for q in ['wk','wk2','mo']: O.loc[c,q]=max(O.loc[c,q],1.0)
 pend_ibnsina=r'BARICT|ANAFR.*75|SERVITAM|APICO|ROSITOR\s*20|ROSUTOR\s*20'
 O['تنبيه']=O.kash.apply(lambda k: f'كشكول: {k}. ' if isinstance(k,str) else '')
 O.loc[O.price>=300,'تنبيه']+='غالي ≥300 — موافقتك. '
 O.loc[O.name.str.contains(fridge,na=False),'تنبيه']+='تلاجة؟ — موافقتك. '
-O.loc[O.name.str.contains(pend_ibnsina,case=False,na=False,regex=True),'تنبيه']+='مطلوب من ابن سينا 3/11 ولسه ما وصلش. '
+O.loc[O.name.str.contains(pend_ibnsina,case=False,na=False,regex=True),'تنبيه']+='في طلبية ابن سينا 3/11 اللي لسه ما وصلتش. '
 O.loc[O['flags']!='','تنبيه']+=O['flags']+'. '
 O.loc[O.name.str.split('#').str[0].str.contains(r'[\u0600-\u06FF]',na=False)&O.kash.isna(),'تنبيه']+='مستلزمات (مؤجلة؟). '
 O['k']=O.kash.notna(); O=O.sort_values(['k','class','q3'],ascending=[False,False,False])

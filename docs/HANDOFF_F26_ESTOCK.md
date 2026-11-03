@@ -59,3 +59,12 @@ Only after A–C; owner reviews on screen before Save.
 - Electricity meter photo: DONE 3/11.
 
 ## Overall ≈ 55% (A 100% (A4 dropped, A6/A7 optional), B 100%, C 0%, D 0%, E 30%, F 0%)
+
+## Update 2026-11-03 19:10 — owner corrections (apply always)
+- Never dismiss any price/discount difference as "small" — we chase maximum margin.
+- Cost = public price lines = bought from another pharmacy (correct data). Bonus of a DIFFERENT item is entered as its own purchase invoice at ~0 cost (same-item bonus goes inside the invoice). Not errors. Flags now 18.
+- Expired stock is NOT returned to suppliers.
+- Supplies postponed; order = medicines only, weekly quantity.
+- Purchase decision = regular/semi-regular items short for one week + kashkool (customer names are not in the E-Stock sales export; kashkool comes from WhatsApp).
+- Supplier allocation needs live search: i'Supply (warehouse offers), Ibn Sina portal, Pharma Overseas, Drug Eye (public price/pack), plus WhatsApp kashkool. In this session Chrome is connected but i'Supply showed the login page → owner must sign in to each site + WhatsApp Web first.
+- Liquidation list `d1_liquidation_list.py` → `2_أصناف_للتصريف.xlsx`: per expiry batch; expired 110 ≈ 10.7k, expiring ≤6 months 248 ≈ 27.2k, dead 1,433 ≈ 124.9k, overstock (>3 months of sales) 162 ≈ 26.3k; total ≈ 189k (medicines ≈ 178k). Next: price check vs current public price; update old prices where possible, otherwise mark "على السعر القديم" as a selling point for other pharmacies.
