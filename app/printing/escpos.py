@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw, ImageFont, features
 DOTS_80MM = 576          # 72 mm printable at 203 dpi (typical 80 mm printer)
 DOTS_58MM = 384          # 48 mm printable (58 mm printer)
 ESC, GS = b"\x1b", b"\x1d"
+THRESHOLD = 160          # grey above this prints white, at or below black (thermal heads have no grey)
 INIT = ESC + b"@"
 CUT = GS + b"V" + b"\x42" + b"\x00"          # feed and partial cut
 DRAWER_KICK = ESC + b"p" + b"\x00" + b"\x19" + b"\xfa"   # pin 2, 50 ms on, 500 ms off
@@ -91,9 +92,83 @@ def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
     return img.crop((0, 0, width, min(height, y + 10)))
 
 
+def qr_block(width: int, text: str, caption: str = "", font_path: str | None = None,
+             max_w: int | None = None) -> Image.Image:
+    """A QR code with its caption under it (F27), so the customer knows what scanning it does."""
+    from . import qr
+    m = qr.encode(text)
+    target = 168 if width >= DOTS_80MM else 136          # ~21 / 17 mm at 203 dpi
+    module = max(2, min(6, target // (len(m) + 8)))
+    q = qr.image(m, module=module, quiet=4)
+    if not caption:
+        return q
+    # the caption never makes the block wider than max_w (Codex P2 on #103): smaller font, then cut with …
+    limit = max(q.width, (max_w or width) - 8)
+    rtl = "rtl" if shaping_available() else None
+    probe = ImageDraw.Draw(q)
+    for size in range(20 if width >= DOTS_80MM else 18, 13, -1):
+        f = ImageFont.truetype(font_path or find_font(), size)
+        if probe.textlength(caption, font=f, direction=rtl) <= limit:
+            break
+    while len(caption) > 1 and probe.textlength(caption, font=f, direction=rtl) > limit:
+        caption = caption[:-2] + "…"
+    tw = probe.textlength(caption, font=f, direction=rtl)
+    w = max(q.width, int(tw) + 8)
+    img = Image.new("L", (w, q.height + 26), 255)
+    img.paste(q, ((w - q.width) // 2, 0))
+    ImageDraw.Draw(img).text(((w - tw) / 2, q.height - 6), caption, font=f, fill=0, direction=rtl)
+    return img
+
+
+def receipt_header(width: int, logo_png: bytes | None = None, qr_text: str = "", qr_caption: str = "",
+                   font_path: str | None = None) -> Image.Image | None:
+    """Logo and/or QR code above the receipt text (F27): logo on the right and QR on the left
+    (Arabic reads right to left), or either one centred. Grayscale; raster_bytes makes it 1-bit."""
+    from . import logo as logo_mod
+    if not logo_png and not qr_text:
+        return None
+    pad, gap = 8, 16
+    # beside a logo the code and its caption keep to the left half; alone, the whole width
+    q = qr_block(width, qr_text, qr_caption, font_path,
+                 max_w=(width // 2 - pad) if logo_png else width - 2 * pad) if qr_text else None
+    lg = None
+    if logo_png:
+        room = max(1, width - 2 * pad - ((q.width + gap) if q else 0))
+        lg = logo_mod.bitmap(logo_png, room, 200 if width >= DOTS_80MM else 160)
+    h = max(x.height for x in (q, lg) if x) + 8
+    img = Image.new("L", (width, h), 255)
+    if lg and q:
+        img.paste(lg, (width - pad - lg.width, (h - lg.height) // 2))
+        img.paste(q, (pad, (h - q.height) // 2))
+    else:
+        x = lg or q
+        img.paste(x, ((width - x.width) // 2, (h - x.height) // 2))
+    return img
+
+
+def receipt_footer_qr(width: int, text: str, caption: str = "", font_path: str | None = None) -> Image.Image | None:
+    """The optional second code, centred under the receipt (F27)."""
+    if not text:
+        return None
+    b = qr_block(width, text, caption, font_path, max_w=width - 16)
+    img = Image.new("L", (width, b.height + 12), 255)
+    img.paste(b, ((width - b.width) // 2, 6))
+    return img
+
+
+def stack(*parts: Image.Image | None) -> Image.Image:
+    parts = [p for p in parts if p is not None]
+    out = Image.new("L", (max(p.width for p in parts), sum(p.height for p in parts)), 255)
+    y = 0
+    for p in parts:
+        out.paste(p, (0, y))
+        y += p.height
+    return out
+
+
 def raster_bytes(img: Image.Image) -> bytes:
     """ESC/POS `GS v 0` raster image (1 bit per dot, MSB first, black = 1)."""
-    bw = img.convert("L").point(lambda p: 255 if p > 160 else 0, mode="1")
+    bw = img.convert("L").point(lambda p: 255 if p > THRESHOLD else 0, mode="1")
     w, h = bw.size
     wb = (w + 7) // 8
     px = bw.load()
@@ -172,7 +247,11 @@ def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover 
         win32print.ClosePrinter(h)
 
 
-def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None) -> list[tuple[str, str, str]]:
+def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
+                  given: int = 0) -> list[tuple[str, str, str]]:
+    """given: what the customer handed over in cash (piastres), printed with the change due when it is
+    more than the cash part of the sale (F27). Shown only on the receipt printed at checkout; it is
+    not stored, so a later reprint has no change line."""
     cfg = cfg or {}
     m = lambda p: f"{p / 100:.2f}"  # noqa: E731
     out = [("small", cfg["header"], "")] if cfg.get("header") else []
@@ -183,13 +262,20 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None)
     for key, label in (("tax_no", "رقم التسجيل الضريبي"), ("cr_no", "السجل التجاري")):
         if cfg.get(key):
             out.append(("small", f"{label}: {cfg[key]}", ""))
-    out += [("small", f"فاتورة رقم {sale['sale_no']}", when), ("rule", "", "")]
+    out.append(("small", f"فاتورة رقم {sale['sale_no']}", when))
+    if cashier and cfg.get("show_cashier", True):
+        out.append(("small", f"البائع: {cashier}", ""))
+    out.append(("rule", "", ""))
     for l in sale["lines"]:
         it = l["item"]
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
         out.append(("row", name, m(l["line_total"])))
         out.append(("small", f"{l['qty_base']} {it['base_unit']}", ""))
     out.append(("rule", "", ""))
+    if cfg.get("show_item_count") and sale["lines"]:
+        out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
+    if sale["discount_total"] and sale.get("subtotal"):
+        out.append(("row", "الإجمالي", m(sale["subtotal"])))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
     out.append(("total", "المطلوب", m(sale["total"])))
@@ -197,5 +283,8 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None)
                        ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
         if sale.get(key):
             out.append(("row", label, m(sale[key])))
+    cash = sale.get("paid_cash") or 0
+    if cfg.get("show_change", True) and cash and given > cash:
+        out += [("row", "المدفوع من العميل", m(given)), ("total", "الباقي", m(given - cash))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
     return out

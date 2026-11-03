@@ -8,6 +8,7 @@ from ..core import audit
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
+from . import logo, qr, qrlinks
 
 DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا لزيارتكم — ألف سلامة",
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
@@ -18,8 +19,13 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             # independently of the receipt (direct ESC/POS printers only).
             "auto_receipt": False, "auto_receipt_min": 0, "drawer_on_cash": True, "drawer_timing": "after",
             "time_format": "12", "header": "", "tax_no": "", "cr_no": "", "copies": 1,
+            # F27: QR code text (a link / WhatsApp), item count and the change due on the receipt.
+            # The logo itself lives under its own key (logo.py); get() reports has_logo.
+            # qr2 = an optional second code at the bottom (e.g. the location); captions blank = from the link
+            "qr_text": "", "qr_caption": "", "qr2_text": "", "qr2_caption": "", "show_item_count": True, "show_change": True,
             # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
             "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24"}
+_KEEP = object()
 LABEL_SIZES = ("38x25", "50x30", "58x40")
 DRAWER_TIMINGS = ("before", "with", "after")
 
@@ -41,6 +47,7 @@ def get(db: Database, org_id: str) -> dict:
     out = {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
     from .labels import DEFAULT_FIELDS
     out["label_fields"] = {**DEFAULT_FIELDS, **{k: bool(v) for k, v in (out["label_fields"] or {}).items() if k in DEFAULT_FIELDS}}
+    out["has_logo"] = bool(db.one("SELECT 1 FROM org_settings WHERE org_id=? AND key=?", (org_id, logo.KEY)))
     return out
 
 
@@ -89,6 +96,7 @@ def check_target(value, example: str = "win:POS-80C", allow_browser: bool = Fals
 def save(db: Database, ctx: Context, data: dict) -> dict:
     ctx.require("settings.manage")
     cur = get(db, ctx.org_id)
+    cur.pop("has_logo")
     new = dict(cur)
     if "paper" in data:
         if data["paper"] not in (80, 58):
@@ -154,11 +162,31 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if not isinstance(data["lines"], list):
             raise ValidationFailed("بيانات غير صحيحة")
         new["lines"] = [str(x or "").strip()[:60] for x in data["lines"][:3]]
-    for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash"):
+    for k in ("qr_text", "qr2_text"):
+        if k in data:
+            t = qrlinks.normalize(data[k])          # a mobile number becomes its WhatsApp link
+            if t:
+                try:
+                    qr.encode(t)
+                except qr.QRTooLong as e:
+                    raise ValidationFailed(str(e))
+            new[k] = t
+    for k in ("qr_caption", "qr2_caption"):
+        if k in data:
+            new[k] = str(data[k] or "").strip()[:40]
+    png = _KEEP
+    if "logo" in data:              # data URL from the settings page; "" / null removes the logo
+        png = logo.clean(data["logo"]) if data["logo"] else None
+    for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash",
+              "show_item_count", "show_change"):
         if k in data:
             new[k] = bool(data[k])
     with db.transaction():
+        if png is not _KEEP:
+            audit.record(db, ctx, "settings.receipt_logo", "organization", ctx.org_id,
+                         after=logo.store(db, ctx.org_id, png))
         db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'receipt', ?) ON CONFLICT(org_id, key)"
                    " DO UPDATE SET value=excluded.value", (ctx.org_id, json.dumps(new, ensure_ascii=False)))
-        audit.record(db, ctx, "settings.receipt", "organization", ctx.org_id, before=cur, after=new)
-    return new
+        if set(data) != {"logo"}:          # a logo-only upload leaves the settings record alone
+            audit.record(db, ctx, "settings.receipt", "organization", ctx.org_id, before=cur, after=new)
+    return get(db, ctx.org_id)
