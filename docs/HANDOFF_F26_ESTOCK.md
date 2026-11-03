@@ -7,7 +7,7 @@ Owner prefs: short Egyptian Arabic replies, double-check everything, ask before 
 - Work files (scripts, data, outputs, raw E-Stock exports): `work/f26_2026-11-03/` (see its README).
 - New E-Stock exports from 3/11 are on the pharmacy PC Desktop (`claude_*.xlsx`) — ask the owner to attach them; folder access was denied.
 - Tools: GitHub access to this private repo; Claude in Chrome logged into i'Supply / Ibn Sina portal / Pharma Overseas / WhatsApp Web (owner keeps passwords); Claude desktop app on the pharmacy PC with Computer use for E-Stock.
-- Another Claude account does NOT share this account's memory. Owner rules to apply: masculine Arabic; explain step by step in plain words (he is not technical); very short replies; constructive critic; double/triple-check; never assume supplier terms — ask; English text in its own code block (renders garbled inline); big bold fonts in files; warn before heavy usage; keep open questions and re-raise them; list open reminders at the end of each reply until he closes them; supplier files = item name + qty + polite note only.
+- Another Claude account does NOT share this account's memory. Owner rules to apply: one file per output (merge only when asked); plain words, no odd terms; never leave open questions — answer/resolve them; finish work, don't stop midway; think about the whole picture (e.g. all items missing from ALL suppliers, not one supplier); ED drugs normally come at 50–70% discount (not an error); masculine Arabic; explain step by step in plain words (he is not technical); very short replies; constructive critic; double/triple-check; never assume supplier terms — ask; English text in its own code block (renders garbled inline); big bold fonts in files; warn before heavy usage; keep open questions and re-raise them; list open reminders at the end of each reply until he closes them; supplier files = item name + qty + polite note only.
 - Supplier WhatsApp chats: Nahda = +20 10 92911028; Ibn Sina = تقي صابر تليسيلز صباحي ابن سينا; Ibn Khaldun = ياسمين محسن سيلز ابن خلدون; Wataniya = عماد المعصراوي سيلز مخزن الوطنية. Nahda cutoff 3:45–4 pm. When sending a PDF: attach → Document (not Photos), clear any draft caption first. The WhatsApp Web in Chrome is the owner's personal account (pharmacy WhatsApp is separate — ask).
 - Supplier sites: https://app.isupply.com.eg — https://customerportal.ibnsina-pharma.com — https://shop.pharmaemarket.com — Drug Eye https://drugeye.pharorg.com/drugeyeapp/android-search/drugeye-android-live-go.aspx
 
@@ -35,10 +35,12 @@ Owner prefs: short Egyptian Arabic replies, double-check everything, ask before 
 
 ### Phase B — analysis — 70% (2026-11-03 18:40)
 Done: 12 months sales + purchases + stock-by-expiry received (A3/A5 done; A4 dropped — dead stock derived from 12 months). Scripts `work/f26_2026-11-03/scripts/b1_load.py`, `b3_classify.py`, `b7_excel.py` (run in a folder with the claude_*.xlsx files). Output `تحليل_سنة_2026-11-03.xlsx`. Results: dead (stock>0, no sale Aug–Oct, not bought in 75 days) = 1,592 items ≈ 158,100 EGP; regular 358 items; 61 data-quality flags. Purchases export has NO supplier name column. Two Ibn Khaldun invoices not yet entered in E-Stock: 150292 (2/11, Blink Tears ×2) and 150745 (3/11, 15 lines, 2,239.89) — listed in the Excel; don't re-order those items.
-Left: B6 approval list (≥300, fridge, near expiry) inside the 4/11 order.
+Update 18:55: split into 5 files (`1_مسودة_طلبية_4-11`, `2_الرواكد`, `3_بيانات_مشكوك_فيها`, `4_تصنيف_كل_الأصناف`, `5_فواتير_ابن_خلدون_مش_متسجلة`) by `b8_split_files.py` + `c1_order_draft.py`. Data-quality flags refined to 31 real cases (strip fractions are normal; ED drugs/supplies have high discounts). Cost≈0 lines = bonus entered as its own invoice (likely); cost = sale price = bought from another pharmacy at public price (likely) — owner to confirm.
+Dead stock tiers: expired 92 ≈ 10.3k; expiring ≤6 months 215 ≈ 24.8k; ≥100 EGP good expiry 375 ≈ 81.1k; <100 EGP 910 ≈ 41.9k. 134 items = 50% of tiers 2+3 value.
+Order draft 4/11 = regular + semi-regular items short for 2 weeks + kashkool, minus Ibn Khaldun arrivals; qty for 1 week / 2 weeks / month (≈ 23.2k / 33.9k / 56.6k at cost). Not yet assigned to suppliers. Ibn Sina 3/11 manual list still not arrived.
 B1 merge 12 months → per item: months sold, qty, last month sold; B2 last purchase (date/supplier/discount/expiry) from A1; B3 classify regular / intermittent / stopped / new / seasonal; B4 precise dead stock (cross-check A4 + B1 + B2 + stock); B5 data-quality flags (§58); B6 approval list: expensive (≥300), fridge, near expiry; B7 send Excel files (big bold font).
 
-### Phase C — tomorrow 4/11 Nahda order (before 3:30) — 0%
+### Phase C — tomorrow 4/11 full order (ALL items not received from any supplier, not only Nahda) — 30%
 Kashkool items not ordered on 3/11: ميلاكريست، اكتي كولا سي، فليكتور، كاندالكان، جاست ريج، EXEEDOGAST، بلينك، ازروليد، اومنيفورا، بيزوكارد، مينوكسي جرو، بانادول اكيوت، مكسترد فايل + read new kashkool messages. Check alternate codes with stock (charcoal case), per-item tax/bonus (no rule), Drug Eye for pack/price. Owner approves before sending. Scheduled reminder at 11:30.
 
 ### Phase D — Drug Eye price re-check of 1,365 slow items — 0%
@@ -56,4 +58,4 @@ Only after A–C; owner reviews on screen before Save.
 - Keypad phone + SIM for the delivery person.
 - Electricity meter photo: DONE 3/11.
 
-## Overall ≈ 45% (A 100% (A4 dropped, A6/A7 optional), B 70%, C 0%, D 0%, E 30%, F 0%)
+## Overall ≈ 55% (A 100% (A4 dropped, A6/A7 optional), B 100%, C 0%, D 0%, E 30%, F 0%)

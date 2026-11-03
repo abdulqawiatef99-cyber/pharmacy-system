@@ -27,15 +27,23 @@ def cls(r):
     return 'متقطع'
 T['class']=T.apply(cls,axis=1)
 T['val']=T.stock*T.cost.fillna(T.last_cost)
-# flags
+# flags (refined 2026-11-03: normal strip fractions are fine; ED drugs have 50-70% discounts)
+import re,numpy as np
+ED=re.compile(r'[\u0600-\u06FF]|TEST|TEMPO|EREC|VIAVAG|VIRECTA|ROMANTI|REKTLONG|VIAG|SILD|NERHA|TADAL|KEMPORIC|VETOYAGRA|ERECTO|DAPOX|CIALIS|LEVITRA|VARDEN|AVANA|AVANAFIL|PRILIGY|EJACUR|DURALAST',re.I)
 fl=[]
 for c,r in T.iterrows():
     f=[]
-    if str(r['name']).strip().isdigit(): f.append('اسم = رقم')
+    if str(r['name']).strip().isdigit(): f.append('الاسم رقم بس')
     if r.stock<0: f.append('رصيد سالب')
-    if r.stock>0 and abs(r.stock-round(r.stock))>1e-6: f.append('رصيد كسري')
+    fr=r.stock-np.floor(r.stock)
+    if r.stock>0 and (0<fr<0.02 or 0.98<fr<1): f.append('رصيد كسري غلط تقريب')
     if pd.notna(r.price) and pd.notna(r.cost) and r.price>0 and r.price<r.cost: f.append('سعر البيع أقل من التكلفة')
-    if pd.notna(r.last_disc) and (r.last_disc<5 or r.last_disc>60): f.append(f'خصم شراء غريب {r.last_disc:.0f}%')
+    d=r.last_disc
+    if pd.notna(d):
+        if d>=90: f.append('تكلفة ≈ صفر (بونص متسجل لوحده غالبًا)')
+        elif d<=0: f.append('تكلفة = سعر البيع (اتجاب من صيدلية بسعر الجمهور غالبًا)')
+        elif d<5: f.append(f'خصم {d:.0f}% قليل جدًا')
+        elif d>60 and not ED.search(str(r['name'])): f.append(f'خصم {d:.0f}% عالي لصنف مش منشطات')
     fl.append('، '.join(f))
 T['flags']=fl
 T.to_pickle('T.pkl')
