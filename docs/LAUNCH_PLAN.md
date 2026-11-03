@@ -42,6 +42,9 @@ Allowed PRs: (a) ones that close or unblock #18, #19 or #20, including fixes for
 (d) **owner exception, 2026-10-30:** the written assessment of the independent-pharmacy federation (F20 in
 `docs/FUTURE_REQUIREMENTS.md`) as `docs/FEDERATION_ASSESSMENT.md`. Docs only: no code, no migrations, no
 change to app files. It must not take device-test time or touch files of an open #18/#19/#20 PR.
+(e) **owner exception, 2026-11-03:** F27 receipt logo + QR codes + change due (#103, merged into `develop`
+`d04daf2`), asked for directly by the owner ("ضيف كل ده"). No migration, no `requirements.txt` change. It
+reaches the pharmacy only with #20; its device checks are in `docs/OWNER_TEST_PLAN.md` (priority 3, F27 table).
 **Everything else waits** and goes to `docs/FUTURE_REQUIREMENTS.md` class C (`AGENTS.md` §6). That includes
 #76 (agent auto-continuation), new process docs, refactors, new features and tooling.
 
