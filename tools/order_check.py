@@ -31,7 +31,7 @@ import pandas as pd
 
 RULES = {
     'adj': {'النهضة': -2.0, 'ابن خلدون': +1.0},     # owner-stated real discount adjustments
-    'allowed': ['ابن سينا', 'ابن خلدون', 'النهضة', 'الوطنية'],  # main suppliers
+    'allowed': None,             # None = any supplier the owner deals with; or a list to restrict
     'min_lines': 6,             # below this a supplier order is not worth a delivery
     'slow_months': 4,           # no sale in this many months -> ask owner
     'single_sale_share': 0.7,   # one month holds >= 70% of yearly qty -> single-patient risk
@@ -42,6 +42,7 @@ RULES = {
     'excluded': [],             # owner "don't order now"
 }
 
+MODIFIERS = {'plus','forte','fort','xr','sr','er','mr','cr','xl','advance','advanced','extra','max','duo','comp','junior','kids','baby','depot','retard','zinc','d','hct','met','am','co'}
 STRENGTH = re.compile(r'(\d+(?:[.,]\d+)?)\s*(mg|mcg|g|gm|ml|iu|%)?', re.I)
 PACKWORDS = re.compile(r'\b(\d+\s*(tab|tabs|cap|caps|amp|sach|film|strip|supp)s?|#\d*strip|#unit|#صغير|#ثلاجة)\b', re.I)
 
@@ -69,7 +70,7 @@ def check(cand, stock, sales, rules=RULES, today_month=None, arrived=None):
         b = base_name(r['name'])
         if b in base_bal.index and bal.get(r.code, 0) <= 0:
             others = base_bal[b]
-            if others and others != r['name']: reasons.append(f'فيه عبوة تانية رصيد: {others}')
+            if others and others != r['name']: reasons.append(f'نفس الصنف بعبوة تانية عليها رصيد: {others} — اتأكد إنه نفس الصنف')
         if arrived and arrived.get(r.code, 0) > 0: reasons.append(f'وصل ومش متسجل ({arrived[r.code]:g})')
         s = sales[sales.code == r.code]
         if 0 < s.qty.sum() < rules['min_year_qty']: reasons.append(f'بطيء: {s.qty.sum():g} علبة في السنة')
@@ -93,7 +94,7 @@ def allocate(df, rules=RULES):
     rows = []
     for _, r in df[df.ok].iterrows():
         real = sorted(((d + rules['adj'].get(s, 0), s) for s, d in (r.offers or [])
-                       if s in rules['allowed'] and d is not None), reverse=True)
+                       if (rules['allowed'] is None or s in rules['allowed']) and d is not None), reverse=True)
         rows.append({**r.to_dict(), 'ranked': real, 'sup': real[0][1] if real else 'اسأل عليه',
                      'disc': real[0][0] if real else None, 'move_cost': 0.0})
     a = pd.DataFrame(rows)
