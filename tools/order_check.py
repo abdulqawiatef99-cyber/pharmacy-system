@@ -51,9 +51,11 @@ def base_name(name: str) -> str:
     """Brand + first strength, without pack size: 'ROMANTIGRA 20MG 4TAB' -> 'romantigra 20mg'."""
     n = PACKWORDS.sub(' ', str(name).lower())
     words = re.findall(r'[a-z؀-ۿ]+|\d+(?:\.\d+)?\s*(?:mg|mcg|g|gm|ml|iu|%)?', n)
-    brand = next((w for w in words if re.match(r'[a-z؀-ۿ]', w)), '')
+    letters = [w for w in words if re.match(r'[a-z؀-ۿ]', w)]
+    brand = letters[0] if letters else ''
+    mods = sorted(w for w in letters[1:] if w in MODIFIERS)  # PLUS / FORTE / XR ... = different product
     strength = next((w.replace(' ', '') for w in words if re.match(r'\d', w)), '')
-    return f'{brand} {strength}'.strip()
+    return ' '.join([brand] + mods + [strength]).strip()
 
 
 def check(cand, stock, sales, rules=RULES, today_month=None, arrived=None):
