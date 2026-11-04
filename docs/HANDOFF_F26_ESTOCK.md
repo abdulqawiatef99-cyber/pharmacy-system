@@ -86,3 +86,16 @@ Only after A–C; owner reviews on screen before Save.
 | E — platform docs | unchanged | 30% |
 | F — enter invoice from photo | not started | 0% |
 | **Overall** | | **≈ 70%** |
+
+## Owner rules added 2026-11-04 (must follow every session)
+- Show a short step-by-step progress report in chat for every step (SendUserMessage).
+- Purchase choice cash vs Nahda credit: decide in EGP, not %. Compute per line and monthly total: Nahda cost (shown -2%) vs best cash warehouse on i'Supply (ANY seller, not only Ibn Khaldun/Wataniya). If monthly difference is small (~300-400 EGP on ~50k) credit wins; if large, show numbers and let owner decide.
+- Never merge kashkool lines: "راني فوار" (RANI-F) and "فوار فواكه" (FAWAR FRUIT) are two different DRUGS (high sellers). Verify any unknown item on i'Supply/Ibn Sina before classifying as non-drug.
+- "توفير X" in kashkool = usually a customer asked; order 1 box of each strength only if balance is zero (check exported stock yourself).
+- Check balances yourself from the exports; never say "only if balance is zero" — find out.
+- WhatsApp: both accounts are Business. Personal one = supplier tele-sales chats (and sees the kashkool group).
+- Ibn Sina claim discount categories (regular 3% / special 2% / other 0.25%): meaning unknown (owner guesses local/imported/supplies, NOT a rule) -> ask Ibn Sina customer service.
+- VAT: if not clear on Ibn Sina, check the item on Pharma Overseas portal (often similar, not a rule).
+- Drug Eye extra menus: "خدمة أحدث الأسعار" -> "قائمة أحدث الأسعار" (downloadable list to compare with our prices) and "بحث في مخازن الأدوية" (use only for hard-to-find items).
+- Collect all Ibn Sina customer-service questions into one list; call once after the order.
+- Before heavy computer-use (E-Stock screenshots), warn and offer the cheaper option (owner exports the report).
