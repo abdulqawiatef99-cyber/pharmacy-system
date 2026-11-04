@@ -99,3 +99,6 @@ Only after A–C; owner reviews on screen before Save.
 - Drug Eye extra menus: "خدمة أحدث الأسعار" -> "قائمة أحدث الأسعار" (downloadable list to compare with our prices) and "بحث في مخازن الأدوية" (use only for hard-to-find items).
 - Collect all Ibn Sina customer-service questions into one list; call once after the order.
 - Before heavy computer-use (E-Stock screenshots), warn and offer the cheaper option (owner exports the report).
+- Backup sourcing ideas (later, keep current plan now): ask every warehouse (owner is in touch with all) for their stock list when i'Supply fails; try another app similar to i'Supply later.
+- TODO list for owner: high-discount items WE HAVE IN STOCK, sorted high->low discount, grouped by therapeutic category (cold, stomach, diarrhea...) so he can push/prescribe them for more profit. Supplies grouped separately for a later order.
+- When any tool/site blocks me (e.g. i'Supply "out of stock" message, empty results), ASK the owner — he wants to teach purchasing know-how.
