@@ -112,3 +112,5 @@ Only after A–C; owner reviews on screen before Save.
 - Cold Free history: 2/9 bought 10+2 at Ibn Sina (42.5%). 10+2 (16.7% bonus) > 25+3 (10.7%).
 - Tebofortin Forte public price: 165 until Sep, 202.5 in Oct sales, Ibn Sina/i'Supply now 240.
 - Reply to owner ALWAYS in Arabic (never English), even final summaries.
+- 4/11 error: Ibn Sina got 59 lines where cash/Nahda was higher because I added an UNCONFIRMED +2.2% claim discount and compared Ibn Sina only vs Nahda. Rule: compare raw shown discounts; never add assumed claim discount; show per-line table (Ibn Sina / Nahda-2 / best cash) before sending. Same-name items with different packs (2-strip vs 3-strip, cream vs ointment) = one product: if any pack has stock, don't order.
+- Removed 4/11: Dermovate cream+oint, Doliprane 15 & 20, Iverzine lotion, Zithromax 600, Zetazolex 4, Vilaphoria 20, Vildagluse plus, Vanvilda plus, Super Kids D3, Fortiferrum, Cold Free, Charcoal. Azrolid qty 1.
