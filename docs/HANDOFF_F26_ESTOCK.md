@@ -106,3 +106,9 @@ Only after A–C; owner reviews on screen before Save.
 - Deferred/removed 4/11: Reagila, Centrum Energy, Bladogra, Duphaston, Regaine, Gastrotidine, Mixtard vial, Dozova, Nasonex, Strepsils, Sleep Aid, Haloprol (5mg/1ml; big seller 25-55/month until Aug — revisit).
 - ALWAYS check today's incoming WhatsApp lists ("وارد") from companies/warehouses for missing items and bonus offers BEFORE finalizing an order (missed on 4/11 at first). Chats: Ibn Sina tele-sales (morning/evening), Al-Sahm, Orient (+20 10 68316319), Nermeen Menoufia, Abdaa rep (احمد الصاوي/semo6917), Wataniya, Taj.
 - Bonus math: effective discount = 1 - (pharmacy price * paid/(paid+free)) / public. e.g. Cold Free 25+3 at Ibn Sina: 34.5*25/28=30.8 -> 38.4% (+claim ~2%).
+- NEVER send a warehouse an order of 1-5 lines (owner's relationships; rep rides a motorcycle for it). Consolidate: after allocation, move every small-supplier line to the next-best among the big suppliers of that order (Ibn Sina / Nahda / one main cash warehouse), accept small loss. Target 2-3 suppliers per order.
+- Charcoal: we have the 30-cap (3 strips) box; don't order 20-cap. Check alternate codes/packs before ordering.
+- Ibn Sina search hit != in stock (no stock field in search result). Say "ظهر في البحث" not "موجود".
+- Cold Free history: 2/9 bought 10+2 at Ibn Sina (42.5%). 10+2 (16.7% bonus) > 25+3 (10.7%).
+- Tebofortin Forte public price: 165 until Sep, 202.5 in Oct sales, Ibn Sina/i'Supply now 240.
+- Reply to owner ALWAYS in Arabic (never English), even final summaries.
