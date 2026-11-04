@@ -567,3 +567,11 @@
 - **الضرائب:** القسم بيحمّل «جواب المسحوبات» مختوم لكل سنة ← الضريبة مش نسبة على الفاتورة؛ مسحوبات الشركات بتتبلغ لمصلحة الضرايب وبتتحسب منها ضريبة الأرباح. المخازن غالبًا لأ. النسبة الفعلية لسه مش معروفة (صاحب الصيدلية بيقدّرها 1–3%) — يتأكد من محاسب.
 - مرجع عام: ضريبة الخصم والإضافة على التوريدات 1% لبعض الأنشطة وبتتخصم من ضريبة آخر السنة (مش مذكور فيها الصيدليات تحديدًا).
 - Atorstat 10mg تشغيلة 50605 موجودة عند الصيدلية ← تتعزل وتترجع لابن سينا مع المندوب.
+
+## 62. Order 4/11 — i'Supply market scan (201 drug lines, all sellers)
+- Seller wins (best discount, items listed): Orient 84/143, Al-Salam 68/101, Nahda 74/126 (shown; real = -2 so loses), Wataniya 36/131, Al-Zahed 25/129, Ibn Khaldun 17/118 (+1 not included), Taj 8/112, Menoufia 4/98.
+- Avg gap from best (points): Orient 0.74, Salam 0.77, Nahda 0.85 (shown), Wataniya 1.29, Khaldun 1.38, Zahed 1.47, New Arabi 1.54, Youssef 1.61, Taj 2.12, Menoufia 2.20.
+- Nahda real vs best cash on 125 shared lines (16.1k EGP): cash saves 428 EGP (~2.65%) per order -> ~1.7k/month if weekly. Owner decides vs credit value.
+- i'Supply throttles fast sequential search: empty results; retry with ~1.2s gap + 4s backoff worked.
+- Allocation: Ibn Sina 74 / Orient 43 / Salam 28 / Wataniya 25 / Khaldun 20 / Nahda 3 / small 5 / ask 14. Small sellers consolidated when loss <=15 EGP.
+- Files: work/f26_2026-11-04/.
