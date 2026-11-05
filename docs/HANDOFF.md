@@ -1,5 +1,7 @@
 # HANDOFF — الحالة الحالية
 
+> **Purchasing / smart-order work: read `docs/PURCHASING_PLAYBOOK.md` first** (owner rules, lessons, tool how-tos; gate `tools/order_check.py`; branch `claude/f26-smart-order`).
+
 آخر تحقق: 2026-10-31 · Claude · أساس الملخص: `develop` @ `7190880`. الأولويات والأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md).
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
