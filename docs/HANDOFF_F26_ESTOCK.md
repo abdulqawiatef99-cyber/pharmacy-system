@@ -1,5 +1,7 @@
 # Handoff — F26 smart order + E-Stock data (2026-11-03 17:50 Cairo)
 
+> **START HERE (2026-11-05): `docs/PURCHASING_PLAYBOOK.md`** — all rules, lessons, tool how-tos and open items in one file. Validation gate: `tools/order_check.py`.
+
 > **Latest (2026-11-03 21:30): read `docs/HANDOFF_ACC2.md` first** — second-account session: full year analysis, sell-off list, 4/11 order allocated to suppliers (Ibn Sina / Ibn Khaldun +1 / Nahda −2 / Wataniya). Files in `work/acc2_2026-11-03/`.
 
 Read first: `docs/SMART_ORDER_REPORT.md` (§47–§58 are the latest). Branch `claude/f26-smart-order`, PR #102 → develop.
