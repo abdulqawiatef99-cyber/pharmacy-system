@@ -1,12 +1,21 @@
 # HANDOFF — الحالة الحالية
 
-آخر تحقق: 2026-11-01 · Claude · أساس الملخص: `develop` @ `7190880`. الأولويات والأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
+آخر تحقق: 2026-11-10 · Claude · أساس الملخص: `develop` @ `16ab71d`. **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md).
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## تنضيف 2026-11-10 (بموافقة المالك، docs و labels بس، مفيش كود ولا تغيير في `main`)
+- PR #101 (HANDOFF بعد تجربة 1/11) اتدمج في `develop` @ `16ab71d` (CI linux أخضر على `ed79ced`، windows متخطّى لأنه docs، Codex: مفيش ملاحظات).
+- **المفتوح للإطلاق بالترتيب:** #100 ← #98 ← #104 ← [#107](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/107) ← #18 ← #19 ← #20. التفاصيل ومين يعمل إيه: [START_HERE.md](START_HERE.md).
+- #107 (جديدة، `launch-critical`): زرار التحديث في الإعدادات يشتغل على قناة `develop` لنسخ التجربة. السبب في الكود: `app/api/app.py` `_update_status()` بيرجع بدري لما `ref != main`، والفحص والتشغيل ثابتين على `main`.
+- #96 (التحديث التلقائي الكامل) اتشال منه `launch-critical` واتحط `after-launch`، وفضل مفتوح؛ PR #99 مفتوح بـ `after-launch` (ما يتدمجش؛ #107 ياخد منه اللي محتاجه بس).
+- `after-launch` على: Issues #106، #97، #95، #86، #76، #96 (و#12 كانت عليه)؛ PRs #99، #102، #83، #77. ما اتقفلش ولا اتمسح حاجة.
+- ملحوظة: #97 (تقرير قفل الدرج) كانت أولوية تانية للمالك يوم 1/11، لكنها مش في قائمة الإطلاق اللي حددها المالك النهارده، فبقت `after-launch`.
+- F27 (من تعليق على #101): اتدمج في `develop` (#103، `d04daf2`): لوجو الإيصال، QR فوق وتحت اختياري، رقم الموبايل ← wa.me، اسم الكاشير، عدد الأصناف، الباقي للعميل (`cash_given` مش بيتخزن). 589 اختبار OK، CI linux أخضر. لسه: تجربة الطابعة ومسح الموبايل في الصيدلية. المواصفات: `docs/specs/07-receipt-logo-qr-benchmark.md`.
+
 ## الحالة المثبتة
 
-- مفيش PR مفتوحة أو Issue كود `launch-critical` وقت التحقق. المفتوح للإطلاق: [#18](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18) ← [#19](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/19) ← [#20](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/20).
+- (اتعدّل 11/10) فيه PRs و Issues `launch-critical` مفتوحة؛ القائمة الحالية في [START_HERE.md](START_HERE.md). الكلام تحت ده حالة 10/31–11/1 للمرجع.
 - إصلاحات تجربة الجهاز اتدمجت: #35، #37، #39، #42، #44، #46، #49؛ إعادة التحقق على الأجهزة لسه مطلوبة.
 - مراجعة الإصدار [#68](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/68) اتعملت بالفعل؛ العيب المؤكد [#72](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/72) اتقفل بإصلاح [#73](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/73)، مدمج @ `c9906a9`. المرتجع القديم يحافظ على المدفوع 99.99؛ السجل يثبت 535 اختبار بلا skip ومراجعة Codex سليمة على `de44f90`؛ [CI ناجح](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41031438683). لا تعيد المراجعة أو الإصلاح من الصفر.
 - **المثبّت الحالي: [Windows installer run 75](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/41237493804)**، artifact `PharmacySetup` (id 13055634945، digest الـ zip `sha256:3a07be7a…ae18f`)، كود `develop` @ `7190880`؛ اختبارات Windows + smoke + Inno ناجحة، النشر متخطّى. يشمل #85 و#81 و#84 و#80. run 72 (`c9906a9`) بقى قديم.
@@ -20,7 +29,7 @@
 - بكرة الملصق: **38×13 مم، فراغ 2 مم**، Xprinter XP-235B على USB004، TSPL، 203 dpi. الإعداد رجع لفراغ 2 مم، وتوقيت الدرج رجع «بعد الإيصال».
 - القارئ 2D الجديد: بيقرا QR وEAN-13 وGS1 DataMatrix. في Chrome بيبعت F12 الأول، والـ GS بيوصل (Alt+0029)، ومفيش بادئة `]d2`. Notepad بيشيل الـ GS. المحلل طلّع GTIN والصلاحية 06/2029 والتشغيلة 260128 مطابقين للعلبة. كارت الصنف بيخزن الـ EAN-13، والإضافة السريعة في الشراء بتملا الصلاحية والتشغيلة من الكود.
 - ملاحظات مش launch-critical: زرار البيع السريع بيفضل «ناقص» بعد الشراء؛ «عميل جديد» بيستخدم `prompt()` بتاع المتصفح؛ تقرير الوردية بيطبع من نافذة المتصفح؛ إعادة الطباعة من غير رسالة؛ F9 في التوصيل مرفوض لحد ما خانة العنوان تفقد التركيز، ولوحة التوصيل طالعة برا الشاشة من الشمال؛ مفيش طريقة لاسترجاع كلمة سر المالك.
-- أولويات المالك: #96 التحديث التلقائي (شغال في جلسة منفصلة)، بعده #97 تقرير قفل الدرج (جدول الفئة والعدد + سطري العجز والزيادة بصفر لو مفيش)، بعده #98 و#100، بعدهم شكل الإيصال وبيانات الصيدلية.
+- أولويات المالك يوم 11/1 (اتغيرت 11/10، شوف START_HERE): #96 التحديث التلقائي، بعده #97 تقرير قفل الدرج (جدول الفئة والعدد + سطري العجز والزيادة بصفر لو مفيش)، بعده #98 و#100، بعدهم شكل الإيصال وبيانات الصيدلية.
 - **قرار مالك مفتوح:** اختيار اسم للمنتج بدل «منصة الصيدلية» قبل الإصدار #20.
 
 ## نتيجة جهاز الصيدلية (2026-10-30 بالليل) — الملخص الكامل في [تعليق #18](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18#issuecomment-6533037626)
@@ -36,9 +45,10 @@
 - Windows CI على develop وقع مرتين من اختبارات جديدة (مش من التطبيق) واتصلّح: [#92](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/92)، [#93](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/93). درس: شغّل `scripts/validate_local_release.py` محليًا قبل أي اختبار CLI/مسارات.
 
 ## التالي بالضبط
-1. المالك: مقاس بكرة الملصق بالظبط (يتكتب في الإعدادات ← شكل الملصق ← مقاس آخر).
-2. إعادة تجربة #18 بـ run 75 حسب [قائمة التعليق](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/18#issuecomment-6548642933) (خطوة 9، إيصال/درج، ملصق، قارئ). كل فشل = Issue `launch-critical`.
-3. بعدها #19 ثم #20 بموافقة المالك. بعد الإطلاق: [#86](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/86).
+1. Claude: #100 (إزاحة رأسية/`SHIFT` و`OFFSET` في `app/printing/labels.py` + زرار ملصق تجريبي واحد) ← #98 ← #107، كل واحدة Issue/فرع/PR لوحدها إلى `develop` مع `@codex review`.
+2. المالك: قرار #104 (المقترح: الخيار 1). Claude ما يلمسش `main`.
+3. بعد دمج الإصلاحات و CI أخضر linux + windows: مثبّت جديد، ثم إعادة تجربة #18 للسطور اللي فشلت (P7، P10) + زرار التحديث على `develop`.
+4. بعدها #19 ثم #20 بموافقة المالك المكتوبة.
 
 ## المرجع القديم للتجربة
 - [DEVICE_RUNBOOK.md](DEVICE_RUNBOOK.md) (A = لابتوب، B = صيدلية) — التقسيم المحدّث في تعليق #18 أعلاه.
