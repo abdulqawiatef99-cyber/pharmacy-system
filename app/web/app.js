@@ -1829,7 +1829,8 @@ async function viewSystem() {
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
-      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div></div>
+      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
+      <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `مفيش (فرع ${esc(st.candidate || "?")})`}</b></div></div>
     ${st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
       ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
          <button class="btn" id="updGo">حدّث البرنامج الآن</button>`

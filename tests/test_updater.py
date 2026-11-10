@@ -94,3 +94,68 @@ class TestUpdateAPI(APICase):
         self.assertIn("update", run.call_args[0][0])
         n = self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update'")[0]
         self.assertEqual(n, 1)
+
+
+class TestUpdateChannel(APICase):
+    """#107: the settings button follows the install's own channel; develop test installs can update."""
+
+    def status(self, info, latest="b" * 40):
+        from app.core import updater
+        with _mock.patch.object(updater, "installed", return_value=info), \
+                _mock.patch.object(updater, "read_token", return_value="t"), \
+                _mock.patch.object(updater, "latest_sha", return_value=latest) as ls:
+            st = self.c.get("/api/system/update").json()
+        return st, ls
+
+    def run_update(self, info):
+        from app.core import updater
+        done = _mock.Mock(returncode=0, stdout="ok", stderr="")
+        with _mock.patch.object(updater, "installed", return_value=info), \
+                _mock.patch("subprocess.run", return_value=done) as run:
+            r = self.c.post("/api/system/update", headers=_H, json={})
+        return r, run
+
+    def test_channel_rules(self):
+        from app.core import updater
+        self.assertEqual(updater.channel({}), "main")
+        self.assertEqual(updater.channel({"ref": "main"}), "main")
+        self.assertEqual(updater.channel({"ref": "develop", "source": "installer"}), "develop")
+        self.assertIsNone(updater.channel({"ref": "claude/96-auto-updates"}))
+
+    def test_develop_installer_checks_develop_and_sees_an_update(self):
+        self.http_login()
+        st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "develop"})
+        self.assertEqual(ls.call_args[0][1], "develop")
+        self.assertEqual((st["channel"], st["available"], st["latest"]), ("develop", True, "b" * 40))
+        self.assertNotIn("candidate", st)
+
+    def test_main_and_unknown_installs_still_use_main(self):
+        import itertools
+        self.http_login()
+        clock = itertools.count(10_000, 1000)          # past the 10-minute status cache on every call
+        for info in ({"sha": "a" * 40, "source": "installer", "ref": "main"}, {"sha": "a" * 40}, {}):
+            with _mock.patch("app.api.app.time.time", side_effect=lambda: next(clock)):
+                st, ls = self.status(info, latest="a" * 40)
+            self.assertEqual(ls.call_args[0][1], "main", info)
+            self.assertEqual((st["channel"], st["available"]), ("main", info.get("sha") != "a" * 40), info)
+
+    def test_button_passes_the_channel(self):
+        self.http_login()
+        r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "develop"})
+        self.assertEqual(r.status_code, 200, r.text)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "develop"])
+        row = self.db.one("SELECT after_json FROM audit_log WHERE action='system.update'")
+        self.assertIn('"channel": "develop"', row["after_json"])
+        r, run = self.run_update({"sha": "a" * 40})
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
+
+    def test_work_branch_install_has_no_channel(self):
+        self.http_login()
+        st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
+        self.assertFalse(ls.called)
+        self.assertEqual((st["channel"], st["candidate"], st["available"]), (None, "claude/x", False))
+        r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
+        self.assertEqual(r.status_code, 422)
+        self.assertFalse(run.called)

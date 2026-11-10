@@ -305,8 +305,10 @@ def cmd_update(a, s):
             finally:
                 db.close()
             print("نسخة احتياطية للبيانات:", out)
+        # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
+        ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
         releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "at": datetime.now().isoformat()},
+                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat()},
                           expected_active=expected_active)
         print(f"Prepared {staged['files']} files; restart to check the selected release.")
         print("Previous code is retained. No pip install or database migration was run.")

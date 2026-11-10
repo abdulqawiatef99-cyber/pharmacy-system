@@ -141,6 +141,31 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         self.assertEqual(self.dests(base), [self.tmp / "home" / "backups"])
         self.assertEqual(self.dests(base + ["--backup-dir", str(self.tmp / "mine")]), [self.tmp / "mine"])
 
+    def test_update_remembers_its_channel(self):
+        """#107: an update from develop records ref=develop, so the next check follows develop; a zip keeps
+        the channel that was installed."""
+        import subprocess as sp
+        from app.core import backup, updater
+        import release_bootstrap as releases
+        staged = {"release": str(self.tmp), "id": "r1", "files": 1}
+        seen = []
+        (self.tmp / "u.zip").write_bytes(b"x")
+        with mock.patch.object(updater, "read_token", return_value="t"), \
+                mock.patch.object(updater, "latest_sha", return_value="b" * 40) as latest, \
+                mock.patch.object(updater, "download", return_value=b"zip"), \
+                mock.patch.object(updater, "installed", return_value={"sha": "a" * 40, "ref": "develop"}), \
+                mock.patch.object(updater, "apply_zip", return_value=staged), \
+                mock.patch.object(releases, "check_compatible"), \
+                mock.patch.object(sp, "run", return_value=SimpleNamespace(returncode=0)), \
+                mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"), \
+                mock.patch.object(backup, "verify_archive", return_value={"problems": []}), \
+                mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3])):
+            self.manage.main(["update", "--ref", "develop"])
+            self.manage.main(["update", "--from-zip", "u.zip"])
+        self.assertEqual(latest.call_args[0][1], "develop")
+        self.assertEqual([m["ref"] for m in seen], ["develop", "develop"])
+        self.assertEqual(seen[0]["sha"], "b" * 40)
+
     def test_update_from_zip(self):
         import subprocess as sp
         from app.core import updater
