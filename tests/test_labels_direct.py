@@ -72,3 +72,99 @@ class TestApi(APICase):
         r = self.c.post("/api/print/labels", json={"items": [{"id": self.pan, "count": 1}]}, headers=H)
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["error"]["code"], "labels_in_browser")
+
+
+class TestShift(Base):
+    """#100: XP-235B, 38x13 mm: the print started several mm low and every printed label was followed by a
+    blank one. The job had no way to move the print; the shift setting and a test run fix that from the app."""
+
+    def test_no_shift_sends_no_shift_command(self):
+        img = lb.render("Panadol", "6221025012345", "40.00 ج", 38, 13, 203)
+        self.assertNotIn(b"SHIFT", lb.tspl_job(img, 1, 38, 13))
+        self.assertNotIn("^LT", lb.zpl_job(img, 1).decode())
+
+    def test_shift_in_tspl_and_zpl(self):
+        img = lb.render("Panadol", "6221025012345", "40.00 j", 38, 13, 203)
+        t = lb.tspl_job(img, 5, 38, 13, 2, lb.shift_dots(-2.5, 203))
+        self.assertTrue(t.startswith(b"SIZE 38 mm,13 mm\r\nGAP 2 mm,0 mm\r\nSHIFT -20\r\nDIRECTION 1\r\n"))
+        self.assertEqual(lb.shift_dots(1, 300), 12)
+        self.assertEqual(lb.shift_dots(-50, 203), -lb.dots(10, 203))       # clamped to the ±10 mm the settings allow
+        self.assertIn("^LL104^LT-20^LH0,0", lb.zpl_job(img, 1, -20).decode())
+        self.assertIn("^LT120^", lb.zpl_job(img, 1, 300).decode())           # ZPL's own limit
+        both = lb.job("tspl", [(img, 1), (img, 2)], 38, 13, 2, 16)
+        self.assertEqual(both.count(b"SHIFT 16\r\n"), 2)                     # every label of the job
+
+    def test_setting_rules(self):
+        self.assertEqual(rs.get(self.db, self.ctx.org_id)["label_shift"], 0)
+        self.assertEqual(rs.save(self.db, self.ctx, {"label_shift": -2.5})["label_shift"], -2.5)
+        self.assertEqual(rs.save(self.db, self.ctx, {"label_shift": 3})["label_shift"], 3.0)
+        for bad in (11, -10.5, "2", True, None, float("nan")):
+            with self.assertRaises(ValidationFailed, msg=repr(bad)):
+                rs.save(self.db, self.ctx, {"label_shift": bad})
+        self.assertEqual(rs.get(self.db, self.ctx.org_id)["label_shift"], 3.0)
+
+    def test_saved_shift_reaches_the_printer(self):
+        rs.save(self.db, self.ctx, {"label_lang": "tspl", "label_size": "38x13", "label_shift": -3})
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "job.bin")
+            print_labels(self.db, self.ctx, [(self.pan, 5)], target=f"file:{out}")
+            with open(out, "rb") as f:
+                job = f.read()
+        self.assertIn(b"SIZE 38 mm,13 mm\r\nGAP 2 mm,0 mm\r\nSHIFT -24\r\n", job)
+        self.assertIn(b"PRINT 1,5", job)
+
+
+class TestLabelTest(Base):
+    """#100: the test button prints 3 sample labels with the values on the screen, saved or not."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        self.sent = []
+        p = mock.patch("app.printing.escpos.send", side_effect=lambda dest, data, *a, **k: self.sent.append((dest, data)))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_uses_unsaved_screen_values(self):
+        from app.printing.service import print_label_test
+        r = print_label_test(self.db, self.ctx, {"label_lang": "tspl", "label_target": "win:Xprinter XP-235B",
+                                                  "label_size": "38x13", "label_gap": 3, "label_shift": -2, "label_dpi": 203})
+        self.assertEqual(r, {"ok": True, "labels": 3})
+        dest, data = self.sent[0]
+        self.assertEqual(dest, "win:Xprinter XP-235B")
+        self.assertTrue(data.startswith(b"SIZE 38 mm,13 mm\r\nGAP 3 mm,0 mm\r\nSHIFT -16\r\n"))
+        self.assertTrue(data.endswith(b"PRINT 1,3\r\n"))
+        saved = rs.get(self.db, self.ctx.org_id)
+        self.assertEqual((saved["label_lang"], saved["label_shift"], saved["label_gap"]), ("browser", 0, 2))   # nothing saved
+        row = self.db.one("SELECT after_json FROM audit_log WHERE action='print.label_test'")
+        self.assertIn('"shift_mm": -2', row["after_json"])
+
+    def test_refusals(self):
+        from app.printing.service import print_label_test
+        with self.assertRaises(ValidationFailed):
+            print_label_test(self.db, self.ctx, {})                                  # still "browser"
+        for bad in ({"label_shift": 20}, {"label_gap": -1}, {"label_target": "file:C:/x"}, {"label_dpi": 600},
+                    {"label_size": "5x5"}, {"label_lang": "epl"}):
+            with self.assertRaises(ValidationFailed, msg=bad):
+                print_label_test(self.db, self.ctx, {"label_lang": "tspl", "label_target": "win:X", **bad})
+        with self.assertRaises(ValidationFailed):
+            print_label_test(self.db, self.ctx, {"label_lang": "tspl", "label_target": ""})   # no printer chosen
+        self.assertEqual(self.sent, [])
+
+    def test_printer_error_is_reported(self):
+        from unittest import mock
+        from app.printing.escpos import PrinterError
+        from app.printing.service import PrintFailed, print_label_test
+        with mock.patch("app.printing.escpos.send", side_effect=PrinterError("offline")):
+            with self.assertRaises(PrintFailed):
+                print_label_test(self.db, self.ctx, {"label_lang": "tspl", "label_target": "win:X"})
+        self.assertIsNone(self.db.one("SELECT 1 FROM audit_log WHERE action='print.label_test'"))
+
+
+
+class TestLabelTestApi(APICase):
+    def test_needs_settings_permission_and_answers_browser_mode(self):
+        self.http_login()
+        r = self.c.post("/api/print/label-test", json={}, headers=H)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["error"]["code"], "labels_in_browser")

@@ -20,6 +20,8 @@ from .escpos import PrinterError, find_font, shaping_available
 LANGS = ("browser", "a4", "tspl", "zpl")      # a4 = browser printing on an A4 label sheet (grid)
 DPIS = (203, 300)
 MAX_LABELS = 500
+SHIFT_MM = 10           # #100: the vertical shift the settings accept, either way (mm)
+TEST_LABELS = 3         # #100: a test run is 3 labels, so a blank label between two printed ones shows
 
 
 def parse_size(size: str) -> tuple[float, float]:
@@ -193,25 +195,34 @@ def _rows(img: Image.Image, black_bit: int) -> tuple[int, int, bytes]:
     return wb, h, bytes(out)
 
 
-def tspl_job(img: Image.Image, copies: int, w_mm: float, h_mm: float, gap_mm: int = 2) -> bytes:
-    """TSPL: BITMAP data uses 0 for a printed (black) dot."""
+def tspl_job(img: Image.Image, copies: int, w_mm: float, h_mm: float, gap_mm: int = 2, shift: int = 0) -> bytes:
+    """TSPL: BITMAP data uses 0 for a printed (black) dot. shift (dots, #100): TSPL `SHIFT`, which moves the
+    whole print along the paper; positive = lower on the label, negative = higher. Sent only when not 0."""
     wb, h, data = _rows(img, black_bit=0)
-    head = (f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\nDIRECTION 1\r\nREFERENCE 0,0\r\nCLS\r\n"
-            f"BITMAP 0,0,{wb},{h},0,").encode("ascii")
+    head = (f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\n" + (f"SHIFT {shift}\r\n" if shift else "")
+            + f"DIRECTION 1\r\nREFERENCE 0,0\r\nCLS\r\nBITMAP 0,0,{wb},{h},0,").encode("ascii")
     return head + data + f"\r\nPRINT 1,{copies}\r\n".encode("ascii")
 
 
-def zpl_job(img: Image.Image, copies: int) -> bytes:
-    """ZPL: ^GFA graphic field in hex, 1 = black."""
+def zpl_job(img: Image.Image, copies: int, shift: int = 0) -> bytes:
+    """ZPL: ^GFA graphic field in hex, 1 = black. shift (dots, #100): ZPL `^LT` label top, positive = lower;
+    ZPL accepts -120..120 dots."""
     wb, h, data = _rows(img, black_bit=1)
     total = wb * h
     w = img.size[0]
-    return (f"^XA^PW{w}^LL{h}^LH0,0^FO0,0^GFA,{total},{total},{wb},{data.hex().upper()}^FS^PQ{copies},0,1,Y^XZ").encode("ascii")
+    top = f"^LT{max(-120, min(120, shift))}" if shift else ""
+    return (f"^XA^PW{w}^LL{h}{top}^LH0,0^FO0,0^GFA,{total},{total},{wb},{data.hex().upper()}^FS^PQ{copies},0,1,Y^XZ").encode("ascii")
 
 
-def job(lang: str, labels: list[tuple[Image.Image, int]], w_mm: float, h_mm: float, gap_mm: int = 2) -> bytes:
+def shift_dots(shift_mm: float, dpi: int) -> int:
+    """The settings' vertical shift (mm, positive = lower on the label) in printer dots."""
+    return dots(max(-SHIFT_MM, min(SHIFT_MM, float(shift_mm or 0))), dpi)
+
+
+def job(lang: str, labels: list[tuple[Image.Image, int]], w_mm: float, h_mm: float, gap_mm: int = 2,
+        shift: int = 0) -> bytes:
     if lang == "tspl":
-        return b"".join(tspl_job(img, n, w_mm, h_mm, gap_mm) for img, n in labels)
+        return b"".join(tspl_job(img, n, w_mm, h_mm, gap_mm, shift) for img, n in labels)
     if lang == "zpl":
-        return b"".join(zpl_job(img, n) for img, n in labels)
+        return b"".join(zpl_job(img, n, shift) for img, n in labels)
     raise PrinterError("اختر نوع طابعة الملصقات (TSPL أو ZPL)")
