@@ -78,10 +78,19 @@ class TestShift(Base):
     """#100: XP-235B, 38x13 mm: the print started several mm low and every printed label was followed by a
     blank one. The job had no way to move the print; the shift setting and a test run fix that from the app."""
 
-    def test_no_shift_sends_no_shift_command(self):
+    def test_no_shift(self):
         img = lb.render("Panadol", "6221025012345", "40.00 ج", 38, 13, 203)
-        self.assertNotIn(b"SHIFT", lb.tspl_job(img, 1, 38, 13))
-        self.assertNotIn("^LT", lb.zpl_job(img, 1).decode())
+        self.assertNotIn(b"SHIFT", lb.tspl_job(img, 1, 38, 13))              # TSPL job unchanged at 0
+        self.assertIn("^LL104^LT0^LH0,0", lb.zpl_job(img, 1).decode())      # ZPL: explicit reset (Codex on #110)
+
+    def test_zpl_shift_back_to_zero_resets_the_printer(self):
+        """A test run at -2 mm, then the setting back to 0: the next ZPL job must reset ^LT, not omit it."""
+        img = lb.render("Panadol", "6221025012345", "40.00 ج", 38, 13, 203)
+        first = lb.job("zpl", [(img, 1)], 38, 13, 2, lb.shift_dots(-2, 203)).decode()
+        back = lb.job("zpl", [(img, 1)], 38, 13, 2, lb.shift_dots(0, 203)).decode()
+        self.assertIn("^LT-16^", first)
+        self.assertIn("^LT0^", back)
+        self.assertEqual(back.count("^LT"), 1)
 
     def test_shift_in_tspl_and_zpl(self):
         img = lb.render("Panadol", "6221025012345", "40.00 j", 38, 13, 203)

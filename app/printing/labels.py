@@ -206,11 +206,12 @@ def tspl_job(img: Image.Image, copies: int, w_mm: float, h_mm: float, gap_mm: in
 
 def zpl_job(img: Image.Image, copies: int, shift: int = 0) -> bytes:
     """ZPL: ^GFA graphic field in hex, 1 = black. shift (dots, #100): ZPL `^LT` label top, positive = lower;
-    ZPL accepts -120..120 dots."""
+    ZPL accepts -120..120 dots. Always sent, 0 included: Zebra keeps ^LT across formats, so leaving it out
+    would keep an earlier shift (e.g. from the test button) after the setting goes back to 0 (Codex on #110)."""
     wb, h, data = _rows(img, black_bit=1)
     total = wb * h
     w = img.size[0]
-    top = f"^LT{max(-120, min(120, shift))}" if shift else ""
+    top = f"^LT{max(-120, min(120, shift))}"
     return (f"^XA^PW{w}^LL{h}{top}^LH0,0^FO0,0^GFA,{total},{total},{wb},{data.hex().upper()}^FS^PQ{copies},0,1,Y^XZ").encode("ascii")
 
 
