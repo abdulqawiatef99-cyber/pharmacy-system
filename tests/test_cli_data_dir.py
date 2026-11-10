@@ -162,8 +162,9 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
                 mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3])):
             self.manage.main(["update", "--ref", "develop"])
             self.manage.main(["update", "--from-zip", "u.zip"])
-        self.assertEqual(latest.call_args[0][1], "develop")
-        self.assertEqual([m["ref"] for m in seen], ["develop", "develop"])
+            self.manage.main(["update"])          # no --ref on a develop install stays on develop, not main
+        self.assertEqual([c[0][1] for c in latest.call_args_list], ["develop", "develop"])
+        self.assertEqual([m["ref"] for m in seen], ["develop", "develop", "develop"])
         self.assertEqual(seen[0]["sha"], "b" * 40)
 
     def test_update_from_zip(self):

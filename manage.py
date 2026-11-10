@@ -272,6 +272,8 @@ def cmd_update(a, s):
         if a.from_zip:
             data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
         else:
+            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
+                a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
             token = updater.read_token()
             sha = updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
@@ -378,7 +380,7 @@ def main(argv=None):
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
-    up.add_argument("--ref", default="main")
+    up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
     a = p.parse_args(argv)
