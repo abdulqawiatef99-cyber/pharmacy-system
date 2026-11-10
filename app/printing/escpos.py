@@ -238,6 +238,7 @@ SPOOL_WAIT = 6.0
 SPOOL_POLL = 0.25
 _JOB_STUCK = 0x2 | 0x20 | 0x40 | 0x200 | 0x400 | 0x1   # ERROR, OFFLINE, PAPEROUT, BLOCKED_DEVQ, USER_INTERVENTION, PAUSED
 _JOB_PRINTING = 0x10
+_JOB_DONE = 0x80 | 0x1000   # PRINTED, COMPLETE: finished but kept in the queue ("Keep printed documents")
 
 
 def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clock=time.monotonic,
@@ -245,7 +246,8 @@ def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clo
     """RAW job to a Windows queue, then make sure the printer took it (#98). Windows keeps a job for a printer
     that is switched off and reports the printer as ready; the job (and its drawer pulse) would then fire by
     itself when the printer comes back. So: wait until the job has left the queue, or is printing with no
-    error. Otherwise cancel it and raise PrinterError, so the screen warns and nothing fires later."""
+    error, or is marked printed/complete (a queue set to keep printed documents holds finished jobs).
+    Otherwise cancel it and raise PrinterError, so the screen warns and nothing fires later."""
     try:
         import win32print  # type: ignore
     except ImportError as e:
@@ -263,7 +265,7 @@ def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clo
         end = clock() + wait
         while True:
             status = _job_status(win32print, h, job)
-            if status is None or (status & _JOB_PRINTING and not status & _JOB_STUCK):
+            if status is None or (status & (_JOB_PRINTING | _JOB_DONE) and not status & _JOB_STUCK):
                 return
             if clock() >= end:
                 break

@@ -28,7 +28,8 @@ class FakeSpooler:
 
     def StartDocPrinter(self, h, level, info):
         self.doc = info
-        self.jobs[7] = {"printing": 0x10, "offline": 0x30}.get(self.mode, 0)
+        self.jobs[7] = {"printing": 0x10, "offline": 0x30, "printed": 0x80, "complete": 0x1000,
+                        "printed_offline": 0xA0}.get(self.mode, 0)
         return 7
 
     def StartPagePrinter(self, h): pass
@@ -86,6 +87,21 @@ class TestSendWindows(unittest.TestCase):
         f = FakeSpooler("printing")              # a long label run still printing when the wait ends
         send(f)
         self.assertEqual(f.deleted, [])
+
+    def test_finished_job_kept_in_queue_counts_as_taken(self):
+        # Codex review on #111: with "Keep printed documents" on, a finished receipt stays queued as PRINTED
+        # or COMPLETE. It was printed (and the drawer opened), so it must not be cancelled or reported failed.
+        for mode in ("printed", "complete"):
+            f = FakeSpooler(mode)
+            c = send(f, wait=2.0)
+            self.assertEqual(f.deleted, [], mode)
+            self.assertLess(c.t, 2.0, mode)
+
+    def test_printed_flag_with_an_error_is_not_trusted(self):
+        f = FakeSpooler("printed_offline")
+        with self.assertRaises(escpos.PrinterError):
+            send(f, wait=2.0)
+        self.assertEqual(f.deleted, [7])
 
     def test_printer_off_job_is_cancelled_and_reported(self):
         for mode in ("keeps", "offline"):
