@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "catalog.schema.json",
+  "title": "Pharmacy public availability feed (future, read-only)",
+  "description": "NOT USED BY VERSION 1. Contract for a file or API response the pharmacy program could publish later (F28 website, patient availability portal). Each item says only whether a public item is available. Never quantities, prices, batches, expiry dates, suppliers, costs, customers, patients or prescriptions. See docs/INTEGRATION.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "items"],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this contract. Bump on any breaking change.",
+      "const": 1
+    },
+    "generated_at": {
+      "description": "When the program produced the feed (UTC, ISO 8601). Lets the site show how fresh it is and hide a stale feed.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category", "available"],
+      "properties": {
+        "name": {
+          "description": "Public display name chosen for publishing (not an internal code or barcode).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "description": "Public category from a short fixed list the owner approves.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "available": {
+          "description": "true = in stock now, false = not in stock. Never a number.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
