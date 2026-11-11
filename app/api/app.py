@@ -351,14 +351,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        out = {"version": __version__, "installed": cur, "latest": None, "available": False,
+        chan = updater.channel(info)
+        out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
                "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
-        if info.get("source") == "installer" and info.get("ref") not in (None, "main"):
-            out["candidate"] = info["ref"]        # a test installer from another branch: main is not an update
+        if chan is None:
+            out["candidate"] = info["ref"]        # a review installer of a work branch: no channel to follow
             upd_cache.update(at=now, v=out)
             return out
-        try:
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, "main", updater.read_token())
+        try:                                      # #107: the install's own channel (develop on test PCs)
+            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, updater.read_token())
             out["available"] = out["latest"] != cur
         except updater.UpdateError as e:
             out["error"] = str(e)
@@ -376,15 +377,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx.require("settings.manage")
         import subprocess
         import sys as _sys
+        from ..core import updater
+        chan = updater.channel(updater.installed(s.data_dir))
+        if chan is None:
+            raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
         root = Path(__file__).resolve().parents[2]
         proc = await run_in_threadpool(lambda: subprocess.run(
-            [_sys.executable, str(root / "manage.py"), "update"], cwd=os.getcwd(), capture_output=True,
+            [_sys.executable, str(root / "manage.py"), "update", "--ref", chan], cwd=os.getcwd(), capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=900,
             env={**os.environ, "PYTHONUTF8": "1"}))
         ok = proc.returncode == 0
         with db.transaction():
             audit.record(db, ctx, "system.update", "system", None,
-                         after={"ok": ok, "tail": (proc.stdout or "")[-500:]})
+                         after={"ok": ok, "channel": chan, "tail": (proc.stdout or "")[-500:]})
         upd_cache.clear()
         restart = ok and os.environ.get("PHARM_LAUNCHER") == "1"
         if restart:          # the launcher starts the new version when we exit with 75
@@ -2087,6 +2092,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped)})
 
     @handler
+    async def print_label_test(req):
+        from ..printing import service as ps
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(ps.print_label_test, db, ctx, b if isinstance(b, dict) else {}))
+
+    @handler
     async def print_labels_api(req):
         from ..printing import service as ps
         ctx = ctx_of(req)
@@ -2285,6 +2297,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/test", print_test, methods=["POST"]),
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/print/label-preview", label_preview, methods=["POST"]),
+        Route("/api/print/label-test", print_label_test, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),

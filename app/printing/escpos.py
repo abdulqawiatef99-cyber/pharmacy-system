@@ -11,7 +11,10 @@ Printing runs inside the server on the pharmacy PC (the printer is attached
 to that PC), so phones/tablets can print too, and the browser never needs
 access to USB devices. Transports:
   tcp:IP:PORT        network printers (usually port 9100)       — tested with a fake socket printer
-  win:PRINTER NAME   Windows print queue, RAW data (pywin32)     — NOT tested (needs Windows)
+  win:PRINTER NAME   Windows print queue, RAW data (pywin32)     — tested with a fake spooler; checked on the
+                     pharmacy PC. After sending, the job must leave the queue (or be printing) within a few
+                     seconds, else it is cancelled and reported (#98): a queued job would print, and kick
+                     the drawer, by itself when the printer is switched on later.
   file:PATH          write bytes to a device/file (/dev/usb/lp0) — tested with a file
 Chosen in Settings → receipt (falls back to PHARM_PRINTER); PHARM_RECEIPT_FONT points to a TTF with Arabic.
 """
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, features
@@ -229,22 +233,66 @@ def windows_printers() -> list[str]:   # pragma: no cover - needs Windows
     return sorted({p[2] for p in win32print.EnumPrinters(flags, None, 1)})
 
 
-def _send_windows(printer_name: str, data: bytes) -> None:   # pragma: no cover - needs Windows
+# #98: how long a Windows job may wait in the queue before the printer counts as not answering
+SPOOL_WAIT = 6.0
+SPOOL_POLL = 0.25
+_JOB_STUCK = 0x2 | 0x20 | 0x40 | 0x200 | 0x400 | 0x1   # ERROR, OFFLINE, PAPEROUT, BLOCKED_DEVQ, USER_INTERVENTION, PAUSED
+_JOB_PRINTING = 0x10
+_JOB_DONE = 0x80 | 0x1000   # PRINTED, COMPLETE: finished but kept in the queue ("Keep printed documents")
+
+
+def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clock=time.monotonic,
+                  sleep=time.sleep) -> None:
+    """RAW job to a Windows queue, then make sure the printer took it (#98). Windows keeps a job for a printer
+    that is switched off and reports the printer as ready; the job (and its drawer pulse) would then fire by
+    itself when the printer comes back. So: wait until the job has left the queue, or is printing with no
+    error, or is marked printed/complete (a queue set to keep printed documents holds finished jobs).
+    Otherwise cancel it and raise PrinterError, so the screen warns and nothing fires later."""
     try:
         import win32print  # type: ignore
     except ImportError as e:
         raise PrinterError("الطباعة على Windows تحتاج تثبيت pywin32 (pip install pywin32)") from e
+    wait = SPOOL_WAIT if wait is None else wait
     h = win32print.OpenPrinter(printer_name)
     try:
-        win32print.StartDocPrinter(h, 1, ("pharmacy-receipt", None, "RAW"))
+        job = win32print.StartDocPrinter(h, 1, ("pharmacy-print", None, "RAW"))
         try:
             win32print.StartPagePrinter(h)
             win32print.WritePrinter(h, data)
             win32print.EndPagePrinter(h)
         finally:
             win32print.EndDocPrinter(h)
+        end = clock() + wait
+        while True:
+            status = _job_status(win32print, h, job)
+            if status is None or (status & (_JOB_PRINTING | _JOB_DONE) and not status & _JOB_STUCK):
+                return
+            if clock() >= end:
+                break
+            sleep(SPOOL_POLL)
+        try:
+            win32print.SetJob(h, job, 0, None, win32print.JOB_CONTROL_DELETE)
+            cancelled = True
+        except Exception:  # noqa: BLE001 — pywintypes.error; reported below
+            cancelled = False
+        if cancelled:
+            raise PrinterError("الطابعة لا تستجيب (مقفولة أو مفصولة أو الورق خلص) — اتلغى أمر الطباعة فمش هيطلع لوحده بعدين")
+        raise PrinterError("الطابعة لا تستجيب، وتعذر إلغاء أمر الطباعة من ويندوز: امسحه من قائمة الطباعة قبل تشغيل الطابعة")
     finally:
         win32print.ClosePrinter(h)
+
+
+def _job_status(win32print, h, job: int) -> int | None:
+    """The job's status bits, or None once it has left the queue. If Windows will not list the queue,
+    None too: the job was handed over and the check is skipped (the behaviour before #98)."""
+    try:
+        jobs = win32print.EnumJobs(h, 0, 999, 1)
+    except Exception:  # noqa: BLE001 — pywintypes.error
+        return None
+    for j in jobs:
+        if j.get("JobId") == job:
+            return int(j.get("Status") or 0)
+    return None
 
 
 def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
