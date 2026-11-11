@@ -270,6 +270,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def handler(fn):
         async def wrapped(req: Request):
             try:
+                path = req.url.path
+                if req.method not in ("GET", "HEAD") and (path.startswith("/api/sales") or path == "/api/cash/open"):
+                    # #96: a sale or a new shift never starts once the restart is decided; one that got past
+                    # this line counts as activity, so the updater's last busy() check sees it.
+                    if autoupd.restarting:       # the program restarts for an update in a second (#96)
+                        return J({"error": {"code": "updating", "message":
+                                            "البرنامج بيتحدث وهيرجع خلال ثواني؛ أعد المحاولة"}}, status_code=503)
+                    autoupd.touch_sale()
                 return await _idempotent(req, fn)
             except DomainError as e:
                 status = 429 if e.code == "rate_limited" else e.status
@@ -340,62 +348,35 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                         max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
         return resp
 
-    # ------------------------------------------------------------- program update (owner)
-    upd_cache: dict = {}
-
-    def _update_status() -> dict:
-        from ..core import updater
-        from ..version import __version__
-        now = time.time()
-        if upd_cache.get("at", 0) > now - 600:
-            return upd_cache["v"]
-        info = updater.installed(s.data_dir)
-        cur = info.get("sha")
-        chan = updater.channel(info)
-        out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
-        if chan is None:
-            out["candidate"] = info["ref"]        # a review installer of a work branch: no channel to follow
-            upd_cache.update(at=now, v=out)
-            return out
-        try:                                      # #107: the install's own channel (develop on test PCs)
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, updater.read_token())
-            out["available"] = out["latest"] != cur
-        except updater.UpdateError as e:
-            out["error"] = str(e)
-        upd_cache.update(at=now, v=out)
-        return out
+    # ------------------------------------------------------------- program update (owner, #96)
+    from ..core.autoupdate import AutoUpdater
+    autoupd = AutoUpdater(db, s)
 
     @handler
     async def system_update_status(req):
         ctx_of(req).require("settings.manage")
-        return J(await run_in_threadpool(_update_status))
+        return J(await run_in_threadpool(autoupd.status))
 
     @handler
     async def system_update_run(req):
+        """The owner's "update now": same safe path as the automatic one (blocked during an open sale)."""
         ctx = ctx_of(req)
         ctx.require("settings.manage")
-        import subprocess
-        import sys as _sys
-        from ..core import updater
-        chan = updater.channel(updater.installed(s.data_dir))
-        if chan is None:
+        if autoupd.channel() is None:      # #107: a review build of a work branch has no channel to follow
             raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
-        root = Path(__file__).resolve().parents[2]
-        proc = await run_in_threadpool(lambda: subprocess.run(
-            [_sys.executable, str(root / "manage.py"), "update", "--ref", chan], cwd=os.getcwd(), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=900,
-            env={**os.environ, "PYTHONUTF8": "1"}))
-        ok = proc.returncode == 0
-        with db.transaction():
-            audit.record(db, ctx, "system.update", "system", None,
-                         after={"ok": ok, "channel": chan, "tail": (proc.stdout or "")[-500:]})
-        upd_cache.clear()
-        restart = ok and os.environ.get("PHARM_LAUNCHER") == "1"
-        if restart:          # the launcher starts the new version when we exit with 75
-            threading.Timer(1.5, lambda: os._exit(75)).start()
-        return J({"ok": ok, "restarting": restart,
-                  "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
+        r = await run_in_threadpool(lambda: autoupd.apply("manual", ctx))
+        if r.get("blocked"):
+            raise Conflict(r["message"], code="update_blocked")
+        return J({"restarting": False, "output": "", **r}, status_code=200 if r.get("ok") else 500)
+
+    @handler
+    async def system_update_settings(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        if req.method == "PUT":
+            autoupd.update_settings(ctx, await body(req))
+        return J({"settings": autoupd.settings(), "develop_allowed": autoupd.develop_allowed(),
+                  "channel": autoupd.channel()})
 
     @handler
     async def setup_restore(req):
@@ -2152,6 +2133,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/setup", setup_status),
         Route("/api/system/update", system_update_status),
         Route("/api/system/update", system_update_run, methods=["POST"]),
+        Route("/api/system/update/settings", system_update_settings, methods=["GET", "PUT"]),
         Route("/api/system/network", system_network, methods=["GET", "PUT"]),
         Route("/api/system/storage", system_storage),
         Route("/api/setup", setup_create, methods=["POST"]),
@@ -2334,14 +2316,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if auto_backup:
             autob.start()
             daily.start()
+            autoupd.start()
         try:
             yield
         finally:
             if auto_backup:
+                autoupd.stop()
                 daily.stop()
                 await run_in_threadpool(autob.stop)
 
     app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
+    app.state.autoupdate = autoupd
     return app

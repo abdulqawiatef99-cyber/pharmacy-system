@@ -3,7 +3,8 @@
 - build_info.json (written by the installer build) → on its first start the launcher selects the
   installed program instead of a release chosen by an older in-app update, and records its SHA.
 - Once per installer build: a later in-app update stays selected.
-- The update badge does not show for main's own build, nor for a candidate built from another branch.
+- The update badge does not show for main's own build, nor for a review build from another branch;
+  a develop build follows the develop channel (#96).
 No real data."""
 import json
 from pathlib import Path
@@ -83,6 +84,7 @@ class TestAdoptInstaller(unittest.TestCase):
         app_home = self.home.parent.parent
         with patch.object(launcher, "ROOT", self.root), patch.object(launcher, "home", return_value=app_home), \
                 patch.object(launcher, "running", return_value=False), \
+                patch.object(launcher, "selftest", return_value=True), \
                 patch.object(launcher.threading, "Thread"), \
                 patch.object(launcher.subprocess, "Popen", return_value=process) as spawn:
             self.assertEqual(launcher.main(), 0)
@@ -97,7 +99,8 @@ class TestUpdateBadge(APICase):
         self.http_login()
         with mock.patch.object(updater, "installed", return_value=info), \
                 mock.patch.object(updater, "read_token", return_value="t"), \
-                mock.patch.object(updater, "latest_sha", return_value=latest):
+                mock.patch.object(updater, "latest_sha", return_value=latest), \
+                mock.patch.object(updater, "compare", return_value={"files": [], "summary": "", "complete": True}):
             return self.c.get("/api/system/update").json()
 
     def test_main_build_is_not_an_update_of_itself(self):

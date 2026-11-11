@@ -153,9 +153,11 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         with mock.patch.object(updater, "read_token", return_value="t"), \
                 mock.patch.object(updater, "latest_sha", return_value="b" * 40) as latest, \
                 mock.patch.object(updater, "download", return_value=b"zip"), \
+                mock.patch.object(updater, "verify_source"), \
                 mock.patch.object(updater, "installed", return_value={"sha": "a" * 40, "ref": "develop"}), \
                 mock.patch.object(updater, "apply_zip", return_value=staged), \
                 mock.patch.object(releases, "check_compatible"), \
+                mock.patch.object(updater, "installer_reasons", return_value=[]), \
                 mock.patch.object(sp, "run", return_value=SimpleNamespace(returncode=0)), \
                 mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"), \
                 mock.patch.object(backup, "verify_archive", return_value={"problems": []}), \
@@ -175,6 +177,7 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         staged = {"release": str(self.tmp), "id": "r1", "files": 1}
         with mock.patch.object(updater, "apply_zip", return_value=staged), \
                 mock.patch.object(releases, "check_compatible"), \
+                mock.patch.object(updater, "installer_reasons", return_value=[]), \
                 mock.patch.object(sp, "run", return_value=SimpleNamespace(returncode=0)):
             self.assertEqual(self.dests(["update", "--from-zip", "u.zip"]), [self.tmp / "home" / "backups"])
             self.assertEqual(self.dests(["update", "--from-zip", "u.zip", "--backup-dir", "mine"]), [Path("mine")])

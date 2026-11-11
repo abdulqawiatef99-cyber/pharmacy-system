@@ -253,6 +253,7 @@ def cmd_import_estock(a, s):
 
 def cmd_update(a, s):
     """Stage immutable code and atomically select it; never migrate the live DB here."""
+    import re
     import subprocess
     import tempfile
     import zipfile
@@ -267,6 +268,8 @@ def cmd_update(a, s):
             releases.rollback(home)
             print("Previous code selected. Restart the program; no database restore was performed.")
             return
+        if a.sha and not re.fullmatch(r"[0-9a-f]{40}", a.sha):
+            raise updater.UpdateError("--sha must be a full commit id")
         state = releases.read_state(home)
         expected_active = (state.get("active") or {}).get("id")
         if a.from_zip:
@@ -275,7 +278,7 @@ def cmd_update(a, s):
             if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
                 a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
             token = updater.read_token()
-            sha = updater.latest_sha(a.repo, a.ref, token)
+            sha = a.sha or updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
             if cur == sha and not a.force:
                 print("البرنامج محدّث بالفعل:", sha[:7])
@@ -284,9 +287,19 @@ def cmd_update(a, s):
             if a.check:
                 return
             data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
+            updater.verify_source(data, sha)     # #96: intact, and exactly the commit that was asked for
         staged = updater.apply_zip(data, root, code_home=home)
         candidate = Path(staged["release"])
-        releases.check_compatible(releases.current_root(root, home), candidate)
+        current = releases.current_root(root, home)
+        try:
+            releases.check_compatible(current, candidate)
+        except releases.ReleaseError as exc:
+            print("يحتاج المثبّت (installer):", exc)
+            sys.exit(updater.NEEDS_INSTALLER)
+        reasons = updater.installer_reasons(current, candidate)
+        if reasons:      # the installed launcher/bootstrap/runtime would not change with a code-only release
+            print("يحتاج المثبّت (installer):", ", ".join(reasons[:10]))
+            sys.exit(updater.NEEDS_INSTALLER)
         # A candidate check must not open/migrate the real pharmacy database.
         with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
             isolated = Path(tmp)
@@ -381,6 +394,7 @@ def main(argv=None):
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
+    up.add_argument("--sha", help="apply exactly this commit of --ref (automatic updates)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
     a = p.parse_args(argv)

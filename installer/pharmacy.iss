@@ -149,3 +149,23 @@ begin
     Sleep(1500);
   end;
 end;
+
+{ Automatic updates (#96): the program runs this installer silently with /RELAUNCH=1 and is stopped by
+  PrepareToInstall above. Start it again when setup ends, whether the install worked or not, so the
+  pharmacy is never left without the program (the program reports the result to the owner). }
+procedure DeinitializeSetup();
+var
+  Code: Integer;
+begin
+  if ExpandConstant('{param:RELAUNCH|0}') = '1' then
+  begin
+    try
+      if not Exec(ExpandConstant('{app}\python\pythonw.exe'),
+                  '"' + ExpandConstant('{app}\program\launcher.py') + '" --no-browser',
+                  ExpandConstant('{app}\program'), SW_SHOWNORMAL, ewNoWait, Code) then
+        Log('Relaunch failed: ' + SysErrorMessage(Code));
+    except
+      Log('Relaunch failed: ' + GetExceptionMessage);
+    end;
+  end;
+end;

@@ -1826,16 +1826,7 @@ async function viewSystem() {
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
   renderLan(await api("/api/system/network"));
-  const st = await api("/api/system/update");
-  $("#sysBox").innerHTML = `
-    <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
-      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
-      <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `مفيش (فرع ${esc(st.candidate || "?")})`}</b></div></div>
-    ${st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
-      ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
-         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
-      : `<p class="badge b-ok">البرنامج محدّث</p>`}
-    <pre id="updOut" class="muted" hidden></pre>`;
+  renderUpdate(await api("/api/system/update"));
   api("/api/system/storage").then((x) => {
     const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} ميجا`;
     $("#stoBox").innerHTML = `<div class="totals"><div>قاعدة البيانات<b>${mb(x.db)}</b><span>${x.since ? `تحتوي على مبيعات منذ ${esc(x.since)}` : ""}</span></div>
@@ -1845,17 +1836,56 @@ async function viewSystem() {
       <p class="muted">النسخ الاحتياطية مضغوطة (تشغل نحو عُشر حجم قاعدة البيانات). إذا قلّت المساحة يومًا، يمكن عمل أرشيف مضغوط للسنوات القديمة — وهذا يحتاج إلى قرارك.</p>
       <p class="muted">عدد الفواتير: ${x.rows.sales} · سطور البيع: ${x.rows.sale_lines} · فواتير الشراء: ${x.rows.purchase_invoices} · حركات المخزون: ${x.rows.stock_movements}</p>`;
   }).catch((e) => { $("#stoBox").innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; });
+}
+// Automatic updates (#96): nothing to press; the owner sees the state, the last result and the settings.
+function renderUpdate(st) {
+  const cfg = st.settings || {};
+  const hours = (n) => `${String(n).padStart(2, "0")}:00`;
+  const chName = { main: "الصيدلية (main)", develop: "التجربة (develop)" };
+  const state = st.error ? `<p class="badge b-err">${esc(st.error)}</p>`
+    : st.candidate ? `<p class="badge b-plain">نسخة مراجعة من فرع ${esc(st.candidate)}: لا تتحدث تلقائيًا إلا لو اخترت قناة</p>`
+    : !st.available ? `<p class="badge b-ok">البرنامج محدّث</p>`
+    : `<p>يوجد تحديث${st.kind === "installer" ? " (بالمثبّت)" : ""}${st.summary ? `: ${esc(st.summary)}` : ""}.</p>
+       <p class="muted">${st.failed ? "التحديث ده فشل قبل كده ولن يُعاد تلقائيًا؛ اضغط الزرار لمحاولة جديدة."
+         : st.waiting ? "المثبّت الجديد لسه بيتبني على GitHub؛ هيتثبت لوحده لما يخلص."
+         : st.busy ? `مستني: ${esc(st.busy)}. هيكمل لوحده بعد ما تخلص.`
+         : cfg.auto ? `هيتثبت لوحده بين ${hours(cfg.quiet_start)} و${hours(cfg.quiet_end)}${cfg.on_events ? "، أو بعد قفل الوردية، أو أول ما البرنامج يفتح" : ""} لو مفيش بيع ولا وردية مفتوحة، أو دوس الزرار دلوقتي.` : "التحديث التلقائي متوقف؛ دوس الزرار لما تحب."}</p>
+       <button class="btn" id="updGo">حدّث الآن</button>`;
+  $("#sysBox").innerHTML = `
+    <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
+      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div><div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `مفيش (فرع ${esc(st.candidate || "?")})`}</b></div></div>
+    ${st.last_result ? `<p class="badge ${st.last_result.ok ? "b-ok" : "b-err"}">${esc(st.last_result.text)}</p>` : ""}
+    ${state}
+    <p class="muted">كل تحديث ياخد نسخة احتياطية متأكد منها الأول، ومش بيشتغل أبدًا وفيه فاتورة بيع أو وردية مفتوحة، ولو النسخة الجديدة فشلت في الفحص يرجع للقديمة لوحده. بياناتك مش بتتلمس.</p>
+    <div class="row mt">
+      <label><input type="checkbox" id="updAuto" ${cfg.auto ? "checked" : ""}> تحديث تلقائي</label>
+      <label><input type="checkbox" id="updEv" ${cfg.on_events ? "checked" : ""}> كمان بعد قفل الوردية وأول ما البرنامج يفتح</label>
+      <label>القناة <select id="updCh"><option value="">تلقائي (حسب المثبّت)</option><option value="main">${chName.main}</option>
+        ${st.develop_allowed ? `<option value="develop">${chName.develop}</option>` : ""}</select></label>
+      <label>وقت الهدوء من <input type="number" id="updQs" min="0" max="23" value="${cfg.quiet_start}" style="width:4em"></label>
+      <label>إلى <input type="number" id="updQe" min="0" max="23" value="${cfg.quiet_end}" style="width:4em"></label>
+      <label>البحث كل <select id="updEvery">${[1, 2, 4, 6, 12, 24].map((h) => `<option value="${h}" ${h === cfg.check_hours ? "selected" : ""}>${h} ساعة</option>`).join("")}</select></label>
+      <button class="btn secondary" id="updSave">حفظ</button></div>
+    <pre id="updOut" class="muted" hidden></pre>`;
+  $("#updCh").value = cfg.channel || "";
+  $("#updSave").addEventListener("click", async () => {
+    try {
+      await api("/api/system/update/settings", { method: "PUT", body: { auto: $("#updAuto").checked, on_events: $("#updEv").checked, channel: $("#updCh").value,
+        quiet_start: Number($("#updQs").value), quiet_end: Number($("#updQe").value), check_hours: Number($("#updEvery").value) } });
+      toast("اتحفظ"); renderUpdate(await api("/api/system/update"));
+    } catch (e) { toast(e.message, true); }
+  });
   $("#updGo")?.addEventListener("click", async () => {
     const b = $("#updGo"); b.disabled = true; b.textContent = "جارٍ التحديث… (دقيقة أو دقيقتان)";
     try {
       const r = await api("/api/system/update", { method: "POST", body: {} });
-      $("#updOut").hidden = false; $("#updOut").textContent = r.output;
+      $("#updOut").hidden = false; $("#updOut").textContent = r.output || r.message || "";
       if (r.restarting) {
         b.textContent = "يعيد البرنامج تشغيل نفسه…";
         const wait = async () => { try { await fetch("/api/health"); location.reload(true); } catch { setTimeout(wait, 1500); } };
-        setTimeout(wait, 4000);
-      } else { b.textContent = "اكتمل. أغلق البرنامج وافتحه مرة أخرى"; }
-    } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج الآن"; toast(e.message, true); }
+        setTimeout(wait, r.installer ? 30000 : 4000);
+      } else { b.textContent = r.message || "اكتمل. أغلق البرنامج وافتحه مرة أخرى"; }
+    } catch (e) { b.disabled = false; b.textContent = "حدّث الآن"; toast(e.message, true); }
   });
 }
 function renderLan(n) {

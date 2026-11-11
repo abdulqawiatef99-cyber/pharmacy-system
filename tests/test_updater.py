@@ -87,7 +87,11 @@ class TestUpdateAPI(APICase):
             st = self.c.get("/api/system/update").json()
         self.assertIn("error", st)                                  # clear message, no crash
         done = _mock.Mock(returncode=0, stdout="التحديث خلص بنجاح", stderr="")
-        with _mock.patch("subprocess.run", return_value=done) as run:
+        with _mock.patch("subprocess.run", return_value=done) as run, \
+                _mock.patch.dict("os.environ", {"PHARM_GITHUB_TOKEN": "t"}), \
+                _mock.patch.object(updater, "latest_sha", return_value="b" * 40), \
+                _mock.patch.object(updater, "compare", return_value={"files": ["app/x.py"], "summary": "",
+                                                                     "complete": True}):
             r = self.c.post("/api/system/update", headers=_H, json={})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(r.json()["restarting"])                    # not under the launcher
@@ -110,7 +114,13 @@ class TestUpdateChannel(APICase):
     def run_update(self, info):
         from app.core import updater
         done = _mock.Mock(returncode=0, stdout="ok", stderr="")
+        # #96: the button goes through the automatic updater's safe path, which asks GitHub for the channel
+        # head first and pins it with --sha
         with _mock.patch.object(updater, "installed", return_value=info), \
+                _mock.patch.object(updater, "read_token", return_value="t"), \
+                _mock.patch.object(updater, "latest_sha", return_value="b" * 40), \
+                _mock.patch.object(updater, "compare", return_value={"files": ["app/x.py"], "summary": "",
+                                                                     "complete": True}), \
                 _mock.patch("subprocess.run", return_value=done) as run:
             r = self.c.post("/api/system/update", headers=_H, json={})
         return r, run
@@ -144,12 +154,12 @@ class TestUpdateChannel(APICase):
         r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "develop"})
         self.assertEqual(r.status_code, 200, r.text)
         cmd = run.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "develop"])
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "develop", "--sha", "b" * 40])
         row = self.db.one("SELECT after_json FROM audit_log WHERE action='system.update'")
         self.assertIn('"channel": "develop"', row["after_json"])
         r, run = self.run_update({"sha": "a" * 40})
         cmd = run.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main", "--sha", "b" * 40])
 
     def test_work_branch_install_has_no_channel(self):
         self.http_login()
