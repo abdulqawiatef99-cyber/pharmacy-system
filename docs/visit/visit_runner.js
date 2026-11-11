@@ -24,6 +24,7 @@
   const KEY = "visit.snapshot";
   const TAG = "TEST-VISIT";
   const PHASE_MS = 25000;
+  let PHASE_END = 0;             // set by each public call: no request may run past it
 
   // ------------------------------------------------------------------ plumbing
   async function call(method, path, body, opt = {}) {
@@ -31,8 +32,12 @@
     let payload;
     if (body instanceof FormData) payload = body;
     else if (body !== undefined) { headers["Content-Type"] = "application/json"; payload = JSON.stringify(body); }
+    const left = PHASE_END ? PHASE_END - Date.now() : Infinity;
+    if (left < 300) {
+      return { ok: false, status: 0, data: null, text: "", code: "phase_time", message: "phase time limit reached; not sent", ms: 0 };
+    }
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), opt.timeout || 12000);
+    const timer = setTimeout(() => ctl.abort(), Math.min(opt.timeout || 12000, left));
     const t0 = Date.now();
     try {
       const r = await fetch(path, { method, headers, body: payload, credentials: "same-origin", cache: "no-store",
@@ -85,8 +90,9 @@
   }
   const row = (id, result, evidence) => ({ id, result, evidence });
 
-  function deadline(ms = PHASE_MS) {
-    const end = Date.now() + ms;
+  // the phase budget of the public call in progress (see phased() at the end)
+  function deadline() {
+    const end = PHASE_END || Date.now() + PHASE_MS;
     return { left: () => end - Date.now(), over: () => Date.now() > end };
   }
 
@@ -173,7 +179,7 @@
     rows.push(row("B2 settings", "INFO", `receipt ${snap.receipt.receipt_target || "—"}, labels ${snap.receipt.label_lang}/${snap.receipt.label_target || "—"} ` +
                   `${snap.receipt.label_size} gap ${snap.receipt.label_gap} shift ${snap.receipt.label_shift}, drawer ${snap.receipt.drawer_timing}, update channel ${snap.channel}`));
     if (opt.backup !== false) {
-      const b = await backup(Math.max(3000, dl.left() - 1000));
+      const b = await backup(Math.max(1000, dl.left() - 1500));
       snap.backup = b.backup;
       rows.push(...b.rows);
     }
@@ -308,24 +314,36 @@
     try { sale = await creditSale(item, cust, "ui"); } catch (e) { return [row("B9 UI", "FAIL", e.message)]; }
     const back = location.hash;
     location.hash = `#/sales/${sale.id}`;
-    let sel = null;
-    for (let i = 0; i < 60 && !sel; i++) { await sleep(100); sel = document.getElementById("rMethod"); }
-    if (!sel) { location.hash = back; return [row("B9 UI", "FAIL", `invoice ${sale.sale_no} screen did not show the return form`)]; }
+    // the previous screen stays on the page while the new invoice loads, so wait for the return form
+    // whose line is this TEST sale's line; never touch a form that belongs to another invoice
+    const lineId = sale.lines[0].id;
+    const ours = () => {
+      const q = document.querySelector("[data-ret]");
+      return q && q.dataset.ret === lineId && document.querySelectorAll("[data-ret]").length === 1 ? q : null;
+    };
+    let qty = null;
+    for (let i = 0; i < 80 && !qty && !dl.over(); i++) { await sleep(100); qty = ours(); }
+    const sel = document.getElementById("rMethod");
+    if (!qty || !sel) { location.hash = back; return [row("B9 UI", "FAIL", `invoice ${sale.sale_no}: its return form did not show; nothing was clicked`)]; }
     rows.push(row("B9 default", sel.value === "credit" ? "PASS" : "FAIL",
                   `TEST credit sale no. ${sale.sale_no} (${money(sale.total)} آجل): refund method preselected "${sel.value}", expected "credit"`));
-    const qty = document.querySelector("[data-ret]");
     const reason = document.getElementById("rReason");
     const go = document.getElementById("rGo");
     qty.value = "1";
     reason.value = "TEST visit runner";
+    if (ours() !== qty) { location.hash = back; return [...rows, row("B9 double click", "FAIL", "the screen changed before the click; nothing was clicked")]; }
     go.click(); go.click();                      // a fast double click
     await sleep(60); go.click();                 // and a late third click while the first is saving
     let s = null;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 30 && !s && !dl.over(); i++) {
       await sleep(200);
       const r = await call("GET", `/api/sales/${sale.id}`);
-      if (r.ok && r.data.returns.length) { s = r.data; if (i > 4) break; }
-      if (dl.over()) break;
+      if (r.ok && r.data.returns.length) s = r.data;
+    }
+    if (s) {                                     // give a second return time to show up, then read again
+      await sleep(800);
+      const r = await call("GET", `/api/sales/${sale.id}`);
+      if (r.ok) s = r.data;
     }
     const n = s ? s.returns.length : 0;
     rows.push(row("B9 double click", n === 1 ? "PASS" : "FAIL",
@@ -350,30 +368,38 @@
   // #116: a cut-off E-Stock stock export is refused; the same file complete is accepted (single store)
   async function flowEstock() {
     const rows = [];
+    const dl = deadline();
     const header = ["TEST-مخزن", "اسم المخزن", 1, "كود المخزن", "نسبة الربح", "إجمالى البيع", "إجمالى التكلفة",
                     "البيع", "التكلفة", "الكمية", "تاريخ الصلاحية", "الوحدة", "الشركة", "اسم الصنف", "الكود"];
     const data = [[10, 80, 64, 40, 32, 2, null, "علبة", "TEST", TAG + " estock item", 990001],
                   [5, 30, 24, 30, 24, 1, null, "علبة", "TEST", TAG + " estock item 2", 990002]];
     const total = [110, "إجمالى البيع", 88, "إجمالى التكلفة", 2, "عدد الاصناف"];
     const grand = ["إجمالى جميع المخازن", 110, "إجمالى البيع", 88, "إجمالى التكلفة", 2, "عدد الاصناف"];
-    const send = (sheet, name) => {
+    const send = (sheet, name, timeout) => {
       const fd = new FormData();
       fd.append("file", new Blob([xlsx(sheet)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), name);
       fd.append("kind", "opening_stock");
       fd.append("source_system", "estock");
-      return call("POST", "/api/imports", fd, { timeout: 15000 });
+      return call("POST", "/api/imports", fd, { timeout });
     };
-    const cut = await send([header, ...data], "TEST-estock-cut.xlsx");
+    const cut = await send([header, ...data], "TEST-estock-cut.xlsx", 8000);
     rows.push(row("L2 cut-off file", !cut.ok && cut.code === "estock_totals_mismatch" ? "PASS" : "FAIL",
                   cut.ok ? "accepted (expected a refusal)" : `${cut.status} ${cut.code}: ${cut.message}`));
-    const full = await send([header, ...data, total, grand], "TEST-estock-full.xlsx");
+    if (dl.left() < 7000) {                     // keep time for the upload and for discarding its draft
+      rows.push(row("L3 complete single-store file", "SKIP", "time limit: run visit.estock()"));
+      return rows;
+    }
+    const full = await send([header, ...data, total, grand], "TEST-estock-full.xlsx", Math.min(8000, dl.left() - 3000));
     const run = full.data || {};
     const runId = run.id || (run.run && run.run.id);
     rows.push(row("L3 complete single-store file", full.ok ? "PASS" : "FAIL",
                   full.ok ? `accepted for review (import ${runId}, not applied)` : `${full.status} ${full.code}: ${full.message}`));
     if (full.ok && runId) {        // the analysis is only a draft; mark it discarded so nobody applies it
       const d = await call("POST", `/api/imports/${runId}/discard`, {});
-      rows.push(row("L3 cleanup", d.ok ? "INFO" : "FAIL", d.ok ? "the TEST import draft was marked discarded (nothing was imported)" : fail(d)));
+      rows.push(row("L3 cleanup", d.ok ? "INFO" : "FAIL", d.ok ? "the TEST import draft was marked discarded (nothing was imported)"
+        : `${fail(d)}; run visit.discardImport("${runId}")`));
+    } else if (full.code === "timeout") {
+      rows.push(row("L3 cleanup", "FAIL", "the upload timed out: a TEST-estock-full draft may exist; discard it from the import screen"));
     }
     return rows;
   }
@@ -438,6 +464,17 @@
   }
 
   async function estock() { return report("visit.estock", await flowEstock()); }
+
+  // only the runner's own TEST E-Stock draft can be discarded this way
+  async function discardImport(runId) {
+    const g = await call("GET", `/api/imports/${encodeURIComponent(runId)}`);
+    if (!g.ok) return report("visit.discardImport", [row("L3 cleanup", "FAIL", fail(g))]);
+    if (!String(g.data.filename || "").startsWith("TEST-estock-") || g.data.status !== "analyzed") {
+      return report("visit.discardImport", [row("L3 cleanup", "FAIL", `refused: ${g.data.filename} (${g.data.status}) is not a TEST draft`)]);
+    }
+    const d = await call("POST", `/api/imports/${encodeURIComponent(runId)}/discard`, {});
+    return report("visit.discardImport", [row("L3 cleanup", d.ok ? "INFO" : "FAIL", d.ok ? "TEST import draft discarded" : fail(d))]);
+  }
 
   // ------------------------------------------------------------------ printer and drawer (NEEDS-OWNER)
   const PRINT = {
@@ -552,7 +589,14 @@
             "visit.printAudit(sinceIso)", "visit.backupStatus()", "visit.day19()", "print a phase's table: (await visit.pre()).md"].join("\n");
   }
 
-  window.visit = { version: VERSION, pre, post, flows, estock, print, printAudit, backup: async () => report("visit.backup", (await backup()).rows),
-                   backupStatus, day19, snapshot, help, load };
+  // every public call gets one phase budget; call() never lets a request run past it
+  const phased = (fn) => async (...args) => {
+    PHASE_END = Date.now() + PHASE_MS;
+    try { return await fn(...args); } finally { PHASE_END = 0; }
+  };
+  window.visit = { version: VERSION, pre: phased(pre), post: phased(post), flows: phased(flows), estock: phased(estock),
+                   discardImport: phased(discardImport), print: phased(print), printAudit: phased(printAudit),
+                   backup: phased(async () => report("visit.backup", (await backup()).rows)), backupStatus: phased(backupStatus),
+                   day19: phased(day19), snapshot: phased(snapshot), help, load };
   return "visit runner v" + VERSION + " ready: " + help();
 })();

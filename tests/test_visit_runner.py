@@ -89,7 +89,7 @@ class TestRunnerContract(unittest.TestCase):
         bad = [p for p in posts if forbidden.search(p)]
         self.assertEqual(bad, [])
         # the only status change is discarding the runner's own TEST import draft (it never touched stock)
-        self.assertEqual([p for p in posts if p.endswith("/discard")], ["/api/imports/x1/discard"])
+        self.assertEqual({p for p in posts if p.endswith("/discard")}, {"/api/imports/x1/discard"})
         self.assertNotIn(".removeItem(", SRC)
         self.assertNotIn("localStorage.clear", SRC)
 
@@ -167,6 +167,21 @@ const fs = require('fs');
   const ready = await p.evaluate(src);
   const out = { ready };
   for (const step of JSON.parse(plan)) {
+    if (step.hash) {                       // the coordinator's tab may show any screen when a phase starts
+      await p.evaluate((h) => { location.hash = h; }, step.hash);
+      await p.waitForSelector(step.wait);
+      continue;
+    }
+    if (step.slow) {                       // a slow device: delay matching requests made by the page
+      await p.route(step.slow.glob, async (route) => {
+        const req = route.request();
+        if (req.method() === step.slow.method && !(step.slow.except && req.url().includes(step.slow.except))) {
+          await new Promise((res) => setTimeout(res, step.slow.ms));
+        }
+        try { await route.continue(); } catch (e) { /* the page aborted it */ }
+      });
+      continue;
+    }
     const t0 = Date.now();
     out[step.as || step.fn] = await p.evaluate(async ([fn, args]) => {
       const a = args.map((x) => (x === '$snap' ? window.__snap : x));
@@ -270,6 +285,55 @@ class TestRunnerInBrowser(APICase):
         self.assertEqual(after["B5 data"], "FAIL")
         self.assertEqual(after["B5 rows.sales"], "FAIL")
         self.assertEqual(after["B14 settings"], "PASS")
+
+    def test_return_flow_never_touches_the_invoice_already_on_screen(self):
+        """Codex P1 on #141: the previous invoice stays in the DOM while the TEST one loads; a slow load
+        must not make the runner fill and click the real invoice's return form."""
+        from app.sales.service import Sales
+        from app.inventory import service as inv
+        from decimal import Decimal
+        from app.catalog import service as cat
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Real Item", "pack_size": 3, "public_price": 3000})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, it, "R1", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=30, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        s = Sales(self.db)
+        cust = s.create_customer(self.ctx, name="عميل حقيقي", credit_limit=100000)
+        real = s.create(self.ctx, customer_id=cust)
+        d = s.add_line(self.ctx, real, it, units=3)
+        s.complete(self.ctx, real, on_credit=d["total"])
+        out = self.run_plan([{"hash": f"#/sales/{real}", "wait": "#rMethod"},
+                             {"slow": {"glob": "**/api/sales/*", "method": "GET", "except": real, "ms": 1500}},
+                             {"fn": "flows", "args": [{"ui": True}]}])
+        self.assertFalse(self.db.all("SELECT id FROM sale_returns WHERE sale_id=?", (real,)), "a real invoice got a return")
+        res = self.results(out["flows"])
+        self.assertEqual((res["B9 default"], res["B9 double click"]), ("PASS", "PASS"), out["flows"]["md"])
+        self.assertEqual(s.balance(self.ctx, cust), 3000)
+
+    def test_a_slow_device_stays_inside_the_phase_budget(self):
+        """Codex P2 on #141: nested requests share the phase budget, so a hung upload cannot push a call
+        past ~25 s (the coordinator's limit is ~40 s) and the result still comes back."""
+        out = self.run_plan([{"slow": {"glob": "**/api/imports", "method": "POST", "ms": 60000}},
+                             {"fn": "flows", "args": [{"ui": False}]}])
+        self.assertLess(out["flows"]["ms"], 26500)
+        res = self.results(out["flows"])
+        self.assertEqual(res["B9 retry"], "PASS", out["flows"]["md"])
+        self.assertEqual(res["L2 cut-off file"], "FAIL")
+        self.assertIn("timeout", out["flows"]["md"])
+        self.assertNotIn("PASS", [res.get("L3 complete single-store file")])
+
+    def test_discard_import_only_takes_the_runners_own_draft(self):
+        from tests.test_estock import stock_rows, xlsx
+        self.http_login()
+        r = self.c.post("/api/imports", headers=H, files={"file": ("stock.xlsx", xlsx(stock_rows()))},
+                        data={"kind": "opening_stock", "source_system": "estock"})
+        self.assertEqual(r.status_code, 201, r.text)
+        run = r.json()["id"]
+        out = self.run_plan([{"fn": "discardImport", "args": [run]}])
+        self.assertEqual(self.results(out["discardImport"]), {"L3 cleanup": "FAIL"})
+        self.assertIn("not a TEST draft", out["discardImport"]["md"])
+        self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (run,))["status"], "analyzed")
 
     def test_post_reports_a_new_boot_and_each_difference(self):
         self.http_login()
