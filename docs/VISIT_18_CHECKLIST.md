@@ -15,7 +15,7 @@ Any failure = its own `launch-critical` Issue.
 | V0.2 | ✅ Done 11/11: artifact upload still blocked by the quota, so PR #129 delivers manual builds as the pre-release `installer-review`; run [43018407392](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/43018407392) green | Claude | exe sha256 `ec7de5ff…0934` in the release notes |
 | V0.3 | `develop` must not move between that build and the visit, except the one docs change kept for step B9 | Claude | The installed build is older than `develop` only at B9 |
 
-## Pharmacy PC `desktop-5jvh3qd` (real devices; during working hours with the owner watching the screen; E-Stock stays the live cashier and is never closed or covered full-screen)
+## Pharmacy PC `desktop-5jvh3qd` (real devices; any time that suits the owner — open or closed, no fixed rule — with the owner watching the screen; E-Stock stays the live cashier and is never closed or covered full-screen)
 | # | Step | Who | Expected |
 |---|---|---|---|
 | B0 | `hostname` | Claude | `DESKTOP-5JVH3QD`; anything else: stop |

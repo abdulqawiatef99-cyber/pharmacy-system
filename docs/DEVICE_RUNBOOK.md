@@ -30,7 +30,7 @@ port 8000 is in use.
 6. **G6:** R8 update to `b632981` (0.4.0rc2) → open the app → `--rollback` (0.4.0rc1), same data. Doing it here
    keeps the risk off the cashier PC. Then R10: run the installer again while the app is running.
 
-## B. Pharmacy PC `DESKTOP-5JVH3QD` (during working hours with the owner watching; the chat session bound to it)
+## B. Pharmacy PC `DESKTOP-5JVH3QD` (any time that suits the owner, with the owner watching; the chat session bound to it)
 1. Read-only check: hostname, free disk on C: and D:, installed version, port 8000 owner, `Get-Printer`.
 2. **Backup first:** `manage.py backup` → `verify` → copy it into a new `D:\PharmacyPlatform-backup-2026-10-30\`
    and onto a USB flash. Leave the old `D:\PharmacyPlatform-backup-2026-10-29\` untouched.
