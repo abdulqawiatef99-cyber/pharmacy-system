@@ -882,8 +882,9 @@ class Sales:
         if not r:
             raise NotFound("المرتجع غير موجود")
         sale = self.get(ctx, r["sale_id"])
-        a = self.db.one("SELECT after_json FROM audit_log WHERE entity_type='sale' AND entity_id=? AND action='sale.return'"
-                        " AND json_extract(after_json, '$.return_id')=?", (r["sale_id"], rid))
+        a = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
+                        " AND action='sale.return' AND json_extract(after_json, '$.return_id')=?",
+                        (ctx.org_id, r["sale_id"], rid))      # org_id first: the audit index, not a scan of the whole log
         qty = json.loads(a["after_json"]).get("lines", {}) if a else {}
         lines = [{**l, "returned_now": int(qty[l["id"]])} for l in sale["lines"] if l["id"] in qty]
         return {"return": dict(r), "sale": sale, "lines": lines}
