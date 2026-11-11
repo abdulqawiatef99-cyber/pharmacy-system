@@ -129,10 +129,18 @@ def current_root(legacy: Path, home: Path) -> Path:
     return path
 
 
+def _text(p: Path) -> bytes:
+    """File bytes with Windows line ends as Unix ones. The installer's program files came from `git archive`
+    on a Windows runner (CRLF) while GitHub's update archive has LF: byte for byte every update looked like a
+    dependency/migration change and the update button refused all of them on the pharmacy PC (#18 B13).
+    The database's own migration checksum (db.migrate) already reads the files in text mode, ignoring them."""
+    return p.read_bytes().replace(b"\r\n", b"\n")
+
+
 def _contract(root: Path) -> tuple[bytes, dict]:
     req = root / "requirements.txt"
-    return (req.read_bytes() if req.exists() else b"",
-            {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+    return (_text(req) if req.exists() else b"",
+            {p.name: hashlib.sha256(_text(p)).hexdigest()
              for p in sorted((root / "app" / "migrations").glob("*.sql"))})
 
 
