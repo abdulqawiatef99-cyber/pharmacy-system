@@ -3,7 +3,9 @@
 no update · code update (applies at startup, restarts, one notification) · installer update (sha256,
 verified backup, silent installer, notification) · `update` saying only the installer can ship it ·
 failed selftest -> rollback by the launcher -> failure notification, not retried · blocked during an
-open sale · quiet hours · channels (develop only on the test PC, review builds pinned).
+open sale or an open shift · only in quiet hours unless the owner allows startup/shift close or presses the
+button · announced once · downloaded code must be the requested commit · channels (develop only on the
+test PC, review builds pinned, never switched without the owner).
 """
 import hashlib
 import json
@@ -23,6 +25,8 @@ from tests.test_api import APICase, H
 from tests.test_atomic_releases import package
 
 CUR, NEW, OLDER = "a" * 40, "b" * 40, "c" * 40
+QUIET = __import__("datetime").datetime(2026, 11, 2, 4, 0)        # inside the default quiet hours 03-06
+WORK = __import__("datetime").datetime(2026, 11, 1, 13, 0)        # working hours
 
 
 class _Now:
@@ -62,7 +66,7 @@ class UpdateCase(APICase):
 
     def agent(self):
         return autoupdate.AutoUpdater(self.db, self.s, root=self.tmp, run=self.run, installer=self.installer,
-                                      exit_fn=self.exit)
+                                      exit_fn=self.exit, clock=lambda: QUIET)
 
     def notes(self):
         return [dict(r) for r in self.db.all("SELECT severity, title, body FROM notifications"
@@ -81,6 +85,10 @@ class UpdateCase(APICase):
         self.assertEqual(r.status_code, 200, r.text)
         return sale
 
+    def close_shifts(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE cash_shifts SET status='closed', closed_at='2026-11-01T00:00:00Z'")
+
 
 class TestPaths(UpdateCase):
     def test_no_update(self):
@@ -92,8 +100,8 @@ class TestPaths(UpdateCase):
         self.run.assert_not_called()
         self.exit.assert_not_called()
 
-    def test_code_update_applies_at_startup_and_reports_one_line(self):
-        r = self.u.tick()                                  # first minutes after a start = allowed moment
+    def test_code_update_applies_in_quiet_hours_and_reports_one_line(self):
+        r = self.u.tick()                                  # quiet hours = outside working hours
         self.assertTrue(r["ok"] and r["restarting"], r)
         args = self.run.call_args.args[0]
         self.assertEqual(args[2:], ["update", "--ref", "main", "--sha", NEW])
@@ -129,13 +137,38 @@ class TestPaths(UpdateCase):
         self.u.clock = lambda: __import__("datetime").datetime(2026, 11, 2, 4, 0)     # quiet hours
         self.assertTrue(self.u.tick()["restarting"])
 
-    def test_shift_close_is_an_allowed_moment(self):
-        self.u.started -= autoupdate.STARTUP_WINDOW_S + 1
-        self.u.clock = lambda: __import__("datetime").datetime(2026, 11, 1, 13, 0)
+    def test_startup_and_shift_close_in_working_hours_wait_for_the_owner(self):
+        self.u.clock = lambda: WORK                        # just started, in working hours
+        self.assertIsNone(self.u.tick())
         autoupdate._instance = self.u
         self.addCleanup(setattr, autoupdate, "_instance", None)
         autoupdate.trigger("shift_close")
-        self.assertTrue(self.u.tick()["restarting"])
+        self.assertIsNone(self.u.tick())
+        self.run.assert_not_called()
+        [n] = self.notes()                                 # the owner is told once, in Arabic, what happens
+        self.assertEqual(n["title"], "فيه تحديث جديد للبرنامج")
+        self.assertIn("بين الساعة 03:00 و06:00", n["body"])
+        self.assertIn("«حدّث الآن»", n["body"])
+        self.assertIn("إصلاح طباعة الفاتورة", n["body"])
+        self.u.tick()
+        self.assertEqual(len(self.notes()), 1)             # announced once per version
+        self.assertTrue(self.u.apply("manual", self.ctx)["restarting"])    # the owner's confirmation
+
+    def test_owner_can_allow_startup_and_shift_close(self):
+        self.u.update_settings(self.ctx, {"on_events": True})
+        self.u.clock = lambda: WORK
+        self.assertTrue(self.u.tick()["restarting"])       # first minutes after a start
+        self.exit.reset_mock()
+        self.u.attempt_path.unlink()                       # as if that restart never happened
+        u = self.agent()
+        u.clock = lambda: WORK
+        u.started -= autoupdate.STARTUP_WINDOW_S + 1
+        u.checked_once = True
+        self.assertIsNone(u.tick())
+        autoupdate._instance = u
+        self.addCleanup(setattr, autoupdate, "_instance", None)
+        autoupdate.trigger("shift_close")
+        self.assertTrue(u.tick()["restarting"])
 
     def test_installer_update(self):
         self.files = ["requirements.txt", "app/core/updater.py"]
@@ -257,7 +290,54 @@ class TestOpenSale(UpdateCase):
         sale = self.open_sale()
         with self.db.transaction():
             self.db.execute("UPDATE sales SET created_at='2026-01-01T08:00:00.000Z' WHERE id=?", (sale["id"],))
+        self.close_shifts()
         self.assertIsNone(self.u.busy())                   # kept in the database across the restart
+
+    def test_open_shift_blocks(self):
+        self.http_login()
+        self.assertEqual(self.c.post("/api/cash/open", headers=H, json={"opening_cash": 0}).status_code, 201)
+        self.assertEqual(self.u.busy(), "فيه وردية مفتوحة")
+        r = self.u.apply("quiet_hours")
+        self.assertTrue(r["blocked"])
+        self.assertIn("وردية", r["message"])
+        api = self.c.post("/api/system/update", headers=H, json={})
+        self.assertEqual(api.status_code, 409, api.text)   # the owner's button waits for the shift too
+        self.run.assert_not_called()
+        self.close_shifts()
+        self.assertIsNone(self.u.busy())
+
+    def test_deferred_restart_runs_while_the_new_release_is_still_pending(self):
+        """#99 review: activate() leaves the release pending until the launcher confirms it after the
+        restart, so the deferred restart must not wait for finish_attempt()."""
+        def update(*_a, **_k):
+            home = releases.code_home(self.s.data_dir)
+            releases.atomic_json(home / "active-release.json",
+                                 {"protocol": 1, "active": {"id": "d" * 64}, "previous": None, "pending": True})
+            return Mock(returncode=0, stdout="ok", stderr="")
+        self.run.side_effect = update
+        with patch.object(autoupdate.AutoUpdater, "busy", side_effect=[None, "فيه بيع شغال دلوقتي"]):
+            self.assertFalse(self.u.apply("quiet_hours")["restarting"])
+        self.assertTrue(self.u.restart_due)
+        self.assertFalse(self.u.finish_attempt())          # pending: only the restart can settle it
+        self.u.tick()
+        self.exit.assert_called_once_with(75)
+
+    def test_deferred_restart_waits_for_quiet_hours_unless_the_owner_pressed(self):
+        with patch.object(autoupdate.AutoUpdater, "busy", side_effect=[None, "فيه بيع شغال دلوقتي"]):
+            self.u.apply("quiet_hours")
+        self.u.clock = lambda: WORK                        # the sale ended, but it is working hours now
+        self.assertIsNone(self.u.tick())
+        self.exit.assert_not_called()
+        self.u.clock = lambda: QUIET
+        self.u.tick()
+        self.exit.assert_called_once_with(75)
+        self.exit.reset_mock()
+        u = self.agent()
+        u.clock = lambda: WORK
+        with patch.object(autoupdate.AutoUpdater, "busy", side_effect=[None, "فيه بيع شغال دلوقتي"]):
+            u.apply("manual", self.ctx)                    # the owner's button = his confirmation
+        u.tick()
+        self.exit.assert_called_once_with(75)
 
     def test_api_sales_writes_count_as_selling(self):
         self.http_login()
@@ -284,6 +364,17 @@ class TestOpenSale(UpdateCase):
 
 
 class TestChannels(UpdateCase):
+    def test_channel_never_changes_without_the_owner(self):
+        self.installed = {"sha": CUR, "ref": "main", "source": "installer"}
+        (self.tmp / "no-marker").write_text("")           # even on a test PC, main stays main
+        for _ in range(3):
+            self.u.tick()
+        self.assertEqual(self.u.channel(), "main")
+        self.assertTrue(all(c.args[0][2:5] == ["update", "--ref", "main"] for c in self.run.call_args_list))
+        self.installed = {"sha": NEW, "ref": "develop", "source": "installer"}
+        self.assertEqual(self.agent().channel(), "develop")     # develop stays develop
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE action='update.settings'")["n"], 0)
+
     def test_pharmacy_cannot_pick_develop(self):
         from app.core.errors import ValidationFailed
         with self.assertRaises(ValidationFailed):
@@ -332,6 +423,44 @@ class TestUpdaterPieces(unittest.TestCase):
     def setUp(self):
         self.base = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.base, True)
+
+    def _zipball(self, sha, *, comment=True, top=None):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        top = top or f"owner-repo-{sha[:7]}"
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(f"{top}/manage.py", "print('x')\n")
+            z.writestr(f"{top}/app/__init__.py", "")
+            if comment:
+                z.comment = sha.encode()
+        return buf.getvalue()
+
+    def test_downloaded_code_must_be_the_requested_commit(self):
+        updater.verify_source(self._zipball(NEW), NEW)
+        updater.verify_source(self._zipball(NEW, comment=False), NEW)
+        for data in (self._zipball(OLDER), self._zipball(NEW, top="owner-repo-x"),
+                     self._zipball(OLDER, top=f"owner-repo-{NEW[:7]}"), b"not a zip"):
+            with self.assertRaises(updater.UpdateError):
+                updater.verify_source(data, NEW)
+
+    def test_damaged_download_is_refused(self):
+        data = bytearray(self._zipball(NEW))
+        i = data.index(b"print('x')")
+        data[i] ^= 0xFF                                    # flip a byte inside a member: CRC no longer matches
+        with self.assertRaises(updater.UpdateError):
+            updater.verify_source(bytes(data), NEW)
+
+    def test_update_command_checks_the_download_before_staging(self):
+        import manage
+        with patch.dict(os.environ, {"PHARM_DATA_DIR": str(self.base / "d"), "PHARM_GITHUB_TOKEN": "t"}), \
+                patch.object(updater, "installed", return_value={"sha": CUR, "ref": "main"}), \
+                patch.object(updater, "download", return_value=self._zipball(OLDER)), \
+                patch.object(updater, "apply_zip") as stage:
+            with self.assertRaises(SystemExit) as stop:
+                manage.main(["update", "--ref", "main", "--sha", NEW])
+        self.assertIn("مش للنسخة المطلوبة", str(stop.exception.code))
+        stage.assert_not_called()
 
     def test_which_changes_need_the_installer(self):
         self.assertEqual(updater.needs_installer(["app/x.py", "docs/a.md"]), [])

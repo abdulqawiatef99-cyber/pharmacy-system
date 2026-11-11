@@ -78,6 +78,30 @@ def download(repo: str, sha: str, token: str) -> bytes:
     return _get(f"{API}/repos/{repo}/zipball/{sha}", token, "application/vnd.github+json")
 
 
+def verify_source(data: bytes, sha: str) -> None:
+    """Integrity of a downloaded source archive (#96): every member's CRC is intact, and the archive is
+    the requested commit. GitHub names the top folder <owner>-<repo>-<short sha> and git stores the full
+    commit id as the zip comment; a mismatch in either means this is not the code that was checked."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise UpdateError("ملف التحديث تالف") from e
+    with z:
+        try:
+            bad = z.testzip()
+        except (zipfile.BadZipFile, OSError, EOFError) as e:
+            raise UpdateError("ملف التحديث تالف") from e
+        if bad is not None:
+            raise UpdateError(f"ملف التحديث تالف: {bad}")
+        tops = {n.split("/", 1)[0] for n in z.namelist() if n.strip("/")}
+        short = next(iter(tops)).rsplit("-", 1)[-1].lower() if len(tops) == 1 else ""
+        comment = z.comment.decode("ascii", "replace").strip().lower()
+    if len(short) < 7 or not sha.startswith(short):
+        raise UpdateError("ملف التحديث مش للنسخة المطلوبة؛ ماتغيرش حاجة")
+    if re.fullmatch(r"[0-9a-f]{40}", comment) and comment != sha:
+        raise UpdateError("ملف التحديث مش للنسخة المطلوبة؛ ماتغيرش حاجة")
+
+
 CHANNELS = ("main", "develop")      # #107: main = the pharmacy; develop = test installs
 
 

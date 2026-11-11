@@ -153,6 +153,7 @@ class TestBackupDefaultsOfOtherCommands(unittest.TestCase):
         with mock.patch.object(updater, "read_token", return_value="t"), \
                 mock.patch.object(updater, "latest_sha", return_value="b" * 40) as latest, \
                 mock.patch.object(updater, "download", return_value=b"zip"), \
+                mock.patch.object(updater, "verify_source"), \
                 mock.patch.object(updater, "installed", return_value={"sha": "a" * 40, "ref": "develop"}), \
                 mock.patch.object(updater, "apply_zip", return_value=staged), \
                 mock.patch.object(releases, "check_compatible"), \

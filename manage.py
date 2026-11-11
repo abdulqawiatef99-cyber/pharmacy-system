@@ -287,6 +287,7 @@ def cmd_update(a, s):
             if a.check:
                 return
             data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
+            updater.verify_source(data, sha)     # #96: intact, and exactly the commit that was asked for
         staged = updater.apply_zip(data, root, code_home=home)
         candidate = Path(staged["release"])
         current = releases.current_root(root, home)

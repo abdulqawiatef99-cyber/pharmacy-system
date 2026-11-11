@@ -4,11 +4,15 @@
   (default); "develop" is for the owner's test PC only (an installer built from develop, or the marker
   file ~/.pharmacy/test_pc). An installer from any other branch is a review build: it is never replaced
   unless the owner picks a channel.
-- Applies only when no sale is open (a draft invoice with lines started in the last hour, or any sales
-  write in the last 5 minutes), and only at one of: the first minutes after startup, a shift close, or the
-  quiet hours (default 03:00-06:00). While the program restarts, sales writes are refused for a moment.
-- Code update: `manage.py update --ref <channel> --sha <commit>` (verified backup, candidate selftest on
-  throw-away data, atomic selection); the launcher then runs selftest on the selected code and checks its
+- Applies only when no sale and no cash shift is open (a draft invoice with lines started in the last hour,
+  any sales write in the last 5 minutes, or an open shift), and only outside working hours: the quiet
+  hours (default 03:00-06:00). The first minutes after startup and a shift close count too only when the
+  owner turned that on (setting "on_events", off by default). Any other time it waits for the owner's
+  "update now" (his confirmation). While the program restarts, sales writes are refused for a moment.
+- A new version is announced once in Arabic: when it will install by itself, or that it waits for the
+  owner's button.
+- Code update: `manage.py update --ref <channel> --sha <commit>` (the downloaded archive must be the
+  requested commit, then verified backup, candidate selftest on throw-away data, atomic selection); the launcher then runs selftest on the selected code and checks its
   startup, and rolls back by itself when either fails (launcher.py).
 - Installer update (requirements, migrations, launcher, bootstrap or the embedded Python changed): the
   channel's published installer is downloaded with the same read-only token, its sha256 is checked against
@@ -39,7 +43,7 @@ from .permissions import Context
 
 log = logging.getLogger("pharm.update")
 
-DEFAULTS = {"auto": True, "channel": "", "check_hours": 4, "quiet_start": 3, "quiet_end": 6}
+DEFAULTS = {"auto": True, "channel": "", "check_hours": 4, "quiet_start": 3, "quiet_end": 6, "on_events": False}
 CHECK_HOURS = (1, 2, 4, 6, 12, 24)
 START_DELAY_S = 60               # let the program finish starting before the first check
 STARTUP_WINDOW_S = 15 * 60       # "apply at startup" = within the first minutes after a start
@@ -87,6 +91,7 @@ class AutoUpdater:
         self.stop_event = threading.Event()
         self.pending_reason: str | None = None
         self.restart_due = False
+        self.restart_confirmed = False   # the deferred restart came from the owner's button
         self.restarting = False          # about to restart for an update: new sales writes wait a moment
         self.last_sale_write = float("-inf")
         self.checked_once = False
@@ -141,8 +146,9 @@ class AutoUpdater:
         ctx.require("settings.manage")
         cfg = self.settings()
         new = dict(cfg)
-        if "auto" in changes:
-            new["auto"] = bool(changes["auto"])
+        for k in ("auto", "on_events"):
+            if k in changes:
+                new[k] = bool(changes[k])
         if "channel" in changes:
             ch = changes["channel"] or ""
             if ch not in ("", *updater.CHANNELS):
@@ -180,23 +186,29 @@ class AutoUpdater:
         if time.monotonic() - self.last_sale_write < SALE_WRITE_S:
             return "فيه بيع شغال دلوقتي"
         since = (datetime.now(timezone.utc) - timedelta(minutes=OPEN_SALE_MIN)).strftime("%Y-%m-%dT%H:%M:%S")
-        for o in self.db.all("SELECT id FROM organizations WHERE status='active'"):
+        orgs = self.db.all("SELECT id FROM organizations WHERE status='active'")
+        for o in orgs:
             r = self.db.one("SELECT count(*) n FROM sales s WHERE s.org_id=? AND s.status='draft'"
                             " AND s.created_at>=? AND EXISTS (SELECT 1 FROM sale_lines l"
                             " WHERE l.sale_id=s.id AND l.org_id=?)", (o["id"], since, o["id"]))
             if r["n"]:
                 return "فيه فاتورة بيع مفتوحة"
+        for o in orgs:
+            if self.db.one("SELECT count(*) n FROM cash_shifts WHERE org_id=? AND status='open'", (o["id"],))["n"]:
+                return "فيه وردية مفتوحة"
         return None
 
     def _window(self) -> str | None:
         """Is this a moment the owner allowed for updating? Returns the reason."""
         cfg = self.settings()
+        if in_quiet_hours(self.clock(), int(cfg["quiet_start"]), int(cfg["quiet_end"])):
+            return "quiet_hours"
+        if not cfg.get("on_events"):          # working hours: only the owner's button (his confirmation)
+            return None
         if self.pending_reason == "shift_close":
             return "shift_close"
         if time.monotonic() - self.started < STARTUP_WINDOW_S:
             return "startup"
-        if in_quiet_hours(self.clock(), int(cfg["quiet_start"]), int(cfg["quiet_end"])):
-            return "quiet_hours"
         return None
 
     # ----------------------------------------------------------------- check
@@ -288,7 +300,7 @@ class AutoUpdater:
                        output[-200:])
             return {"ok": False, "message": "التحديث فشل؛ البرنامج زي ما هو", "output": output}
         self._attempt(plan, "code", plan["latest"], reason)
-        return {**self._restart(), "output": output}
+        return {**self._restart(confirmed=ctx is not None), "output": output}
 
     def _apply_installer(self, plan: dict, reason: str, ctx: Context | None) -> dict:
         if os.environ.get("PHARM_LAUNCHER") != "1":
@@ -342,7 +354,7 @@ class AutoUpdater:
         self.restarting = False
         self.finish_attempt()
 
-    def _restart(self) -> dict:
+    def _restart(self, confirmed: bool = False) -> dict:
         if os.environ.get("PHARM_LAUNCHER") != "1":
             return {"ok": True, "restarting": False, "message": "اكتمل. أغلق البرنامج وافتحه مرة أخرى"}
         self.restarting = True
@@ -350,8 +362,9 @@ class AutoUpdater:
         if why:                               # a sale started meanwhile: the new code waits for it
             self.restarting = False
             self.restart_due = True
-            return {"ok": True, "restarting": False, "message": f"النسخة جاهزة وهتشتغل بعد ما {why} تخلص"}
-        self.restart_due = False
+            self.restart_confirmed = self.restart_confirmed or confirmed
+            return {"ok": True, "restarting": False, "message": f"النسخة جاهزة ومستنية: {why}"}
+        self.restart_due = self.restart_confirmed = False
         t = threading.Timer(1.5, lambda: self._exit(RESTART))
         t.daemon = True
         t.start()
@@ -423,6 +436,23 @@ class AutoUpdater:
             out.pop("candidate", None)       # #107 API: "candidate" only for a review build with no channel
         return out
 
+    def _announce(self, st: dict, cfg: dict) -> None:
+        """Tell the owner once per new version, in Arabic, what will happen (no technical words)."""
+        latest = st.get("latest")
+        if not (st.get("available") and latest and st.get("channel")) or st.get("announced") == latest \
+                or latest == st.get("failed_sha"):
+            return
+        start, end = f"{int(cfg['quiet_start']):02d}:00", f"{int(cfg['quiet_end']):02d}:00"
+        if cfg.get("auto"):
+            when = (f"هيتركب لوحده بين الساعة {start} و{end} لو الجهاز شغال ومفيش بيع ولا وردية مفتوحة"
+                    + ("، أو بعد قفل الوردية أو أول ما البرنامج يفتح" if cfg.get("on_events") else "")
+                    + "، أو دوس «حدّث الآن» من الإعدادات ← البرنامج.")
+        else:
+            when = "التحديث التلقائي مقفول؛ دوس «حدّث الآن» من الإعدادات ← البرنامج لما تحب."
+        body = f"{st.get('summary') or 'تحسينات وإصلاحات'}. {when} بياناتك مش بتتلمس، وبتتاخد نسخة احتياطية الأول."
+        self._notify("info", "فيه تحديث جديد للبرنامج", body)
+        self._save(announced=latest)
+
     # ----------------------------------------------------------------- scheduler
     def _check_due(self) -> bool:
         st, cfg = self.state(), self.settings()
@@ -434,10 +464,13 @@ class AutoUpdater:
 
     def tick(self) -> dict | None:
         """One scheduler step (the loop calls it every minute)."""
+        if self.restart_due:                  # staged code waits for a sale; the launcher can only confirm it
+            if self.busy() or not (self.restart_confirmed or self._window()):    # after this restart, so
+                self.pending_reason = None                                       # it comes first (#99 review)
+                return None
+            return self._restart()
         if not self.finish_attempt():
             return None
-        if self.restart_due and not self.busy():
-            return self._restart()
         if self._check_due() or not self.checked_once:        # always once at startup
             self.check()
             self.checked_once = True
@@ -447,7 +480,11 @@ class AutoUpdater:
         if (cfg.get("auto") and st.get("available") and reason and not st.get("error")
                 and not st.get("waiting") and st.get("latest") != st.get("failed_sha")
                 and os.environ.get("PHARM_LAUNCHER") == "1"):
-            return self.apply(reason)
+            r = self.apply(reason)
+            if r.get("blocked"):
+                self._announce(self.state(), cfg)
+            return r
+        self._announce(st, cfg)               # not now: tell the owner once when it will happen
         return None
 
     def _loop(self) -> None:
