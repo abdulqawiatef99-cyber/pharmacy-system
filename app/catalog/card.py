@@ -140,7 +140,8 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
         out["batches"] = [dict(r) for r in db.all(
             "SELECT sb.qty, nullif(sb.batch_key,'') batch_id, b.batch_no, b.expiry_date, b.public_price,"
             " (SELECT s.name FROM stock_movements m JOIN purchase_invoices p ON p.id=m.ref_id"
-            "  JOIN suppliers s ON s.id=p.supplier_id WHERE m.batch_id=b.id AND m.movement_type='purchase'"
+            "  JOIN suppliers s ON s.id=p.supplier_id WHERE m.org_id=sb.org_id AND m.branch_id=sb.branch_id"
+            "  AND m.item_id=sb.item_id AND m.batch_id=b.id AND m.movement_type='purchase'"   # the item's moves only (#113)
             "  ORDER BY m.rowid DESC LIMIT 1) supplier"
             " FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
             " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty<>0"

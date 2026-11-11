@@ -148,6 +148,24 @@ class TestNoFullScans(SalesCase):
             item_card.movements(self.db, self.ctx, self.pan, self.month, self.today)
             cu.profile(self.db, self.ctx, self.cust)
         self.assertNoScan(rec)
+    def test_ledger_moves_audit_and_couriers_read_only_their_rows(self):
+        # customer balance (ledger index needs org_id), a batch's last supplier (the item's moves only), the drawer
+        # sent count (from the shift's sales) and the cash with couriers (from open deliveries): no new index needed
+        shift = self.db.one("SELECT id FROM cash_shifts WHERE status='open'")["id"]
+        drawer = CashDrawer(self.db)
+        with QueryRecorder(self.db) as rec:
+            cu.profile(self.db, self.ctx, self.cust)
+            item_card.card(self.db, self.ctx, self.pan)
+            drawer.report(self.ctx, shift)
+            drawer.summary(self.ctx)
+        tables = {"customer_ledger", "stock_movements", "audit_log"}
+        bad = [(p, q) for p, q in rec.full_scans() if _aliases(q).get(p.split()[1], p.split()[1]) in tables]
+        self.assertEqual(bad, [])
+        delivery = [q for q in dict.fromkeys(rec.selects()) if "sale_deliveries" in q]
+        self.assertTrue(delivery)
+        for q in delivery:
+            plan = [r[3] for r in self.db.conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()]
+            self.assertTrue(plan[0].startswith("SEARCH d USING INDEX ix_deliveries_status"), plan)
 
     def test_invoice_report_query_count_does_not_grow_with_invoices(self):
         def count():

@@ -7,3 +7,7 @@ CREATE INDEX IF NOT EXISTS ix_alloc_line ON sale_allocations(sale_line_id);
 CREATE INDEX IF NOT EXISTS ix_sales_completed ON sales(org_id, branch_id, status, completed_at);
 -- 3. the cashier's drawer panel and the shift report sum the sales of one shift.
 CREATE INDEX IF NOT EXISTS ix_sales_shift ON sales(shift_id);
+-- 4. an item's sales (item card: 12 months sold): from the item's lines, not from every completed sale.
+CREATE INDEX IF NOT EXISTS ix_sale_lines_item ON sale_lines(item_id);
+-- 5. a customer's invoices and items (customer profile, statement).
+CREATE INDEX IF NOT EXISTS ix_sales_customer ON sales(org_id, customer_id);
