@@ -1961,15 +1961,18 @@ async function renderReceiptCfg(c) {
       <div class="lbprev"><img id="lbPrev" alt="معاينة الملصق"><p id="lbPrevMsg" class="muted small"></p></div></fieldset>
     <fieldset class="lblp"><legend>طابعة الملصقات</legend>
       <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option><option value="a4" ${c.label_lang === "a4" ? "selected" : ""}>من المتصفح على ورق A4 (شبكة)</option>
+        <option value="driver" ${c.label_lang === "driver" ? "selected" : ""}>عن طريق تعريف الطابعة في ويندوز (زي إي ستوك) — الأنسب</option>
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
-      <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
-      <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
-      <label class="f">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
-      <p class="muted">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
-      <label class="f">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
+      <label class="chk lbDrv"><input type="checkbox" name="label_flip" ${c.label_flip ? "checked" : ""}> اقلب الملصق (لو بيطلع مقلوب)</label>
+      <p class="muted lbDrv">البرنامج بيطبع عن طريق تعريف الطابعة في ويندوز، زي إي ستوك بالظبط: مقاس الملصق والمسافة بين الملصقات والاتجاه بتتاخد من «تفضيلات الطباعة» للطابعة في ويندوز (نفس اللي إي ستوك بيطبع بيه). المقاس اللي فوق بيُستخدم بس لو اتطبع من المتصفح.</p>
+      <label class="f lbRaw">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
+      <label class="f lbRaw">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
+      <label class="f lbRaw">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
+      <p class="muted lbRaw">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
+      <label class="f lbRaw">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
         .map((v) => `<option value="${v}" ${(c.label_variant || "current") === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
-      <div class="row"><button type="button" class="btn small secondary" id="lbCal">معايرة بكرة الملصقات</button>
+      <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
     <fieldset class="lblp"><legend>اللوجو والكود (QR) أعلى الإيصال</legend>
@@ -2004,15 +2007,20 @@ async function renderReceiptCfg(c) {
     try {
       const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
         body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
-          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value }) });
+          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim() }) });
       if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
       const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
       if (prevUrl) URL.revokeObjectURL(prevUrl);
       prevUrl = URL.createObjectURL(await r.blob());
       $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
-      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}` : "المعاينة بنفس شكل الطباعة المباشرة (بيانات تجربة).";
+      const fromWin = r.headers.get("X-Label-Source") === "windows" ? ` على مقاس ويندوز ${(r.headers.get("X-Label-Size") || "").replace("x", " × ")} مم` : "";
+      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
     } catch { /* preview only */ }
   }, 300); };
+  // #100: through the Windows driver, size, gap and direction come from Windows: the raw-printer fields hide
+  const lbMode = () => { const drv = lf.label_lang.value === "driver";
+    lf.querySelectorAll(".lbRaw").forEach((x) => { x.hidden = drv; }); lf.querySelectorAll(".lbDrv").forEach((x) => { x.hidden = !drv; }); };
+  lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview);
   showCustom(); preview();
   lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
   ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
@@ -2025,7 +2033,7 @@ async function renderReceiptCfg(c) {
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
       qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
@@ -2042,8 +2050,8 @@ async function renderReceiptCfg(c) {
     try {
       const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
-        label_variant: lf.label_variant.value } });
-      toast(`أُرسل ${r.labels} ملصق تجربة — لو تمام دوس «احفظ»`);
+        label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked } });
+      toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — لو تمام دوس «احفظ»`);
     } catch (err) { toast(err.message, true); }
   });
   $("#lbCal").addEventListener("click", async () => {

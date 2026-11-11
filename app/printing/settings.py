@@ -16,6 +16,7 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
             "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
             "label_variant": "current",   # #100: how the TSPL job is built (labels.VARIANTS); saved after a device test
+            "label_flip": False,          # #100: driver labels turned 180° (a driver set to print upside down)
             "receipt_target": "",
             # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
             # independently of the receipt (direct ESC/POS printers only).
@@ -99,6 +100,12 @@ def label_identity(db: Database, org_id: str, cfg: dict) -> tuple[str, str]:
     return name, cfg["label_phone"] or (lines[1] if len(lines) > 1 else "")
 
 
+def label_flip_ok(value) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationFailed("قلب الملصق: نعم أو لا")
+    return value
+
+
 def check_target(value, example: str = "win:POS-80C", allow_browser: bool = False) -> str:
     """A printer typed or picked on the screen: only a network printer or a Windows printer name,
     never a file path (the server would write wherever it was told). "browser" (receipt only) means
@@ -145,6 +152,9 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
     for k, example in (("label_target", "win:Xprinter XP-365B"), ("receipt_target", "win:POS-80C")):
         if k in data:
             new[k] = check_target(data[k], example, allow_browser=k == "receipt_target")
+    if new["label_lang"] == "driver" and new["label_target"] and not new["label_target"].startswith("win:"):
+        # #100: the Windows driver prints only to a Windows printer (a network address has no driver here)
+        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز: win:اسم الطابعة")
     if "label_dpi" in data:
         if data["label_dpi"] not in (203, 300):
             raise ValidationFailed("دقة الطابعة 203 أو 300")
@@ -157,6 +167,8 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         new["label_shift"] = label_shift_ok(data["label_shift"])
     if "label_variant" in data:
         new["label_variant"] = label_variant_ok(data["label_variant"])
+    if "label_flip" in data:
+        new["label_flip"] = label_flip_ok(data["label_flip"])
     for k in ("title", "footer", "header"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:80]

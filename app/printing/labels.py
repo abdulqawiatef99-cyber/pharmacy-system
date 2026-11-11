@@ -17,7 +17,10 @@ from PIL import Image, ImageDraw, ImageFont
 from . import barcode as bc
 from .escpos import PrinterError, find_font, shaping_available
 
-LANGS = ("browser", "a4", "tspl", "zpl")      # a4 = browser printing on an A4 label sheet (grid)
+# a4 = browser printing on an A4 label sheet (grid); driver = through the printer's Windows driver, like
+# E-Stock (#100, driver.py): the size and the media handling come from Windows, not from these settings
+LANGS = ("browser", "a4", "tspl", "zpl", "driver")
+DIRECT = ("tspl", "zpl", "driver")             # printed by the server, no browser dialog
 DPIS = (203, 300)
 MAX_LABELS = 500
 SHIFT_MM = 10           # #100: the vertical shift the settings accept, either way (mm)
