@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import logging.config
+import re
 import zipfile
 from dataclasses import replace
 from datetime import date
@@ -33,7 +34,9 @@ def bomb_xlsx(dimension: str, last_cell: str) -> bytes:
             d = zin.read(i.filename)
             if i.filename == "xl/worksheets/sheet1.xml":
                 row = "".join(ch for ch in last_cell if ch.isdigit())
-                d = d.replace(b'<dimension ref="A1:A1"/>', f'<dimension ref="{dimension}"/>'.encode())
+                # with or without lxml openpyxl writes '<dimension ref="A1:A1"/>' or '... />'
+                d, n = re.subn(rb'<dimension ref="[^"]*"\s*/>', f'<dimension ref="{dimension}"/>'.encode(), d)
+                assert n == 1, d[:300]
                 d = d.replace(b"</sheetData>", f'<row r="{row}"><c r="{last_cell}"><v>1</v></c></row></sheetData>'.encode())
             zout.writestr(i, d)
     return out.getvalue()
