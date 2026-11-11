@@ -122,6 +122,30 @@ class TestAtomicReleases(unittest.TestCase):
                 self.unchanged()
                 self.assertEqual(releases.read_state(self.home), {})
 
+    def test_line_ends_alone_are_not_a_dependency_change(self):
+        """#18 B13: the installer's files had CRLF (git archive on a Windows runner), GitHub's update archive
+        LF; every update from the button was refused as "dependencies or migrations changed"."""
+        (self.root / "requirements.txt").write_bytes(b"pillow==13.0.0\r\npywin32==312\r\n")
+        (self.root / "app" / "migrations" / "0001.sql").write_bytes(b"CREATE TABLE t (a);\r\n-- end\r\n")
+        lf = {**self.files, "requirements.txt": "pillow==13.0.0\npywin32==312\n",
+              "app/migrations/0001.sql": "CREATE TABLE t (a);\n-- end\n"}
+        self.activate(self.stage(lf))
+        self.assertTrue(releases.read_state(self.home)["pending"])
+        for name, text in (("requirements.txt", "pillow==13.0.1\npywin32==312\n"),     # a real change is still refused
+                           ("app/migrations/0001.sql", "CREATE TABLE t (b);\n-- end\n")):
+            with self.subTest(name=name):
+                current = releases.current_root(self.root, self.home)
+                with self.assertRaises(releases.ReleaseError):
+                    releases.check_compatible(current, self.stage_dir({**lf, name: text}))
+
+    def stage_dir(self, files):
+        d = self.base / "candidate"
+        shutil.rmtree(d, ignore_errors=True)
+        for name, text in files.items():
+            (d / name).parent.mkdir(parents=True, exist_ok=True)
+            (d / name).write_text(text)
+        return d
+
     def test_pending_activation_cannot_destroy_rollback_target(self):
         first = self.stage()
         self.activate(first)
