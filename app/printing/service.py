@@ -33,7 +33,7 @@ def printer_target(db: Database | None = None, org_id: str | None = None) -> str
 
 
 def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool = False,
-                  target: str | None = None) -> dict:
+                  target: str | None = None, given: int = 0) -> dict:
     """open_drawer is the automatic checkout pulse only (checkout_devices); a reprint never opens the drawer."""
     ctx.require("sales.read")
     sale = Sales(db).get(ctx, sale_id)
@@ -50,21 +50,49 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         raise PrintFailed("لم يتم اختيار طابعة الإيصال", code="no_printer")
     rendered = False
     try:
-        img = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg),
-                                    width=escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM)
+        width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
+        who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
+        body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
+                                                          given=given), width=width)
+        img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
     except escpos.PrinterError as e:
         # The receipt could not be drawn here (no Arabic shaping / font) but the printer may be fine:
         # the cash drawer still opens, and the browser prints the receipt instead.
         drawer = open_drawer and not rendered and _kick(db, ctx, dest, sale_id)
+        if rendered:            # #98: the printer did not take the receipt; audit what really happened
+            with db.transaction():
+                audit.record(db, ctx, "print.receipt", "sale", sale_id,
+                             after={"drawer": open_drawer, "outcome": "not_printed", "error": str(e)[:200]})
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك",
                           details={"drawer_opened": bool(drawer)}) from e
     with db.transaction():
-        audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer})
+        audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer, "outcome": "sent"})
         if open_drawer:
             audit.record(db, ctx, "cash.drawer_auto", "sale", sale_id, after={"with_receipt": True, "outcome": "sent"})
     return {"ok": True}
+
+
+def _header(db: Database, ctx: Context, cfg: dict, width: int):
+    """Logo + QR (F27). A broken logo or QR text must never stop the receipt: log it and print without."""
+    from . import logo, qrlinks
+    try:
+        return escpos.receipt_header(width, logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None, cfg["qr_text"],
+                                     qrlinks.caption(cfg["qr_text"], cfg["qr_caption"]))
+    except Exception:  # noqa: BLE001
+        log.exception("receipt header (logo/QR) skipped")
+        return None
+
+
+def _footer(cfg: dict, width: int):
+    """The optional second QR code under the receipt (F27); same rule: never stops the receipt."""
+    from . import qrlinks
+    try:
+        return escpos.receipt_footer_qr(width, cfg["qr2_text"], qrlinks.caption(cfg["qr2_text"], cfg["qr2_caption"]))
+    except Exception:  # noqa: BLE001
+        log.exception("receipt footer QR skipped")
+        return None
 
 
 def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
@@ -78,7 +106,7 @@ def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
     return True
 
 
-def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool) -> dict:
+def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, given: int = 0) -> dict:
     """After a sale is committed (#81), once: the call site skips replays of the same request_id.
     The drawer opens on any cash part of a store sale, with or without a receipt; a delivery sale prints
     one receipt and never opens the drawer. A failure here never touches the saved sale.
@@ -98,7 +126,7 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool) -> d
     try:
         if want_receipt:
             try:
-                print_receipt(db, ctx, sale["id"], open_drawer=want_drawer, target=dest)
+                print_receipt(db, ctx, sale["id"], open_drawer=want_drawer, target=dest, given=given)
                 out["receipt"], out["drawer"] = "sent", "sent" if want_drawer else "none"
             except PrintFailed as e:
                 out["receipt"], out["message"] = "failed", e.message
@@ -252,10 +280,58 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
         if not imgs:
             raise ValidationFailed("اختر الأصناف")
         escpos.send(target or cfg["label_target"] or "none",
-                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"]))
+                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
     with db.transaction():
         audit.record(db, ctx, "print.labels", "item", None,
                      after={"labels": total, "size": f"{w:g}x{h:g}", "lang": cfg["label_lang"]})
     return {"ok": True, "labels": total, "dropped": sorted(dropped)}
+
+
+def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> dict:
+    """#100: a few sample labels with the values on the settings screen, saved or not (size, gap, shift, dpi,
+    type, printer, fields), so the owner can tune the roll in one go. No item, nothing saved."""
+    from . import labels as lb, settings as rs
+    ctx.require("settings.manage")
+    data = data or {}
+    cfg = rs.get(db, ctx.org_id)
+    if "label_lang" in data:
+        if data["label_lang"] not in lb.LANGS:
+            raise ValidationFailed("نوع طابعة الملصقات غير صحيح")
+        cfg["label_lang"] = data["label_lang"]
+    if cfg["label_lang"] not in ("tspl", "zpl"):
+        raise ValidationFailed("اختر نوع طابعة الملصقات (TSPL أو ZPL) لتجربة الطباعة المباشرة", code="labels_in_browser")
+    if "label_size" in data:
+        cfg["label_size"] = rs.label_size_ok(data["label_size"])
+    if "label_target" in data:
+        cfg["label_target"] = rs.check_target(data["label_target"], "win:Xprinter XP-365B")
+    if "label_dpi" in data:
+        if data["label_dpi"] not in lb.DPIS:
+            raise ValidationFailed("دقة الطابعة 203 أو 300")
+        cfg["label_dpi"] = data["label_dpi"]
+    if "label_gap" in data:
+        if not isinstance(data["label_gap"], int) or isinstance(data["label_gap"], bool) or not 0 <= data["label_gap"] <= 10:
+            raise ValidationFailed("المسافة بين الملصقات من 0 إلى 10 مم")
+        cfg["label_gap"] = data["label_gap"]
+    if "label_shift" in data:
+        cfg["label_shift"] = rs.label_shift_ok(data["label_shift"])
+    if isinstance(data.get("label_fields"), dict):
+        cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
+    if not cfg["label_target"]:
+        raise ValidationFailed("اختر طابعة الملصقات (مكان الطابعة) أولًا", code="no_printer")
+    w, h = label_size(cfg)
+    pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+              "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
+    shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
+    try:
+        img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
+        escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift))
+    except escpos.PrinterError as e:
+        raise PrintFailed(str(e)) from e
+    with db.transaction():
+        audit.record(db, ctx, "print.label_test", "printer", None,
+                     after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"],
+                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS})
+    return {"ok": True, "labels": lb.TEST_LABELS}

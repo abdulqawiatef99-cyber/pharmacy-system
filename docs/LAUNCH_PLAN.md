@@ -10,6 +10,10 @@ requires the owner's approval.
 The code is done: every gate is at L1 in `docs/STATUS.md`, and no code Issue labelled `launch-critical`
 is open. What remains is **verification on the real pharmacy PC and the owner's sign-off**, not more code.
 
+**Update, owner decision 2026-11-10:** the 2026-11-01 retest found small blockers, so a few code Issues are
+open again. The current launch order and who does what is in `docs/START_HERE.md`:
+#100 → #98 → #104 → #107 → #18 → #19 → #20. Everything else is labelled `after-launch`.
+
 ## 2. Critical path (the only work that moves the release)
 
 | Step | Issue | Where | Who | Done when |
@@ -42,12 +46,15 @@ Allowed PRs: (a) ones that close or unblock #18, #19 or #20, including fixes for
 (d) **owner exception, 2026-10-30:** the written assessment of the independent-pharmacy federation (F20 in
 `docs/FUTURE_REQUIREMENTS.md`) as `docs/FEDERATION_ASSESSMENT.md`. Docs only: no code, no migrations, no
 change to app files. It must not take device-test time or touch files of an open #18/#19/#20 PR.
+(e) **owner exception, 2026-11-03:** F27 receipt logo + QR codes + change due (#103, merged into `develop`
+`d04daf2`), asked for directly by the owner ("ضيف كل ده"). No migration, no `requirements.txt` change. It
+reaches the pharmacy only with #20; its device checks are in `docs/OWNER_TEST_PLAN.md` (priority 3, F27 table).
 **Everything else waits** and goes to `docs/FUTURE_REQUIREMENTS.md` class C (`AGENTS.md` §6). That includes
 #76 (agent auto-continuation), new process docs, refactors, new features and tooling.
 
 ## 5. Standing decisions
 
-- Every agent uses the installer from `docs/HANDOFF.md` (currently run 72, `c9906a9`). A new installer is built
+- Every agent uses the installer from `docs/HANDOFF.md` (the build installed on the pharmacy PC is listed there). A new installer is built
   only after a fix is merged and `develop` CI is green on both linux and windows.
 - Red CI on `develop` is fixed before anything else. A rerun that bills Actions minutes needs the owner's approval
   (cost gate, #77).

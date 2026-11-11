@@ -5,7 +5,7 @@ name: Windows installer
 # publishes the test channel "installer-develop" (prerelease, for the owner's test PC only, #96).
 # Each release carries installer.json (commit, branch, sha256, size): the automatic updater downloads
 # PharmacySetup.exe with the read-only token and installs it only when its sha256 matches.
-# A manual run on any other branch builds a review installer artifact and publishes nothing.
+# A manual run builds a review installer, delivered as the "installer-review" pre-release (#122).
 
 on:
   push:
@@ -152,12 +152,29 @@ jobs:
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
 
+      # Artifact storage is small on GitHub Free (#122): keep review builds 14 days, not 90.
+      # The artifact is only a convenience copy: a push to main delivers "installer-latest"
+      # and a manual review build delivers the "installer-review" pre-release below (release
+      # assets do not count against the Actions storage quota), so a full quota blocks neither.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: PharmacySetup
           path: dist/PharmacySetup.exe
+          retention-days: 14
 
-      - name: Publish the channel installer ("installer-latest" for main, "installer-develop" for develop)
+      - name: Publish review build as pre-release "installer-review"
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $hash = (Get-FileHash dist/PharmacySetup.exe -Algorithm SHA256).Hash.ToLower()
+          gh release delete installer-review --yes --cleanup-tag 2>$null
+          gh release create installer-review dist/PharmacySetup.exe --prerelease --title "منصة الصيدلية — نسخة تجربة" --notes "نسخة تجربة من فرع ${{ github.ref_name }} (${{ github.sha }})، تشغيلة ${{ github.run_id }}. sha256: $hash" --target ${{ github.sha }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish as release "installer-latest" (main) or "installer-develop" (develop, #96)
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         shell: pwsh
         env:

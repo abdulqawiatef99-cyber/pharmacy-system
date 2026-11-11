@@ -1853,7 +1853,7 @@ function renderUpdate(st) {
        <button class="btn" id="updGo">حدّث الآن</button>`;
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
-      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div><div>القناة<b>${esc(chName[st.channel] || "—")}</b></div></div>
+      <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div><div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `مفيش (فرع ${esc(st.candidate || "?")})`}</b></div></div>
     ${st.last_result ? `<p class="badge ${st.last_result.ok ? "b-ok" : "b-err"}">${esc(st.last_result.text)}</p>` : ""}
     ${state}
     <p class="muted">كل تحديث ياخد نسخة احتياطية متأكد منها الأول، ومش بيشتغل أبدًا وفيه فاتورة بيع مفتوحة، ولو النسخة الجديدة فشلت في الفحص يرجع للقديمة لوحده.</p>
@@ -1912,6 +1912,40 @@ function renderLan(n) {
     } catch (err) { e.target.disabled = false; toast(err.message, true); }
   });
 }
+let RC_LOGO;                         // F27: undefined = keep, "" = remove, data URL = new logo
+// shrink a picked logo in the browser (≤ 576×240, white behind transparency) so the upload stays small
+function logoDataUrl(file) {
+  return new Promise((ok, fail) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 576 / img.width, 240 / img.height);
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.round(img.width * k)); cv.height = Math.max(1, Math.round(img.height * k));
+      const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height);
+      g.drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url); ok(cv.toDataURL("image/png"));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); fail(new Error("bad image")); };
+    img.src = url;
+  });
+}
+// the logo as the thermal printer will print it: grey above 160 → white, else black (same rule as the server)
+function printLook(dataUrl) {
+  return new Promise((ok) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement("canvas"); cv.width = img.width; cv.height = img.height;
+      const g = cv.getContext("2d"); g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, cv.width, cv.height), p = d.data;
+      for (let i = 0; i < p.length; i += 4) {
+        const v = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000 > 160 ? 255 : 0;
+        p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255;
+      }
+      g.putImageData(d, 0, 0); ok(cv.toDataURL("image/png"));
+    };
+    img.onerror = () => ok(dataUrl);
+    img.src = dataUrl;
+  });
+}
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
   const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
@@ -1960,10 +1994,35 @@ async function renderReceiptCfg(c) {
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
       <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
       <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
-      <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". الطباعة المباشرة لم تُجرَّب بعد على طابعة حقيقية؛ وعند أي مشكلة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
-    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}</div>
+      <label class="f">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
+      <p class="muted">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
+      <div class="row"><button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
+      <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
+    <fieldset class="lblp"><legend>اللوجو والكود (QR) أعلى الإيصال</legend>
+      <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
+      <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
+        <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
+        <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>شيل اللوجو</button></div>
+      <p class="muted">في كل كود: اكتب <b>رقم موبايل الصيدلية</b> (للواتساب — البرنامج يحوّله لوحده)، أو الصق لينك صفحة الفيسبوك، أو لينك اللوكيشن من خرائط جوجل (مشاركة ← نسخ اللينك)، أو لينك الدفع من أبلكيشن إنستاباي. الكلمة اللي تحت الكود بتتكتب لوحدها حسب اللينك، أو اكتبها بنفسك.</p>
+      <label class="f">الكود اللي فوق (جنب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+      <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
+      <label class="f">كود تاني تحت الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
+      <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
+      <p class="muted">الطابعة الحرارية أبيض وأسود بس: الرمادي الفاتح بيختفي والغامق بيبقى أسود. بعد الحفظ اطبع «آخر فاتورة كتجربة» وجرّب تقرا الكود بالموبايل.</p></fieldset>
+    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
+  RC_LOGO = undefined;
+  $("#rcLogoFile").addEventListener("change", async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
+    $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
+    $("#rcLogoMsg").textContent = "ده شكله على الورق بالظبط (أبيض وأسود). لو جزء اختفى أو بقى أسود، ارفع نسخة أبيض وأسود من اللوجو. يتحفظ لما تدوس «احفظ»";
+  });
+  $("#rcLogoDel").addEventListener("click", () => {
+    RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
+    $("#rcLogoMsg").textContent = "هيتشال لما تدوس «احفظ»";
+  });
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
   let prevT = null, prevUrl = null;
@@ -1992,8 +2051,11 @@ async function renderReceiptCfg(c) {
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
-      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked } })); toast("تم الحفظ"); }
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
+      qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
+      qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
+      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
@@ -2001,6 +2063,13 @@ async function renderReceiptCfg(c) {
     const last = (await api("/api/sales"))[0];
     if (!last) return toast("لا توجد فواتير اليوم", true);
     printInFrame(`/receipt/${last.id}`);
+  });
+  $("#lbTest").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
+        label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0 } });
+      toast(`أُرسل ${r.labels} ملصق تجربة — لو تمام دوس «احفظ»`);
+    } catch (err) { toast(err.message, true); }
   });
   $("#rcTest").addEventListener("click", async () => {
     try { await api("/api/print/test", { method: "POST", body: { target: $("#rcForm").receipt_target.value.trim() } }); toast("تم الإرسال للطابعة"); }
@@ -2277,6 +2346,14 @@ async function viewSalesSimple() {
   }
 }
 
+// #114: the refund goes back the way the sale was paid (credit sale -> the customer's account, card only -> card);
+// the cashier can still pick another method
+function refundDefault(s) {
+  if (s.on_credit > 0 && !s.paid_cash && s.customer_id) return "credit";
+  if (s.paid_card > 0 && !s.paid_cash && !s.on_credit && !s.paid_transfer) return "card";
+  return "cash";
+}
+
 async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
@@ -2308,20 +2385,23 @@ async function viewSale(id) {
         <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">إرجاع الكل</span>`}</td>` : ""}</tr>`).join("")}
     </tbody></table></div>
     ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
-      <option value="cash">نقدًا من الخزينة</option><option value="card">بطاقة</option>${s.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+      ${[["cash", "نقدًا من الخزينة"], ["card", "بطاقة"], ...(s.customer_id ? [["credit", "على حساب العميل"]] : [])].map(([v, t]) => `<option value="${v}" ${v === refundDefault(s) ? "selected" : ""}>${t}</option>`).join("")}</select></label>
       <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
       <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
   </section>`;
-  $("#rGo")?.addEventListener("click", async () => {
+  $("#rGo")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
     app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
+    btn.disabled = true;
     try {
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
       toast(`تم تسجيل المرتجع: ${money(r.refund)} ج — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -2881,15 +2961,17 @@ async function complete(findings) {
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
+  // F27: what the customer handed over — printed with the change due, never stored
+  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id,
+      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
               confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
     delete POS.rcpt[SALE.id];
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
-    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}`);
+    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${given ? `?given=${given}` : ""}`);
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));

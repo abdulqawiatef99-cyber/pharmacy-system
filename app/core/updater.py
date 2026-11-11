@@ -78,6 +78,16 @@ def download(repo: str, sha: str, token: str) -> bytes:
     return _get(f"{API}/repos/{repo}/zipball/{sha}", token, "application/vnd.github+json")
 
 
+CHANNELS = ("main", "develop")      # #107: main = the pharmacy; develop = test installs
+
+
+def channel(info: dict) -> str | None:
+    """The branch this install updates from (#107): the ref it was installed or last updated from, main when
+    unknown. None for any other branch (a review installer of a work branch): no update offered."""
+    ref = info.get("ref") or "main"
+    return ref if ref in CHANNELS else None
+
+
 def installed(data_dir: Path) -> dict:
     state = releases.read_state(releases.code_home(data_dir))
     if state.get("active"):
@@ -196,7 +206,6 @@ def record(data_dir: Path, sha: str, source: str) -> None:
 # ---------------------------------------------------------------- automatic updates (#96)
 # Channels: "main" is the pharmacy (default); "develop" is for the owner's test PC only. Each channel's
 # installer is published by .github/workflows/windows-installer.yml as a release with a manifest.
-CHANNELS = ("main", "develop")
 INSTALLER_TAGS = {"main": "installer-latest", "develop": "installer-develop"}
 # A change to any of these cannot ship as a code-only release: the installed launcher and bootstrap run
 # from the installed folder, and libraries, migrations and the embedded Python come with the installer.

@@ -275,6 +275,8 @@ def cmd_update(a, s):
         if a.from_zip:
             data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
         else:
+            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
+                a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
             token = updater.read_token()
             sha = a.sha or updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
@@ -317,9 +319,10 @@ def cmd_update(a, s):
             finally:
                 db.close()
             print("نسخة احتياطية للبيانات:", out)
+        # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
+        ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
         releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "ref": None if a.from_zip else a.ref,
-                           "at": datetime.now().isoformat()},
+                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat()},
                           expected_active=expected_active)
         print(f"Prepared {staged['files']} files; restart to check the selected release.")
         print("Previous code is retained. No pip install or database migration was run.")
@@ -389,7 +392,7 @@ def main(argv=None):
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
     up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
-    up.add_argument("--ref", default="main", help="channel: main (pharmacy) or develop (test PC)")
+    up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--sha", help="apply exactly this commit of --ref (automatic updates)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)

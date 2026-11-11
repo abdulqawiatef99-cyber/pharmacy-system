@@ -114,6 +114,7 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
             if stores is None or store in stores:
                 out.append([store, code, r[9], r[8], qty, cost, _expiry(r[6])])
         elif _n(r[1]) == _n("إجمالى البيع") and store:
+            acc[store]["closed"] = True
             _check(f"بيع مخزن {store}", acc[store]["sale"], r[0])
             _check(f"تكلفة مخزن {store}", acc[store]["cost"], r[2])
             if int(r[4] or -1) != len(acc[store]["items"]):
@@ -122,9 +123,14 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
             grand = r
     if not acc:
         raise ValidationFailed("مفيش مخازن في الملف", code="estock_layout")
-    if grand is not None:
-        _check("بيع كل المخازن", sum((a["sale"] for a in acc.values()), Decimal(0)), grand[1])
-        _check("تكلفة كل المخازن", sum((a["cost"] for a in acc.values()), Decimal(0)), grand[3])
+    # a file cut off at the end has no total line for its last store and no grand total (#116)
+    open_ = [s for s, a in acc.items() if not a.get("closed")]
+    if open_:
+        raise ValidationFailed(f"سطر إجمالي مخزن {open_[0]} ناقص؛ الملف ناقص", code="estock_totals_mismatch")
+    if grand is None:
+        raise ValidationFailed("سطر «إجمالى جميع المخازن» ناقص؛ الملف ناقص", code="estock_totals_mismatch")
+    _check("بيع كل المخازن", sum((a["sale"] for a in acc.values()), Decimal(0)), grand[1])
+    _check("تكلفة كل المخازن", sum((a["cost"] for a in acc.values()), Decimal(0)), grand[3])
     for s, a in acc.items():
         summary["stores"][s] = {"batches": a["rows"], "items": len(a["items"]),
                                 "cost": str(a["cost"].quantize(Decimal("0.01"))),

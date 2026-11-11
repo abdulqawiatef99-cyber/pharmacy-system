@@ -110,16 +110,16 @@ class TestUpdateBadge(APICase):
     def test_main_moved_on_is_an_update(self):
         self.assertTrue(self.status({"sha": SHA, "ref": "main", "source": "installer"}, SHA2)["available"])
 
-    def test_develop_build_follows_the_develop_channel(self):
-        # #96: an installer build of develop is no longer a dead end; it updates itself from develop
+    def test_candidate_from_another_branch_shows_no_update(self):
+        # #107: develop is a channel now (below); a review installer of a work branch still has none
+        st = self.status({"sha": SHA, "ref": "claude/96-auto-updates", "source": "installer"}, SHA2)
+        self.assertFalse(st["available"])
+        self.assertEqual(st["candidate"], "claude/96-auto-updates")
+
+    def test_develop_build_follows_develop(self):
         st = self.status({"sha": SHA, "ref": "develop", "source": "installer"}, SHA2)
         self.assertTrue(st["available"])
         self.assertEqual(st["channel"], "develop")
-
-    def test_review_build_from_another_branch_shows_no_update(self):
-        st = self.status({"sha": SHA, "ref": "claude/42-review", "source": "installer"}, SHA2)
-        self.assertFalse(st["available"])
-        self.assertEqual(st["candidate"], "claude/42-review")
 
 
 if __name__ == "__main__":

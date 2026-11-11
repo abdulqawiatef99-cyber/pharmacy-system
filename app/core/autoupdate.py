@@ -135,10 +135,7 @@ class AutoUpdater:
         chosen = self.settings().get("channel")
         if chosen in updater.CHANNELS:
             return chosen
-        ref = self._build_ref()
-        if ref in (None, "", "main"):
-            return "main"
-        return "develop" if ref == "develop" else None
+        return updater.channel({"ref": self._build_ref()})     # #107 rule: main, develop, or None
 
     def update_settings(self, ctx: Context, changes: dict) -> dict:
         ctx.require("settings.manage")
@@ -284,7 +281,7 @@ class AutoUpdater:
             self._save(kind="installer")
             return self._apply_installer({**plan, "kind": "installer"}, reason, ctx)
         ok = proc.returncode == 0
-        self._audit(ctx, {"ok": ok, "kind": "code", "target": plan["latest"], "reason": reason,
+        self._audit(ctx, {"ok": ok, "kind": "code", "channel": plan["channel"], "target": plan["latest"], "reason": reason,
                           "tail": output[-500:]})
         if not ok:
             self._fail(plan["latest"], "فحص النسخة الجديدة أو النسخة الاحتياطية فشل؛ البرنامج زي ما هو",
@@ -319,7 +316,7 @@ class AutoUpdater:
         out = backup.create(self.db, self.s.upload_dir, self.s.backup_path)
         if backup.verify_archive(out)["problems"]:
             raise updater.UpdateError("النسخة الاحتياطية فشلت في التحقق؛ لم يُثبَّت شيء")
-        self._audit(ctx, {"ok": True, "kind": "installer", "target": target, "reason": reason,
+        self._audit(ctx, {"ok": True, "kind": "installer", "channel": plan["channel"], "target": target, "reason": reason,
                           "sha256": rel["sha256"], "backup": out.name})
         self.restarting = True
         why = self.busy()
@@ -407,7 +404,7 @@ class AutoUpdater:
         return True
 
     # ----------------------------------------------------------------- owner view
-    def status(self) -> dict:
+    def _status(self) -> dict:
         st = self._fresh(STATUS_CACHE_S)
         cfg = self.settings()
         from ..version import __version__
@@ -419,6 +416,12 @@ class AutoUpdater:
                 "last_result": st.get("last_result"), "settings": cfg, "develop_allowed": self.develop_allowed(),
                 "busy": self.busy(), "restart_due": self.restart_due,
                 "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
+
+    def status(self) -> dict:
+        out = self._status()
+        if not out.get("candidate"):
+            out.pop("candidate", None)       # #107 API: "candidate" only for a review build with no channel
+        return out
 
     # ----------------------------------------------------------------- scheduler
     def _check_due(self) -> bool:
