@@ -4,6 +4,9 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md).
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## مراجعة جاهزية الإطلاق 2026-11-11 ([#113](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/113))
+- المنطقة (أ) الدفع والفلوس: عيب واحد launch-critical [#114](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/114): شاشة المرتجع كانت بتختار «نقدًا» حتى لفاتورة آجل، والضغطة المزدوجة بتسجل المرتجع مرتين. الإصلاح على `claude/114-return-refund-default` (PR إلى `develop`، مستني مراجعة Codex وموافقة المالك على الدمج). 591 اختبار نجحوا محليًا. الملاحظات غير الحرجة في #113.
+
 ## تنضيف 2026-11-10 (بموافقة المالك، docs و labels بس، مفيش كود ولا تغيير في `main`)
 - PR #101 (HANDOFF بعد تجربة 1/11) اتدمج في `develop` @ `16ab71d` (CI linux أخضر على `ed79ced`، windows متخطّى لأنه docs، Codex: مفيش ملاحظات).
 - **المفتوح للإطلاق بالترتيب:** #100 ← #98 ← #104 ← [#107](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/107) ← #18 ← #19 ← #20. التفاصيل ومين يعمل إيه: [START_HERE.md](START_HERE.md).
