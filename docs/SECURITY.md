@@ -49,3 +49,14 @@
 7. **Health data (clinical phases):** retention policy, consent, and the Egyptian Personal Data
    Protection Law (Law 151 of 2020) obligations must be reviewed with a lawyer before storing
    patient medication histories or voice recordings.
+
+### نسيان كلمة سر المالك (#151)
+مفيش أي طريقة من الشبكة ولا كلمة سر افتراضية. الاسترجاع من جهاز الصيدلية نفسه بس (اللي قدامه الجهاز وفولدر البيانات):
+
+```
+cd /d "%LOCALAPPDATA%\Programs\PharmacyPlatform\program"
+set PHARM_DATA_DIR=%LOCALAPPDATA%\PharmacyPlatform\data
+"%LOCALAPPDATA%\Programs\PharmacyPlatform\python\python.exe" manage.py reset-owner-password
+```
+
+بيطلب كلمة السر الجديدة مرتين، وبيطبّق نفس شروط كلمة السر، وبيخرّج المالك من كل الأجهزة، وبيتسجّل في سجل التدقيق (`user.password_reset`, `via: local_cli`). لو فيه أكتر من مالك: `--username`.
