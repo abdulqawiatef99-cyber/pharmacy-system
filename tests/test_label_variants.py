@@ -120,7 +120,7 @@ class Sent(Base):
 class TestLabelTestVariants(Sent):
     def test_variant_on_the_test_button_not_saved(self):
         r = print_label_test(self.db, self.ctx, {**ROLL, "label_shift": 5, "label_variant": "tear_clamp"})
-        self.assertEqual(r, {"ok": True, "labels": 3, "variant": "tear_clamp"})
+        self.assertEqual(r, {"ok": True, "labels": 3, "variant": "tear_clamp", "size": "38x13"})
         t = _text(self.sent[0][1])
         self.assertIn("SET TEAR ON\r\nOFFSET 0 mm\r\nSHIFT 40\r\n", t)
         self.assertIn("BITMAP 0,0,38,60,0,", t)

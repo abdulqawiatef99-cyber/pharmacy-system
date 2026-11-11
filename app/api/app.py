@@ -2094,8 +2094,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..printing import service as ps
         ctx = ctx_of(req)
         b = await body(req)
-        png, dropped = await run_in_threadpool(ps.label_preview, db, ctx, b)
-        return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped)})
+        png, dropped, info = await run_in_threadpool(ps.label_preview, db, ctx, b)
+        return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped),
+                                                              "X-Label-Size": info["size"], "X-Label-Source": info["source"]})
 
     @handler
     async def print_label_test(req):
