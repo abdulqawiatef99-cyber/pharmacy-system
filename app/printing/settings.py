@@ -14,6 +14,7 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
             "show_return_policy": True, "label_size": "38x25",
             "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
+            "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
             "receipt_target": "",
             # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
             # independently of the receipt (direct ESC/POS printers only).
@@ -59,6 +60,14 @@ def label_size_ok(size) -> str:
     except PrinterError as e:
         raise ValidationFailed(str(e)) from e
     return f"{w:g}x{h:g}"
+
+
+def label_shift_ok(value) -> float:
+    """#100: the vertical shift of the label print in mm (positive = lower), one decimal, within ±10 mm."""
+    from .labels import SHIFT_MM
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) > SHIFT_MM:
+        raise ValidationFailed(f"تحريك الطباعة من -{SHIFT_MM} إلى {SHIFT_MM} مم (سالب = لفوق، موجب = لتحت)")
+    return round(float(value), 1) + 0.0
 
 
 def a4_grid(value) -> tuple[int, int]:
@@ -135,6 +144,8 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if not isinstance(data["label_gap"], int) or not 0 <= data["label_gap"] <= 10:
             raise ValidationFailed("المسافة بين الملصقات من 0 إلى 10 مم")
         new["label_gap"] = data["label_gap"]
+    if "label_shift" in data:
+        new["label_shift"] = label_shift_ok(data["label_shift"])
     for k in ("title", "footer", "header"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:80]
