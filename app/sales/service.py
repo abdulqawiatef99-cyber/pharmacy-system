@@ -837,6 +837,22 @@ class Sales:
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
                 refund += before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+            if refund_method == "cash":
+                # #142: the drawer pays back at most the cash this sale brought in, minus earlier cash
+                # refunds; a courier's cash counts only once it was handed in. The rest goes back to the
+                # customer's account or the card, so a debt can never turn into cash out of the drawer.
+                received = s["paid_cash"] or 0
+                if s["kind"] == "delivery":
+                    d = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=?", (sid,))
+                    if not d or d["status"] != "settled":
+                        received = 0
+                refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns"
+                                       " WHERE sale_id=? AND refund_method='cash'", (sid,))[0]
+                can = max(0, received - refunded)
+                if refund > can:
+                    raise Conflict(f"المبلغ النقدي المسترد أكبر مما دخل الخزينة من هذه الفاتورة (الحد الأقصى نقدًا"
+                                   f" {egp(can)} ج)؛ أعد الباقي على حساب العميل أو على البطاقة",
+                                   code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
             rid = new_id()
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
                             " created_by) VALUES (?,?,?,?,?,?,?)",
