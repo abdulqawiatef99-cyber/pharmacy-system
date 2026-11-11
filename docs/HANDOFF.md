@@ -4,6 +4,9 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md).
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## مراجعة جاهزية الإطلاق 2026-11-11 ([#113](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/113))
+- المنطقة (هـ) استيراد E-Stock: عيب launch-critical [#116](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/116): ملف أرصدة مقطوع من آخره كان بيعدّي من غير فحص الإجماليات. الإصلاح على `claude/116-estock-truncated-stock` (PR إلى `develop`). 590 اختبار نجحوا محليًا. باقي المناطق والملاحظات في #113.
+
 ## تنضيف 2026-11-10 (بموافقة المالك، docs و labels بس، مفيش كود ولا تغيير في `main`)
 - PR #101 (HANDOFF بعد تجربة 1/11) اتدمج في `develop` @ `16ab71d` (CI linux أخضر على `ed79ced`، windows متخطّى لأنه docs، Codex: مفيش ملاحظات).
 - **المفتوح للإطلاق بالترتيب:** #100 ← #98 ← #104 ← [#107](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/107) ← #18 ← #19 ← #20. التفاصيل ومين يعمل إيه: [START_HERE.md](START_HERE.md).
