@@ -5,6 +5,8 @@
 تفاصيل المهمة تُقرأ عند الحاجة من الروابط تحت؛ السجل القديم مش مطلوب لبداية الجلسة.
 
 ## مراجعة جاهزية الإطلاق 2026-11-11 ([#113](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/113))
+- المنطقة (هـ) استيراد E-Stock: عيب launch-critical [#116](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/116): ملف أرصدة مقطوع من آخره كان بيعدّي من غير فحص الإجماليات. الإصلاح على `claude/116-estock-truncated-stock` (PR إلى `develop`). 590 اختبار نجحوا محليًا. باقي المناطق والملاحظات في #113.
+
 - المنطقة (أ) الدفع والفلوس: عيب واحد launch-critical [#114](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/114): شاشة المرتجع كانت بتختار «نقدًا» حتى لفاتورة آجل، والضغطة المزدوجة بتسجل المرتجع مرتين. الإصلاح على `claude/114-return-refund-default` (PR إلى `develop`، مستني مراجعة Codex وموافقة المالك على الدمج). 591 اختبار نجحوا محليًا. الملاحظات غير الحرجة في #113.
 
 ## #107 زرار التحديث على قناة develop (2026-11-10، Claude، فرع `claude/107-update-channel`، PR لـ `develop`، مش مدموج)
