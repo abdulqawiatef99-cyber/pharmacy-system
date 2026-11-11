@@ -1018,6 +1018,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         uid, action = req.path_params["id"], req.path_params["action"]
         b = await body(req)
+        if action in ("pin", "password") and uid == ctx.user_id:
+            # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
+            u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
+            from ..core import security as _sec
+            if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
+                raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
             return J(people.set_exception(db, ctx, uid, str(b.get("permission", "")), str(b.get("mode", ""))))
         if action == "reset":

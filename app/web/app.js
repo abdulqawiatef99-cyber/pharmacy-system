@@ -4217,7 +4217,9 @@ async function viewUsers() {
 async function viewUser(id) {
   if (!ME.permissions.includes("users.manage")) { location.hash = "#/users"; return; }
   const [m, { roles }] = await Promise.all([api(`/api/users/${id}`), api("/api/users")]);
-  const u = m.user, owner = u.role === "owner";
+  const u = m.user, owner = u.role === "owner", mine = String(u.id) === String(ME.user.id);
+  // #131: changing one's own sign-in needs the current password (an open session alone is not enough)
+  const cur = mine ? `<label class="f">كلمة المرور الحالية <input name="current" type="password" autocomplete="current-password" required></label>` : "";
   const roleName = Object.fromEntries(roles.map((r) => [r.code, r.name]));
   const cell = (v) => (v ? `<span class="ok">✓ مسموح</span>` : `<span class="muted">✕ ممنوع</span>`);
   const pick = (it) => {
@@ -4241,8 +4243,8 @@ async function viewUser(id) {
         <button class="btn small secondary" id="uDiscSave">احفظ</button></span></label>
       <button class="btn small ${u.active ? "danger" : ""}" id="uActive">${u.active ? "إيقاف المستخدم" : "تشغيل المستخدم"}</button></div>`}
     <div class="row mt">
-      <form id="uPin" class="row"><label class="f">رقم سري جديد <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" required></label><button class="btn small secondary">احفظ الرقم</button></form>
-      ${owner ? "" : `<form id="uPw" class="row"><label class="f">كلمة مرور جديدة <input name="password" type="password" minlength="10" autocomplete="new-password" required></label><button class="btn small secondary">غيّر كلمة المرور</button></form>`}
+      <form id="uPin" class="row">${cur}<label class="f">رقم سري جديد <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" required></label><button class="btn small secondary">احفظ الرقم</button></form>
+      ${owner ? "" : `<form id="uPw" class="row">${cur}<label class="f">كلمة مرور جديدة <input name="password" type="password" minlength="10" autocomplete="new-password" required></label><button class="btn small secondary">غيّر كلمة المرور</button></form>`}
     </div></section>
   <section class="panel tablewrap"><h2>الصلاحيات</h2>
     <div class="legend"><span class="badge b-info">✓ مسموحة له = مسموحة لهذا الشخص فقط</span><span class="badge b-err">✕ ممنوعة عنه = ممنوعة عليه وحده</span><span>الباقي = افتراضي نوعه</span></div>
@@ -4260,8 +4262,8 @@ async function viewUser(id) {
   $("#uRole")?.addEventListener("change", (e) => post("role", { role: e.target.value }));
   $("#uDiscSave")?.addEventListener("click", () => post("discount", { max_discount_bp: toBp($("#uDisc").value) }));
   $("#uActive")?.addEventListener("click", (e) => { if (confirmInline(e.target)) post("active", { active: !u.active }); });
-  $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value }); });
-  $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value }); });
+  $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
+  $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
