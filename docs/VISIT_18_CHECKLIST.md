@@ -11,17 +11,17 @@ Any failure = its own `launch-critical` Issue.
 ## Before the visit (cloud)
 | # | Step | Who | Expected |
 |---|---|---|---|
-| V0.1 | #122: PR #123 merged after `CI / linux` is green on its head; owner says yes to deleting the old artifacts listed on #122 | Owner (chat) | Claude deletes them; usage recalculates in 6-12 h |
-| V0.2 | Owner approves one review installer build of `develop` in chat; Claude dispatches it | Owner, then Claude | Run green, artifact `PharmacySetup`; run id, zip sha256 and expiry recorded in `HANDOFF.md` |
+| V0.1 | ✅ Done 11/11: PR #123 merged; 50 old artifacts deleted with the owner's yes | Claude | Usage recalculates in 6-12 h; no longer blocks delivery |
+| V0.2 | ✅ Done 11/11: artifact upload still blocked by the quota, so PR #129 delivers manual builds as the pre-release `installer-review`; run [43018407392](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/43018407392) green | Claude | exe sha256 `ec7de5ff…0934` in the release notes |
 | V0.3 | `develop` must not move between that build and the visit, except the one docs change kept for step B9 | Claude | The installed build is older than `develop` only at B9 |
 
-## Pharmacy PC `desktop-5jvh3qd` (real devices; after closing hours)
+## Pharmacy PC `desktop-5jvh3qd` (real devices; during working hours with the owner watching the screen; E-Stock stays the live cashier and is never closed or covered full-screen)
 | # | Step | Who | Expected |
 |---|---|---|---|
 | B0 | `hostname` | Claude | `DESKTOP-5JVH3QD`; anything else: stop |
 | B1 | Backup first: `POST /api/backup/run` with header `X-Requested-With: pharm`; copy the file to the USB stick | Claude, then Owner (USB) | Backup written and verified; file name + size + sha256 on #18; copy on USB (open reminder since 11/01) |
 | B2 | Record counts before install (users, items, sales, stock rows, audit, migrations), `/api/health` (`version`, `boot_id`) and `GET /api/system/update` (`installed`) | Claude | Numbers on #18 |
-| B3 | Download the artifact in Edge; check the zip sha256 against the GitHub digest | Owner downloads, Claude checks | Digest = the one in `HANDOFF.md` (digest is of the zip, not the exe) |
+| B3 | Download `PharmacySetup.exe` from the pre-release [`installer-review`](https://github.com/abdulqawiatef99-cyber/pharmacy-system/releases/tag/installer-review) (#122 fix, PR #129); check its sha256 against the release notes | Owner or Claude downloads, Claude checks | sha256 of the exe = `ec7de5ff04e5ae9dda512af53cf8fb1bdd90c3b5d0117e8bdcddbc972e2e0934` (run 43018407392, `develop` @ `f56de12`) |
 | B4 | R10: run `PharmacySetup.exe` **while the old app is running** | Owner | "The app is running… OK to close", then install completes with no "unable to automatically close"; app reopens from its shortcut |
 | B5 | `/api/health`, `GET /api/system/update` and the same counts as B2 | Claude | A new `boot_id`; `installed` = the review build's SHA (`version` may stay the same: it changes only with `app/version.py`); counts identical; `/` returns `no-cache` and the new `app.js?v=` |
 | B6 | Settings → البرنامج: update channel | Owner looks, Claude reads `GET /api/system/update` | «قناة التحديث: develop (تجربة)» (#107); "no update" right after install |
