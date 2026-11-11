@@ -38,7 +38,8 @@ def set_pin(db: Database, ctx: Context, user_id: str, pin: str) -> None:
         ctx.require("users.manage")
     pin = str(pin or "").strip()
     _check_pin_format(pin)
-    _member(db, ctx, user_id)
+    if _member(db, ctx, user_id)["role_code"] == "owner" and user_id != ctx.user_id:
+        raise Forbidden("الرقم السري للمالك يغيّره هو فقط", code="owner_locked")   # #131
     with db.transaction():
         db.execute("UPDATE users SET pin_hash=?, pin_failed=0, pin_locked_until=NULL WHERE id=?",
                    (security.hash_password(pin), user_id))
