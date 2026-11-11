@@ -8,6 +8,36 @@ printer drivers or Windows security settings; start the app from its own shortcu
 results on #18 right away (hostname, installer run, table of step / result / evidence, settings left).
 Any failure = its own `launch-critical` Issue.
 
+## Visit runner (coordinator, browser tab only)
+`docs/visit/visit_runner.js` replaces the hand-written fetch calls. In the tab logged in to
+http://127.0.0.1:8000, evaluate the whole file once (again after any reload), then one call per tool
+call; each finishes in under 25 s and returns `{md, rows}` (print `r.md`: id / PASS · FAIL · SKIP ·
+NEEDS-OWNER · INFO / evidence). Every request is same-origin with `X-Requested-With: pharm`; it saves no
+settings, deletes nothing and writes only `TEST-VISIT` records. Order on an install day:
+1. `r = await visit.pre()` → post `r.md` on #18 and keep `r.json` (the snapshot is also in localStorage).
+2. Owner installs (B4). 3. `await visit.post(r.snapshot, {channel: "develop", noUpdate: true})`
+   (add `installed: "<sha>"` when known). 4. `await visit.flows()` (only after step 3: it adds TEST sales).
+5. Printer rows: `await visit.print("test" | "labels" | "sale", {confirm: true} | "reprint" | "drawer")`, then
+   ask the owner the Arabic question in the row; B8(b): `await visit.printAudit("<time before the sale>")`.
+6. B13: `s = await visit.pre({backup: false})` right before the press, then `await visit.post(s.snapshot, {audit: 1})`.
+`visit.day19()` checks the #19 end-of-day figures. Contract and browser tests: `tests/test_visit_runner.py`.
+
+| Row | Runner call | Result it gives |
+|---|---|---|
+| B1 | `visit.pre()` | Backup name, size, `last_ok` (sha256 and the USB copy stay manual) |
+| B2 | `visit.pre()` | Health, counts, stock totals, cash, settings, channel |
+| B5 | `visit.post(snapshot)` | New `boot_id`, `/` no-cache and `app.js?v=`, every snapshot value line by line |
+| B6 | `visit.post(…, {channel, noUpdate})` | Channel unchanged, no update offered |
+| B7 | `visit.print("labels", {label_shift: -2})` | NEEDS-OWNER: how many labels, whole, no blank |
+| B8 | `visit.print("sale" / "reprint" / "drawer")`, `visit.printAudit(since)` | NEEDS-OWNER questions; (b) audit `not_printed` + `failed` |
+| B9 | `visit.flows()` | Credit sale refund defaults to «آجل» on the real screen; double click and a retried POST each give one return |
+| B13 | `visit.post(snapshot, {audit: 1})` | New `boot_id`, data unchanged, audit +1 |
+| B14 | `visit.post(snapshot)` | Receipt, label and drawer settings unchanged |
+| L2 | `visit.flows()` / `visit.estock()` | Cut-off E-Stock stock file refused with `estock_totals_mismatch` (upload through `/api/imports`) |
+| L3 | `visit.flows()` / `visit.estock()` | Complete single-store file accepted (draft discarded, nothing imported) |
+| L6 | `visit.day19()` | DAY19_SCRIPT.md end-of-day figures |
+Not covered (owner's eyes or hands): B0, B3, B4, B10–B12, L0, L1, L4, L5.
+
 ## Before the visit (cloud)
 | # | Step | Who | Expected |
 |---|---|---|---|
@@ -25,7 +55,8 @@ Any failure = its own `launch-critical` Issue.
 | B4 | R10: run `PharmacySetup.exe` **while the old app is running** | Owner | "The app is running… OK to close", then install completes with no "unable to automatically close"; app reopens from its shortcut |
 | B5 | `/api/health`, `GET /api/system/update` and the same counts as B2 | Claude | A new `boot_id`; `installed` = the review build's SHA (`version` may stay the same: it changes only with `app/version.py`); counts identical; `/` returns `no-cache` and the new `app.js?v=` |
 | B6 | Settings → البرنامج: update channel | Owner looks, Claude reads `GET /api/system/update` | «قناة التحديث: develop (تجربة)» (#107); "no update" right after install |
-| B7 | #100 labels XP-235B 38×13, gap 2: shift −2 mm → «اطبع 3 ملصقات تجربة»; change by 0.5 mm until 3 come out whole, back to back, no blank; if −2 moves the print further down, try +2; save; then 5 labels from an item card | Claude sets, Owner looks | 3 test labels whole; after save, 5 labels whole with no blank between them; the saved value is on #18. Extra: set 0, save, print 3; they must print as before the fix (checks the printer does not keep the old SHIFT) |
+| B7 | #100 labels XP-235B 38×13 (gap measured ≈ 3 mm). Shift alone cannot fix it (11/11 evidence on #100), so this visit tries named TSPL job variants. **0. Set on the screen (do not save yet):** TSPL, `win:Xprinter XP-235B`, 38×13, gap **3**, dpi 203, shift **0**, variant `current`. **1. Calibrate:** «معايرة بكرة الملصقات» (`POST /api/print/label-calibrate`, same body as the test; audit `print.label_calibrate`): the printer feeds a few blank labels and stops by itself at a gap. If it never stops or stops mid-label, send it again with `"mode": "auto"`. Then one press on the printer's FEED button: exactly one label, stopping at the gap. **2. Variants, shift 0, in this order, 3 test labels each** («اطبع 3 ملصقات تجربة» with the variant picked, or `POST /api/print/label-test` with `label_variant`): `current` → `tear` → `clamp` → `tear_clamp` → `per_label` → `tear_clamp_per_label` → `home` → `all`. One photo per variant with its name written next to the strip. Stop at the first where all 3 copies sit whole inside their own label, back to back, no blank label before or between them (`home` may feed one blank label first: that one does not count). **3.** If the winner is whole but 1–2 mm off, keep that variant and move shift by 0.5 mm (positive = lower, proved 11/11). **4.** If none passes: calibrate again with `auto`, repeat `current`, `tear_clamp`, `all`, record the photos on #100 and stop (next step needs the owner: copy the commands E-Stock's driver sends). **5. Save:** variant + shift + gap 3 → «احفظ» (or `PUT /api/settings/receipt` with `label_variant`, `label_shift`, `label_gap`); then 5 labels from an item card. **6.** Extra: shift 0 with the saved variant, 3 test labels: as in step 2 (the printer keeps no old SHIFT) | Claude sends, Owner looks and photographs | Calibration stops on its own; FEED = one label; one variant gives 3 whole labels in a row; after save, 5 labels whole with no blank between them; the variant, shift and gap saved are on #18 and #100 |
+| | **للمالك:** الأول «معايرة بكرة الملصقات» والطابعة هتسحب كام ملصق فاضي وتقف لوحدها، وبعدين نجرّب طرق الإرسال واحدة ورا التانية (3 ملصقات كل مرة) وتصوّر كل شريط، وأول طريقة تطلع فيها الثلاثة كاملين ورا بعض من غير ملصق فاضي نحفظها. | Owner | — |
 | B8 | #98 receipt printer POS-80C. (a) printer **on**: cash sale with receipt, long receipt (10+ lines) | Owner | Prints normally, no warning |
 | | (b) printer **off**: cash sale with receipt (F4 then F9) | Owner, Claude reads `Get-PrintJob -PrinterName POS-80C` and the audit | Warning «الإيصال لم يُطبع» and «الدرج لم يُفتح (F8)»; queue empty; audit `print.receipt` `not_printed`, `cash.drawer_auto` `failed`. After power on: **nothing prints, drawer stays shut** |
 | | (c) printer on again: «اطبع إيصال آخر فاتورة» | Owner | One receipt, no drawer |

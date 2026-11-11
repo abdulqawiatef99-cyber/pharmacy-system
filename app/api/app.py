@@ -1018,6 +1018,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         uid, action = req.path_params["id"], req.path_params["action"]
         b = await body(req)
+        if action in ("pin", "password") and uid == ctx.user_id:
+            # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
+            u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
+            from ..core import security as _sec
+            if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
+                raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
             return J(people.set_exception(db, ctx, uid, str(b.get("permission", "")), str(b.get("mode", ""))))
         if action == "reset":
@@ -2088,8 +2094,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..printing import service as ps
         ctx = ctx_of(req)
         b = await body(req)
-        png, dropped = await run_in_threadpool(ps.label_preview, db, ctx, b)
-        return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped)})
+        png, dropped, info = await run_in_threadpool(ps.label_preview, db, ctx, b)
+        return Response(png, media_type="image/png", headers={"X-Label-Dropped": ",".join(dropped),
+                                                              "X-Label-Size": info["size"], "X-Label-Source": info["source"]})
 
     @handler
     async def print_label_test(req):
@@ -2097,6 +2104,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(await run_in_threadpool(ps.print_label_test, db, ctx, b if isinstance(b, dict) else {}))
+
+    @handler
+    async def print_label_calibrate(req):
+        from ..printing import service as ps
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(ps.calibrate_labels, db, ctx, b if isinstance(b, dict) else {}))
 
     @handler
     async def print_labels_api(req):
@@ -2298,6 +2312,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/print/label-preview", label_preview, methods=["POST"]),
         Route("/api/print/label-test", print_label_test, methods=["POST"]),
+        Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),

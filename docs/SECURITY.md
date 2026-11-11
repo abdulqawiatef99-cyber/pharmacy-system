@@ -10,6 +10,7 @@
 | Sessions | random 256-bit token, SHA-256 stored, 12h absolute + 2h idle expiry, revoke on logout / password change / org suspension | `TestAuth` |
 | Cookie | HttpOnly, SameSite=Strict, Secure when `PHARM_COOKIE_SECURE=1` | `test_login_sets_httponly_cookie_and_headers` |
 | CSRF | cookie-auth writes need `X-Requested-With: pharm` | `test_csrf_header_required_for_cookie_writes` |
+| Owner sign-in | the owner's own password/PIN change needs his current password (users screen too); nobody else, not even with an owner approval, sets the owner's PIN (#131) | `test_sec_owner_credentials.py` |
 | Authorization | permission checks inside services; roles per org | `test_permission_enforced_in_service`, `test_assistant_cannot_approve` |
 | Tenant isolation | every query filtered by `ctx.org_id`; cross-tenant tests at service and HTTP level | `test_tenant_isolation` (×3), `test_cross_tenant_via_api` |
 | Audit | append-only (DB triggers), written in the same transaction as the change | `TestAudit`, `test_edits_are_audited_and_original_kept` |
@@ -48,3 +49,14 @@
 7. **Health data (clinical phases):** retention policy, consent, and the Egyptian Personal Data
    Protection Law (Law 151 of 2020) obligations must be reviewed with a lawyer before storing
    patient medication histories or voice recordings.
+
+### نسيان كلمة سر المالك (#151)
+مفيش أي طريقة من الشبكة ولا كلمة سر افتراضية. الاسترجاع من جهاز الصيدلية نفسه بس (اللي قدامه الجهاز وفولدر البيانات):
+
+```
+cd /d "%LOCALAPPDATA%\Programs\PharmacyPlatform\program"
+set PHARM_DATA_DIR=%LOCALAPPDATA%\PharmacyPlatform\data
+"%LOCALAPPDATA%\Programs\PharmacyPlatform\python\python.exe" manage.py reset-owner-password
+```
+
+بيطلب كلمة السر الجديدة مرتين، وبيطبّق نفس شروط كلمة السر، وبيخرّج المالك من كل الأجهزة، وبيتسجّل في سجل التدقيق (`user.password_reset`, `via: local_cli`). لو فيه أكتر من مالك: `--username`.
