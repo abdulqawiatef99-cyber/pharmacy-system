@@ -49,7 +49,7 @@ git push origin release/v0.4.0
 # PR release/v0.4.0 -> main. CI linux + windows run on it (a PR into main runs Windows: part of the approved release).
 ```
 - **إنت بس** اللي تدوس Merge، وبـ **"Create a merge commit"** (مش squash ولا rebase).
-- بعد الدمج: `git diff --quiet "$ACCEPTED" origin/main` لازم ينجح.
+- بعد الدمج: `git fetch origin main` الأول (الـ `origin/main` المحلي لسه قديم)، وبعدين `git diff --quiet "$ACCEPTED" origin/main` لازم ينجح، و`git rev-parse origin/main^2` = آخر commit في `release/v0.4.0`.
 - **تحذير لبعد الإطلاق:** ماحدش يدمج `main` في `develop`. التعديلات الـ 12 بقت في تاريخ `main` من غير محتواها، فدمج عكسي يخلي git يفتكرها اتدمجت. الكتالوج يرجع من `feature/reference-catalog` لـ `develop` مباشرة (أو بعد إعادة ترقيم الـ migrations)، والإصدار الجاي `develop → main` عادي.
 
 ### 2-ب. البديل: إعادة ضبط `main` (محتاج موافقة منفصلة)
@@ -61,6 +61,8 @@ git push --force origin "$ACCEPTED":refs/heads/main
 
 ## 3. العلامة `v0.4.0`
 ```bash
+git fetch origin main                   # origin/main must include the merged release PR
+git diff --quiet "$ACCEPTED" origin/main || echo STOP
 M=$(git rev-parse origin/main)          # the merge commit from 2-A
 git tag -a v0.4.0 "$M" -m "v0.4.0: first release (develop @ ${ACCEPTED:0:7}, #20)"
 git push origin v0.4.0                  # tags trigger no workflow
@@ -88,7 +90,7 @@ set M="%LOCALAPPDATA%\Programs\PharmacyPlatform\program\manage.py"
 mkdir "D:\PharmacyPlatform-backup-v0.4.0"
 %PY% %M% backup --dest "D:\PharmacyPlatform-backup-v0.4.0"
 %PY% %M% verify "D:\PharmacyPlatform-backup-v0.4.0\<file>.zip"
-%PY% %M% preflight "D:\PharmacyPlatform-backup-v0.4.0\<file>.zip" > "D:\PharmacyPlatform-backup-v0.4.0\before.txt"
+%PY% %M% preflight --json "D:\PharmacyPlatform-backup-v0.4.0\<file>.zip" > "D:\PharmacyPlatform-backup-v0.4.0\before.json"
 mkdir "E:\v0.4.0"
 copy "D:\PharmacyPlatform-backup-v0.4.0\*" "E:\v0.4.0\"
 %PY% %M% verify "E:\v0.4.0\<file>.zip"
@@ -117,9 +119,9 @@ type "%LOCALAPPDATA%\Programs\PharmacyPlatform\program\build_info.json"
 rem expect: sha = M from section 3, ref = main
 %PY% %M% verify
 %PY% %M% backup --dest "D:\PharmacyPlatform-backup-v0.4.0"
-%PY% %M% preflight "D:\PharmacyPlatform-backup-v0.4.0\<new file>.zip" > "D:\PharmacyPlatform-backup-v0.4.0\after.txt"
-fc "D:\PharmacyPlatform-backup-v0.4.0\before.txt" "D:\PharmacyPlatform-backup-v0.4.0\after.txt"
-rem counts must be the same (only the file name and time differ)
+%PY% %M% preflight --json "D:\PharmacyPlatform-backup-v0.4.0\<new file>.zip" > "D:\PharmacyPlatform-backup-v0.4.0\after.json"
+%PY% -c "import json,sys; c=[json.load(open(f,encoding='utf-8'))['counts'] for f in sys.argv[1:]]; print('COUNTS SAME' if c[0]==c[1] else ('COUNTS DIFFER', c))" "D:\PharmacyPlatform-backup-v0.4.0\before.json" "D:\PharmacyPlatform-backup-v0.4.0\after.json"
+rem must print COUNTS SAME (the text output of preflight has no counts; --json has)
 ```
 وبإيدك:
 | ✓ | الفحص | المطلوب |
@@ -165,7 +167,7 @@ rem the data before the restore is kept in a pre-restore backup folder (printed)
 | # | التجربة | المطلوب |
 |---|---|---|
 | RB1 | على اللابتوب أو جهاز الصيدلية: ثبّت مثبّت #18 الجديد فوق run 41238470755، وبعدين **ثبّت القديم تاني فوقه** | يفتح، و`/api/health` يرجّع الإصدار القديم، والبيانات زي ما هي |
-| RB2 | `restore` لنسخة الفلاشة على جهاز تاني (R7 في `WINDOWS_ACCEPTANCE.md`) | نفس العدد في `preflight` |
+| RB2 | `restore` لنسخة الفلاشة على جهاز تاني (R7 في `WINDOWS_ACCEPTANCE.md`) | نفس `counts` في `preflight --json` (نفس أمر المقارنة في القسم 7) |
 | RB3 | المثبّت والبرنامج شغال (R10) | يقفله ويكمّل من غير Task Manager |
 | RB4 | `git diff --stat` للـ migrations والمكتبات بين المثبّت المتثبت ومثبّت #18 | فاضي (لو مش فاضي، المستوى 1 مش متاح ولازم RB2 ينجح) |
 
