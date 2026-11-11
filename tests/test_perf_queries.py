@@ -11,6 +11,8 @@ from datetime import timedelta
 
 from app.catalog import card as item_card
 from app.reports import invoices, owner
+from app.sales import customers as cu
+from app.sales.cash import CashDrawer
 from app.sales.service import local_today
 from tests.test_sales import SalesCase
 
@@ -117,6 +119,25 @@ class TestNoFullScans(SalesCase):
             self.s.return_receipt(self.ctx, self.return_id)
             owner.returns_report(self.db, self.ctx, self.month, self.today)
         self.assertEqual([p for p, q in rec.full_scans() if "audit_log" in q.split(" WHERE")[0]], [], rec.full_scans())
+
+    def test_ledger_moves_audit_and_couriers_read_only_their_rows(self):
+        # customer balance (ledger index needs org_id), a batch's last supplier (the item's moves only), the drawer
+        # sent count (from the shift's sales) and the cash with couriers (from open deliveries): no new index needed
+        shift = self.db.one("SELECT id FROM cash_shifts WHERE status='open'")["id"]
+        drawer = CashDrawer(self.db)
+        with QueryRecorder(self.db) as rec:
+            cu.profile(self.db, self.ctx, self.cust)
+            item_card.card(self.db, self.ctx, self.pan)
+            drawer.report(self.ctx, shift)
+            drawer.summary(self.ctx)
+        tables = {"customer_ledger", "stock_movements", "audit_log"}
+        bad = [(p, q) for p, q in rec.full_scans() if _aliases(q).get(p.split()[1], p.split()[1]) in tables]
+        self.assertEqual(bad, [])
+        delivery = [q for q in dict.fromkeys(rec.selects()) if "sale_deliveries" in q]
+        self.assertTrue(delivery)
+        for q in delivery:
+            plan = [r[3] for r in self.db.conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()]
+            self.assertTrue(plan[0].startswith("SEARCH d USING INDEX ix_deliveries_status"), plan)
 
     def test_invoice_report_query_count_does_not_grow_with_invoices(self):
         def count():
