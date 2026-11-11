@@ -150,14 +150,26 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
 
       # Artifact storage is small on GitHub Free (#122): keep review builds 14 days, not 90.
-      # On a push to main the release below is the deliverable, so a full artifact quota
-      # must not block it; a manual review build still fails visibly.
+      # The artifact is only a convenience copy: a push to main delivers "installer-latest"
+      # and a manual review build delivers the "installer-review" pre-release below (release
+      # assets do not count against the Actions storage quota), so a full quota blocks neither.
       - uses: actions/upload-artifact@v4
-        continue-on-error: ${{ github.event_name == 'push' }}
+        continue-on-error: true
         with:
           name: PharmacySetup
           path: dist/PharmacySetup.exe
           retention-days: 14
+
+      - name: Publish review build as pre-release "installer-review"
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $hash = (Get-FileHash dist/PharmacySetup.exe -Algorithm SHA256).Hash.ToLower()
+          gh release delete installer-review --yes --cleanup-tag 2>$null
+          gh release create installer-review dist/PharmacySetup.exe --prerelease --title "منصة الصيدلية — نسخة تجربة" --notes "نسخة تجربة من فرع ${{ github.ref_name }} (${{ github.sha }})، تشغيلة ${{ github.run_id }}. sha256: $hash" --target ${{ github.sha }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish as release "installer-latest"
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

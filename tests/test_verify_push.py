@@ -101,8 +101,17 @@ class TestGuardWiring(unittest.TestCase):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
         upload = wf.split("- uses: actions/upload-artifact@v4", 1)[1].split("- name:", 1)[0]
         self.assertIn("retention-days: 14", upload)                       # #122: quota filled at 90 days
-        self.assertIn("continue-on-error: ${{ github.event_name == 'push' }}", upload)
+        self.assertIn("continue-on-error: true", upload)                     # #122: a full quota blocks no delivery
         self.assertLess(wf.index("actions/upload-artifact@v4"), wf.index('Publish as release "installer-latest"'))
+
+    def test_manual_review_build_is_delivered_as_a_prerelease(self):
+        wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
+        step = wf.split('- name: Publish review build as pre-release "installer-review"', 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", step)
+        self.assertIn("gh release create installer-review", step)
+        self.assertIn("--prerelease", step)                                   # never shown as "latest"
+        self.assertNotIn("installer-latest", step)                            # main's release stays untouched
+        self.assertIn("Get-FileHash", step)
 
     def test_failure_opens_an_issue_and_keeps_the_old_tip(self):
         wf = (ROOT / ".github" / "workflows" / "branch-guard.yml").read_text(encoding="utf-8")
