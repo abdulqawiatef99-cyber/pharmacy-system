@@ -10,6 +10,7 @@
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
+  python manage.py reset-owner-password [--username owner]   (forgotten owner password; on this PC only)
 """
 from __future__ import annotations
 
@@ -319,6 +320,40 @@ def cmd_update(a, s):
         sys.exit(f"التحديث فشل: {exc}")
 
 
+def cmd_reset_owner_password(a, s):
+    """#151: the owner forgot the password. Only someone at this PC, with the data folder, can set a new one:
+    there is no network route and no default password. The new password follows the usual policy, every
+    session of that owner is signed out (failed logins and lock-out cleared), and the audit log records it."""
+    db = _db(s)
+    from app.core import audit, security
+    from app.core.permissions import Context
+    rows = db.all("SELECT u.id, u.username, u.full_name, m.org_id FROM memberships m JOIN roles r ON r.id=m.role_id"
+                  " JOIN users u ON u.id=m.user_id WHERE r.code='owner'" + (" AND u.username=?" if a.username else "")
+                  + " ORDER BY u.username", ((a.username,) if a.username else ()))
+    if not rows:
+        sys.exit("مفيش حساب مالك بالاسم ده. (no owner account found)" if a.username else
+                 "مفيش حساب مالك في قاعدة البيانات دي. (no owner account found)")
+    if len({r["id"] for r in rows}) > 1:
+        sys.exit("فيه أكتر من مالك: اكتب الاسم بـ --username: " + "، ".join(sorted({r["username"] for r in rows})))
+    owner = rows[0]
+    print(f"تغيير كلمة سر المالك: {owner['username']} ({owner['full_name'] or ''})")
+    pw = getpass.getpass("كلمة السر الجديدة (10 حروف على الأقل): ")
+    if getpass.getpass("اكتبها تاني للتأكيد: ") != pw:
+        sys.exit("الكلمتين مش زي بعض؛ متغيّرش حاجة. (passwords differ; nothing changed)")
+    problems = security.check_password_policy(pw)
+    if problems:
+        sys.exit("؛ ".join(problems) + " (nothing changed)")
+    now = accounts.iso(accounts.utcnow())
+    with db.transaction():
+        db.execute("UPDATE users SET password_hash=?, password_changed_at=?, failed_logins=0, locked_until=NULL"
+                   " WHERE id=?", (security.hash_password(pw), now, owner["id"]))
+        db.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, owner["id"]))
+        for org_id in sorted({r["org_id"] for r in rows}):
+            audit.record(db, Context(user_id="system", org_id=org_id, branch_id=None), "user.password_reset",
+                         "user", owner["id"], after={"via": "local_cli", "reason": "forgotten owner password"})
+    print("تم. ادخل البرنامج بكلمة السر الجديدة. (done; all sessions of this owner were signed out)")
+
+
 def cmd_feature(a, s):
     db = _db(s)
     limits = {"monthly": a.monthly} if a.monthly else {}
@@ -383,12 +418,15 @@ def main(argv=None):
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
+    rp = sub.add_parser("reset-owner-password", help="forgotten owner password: set a new one on this PC (#151)")
+    rp.add_argument("--username", help="needed only when there is more than one owner")
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "update": cmd_update,
+     "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
 
 
 if __name__ == "__main__":
