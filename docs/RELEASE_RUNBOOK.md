@@ -150,15 +150,20 @@ git diff --stat 7190880 "$ACCEPTED" -- app/migrations requirements.txt   # empty
 ```
 لو مش فاضي، النسخة القديمة ممكن ما تفهمش القاعدة: روح للمستوى 2.
 
-**المستوى 2 — البيانات كمان:** البرنامج لازم يكون مقفول خالص (السيرفر شغال في الخلفية حتى لو المتصفح اتقفل)، فأنا بقفله بالأمر الأول، وبعدين الاسترجاع:
+**المستوى 2 — البرنامج القديم + البيانات:** الاسترجاع بيرجّع البيانات بس، مش البرنامج. لو البرنامج الجديد فضل متثبت، أول ما يفتح هيطبّق الـ migrations بتاعته على البيانات المسترجعة تاني. فالترتيب:
+1. ثبّت **ملف التثبيت القديم** من الفلاشة، وفي آخر شاشة **شيل علامة «افتح البرنامج دلوقتي»** قبل Finish.
+2. أنا بقفل أي نسخة شغالة (السيرفر بيفضل شغال في الخلفية حتى لو المتصفح اتقفل)، وبعدين أسترجع **بالبرنامج القديم**، وبعدين أتأكد:
 ```bat
 powershell -NoProfile -Command "Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -like \"$env:LOCALAPPDATA\Programs\PharmacyPlatform\*\" } | Stop-Process -Force"
 curl.exe -s http://127.0.0.1:8000/api/health
 rem must fail to connect before the restore
+type "%LOCALAPPDATA%\Programs\PharmacyPlatform\program\build_info.json"
+rem must show the OLD sha (E:\v0.4.0\build_before.txt), otherwise stop: the new program is still installed
 %PY% %M% restore "E:\v0.4.0\<file>.zip" --yes
 rem the data before the restore is kept in a pre-restore backup folder (printed)
 %PY% %M% verify
 ```
+3. افتح البرنامج من الأيقونة، و`/api/health` لازم يرجّع الإصدار القديم، والأرقام زي الورقة اللي في القسم 5.
 أي بيع اتعمل بعد النسخة لازم يتسجل تاني بإيد (من E-Stock أو الورق)؛ عشان كده E-Stock شغال الأسبوع ده.
 
 **المستوى 3 — `main` نفسه:** `main` ما يرجعش لورا. الإصلاح ينزل كإصدار جديد `v0.4.1` بنفس الطريقة (2-أ). التعديلات الـ 12 القديمة محفوظة في `feature/reference-catalog`.
