@@ -76,6 +76,16 @@ def download(repo: str, sha: str, token: str) -> bytes:
     return _get(f"{API}/repos/{repo}/zipball/{sha}", token, "application/vnd.github+json")
 
 
+CHANNELS = ("main", "develop")      # #107: main = the pharmacy; develop = test installs
+
+
+def channel(info: dict) -> str | None:
+    """The branch this install updates from (#107): the ref it was installed or last updated from, main when
+    unknown. None for any other branch (a review installer of a work branch): no update offered."""
+    ref = info.get("ref") or "main"
+    return ref if ref in CHANNELS else None
+
+
 def installed(data_dir: Path) -> dict:
     state = releases.read_state(releases.code_home(data_dir))
     if state.get("active"):
