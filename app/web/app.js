@@ -2141,6 +2141,31 @@ async function checkUpdateBadge() {
   try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
 }
 
+// An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
+const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
+function screenIdle() {
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen
+  if ($("dialog[open]")) return false;
+  const h = location.hash || "#/home";
+  if (h === "#/login" || h === "#/home") return true;
+  return h.startsWith("#/pos") && !(SALE?.lines?.length);
+}
+async function checkBuild() {
+  if (!BUILD || checkBuild.stale) return;
+  let h;
+  try { h = await (await fetch("/api/health", { cache: "no-store" })).json(); } catch { return; }   // restarting
+  if (!h?.web || h.web === BUILD) return;
+  if (screenIdle()) { location.reload(); return; }
+  checkBuild.stale = true;
+  $("#staleBar").hidden = false;
+}
+if (BUILD) {
+  $("#staleBar")?.addEventListener("click", () => location.reload());
+  setInterval(checkBuild, 60000);
+  window.addEventListener("focus", checkBuild);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
+}
+
 // ------------------------------------------------------------------ sales history / returns
 const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
 const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
