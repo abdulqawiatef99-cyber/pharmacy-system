@@ -34,14 +34,14 @@ Any failure = its own `launch-critical` Issue.
 | B10 | P7 (old failure): covered by B8(b) | — | Pass only if B8(b) passes |
 | B11 | P10 (old failure): covered by B7 | — | Pass only if B7 passes |
 | B12 | Scanner HH360: scan an item and a printed label, focus in the search box and in the customer field | Owner | Added once, no DevTools, customer field stays empty |
-| B13 | Update button (#107): the coordinator merges the small docs PR with this visit's results (after `CI / linux` is green on its head), so `develop` moves; Settings → «تحديث» | Claude prepares the PR, Owner merges and presses | Offers the update; the app restarts by itself; `/api/health` new `version`/`boot_id`; counts as B5; channel still develop |
+| B13 | Update button (#107): the coordinator merges the small docs PR with this visit's results (after `CI / linux` is green on its head), so `develop` moves; Settings → «تحديث» | Claude prepares the PR and records the counts again right before the press (B8/B9 add rows), Owner merges and presses | Offers the update; the app restarts by itself; `/api/health` new `version`/`boot_id`; counts identical to the snapshot taken just before the press; channel still develop |
 | B14 | Leave the settings as found: label shift = the saved good value, drawer timing «بعد الإيصال», receipt printer selected | Claude | Settings listed on #18 |
 
 ## Home laptop `DESKTOP-0DCSIC2` (no devices)
 | # | Step | Who | Expected |
 |---|---|---|---|
 | L0 | `hostname`; check the install paths and port 8000 per `HANDOFF.md` | Claude | `DESKTOP-0DCSIC2`; anything else: stop |
-| L1 | Install the same review installer (R10 if the app is running) | Owner | Install completes, data intact |
+| L1 | Install the same review installer (R10 if the app is running); counts before and after | Owner, Claude counts | Install completes, counts identical |
 | L2 | #116 E-Stock: `manage.py import-estock --stock <file cut off at the end> …` without `--apply` (dry run) | Claude | Refused with `estock_totals_mismatch` |
 | L3 | #116: dry run on a complete E-Stock stock export, including a single-store export | Claude | Accepted as before (checks the grand-total line is there in a single-store file) |
 | L4 | #114 return form on a credit sale and a card sale | Owner | Defaults: credit → «آجل», card only → «بطاقة», cash → «نقدًا» |
