@@ -1967,7 +1967,10 @@ async function renderReceiptCfg(c) {
       <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
       <label class="f">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
       <p class="muted">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
-      <div class="row"><button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
+      <label class="f">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
+        .map((v) => `<option value="${v}" ${(c.label_variant || "current") === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      <div class="row"><button type="button" class="btn small secondary" id="lbCal">معايرة بكرة الملصقات</button>
+        <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
     <fieldset class="lblp"><legend>اللوجو والكود (QR) أعلى الإيصال</legend>
       <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
@@ -2022,7 +2025,7 @@ async function renderReceiptCfg(c) {
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
       qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
@@ -2038,8 +2041,17 @@ async function renderReceiptCfg(c) {
   $("#lbTest").addEventListener("click", async () => {
     try {
       const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
-        label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0 } });
+        label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
+        label_variant: lf.label_variant.value } });
       toast(`أُرسل ${r.labels} ملصق تجربة — لو تمام دوس «احفظ»`);
+    } catch (err) { toast(err.message, true); }
+  });
+  $("#lbCal").addEventListener("click", async () => {
+    // #100: the printer feeds a few blank labels while its gap sensor learns the roll on the screen
+    try {
+      await api("/api/print/label-calibrate", { method: "POST", body: { label_size: labelSize(lf), label_lang: lf.label_lang.value,
+        label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0 } });
+      toast("أُرسل أمر المعايرة — الطابعة هتسحب كام ملصق فاضي وتقف لوحدها");
     } catch (err) { toast(err.message, true); }
   });
   $("#rcTest").addEventListener("click", async () => {

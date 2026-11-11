@@ -2099,6 +2099,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(ps.print_label_test, db, ctx, b if isinstance(b, dict) else {}))
 
     @handler
+    async def print_label_calibrate(req):
+        from ..printing import service as ps
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(await run_in_threadpool(ps.calibrate_labels, db, ctx, b if isinstance(b, dict) else {}))
+
+    @handler
     async def print_labels_api(req):
         from ..printing import service as ps
         ctx = ctx_of(req)
@@ -2298,6 +2305,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/print/label-preview", label_preview, methods=["POST"]),
         Route("/api/print/label-test", print_label_test, methods=["POST"]),
+        Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),
