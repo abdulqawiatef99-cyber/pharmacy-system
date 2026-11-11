@@ -39,6 +39,7 @@ os.environ.setdefault("TZ", "Africa/Cairo")
 if hasattr(time, "tzset"):
     time.tzset()
 
+OWNER_PW = "Perf-Owner-2026"         # the synthetic owner made by loadgen.py
 H = {"X-Requested-With": "pharm", "Content-Type": "application/json"}
 
 
@@ -374,7 +375,7 @@ def explain(data: Path, f: dict, slow_ms: float) -> list[dict]:
     while not srv.started:
         time.sleep(0.05)
     c = Client(f"http://127.0.0.1:{port}")
-    c.req("POST", "/api/auth/login", {"username": "owner", "password": "Perf-Owner-2026"})
+    c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
     c.req("POST", "/api/cash/open", {"opening_cash": 10000})
     for name, path in scenarios(f):
         c.req("GET", path)
@@ -428,7 +429,7 @@ def main(argv=None):
         res["startup"] = {"health_s": round(srv.ready_s, 2), "mem_after_start_mb": srv.mem()}
         try:
             c = Client(srv.base)
-            code, _, _, _ = c.req("POST", "/api/auth/login", {"username": "owner", "password": "Perf-Owner-2026"})
+            code, _, _, _ = c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
             assert code == 200, code
             c.req("POST", "/api/cash/open", {"opening_cash": 10000})
             res["requests"] = {}

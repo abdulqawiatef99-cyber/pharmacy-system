@@ -55,6 +55,7 @@ STRENGTHS = ["5mg", "10mg", "20mg", "25mg", "50mg", "100mg", "250mg", "500mg", "
 
 
 GEN_INDEX = "perf_loadgen_alloc_line"
+OWNER_PW, STAFF_PW = "Perf-Owner-2026", "Perf-Staff-2026"     # synthetic accounts of the synthetic pharmacy
 
 
 class GenDatabase(Database):
@@ -121,16 +122,16 @@ class Generator:
             db.execute(f"CREATE INDEX IF NOT EXISTS {GEN_INDEX} ON sale_allocations(sale_line_id)")
         accounts.sync_system_roles(db)
         accounts.create_organization(db, name="صيدلية تجربة الأداء", owner_username="owner",
-                                     owner_full_name="Owner", owner_password="Perf-Owner-2026")
+                                     owner_full_name="Owner", owner_password=OWNER_PW)
         backfill_search_keys(db)                 # what `manage.py serve` does on every start
         ensure_default_categories(db)
         ch(db)
         ex(db)
-        self.owner = self.login("owner", "Perf-Owner-2026")
+        self.owner = self.login("owner", OWNER_PW)
         self.staff = []
         for u, role in (("cashier1", "assistant"), ("cashier2", "assistant"), ("pharm1", "pharmacist")):
-            people.add_user(db, self.owner, username=u, full_name=u, password="Perf-Staff-2026", role_code=role)
-            self.staff.append(self.login(u, "Perf-Staff-2026"))
+            people.add_user(db, self.owner, username=u, full_name=u, password=STAFF_PW, role_code=role)
+            self.staff.append(self.login(u, STAFF_PW))
         from app.catalog import service as cat
         self.suppliers = [cat.create_supplier(db, self.owner, name=f"مورد تجربة {i + 1}", supplier_type="distributor"
                                               if i < 6 else "other") for i in range(self.a.suppliers)]
