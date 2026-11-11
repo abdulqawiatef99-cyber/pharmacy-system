@@ -61,10 +61,14 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         # The receipt could not be drawn here (no Arabic shaping / font) but the printer may be fine:
         # the cash drawer still opens, and the browser prints the receipt instead.
         drawer = open_drawer and not rendered and _kick(db, ctx, dest, sale_id)
+        if rendered:            # #98: the printer did not take the receipt; audit what really happened
+            with db.transaction():
+                audit.record(db, ctx, "print.receipt", "sale", sale_id,
+                             after={"drawer": open_drawer, "outcome": "not_printed", "error": str(e)[:200]})
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك",
                           details={"drawer_opened": bool(drawer)}) from e
     with db.transaction():
-        audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer})
+        audit.record(db, ctx, "print.receipt", "sale", sale_id, after={"drawer": open_drawer, "outcome": "sent"})
         if open_drawer:
             audit.record(db, ctx, "cash.drawer_auto", "sale", sale_id, after={"with_receipt": True, "outcome": "sent"})
     return {"ok": True}
