@@ -8,6 +8,36 @@ printer drivers or Windows security settings; start the app from its own shortcu
 results on #18 right away (hostname, installer run, table of step / result / evidence, settings left).
 Any failure = its own `launch-critical` Issue.
 
+## Visit runner (coordinator, browser tab only)
+`docs/visit/visit_runner.js` replaces the hand-written fetch calls. In the tab logged in to
+http://127.0.0.1:8000, evaluate the whole file once (again after any reload), then one call per tool
+call; each finishes in under 25 s and returns `{md, rows}` (print `r.md`: id / PASS · FAIL · SKIP ·
+NEEDS-OWNER · INFO / evidence). Every request is same-origin with `X-Requested-With: pharm`; it saves no
+settings, deletes nothing and writes only `TEST-VISIT` records. Order on an install day:
+1. `r = await visit.pre()` → post `r.md` on #18 and keep `r.json` (the snapshot is also in localStorage).
+2. Owner installs (B4). 3. `await visit.post(r.snapshot, {channel: "develop", noUpdate: true})`
+   (add `installed: "<sha>"` when known). 4. `await visit.flows()` (only after step 3: it adds TEST sales).
+5. Printer rows: `await visit.print("test" | "labels" | "sale", {confirm: true} | "reprint" | "drawer")`, then
+   ask the owner the Arabic question in the row; B8(b): `await visit.printAudit("<time before the sale>")`.
+6. B13: `s = await visit.pre({backup: false})` right before the press, then `await visit.post(s.snapshot, {audit: 1})`.
+`visit.day19()` checks the #19 end-of-day figures. Contract and browser tests: `tests/test_visit_runner.py`.
+
+| Row | Runner call | Result it gives |
+|---|---|---|
+| B1 | `visit.pre()` | Backup name, size, `last_ok` (sha256 and the USB copy stay manual) |
+| B2 | `visit.pre()` | Health, counts, stock totals, cash, settings, channel |
+| B5 | `visit.post(snapshot)` | New `boot_id`, `/` no-cache and `app.js?v=`, every snapshot value line by line |
+| B6 | `visit.post(…, {channel, noUpdate})` | Channel unchanged, no update offered |
+| B7 | `visit.print("labels", {label_shift: -2})` | NEEDS-OWNER: how many labels, whole, no blank |
+| B8 | `visit.print("sale" / "reprint" / "drawer")`, `visit.printAudit(since)` | NEEDS-OWNER questions; (b) audit `not_printed` + `failed` |
+| B9 | `visit.flows()` | Credit sale refund defaults to «آجل» on the real screen; double click and a retried POST each give one return |
+| B13 | `visit.post(snapshot, {audit: 1})` | New `boot_id`, data unchanged, audit +1 |
+| B14 | `visit.post(snapshot)` | Receipt, label and drawer settings unchanged |
+| L2 | `visit.flows()` / `visit.estock()` | Cut-off E-Stock stock file refused with `estock_totals_mismatch` (upload through `/api/imports`) |
+| L3 | `visit.flows()` / `visit.estock()` | Complete single-store file accepted (draft discarded, nothing imported) |
+| L6 | `visit.day19()` | DAY19_SCRIPT.md end-of-day figures |
+Not covered (owner's eyes or hands): B0, B3, B4, B10–B12, L0, L1, L4, L5.
+
 ## Before the visit (cloud)
 | # | Step | Who | Expected |
 |---|---|---|---|
