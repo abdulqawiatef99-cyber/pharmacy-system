@@ -3069,14 +3069,27 @@ async function viewShift() {
       app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الوردية</h1>
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
         <div class="totals"><div>المفروض<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
-        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح وردية جديدة</a></div></section>`;
-      printInFrame(`/shift-report/${r.id}`);
+        <div class="row mt"><a class="btn" id="shPrint" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح وردية جديدة</a></div></section>`;
+      $("#shPrint").addEventListener("click", (ev) => { ev.preventDefault(); printShiftReport(r.id); });
+      printShiftReport(r.id);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
       if (err.code === "difference_note_required") e.target.note.focus();
     }
   });
 }
+
+// ------------------------------------------------------------------ #97 shift-close report printing
+// Straight to the receipt printer when direct printing is set; the browser page stays the fallback
+// (browser printing chosen, or the printer did not take it).
+async function printShiftReport(id) {
+  try { await api(`/api/print/shift-report/${id}`, { method: "POST", body: {} }); toast("✓ أُرسل تقرير الوردية للطابعة"); }
+  catch (err) {
+    if (err.code !== "no_printer") toast(err.message, true);
+    printInFrame(`/shift-report/${id}`);
+  }
+}
+// ------------------------------------------------------------------ end #97
 
 // ------------------------------------------------------------------ suppliers and their accounts
 const PAY_M = { drawer: "نقدًا من الخزينة", cash: "نقدًا من خارج الخزينة", bank: "تحويل بنكي", cheque: "شيك", wallet: "إنستاباي / محفظة" };
