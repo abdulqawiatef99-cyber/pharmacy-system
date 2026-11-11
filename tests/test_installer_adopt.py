@@ -108,9 +108,15 @@ class TestUpdateBadge(APICase):
         self.assertTrue(self.status({"sha": SHA, "ref": "main", "source": "installer"}, SHA2)["available"])
 
     def test_candidate_from_another_branch_shows_no_update(self):
-        st = self.status({"sha": SHA, "ref": "develop", "source": "installer"}, SHA2)
+        # #107: develop is a channel now (below); a review installer of a work branch still has none
+        st = self.status({"sha": SHA, "ref": "claude/96-auto-updates", "source": "installer"}, SHA2)
         self.assertFalse(st["available"])
-        self.assertEqual(st["candidate"], "develop")
+        self.assertEqual(st["candidate"], "claude/96-auto-updates")
+
+    def test_develop_build_follows_develop(self):
+        st = self.status({"sha": SHA, "ref": "develop", "source": "installer"}, SHA2)
+        self.assertTrue(st["available"])
+        self.assertEqual(st["channel"], "develop")
 
 
 if __name__ == "__main__":
