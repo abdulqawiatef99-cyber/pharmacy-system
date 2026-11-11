@@ -11,3 +11,5 @@ CREATE INDEX IF NOT EXISTS ix_sales_shift ON sales(shift_id);
 CREATE INDEX IF NOT EXISTS ix_sale_lines_item ON sale_lines(item_id);
 -- 5. a customer's invoices and items (customer profile, statement).
 CREATE INDEX IF NOT EXISTS ix_sales_customer ON sales(org_id, customer_id);
+-- 6. an item's purchase prices by supplier (item card): from the item's invoice lines.
+CREATE INDEX IF NOT EXISTS ix_pinv_lines_item ON purchase_invoice_lines(org_id, item_id);
