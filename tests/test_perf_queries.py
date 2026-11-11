@@ -9,6 +9,9 @@ from datetime import timedelta
 
 from app.catalog import card as item_card
 from app.reports import invoices, owner
+from app.reports import service as reports
+from app.sales import customers as cu
+from app.sales.cash import CashDrawer
 from app.sales.service import local_today
 from tests.test_sales import SalesCase
 
@@ -87,6 +90,34 @@ class TestNoFullScans(SalesCase):
         with QueryRecorder(self.db) as rec:
             owner.returns_report(self.db, self.ctx, self.month, self.today)
         self.assertEqual([p for p, _ in rec.full_scans() if " audit_log" in p], [])   # its sales total waits for 0036
+
+    def test_cashier_flow(self):
+        with QueryRecorder(self.db) as rec:
+            sid = self.s.create(self.ctx)
+            d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+            done = self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+            self.s.get(self.ctx, done["id"])                                   # receipt / reprint
+            self.s.return_items(self.ctx, done["id"], {done["lines"][0]["id"]: 1}, refund_method="cash", reason="اختبار")
+            self.s.return_receipt(self.ctx, self.return_id)
+            CashDrawer(self.db).summary(self.ctx)                              # the cashier's drawer panel
+        self.assertNoScan(rec)
+
+    def test_daily_lists_and_reports(self):
+        drawer = CashDrawer(self.db)
+        shift = self.db.one("SELECT id FROM cash_shifts WHERE status='open'")["id"]
+        with QueryRecorder(self.db) as rec:
+            self.s.list_sales(self.ctx, day=self.today)
+            self.s.day_summary(self.ctx, self.today)
+            invoices.report(self.db, self.ctx, date_from=self.month, date_to=self.today)
+            reports.sales_report(self.db, self.ctx, self.month, self.today)
+            reports.home(self.db, self.ctx)
+            owner.returns_report(self.db, self.ctx, self.month, self.today)
+            owner.discounts_report(self.db, self.ctx, self.month, self.today)
+            drawer.report(self.ctx, shift)
+            item_card.card(self.db, self.ctx, self.pan)
+            item_card.movements(self.db, self.ctx, self.pan, self.month, self.today)
+            cu.profile(self.db, self.ctx, self.cust)
+        self.assertNoScan(rec)
 
     def test_invoice_report_query_count_does_not_grow_with_invoices(self):
         def count():
