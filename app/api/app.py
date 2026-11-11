@@ -2349,7 +2349,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 daily.stop()
                 await run_in_threadpool(autob.stop)
 
-    app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)
+    from .hostcheck import HostAllowlist
+    app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
+                                               Middleware(SecurityHeaders)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app
