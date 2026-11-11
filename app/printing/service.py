@@ -280,7 +280,8 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
         if not imgs:
             raise ValidationFailed("اختر الأصناف")
         escpos.send(target or cfg["label_target"] or "none",
-                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])))
+                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"]),
+                           _variant(cfg), cfg["label_dpi"]))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
     with db.transaction():
@@ -289,12 +290,16 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
     return {"ok": True, "labels": total, "dropped": sorted(dropped)}
 
 
-def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> dict:
-    """#100: a few sample labels with the values on the settings screen, saved or not (size, gap, shift, dpi,
-    type, printer, fields), so the owner can tune the roll in one go. No item, nothing saved."""
+def _variant(cfg: dict) -> str:
+    """The saved TSPL job variant (#100); an unknown stored value falls back to the default job."""
+    from . import labels as lb
+    v = cfg.get("label_variant")
+    return v if v in lb.VARIANTS else "current"
+
+
+def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
+    """The saved label settings with the screen's unsaved values on top, each one validated (#100)."""
     from . import labels as lb, settings as rs
-    ctx.require("settings.manage")
-    data = data or {}
     cfg = rs.get(db, ctx.org_id)
     if "label_lang" in data:
         if data["label_lang"] not in lb.LANGS:
@@ -316,10 +321,25 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
         cfg["label_gap"] = data["label_gap"]
     if "label_shift" in data:
         cfg["label_shift"] = rs.label_shift_ok(data["label_shift"])
+    if "label_variant" in data:
+        cfg["label_variant"] = rs.label_variant_ok(data["label_variant"])
+    cfg["label_variant"] = _variant(cfg)
     if isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
     if not cfg["label_target"]:
         raise ValidationFailed("اختر طابعة الملصقات (مكان الطابعة) أولًا", code="no_printer")
+    return cfg
+
+
+def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> dict:
+    """#100: a few sample labels with the values on the settings screen, saved or not (size, gap, shift, dpi,
+    type, printer, fields, job variant), so the owner can tune the roll in one go. No item, nothing saved."""
+    from . import labels as lb, settings as rs
+    ctx.require("settings.manage")
+    cfg = _label_cfg(db, ctx, data or {})
+    variant = cfg["label_variant"]
+    if variant != "current" and cfg["label_lang"] != "tspl":
+        raise ValidationFailed("طرق الإرسال البديلة لطابعات TSPL فقط", code="variant_tspl_only")
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
     sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
@@ -327,11 +347,39 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
     try:
         img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
-        escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift))
+        escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift,
+                                                variant, cfg["label_dpi"]))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e)) from e
     with db.transaction():
         audit.record(db, ctx, "print.label_test", "printer", None,
                      after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"],
-                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS})
-    return {"ok": True, "labels": lb.TEST_LABELS}
+                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS,
+                            "variant": variant})
+    return {"ok": True, "labels": lb.TEST_LABELS, "variant": variant}
+
+
+def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> dict:
+    """#100: «معايرة بكرة الملصقات»: TSPL GAPDETECT for the roll on the screen (size and gap, saved or not), so
+    the printer's gap sensor learns this roll. The printer feeds a few blank labels; nothing is saved."""
+    from . import labels as lb
+    ctx.require("settings.manage")
+    data = data or {}
+    cfg = _label_cfg(db, ctx, data)
+    if cfg["label_lang"] != "tspl":
+        raise ValidationFailed("المعايرة من البرنامج لطابعات TSPL (Xprinter / TSC) فقط", code="calibrate_tspl_only")
+    mode = data.get("mode", "sized")
+    if mode not in lb.CALIBRATE_MODES:
+        raise ValidationFailed("طريقة المعايرة: sized أو auto")
+    w, h = label_size(cfg)
+    if mode == "sized" and cfg["label_gap"] < 1:
+        raise ValidationFailed("المعايرة تحتاج مسافة بين الملصقات 1 مم على الأقل")
+    try:
+        escpos.send(cfg["label_target"], lb.calibrate_job(w, h, cfg["label_gap"], cfg["label_dpi"], mode))
+    except escpos.PrinterError as e:
+        raise PrintFailed(str(e)) from e
+    with db.transaction():
+        audit.record(db, ctx, "print.label_calibrate", "printer", None,
+                     after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"],
+                            "dpi": cfg["label_dpi"], "mode": mode})
+    return {"ok": True, "mode": mode}

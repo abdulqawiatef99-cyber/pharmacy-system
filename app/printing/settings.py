@@ -15,6 +15,7 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "show_return_policy": True, "label_size": "38x25",
             "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
             "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
+            "label_variant": "current",   # #100: how the TSPL job is built (labels.VARIANTS); saved after a device test
             "receipt_target": "",
             # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
             # independently of the receipt (direct ESC/POS printers only).
@@ -68,6 +69,14 @@ def label_shift_ok(value) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) > SHIFT_MM:
         raise ValidationFailed(f"تحريك الطباعة من -{SHIFT_MM} إلى {SHIFT_MM} مم (سالب = لفوق، موجب = لتحت)")
     return round(float(value), 1) + 0.0
+
+
+def label_variant_ok(value) -> str:
+    """#100: one of the named TSPL job variants (labels.VARIANTS)."""
+    from .labels import VARIANTS
+    if not isinstance(value, str) or value not in VARIANTS:
+        raise ValidationFailed("طريقة إرسال الملصق غير معروفة: " + " / ".join(VARIANTS))
+    return value
 
 
 def a4_grid(value) -> tuple[int, int]:
@@ -146,6 +155,8 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         new["label_gap"] = data["label_gap"]
     if "label_shift" in data:
         new["label_shift"] = label_shift_ok(data["label_shift"])
+    if "label_variant" in data:
+        new["label_variant"] = label_variant_ok(data["label_variant"])
     for k in ("title", "footer", "header"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:80]

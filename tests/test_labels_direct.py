@@ -138,7 +138,7 @@ class TestLabelTest(Base):
         from app.printing.service import print_label_test
         r = print_label_test(self.db, self.ctx, {"label_lang": "tspl", "label_target": "win:Xprinter XP-235B",
                                                   "label_size": "38x13", "label_gap": 3, "label_shift": -2, "label_dpi": 203})
-        self.assertEqual(r, {"ok": True, "labels": 3})
+        self.assertEqual(r, {"ok": True, "labels": 3, "variant": "current"})
         dest, data = self.sent[0]
         self.assertEqual(dest, "win:Xprinter XP-235B")
         self.assertTrue(data.startswith(b"SIZE 38 mm,13 mm\r\nGAP 3 mm,0 mm\r\nSHIFT -16\r\n"))
