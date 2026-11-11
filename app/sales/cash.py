@@ -206,7 +206,7 @@ class CashDrawer:
         # from the shift's sales to their audit rows, not from every sale's audit rows in the log (#113)
         auto = self.db.one("SELECT count(*) n FROM sales x CROSS JOIN audit_log a ON a.org_id=x.org_id"
                            " AND a.entity_type='sale' AND a.entity_id=x.id"
-                           " WHERE x.org_id=? AND x.shift_id=? AND a.action='cash.drawer_auto'"
+                           " WHERE +x.org_id=? AND x.shift_id=? AND a.action='cash.drawer_auto'"   # +: shift index
                            " AND json_extract(a.after_json, '$.outcome')='sent'", (ctx.org_id, shift_id))["n"]
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
