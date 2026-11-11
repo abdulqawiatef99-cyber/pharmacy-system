@@ -940,7 +940,7 @@ class Sales:
              " s.returned_total, s.completed_at, s.voided_at, c.name customer,"
              " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
              " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"
-             " WHERE s.org_id=? AND s.branch_id=? AND s.status<>'draft'")
+             " WHERE s.org_id=? AND s.branch_id=? AND s.status IN ('completed','voided')")   # = not draft; IN uses the index
         params: list = [ctx.org_id, ctx.branch_id]
         mine_only = not ctx.can("sales.totals")
         if mine_only and not (sale_no is not None and ctx.allowed("sales.return_others")):
