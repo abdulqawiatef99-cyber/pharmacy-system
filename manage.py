@@ -79,8 +79,9 @@ def cmd_serve(a, s):
         print("تنبيه: البرنامج مفتوح على شبكة الصيدلية (واي فاي) من غير HTTPS — استخدمه على شبكة الصيدلية المقفولة بباسورد بس.",
               file=sys.stderr)
     os.environ["PHARM_HOST"] = a.host
+    from app.core.accesslog import uvicorn_log_config
     uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
-                server_header=False)
+                server_header=False, log_config=uvicorn_log_config())
 
 
 def cmd_backup(a, s):
