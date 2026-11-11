@@ -41,7 +41,14 @@ jobs:
       - name: Browser for the UI tests (Node Playwright + Chromium, pinned)
         run: |
           npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
-          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          PW="$RUNNER_TEMP/pw/node_modules/.bin/playwright"
+          # --with-deps needs the Ubuntu apt mirrors. When they are unreachable (11/11: every mirror
+          # timed out, apt exit 100), fall back to the browser alone: the runner image already has the
+          # libraries Chromium needs, and PHARM_REQUIRE_BROWSER below still fails the job if it cannot start.
+          if ! timeout 240 "$PW" install --with-deps chromium; then
+            echo "::warning::apt mirrors unreachable; installing Chromium without system packages"
+            "$PW" install chromium
+          fi
       - name: Tests
         env:
           PYTHONUTF8: "1"
