@@ -322,6 +322,65 @@ class TestOpenSale(UpdateCase):
         self.u.tick()
         self.exit.assert_called_once_with(75)
 
+    def test_restart_waits_when_the_check_ran_past_quiet_hours(self):
+        """#99 review: check and backup can take long; the restart re-checks the allowed moment."""
+        def slow(*_a, **_k):
+            self.u.clock = lambda: WORK                    # the candidate check ended after 06:00
+            return Mock(returncode=0, stdout="ok", stderr="")
+        self.run.side_effect = slow
+        r = self.u.tick()
+        self.assertFalse(r["restarting"])
+        self.assertIn("وقت الشغل بدأ", r["message"])
+        self.assertTrue(self.u.restart_due)
+        self.u.tick()
+        self.exit.assert_not_called()
+        self.assertTrue(self.u.apply("manual", self.ctx)["restarting"])   # the owner's button restarts it
+        self.exit.assert_called_once_with(75)
+
+    def test_installer_not_started_when_the_download_ran_past_quiet_hours(self):
+        self.files = ["requirements.txt"]
+        digest = hashlib.sha256(b"x").hexdigest()
+
+        def download(_u, _t, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x")
+            self.u.clock = lambda: WORK
+            return digest
+        with patch.object(updater, "installer_release", return_value={
+                "sha": NEW, "ref": "main", "sha256": digest, "url": "u", "size": 1}), \
+                patch.object(updater, "download_asset", side_effect=download):
+            r = self.u.tick()
+        self.assertTrue(r["blocked"])
+        self.installer.assert_not_called()
+        self.assertFalse(self.u.restarting)
+        self.assertFalse(self.u.attempt_path.exists())
+
+    def test_shift_close_moment_survives_the_sale_cooldown(self):
+        """#99 review: a shift closed right after the last sale is still used once the cooldown ends."""
+        self.u.update_settings(self.ctx, {"on_events": True})
+        self.u.clock = lambda: WORK
+        self.u.started -= autoupdate.STARTUP_WINDOW_S + 1
+        autoupdate._instance = self.u
+        self.addCleanup(setattr, autoupdate, "_instance", None)
+        self.u.touch_sale()
+        autoupdate.trigger("shift_close")
+        self.assertTrue(self.u.tick()["blocked"])
+        self.u.last_sale_write -= autoupdate.SALE_WRITE_S + 1     # five minutes later
+        self.assertTrue(self.u.tick()["restarting"])
+        self.u.pending_since -= autoupdate.SHIFT_CLOSE_KEEP_S + 1  # a stale close is not a moment forever
+        self.assertIsNone(self.u._window())
+
+    def test_no_new_shift_while_restarting(self):
+        self.http_login()
+        self.app.state.autoupdate.restarting = True
+        r = self.c.post("/api/cash/open", headers=H, json={"opening_cash": 0})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"]["code"], "updating")
+        self.assertIsNone(self.db.one("SELECT id FROM cash_shifts WHERE status='open'"))
+        self.app.state.autoupdate.restarting = False
+        self.assertEqual(self.c.post("/api/cash/open", headers=H, json={"opening_cash": 0}).status_code, 201)
+        self.assertEqual(self.app.state.autoupdate.busy(), "فيه بيع شغال دلوقتي")   # counts as activity
+
     def test_deferred_restart_waits_for_quiet_hours_unless_the_owner_pressed(self):
         with patch.object(autoupdate.AutoUpdater, "busy", side_effect=[None, "فيه بيع شغال دلوقتي"]):
             self.u.apply("quiet_hours")

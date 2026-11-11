@@ -270,7 +270,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def handler(fn):
         async def wrapped(req: Request):
             try:
-                if req.method not in ("GET", "HEAD") and req.url.path.startswith("/api/sales"):
+                path = req.url.path
+                if req.method not in ("GET", "HEAD") and (path.startswith("/api/sales") or path == "/api/cash/open"):
+                    # #96: a sale or a new shift never starts once the restart is decided; one that got past
+                    # this line counts as activity, so the updater's last busy() check sees it.
                     if autoupd.restarting:       # the program restarts for an update in a second (#96)
                         return J({"error": {"code": "updating", "message":
                                             "البرنامج بيتحدث وهيرجع خلال ثواني؛ أعد المحاولة"}}, status_code=503)

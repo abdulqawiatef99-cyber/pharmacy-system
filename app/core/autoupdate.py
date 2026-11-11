@@ -49,7 +49,8 @@ START_DELAY_S = 60               # let the program finish starting before the fi
 STARTUP_WINDOW_S = 15 * 60       # "apply at startup" = within the first minutes after a start
 OPEN_SALE_MIN = 60               # a draft invoice with lines started this recently is an open sale
 SALE_WRITE_S = 5 * 60            # any sales write this recently means someone is selling
-WAITING_RECHECK_S = 30 * 60      # installer not published yet: look again sooner
+WAITING_RECHECK_S = 30 * 60
+SHIFT_CLOSE_KEEP_S = 30 * 60     # a shift close stays an allowed moment this long while a sale cools down      # installer not published yet: look again sooner
 STATUS_CACHE_S = 600
 INSTALLER_TIMEOUT_S = 15 * 60    # the installer stops the program within seconds; else give the tills back
 RESTART = 75                     # launcher.py starts the program again on this exit code
@@ -61,7 +62,7 @@ def trigger(reason: str) -> None:
     """Ask for an update attempt soon (after a shift close). Never blocks or raises."""
     inst = _instance
     if inst is not None:
-        inst.pending_reason = reason
+        inst.pending_reason, inst.pending_since = reason, time.monotonic()
         inst.wake.set()
 
 
@@ -90,6 +91,7 @@ class AutoUpdater:
         self.wake = threading.Event()
         self.stop_event = threading.Event()
         self.pending_reason: str | None = None
+        self.pending_since = float("-inf")
         self.restart_due = False
         self.restart_confirmed = False   # the deferred restart came from the owner's button
         self.restarting = False          # about to restart for an update: new sales writes wait a moment
@@ -205,7 +207,7 @@ class AutoUpdater:
             return "quiet_hours"
         if not cfg.get("on_events"):          # working hours: only the owner's button (his confirmation)
             return None
-        if self.pending_reason == "shift_close":
+        if self.pending_reason == "shift_close" and time.monotonic() - self.pending_since < SHIFT_CLOSE_KEEP_S:
             return "shift_close"
         if time.monotonic() - self.started < STARTUP_WINDOW_S:
             return "startup"
@@ -254,6 +256,8 @@ class AutoUpdater:
             why = self.busy()
             if why:
                 return {"ok": False, "blocked": why, "message": f"التحديث مستني: {why}"}
+            if self.restart_due and ctx is not None:     # staged code waiting for its restart: the owner's go
+                return self._restart(confirmed=True)
             plan = self.check() if ctx is not None else self._fresh(300)
             if plan.get("error"):
                 return {"ok": False, "message": plan["error"]}
@@ -325,13 +329,15 @@ class AutoUpdater:
         for old in updates.glob("PharmacySetup-*.exe"):
             if old != exe:
                 old.unlink(missing_ok=True)
+        if ctx is None and not self._window():           # the download ran past the allowed moment
+            return {"ok": False, "blocked": "وقت الشغل بدأ", "message": "التحديث مستني: وقت الشغل بدأ"}
         out = backup.create(self.db, self.s.upload_dir, self.s.backup_path)
         if backup.verify_archive(out)["problems"]:
             raise updater.UpdateError("النسخة الاحتياطية فشلت في التحقق؛ لم يُثبَّت شيء")
         self._audit(ctx, {"ok": True, "kind": "installer", "channel": plan["channel"], "target": target, "reason": reason,
                           "sha256": rel["sha256"], "backup": out.name})
         self.restarting = True
-        why = self.busy()
+        why = self.busy() or (None if ctx is not None or self._window() else "وقت الشغل بدأ")
         if why:
             self.restarting = False
             return {"ok": False, "blocked": why, "message": f"التحديث مستني: {why}"}
@@ -359,6 +365,8 @@ class AutoUpdater:
             return {"ok": True, "restarting": False, "message": "اكتمل. أغلق البرنامج وافتحه مرة أخرى"}
         self.restarting = True
         why = self.busy()
+        if not why and not confirmed and not self._window():
+            why = "وقت الشغل بدأ"            # the check/backup ran past the allowed moment (#99 review)
         if why:                               # a sale started meanwhile: the new code waits for it
             self.restarting = False
             self.restart_due = True
@@ -466,9 +474,8 @@ class AutoUpdater:
         """One scheduler step (the loop calls it every minute)."""
         if self.restart_due:                  # staged code waits for a sale; the launcher can only confirm it
             if self.busy() or not (self.restart_confirmed or self._window()):    # after this restart, so
-                self.pending_reason = None                                       # it comes first (#99 review)
-                return None
-            return self._restart()
+                return None                                                      # it comes first (#99 review)
+            return self._restart(confirmed=self.restart_confirmed)
         if not self.finish_attempt():
             return None
         if self._check_due() or not self.checked_once:        # always once at startup
@@ -476,14 +483,16 @@ class AutoUpdater:
             self.checked_once = True
         st, cfg = self.state(), self.settings()
         reason = self._window()
-        self.pending_reason = None
         if (cfg.get("auto") and st.get("available") and reason and not st.get("error")
                 and not st.get("waiting") and st.get("latest") != st.get("failed_sha")
                 and os.environ.get("PHARM_LAUNCHER") == "1"):
             r = self.apply(reason)
-            if r.get("blocked"):
+            if r.get("blocked"):              # a sale or shift: keep the shift-close moment for a while
                 self._announce(self.state(), cfg)
+            else:
+                self.pending_reason = None
             return r
+        self.pending_reason = None
         self._announce(st, cfg)               # not now: tell the owner once when it will happen
         return None
 
