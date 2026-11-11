@@ -138,7 +138,7 @@ class Generator:
         from app.sales.service import Sales
         self.sales = Sales(db)
         self.customers = [self.sales.create_customer(self.owner, name=f"عميل تجربة {i + 1}",
-                                                     phone=f"010{i:08d}", credit_limit=500000)
+                                                     phone=f"010{i:08d}", credit_limit=self.a.credit_limit)
                           for i in range(self.a.customers)]
         self.credit_customers = self.customers[: max(1, len(self.customers) // 5)]
         self.make_items()
@@ -315,7 +315,9 @@ class Generator:
             return
         total = draft["total"]
         r = rng.random()
-        if cust in self.credit_customers and r < 0.6:
+        # a credit sale over the remaining limit is refused (credit_limit), so it is paid in cash instead
+        if (cust in self.credit_customers and r < 0.6
+                and self.sales.balance(ctx, cust) + total <= self.a.credit_limit):
             pay = [{"method": "credit", "amount": total}]
         elif r < 0.12:
             pay = [{"method": "card", "amount": total, "channel_id": self.channels.get("card")}]
@@ -416,6 +418,7 @@ def main(argv=None):
     ap.add_argument("--items", type=int, default=4000)
     ap.add_argument("--suppliers", type=int, default=12)
     ap.add_argument("--customers", type=int, default=300)
+    ap.add_argument("--credit-limit", type=int, default=500000, help="every synthetic customer's credit limit, piastres")
     ap.add_argument("--per-day", default="150-300", help="sales per day, min-max")
     ap.add_argument("--transfer-share", type=float, default=0.02, help="share of sales paid by transfer with a screenshot")
     ap.add_argument("--attachment-kb", type=float, default=60, help="average transfer screenshot size")
