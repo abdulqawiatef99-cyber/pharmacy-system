@@ -211,8 +211,10 @@ def movements(db: Database, ctx: Context, item_id: str, date_from: str, date_to:
     if d2 < d1:
         raise ValidationFailed("تاريخ النهاية قبل البداية")
     lo, hi = local_day_bounds(d1)[0], local_day_bounds(d2)[1]
-    opening = db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE org_id=? AND item_id=? AND created_at<?",
-                     (ctx.org_id, item_id, lo))["q"]
+    # every branch of the pharmacy, spelled out so the (org, branch, item) index is used instead of reading all movements
+    branches = "branch_id IN (SELECT id FROM branches WHERE org_id=?)"
+    opening = db.one(f"SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE org_id=? AND {branches} AND item_id=?"
+                     " AND created_at<?", (ctx.org_id, ctx.org_id, item_id, lo))["q"]
     rows = db.all(
         "SELECT m.created_at, m.movement_type, m.qty_delta, m.ref_type, m.ref_id, m.note, b.batch_no, b.expiry_date,"
         " u.full_name by_name, s.sale_no, p.invoice_no, sp.name supplier FROM stock_movements m"
@@ -220,8 +222,8 @@ def movements(db: Database, ctx: Context, item_id: str, date_from: str, date_to:
         " LEFT JOIN sales s ON s.id=m.ref_id AND m.movement_type IN ('sale','sale_return')"
         " LEFT JOIN purchase_invoices p ON p.id=m.ref_id AND m.movement_type IN ('purchase','purchase_reversal')"
         " LEFT JOIN suppliers sp ON sp.id=p.supplier_id"
-        " WHERE m.org_id=? AND m.item_id=? AND m.created_at>=? AND m.created_at<? ORDER BY m.created_at, m.rowid",
-        (ctx.org_id, item_id, lo, hi))
+        f" WHERE m.org_id=? AND m.{branches} AND m.item_id=? AND m.created_at>=? AND m.created_at<? ORDER BY m.created_at, m.rowid",
+        (ctx.org_id, ctx.org_id, item_id, lo, hi))
     bal, out = opening, []
     for r in rows:
         bal += r["qty_delta"]
