@@ -48,6 +48,22 @@ class TestLoadGenerator(unittest.TestCase):
                 c.close()
             self.assertEqual(info["snapshots"][-1]["label"], "final")
 
+    def test_credit_sale_over_the_limit_is_paid_in_cash(self):
+        # a credit sale over the remaining limit is refused by the program; the generator must not abort on it
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "gen"
+            r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/loadgen.py"), "--out", str(out), "--days", "2",
+                                "--items", "40", "--customers", "2", "--suppliers", "2", "--per-day", "40-40",
+                                "--credit-limit", "1", "--attachment-kb", "0", "--end", "2026-01-15", "--quiet"],
+                               capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            db = Database(out / "final" / "data" / "pharmacy.db")
+            try:
+                self.assertEqual(db.one("SELECT count(*) n FROM sales WHERE on_credit>0")["n"], 0)
+                self.assertGreaterEqual(db.one("SELECT count(*) n FROM sales WHERE status='completed'")["n"], 40)
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
