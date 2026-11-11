@@ -97,6 +97,13 @@ class TestGuardWiring(unittest.TestCase):
         self.assertIn("needs.gate.result == 'success' || needs.gate.result == 'skipped'", wf)
         self.assertIn("if: github.event_name == 'push'", wf)              # manual review builds skip the gate
 
+    def test_installer_artifact_is_short_lived_and_never_blocks_the_release(self):
+        wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
+        upload = wf.split("- uses: actions/upload-artifact@v4", 1)[1].split("- name:", 1)[0]
+        self.assertIn("retention-days: 14", upload)                       # #122: quota filled at 90 days
+        self.assertIn("continue-on-error: ${{ github.event_name == 'push' }}", upload)
+        self.assertLess(wf.index("actions/upload-artifact@v4"), wf.index('Publish as release "installer-latest"'))
+
     def test_failure_opens_an_issue_and_keeps_the_old_tip(self):
         wf = (ROOT / ".github" / "workflows" / "branch-guard.yml").read_text(encoding="utf-8")
         self.assertIn("branches: [main, develop]", wf)
