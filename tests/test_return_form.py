@@ -45,6 +45,40 @@ class TestRefundDefault(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), ["credit", "credit", "cash", "card", "cash", "cash", "cash"])
 
 
+OPTS_FN = "".join(re.search(rf"\nfunction {n}\(.*?\n\}}\n", JS, re.S).group(0)
+                  for n in ("refundDefault", "cashRefundRoom", "refundOptions"))
+OPTS = "const money = (p) => (p / 100).toFixed(2);\n" + OPTS_FN + r"""
+const sale = (o) => ({ paid_cash: 0, paid_card: 0, paid_transfer: 0, on_credit: 0, customer_id: "c1", total: 0,
+                       returned_total: 0, returns: [], kind: "store", ...o });
+const view = (s) => refundOptions(s).map((o) => [o.value, o.disabled, o.selected]);
+console.log(JSON.stringify([
+  view(sale({ on_credit: 5000, total: 5000 })),                                   // credit only
+  view(sale({ paid_cash: 3000, on_credit: 5000, total: 8000 })),                  // cash + credit
+  refundOptions(sale({ paid_cash: 3000, on_credit: 5000, total: 8000 }))[0].label,
+  view(sale({ paid_card: 4000, total: 4000, customer_id: null })),                // card, walk-in
+  view(sale({ paid_cash: 4000, total: 4000, customer_id: null })),                // cash, walk-in
+  view(sale({ paid_cash: 4000, total: 4000, kind: "delivery", delivery: { status: "out" } })),   // courier has it
+  view(sale({ paid_cash: 4000, total: 4000, returned_total: 4000, returns: [{ refund_method: "cash", total: 4000 }] }))
+]));
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "Node not available")
+class TestRefundOptions(unittest.TestCase):
+    """#142: only the wrong refund choice is disabled; the best one is preselected; the rest stay available."""
+    def test_options_follow_the_money_received(self):
+        r = subprocess.run([shutil.which("node"), "-e", OPTS], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out[0], [["cash", True, False], ["credit", False, True]])           # cash disabled
+        self.assertEqual(out[1], [["cash", False, True], ["credit", False, False]])          # both open
+        self.assertEqual(out[2], "نقدًا من الخزينة (حتى 30.00 ج)")                          # the cap is shown
+        self.assertEqual(out[3], [["cash", False, False], ["card", False, True]])           # card back to card
+        self.assertEqual(out[4], [["cash", False, True]])                                   # no card option
+        self.assertEqual(out[5], [["cash", True, False], ["credit", False, True]])          # courier's cash
+        self.assertEqual(out[6], [["cash", True, False], ["credit", False, True]])          # cash already paid back
+
+
 SCRIPT = r"""
 const { chromium } = require('playwright');
 (async () => {

@@ -2325,6 +2325,26 @@ function refundDefault(s) {
   return "cash";
 }
 
+// #142 (owner, 11/11): cash goes back only for money the sale actually brought in (cash, card or transfer; a
+// courier's cash once handed in) minus earlier cash or card refunds; the credit part goes back to the account.
+// A wrong choice is shown disabled with the reason; every other choice stays available.
+function cashRefundRoom(s) {
+  const cashIn = s.kind === "delivery" && s.delivery?.status !== "settled" ? 0 : (s.paid_cash || 0);
+  const back = (s.returns || []).filter((r) => r.refund_method === "cash" || r.refund_method === "card")
+    .reduce((t, r) => t + (r.total || 0), 0);
+  return Math.max(0, cashIn + (s.paid_card || 0) + (s.paid_transfer || 0) - back);
+}
+
+function refundOptions(s) {
+  const room = cashRefundRoom(s), left = (s.total || 0) - (s.returned_total || 0);
+  const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
+  const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
+    ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
+  const want = refundDefault(s), ok = opts.filter((o) => !o[2]);
+  const pick = ok.some((o) => o[0] === want) ? want : (ok[0] || opts[0])[0];
+  return opts.map(([v, t, off]) => ({ value: v, label: t, disabled: off, selected: v === pick }));
+}
+
 async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
@@ -2356,7 +2376,7 @@ async function viewSale(id) {
         <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">إرجاع الكل</span>`}</td>` : ""}</tr>`).join("")}
     </tbody></table></div>
     ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
-      ${[["cash", "نقدًا من الخزينة"], ["card", "بطاقة"], ...(s.customer_id ? [["credit", "على حساب العميل"]] : [])].map(([v, t]) => `<option value="${v}" ${v === refundDefault(s) ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      ${refundOptions(s).map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
       <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
