@@ -149,10 +149,15 @@ jobs:
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
 
+      # Artifact storage is small on GitHub Free (#122): keep review builds 14 days, not 90.
+      # On a push to main the release below is the deliverable, so a full artifact quota
+      # must not block it; a manual review build still fails visibly.
       - uses: actions/upload-artifact@v4
+        continue-on-error: ${{ github.event_name == 'push' }}
         with:
           name: PharmacySetup
           path: dist/PharmacySetup.exe
+          retention-days: 14
 
       - name: Publish as release "installer-latest"
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
