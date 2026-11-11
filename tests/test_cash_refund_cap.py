@@ -49,14 +49,23 @@ class TestCashRefundCap(Base):
         r = self.s.return_items(self.ctx, sale["id"], {line: 2}, refund_method="cash", reason="مرتجع تجربة")
         self.assertEqual((r["refund"], self.drawer()), (4000, 10000))
 
-    def test_card_sale_cannot_be_refunded_in_cash(self):
+    def test_card_or_transfer_sale_can_still_be_refunded_in_cash(self):
+        """Owner's rule (11/11): money the shop received by card or transfer may go back in cash."""
         sale = self.sell(units=2, cash=0, card=4000)
-        with self.assertRaises(Conflict) as e:
-            self.s.return_items(self.ctx, sale["id"], {sale["lines"][0]["id"]: 1}, refund_method="cash",
+        r = self.s.return_items(self.ctx, sale["id"], {sale["lines"][0]["id"]: 1}, refund_method="cash",
                                 reason="مرتجع تجربة")
-        self.assertEqual(e.exception.code, "cash_refund_exceeds_paid")
-        self.assertEqual(self.drawer(), 10000)
+        self.assertEqual((r["refund"], self.drawer()), (2000, 10000 - 2000))
 
+    def test_card_plus_credit_sale_refunds_cash_only_up_to_the_card_part(self):
+        sale = self.sell(units=4, cash=0, card=3000, credit=5000, customer=self.cust)   # 30 card + 50 credit
+        line = sale["lines"][0]["id"]
+        self.s.return_items(self.ctx, sale["id"], {line: 1}, refund_method="cash", reason="مرتجع تجربة")  # 20
+        with self.assertRaises(Conflict) as e:                                       # 20 more > the 10 left
+            self.s.return_items(self.ctx, sale["id"], {line: 1}, refund_method="cash", reason="مرتجع تجربة")
+        self.assertEqual(e.exception.details["max_cash"], 1000)
+        self.s.return_items(self.ctx, sale["id"], {line: 1}, refund_method="credit", reason="مرتجع تجربة")
+        self.assertEqual(self.balance(), 5000 - 2000)                                 # the credit part goes back
+        self.assertEqual(self.drawer(), 10000 - 2000)                                 # to the account, not cash
 
 class TestDeliveryCashRefund(Base):
     """#142: a delivery's cash is with the courier until it is handed in; before that the drawer has
