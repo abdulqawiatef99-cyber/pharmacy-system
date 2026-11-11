@@ -2317,6 +2317,14 @@ async function viewSalesSimple() {
   }
 }
 
+// #114: the refund goes back the way the sale was paid (credit sale -> the customer's account, card only -> card);
+// the cashier can still pick another method
+function refundDefault(s) {
+  if (s.on_credit > 0 && !s.paid_cash && s.customer_id) return "credit";
+  if (s.paid_card > 0 && !s.paid_cash && !s.on_credit && !s.paid_transfer) return "card";
+  return "cash";
+}
+
 async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
@@ -2348,20 +2356,23 @@ async function viewSale(id) {
         <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">إرجاع الكل</span>`}</td>` : ""}</tr>`).join("")}
     </tbody></table></div>
     ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
-      <option value="cash">نقدًا من الخزينة</option><option value="card">بطاقة</option>${s.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+      ${[["cash", "نقدًا من الخزينة"], ["card", "بطاقة"], ...(s.customer_id ? [["credit", "على حساب العميل"]] : [])].map(([v, t]) => `<option value="${v}" ${v === refundDefault(s) ? "selected" : ""}>${t}</option>`).join("")}</select></label>
       <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
       <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
   </section>`;
-  $("#rGo")?.addEventListener("click", async () => {
+  $("#rGo")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
     app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
+    btn.disabled = true;
     try {
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
       toast(`تم تسجيل المرتجع: ${money(r.refund)} ج — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
