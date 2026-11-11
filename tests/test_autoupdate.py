@@ -381,6 +381,28 @@ class TestOpenSale(UpdateCase):
         self.assertEqual(self.c.post("/api/cash/open", headers=H, json={"opening_cash": 0}).status_code, 201)
         self.assertEqual(self.app.state.autoupdate.busy(), "فيه بيع شغال دلوقتي")   # counts as activity
 
+    def test_concurrent_state_saves_neither_fail_nor_lose_a_field(self):
+        """#99 review: the scheduler and the settings page save the state at the same time."""
+        import threading
+        errors, start = [], threading.Barrier(8)
+
+        def worker(i):
+            try:
+                start.wait()
+                for n in range(40):
+                    self.u._save(**{f"k{i}": n})
+            except Exception as e:                     # pragma: no cover - the failure being tested
+                errors.append(e)
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        self.assertEqual(errors, [])
+        st = self.u.state()
+        self.assertEqual({st[f"k{i}"] for i in range(8)}, {39})
+        self.assertEqual(list(self.s.data_dir.glob("update_state*.tmp")), [])
+
     def test_deferred_restart_waits_for_quiet_hours_unless_the_owner_pressed(self):
         with patch.object(autoupdate.AutoUpdater, "busy", side_effect=[None, "فيه بيع شغال دلوقتي"]):
             self.u.apply("quiet_hours")

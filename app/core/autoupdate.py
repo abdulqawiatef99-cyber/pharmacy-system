@@ -30,6 +30,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,7 @@ class AutoUpdater:
         self.cfg_path, self.state_path = d / "update_settings.json", d / "update_state.json"
         self.attempt_path, self.outcome_path = d / "update_attempt.json", d / "update_outcome.json"
         self.lock = threading.Lock()
+        self.files_lock = threading.RLock()   # scheduler and API threads both save the state (#99 review)
         self.wake = threading.Event()
         self.stop_event = threading.Event()
         self.pending_reason: str | None = None
@@ -110,9 +112,15 @@ class AutoUpdater:
 
     def _write(self, path: Path, data: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(path)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.stem + ".", suffix=".tmp")
+        tmp = Path(name)                      # a unique temp file per write: no writer replaces another's
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False, indent=1))
+            with self.files_lock:
+                tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def settings(self) -> dict:
         return self._read(self.cfg_path, DEFAULTS)
@@ -121,8 +129,9 @@ class AutoUpdater:
         return self._read(self.state_path)
 
     def _save(self, **changes) -> dict:
-        st = {**self.state(), **changes}
-        self._write(self.state_path, st)
+        with self.files_lock:                 # read-modify-write as one step
+            st = {**self.state(), **changes}
+            self._write(self.state_path, st)
         return st
 
     # ----------------------------------------------------------------- channel
