@@ -210,7 +210,7 @@ class TestPriority1(PlanCase):
 
     def test_manual_purchase_of_two_items_adds_quantity_plus_bonus_and_updates_public_price(self):
         """P1 line 12: a typed invoice for two items; approval adds qty + bonus and the new public price."""
-        sup = self.db.one("SELECT id FROM suppliers")["id"]
+        sup = self.db.one("SELECT id FROM suppliers WHERE org_id=?", (self.ctx.org_id,))["id"]
         inv_id, d = self.manual_purchase(sup, "TRIAL-M1", [
             {"item_id": self.pan, "qty": 5, "bonus_qty": 1, "public_price": 4200, "discount_bp": 2000},
             {"item_id": self.box, "qty": 2, "bonus_qty": 0, "public_price": 10000, "discount_bp": 2000}])
@@ -224,10 +224,11 @@ class TestPriority1(PlanCase):
         self.assertEqual(self.qty(self.box), 30 + 2 * 3)
         self.assertEqual(self.call("GET", f"/api/items/{self.pan}")["public_price"], 4200)
         self.assertEqual(self.call("GET", f"/api/items/{self.box}")["public_price"], 10000)   # unchanged price kept
-        hist = self.db.all("SELECT previous_price, public_price, source FROM item_price_history WHERE item_id=?"
-                           " ORDER BY observed_at", (self.pan,))
+        hist = self.db.all("SELECT previous_price, public_price, source FROM item_price_history WHERE org_id=?"
+                           " AND item_id=? ORDER BY observed_at", (self.ctx.org_id, self.pan))
         self.assertEqual(tuple(hist[-1]), (4000, 4200, "purchase_invoice"))
-        self.assertEqual(self.db.one("SELECT sum(amount) FROM supplier_ledger WHERE supplier_id=?", (sup,))[0], 32800)
+        self.assertEqual(self.db.one("SELECT sum(amount) FROM supplier_ledger WHERE org_id=? AND supplier_id=?",
+                                     (self.ctx.org_id, sup))[0], 32800)
         self.assertEqual(inv.verify_balances(self.db, self.ctx.org_id), [])
 
     def test_damaged_adjustment_shows_in_stock_losses_with_the_user(self):
@@ -341,7 +342,7 @@ class TestPriority2(PlanCase):
     def test_supplier_cheque_payment_shows_with_its_number_on_the_period_statement(self):
         """P2 line 6 (acceptance 19): pay by cheque; the period statement lists it with the cheque number."""
         from app.procurement import suppliers as sup_mod
-        sup = self.db.one("SELECT id FROM suppliers")["id"]
+        sup = self.db.one("SELECT id FROM suppliers WHERE org_id=?", (self.ctx.org_id,))["id"]
         inv_id, d = self.manual_purchase(sup, "TRIAL-C1", [
             {"item_id": self.box, "qty": 2, "bonus_qty": 0, "public_price": 10000, "discount_bp": 2500}])
         self.call("POST", f"/api/purchases/{inv_id}/approve", json={"version": d["invoice"]["version"]})   # 150.00 owed
