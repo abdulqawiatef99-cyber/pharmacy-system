@@ -2144,8 +2144,14 @@ async function checkUpdateBadge() {
 // An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
 const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
 function screenIdle() {
-  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen,
+  // and only while no field holds text the person typed but the screen has not saved yet
   if ($("dialog[open]")) return false;
+  const typed = [...document.querySelectorAll("input, textarea, select")].some((el) =>
+    el.type === "checkbox" || el.type === "radio" ? el.checked !== el.defaultChecked
+      : el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : el.value !== el.defaultValue);
+  if (typed) return false;
   const h = location.hash || "#/home";
   if (h === "#/login" || h === "#/home") return true;
   return h.startsWith("#/pos") && !(SALE?.lines?.length);

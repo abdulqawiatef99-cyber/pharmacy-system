@@ -1,6 +1,7 @@
 """#153: a tab left open across an update keeps running the old app.js. The page knows the shell it was
 loaded with (meta pharm-build), /api/health reports the current one; on a change the screen reloads by itself
-where nothing can be lost (sign-in, home, an empty sale screen) and otherwise shows a reload bar."""
+where nothing can be lost (sign-in, home, an empty sale screen, no field holding unsaved typing) and otherwise
+shows a reload bar."""
 import json
 import os
 import re
@@ -110,6 +111,19 @@ const fs = require('fs');
                           b2, { timeout: 10000 });
   await p.waitForSelector('#posQ');
   out.barHiddenAfterReload = await p.locator('#staleBar').isHidden();
+  // 4. an empty sale screen with a search still being typed: not idle, the bar instead of a reload
+  if (await p.locator('table.cart [data-minus]').count()) {
+    await p.locator('table.cart [data-minus]').first().click();
+    await p.waitForFunction(() => document.querySelectorAll('table.cart [data-minus]').length === 0, null, { timeout: 10000 });
+  }
+  await p.locator('#posQ').focus();
+  await p.keyboard.type('pana', { delay: 5 });
+  await p.evaluate(() => { window.__sameDoc = 2; });
+  touch();
+  await p.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await p.waitForSelector('#staleBar:not([hidden])', { timeout: 10000 });
+  await p.waitForTimeout(500);
+  out.typingKept = await p.evaluate(() => window.__sameDoc === 2 && document.querySelector('#posQ').value === 'pana');
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -147,7 +161,7 @@ class TestStaleScreenInBrowser(StaleCase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out, {"barHiddenAtStart": True, "reloadedOnLogin": True, "sameDocument": True, "cartKept": 1,
-                               "barHiddenAfterReload": True})
+                               "barHiddenAfterReload": True, "typingKept": True})
 
 
 if __name__ == "__main__":
