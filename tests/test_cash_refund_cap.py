@@ -56,3 +56,28 @@ class TestCashRefundCap(Base):
                                 reason="مرتجع تجربة")
         self.assertEqual(e.exception.code, "cash_refund_exceeds_paid")
         self.assertEqual(self.drawer(), 10000)
+
+
+class TestDeliveryCashRefund(Base):
+    """#142: a delivery's cash is with the courier until it is handed in; before that the drawer has
+    nothing to pay back."""
+    def test_cash_refund_waits_for_the_courier_to_hand_in_the_cash(self):
+        self.cd.open(self.ctx, 10000)
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2)                  # 40.00
+        d = self.s.set_details(self.ctx, sid, {"kind": "delivery", "delivery": {"phone": "0100"}})
+        f = self.s.safety_check(self.ctx, sid)
+        r = self.s.complete(self.ctx, sid, payments=[{"method": "cash", "amount": d["total"]}],
+                            safety_decisions={i: "ok" for i in range(len(f))})
+        line = r["lines"][0]["id"]
+        left = lambda: self.db.one("SELECT sum(qty_base - returned_qty) FROM sale_allocations WHERE sale_line_id=?",
+                                   (line,))[0]
+        before = left()
+        with self.assertRaises(Conflict) as e:                                 # courier still holds the cash
+            self.s.return_items(self.ctx, sid, {line: 1}, refund_method="cash", reason="مرتجع تجربة")
+        self.assertEqual(e.exception.details["max_cash"], 0)
+        self.assertEqual((self.cd.summary(self.ctx)["expected_cash"], left()), (10000, before))   # nothing moved
+        self.s.delivery_status(self.ctx, sid, "settled")                         # 40.00 enters the drawer
+        out = self.s.return_items(self.ctx, sid, {line: 1}, refund_method="cash", reason="مرتجع تجربة")
+        self.assertEqual(out["refund"], 2000)
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 10000 + 4000 - 2000)

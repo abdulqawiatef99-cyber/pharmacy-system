@@ -843,11 +843,12 @@ class Sales:
                 # customer's account or the card, so a debt can never turn into cash out of the drawer.
                 received = s["paid_cash"] or 0
                 if s["kind"] == "delivery":
-                    d = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=?", (sid,))
+                    d = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=? AND org_id=?",
+                                    (sid, ctx.org_id))
                     if not d or d["status"] != "settled":
                         received = 0
                 refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns"
-                                       " WHERE sale_id=? AND refund_method='cash'", (sid,))[0]
+                                       " WHERE sale_id=? AND org_id=? AND refund_method='cash'", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
                 if refund > can:
                     raise Conflict(f"المبلغ النقدي المسترد أكبر مما دخل الخزينة من هذه الفاتورة (الحد الأقصى نقدًا"
