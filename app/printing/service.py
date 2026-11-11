@@ -280,10 +280,58 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
         if not imgs:
             raise ValidationFailed("اختر الأصناف")
         escpos.send(target or cfg["label_target"] or "none",
-                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"]))
+                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
     with db.transaction():
         audit.record(db, ctx, "print.labels", "item", None,
                      after={"labels": total, "size": f"{w:g}x{h:g}", "lang": cfg["label_lang"]})
     return {"ok": True, "labels": total, "dropped": sorted(dropped)}
+
+
+def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> dict:
+    """#100: a few sample labels with the values on the settings screen, saved or not (size, gap, shift, dpi,
+    type, printer, fields), so the owner can tune the roll in one go. No item, nothing saved."""
+    from . import labels as lb, settings as rs
+    ctx.require("settings.manage")
+    data = data or {}
+    cfg = rs.get(db, ctx.org_id)
+    if "label_lang" in data:
+        if data["label_lang"] not in lb.LANGS:
+            raise ValidationFailed("نوع طابعة الملصقات غير صحيح")
+        cfg["label_lang"] = data["label_lang"]
+    if cfg["label_lang"] not in ("tspl", "zpl"):
+        raise ValidationFailed("اختر نوع طابعة الملصقات (TSPL أو ZPL) لتجربة الطباعة المباشرة", code="labels_in_browser")
+    if "label_size" in data:
+        cfg["label_size"] = rs.label_size_ok(data["label_size"])
+    if "label_target" in data:
+        cfg["label_target"] = rs.check_target(data["label_target"], "win:Xprinter XP-365B")
+    if "label_dpi" in data:
+        if data["label_dpi"] not in lb.DPIS:
+            raise ValidationFailed("دقة الطابعة 203 أو 300")
+        cfg["label_dpi"] = data["label_dpi"]
+    if "label_gap" in data:
+        if not isinstance(data["label_gap"], int) or isinstance(data["label_gap"], bool) or not 0 <= data["label_gap"] <= 10:
+            raise ValidationFailed("المسافة بين الملصقات من 0 إلى 10 مم")
+        cfg["label_gap"] = data["label_gap"]
+    if "label_shift" in data:
+        cfg["label_shift"] = rs.label_shift_ok(data["label_shift"])
+    if isinstance(data.get("label_fields"), dict):
+        cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
+    if not cfg["label_target"]:
+        raise ValidationFailed("اختر طابعة الملصقات (مكان الطابعة) أولًا", code="no_printer")
+    w, h = label_size(cfg)
+    pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+              "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
+    shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
+    try:
+        img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
+        escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift))
+    except escpos.PrinterError as e:
+        raise PrintFailed(str(e)) from e
+    with db.transaction():
+        audit.record(db, ctx, "print.label_test", "printer", None,
+                     after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"],
+                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS})
+    return {"ok": True, "labels": lb.TEST_LABELS}
