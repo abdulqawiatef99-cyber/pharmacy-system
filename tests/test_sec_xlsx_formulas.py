@@ -22,9 +22,10 @@ class FormulaGuard(DBTestCase):
     def assert_no_formula(self, data: bytes, expect: list[str]):
         cells = self.cells(data)
         self.assertEqual([c.coordinate for c in cells if c.data_type == "f"], [])
-        values = {c.value for c in cells if c.data_type == "s"}
+        # XML parsers may turn a stored CR into LF on reading (openpyxl versions differ); the cell is text either way
+        values = {c.value.replace("\r", "\n") for c in cells if c.data_type == "s"}
         for v in expect:
-            self.assertIn(v, values)
+            self.assertIn(v.replace("\r", "\n"), values)
 
 
 class TestExports(FormulaGuard):
