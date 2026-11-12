@@ -163,6 +163,29 @@ class TestOpeningStock(DBTestCase):
         cs = inv.stock_for_item(self.db, self.ctx, caf)
         self.assertIsNone(cs["batches"][0]["expiry_date"])
 
+    def test_a_ledger_that_does_not_match_the_file_undoes_the_whole_import(self):
+        """If what reached the stock ledger differs from the file (a posting bug), nothing stays: no movement,
+        no balance, the run can be applied again once fixed (coverage 12/11: the reconciliation refusal never ran)."""
+        from unittest import mock
+        data = self.stock_sheet([[101, "Panadol", 5, 32, "P1", "05/2028"], [103, "Augmentin", 3, 120, "A1", "01/2029"]])
+        run = self.di.analyze(self.ctx, data, "stock.xlsx", kind="opening_stock")
+        real = inv.post_movement
+
+        def short(db, ctx, **kw):                       # the second row posts one unit less than the file says
+            if kw.get("qty_delta") == 6:
+                kw["qty_delta"] = 5
+            return real(db, ctx, **kw)
+        with mock.patch("app.dataimport.service.inventory.post_movement", side_effect=short):
+            with self.assertRaises(Conflict) as e:
+                self.di.apply(self.ctx, run)
+        self.assertEqual(e.exception.code, "reconciliation_failed")
+        self.assertEqual(self.db.one("SELECT count(*) FROM stock_movements")[0], 0)
+        self.assertEqual(self.db.one("SELECT count(*) FROM stock_balances WHERE qty <> 0")[0], 0)
+        self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (run,))[0], "analyzed")
+        rep = self.di.apply(self.ctx, run)              # the same run applies once the posting is right
+        self.assertTrue(rep["reconciliation"]["ok"])
+        self.assertEqual(rep["applied"]["posted_base_units"], 16)
+
     def test_fractional_units_rejected_atomically(self):
         data = self.stock_sheet([[101, "Panadol", 5, 32, None, None],
                                  [102, "Cataflam", 1.3, 49.2, None, None]])  # 2.6 strips
