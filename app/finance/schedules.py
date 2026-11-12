@@ -138,6 +138,9 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
     if db.one("SELECT 1 FROM expenses WHERE schedule_id=? AND schedule_period=? AND status<>'rejected'", (sid, period)):
         raise ValidationFailed("هذا الشهر سُجّل من قبل")
     with db.transaction():
+        # again under the write lock: two screens must not record this period twice
+        if db.one("SELECT 1 FROM expenses WHERE schedule_id=? AND schedule_period=? AND status<>'rejected'", (sid, period)):
+            raise ValidationFailed("هذا الشهر سُجّل من قبل")
         e = fin.record(db, ctx, category_id=s["category_id"], amount=amount, paid_from=paid_from or s["paid_from"],
                        note=(note or s["name"]) + f" ({period})")
         db.execute("UPDATE expenses SET schedule_id=?, schedule_period=? WHERE id=?", (sid, period, e["id"]))

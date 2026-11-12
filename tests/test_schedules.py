@@ -2,7 +2,7 @@
 from datetime import date
 
 from app.core import daily, notify, people
-from app.core.errors import Forbidden, ValidationFailed
+from app.core.errors import Conflict, Forbidden, ValidationFailed
 from app.finance import expenses as fin, schedules as sc
 from tests.helpers import DBTestCase
 
@@ -58,3 +58,59 @@ class TestSchedules(DBTestCase):
                                      "remind_days": 2, "start_month": "2026-10"})
         self.assertGreaterEqual(daily.run(self.db, date(2026, 10, 4)), 1)
         self.assertEqual(daily.run(self.db, date(2026, 10, 4)), 0)
+
+
+class TestPaidOnce(DBTestCase):
+    """Two screens acting on the same money at the same moment: the check before the write is repeated
+    inside it, so it happens once."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.cat = fin.categories(self.db, self.ctx)[0]["id"]
+
+    def after_first(self, prefix, action):
+        real, fired = self.db.one, []
+
+        def one(sql, params=()):
+            out = real(sql, params)
+            if not fired and sql.startswith(prefix):
+                fired.append(1)
+                action()
+            return out
+        self.db.one = one
+        return fired
+
+    def test_a_scheduled_expense_is_recorded_once_for_its_period(self):
+        s = sc.save(self.db, self.ctx, {"name": "إيجار الصيدلية", "category_id": self.cat, "amount": 500000,
+                                         "day_of_month": 1, "remind_days": 3})
+        fired = self.after_first("SELECT 1 FROM expenses WHERE schedule_id",
+                                 lambda: sc.pay(self.db, self.ctx, s["id"], paid_from="outside"))
+        with self.assertRaises(ValidationFailed):
+            sc.pay(self.db, self.ctx, s["id"], paid_from="outside")
+        self.assertEqual(fired, [1])
+        self.assertEqual(self.db.one("SELECT count(*) n FROM expenses WHERE org_id=? AND schedule_id=?",
+                                     (self.ctx.org_id, s["id"]))["n"], 1)
+
+    def test_an_approval_and_a_rejection_at_the_same_moment_do_not_both_stand(self):
+        people.add_user(self.db, self.ctx, username="asst", full_name="مساعد", password=PW, role_code="assistant")
+        a = self.login("asst", PW)
+        e = fin.record(self.db, a, category_id=self.cat, amount=12000, paid_from="outside", note="فاتورة كهرباء")
+        self.assertEqual(e["status"], "pending")
+        real, fired = fin.get, []
+
+        def get_then_reject(db, ctx, eid):
+            out = real(db, ctx, eid)
+            if not fired:
+                fired.append(1)
+                fin.decide(self.db, self.ctx, eid, False, "مكرر")
+            return out
+        fin.get = get_then_reject
+        try:
+            with self.assertRaises(Conflict):
+                fin.decide(self.db, self.ctx, e["id"], True)
+        finally:
+            fin.get = real
+        self.assertEqual(fin.get(self.db, self.ctx, e["id"])["status"], "rejected")
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE org_id=? AND action IN"
+                                     " ('expense.approve','expense.reject')", (self.ctx.org_id,))["n"], 1)
