@@ -538,6 +538,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"alert": integrity.banner(db, ctx)})
 
     @handler
+    async def stock_check_report(req):
+        """#202 «مطابقة الأرصدة»: POST runs the stock integrity check now and returns the report."""
+        from ..inventory import integrity
+        return J(await run_in_threadpool(integrity.report, db, ctx_of(req)))
+
+    @handler
     async def ui_settings_api(req):
         from ..core import ui_settings
         ctx = ctx_of(req)
@@ -2277,6 +2283,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
         Route("/api/stock/alert", stock_alert_api),
+        Route("/api/reports/stock-check", stock_check_report, methods=["POST"]),
         Route("/api/auth/quick-users", quick_users),
         Route("/api/auth/pin", pin_login, methods=["POST"]),
         Route("/api/me/pin", my_pin, methods=["POST"]),

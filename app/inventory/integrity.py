@@ -103,15 +103,16 @@ def _system_ctx(org_id: str) -> Context:
     return Context(user_id="system", org_id=org_id, branch_id=None)
 
 
-def check(db: Database, org_id: str, reason: str) -> dict:
+def check(db: Database, org_id: str, reason: str, actor: Context | None = None) -> dict:
     """Scan one pharmacy and record the outcome (audit row on mismatch, notification when the mismatch is new,
-    audit row when it is clean again). Never touches the stock tables."""
+    audit row when it is clean again). Never touches the stock tables. actor: who asked (the owner's report);
+    None = the program itself."""
     result = scan(db, org_id)
     prev = last_state(db, org_id)
     fp = _fingerprint(result)
+    ctx = actor or _system_ctx(org_id)
     if not result["ok"]:
         log.error("stock integrity mismatch (%s): %s", reason, result["counts"])
-        ctx = _system_ctx(org_id)
         with db.transaction():
             audit.record(db, ctx, MISMATCH, "system", None, after={
                 "reason": reason, "counts": result["counts"], "fingerprint": fp,
@@ -124,7 +125,7 @@ def check(db: Database, org_id: str, reason: str) -> dict:
                             "system", None)
     elif prev and prev.get("alert"):
         with db.transaction():
-            audit.record(db, _system_ctx(org_id), CLEAN, "system", None,
+            audit.record(db, ctx, CLEAN, "system", None,
                          after={"reason": reason, "movements": result["movements"]})
     result["fingerprint"] = fp
     return result
@@ -150,3 +151,44 @@ def banner(db: Database, ctx: Context) -> dict | None:
     if not st or not st.get("alert"):
         return None
     return {"at": st["at"], "counts": st.get("counts", {}), "reason": st.get("reason")}
+
+
+def report(db: Database, ctx: Context) -> dict:
+    """The owner's report «مطابقة الأرصدة»: runs the check now (recorded like any other run, by this user) and
+    returns it with names, plus the recent history of checks that found or cleared a mismatch."""
+    ctx.require("audit.read")
+    r = check(db, ctx.org_id, "manual", actor=ctx)
+    names: dict = {}
+
+    def item(iid):
+        if iid not in names:
+            x = db.one("SELECT name_en, name_ar, code FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
+            names[iid] = {"name": (x["name_en"] or x["name_ar"]) if x else None, "code": x["code"] if x else None}
+        return names[iid]
+
+    def batch(bid):
+        if not bid:
+            return {"batch_no": None, "expiry_date": None}
+        b = db.one("SELECT batch_no, expiry_date FROM batches WHERE id=?", (bid,))
+        return {"batch_no": b["batch_no"] if b else None, "expiry_date": b["expiry_date"] if b else None}
+
+    for k in KINDS:
+        rows = []
+        for row in r[k]:
+            row = dict(row)
+            row.update(item(row["item_id"]))
+            if k in ("batches", "negative"):
+                row.update(batch(row.get("batch_key")))
+            elif k == "foreign_batch":
+                row.update(batch(row.get("batch_id")))
+            rows.append(row)
+        r[k] = rows
+    r["items_checked"] = db.one("SELECT count(DISTINCT item_id) n FROM stock_balances WHERE org_id=?",
+                                (ctx.org_id,))["n"]
+    r["history"] = [{"at": h["at"], "ok": h["action"] == CLEAN, "who": h["full_name"] or "البرنامج",
+                     **{k: v for k, v in (json.loads(h["after_json"]) if h["after_json"] else {}).items()
+                        if k in ("reason", "counts")}}
+                    for h in db.all("SELECT a.at, a.action, a.after_json, u.full_name FROM audit_log a"
+                                    " LEFT JOIN users u ON u.id = a.user_id WHERE a.org_id=? AND a.action IN (?,?)"
+                                    " ORDER BY a.seq DESC LIMIT 20", (ctx.org_id, MISMATCH, CLEAN))]
+    return r
