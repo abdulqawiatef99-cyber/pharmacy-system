@@ -1,6 +1,8 @@
 """Card machines and transfer wallets (إنستاباي، فودافون كاش، ...) the pharmacy accepts."""
 from __future__ import annotations
 
+import sqlite3
+
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
@@ -30,22 +32,22 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
     name = str(data.get("name", "")).strip()
     kind = data.get("kind")
     with db.transaction():
-        if cid:
-            row = db.one("SELECT * FROM payment_channels WHERE id=? AND org_id=?", (cid, ctx.org_id))
-            if not row:
-                raise NotFound("غير موجود")
-            db.execute("UPDATE payment_channels SET name=?, is_active=? WHERE id=?",
-                       (name or row["name"], int(bool(data.get("is_active", row["is_active"]))), cid))
-        else:
-            if kind not in ("card", "transfer") or len(name) < 2:
-                raise ValidationFailed("اكتب الاسم واختر النوع")
-            try:
+        try:          # a rename to a name already used is the same conflict as adding it twice (was a 500)
+            if cid:
+                row = db.one("SELECT * FROM payment_channels WHERE id=? AND org_id=?", (cid, ctx.org_id))
+                if not row:
+                    raise NotFound("غير موجود")
+                db.execute("UPDATE payment_channels SET name=?, is_active=? WHERE id=?",
+                           (name or row["name"], int(bool(data.get("is_active", row["is_active"]))), cid))
+            else:
+                if kind not in ("card", "transfer") or len(name) < 2:
+                    raise ValidationFailed("اكتب الاسم واختر النوع")
                 db.execute("INSERT INTO payment_channels (id, org_id, kind, name, sort) VALUES (?,?,?,?,"
                            " (SELECT coalesce(max(sort),0)+1 FROM payment_channels WHERE org_id=?))",
                            (new_id(), ctx.org_id, kind, name, ctx.org_id))
-            except Exception as e:
-                if "UNIQUE" in str(e):
-                    raise Conflict("موجود بالفعل") from e
-                raise
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise Conflict("موجود بالفعل") from e
+            raise
         audit.record(db, ctx, "payment_channel.save", "payment_channel", cid, after=data)
     return listing(db, ctx)
