@@ -21,6 +21,7 @@ from ..catalog import matching, service as catalog
 from ..catalog.normalize import normalize_text
 from ..core import accounts, audit, notify
 from ..core.errors import Conflict, DomainError, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
@@ -317,7 +318,10 @@ class Purchasing:
                 if k == "supplier_id" and v:
                     catalog.get_supplier(self.db, ctx, v)
                 if k in ("declared_total", "extra_discount", "extra_tax") and v is not None:
-                    v = int(v)
+                    try:
+                        v = whole_number(v)          # piasters: 100.5 or true is refused, never cut
+                    except (TypeError, ValueError):
+                        raise ValidationFailed(f"قيمة غير صحيحة: {k}")
                     if v < 0:
                         raise ValidationFailed("القيمة لا تكون بالسالب")
                 if k in ("extra_discount", "extra_tax") and v is None:
@@ -376,7 +380,7 @@ class Purchasing:
                            "tax_amount", "line_total"):
                     if v is not None:
                         try:
-                            v = int(v)
+                            v = whole_number(v)      # 2.5 boxes or 12.5 piasters is refused, never cut
                         except (TypeError, ValueError):
                             raise ValidationFailed(f"قيمة غير صحيحة: {k}")
                         if v < 0 or (k == "discount_bp" and v > 10000):
