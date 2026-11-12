@@ -4042,8 +4042,10 @@ async function viewStockCheck() {
       html += `<p class="mt"><b>لم يُصلَّح أي رصيد تلقائيًا.</b> اطبع التقرير ده واتبع الخطوات في «ماذا أفعل عند ظهور اختلاف» تحت.</p>`;
       for (const [k, [title, cols]] of Object.entries(STOCK_KINDS)) {
         if (!r.counts[k]) continue;
-        html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>حسب الحركات</th><th>المعروض</th></tr></thead><tbody>
-          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td></tr>`; }).join("")}</tbody></table>
+        const ack = k === "sales" && ME.permissions.includes("settings.manage");
+        html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>${k === "sales" ? "خرج من المخزون" : "حسب الحركات"}</th><th>${k === "sales" ? "حسب الفاتورة" : "المعروض"}</th>${ack ? "<th class=\"noprint\">بعد الجرد</th>" : ""}</tr></thead><tbody>
+          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
+          ${ack ? `<p class="muted noprint">فاتورة بيع حركتها مختلفة عن الفاتورة بتفضل مختلفة في السجل للأبد. صحّح الرف بجرد الصنف الأول، وبعدين «تمت المراجعة» بملاحظة: السطر ده بس يختفي، ويرجع لو أرقامه اتغيّرت.</p>` : ""}
           ${r.counts[k] > r[k].length ? `<p class="muted">معروض أول ${r[k].length} فقط.</p>` : ""}`;
       }
       html += `<section class="panel mt"><h2>ماذا أفعل عند ظهور اختلاف</h2><ol>
@@ -4054,9 +4056,16 @@ async function viewStockCheck() {
     }
     if (r.history.length) {
       html += `<h2 class="mt">آخر الفحوصات اللي لقت اختلاف أو رجعت سليمة</h2><table><thead><tr><th>الوقت</th><th>النتيجة</th><th>الفحص</th><th>بواسطة</th></tr></thead><tbody>
-        ${r.history.map((h) => `<tr${h.ok ? "" : ` class="has-err"`}><td>${esc(when(h.at))}</td><td>${h.ok ? "مطابقة" : `${Object.values(h.counts || {}).reduce((a, b) => a + b, 0)} اختلاف`}</td><td>${esc(CHECK_REASONS[h.reason] || h.reason || "")}</td><td>${esc(h.who)}</td></tr>`).join("")}</tbody></table>`;
+        ${r.history.map((h) => `<tr${h.ok || h.ack ? "" : ` class="has-err"`}><td>${esc(when(h.at))}</td><td>${h.ack ? `مراجعة فاتورة ${esc(h.sale_no)}: ${esc(h.note)}` : h.ok ? "مطابقة" : `${Object.values(h.counts || {}).reduce((a, b) => a + b, 0)} اختلاف`}</td><td>${h.ack ? "" : esc(CHECK_REASONS[h.reason] || h.reason || "")}</td><td>${esc(h.who)}</td></tr>`).join("")}</tbody></table>`;
     }
     $("#scBox").innerHTML = html;
+    $("#scBox").querySelectorAll("[data-ack]").forEach((btn) => btn.addEventListener("click", async () => {
+      const [sale_id, item_id] = btn.dataset.ack.split("|");
+      const note = $("#scBox").querySelector(`[data-ackn="${CSS.escape(btn.dataset.ack)}"]`).value;
+      btn.disabled = true;
+      try { await api("/api/reports/stock-check/ack", { method: "POST", body: { sale_id, item_id, note } }); await load(); }
+      catch (e) { btn.disabled = false; toast(e.message, true); }
+    }));
     refreshStockAlert();
   };
   $("#scRun").onclick = () => load().catch((e) => toast(e.message, true));

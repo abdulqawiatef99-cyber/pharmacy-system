@@ -122,8 +122,12 @@ fixed → clean → banner gone).
      no button for it yet; until a dedicated, audited command exists, the safe way is restoring the newest
      backup that verifies (`manage.py restore`) — **the owner's approval is required** (`AGENTS.md` §5); a
      rebuild command is proposed as F29 in `FUTURE_REQUIREMENTS.md`, not built;
-   - **the ledger itself is wrong** against the shelf (e.g. a sale whose movement differs from its invoice): a
-     stock count on the affected items, approved by the owner. The count posts normal, audited movements; the
-     old rows stay.
-5. **Closed when** a check is clean again: the audit row `stock.integrity_ok` is written, the banner goes away,
+   - **a sale moved stock differently from its invoice** (`sales` kind): the shelf is corrected by a stock count
+     on that item, approved by the owner (normal, audited movements; the old rows stay). The sale's own movements
+     can never equal its invoice afterwards (the ledger is append-only and the count posts under
+     `count_session`), so the owner then marks **that exact row** «تمت المراجعة» on the report with a note
+     (`POST /api/reports/stock-check/ack`, `settings.manage` = owner only, audit `stock.integrity_ack`). The row
+     stays out only while its numbers are exactly the reviewed ones; any later change brings it back. Only
+     `sales` rows can be reviewed; a balance that differs from its ledger is never acknowledged away.
+5. **Closed when** a check is clean again (after a review, the report runs the check at once): the audit row `stock.integrity_ok` is written, the banner goes away,
    and the next backup succeeds. The cause and the fix go on the Issue.

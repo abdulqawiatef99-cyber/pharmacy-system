@@ -36,6 +36,21 @@ class ReportCase(APICase):
         c.commit()
         c.close()
 
+    def sale_mismatch(self):
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        CashDrawer(self.db).open(self.ctx, 0)
+        s = Sales(self.db)
+        sid = s.create(self.ctx)
+        d = s.add_line(self.ctx, sid, self.pan, units=4)
+        f = s.safety_check(self.ctx, sid)
+        s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={i: "ok" for i in range(len(f))})
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type,"
+                 " ref_type, ref_id) VALUES ('00000000-0000-7000-8000-0000000000bb',?,?,?,?,-1,'sale','sale',?)",
+                 (self.ctx.org_id, self.ctx.branch_id, self.pan, self.b1, sid))
+        self.raw("UPDATE stock_balances SET qty = qty - 1 WHERE item_id=?", (self.pan,))
+        return sid
+
 
 class TestReportApi(ReportCase):
     def test_clean(self):
@@ -121,6 +136,54 @@ class TestReportApi(ReportCase):
         js = (api.WEB_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn("${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف", js)
 
+    def test_a_sale_mismatch_is_cleared_only_by_the_owners_review(self):
+        """Codex P2 on #213: a count corrects the shelf but can never make the sale's own movements equal its
+        invoice (the ledger is append-only), so the owner marks that exact row reviewed, with a note."""
+        from app.inventory.counting import Counting
+        sid = self.sale_mismatch()
+        self.http_login()
+        d = self.c.post("/api/reports/stock-check", json={}, headers=H).json()
+        self.assertEqual(d["counts"]["sales"], 1)
+        cnt = Counting(self.db)                                   # the shelf is counted: still a sales difference
+        cs = cnt.create(self.ctx, title="جرد الصنف", scope="items", item_ids=[self.pan])
+        cnt.record(self.ctx, cs, item_id=self.pan, qty=15, batch_id=self.b1)
+        cnt.approve(self.ctx, cs)
+        self.assertEqual(self.c.post("/api/reports/stock-check", json={}, headers=H).json()["counts"]["sales"], 1)
+        bad = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan, "note": "x"}, headers=H)
+        self.assertEqual(bad.status_code, 422)
+        nf = self.c.post("/api/reports/stock-check/ack", json={"sale_id": "nope", "item_id": self.pan,
+                                                               "note": "جرد الصنف اليوم"}, headers=H)
+        self.assertEqual(nf.status_code, 404)
+        r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
+                                                              "note": "جرد الصنف اليوم وصحّحنا الرف"}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        d = r.json()
+        self.assertTrue(d["ok"], d["counts"])
+        self.assertTrue(d["history"][1]["ack"])
+        self.assertIsNone(self.c.get("/api/stock/alert", headers=H).json()["alert"])
+        a = self.db.one("SELECT user_id, entity_id FROM audit_log WHERE action=?", (integrity.ACK,))
+        self.assertEqual((a["user_id"], a["entity_id"]), (self.ctx.user_id, sid))
+        # the same sale moving again later is a new difference: it comes back
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type,"
+                 " ref_type, ref_id) VALUES ('00000000-0000-7000-8000-0000000000cc',?,?,?,?,-1,'sale','sale',?)",
+                 (self.ctx.org_id, self.ctx.branch_id, self.pan, self.b1, sid))
+        self.raw("UPDATE stock_balances SET qty = qty - 1 WHERE item_id=?", (self.pan,))
+        self.assertEqual(integrity.scan(self.db, self.ctx.org_id)["counts"]["sales"], 1)
+
+    def test_only_the_owner_reviews_and_only_sales_rows(self):
+        sid = self.sale_mismatch()
+        people.add_user(self.db, self.ctx, username="mgr1", full_name="M", password=PW, role_code="manager")
+        self.http_login("mgr1", PW)
+        r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
+                                                              "note": "جرد الصنف اليوم"}, headers=H)
+        self.assertEqual(r.status_code, 403)
+        self.raw("UPDATE stock_balances SET qty = qty + 5 WHERE item_id=?", (self.pan,))   # a balance difference
+        self.http_login()
+        r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
+                                                              "note": "جرد الصنف اليوم"}, headers=H).json()
+        self.assertEqual((r["counts"]["sales"], r["counts"]["batches"]), (0, 1))          # never acknowledged away
+        self.assertFalse(r["ok"])
+
     def test_screen_wiring(self):
         from app.api import app as api
         js = (api.WEB_DIR / "app.js").read_text(encoding="utf-8")
@@ -189,3 +252,57 @@ class TestReportInBrowser(ReportCase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
                          {"banner": True, "bad": True, "badge": True, "cleared": True})
+
+
+ACK_SCRIPT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+  const b = await chromium.launch();
+  const p = await (await b.newContext()).newPage();
+  await p.goto(base + '/');
+  await p.waitForSelector('#loginForm');
+  await p.fill('#loginForm [name=username]', user);
+  await p.fill('#loginForm [name=password]', pw);
+  await p.press('#loginForm [name=password]', 'Enter');
+  await p.waitForSelector('#stockAlert:not([hidden])', { timeout: 15000 });
+  await p.goto(base + '/#/stock-check');
+  await p.waitForSelector('#scBox [data-ack]', { timeout: 15000 });
+  const out = { button: true };
+  await p.fill('#scBox [data-ackn]', 'جرد الصنف اليوم وصحّحنا الرف');
+  await p.click('#scBox [data-ack]');
+  await p.waitForFunction(() => (document.querySelector('#scBox .badge') || {}).textContent?.includes('✔'), null, { timeout: 15000 });
+  out.historyShowsReview = (await p.textContent('#scBox')).includes('مراجعة فاتورة');
+  await p.waitForSelector('#stockAlert', { state: 'hidden', timeout: 15000 });
+  out.bannerGone = true;
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestReviewInBrowser(ReportCase):
+    def test_owner_reviews_a_sale_difference_on_the_screen(self):
+        import uvicorn
+        self.sale_mismatch()
+        integrity.check_all(self.db, "startup")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(self.app, host="127.0.0.1", port=port, log_level="error"))
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        try:
+            for _ in range(100):
+                if server.started:
+                    break
+                time.sleep(0.05)
+            r = subprocess.run([shutil.which("node"), "-e", ACK_SCRIPT, f"http://127.0.0.1:{port}", "owner", OWNER_PW],
+                               capture_output=True, text=True, timeout=120, cwd=str(Path(__file__).parent))
+        finally:
+            server.should_exit = True
+            t.join(10)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
+                         {"button": True, "historyShowsReview": True, "bannerGone": True})
