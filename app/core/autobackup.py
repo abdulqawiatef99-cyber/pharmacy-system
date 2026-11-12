@@ -44,8 +44,8 @@ def trigger(reason: str) -> None:
     """Ask for a backup soon (e.g. after closing a shift). Never blocks or raises."""
     inst = _instance
     if inst is not None and (reason != "shift_close" or inst.settings().get("on_shift_close", True)):
+        inst.pending_reason = reason                  # before waking the thread, so it sees the reason
         inst.wake.set()
-        inst.pending_reason = reason
 
 
 def _stamp(p: Path) -> datetime | None:
@@ -257,7 +257,10 @@ class AutoBackup:
             last = st.get("last_fail_at") or None      # retry a failed backup after one interval too
         if not last:
             return True
-        return datetime.fromisoformat(last) + timedelta(minutes=cfg["interval_min"]) <= datetime.now()
+        try:
+            return datetime.fromisoformat(last) + timedelta(minutes=cfg["interval_min"]) <= datetime.now()
+        except (TypeError, ValueError):               # a state or settings file edited by hand: back up now
+            return True
 
     def _loop(self) -> None:
         self.stop_event.wait(20)                      # let the program finish starting
@@ -267,10 +270,13 @@ class AutoBackup:
                 break
             if woke:
                 self.wake.clear()
-            reason = self.pending_reason
-            if reason or self._due():
-                self.pending_reason = None
-                self.run(reason or "schedule")
+            try:
+                reason = self.pending_reason
+                if reason or self._due():
+                    self.pending_reason = None
+                    self.run(reason or "schedule")
+            except Exception:                          # the scheduler thread must outlive any one bad check
+                log.exception("automatic backup scheduler: check failed")
 
     def start(self) -> None:
         global _instance
