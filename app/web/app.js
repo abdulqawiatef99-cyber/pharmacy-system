@@ -181,16 +181,17 @@ function toast(msg, isError = false) {
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
 // ------------------------------------------------------------------ on-screen approval
-// The owner or a manager types his PIN on this screen; the approval is kept for
-// 90 seconds on this screen only (cleared when leaving it), then asked again.
+// The owner or a manager types his PIN on this screen; the server checks it once and gives back a
+// token for that one action (permission + API path) for 90 seconds, on this screen only (cleared when
+// leaving it). The PIN itself is never kept (#137).
 let APPROVAL = null;
-const approvalHeaders = () => {
-  if (APPROVAL && APPROVAL.until > Date.now()) return { "X-Approver": APPROVAL.id, "X-Approver-Pin": APPROVAL.pin };
+const approvalHeaders = (action) => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.action === action ? { "X-Approval": APPROVAL.token } : {};
   APPROVAL = null; return {};
 };
 window.addEventListener("hashchange", () => { APPROVAL = null; });
 
-async function askApproval(details, message) {
+async function askApproval(details, message, method, path) {
   let list = [];
   try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
   if (!list.length) {
@@ -218,15 +219,16 @@ async function askApproval(details, message) {
       const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
       const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
         headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
-        body: JSON.stringify({ permission: details?.permission || "" }) });
+        body: JSON.stringify({ permission: details?.permission || "", method, path,
+          previous: APPROVAL && APPROVAL.id === who && APPROVAL.action === `${method} ${path}` && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
       const d = await r.json().catch(() => ({}));
-      const enough = r.ok && d.ok && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
+      const enough = r.ok && d.ok && d.token && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
       if (!enough) {
         err.hidden = false;
         err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غير صحيح"}` : "✕ الشخص الذي اخترته لا يملك هذه الصلاحية";
         form.pin.value = ""; form.pin.focus(); return;
       }
-      APPROVAL = { id: who, pin, until: Date.now() + 90000 };
+      APPROVAL = { id: who, action: `${method} ${path}`, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
       dlg.close(); resolve(true);
     });
     dlg.addEventListener("cancel", () => resolve(false), { once: true });
@@ -234,8 +236,10 @@ async function askApproval(details, message) {
 }
 
 const API = { busy: 0, last: 0 };
-async function api(path, { method = "GET", body, form, _retried = false } = {}) {
-  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
+const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
+async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
+  const apiPath = path.split("?")[0];
+  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -243,7 +247,7 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
+  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = _key || newKey();
   let r, data;
   API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
   try {
@@ -257,12 +261,19 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
     }
     data = await r.json().catch(() => ({}));
   } finally { API.busy--; API.last = Date.now(); }
-  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
-    if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
+  // one approval per distinct permission the action needs (a late restricted return of someone else's
+  // invoice needs four), each added to the same token; a permission asked twice means it was not granted
+  const perm = data?.error?.details?.permission;
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)) {
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
-  if (!r.ok && opts.headers["X-Approver"] && ["invalid_pin", "pin_locked"].includes(data?.error?.code)) APPROVAL = null;
+  if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
+    APPROVAL = null;
+    // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
+    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
+  }
   if (!r.ok) {
-    if (r.status === 401 && !path.startsWith("/api/auth") && !opts.headers["X-Approver"]) { ME = null; location.hash = "#/login"; }
+    if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
     const err = new Error(data?.error?.message || "خطأ في الاتصال");
     err.code = data?.error?.code; err.details = data?.error?.details;
     throw err;

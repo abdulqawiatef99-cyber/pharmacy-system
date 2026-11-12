@@ -14,6 +14,15 @@ FUT = (date.today() + timedelta(days=700)).strftime("%m/%Y")
 H = {"X-Requested-With": "pharm"}
 
 
+def approval_headers(client, approver_id, pin, permission, path, method="GET"):
+    """What the approval box does (#137): the PIN goes to /api/approvals/check once, the action (method +
+    path) then carries the token it returns. Returns the headers for the action (no approval if refused)."""
+    r = client.post("/api/approvals/check", json={"permission": permission, "path": path, "method": method},
+                    headers={**H, "X-Approver": approver_id, "X-Approver-Pin": pin})
+    token = r.json().get("token") if r.status_code == 200 else None
+    return {**H, "X-Approval": token} if token else dict(H)
+
+
 class APICase(DBTestCase):
     def setUp(self):
         super().setUp()

@@ -14,7 +14,7 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 from app.core import people, security
-from tests.test_api import APICase, H
+from tests.test_api import APICase, H, approval_headers
 from tests.helpers import OWNER_PW, needs_browser
 
 PW = "Staff-Pass-2026"
@@ -65,12 +65,15 @@ class TestOwnerCredentials(APICase):
                               role_code="pharmacist")
         a = TestClient(self.app)
         self.http_login("asst", PW, client=a)
-        hdr = {**H, "X-Approver": self.owner, "X-Approver-Pin": "9753"}
-        r = a.post(f"/api/users/{self.owner}/pin", json={"pin": "4826"}, headers=hdr)
+        path = f"/api/users/{self.owner}/pin"
+        hdr = approval_headers(a, self.owner, "9753", "users.manage", path, "POST")
+        self.assertIn("X-Approval", hdr)
+        r = a.post(path, json={"pin": "4826"}, headers=hdr)
         self.assertEqual(r.status_code, 403, r.text)
         self.assertTrue(security.verify_password("9753", self._pin_hash(self.owner)))
         # the owner (or his approval) still sets a staff member's PIN as before
-        r = a.post(f"/api/users/{uid}/pin", json={"pin": "5172"}, headers=hdr)
+        path = f"/api/users/{uid}/pin"
+        r = a.post(path, json={"pin": "5172"}, headers=approval_headers(a, self.owner, "9753", "users.manage", path, "POST"))
         self.assertEqual(r.status_code, 200, r.text)
         self.http_login(client=self.c)
         r = self.c.post(f"/api/users/{uid}/pin", json={"pin": "5283"}, headers=H)
