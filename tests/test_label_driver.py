@@ -305,3 +305,28 @@ class TestLabelLanguage(DriverCase):
             lb.render_label(data, 38, 11.5, 203, {**lb.DEFAULT_FIELDS, "pharmacy": True, "phone": True})
         sizes = dict(captured)
         self.assertLess(sizes["Abdul Qawi Pharmacy"], max(s for _, s in captured))   # made smaller, not just cut
+
+
+class TestRowsAndShrinkEdges(DriverCase):
+    def test_rows_keep_their_place_when_dpi_differs(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 2})
+        f = self.use(FakeWindows(caps=(450, 590, 300, 600)))       # 38.1 x 25.0 mm at 300 x 600 dpi
+        print_labels(self.db, self.ctx, [(self.pan, 2)])
+        page = f.images[0]
+        self.assertEqual(page.size, (450, round(590 * 25.4 / 600 * 300 / 25.4)))   # square at 300 dpi
+        self.assertEqual(f.pages[0][3], (0, 0, 450, 590))                          # stretched to the page
+
+    def test_shrinking_stops_at_seventy_percent(self):
+        from app.printing import labels as lb
+        sizes = []
+        real = lb._fit
+
+        def spy(d, text, font, width, **kw):
+            sizes.append((text, font.size))
+            return real(d, text, font, width, **kw)
+        data = {"name": "A very long medicine name that cannot fit on a small label at all " * 2, "value": "6221025012340",
+                "code": "", "price": "", "expiry": "", "pharmacy": "", "phone": ""}
+        with mock.patch.object(lb, "_fit", spy):
+            lb.render_label(data, 38, 25, 300, lb.DEFAULT_FIELDS)
+        start = max(10, min(round(25 * 300 / 25.4) // 7, round(3.2 * 300 / 25.4)))
+        self.assertGreaterEqual(dict(sizes)[data["name"]], max(10, int(start * 0.7)))

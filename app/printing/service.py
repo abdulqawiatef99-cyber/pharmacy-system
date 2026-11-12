@@ -333,7 +333,9 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
         row_mm = (pg.h_mm - gap * (rows - 1)) / rows
         if row_mm < 6:
             raise escpos.PrinterError("الصفحة صغيرة على عدد الملصقات ده: قلل عدد الملصقات في الصفحة")
-        dots = lambda mm: round(mm * pg.dpi_y / 25.4)            # noqa: E731
+        # composed at the labels' own (horizontal) resolution; the driver page stretches it to its pixels,
+        # so a driver with different vertical dots per inch keeps the rows where they belong
+        dots = lambda mm: round(mm * pg.dpi_x / 25.4)            # noqa: E731
         labels = []
         for data, n in wanted:
             img, gone = lb.render_label(data, pg.w_mm, row_mm, pg.dpi_x, cfg["label_fields"])
