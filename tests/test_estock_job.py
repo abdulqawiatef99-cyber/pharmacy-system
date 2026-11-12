@@ -76,6 +76,15 @@ class TestPacksFile(DBTestCase):
         p.write_text(json.dumps({"30906": 3, "77": 0}), encoding="utf-8")
         self.assertEqual(estock_job.read_packs(p), {"30906": 3})
 
+    def test_json_packs_refuse_a_fraction_like_the_sheet(self):
+        for bad in (2.5, "2.5", -3, True, "x"):
+            with self.subTest(bad=bad):
+                p = Path(tempfile.mkdtemp(dir=self.tmp)) / "p.json"
+                p.write_text(json.dumps({"packs": {"77": 2, "30906": bad}}), encoding="utf-8")
+                with self.assertRaises(ValidationFailed) as e:
+                    estock_job.read_packs(p)
+                self.assertIn("30906", str(e.exception))
+
 
 class TestJobRules(DBTestCase):
     def files(self, packs_rows=None, store2_cost=20.0):
