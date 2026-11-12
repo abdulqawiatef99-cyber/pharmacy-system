@@ -2945,8 +2945,10 @@ function newCustomerDialog() {
     try {
       const c = await api("/api/customers", { method: "POST", body });
       SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } });
-      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone)
-        SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { phone: body.phone } } });
+      const fill = {};                                // like choosing an existing customer: fill only what is empty
+      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone) fill.phone = body.phone;
+      if (SALE.kind === "delivery" && body.address1 && !SALE.delivery?.address) fill.address = body.address1;
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: fill } });
       done(); renderSide();
     } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
   });

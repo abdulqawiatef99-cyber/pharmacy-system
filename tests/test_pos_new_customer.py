@@ -55,6 +55,33 @@ const { chromium } = require('playwright');
 """
 
 
+DELIVERY = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  await p.goto(base + '/');
+  await p.waitForSelector('#loginForm');
+  await p.evaluate(async ([u, w]) => fetch('/api/auth/login', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ username: u, password: w }) }), [user, pw]);
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('button[data-kind="delivery"]');
+  await p.locator('button[data-kind="delivery"]').click();
+  await p.waitForSelector('[data-dl="address"]');
+  await p.locator('#posCustNew').click();
+  await p.waitForSelector('#custNewDlg[open] [name=address1]');
+  await p.locator('#custNewDlg [name=name]').fill('عميل توصيل وهمي');
+  await p.locator('#custNewDlg [name=phone]').fill('01000000003');
+  await p.locator('#custNewDlg [name=address1]').fill('شارع وهمي 7');
+  await p.locator('#custNewDlg button[value=ok]').click();
+  await p.waitForSelector('#custClear', { timeout: 10000 });
+  console.log(JSON.stringify({ address: await p.locator('[data-dl="address"]').inputValue() }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
 class Wiring(unittest.TestCase):
     def test_no_prompt_box_for_a_new_customer(self):
         js = APP_JS.read_text(encoding="utf-8")
@@ -65,9 +92,8 @@ class Wiring(unittest.TestCase):
 
 @needs_browser
 class NewCustomerInBrowser(APICase):
-    def test_form_keeps_the_typing_on_a_refusal_and_saves_once(self):
+    def run_script(self, script):
         import uvicorn
-        Sales(self.db).create_customer(self.ctx, name="عميل وهمي قديم", phone="01000000001")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -79,13 +105,17 @@ class NewCustomerInBrowser(APICase):
                 if server.started:
                     break
                 time.sleep(0.05)
-            r = subprocess.run([shutil.which("node"), "-e", SCRIPT, f"http://127.0.0.1:{port}", "owner", OWNER_PW],
+            r = subprocess.run([shutil.which("node"), "-e", script, f"http://127.0.0.1:{port}", "owner", OWNER_PW],
                                capture_output=True, text=True, timeout=120, cwd=str(Path(__file__).parent))
         finally:
             server.should_exit = True
             t.join(10)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        out = json.loads(r.stdout.strip().splitlines()[-1])
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_form_keeps_the_typing_on_a_refusal_and_saves_once(self):
+        Sales(self.db).create_customer(self.ctx, name="عميل وهمي قديم", phone="01000000001")
+        out = self.run_script(SCRIPT)
         self.assertEqual(out["dialogs"], [])                                 # no prompt() / alert()
         self.assertEqual(out["prefilled"], ["", "01000000001", "name"])
         self.assertEqual(out["refused"], {"open": True, "name": "عميل وهمي جديد"})
@@ -95,3 +125,11 @@ class NewCustomerInBrowser(APICase):
         self.assertEqual(out["chosen"], "عميل وهمي جديد")
         rows = self.db.all("SELECT phone FROM customers WHERE org_id=? AND name=?", (self.ctx.org_id, "عميل وهمي جديد"))
         self.assertEqual([x["phone"] for x in rows], ["01000000002"])
+
+    def test_delivery_sale_takes_the_new_customers_address_and_phone(self):
+        out = self.run_script(DELIVERY)
+        self.assertEqual(out["address"], "شارع وهمي 7")
+        d = self.db.one("SELECT d.address, d.phone, c.address1 FROM sale_deliveries d JOIN sales s ON s.id=d.sale_id"
+                        " JOIN customers c ON c.id=s.customer_id WHERE d.org_id=? ORDER BY s.created_at DESC LIMIT 1",
+                        (self.ctx.org_id,))
+        self.assertEqual((d["address"], d["phone"], d["address1"]), ("شارع وهمي 7", "01000000003", "شارع وهمي 7"))
