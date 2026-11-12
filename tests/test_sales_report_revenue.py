@@ -71,6 +71,25 @@ class TopItemsRevenue(PlanCase):
         totals = rep["totals"]
         self.assertEqual(sum(t["revenue"] for t in rep["top_items"]), totals["total"] - totals["returns"])
 
+    def test_many_lines_with_returns_are_each_valued_on_their_own_allocations(self):
+        """Several sales with returns in the period, read in one batch: each line keeps its own value."""
+        a, b = self.split_box("Batch A", cost=Decimal("7")), self.split_box("Batch B", cost=Decimal("7"))
+        refunds = {}
+        for item, keep_bp in ((a, 0), (b, 750)):
+            sid = self.draft()
+            d = self.line(sid, item, packs=1, discount_bp=keep_bp)
+            done = self.complete(sid, [{"method": "cash", "amount": d["total"]}])
+            lid = done["lines"][0]["id"]
+            r = self.call("POST", f"/api/sales/{sid}/return", json={"lines": {lid: 2}, "refund_method": "cash",
+                                                                    "reason": "مراجعة"})
+            refunds[item] = d["total"] - r["refund"]
+        self.sell(self.box, units=1)                                  # an untouched line in the same period
+        top, rep = self.top()
+        self.assertEqual({k: top[k]["revenue"] for k in (a, b)}, refunds)
+        self.assertEqual(top[self.box]["revenue"], 3333)
+        totals = rep["totals"]
+        self.assertEqual(sum(t["revenue"] for t in rep["top_items"]), totals["total"] - totals["returns"])
+
     def test_a_line_sold_under_the_old_per_batch_rule_keeps_its_recorded_total(self):
         """A sale recorded before 0.4 priced each batch alone (2 x 10.33 + 10.33 = 30.99, #72): the report
         shows the money that sale actually took, not today's rule."""

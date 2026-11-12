@@ -58,8 +58,8 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             " sum(a.returned_qty) returned, sum((a.qty_base - a.returned_qty) * coalesce(CAST(a.unit_cost AS REAL), 0) * 100) cost,"
             " sum(a.unit_cost IS NULL) unknown"
             " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
-            " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
-            " GROUP BY l.id", p):
+            " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
+            " AND s.completed_at>=? AND s.completed_at<? GROUP BY l.id", p):
         d = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "qty": 0, "revenue": 0, "cost": 0.0, "unknown": 0})
         d["qty"] += r["qty"]
         d["cost"] += r["cost"]
@@ -68,11 +68,20 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             d["revenue"] += r["line_total"]
         else:
             partial.append((d, dict(r)))
-    for d, l in partial:
-        allocs = [dict(a) for a in db.all("SELECT id, qty_base, returned_qty, unit_price, pack_price, pack_size"
-                                          " FROM sale_allocations WHERE sale_line_id=?", (l["id"],))]
-        kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-        d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+    if partial:              # one read for all of them (same period and organization), not one per line
+        want = {l["id"] for _, l in partial}
+        allocs_of: dict[str, list[dict]] = {}
+        for a in db.all(
+                "SELECT a.sale_line_id, a.id, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
+                " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
+                " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
+                " AND s.completed_at>=? AND s.completed_at<?", p):
+            if a["sale_line_id"] in want:
+                allocs_of.setdefault(a["sale_line_id"], []).append(dict(a))
+        for d, l in partial:
+            allocs = allocs_of.get(l["id"], [])
+            kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+            d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
     ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]
     names = {r["id"]: dict(r) for r in db.all(
         "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
