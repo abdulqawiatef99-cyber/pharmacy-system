@@ -69,6 +69,26 @@ class TestReportApi(ReportCase):
         self.assertEqual([h["ok"] for h in d["history"]], [True, False])
         self.assertIsNone(self.c.get("/api/stock/alert", headers=H).json()["alert"])
 
+    def test_another_pharmacys_batch_is_not_shown(self):
+        org, other = self.second_tenant()
+        theirs = cat.create_item(self.db, other, {"name_en": "Their item", "pack_size": 1, "public_price": 100})
+        with self.db.transaction():
+            secret = inv.get_or_create_batch(self.db, other, theirs, "THEIR-SECRET-LOT", "2031-01-31")
+        mid = "00000000-0000-7000-8000-0000000000aa"       # damage: our movement points at their batch
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type)"
+                 " VALUES (?,?,?,?,?,1,'adjustment')", (mid, self.ctx.org_id, self.ctx.branch_id, self.pan, secret))
+        self.raw("INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty) VALUES (?,?,?,?,1)",
+                 (self.ctx.org_id, self.ctx.branch_id, self.pan, secret))
+        self.http_login()
+        r = self.c.post("/api/reports/stock-check", json={}, headers=H)
+        d = r.json()
+        self.assertEqual(d["counts"]["foreign_batch"], 1)
+        self.assertNotIn("THEIR-SECRET-LOT", r.text)
+        self.assertNotIn("2031-01-31", r.text)
+        self.assertIsNone(d["foreign_batch"][0]["batch_no"])
+        self.assertIsNone(d["foreign_batch"][0]["batch_item_id"])
+        self.assertNotIn(theirs, r.text)
+
     def test_only_owner_and_manager(self):
         people.add_user(self.db, self.ctx, username="pharm1", full_name="P", password=PW, role_code="pharmacist")
         self.http_login("pharm1", PW)

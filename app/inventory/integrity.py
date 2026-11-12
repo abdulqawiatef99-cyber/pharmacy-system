@@ -48,7 +48,8 @@ def _negative(db: Database, org_id: str) -> list[dict]:
 
 def _foreign_batch(db: Database, org_id: str) -> list[dict]:
     return [dict(r) for r in db.all(
-        "SELECT m.id movement_id, m.item_id, m.batch_id, b.item_id batch_item_id FROM stock_movements m"
+        "SELECT m.id movement_id, m.item_id, m.batch_id,"
+        " CASE WHEN b.org_id = m.org_id THEN b.item_id END batch_item_id FROM stock_movements m"   # never another org's id
         " JOIN batches b ON b.id = m.batch_id WHERE m.org_id=? AND (b.item_id <> m.item_id OR b.org_id <> m.org_id)",
         (org_id,))]
 
@@ -171,7 +172,8 @@ def report(db: Database, ctx: Context) -> dict:
     def batch(bid):
         if not bid:
             return {"batch_no": None, "expiry_date": None}
-        b = db.one("SELECT batch_no, expiry_date FROM batches WHERE id=?", (bid,))
+        # scoped to the pharmacy asking: a foreign_batch row may point at another pharmacy's batch (Codex P1)
+        b = db.one("SELECT batch_no, expiry_date FROM batches WHERE id=? AND org_id=?", (bid, ctx.org_id))
         return {"batch_no": b["batch_no"] if b else None, "expiry_date": b["expiry_date"] if b else None}
 
     for k in KINDS:
