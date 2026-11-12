@@ -89,6 +89,10 @@ def _index_html() -> str:
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
 MAX_UPLOAD_FILES = 3          # the most files one upload route takes (dead-stock report)
+# A screen's table sent back for an Excel file (reports/export.py, up to MAX_ROWS rows): the range
+# invoice list alone can hold 5,000 invoices, about 0.6 MB, so the general JSON limit is too small here.
+MAX_EXPORT_JSON = 8 * 1024 * 1024
+JSON_LIMITS = {"/api/export/xlsx": MAX_EXPORT_JSON}
 
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
@@ -248,7 +252,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _body_limit(req: Request) -> int:
         if "multipart/form-data" in req.headers.get("content-type", ""):
             return MAX_UPLOAD_FILES * s.max_upload_bytes + 64 * 1024
-        return MAX_JSON
+        return JSON_LIMITS.get(req.url.path, MAX_JSON)
 
     async def _read_body(req: Request) -> bytes:
         """req.body() that stops at the limit instead of reading everything first (#140).
@@ -268,8 +272,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     async def body(req: Request) -> dict:
         raw = await _read_body(req)
-        if len(raw) > MAX_JSON:
-            raise ValidationFailed("الطلب كبير جدًا")
+        if len(raw) > JSON_LIMITS.get(req.url.path, MAX_JSON):
+            raise ValidationFailed("الطلب كبير جدًا", code="too_large")
         if not raw:
             return {}
         try:
