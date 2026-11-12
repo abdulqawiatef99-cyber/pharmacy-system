@@ -534,6 +534,13 @@ class Sales:
             s = self._draft(ctx, sid)
             if s["version"] != preview["version"]:
                 raise Conflict("عُدّلت الفاتورة أثناء الإتمام", code="stale_version")
+            if on_credit:            # #143: again inside the write lock, so two cashiers cannot pass it together
+                c = self.db.one("SELECT credit_limit FROM customers WHERE id=? AND org_id=?",
+                                (s["customer_id"], ctx.org_id))
+                bal = self.balance(ctx, s["customer_id"])
+                if not c or bal + on_credit > c["credit_limit"]:
+                    raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
+                                   details={"balance": bal, "limit": c["credit_limit"] if c else 0})
             total = 0
             below_cost = []
             for l in preview["lines"]:
