@@ -2610,7 +2610,7 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {} };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -2917,8 +2917,11 @@ function renderSide() {
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
-    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
-    catch (er) { toast(er.message, true); }
+    POS.saving = (async () => {        // complete() waits for it: F9 typed in the address field (11/01)
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
+      catch (er) { toast(er.message, true); }
+    })();
+    await POS.saving;
   }));
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
@@ -2991,6 +2994,10 @@ function currentPayments() {
 }
 
 async function complete(findings) {
+  // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
+  // for a missing address that is right there on the screen (device test 11/01)
+  if (document.activeElement?.dataset?.dl) document.activeElement.blur();
+  await POS.saving;
   const payments = currentPayments();
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
