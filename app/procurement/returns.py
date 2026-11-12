@@ -44,14 +44,17 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
             raise NotFound("صنف غير موجود")
         if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
             raise NotFound("التشغيلة لا تخص الصنف")
-        if not isinstance(qty, int) or qty <= 0:
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:     # true is not 1 unit
             raise ValidationFailed("الكمية غير صحيحة")
         if reason not in REASONS:
             raise ValidationFailed("اختر سبب المرتجع لكل صنف")
         value = ln.get("unit_value")
         if value is None:
             value = suggest_value(db, ctx, item_id, batch_id)
-        if not isinstance(value, int) or value < 0:
+        elif not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
+            # a typed value credits the supplier's account with that amount: only who may see the values
+            ctx.require("suppliers.pay")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValidationFailed("قيمة الوحدة غير صحيحة")
         clean.append((item_id, batch_id, qty, value, reason))
     total = sum(q * v for _, _, q, v, _ in clean)
