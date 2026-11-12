@@ -12,6 +12,7 @@ from ..core import audit, notify
 import json
 
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 
@@ -56,7 +57,7 @@ def count_total(detail: dict) -> tuple[int, dict]:
     clean = {}
     for k, v in detail.items():
         try:
-            d, n = int(k), int(v or 0)
+            d, n = int(k), whole_number(v or 0)      # 2.5 notes is refused, never counted as 2
         except (TypeError, ValueError):
             raise ValidationFailed("عدد الفئات غير صحيح")
         if d not in DENOMINATIONS or n < 0 or n > 100000:
