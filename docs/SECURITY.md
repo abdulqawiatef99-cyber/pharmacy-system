@@ -18,6 +18,7 @@
 | Request size before reading | JSON bodies and every upload route are refused from `Content-Length` before reading; a body without a length is read only up to the limit; uploads need a `Content-Length` (#140) | `test_sec_misc_hardening.TestRequestSize` |
 | Spreadsheet bombs | an uploaded xlsx is refused if it unpacks past 256 MB or holds more than 5 million cells (a tiny file can declare a huge sheet) (#140) | `test_sec_misc_hardening.TestSpreadsheetBomb` |
 | No personal data in the server log | the access log keeps the path, never the query string (customer search by phone or name) (#140) | `test_sec_misc_hardening.TestAccessLog` |
+| Host allowlist (DNS rebinding) | every request whose `Host` is not `127.0.0.1`/`localhost`/`[::1]`, the address the connection arrived on (LAN mode), or a name in `PHARM_ALLOWED_HOSTS` gets 403 `bad_host`; a Host port must be the listening port (#136) | `test_sec_host_header.py` |
 | Headers | strict CSP (no inline script/style), nosniff, frame-ancestors none, no-store on API | API test |
 | Errors | internal exceptions logged, generic message to client; malformed import fields and item ids answer 422, not 500 (#140) | handler, `TestBadFields` |
 | Self-granting features | entitlements settable only by platform operator | `test_tenant_cannot_grant_itself` |

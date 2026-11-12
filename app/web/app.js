@@ -17,6 +17,8 @@ const fmtStock = (q, it) => {
   return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// a typed whole number; "2.5" goes to the server as typed and is refused there, never cut to 2 by parseInt
+const typedWhole = (v) => { const t = String(v ?? "").trim(); if (t === "") return null; const n = Number(t); return Number.isInteger(n) ? n : t; };
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
@@ -231,6 +233,7 @@ async function askApproval(details, message) {
   });
 }
 
+const API = { busy: 0, last: 0 };
 async function api(path, { method = "GET", body, form, _retried = false } = {}) {
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -241,16 +244,19 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
   if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
-  let r;
-  for (let attempt = 0; ; attempt++) {
-    try { r = await fetch(path, opts); break; }
-    catch (netErr) {
-      if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-      if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
-      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+  let r, data;
+  API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { r = await fetch(path, opts); break; }
+      catch (netErr) {
+        if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
+        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+      }
     }
-  }
-  const data = await r.json().catch(() => ({}));
+    data = await r.json().catch(() => ({}));
+  } finally { API.busy--; API.last = Date.now(); }
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
     if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
   }
@@ -544,8 +550,8 @@ function viewSetup() {
   <form class="panel login" id="setupForm">
     <h1>أهلًا بك</h1>
     <p class="muted">هذه أول مرة يعمل فيها البرنامج على هذا الجهاز. أدخل هذه البيانات مرة واحدة فقط.</p>
-    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية عبد القوي"></label><br>
-    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. عبد القوي"></label><br>
+    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية الشفاء"></label><br>
+    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. أحمد محمود"></label><br>
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة السر <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
@@ -876,9 +882,9 @@ function bindQuickAdd() {
   q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
   const add = async () => {
     if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
-    const qty = parseInt($("#qaQty").value, 10);
-    if (!(qty > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: parseInt($("#qaBonus").value || "0", 10) };
+    const qty = typedWhole($("#qaQty").value);
+    if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
+    const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
@@ -957,8 +963,8 @@ async function purchaseTabs(curId) {
 
 const CONVERT = {
   public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters, tax_amount: toPiasters,
-  discount_bp: toBp, qty: (v) => (v === "" ? null : parseInt(v, 10)),
-  bonus_qty: (v) => (v === "" ? 0 : parseInt(v, 10)), batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
+  discount_bp: toBp, qty: (v) => typedWhole(v),
+  bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
 async function save(path, body, method = "PATCH") {
@@ -1729,8 +1735,8 @@ async function viewCountSession(id) {
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
   const save = async (recount) => {
-    const qty = parseInt($("#cntQty").value, 10);
-    if (Number.isNaN(qty) || qty < 0) return toast("اكتب كمية صحيحة", true);
+    const qty = typedWhole($("#cntQty").value);
+    if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
     try {
       await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
         location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
@@ -1961,15 +1967,18 @@ async function renderReceiptCfg(c) {
       <div class="lbprev"><img id="lbPrev" alt="معاينة الملصق"><p id="lbPrevMsg" class="muted small"></p></div></fieldset>
     <fieldset class="lblp"><legend>طابعة الملصقات</legend>
       <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option><option value="a4" ${c.label_lang === "a4" ? "selected" : ""}>من المتصفح على ورق A4 (شبكة)</option>
+        <option value="driver" ${c.label_lang === "driver" ? "selected" : ""}>عن طريق تعريف الطابعة في ويندوز (زي إي ستوك) — الأنسب</option>
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
-      <label class="f">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
-      <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
-      <label class="f">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
-      <p class="muted">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
-      <label class="f">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
+      <label class="chk lbDrv"><input type="checkbox" name="label_flip" ${c.label_flip ? "checked" : ""}> اقلب الملصق (لو بيطلع مقلوب)</label>
+      <p class="muted lbDrv">البرنامج بيطبع عن طريق تعريف الطابعة في ويندوز، زي إي ستوك بالظبط: مقاس الملصق والمسافة بين الملصقات والاتجاه بتتاخد من «تفضيلات الطباعة» للطابعة في ويندوز (نفس اللي إي ستوك بيطبع بيه). المقاس اللي فوق بيُستخدم بس لو اتطبع من المتصفح.</p>
+      <label class="f lbRaw">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
+      <label class="f lbRaw">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
+      <label class="f lbRaw">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
+      <p class="muted lbRaw">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
+      <label class="f lbRaw">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
         .map((v) => `<option value="${v}" ${(c.label_variant || "current") === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
-      <div class="row"><button type="button" class="btn small secondary" id="lbCal">معايرة بكرة الملصقات</button>
+      <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
     <fieldset class="lblp"><legend>اللوجو والكود (QR) أعلى الإيصال</legend>
@@ -2004,15 +2013,20 @@ async function renderReceiptCfg(c) {
     try {
       const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
         body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
-          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value }) });
+          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim() }) });
       if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
       const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
       if (prevUrl) URL.revokeObjectURL(prevUrl);
       prevUrl = URL.createObjectURL(await r.blob());
       $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
-      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}` : "المعاينة بنفس شكل الطباعة المباشرة (بيانات تجربة).";
+      const fromWin = r.headers.get("X-Label-Source") === "windows" ? ` على مقاس ويندوز ${(r.headers.get("X-Label-Size") || "").replace("x", " × ")} مم` : "";
+      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
     } catch { /* preview only */ }
   }, 300); };
+  // #100: through the Windows driver, size, gap and direction come from Windows: the raw-printer fields hide
+  const lbMode = () => { const drv = lf.label_lang.value === "driver";
+    lf.querySelectorAll(".lbRaw").forEach((x) => { x.hidden = drv; }); lf.querySelectorAll(".lbDrv").forEach((x) => { x.hidden = !drv; }); };
+  lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview);
   showCustom(); preview();
   lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
   ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
@@ -2025,7 +2039,7 @@ async function renderReceiptCfg(c) {
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
       qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
@@ -2042,8 +2056,8 @@ async function renderReceiptCfg(c) {
     try {
       const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
-        label_variant: lf.label_variant.value } });
-      toast(`أُرسل ${r.labels} ملصق تجربة — لو تمام دوس «احفظ»`);
+        label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked } });
+      toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — لو تمام دوس «احفظ»`);
     } catch (err) { toast(err.message, true); }
   });
   $("#lbCal").addEventListener("click", async () => {
@@ -2131,6 +2145,38 @@ function renderBackup(b) {
 async function checkUpdateBadge() {
   if (!ME?.permissions?.includes("settings.manage")) { $("#navSystem")?.setAttribute("hidden", ""); return; }
   try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
+}
+
+// An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
+const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
+function screenIdle() {
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen,
+  // and only while no field holds text the person typed but the screen has not saved yet
+  if ($("dialog[open]")) return false;
+  if (API.busy || Date.now() - API.last < 3000) return false;     // a scan or a save may still be on its way
+  const typed = [...document.querySelectorAll("input, textarea, select")].some((el) =>
+    el.type === "checkbox" || el.type === "radio" ? el.checked !== el.defaultChecked
+      : el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : el.value !== el.defaultValue);
+  if (typed) return false;
+  const h = location.hash || "#/home";
+  if (h === "#/login" || h === "#/home") return true;
+  return h.startsWith("#/pos") && !(SALE?.lines?.length);
+}
+async function checkBuild() {
+  if (!BUILD || checkBuild.stale) return;
+  let h;
+  try { h = await (await fetch("/api/health", { cache: "no-store" })).json(); } catch { return; }   // restarting
+  if (!h?.web || h.web === BUILD) return;
+  if (screenIdle()) { location.reload(); return; }
+  checkBuild.stale = true;
+  $("#staleBar").hidden = false;
+}
+if (BUILD) {
+  $("#staleBar")?.addEventListener("click", () => location.reload());
+  setInterval(checkBuild, 60000);
+  window.addEventListener("focus", checkBuild);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
 }
 
 // ------------------------------------------------------------------ sales history / returns
@@ -2398,7 +2444,7 @@ async function viewSale(id) {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
-    app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
+    app.querySelectorAll("[data-ret]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
     btn.disabled = true;
     try {
@@ -2564,7 +2610,7 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {} };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -2589,6 +2635,7 @@ async function openDraft(id) {
 }
 
 async function viewPos() {
+  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "ناقص" (11/01)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
@@ -2870,8 +2917,11 @@ function renderSide() {
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
-    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
-    catch (er) { toast(er.message, true); }
+    POS.saving = (async () => {        // complete() waits for it: F9 typed in the address field (11/01)
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
+      catch (er) { toast(er.message, true); }
+    })();
+    await POS.saving;
   }));
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
@@ -2887,15 +2937,7 @@ function renderSide() {
     }));
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
-  $("#posCustNew")?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const name = prompt("اسم العميل:"); if (!name) return;
-    const phone = prompt("الهاتف (اختياري):") || null;
-    try {
-      const c = await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: 0 } });
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } }); renderSide();
-    } catch (er) { toast(er.message, true); }
-  });
+  $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
@@ -2917,6 +2959,45 @@ function renderSide() {
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
   $("#posDone").addEventListener("click", () => complete(null));
+}
+
+// A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
+// fills the name or the phone, a refusal (a phone already used) stays on the form, and one click saves once.
+function newCustomerDialog() {
+  const typed = ($("#posCust")?.value || "").trim(), isPhone = /^[+\d\s-]{5,}$/.test(typed);
+  const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
+  const d = document.createElement("dialog"); d.id = "custNewDlg";
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
+    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">الهاتف (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
+    ${SALE?.kind === "delivery" ? `<label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE.delivery?.address || "")}"></label>` : ""}
+    <p class="badge b-err" data-err hidden></p>
+    <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  document.body.append(d);
+  const f = d.querySelector("form"), err = d.querySelector("[data-err]"), ok = f.querySelector("[value=ok]");
+  const [nameIn, phoneIn, addrIn] = ["name", "phone", "address1"].map((n) => f.elements.namedItem(n));
+  const done = () => { d.close(); d.remove(); $("#posQ")?.focus(); };
+  f.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (ok.disabled) return;                          // saving: no second save, and no closing mid-save
+    if (ev.submitter?.value === "cancel") { done(); return; }
+    const body = { name: nameIn.value.trim(), phone: phoneIn.value.trim() || null, credit_limit: 0 };
+    if (addrIn?.value.trim()) body.address1 = addrIn.value.trim();
+    if (!body.name) { nameIn.focus(); return; }
+    ok.disabled = true;
+    try {
+      const c = await api("/api/customers", { method: "POST", body });
+      SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { customer_id: c.id } });
+      const fill = {};                                // like choosing an existing customer: fill only what is empty
+      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone) fill.phone = body.phone;
+      if (SALE.kind === "delivery" && body.address1 && !SALE.delivery?.address) fill.address = body.address1;
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { delivery: fill } });
+      done(); renderSide();
+    } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
+  });
+  d.addEventListener("cancel", (ev) => { ev.preventDefault(); if (!ok.disabled) done(); });
+  d.showModal();
+  (isPhone || !typed ? nameIn : phoneIn).focus();
 }
 
 function refreshTabLabel() {
@@ -2944,6 +3025,10 @@ function currentPayments() {
 }
 
 async function complete(findings) {
+  // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
+  // for a missing address that is right there on the screen (device test 11/01)
+  if (document.activeElement?.dataset?.dl) document.activeElement.blur();
+  await POS.saving;
   const payments = currentPayments();
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });

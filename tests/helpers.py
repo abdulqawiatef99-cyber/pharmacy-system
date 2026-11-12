@@ -62,3 +62,11 @@ class DBTestCase(unittest.TestCase):
             self.db, name="صيدلية أخرى", owner_username="other",
             owner_full_name="Other", owner_password="Other-Pass-2026")
         return org, self.login("other", "Other-Pass-2026")
+
+
+def today() -> str:
+    """The local day at the moment of the call, for a report that must include what the test just sold.
+    The module constants `T = date.today()` are fixed at import, so a suite that runs across midnight
+    asked yesterday's report for sales completed today (seen on CI 11/12, 23:58 -> 00:01 UTC)."""
+    from app.sales.service import local_today
+    return local_today().isoformat()
