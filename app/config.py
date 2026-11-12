@@ -21,6 +21,7 @@ class Settings:
     short_expiry_days: int
     total_tolerance_piasters: int
     backup_dir: Path | None = None
+    allowed_hosts: tuple[str, ...] = ()        # extra Host names the owner allows (LAN name), #136
 
     @property
     def backup_path(self) -> Path:
@@ -51,4 +52,5 @@ def load() -> Settings:
         short_expiry_days=int(os.environ.get("PHARM_SHORT_EXPIRY_DAYS", "180")),
         total_tolerance_piasters=int(os.environ.get("PHARM_TOTAL_TOLERANCE", "100")),
         backup_dir=Path(os.environ["PHARM_BACKUP_DIR"]).resolve() if os.environ.get("PHARM_BACKUP_DIR") else None,
+        allowed_hosts=tuple(h.strip() for h in os.environ.get("PHARM_ALLOWED_HOSTS", "").split(",") if h.strip()),
     )
