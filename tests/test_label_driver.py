@@ -339,3 +339,45 @@ class TestGapOnScreen(DriverCase):
         _, _, a = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 0})
         _, _, b = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 4})
         self.assertEqual((a["size"], b["size"]), ("38x12.5", "38x10.5"))
+
+
+class TestLabelClarity(DriverCase):
+    """Owner's photo, 12/11: thin, small type and the right edge cut on the 38x11.5 mm labels."""
+
+    def test_bold_face_when_it_exists_regular_otherwise(self):
+        import tempfile
+        from pathlib import Path
+        from app.printing import labels as lb
+        with tempfile.TemporaryDirectory() as d:
+            reg, bold = Path(d) / "tahoma.ttf", Path(d) / "tahomabd.ttf"
+            reg.write_bytes(b"x")
+            self.assertEqual(lb.bold_font(str(reg)), str(reg))           # no bold file: the regular one
+            bold.write_bytes(b"x")
+            self.assertEqual(lb.bold_font(str(reg)), str(bold))
+            other = Path(d) / "custom.ttf"
+            self.assertEqual(lb.bold_font(str(other)), str(other))
+
+    def test_type_is_a_sixth_of_the_label_with_tight_rows(self):
+        from app.printing import labels as lb
+        self.assertEqual(lb.text_metrics(11.5, 203), (15, 16))          # was 13 and 15
+        line, row = lb.text_metrics(11.5, 203)
+        self.assertGreaterEqual(lb.dots(11.5, 203) - 2 * max(3, lb.dots(lb.PAD_MM, 203)) - 3 * row,
+                                lb.dots(lb.MIN_BAR_MM, 203))                  # the 4 mm barcode still fits
+
+    def _edges(self, img):
+        bw = img.convert("1")
+        cols = [x for x in range(bw.size[0]) if any(bw.getpixel((x, y)) == 0 for y in range(bw.size[1]))]
+        return cols[0], cols[-1]
+
+    def test_driver_text_stays_1_5_mm_from_the_sides(self):
+        from app.printing import labels as lb
+        edge = lb.dots(1.5, 203)
+        for rows in (1, 2):
+            with self.subTest(rows=rows):
+                rs.save(self.db, self.ctx, {"label_rows": rows, "label_fields": {"barcode": False, "phone": True,
+                                                                                  "pharmacy": True, "price": True}})
+                f = self.use(FakeWindows())
+                print_labels(self.db, self.ctx, [(self.pan, rows)])
+                left, right = self._edges(f.images[-1])
+                self.assertGreaterEqual(left, edge - 1)
+                self.assertLessEqual(right, f.images[-1].size[0] - edge)

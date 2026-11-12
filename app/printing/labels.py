@@ -80,8 +80,7 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     if on["digits"] and on["code"]:
         on["digits"] = False            # one code at the bottom left: the internal code wins, as in E-Stock
     H = dots(h_mm, dpi)
-    line = max(12, min(dots(h_mm, dpi) // 7, dots(3.2, dpi)))
-    row = int(line * 1.2)
+    line, row = text_metrics(h_mm, dpi)
     pad = max(3, dots(PAD_MM, dpi))
     dropped = []
 
@@ -101,6 +100,23 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     return on, dropped
 
 
+def text_metrics(h_mm: float, dpi: int) -> tuple[int, int]:
+    """Text height and row height in dots. Owner, 12/11: E-Stock's labels read clearer; the type is a sixth
+    of the label (was a seventh) with tight rows, so a 38x11.5 mm label keeps a 4 mm barcode."""
+    line = max(12, min(dots(h_mm, dpi) // 6, dots(3.2, dpi)))
+    return line, int(line * 1.08)
+
+
+def bold_font(path: str) -> str:
+    """The bold face next to a regular font file when there is one (tahoma -> tahomabd, arial -> arialbd...)."""
+    from pathlib import Path
+    p = Path(path)
+    names = {"tahoma.ttf": "tahomabd.ttf", "arial.ttf": "arialbd.ttf", "segoeui.ttf": "segoeuib.ttf",
+             "DejaVuSans.ttf": "DejaVuSans-Bold.ttf", "NotoNaskhArabic-Regular.ttf": "NotoNaskhArabic-Bold.ttf"}
+    alt = p.with_name(names.get(p.name, p.name))
+    return str(alt) if alt.exists() else path
+
+
 def bar_bits(value: str) -> str:
     try:
         return bc.ean13_modules(value)
@@ -118,7 +134,7 @@ def bar_module(value: str, w_mm: float, dpi: int) -> int:
 
 
 def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: dict | None = None,
-                 font_path: str | None = None) -> tuple[Image.Image, list[str]]:
+                 font_path: str | None = None, edge_mm: float | None = None) -> tuple[Image.Image, list[str]]:
     """One label as a 1-bit image, E-Stock layout (#84): phone · pharmacy name / barcode / item name /
     code · expiry · price. data: name, value (barcode), price, code, expiry, pharmacy, phone (all text).
     Returns the image and the fields dropped for lack of room."""
@@ -130,10 +146,10 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     W, H = dots(w_mm, dpi), dots(h_mm, dpi)
     img = Image.new("L", (W, H), 255)
     d = ImageDraw.Draw(img)
-    fp = font_path or find_font()
-    line = max(12, min(H // 7, dots(3.2, dpi)))
-    row = int(line * 1.2)
+    fp = bold_font(font_path or find_font())          # bold reads like E-Stock's labels (owner, 12/11)
+    line, row = text_metrics(h_mm, dpi)
     pad = max(3, dots(PAD_MM, dpi))
+    edge = max(pad, dots(edge_mm, dpi)) if edge_mm else pad   # side margin: a driver page may run past the label
     font = ImageFont.truetype(fp, line)
     small = ImageFont.truetype(fp, max(11, int(line * 0.9)))
     y = pad
@@ -148,10 +164,10 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
             f = ImageFont.truetype(f.path, size)
         s = _fit(d, s, f, width, **kw)
         tw = d.textlength(s, font=f, **kw)
-        x = {"left": pad, "right": W - pad - tw, "center": (W - tw) / 2}[x_align]
+        x = {"left": edge, "right": W - edge - tw, "center": (W - tw) / 2}[x_align]
         d.text((x, yy), s, font=f, fill=0, **kw)
     if on["phone"] or on["pharmacy"]:
-        half = (W - 2 * pad) // (2 if on["phone"] and on["pharmacy"] else 1)
+        half = (W - 2 * edge) // (2 if on["phone"] and on["pharmacy"] else 1)
         if on["phone"]:
             text("left", data["phone"], small, y, half)
         if on["pharmacy"]:
@@ -167,9 +183,9 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
             if b == "1":
                 d.rectangle([x0 + i * module, y, x0 + (i + 1) * module - 1, name_y - 2], fill=0)
     if on["name"]:
-        text("center", data["name"], font, name_y, W - 2 * pad, rtl=True)
+        text("center", data["name"], font, name_y, W - 2 * edge, rtl=True)
     if bottom_y < H - pad:
-        third = (W - 2 * pad) // 3
+        third = (W - 2 * edge) // 3
         left = data["code"] if on["code"] else data.get("value") if on["digits"] else ""
         if left:
             text("left", str(left), small, bottom_y, third if on["expiry"] else 2 * third)
