@@ -171,9 +171,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     login_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
 
-    def client_ip(req: Request) -> str:
-        return req.client.host if req.client else "?"
-
     def _qlimit(req: Request, default: int, most: int) -> int:
         """?limit= as a whole number from 1 to `most`: "abc" is a 422, not a server error, and -1 is not
         SQLite's "no limit" (every row of the table)."""
@@ -183,6 +180,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         except (TypeError, ValueError):
             raise ValidationFailed("قيمة غير صحيحة: limit")
         return max(1, min(n, most))
+
+    def client_ip(req: Request) -> str:
+        return req.client.host if req.client else "?"
 
     def ctx_of(req: Request):
         token = None
