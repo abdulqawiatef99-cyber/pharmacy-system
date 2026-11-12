@@ -80,8 +80,9 @@ memory peak 314–332 MB. While the automatic backup ran, adding a line stayed a
   basket is checked, about 6 rows a sale. The synthetic items have no clinical data at all; on the pharmacy
   PC most items will not either until the reference catalogue is linked, so the ratio is likely real.
   Tracked in its own issue (whether a "no data" notice must be logged on every check is a safety-log decision).
-- **Safety check** grows with the history: median 26 ms at 30 days, 133–136 ms at one year (all three
-  versions), checked twice per sale. Not looked into yet; next candidate after #166.
+- **Safety check:** not a history problem. The first check after the program starts builds the catalogue
+  match index (~220 ms for 4,000 items on the 1-year file), later checks take ~3 ms (profiled on the same
+  file). The bench's median of 2 runs (133–136 ms) includes that first build; at 30 days it ran 3 times.
 - **Year sales report** 616–622 ms, **stock report** 69–93 ms, **item movements for a year** 145–161 ms:
   acceptable, not changed by these PRs.
 - 3-year snapshot: not measured yet (generating one year took about an hour here).
