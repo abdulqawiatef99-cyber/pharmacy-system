@@ -174,6 +174,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
 
+    def approver_access(org_id: str, who: str) -> dict:
+        """The approver's permissions now; nothing once he is disabled (#137: a token never outlives that)."""
+        if not db.one("SELECT 1 FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
+                      " WHERE u.id=? AND u.is_active=1 AND m.is_active=1", (org_id, who)):
+            return {"permissions": frozenset(), "role_code": None, "max_discount_bp": 0}
+        return accounts.effective_access(db, org_id, who)
+
     def ctx_of(req: Request):
         token = None
         auth = req.headers.get("authorization", "")
@@ -195,7 +202,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             req.state.session_token = token
         elif req.headers.get("x-approval"):
             ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
-                                  lambda who: accounts.effective_access(db, ctx.org_id, who))
+                                  lambda who: approver_access(ctx.org_id, who))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)

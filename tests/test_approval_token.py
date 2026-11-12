@@ -71,9 +71,7 @@ class ApprovalToken(APICase):
 
     def test_the_token_expires(self):
         hdr = approval_headers(self.a, self.owner, "9753", "settings.manage", SUMMARY)
-        with approvals._lock:
-            for k, g in list(approvals._grants.items()):
-                approvals._grants[k] = g.__class__(**{**g.__dict__, "until": g.until - approvals.TTL_SECONDS - 1})
+        self.expire_all()
         r = self.a.get(SUMMARY, headers=hdr)
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.json()["error"]["code"], "approval_expired")
@@ -93,6 +91,48 @@ class ApprovalToken(APICase):
         self.assertEqual(self.a.get(audit, headers=hdr).status_code, 200)
         people.set_exception(self.db, self.ctx, self.mgr, "audit.read", "deny")
         self.assertEqual(self.a.get(audit, headers=hdr).status_code, 403)
+
+    def test_a_disabled_approver_lends_nothing(self):
+        audit = "/api/audit?from=2026-01-01&to=2026-01-02"
+        hdr = approval_headers(self.a, self.mgr, "2468", "audit.read", "/api/audit")
+        self.assertEqual(self.a.get(audit, headers=hdr).status_code, 200)
+        people.set_active(self.db, self.ctx, self.mgr, False)
+        r = self.a.get(audit, headers=hdr)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["error"]["code"], "approver_invalid")
+
+    def expire_all(self):
+        with approvals._lock:
+            for k, g in list(approvals._grants.items()):
+                approvals._grants[k] = g.__class__(**{**g.__dict__, "until": g.until - approvals.TTL_SECONDS - 1})
+
+    def test_a_retry_after_the_approval_expired_replays_and_never_posts_twice(self):
+        """The payment committed but its answer was lost; the retry finds the approval expired, the box asks
+        again, and the same Idempotency-Key replays the first answer: one payment, not two."""
+        self.http_login()
+        cid = self.c.post("/api/customers", json={"name": "عميل تجربة"}, headers=H).json()["id"]
+        self.assertEqual(self.a.post("/api/cash/open", json={"opening_cash": 0}, headers=H).status_code, 201)
+        path = f"/api/customers/{cid}/payments"
+        key = {"Idempotency-Key": "pay-once-1"}
+        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST")
+        first = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
+        self.assertEqual(first.status_code, 200, first.text)
+        self.expire_all()
+        r = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
+        self.assertEqual(r.json()["error"]["code"], "approval_expired")
+        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST")
+        again = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertEqual(again.headers.get("Idempotent-Replay"), "true")
+        self.assertEqual(again.json(), first.json())
+        n = self.db.one("SELECT count(*) n FROM customer_ledger WHERE customer_id=?", (cid,))["n"]
+        self.assertEqual(n, 1)
+
+    def test_the_screen_keeps_the_idempotency_key_when_it_asks_again(self):
+        self.assertIn('opts.headers["Idempotency-Key"] = _key || newKey();', JS)
+        retries = re.findall(r"return api\(path, \{[^}]*\}\)", JS)
+        self.assertEqual(len(retries), 2, retries)
+        self.assertTrue(all('_key: opts.headers["Idempotency-Key"]' in r for r in retries), retries)
 
     def test_a_wrong_pin_gets_no_token(self):
         r = self.a.post("/api/approvals/check", json={"permission": "settings.manage", "path": SUMMARY},

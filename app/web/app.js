@@ -233,7 +233,7 @@ async function askApproval(details, message, method, path) {
   });
 }
 
-async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
+async function api(path, { method = "GET", body, form, _approvals = 0, _key = null } = {}) {
   const apiPath = path.split("?")[0];
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -243,7 +243,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
+  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = _key || newKey();
   let r;
   for (let attempt = 0; ; attempt++) {
     try { r = await fetch(path, opts); break; }
@@ -256,11 +256,12 @@ async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
   const data = await r.json().catch(() => ({}));
   // one approval per permission the action needs (at most 3), each added to the same token
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < 3) {
-    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1 });
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"] });
   }
   if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;
-    if (_approvals < 3) return api(path, { method, body, form, _approvals: _approvals + 1 });
+    // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
+    if (_approvals < 3) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"] });
   }
   if (!r.ok) {
     if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
