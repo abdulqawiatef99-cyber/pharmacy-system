@@ -34,6 +34,15 @@ class TestReleaseValidation(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             self.assertEqual(json.loads((out / 'report.json').read_text())['steps'][0]['returncode'], 1)
 
+    def test_the_test_suite_gets_its_own_longer_time_budget(self):
+        """12/11: 850+ tests ran past 300 s on the Windows runner and the job failed on time, not on a test."""
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch('scripts.validate_local_release.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                report = validate(Path(temporary), Path(temporary) / 'logs')
+            self.assertTrue(report['ok'])
+            budgets = [c.kwargs['timeout'] for c in run.call_args_list]
+            self.assertEqual(budgets, [900, 300, 300, 300])                  # tests, selftest, init, verify
+
     def test_timeout_is_recorded_and_temporary_database_directory_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch('scripts.validate_local_release.subprocess.run', side_effect=subprocess.TimeoutExpired('synthetic', 1)) as run:

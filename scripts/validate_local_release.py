@@ -23,7 +23,11 @@ def isolated_environment(data: Path) -> dict[str, str]:
     return env
 
 
-def validate(root: Path, output: Path, *, timeout: int = 300) -> dict:
+# The whole suite (850+ tests on 12/11) takes over 300 s on a GitHub Windows runner: the other steps keep 300 s
+TESTS_TIMEOUT = 900
+
+
+def validate(root: Path, output: Path, *, timeout: int = 300, tests_timeout: int = TESTS_TIMEOUT) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     report = {'platform': platform.platform(), 'python': platform.python_version(),
               'source': str(root.resolve()), 'scope': 'synthetic automated checks only',
@@ -42,7 +46,8 @@ def validate(root: Path, output: Path, *, timeout: int = 300) -> dict:
             with log.open('wb') as stream:
                 try:
                     result = subprocess.run([sys.executable, *arguments], cwd=root, env=env,
-                                            stdout=stream, stderr=subprocess.STDOUT, timeout=timeout,
+                                            stdout=stream, stderr=subprocess.STDOUT,
+                                            timeout=tests_timeout if name == 'tests' else timeout,
                                             stdin=subprocess.DEVNULL, check=False)
                     code = result.returncode
                 except subprocess.TimeoutExpired:
