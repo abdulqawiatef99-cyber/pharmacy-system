@@ -242,6 +242,15 @@ class TestWhenItRuns(Base):
         self.assertEqual(len(self.alerts()), 1)
         self.assertIn("backup", self.audits(integrity.MISMATCH)[0]["after_json"])
 
+    def test_also_when_the_backup_is_skipped_for_no_changes(self):
+        ab = AutoBackup(self.db, self.tmp / "uploads", self.tmp / "backups", self.tmp / "state")
+        self.assertTrue(ab.run()["last_ok"])
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))   # outside the program
+        st = ab.run()
+        self.assertEqual(st.get("skipped"), "no_changes")          # the fingerprint did not see it ...
+        self.assertEqual(len(self.audits(integrity.MISMATCH)), 1)  # ... the stock check did
+        self.assertEqual(len(self.alerts()), 1)
+
     def test_on_startup_and_the_banner_in_me(self):
         self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
         s = replace(config.load(), upload_dir=self.tmp / "up", anthropic_api_key=None, data_dir=self.tmp,

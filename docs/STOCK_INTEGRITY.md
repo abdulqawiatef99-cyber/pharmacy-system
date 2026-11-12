@@ -52,9 +52,9 @@ transaction, and the guard test below will refuse any other way.
 
 ## 4. Automatic integrity check (`app/inventory/integrity.py`)
 
-When: on every program start (background thread, the screens do not wait) and after every automatic backup
-run — also a refused one, because a stock mismatch is one of the reasons `backup.create` refuses to write a
-backup. The owner can also run it from the report «مطابقة الأرصدة».
+When: on every program start (background thread, the screens do not wait) and on every automatic backup run
+— a refused one (a stock mismatch is one of the reasons `backup.create` refuses to write a backup) and one
+skipped for "no changes" (a change made outside the program does not change the backup's fingerprint). The owner can also run it from the report «مطابقة الأرصدة».
 
 What it compares, per pharmacy, reading only:
 
