@@ -33,6 +33,31 @@ def _utc(local: str, end: bool = False) -> str:
     return d.astimezone().astimezone(timezone.utc).strftime(_F)
 
 
+_CHUNK = 500         # ids per IN (...) query, far below SQLite's limit on bound parameters
+
+
+def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dict]:
+    """The lines of the listed sales (in line order) and each line's allocations, in a few queries instead of
+    one query per invoice and one per line (#113 performance: a month of invoices was ~14,000 queries)."""
+    lines_of: dict[str, list] = {}
+    allocs_of: dict[str, list] = {}
+    line_ids: list[str] = []
+    for k in range(0, len(sale_ids), _CHUNK):
+        part = sale_ids[k:k + _CHUNK]
+        for l in db.all("SELECT l.sale_id, l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_source, l.line_total, i.name_en,"
+                        " i.name_ar, i.pack_size, i.base_unit_name, i.hidden FROM sale_lines l JOIN items i ON i.id=l.item_id"
+                        f" WHERE l.sale_id IN ({','.join('?' * len(part))}) ORDER BY l.sale_id, l.line_no", tuple(part)):
+            lines_of.setdefault(l["sale_id"], []).append(l)
+            line_ids.append(l["id"])
+    for k in range(0, len(line_ids), _CHUNK):
+        part = line_ids[k:k + _CHUNK]
+        for a in db.all("SELECT sale_line_id, id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
+                        f" FROM sale_allocations WHERE sale_line_id IN ({','.join('?' * len(part))}) ORDER BY rowid", tuple(part)):
+            a = dict(a)
+            allocs_of.setdefault(a.pop("sale_line_id"), []).append(a)
+    return lines_of, allocs_of
+
+
 def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: list[str] | None = None,
            q: str | None = None, item_id: str | None = None, user_id: str | None = None, with_lines: bool = False) -> dict:
     ctx.require("sales.totals")
@@ -89,16 +114,14 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     rows = rows[:MAX_ROWS]
     show_cost = ctx.can("costs.read")
     hidden_ok = ctx.can("items.hidden")
+    lines_of, allocs_of = _lines_and_allocations(db, [r["id"] for r in rows])
     for r in rows:
         r["item_discount"] = r["customer_discount"] = 0
         r["profit"] = 0 if show_cost else None
         r["unknown_cost"] = False
         lines = []
-        for l in db.all("SELECT l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_source, l.line_total, i.name_en, i.name_ar,"
-                        " i.pack_size, i.base_unit_name, i.hidden FROM sale_lines l JOIN items i ON i.id=l.item_id"
-                        " WHERE l.sale_id=? ORDER BY l.line_no", (r["id"],)):
-            allocs = [dict(a) for a in db.all("SELECT id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
-                                              " FROM sale_allocations WHERE sale_line_id=?", (l["id"],))]
+        for l in lines_of.get(r["id"], []):
+            allocs = allocs_of.get(l["id"], [])
             gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"])
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net

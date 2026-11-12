@@ -534,6 +534,13 @@ class Sales:
             s = self._draft(ctx, sid)
             if s["version"] != preview["version"]:
                 raise Conflict("عُدّلت الفاتورة أثناء الإتمام", code="stale_version")
+            if on_credit:            # #143: again inside the write lock, so two cashiers cannot pass it together
+                c = self.db.one("SELECT credit_limit FROM customers WHERE id=? AND org_id=?",
+                                (s["customer_id"], ctx.org_id))
+                bal = self.balance(ctx, s["customer_id"])
+                if not c or bal + on_credit > c["credit_limit"]:
+                    raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
+                                   details={"balance": bal, "limit": c["credit_limit"] if c else 0})
             total = 0
             below_cost = []
             for l in preview["lines"]:
@@ -882,8 +889,9 @@ class Sales:
         if not r:
             raise NotFound("المرتجع غير موجود")
         sale = self.get(ctx, r["sale_id"])
-        a = self.db.one("SELECT after_json FROM audit_log WHERE entity_type='sale' AND entity_id=? AND action='sale.return'"
-                        " AND json_extract(after_json, '$.return_id')=?", (r["sale_id"], rid))
+        a = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
+                        " AND action='sale.return' AND json_extract(after_json, '$.return_id')=?",
+                        (ctx.org_id, r["sale_id"], rid))      # org_id first: the audit index, not a scan of the whole log
         qty = json.loads(a["after_json"]).get("lines", {}) if a else {}
         lines = [{**l, "returned_now": int(qty[l["id"]])} for l in sale["lines"] if l["id"] in qty]
         return {"return": dict(r), "sale": sale, "lines": lines}
@@ -939,7 +947,7 @@ class Sales:
              " s.returned_total, s.completed_at, s.voided_at, c.name customer,"
              " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
              " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"
-             " WHERE s.org_id=? AND s.branch_id=? AND s.status<>'draft'")
+             " WHERE s.org_id=? AND s.branch_id=? AND s.status IN ('completed','voided')")   # = not draft; IN uses the index
         params: list = [ctx.org_id, ctx.branch_id]
         mine_only = not ctx.can("sales.totals")
         if mine_only and not (sale_no is not None and ctx.allowed("sales.return_others")):
