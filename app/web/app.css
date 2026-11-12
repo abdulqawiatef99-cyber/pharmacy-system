@@ -289,7 +289,9 @@ td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; 
 .paym button.on { border: 2px solid var(--brand); background: var(--brand-soft); color: var(--brand); font-weight: 700; }
 .paym button:disabled { opacity: .45; cursor: not-allowed; }
 .btn.big { width: 100%; min-height: 58px; font-size: 1.2rem; margin-top: 10px; }
-.deliv { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; padding: 10px; border-radius: 10px; background: var(--warn-bg); }
+.deliv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; padding: 10px; border-radius: 10px; background: var(--warn-bg); }
+/* the inputs' own width must not push the two columns past the side panel (device test 11/01) */
+.deliv label.f { min-width: 0; } .deliv input { width: 100%; min-width: 0; box-sizing: border-box; }
 .part { margin-bottom: 6px; align-items: center; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 input.narrow { width: 104px; }

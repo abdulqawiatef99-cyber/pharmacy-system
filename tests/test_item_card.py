@@ -51,6 +51,20 @@ class TestCard(Base):
         self.assertEqual(c["margin_pct"], 25.0)
         self.assertNotIn("avg_cost_pack", card.card(self.db, self.ph, self.pan))   # cost: owner only
 
+    def test_average_cost_is_exact_half_up(self):
+        # 0.145/unit: float gives 14.499999... and round() gave 14; 0.125: round() half to even gave 12
+        for unit_cost, pack_cost, margin in (("0.145", 15, 98.6), ("0.125", 13, 98.8), ("10.0005", 1000, 0.0)):
+            with self.subTest(unit_cost=unit_cost):
+                it = cat.create_item(self.db, self.ctx, {"name_en": f"Cost {unit_cost}", "pack_size": 1,
+                                                         "public_price": 1000})
+                with self.db.transaction():
+                    b = inv.get_or_create_batch(self.db, self.ctx, it, "C1", (T + timedelta(days=400)).isoformat())
+                    inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=1, batch_id=b,
+                                      movement_type="purchase", unit_cost=Decimal(unit_cost))
+                c = card.card(self.db, self.ctx, it)
+                self.assertEqual((c["avg_cost_pack"], c["margin_pct"]), (pack_cost, margin))
+                self.assertNotEqual(str(c["margin_pct"]), "-0.0")
+
     def test_sections_need_owner_for_no_return(self):
         with self.assertRaises(Forbidden):                     # into a no-return section
             card.set_category(self.db, self.ph, [self.pan], self.cats["ثلاجة"]["id"])

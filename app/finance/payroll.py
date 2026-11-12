@@ -165,6 +165,10 @@ def approve(db: Database, ctx: Context, uid: str, month: str, bonus: int = 0, de
         raise ValidationFailed("المبالغ غير صحيحة")
     c = compute(p["monthly_salary"], p["work_days"], p["days_present"], p["advances"], bonus, deduction)
     with db.transaction():
+        # a salary paid meanwhile from another screen keeps the figures it was paid with
+        if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
+                  (ctx.org_id, uid, month)):
+            raise Conflict("هذا الراتب صُرف بالفعل")
         db.execute("INSERT INTO payroll (id, org_id, user_id, month, base, work_days, days_present, absence_deduction, advances,"
                    " bonus, deduction, net, note, approved_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                    " ON CONFLICT(org_id, user_id, month) DO UPDATE SET base=excluded.base, work_days=excluded.work_days,"
@@ -190,6 +194,10 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
         cat = db.one("SELECT id FROM expense_categories WHERE org_id=? ORDER BY sort LIMIT 1", (ctx.org_id,))
     name = db.one("SELECT full_name FROM users WHERE id=?", (uid,))["full_name"]
     with db.transaction():          # the expense and the "paid" mark together, or neither
+        # again under the write lock: two clicks from two screens must not pay the salary twice
+        pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
+        if pr["status"] == "paid":
+            raise Conflict("هذا الراتب صُرف بالفعل")
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 
@@ -197,15 +205,16 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
 def _pay_tx(db: Database, ctx: Context, pr, name: str, cat_id: str, month: str, uid: str, paid_from: str) -> None:
     from . import expenses as fin
     eid = None
+    y, m = _month(month)
+    last = date(y, m, calendar.monthrange(y, m)[1])
+    spent = min(last, local_today()).isoformat()
     if pr["net"] > 0:
-        y, m = _month(month)
-        last = date(y, m, calendar.monthrange(y, m)[1])
-        spent = min(last, local_today()).isoformat()
         eid = fin.record(db, ctx, category_id=cat_id, amount=pr["net"], paid_from=paid_from,
                          note=f"مرتب {name} — {month}", spent_on=spent)["id"]
-        # advances were already paid out when given: book them as salary expense of that month too
-        if pr["advances"]:
-            fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
-                       note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
+    # advances were already paid out when given: book them as salary expense of that month too, also when
+    # they took the whole salary and nothing is left to pay now
+    if pr["advances"]:
+        fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
+                   note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
     db.execute("UPDATE payroll SET status='paid', paid_at=?, expense_id=? WHERE id=?", (_now(), eid, pr["id"]))
     audit.record(db, ctx, "payroll.pay", "user", uid, after={"month": month, "net": pr["net"], "from": paid_from})

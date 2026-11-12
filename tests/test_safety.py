@@ -197,3 +197,79 @@ class TestBenchmarkHarness(SafetyCase):
         self.assertEqual(r["false_positives"], 0)
         self.assertEqual(r["missed"], [{"case": 3, "missed": ["interaction"]}])
         self.assertAlmostEqual(r["sensitivity"], 2 / 3)
+
+
+class TestQuantityLimitAndCriticalBlock(SafetyCase):
+    """The quantity-limit rule and the critical "block" decision had no test. Fictional ingredients and
+    source, as in the rest of this file: machinery only, never clinical content."""
+
+    def limit(self, severity="high", **params):
+        rid = self.se.create_rule(self.ctx, rule_type="max_qty", severity=severity, title="Testium limit",
+                                  explanation="fictional", params=params, source_id=self.src, source_ref="p.2")
+        self.se.approve_rule(self.ctx, rid, self_approval_reason="مراجعة تجريبية بمرجع وهمي")
+        return rid
+
+    def limits(self, lines, ctx=None):
+        return [f for f in self.se.check(ctx or self.ctx, lines) if f.code == "max_qty"]
+
+    def events(self, decision):
+        return self.db.one("SELECT count(*) n FROM safety_events WHERE org_id=? AND finding_code='max_qty' AND decision=?",
+                           (self.ctx.org_id, decision))["n"]
+
+    def test_an_item_limit_is_quiet_up_to_the_limit_and_asks_above_it(self):
+        self.limit(item_id=self.a, max_base_units=40)
+        self.assertEqual(self.limits([{"item_id": self.a, "base_qty": 40}]), [])
+        f = self.limits([{"item_id": self.a, "base_qty": 41}])
+        self.assertEqual(len(f), 1)
+        self.assertEqual((f[0].severity, f[0].requires), ("high", "override"))
+        self.assertIn("41", f[0].message)
+        self.assertEqual(f[0].source["name"], "FICTIONAL TEST SOURCE")
+
+    def test_an_ingredient_limit_adds_up_every_item_with_it(self):
+        self.limit(ingredient_id=self.ing("Testium"), max_base_units=30)
+        self.assertEqual(self.limits([{"item_id": self.a, "base_qty": 20}, {"item_id": self.c, "base_qty": 50}]), [])
+        f = self.limits([{"item_id": self.a, "base_qty": 20}, {"item_id": self.b, "base_qty": 11}])   # 31 Testium
+        self.assertEqual(len(f), 1)
+
+    def test_a_disabled_or_draft_limit_is_not_applied(self):
+        draft = self.se.create_rule(self.ctx, rule_type="max_qty", severity="high", title="draft", explanation="x",
+                                    params={"item_id": self.a, "max_base_units": 1}, source_id=self.src)
+        self.assertEqual(self.limits([{"item_id": self.a, "base_qty": 5}]), [])
+        self.se.approve_rule(self.ctx, draft, self_approval_reason="مراجعة تجريبية بمرجع وهمي")
+        self.assertEqual(len(self.limits([{"item_id": self.a, "base_qty": 5}])), 1)
+        self.se.disable_rule(self.ctx, draft, "تجربة التعطيل")
+        self.assertEqual(self.limits([{"item_id": self.a, "base_qty": 5}]), [])
+
+    def test_a_limit_needs_a_source_an_item_or_ingredient_and_a_positive_maximum(self):
+        for params, source in (({"item_id": self.a, "max_base_units": 10}, None), ({"max_base_units": 10}, self.src),
+                               ({"item_id": self.a, "max_base_units": 0}, self.src)):
+            with self.subTest(params=params, source=source):
+                with self.assertRaises(ValidationFailed):
+                    self.se.create_rule(self.ctx, rule_type="max_qty", severity="high", title="x", explanation="x",
+                                        params=params, source_id=source)
+
+    def test_a_high_limit_is_overridden_only_by_who_may_and_with_a_reason(self):
+        self.limit(item_id=self.a, max_base_units=10)
+        accounts.add_user(self.db, self.ctx, username="asst", full_name="a", password="Assist-Pass-2026",
+                          role_code="assistant")
+        actx = self.login("asst", "Assist-Pass-2026")
+        f = self.limits([{"item_id": self.a, "base_qty": 11}], actx)
+        self.assertFalse(self.se.resolve(actx, f, {0: "العميل محتاج"}))           # an assistant may not
+        self.assertFalse(self.se.resolve(self.ctx, f, {0: "ok"}))                 # too short a reason
+        self.assertEqual(self.events("override_denied"), 2)
+        self.assertTrue(self.se.resolve(self.ctx, f, {0: "روشتة طبيب بالكمية"}))
+        self.assertEqual(self.events("overridden"), 1)
+
+    def test_a_critical_finding_blocks_unless_the_owner_writes_a_full_reason(self):
+        self.limit(severity="critical", item_id=self.a, max_base_units=10)
+        accounts.add_user(self.db, self.ctx, username="pharm", full_name="p", password="Pharm-Pass-2026",
+                          role_code="pharmacist")
+        pctx = self.login("pharm", "Pharm-Pass-2026")
+        f = self.limits([{"item_id": self.a, "base_qty": 11}])
+        self.assertEqual(f[0].requires, "block")
+        self.assertFalse(self.se.resolve(pctx, f, {0: "روشتة طبيب بالكمية دي"}))   # pharmacist: never
+        self.assertFalse(self.se.resolve(self.ctx, f, {0: "روشتة"}))              # owner: under 10 letters
+        self.assertFalse(self.se.resolve(self.ctx, f, {}))                        # no decision at all
+        self.assertEqual(self.events("blocked"), 3)
+        self.assertTrue(self.se.resolve(self.ctx, f, {0: "روشتة طبيب مختص بالكمية دي، اتراجعت"}))
+        self.assertEqual(self.events("overridden"), 1)

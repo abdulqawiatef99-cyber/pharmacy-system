@@ -138,8 +138,8 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 
 class RateLimiter:
-    def __init__(self, limit: int, window_s: int):
-        self.limit, self.window = limit, window_s
+    def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
+        self.limit, self.window, self.message = limit, window_s, message
         self.hits: dict[str, deque] = defaultdict(deque)
 
     def check(self, key: str) -> None:
@@ -148,7 +148,7 @@ class RateLimiter:
         while q and now - q[0] > self.window:
             q.popleft()
         if len(q) >= self.limit:
-            raise DomainError("محاولات كثيرة، انتظر دقيقة", code="rate_limited")
+            raise DomainError(self.message, code="rate_limited")
         q.append(now)
 
 
@@ -179,6 +179,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
+    # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
+    # session cannot be used to guess the password at full speed
+    reauth_limiter = RateLimiter(5, 300, "محاولات كثيرة لكلمة المرور، انتظر 5 دقائق")
+
+    def _qlimit(req: Request, default: int, most: int) -> int:
+        """?limit= as a whole number from 1 to `most`: "abc" is a 422, not a server error, and -1 is not
+        SQLite's "no limit" (every row of the table)."""
+        raw = req.query_params.get("limit") or default
+        try:
+            n = whole_number(raw)
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيمة غير صحيحة: limit")
+        return max(1, min(n, most))
 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
@@ -508,6 +521,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
         from ..core import security as _sec
+        reauth_limiter.check(ctx.user_id)
         if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
             raise ValidationFailed("كلمة المرور غير صحيحة")
         people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
@@ -975,7 +989,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             b = await body(req)
             a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
             if a == "pay_settings":
-                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), int(b.get("work_days") or 26))
+                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), _int(b.get("work_days") or 26, "work_days"))
             elif a == "advance":
                 pay.add_advance(db, ctx, uid, _int(b.get("amount"), "amount"), month, b.get("note"), str(b.get("paid_from", "outside")))
             elif a == "fix":
@@ -1031,6 +1045,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
             u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
             from ..core import security as _sec
+            reauth_limiter.check(ctx.user_id)
             if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
                 raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
@@ -1061,7 +1076,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def notifications_list(req):
         ctx = ctx_of(req)
         return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
-                                limit=int(req.query_params.get("limit", 50) or 50)))
+                                limit=_qlimit(req, 50, 200)))
 
     @handler
     async def notifications_read(req):
@@ -1105,7 +1120,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 if "return_window_days" not in b:
                     return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
             try:
-                days = int(b.get("return_window_days"))
+                days = whole_number(b.get("return_window_days"))
             except (TypeError, ValueError):
                 raise ValidationFailed("اكتب عدد الأيام")
             if not 0 <= days <= 365:
@@ -1122,7 +1137,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 200),
+        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -1476,7 +1491,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         try:
-            qty = int(b.get("qty"))
+            qty = whole_number(b.get("qty"))          # a counted 2.5 is refused, never posted as 2
         except (TypeError, ValueError):
             raise ValidationFailed("الكمية غير صحيحة")
         return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),
