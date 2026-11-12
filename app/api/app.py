@@ -174,6 +174,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
 
+    def _qlimit(req: Request, default: int, most: int) -> int:
+        """?limit= as a whole number from 1 to `most`: "abc" is a 422, not a server error, and -1 is not
+        SQLite's "no limit" (every row of the table)."""
+        raw = req.query_params.get("limit") or default
+        try:
+            n = whole_number(raw)
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيمة غير صحيحة: limit")
+        return max(1, min(n, most))
+
     def ctx_of(req: Request):
         token = None
         auth = req.headers.get("authorization", "")
@@ -1052,7 +1062,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def notifications_list(req):
         ctx = ctx_of(req)
         return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
-                                limit=int(req.query_params.get("limit", 50) or 50)))
+                                limit=_qlimit(req, 50, 200)))
 
     @handler
     async def notifications_read(req):
@@ -1113,7 +1123,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 200),
+        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
