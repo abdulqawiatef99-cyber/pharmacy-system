@@ -76,13 +76,15 @@ const fs = require('fs');
   };
   const build = (p) => p.evaluate(() => document.querySelector('meta[name="pharm-build"]').content);
   const b = await chromium.launch();
-  const p = await b.newPage();
+  const ctx = await b.newContext();
+  const p = await ctx.newPage();
   const out = {};
   await p.goto(base + '/');
   await p.waitForSelector('#loginForm');
   const b1 = await build(p);
   out.barHiddenAtStart = await p.locator('#staleBar').isHidden();
-  // 1. sign-in screen: nothing to lose, the screen reloads by itself
+  // 1. sign-in screen: nothing to lose, the screen reloads by itself (once its own requests are 3 s old)
+  await p.waitForTimeout(3200);
   touch();
   await p.evaluate(() => window.dispatchEvent(new Event('focus')));
   await p.waitForFunction((old) => { const m = document.querySelector('meta[name="pharm-build"]'); return m && m.content !== old; },
@@ -124,6 +126,20 @@ const fs = require('fs');
   await p.waitForSelector('#staleBar:not([hidden])', { timeout: 10000 });
   await p.waitForTimeout(500);
   out.typingKept = await p.evaluate(() => window.__sameDoc === 2 && document.querySelector('#posQ').value === 'pana');
+  // 5. a scan on an empty sale screen whose lookup is still on its way: the bar, and the scan still lands
+  const q = await ctx.newPage();
+  await q.goto(base + '/#/pos');
+  await q.waitForSelector('#posQ');
+  await q.waitForTimeout(3200);
+  await q.route('**/api/items?*', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.continue(); });
+  await q.evaluate(() => { window.__sameDoc = 3; });
+  await q.locator('#posQ').focus();
+  await q.keyboard.type(code, { delay: 5 }); await q.keyboard.press('Enter');
+  touch();
+  await q.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await q.waitForSelector('#staleBar:not([hidden])', { timeout: 10000 });
+  await q.waitForSelector('table.cart [data-minus]', { timeout: 10000 });
+  out.scanKept = await q.evaluate(() => window.__sameDoc === 3);
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -161,7 +177,8 @@ class TestStaleScreenInBrowser(StaleCase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out, {"barHiddenAtStart": True, "reloadedOnLogin": True, "sameDocument": True, "cartKept": 1,
-                               "barHiddenAfterReload": True, "typingKept": True})
+                               "barHiddenAfterReload": True, "typingKept": True,
+                               "scanKept": True})
 
 
 if __name__ == "__main__":
