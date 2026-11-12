@@ -17,6 +17,8 @@ const fmtStock = (q, it) => {
   return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// a typed whole number; "2.5" goes to the server as typed and is refused there, never cut to 2 by parseInt
+const typedWhole = (v) => { const t = String(v ?? "").trim(); if (t === "") return null; const n = Number(t); return Number.isInteger(n) ? n : t; };
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
@@ -231,6 +233,7 @@ async function askApproval(details, message) {
   });
 }
 
+const API = { busy: 0, last: 0 };
 async function api(path, { method = "GET", body, form, _retried = false } = {}) {
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -241,16 +244,19 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
   if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
-  let r;
-  for (let attempt = 0; ; attempt++) {
-    try { r = await fetch(path, opts); break; }
-    catch (netErr) {
-      if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-      if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
-      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+  let r, data;
+  API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { r = await fetch(path, opts); break; }
+      catch (netErr) {
+        if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
+        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+      }
     }
-  }
-  const data = await r.json().catch(() => ({}));
+    data = await r.json().catch(() => ({}));
+  } finally { API.busy--; API.last = Date.now(); }
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
     if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
   }
@@ -544,8 +550,8 @@ function viewSetup() {
   <form class="panel login" id="setupForm">
     <h1>أهلًا بك</h1>
     <p class="muted">هذه أول مرة يعمل فيها البرنامج على هذا الجهاز. أدخل هذه البيانات مرة واحدة فقط.</p>
-    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية عبد القوي"></label><br>
-    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. عبد القوي"></label><br>
+    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية الشفاء"></label><br>
+    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. أحمد محمود"></label><br>
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة السر <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
@@ -876,9 +882,9 @@ function bindQuickAdd() {
   q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
   const add = async () => {
     if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
-    const qty = parseInt($("#qaQty").value, 10);
-    if (!(qty > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: parseInt($("#qaBonus").value || "0", 10) };
+    const qty = typedWhole($("#qaQty").value);
+    if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
+    const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
@@ -957,8 +963,8 @@ async function purchaseTabs(curId) {
 
 const CONVERT = {
   public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters, tax_amount: toPiasters,
-  discount_bp: toBp, qty: (v) => (v === "" ? null : parseInt(v, 10)),
-  bonus_qty: (v) => (v === "" ? 0 : parseInt(v, 10)), batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
+  discount_bp: toBp, qty: (v) => typedWhole(v),
+  bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
 async function save(path, body, method = "PATCH") {
@@ -1729,8 +1735,8 @@ async function viewCountSession(id) {
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
   const save = async (recount) => {
-    const qty = parseInt($("#cntQty").value, 10);
-    if (Number.isNaN(qty) || qty < 0) return toast("اكتب كمية صحيحة", true);
+    const qty = typedWhole($("#cntQty").value);
+    if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
     try {
       await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
         location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
@@ -2141,6 +2147,38 @@ async function checkUpdateBadge() {
   try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
 }
 
+// An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
+const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
+function screenIdle() {
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen,
+  // and only while no field holds text the person typed but the screen has not saved yet
+  if ($("dialog[open]")) return false;
+  if (API.busy || Date.now() - API.last < 3000) return false;     // a scan or a save may still be on its way
+  const typed = [...document.querySelectorAll("input, textarea, select")].some((el) =>
+    el.type === "checkbox" || el.type === "radio" ? el.checked !== el.defaultChecked
+      : el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : el.value !== el.defaultValue);
+  if (typed) return false;
+  const h = location.hash || "#/home";
+  if (h === "#/login" || h === "#/home") return true;
+  return h.startsWith("#/pos") && !(SALE?.lines?.length);
+}
+async function checkBuild() {
+  if (!BUILD || checkBuild.stale) return;
+  let h;
+  try { h = await (await fetch("/api/health", { cache: "no-store" })).json(); } catch { return; }   // restarting
+  if (!h?.web || h.web === BUILD) return;
+  if (screenIdle()) { location.reload(); return; }
+  checkBuild.stale = true;
+  $("#staleBar").hidden = false;
+}
+if (BUILD) {
+  $("#staleBar")?.addEventListener("click", () => location.reload());
+  setInterval(checkBuild, 60000);
+  window.addEventListener("focus", checkBuild);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
+}
+
 // ------------------------------------------------------------------ sales history / returns
 const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
 const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -2406,7 +2444,7 @@ async function viewSale(id) {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
-    app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
+    app.querySelectorAll("[data-ret]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
     btn.disabled = true;
     try {
@@ -2572,7 +2610,7 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {} };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -2597,6 +2635,7 @@ async function openDraft(id) {
 }
 
 async function viewPos() {
+  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "ناقص" (11/01)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
@@ -2878,8 +2917,11 @@ function renderSide() {
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
-    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
-    catch (er) { toast(er.message, true); }
+    POS.saving = (async () => {        // complete() waits for it: F9 typed in the address field (11/01)
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
+      catch (er) { toast(er.message, true); }
+    })();
+    await POS.saving;
   }));
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
@@ -2895,15 +2937,7 @@ function renderSide() {
     }));
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
-  $("#posCustNew")?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const name = prompt("اسم العميل:"); if (!name) return;
-    const phone = prompt("الهاتف (اختياري):") || null;
-    try {
-      const c = await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: 0 } });
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } }); renderSide();
-    } catch (er) { toast(er.message, true); }
-  });
+  $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
@@ -2925,6 +2959,45 @@ function renderSide() {
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
   $("#posDone").addEventListener("click", () => complete(null));
+}
+
+// A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
+// fills the name or the phone, a refusal (a phone already used) stays on the form, and one click saves once.
+function newCustomerDialog() {
+  const typed = ($("#posCust")?.value || "").trim(), isPhone = /^[+\d\s-]{5,}$/.test(typed);
+  const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
+  const d = document.createElement("dialog"); d.id = "custNewDlg";
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
+    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">الهاتف (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
+    ${SALE?.kind === "delivery" ? `<label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE.delivery?.address || "")}"></label>` : ""}
+    <p class="badge b-err" data-err hidden></p>
+    <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  document.body.append(d);
+  const f = d.querySelector("form"), err = d.querySelector("[data-err]"), ok = f.querySelector("[value=ok]");
+  const [nameIn, phoneIn, addrIn] = ["name", "phone", "address1"].map((n) => f.elements.namedItem(n));
+  const done = () => { d.close(); d.remove(); $("#posQ")?.focus(); };
+  f.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (ok.disabled) return;                          // saving: no second save, and no closing mid-save
+    if (ev.submitter?.value === "cancel") { done(); return; }
+    const body = { name: nameIn.value.trim(), phone: phoneIn.value.trim() || null, credit_limit: 0 };
+    if (addrIn?.value.trim()) body.address1 = addrIn.value.trim();
+    if (!body.name) { nameIn.focus(); return; }
+    ok.disabled = true;
+    try {
+      const c = await api("/api/customers", { method: "POST", body });
+      SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { customer_id: c.id } });
+      const fill = {};                                // like choosing an existing customer: fill only what is empty
+      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone) fill.phone = body.phone;
+      if (SALE.kind === "delivery" && body.address1 && !SALE.delivery?.address) fill.address = body.address1;
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { delivery: fill } });
+      done(); renderSide();
+    } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
+  });
+  d.addEventListener("cancel", (ev) => { ev.preventDefault(); if (!ok.disabled) done(); });
+  d.showModal();
+  (isPhone || !typed ? nameIn : phoneIn).focus();
 }
 
 function refreshTabLabel() {
@@ -2952,6 +3025,10 @@ function currentPayments() {
 }
 
 async function complete(findings) {
+  // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
+  // for a missing address that is right there on the screen (device test 11/01)
+  if (document.activeElement?.dataset?.dl) document.activeElement.blur();
+  await POS.saving;
   const payments = currentPayments();
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });

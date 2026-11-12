@@ -26,6 +26,7 @@ from pathlib import Path
 from ..db import Database
 from . import audit, backup, notify
 from .errors import ValidationFailed
+from .numbers import whole_number
 from .permissions import Context
 
 log = logging.getLogger("pharm.backup")
@@ -124,7 +125,7 @@ class AutoBackup:
         for k, lo, hi in (("keep_last", 1, 100), ("keep_daily", 0, 60), ("keep_weekly", 0, 52)):
             if k in changes:
                 try:
-                    v = int(changes[k])
+                    v = whole_number(changes[k])     # 2.5 or true is refused, never truncated
                 except (TypeError, ValueError):
                     raise ValidationFailed("رقم غير صحيح")
                 if not lo <= v <= hi:

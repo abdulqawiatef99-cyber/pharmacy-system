@@ -143,9 +143,13 @@ def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | No
     if not approve and len((reason or "").strip()) < 3:
         raise ValidationFailed("اكتب سبب الرفض")
     with db.transaction():
-        db.execute("UPDATE expenses SET status=?, decided_by=?, decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
-                   " reject_reason=? WHERE id=?", ("approved" if approve else "rejected", ctx.approver_id or ctx.user_id,
-                                                  None if approve else reason.strip(), eid))
+        # only while still pending: an approval and a rejection at the same moment cannot both stand
+        n = db.execute("UPDATE expenses SET status=?, decided_by=?, decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                       " reject_reason=? WHERE id=? AND org_id=? AND status='pending'",
+                       ("approved" if approve else "rejected", ctx.approver_id or ctx.user_id,
+                        None if approve else reason.strip(), eid, ctx.org_id)).rowcount
+        if not n:
+            raise Conflict("سبق اتخاذ قرار في هذا المصروف")
         audit.record(db, ctx, "expense.approve" if approve else "expense.reject", "expense", eid,
                      after={"amount": e["amount"], "reason": reason})
         if not approve and e["paid_from"] == "drawer":

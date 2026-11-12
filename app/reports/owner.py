@@ -186,8 +186,8 @@ def returns_report(db: Database, ctx: Context, date_from: str, date_to: str) -> 
             " LEFT JOIN users us ON us.id=s.created_by WHERE r.org_id=? AND s.branch_id=? AND r.created_at>=? AND r.created_at<?"
             " ORDER BY r.created_at DESC", (ctx.org_id, ctx.branch_id, lo, hi)):
         d = dict(r)
-        a = db.one("SELECT after_json FROM audit_log WHERE entity_type='sale' AND entity_id=? AND action='sale.return'"
-                   " AND json_extract(after_json,'$.return_id')=?", (d["sale_id"], d["id"]))
+        a = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=? AND action='sale.return'"
+                   " AND json_extract(after_json,'$.return_id')=?", (ctx.org_id, d["sale_id"], d["id"]))   # org_id: uses the index
         lines = json.loads(a["after_json"]).get("lines", {}) if a else {}
         items = []
         for lid, q in lines.items():

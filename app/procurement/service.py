@@ -207,20 +207,26 @@ class Procurement:
             best[k]["purchases"] += 1
         return sorted(best.values(), key=lambda x: Decimal(x["last_unit_cost"]))
 
-    def evaluate_offer(self, ctx: Context, item_id: str, *, packs: int, discount_pct: float,
-                       expiry_date: str | None = None, cash_available: float | None = None) -> dict:
+    def evaluate_offer(self, ctx: Context, item_id: str, *, packs: int, discount_bp: int,
+                       expiry_date: str | None = None, cash_available: int | None = None) -> dict:
         """Should we take a big-discount offer? Weighs cover, cash and expiry —
-        returns a verdict with reasons; never places an order."""
+        returns a verdict with reasons; never places an order. Money is whole piasters
+        (cost and cash_available), the discount basis points, packs whole packs."""
+        from ..sales.service import discount_of
         ctx.require("purchases.read")
         it = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
         if not it:
             raise NotFound("الصنف غير موجود")
-        if packs <= 0 or not 0 <= discount_pct < 100 or it["public_price"] is None:
+        if (any(isinstance(v, bool) or not isinstance(v, int) for v in (packs, discount_bp))
+                or (cash_available is not None and (isinstance(cash_available, bool) or not isinstance(cash_available, int)))):
+            raise ValidationFailed("الكمية والخصم والسيولة أرقام صحيحة")
+        if packs <= 0 or not 0 <= discount_bp < 10000 or it["public_price"] is None or (cash_available or 0) < 0:
             raise ValidationFailed("بيانات العرض غير مكتملة (الكمية/الخصم/سعر الجمهور)")
         u = self._usage(ctx, item_id, 90)
         base = packs * it["pack_size"]
         on_hand = self._on_hand(ctx, item_id)
-        cost = it["public_price"] / 100 * packs * (1 - discount_pct / 100)
+        gross = it["public_price"] * packs
+        cost = gross - discount_of(gross, discount_bp)
         reasons, verdict = [], "ok"
         if u["daily"] == 0:
             verdict = "no"
@@ -233,18 +239,21 @@ class Procurement:
                 verdict = "caution"
                 reasons.append("تغطية أكثر من 4 شهور تحبس سيولة")
         if expiry_date:
-            days_left = (date.fromisoformat(expiry_date) - self.today).days
+            try:
+                days_left = (date.fromisoformat(str(expiry_date)) - self.today).days
+            except ValueError:
+                raise ValidationFailed("تاريخ الصلاحية غير صحيح")
             if u["daily"] and (on_hand + base) / u["daily"] > days_left:
                 verdict = "no"
                 reasons.append(f"لن تُباع الكمية قبل انتهاء الصلاحية بعد {days_left} يوم")
         if cash_available is not None and cost > cash_available:
             verdict = "no"
             reasons.append("التكلفة أكبر من السيولة المتاحة")
-        result = {"verdict": verdict, "cost": round(cost, 2), "days_of_cover": round(cover, 1) if cover else None,
+        result = {"verdict": verdict, "cost": cost, "days_of_cover": round(cover, 1) if cover else None,
                   "reasons": reasons}
         with self.db.transaction():
             audit.record(self.db, ctx, "procurement.offer_eval", "item", item_id,
-                         after={"packs": packs, "discount_pct": discount_pct, **result})
+                         after={"packs": packs, "discount_bp": discount_bp, **result})
         return result
 
 
