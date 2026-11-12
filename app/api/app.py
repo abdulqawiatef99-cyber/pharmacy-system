@@ -138,8 +138,8 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 
 class RateLimiter:
-    def __init__(self, limit: int, window_s: int):
-        self.limit, self.window = limit, window_s
+    def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
+        self.limit, self.window, self.message = limit, window_s, message
         self.hits: dict[str, deque] = defaultdict(deque)
 
     def check(self, key: str) -> None:
@@ -148,7 +148,7 @@ class RateLimiter:
         while q and now - q[0] > self.window:
             q.popleft()
         if len(q) >= self.limit:
-            raise DomainError("محاولات كثيرة، انتظر دقيقة", code="rate_limited")
+            raise DomainError(self.message, code="rate_limited")
         q.append(now)
 
 
@@ -179,6 +179,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
+    # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
+    # session cannot be used to guess the password at full speed
+    reauth_limiter = RateLimiter(5, 300, "محاولات كثيرة لكلمة المرور، انتظر 5 دقائق")
 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
@@ -508,6 +511,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
         from ..core import security as _sec
+        reauth_limiter.check(ctx.user_id)
         if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
             raise ValidationFailed("كلمة المرور غير صحيحة")
         people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
@@ -1031,6 +1035,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
             u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
             from ..core import security as _sec
+            reauth_limiter.check(ctx.user_id)
             if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
                 raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
