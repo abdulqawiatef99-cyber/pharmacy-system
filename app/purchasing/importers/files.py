@@ -123,10 +123,22 @@ def read_csv(data: bytes) -> list[list]:
         except UnicodeDecodeError:
             continue
     try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=CSV_DELIMITERS)
     except csv.Error:
-        dialect = csv.excel
+        # The sniffer wants the same count on every line, so a title line above the table ("رقم الفاتورة: …")
+        # made it give up, and a ';' or tab file (Excel's CSV on many Arabic Windows setups) came out as
+        # one column per line. Fall back to the delimiter found on the most lines.
+        dialect = type("Guessed", (csv.excel,), {"delimiter": _guess_delimiter(text[:4096])})
     return [row for row in csv.reader(io.StringIO(text), dialect)]
+
+
+CSV_DELIMITERS = ",;\t|"
+
+
+def _guess_delimiter(sample: str) -> str:
+    lines = [ln for ln in sample.splitlines() if ln.strip()]
+    return max(CSV_DELIMITERS, key=lambda d: (sum(d in ln for ln in lines), sum(ln.count(d) for ln in lines),
+                                              d == ","))
 
 
 def read_pdf(data: bytes) -> tuple[list[list], list[str], bool]:
