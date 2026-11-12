@@ -1495,6 +1495,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True})
 
     # ------------------------------------------------------------- procurement
+    def _hundredths(v) -> int:
+        """Pounds or percent as typed ("12.5", 12.5, 30) -> whole hundredths (piasters / basis points).
+        More than two decimals, non-numbers and booleans are refused, never rounded."""
+        if isinstance(v, bool) or v is None:
+            raise ValueError("not a number")
+        d = Decimal(str(v).strip()) * 100
+        if not d.is_finite() or d != d.to_integral_value():
+            raise ValueError("more than two decimals")
+        return int(d)
+
     def _sugg_params(req):
         qp = req.query_params
         try:
@@ -1528,13 +1538,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def proc_offer(req):
         ctx = ctx_of(req)
         b = await body(req)
-        try:
-            return J(Procurement(db).evaluate_offer(
-                ctx, str(b.get("item_id", "")), packs=int(b.get("packs", 0)),
-                discount_pct=float(b.get("discount_pct", -1)), expiry_date=b.get("expiry_date") or None,
-                cash_available=float(b["cash_available"]) if b.get("cash_available") else None))
-        except (TypeError, ValueError):
+        try:                       # typed in pounds and percent; exact, never through float (2.5 packs is refused)
+            packs = whole_number(b.get("packs", 0))
+            bp = _hundredths(b.get("discount_pct", -1))
+            cash = _hundredths(b["cash_available"]) if b.get("cash_available") not in (None, "") else None
+        except (TypeError, ValueError, ArithmeticError):
             raise ValidationFailed("قيم غير صحيحة")
+        return J(Procurement(db).evaluate_offer(ctx, str(b.get("item_id", "")), packs=packs, discount_bp=bp,
+                                                expiry_date=b.get("expiry_date") or None, cash_available=cash))
 
     @handler
     async def proc_consumption(req):
