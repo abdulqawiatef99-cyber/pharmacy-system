@@ -435,8 +435,8 @@ class DataImport:
                     normalize_text(d.get("supplier_type") or ""), "other")
                 target = catalog.create_supplier(
                     self.db, ctx, name=d["name"], supplier_type=stype, phone=d.get("phone"),
-                    base_discount_local_bp=round(Decimal(d["discount_local"]) * 100) if d.get("discount_local") else None,
-                    base_discount_imported_bp=round(Decimal(d["discount_imported"]) * 100) if d.get("discount_imported") else None)
+                    base_discount_local_bp=int((Decimal(d["discount_local"]) * 100).to_integral_value(ROUND_HALF_UP)) if d.get("discount_local") else None,
+                    base_discount_imported_bp=int((Decimal(d["discount_imported"]) * 100).to_integral_value(ROUND_HALF_UP)) if d.get("discount_imported") else None)
                 done["created"] += 1
             else:
                 done["updated" if action == "update" else "linked"] += 1

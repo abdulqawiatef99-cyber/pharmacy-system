@@ -31,6 +31,11 @@ def unnamed_roundings() -> list[str]:
                 if (len(n.args) <= positional and not any(k.arg == "rounding" for k in n.keywords)
                         and id(n) not in in_compare):
                     bad.append(f"{p.relative_to(APP.parent)}:{n.lineno}")
+            # round(<a Decimal>) is half to even too
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "round" and n.args
+                    and any(isinstance(m, ast.Call) and isinstance(m.func, ast.Name) and m.func.id == "Decimal"
+                            for m in ast.walk(n.args[0]))):
+                bad.append(f"{p.relative_to(APP.parent)}:{n.lineno}")
     return bad
 
 
