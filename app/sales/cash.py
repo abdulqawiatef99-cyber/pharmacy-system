@@ -12,6 +12,7 @@ from ..core import audit, notify
 import json
 
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 
@@ -56,7 +57,7 @@ def count_total(detail: dict) -> tuple[int, dict]:
     clean = {}
     for k, v in detail.items():
         try:
-            d, n = int(k), int(v or 0)
+            d, n = int(k), whole_number(v or 0)      # 2.5 notes is refused, never counted as 2
         except (TypeError, ValueError):
             raise ValidationFailed("عدد الفئات غير صحيح")
         if d not in DENOMINATIONS or n < 0 or n > 100000:
@@ -113,9 +114,10 @@ class CashDrawer:
             "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
             " JOIN sales s ON s.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
             " WHERE s.shift_id=? AND s.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
-        with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d JOIN sales s"
-                                   " ON s.id=d.sale_id WHERE s.org_id=? AND s.branch_id=? AND d.status IN"
-                                   " ('out','delivered')", (ctx.org_id, s["branch_id"]))["c"]
+        # from the deliveries still with a courier (few), not from every sale of the branch (#113)
+        with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d CROSS JOIN sales s"
+                                   " ON s.id=d.sale_id WHERE d.org_id=? AND d.status IN ('out','delivered')"
+                                   " AND s.org_id=? AND s.branch_id=?", (ctx.org_id, ctx.org_id, s["branch_id"]))["c"]
         expected = s["opening_cash"] + sum(by_kind.values())
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
                else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
@@ -202,8 +204,10 @@ class CashDrawer:
             "SELECT a.at, a.after_json, u.full_name FROM audit_log a LEFT JOIN users u ON u.id=a.user_id"
             " WHERE a.org_id=? AND a.action='cash.drawer_open' AND a.entity_type='cash_shift' AND a.entity_id=?"
             " ORDER BY a.at", (ctx.org_id, shift_id))]
-        auto = self.db.one("SELECT count(*) n FROM audit_log a JOIN sales x ON x.id=a.entity_id AND x.org_id=a.org_id"
-                           " WHERE a.org_id=? AND a.action='cash.drawer_auto' AND a.entity_type='sale' AND x.shift_id=?"
+        # from the shift's sales to their audit rows, not from every sale's audit rows in the log (#113)
+        auto = self.db.one("SELECT count(*) n FROM sales x CROSS JOIN audit_log a ON a.org_id=x.org_id"
+                           " AND a.entity_type='sale' AND a.entity_id=x.id"
+                           " WHERE +x.org_id=? AND x.shift_id=? AND a.action='cash.drawer_auto'"   # +: shift index
                            " AND json_extract(a.after_json, '$.outcome')='sent'", (ctx.org_id, shift_id))["n"]
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],

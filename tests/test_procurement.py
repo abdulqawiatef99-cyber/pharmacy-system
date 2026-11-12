@@ -56,14 +56,14 @@ class TestSuggest(ProcCase):
         self.assertEqual((e["item_id"], e["units_at_risk"]), (self.slow, 4))
 
     def test_offer_evaluation_never_just_discount(self):
-        r = self.p.evaluate_offer(self.ctx, self.slow, packs=10, discount_pct=40)
+        r = self.p.evaluate_offer(self.ctx, self.slow, packs=10, discount_bp=4000)
         self.assertEqual(r["verdict"], "no")
-        r = self.p.evaluate_offer(self.ctx, self.fast, packs=200, discount_pct=35)
+        r = self.p.evaluate_offer(self.ctx, self.fast, packs=200, discount_bp=3500)
         self.assertEqual(r["verdict"], "caution")       # 410 strips / 2 per day = 205 days
-        r = self.p.evaluate_offer(self.ctx, self.fast, packs=20, discount_pct=25,
+        r = self.p.evaluate_offer(self.ctx, self.fast, packs=20, discount_bp=2500,
                                   expiry_date=(TODAY + timedelta(days=10)).isoformat())
         self.assertEqual(r["verdict"], "no")
-        r = self.p.evaluate_offer(self.ctx, self.fast, packs=20, discount_pct=25)
+        r = self.p.evaluate_offer(self.ctx, self.fast, packs=20, discount_bp=2500)
         self.assertEqual(r["verdict"], "ok")
 
 

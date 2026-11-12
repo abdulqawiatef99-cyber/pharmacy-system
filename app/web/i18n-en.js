@@ -1227,8 +1227,8 @@ window.I18N_EN = {
 "مثال: المبلغ لم يصل / المبلغ أقل": "Example: money did not arrive / amount is less",
 "مثال: الفلوس موصلتش / المبلغ أقل": "Example: money did not arrive / amount is less",
 "مثال: جرد رف A": "Example: shelf A count",
-"مثال: د. عبد القوي": "Example: Dr. Abdulqawi",
-"مثال: صيدلية عبد القوي": "Example: Abdulqawi Pharmacy",
+"مثال: د. أحمد محمود": "Example: Dr. Ahmed Mahmoud",
+"مثال: صيدلية الشفاء": "Example: Al-Shifa Pharmacy",
 "مثال: جهاز البنك الأهلي": "Example: Ahly bank machine",
 "مثال: مكنة البنك الأهلي": "Example: Ahly bank machine",
 "مثال: نسي التسجيل": "Example: forgot to check in",
@@ -2451,5 +2451,6 @@ window.I18N_EN = {
 "المسافة بين الملصقات من 0 إلى 10 مم": "Gap between labels is 0 to 10 mm",
 "طابعة الملصقات مضبوطة على الطباعة من المتصفح": "The label printer is set to print from the browser",
 "الكود أطول من عرض الملصق؛ اختر مقاسًا أعرض": "The code is longer than the label width; choose a wider size",
-"اختر نوع طابعة الملصقات (TSPL أو ZPL)": "Choose the label printer type (TSPL or ZPL)"
+"اختر نوع طابعة الملصقات (TSPL أو ZPL)": "Choose the label printer type (TSPL or ZPL)",
+"فيه نسخة جديدة من البرنامج — اضغط هنا لتحديث الشاشة": "A new version of the program is installed — click here to refresh the screen"
 };
