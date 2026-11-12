@@ -5,6 +5,8 @@ import logging
 import os
 import time
 
+from PIL import Image
+
 from ..core import accounts, audit
 from ..core.errors import DomainError, ValidationFailed
 from ..core.permissions import Context
@@ -214,9 +216,9 @@ def label_data(db: Database, ctx: Context, it, cfg: dict) -> dict:
                  " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL",
                  (ctx.org_id, ctx.branch_id, it["id"]))["e"]
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    name = (it["name_ar"] or it["name_en"]) if cfg["names"] == "ar" else (it["name_en"] or it["name_ar"])
+    name = (it["name_ar"] or it["name_en"]) if cfg.get("label_text_lang", "en") == "ar" else (it["name_en"] or it["name_ar"])
     return {"name": name or "", "value": str(lb.label_value(dict(it), codes)), "code": it["code"] or "",
-            "price": f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else "",
+            "price": rs.label_price(it["public_price"], cfg) if it["public_price"] is not None else "",
             "expiry": f"{exp[5:7]}/{exp[2:4]}" if exp else "", "pharmacy": pharmacy, "phone": phone}
 
 
@@ -245,6 +247,15 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         cfg["label_size"] = rs.label_size_ok(data["label_size"])
     if data and isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
+    if data and "label_rows" in data:
+        cfg["label_rows"] = rs.label_rows_ok(data["label_rows"])
+    if data and isinstance(data.get("label_gap"), int) and not isinstance(data["label_gap"], bool) \
+            and 0 <= data["label_gap"] <= 10:
+        cfg["label_gap"] = data["label_gap"]
+    if data and data.get("label_text_lang") in ("ar", "en"):
+        cfg["label_text_lang"] = data["label_text_lang"]
+    if data and "label_pharmacy_en" in data:
+        cfg["label_pharmacy_en"] = str(data["label_pharmacy_en"] or "").strip()[:40]
     if data and "label_target" in data:
         try:
             cfg["label_target"] = rs.check_target(data["label_target"], "win:Xprinter XP-235B")
@@ -255,9 +266,11 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
     if cfg["label_lang"] == "driver":
         pg = driver_page(cfg["label_target"])      # #100: the label is drawn on the driver's page
         if pg:
-            w, h, cfg["label_dpi"], source = pg.w_mm, pg.h_mm, pg.dpi_x, "windows"
+            rows = int(cfg.get("label_rows") or 1)
+            h_one = (pg.h_mm - float(cfg.get("label_gap") or 0) * (rows - 1)) / rows
+            w, h, cfg["label_dpi"], source = pg.w_mm, h_one, pg.dpi_x, "windows"
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     try:
         img, dropped = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
@@ -306,14 +319,41 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
     if not name:
         raise escpos.PrinterError("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز (win:اسم الطابعة)")
 
+    rows = int(cfg.get("label_rows") or 1)
+
     def make(pg):
-        out = []
+        if rows == 1:
+            out = []
+            for data, n in wanted:
+                img, gone = lb.render_label(data, pg.w_mm, pg.h_mm, pg.dpi_x, cfg["label_fields"])
+                out.append((img.rotate(180) if cfg.get("label_flip") else img, n))
+                if dropped is not None:
+                    dropped.update(gone)
+            return out
+        # #100: the driver page holds `rows` labels top to bottom with the gap between them (the pharmacy's
+        # XP-235B: a 38x25 mm page = two 38x12.5 labels); each label is drawn on its own part of the page
+        gap = float(cfg.get("label_gap") or 0)
+        row_mm = (pg.h_mm - gap * (rows - 1)) / rows
+        if row_mm < 6:
+            raise escpos.PrinterError("الصفحة صغيرة على عدد الملصقات ده: قلل عدد الملصقات في الصفحة")
+        # composed at the labels' own (horizontal) resolution; the driver page stretches it to its pixels,
+        # so a driver with different vertical dots per inch keeps the rows where they belong
+        dots = lambda mm: round(mm * pg.dpi_x / 25.4)            # noqa: E731
+        labels = []
         for data, n in wanted:
-            img, gone = lb.render_label(data, pg.w_mm, pg.h_mm, pg.dpi_x, cfg["label_fields"])
-            out.append((img.rotate(180) if cfg.get("label_flip") else img, n))
+            img, gone = lb.render_label(data, pg.w_mm, row_mm, pg.dpi_x, cfg["label_fields"])
+            labels += [img] * n
             if dropped is not None:
                 dropped.update(gone)
-        return out
+        width = max(i.size[0] for i in labels)
+        height = dots(pg.h_mm)
+        pages = []
+        for k in range(0, len(labels), rows):
+            page = Image.new("1", (width, height), 1)
+            for i, img in enumerate(labels[k:k + rows]):
+                page.paste(img, (0, dots(i * (row_mm + gap))))
+            pages.append((page.rotate(180) if cfg.get("label_flip") else page, 1))
+        return pages
     return driver.print_pages(name, make)
 
 
@@ -394,6 +434,12 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
         cfg["label_variant"] = rs.label_variant_ok(data["label_variant"])
     if "label_flip" in data:
         cfg["label_flip"] = rs.label_flip_ok(data["label_flip"])
+    if "label_rows" in data:
+        cfg["label_rows"] = rs.label_rows_ok(data["label_rows"])
+    if data.get("label_text_lang") in ("ar", "en"):
+        cfg["label_text_lang"] = data["label_text_lang"]
+    if "label_pharmacy_en" in data:
+        cfg["label_pharmacy_en"] = str(data["label_pharmacy_en"] or "").strip()[:40]
     cfg["label_variant"] = _variant(cfg)
     if isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
@@ -417,7 +463,7 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
         raise ValidationFailed("طرق الإرسال البديلة لطابعات TSPL فقط", code="variant_tspl_only")
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
     try:

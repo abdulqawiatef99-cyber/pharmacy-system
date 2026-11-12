@@ -236,3 +236,106 @@ class TestDriverRules(DriverCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTwoLabelsPerPage(DriverCase):
+    """#100 on the PC, 12/11: the driver's 38x25 mm page covers two 38x12.5 labels; one label per page
+    printed across both. With label_rows=2 each page carries two labels, each on its own half."""
+
+    def test_two_labels_share_one_page_with_the_gap_between(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 3})
+        f = self.use(FakeWindows())
+        r = print_labels(self.db, self.ctx, [(self.pan, 3)])
+        self.assertEqual(r["labels"], 3)
+        self.assertEqual(len(f.pages), 2)                       # 3 labels -> 2 pages, the last half empty
+        page = f.images[0].convert("1")
+        self.assertEqual(page.size, (304, 200))
+        row = round((25.025 - 3) / 2 * 203 / 25.4)
+        gap_rows = range(row + 2, round((row * 25.4 / 203 + 3) * 203 / 25.4) - 2)
+        self.assertTrue(all(page.getpixel((x, y)) for y in gap_rows for x in range(304)))   # the gap stays blank
+        top, bottom = page.crop((0, 0, 304, row)), page.crop((0, 200 - row, 304, 200))
+        self.assertLess(top.histogram()[0], top.size[0] * top.size[1])                   # something drawn
+        self.assertLess(bottom.histogram()[0], bottom.size[0] * bottom.size[1])
+        last = f.images[1].convert("1").crop((0, 200 - row, 304, 200))
+        self.assertEqual(last.histogram()[0], 0)                                         # odd label: half empty
+
+    def test_rows_must_be_one_to_four(self):
+        for bad in (0, 5, "2", True):
+            with self.assertRaises(ValidationFailed, msg=repr(bad)):
+                rs.save(self.db, self.ctx, {"label_rows": bad})
+
+    def test_preview_shows_one_label_of_the_page(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 3})
+        self.use(FakeWindows())
+        _, _, info = label_preview(self.db, self.ctx, {"label_lang": "driver"})
+        self.assertEqual(info, {"size": "38x11", "source": "windows"})
+
+
+class TestLabelLanguage(DriverCase):
+    """Owner, 12/11: the label's words in English (default) or Arabic; text shrinks before it is cut."""
+
+    def test_english_by_default_arabic_on_request(self):
+        from app.printing.service import label_data
+        rs.save(self.db, self.ctx, {"label_pharmacy": "صيدلية تجربة", "label_pharmacy_en": "Test Pharmacy"})
+        cfg = rs.get(self.db, self.ctx.org_id)
+        self.assertEqual(cfg["label_text_lang"], "en")
+        it = self.db.one("SELECT * FROM items WHERE id=?", (self.pan,))
+        en = label_data(self.db, self.ctx, it, cfg)
+        self.assertEqual(en["pharmacy"], "Test Pharmacy")
+        self.assertTrue(en["price"].endswith(" EGP"))
+        rs.save(self.db, self.ctx, {"label_text_lang": "ar"})
+        ar = label_data(self.db, self.ctx, it, rs.get(self.db, self.ctx.org_id))
+        self.assertEqual(ar["pharmacy"], "صيدلية تجربة")
+        self.assertTrue(ar["price"].endswith(" ج"))
+        with self.assertRaises(ValidationFailed):
+            rs.save(self.db, self.ctx, {"label_text_lang": "fr"})
+
+    def test_long_text_shrinks_before_it_is_cut(self):
+        from PIL import ImageDraw, ImageFont
+        from app.printing import labels as lb
+        captured = []
+        real = lb._fit
+
+        def spy(d, text, font, width, **kw):
+            captured.append((text, font.size))
+            return real(d, text, font, width, **kw)
+        data = {"name": "X", "value": "6221025012340", "code": "", "price": "40.00 EGP", "expiry": "10/27",
+                "pharmacy": "Abdul Qawi Pharmacy", "phone": "01040300507"}
+        with mock.patch.object(lb, "_fit", spy):
+            lb.render_label(data, 38, 11.5, 203, {**lb.DEFAULT_FIELDS, "pharmacy": True, "phone": True})
+        sizes = dict(captured)
+        self.assertLess(sizes["Abdul Qawi Pharmacy"], max(s for _, s in captured))   # made smaller, not just cut
+
+
+class TestRowsAndShrinkEdges(DriverCase):
+    def test_rows_keep_their_place_when_dpi_differs(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 2})
+        f = self.use(FakeWindows(caps=(450, 590, 300, 600)))       # 38.1 x 25.0 mm at 300 x 600 dpi
+        print_labels(self.db, self.ctx, [(self.pan, 2)])
+        page = f.images[0]
+        self.assertEqual(page.size, (450, round(590 * 25.4 / 600 * 300 / 25.4)))   # square at 300 dpi
+        self.assertEqual(f.pages[0][3], (0, 0, 450, 590))                          # stretched to the page
+
+    def test_shrinking_stops_at_seventy_percent(self):
+        from app.printing import labels as lb
+        sizes = []
+        real = lb._fit
+
+        def spy(d, text, font, width, **kw):
+            sizes.append((text, font.size))
+            return real(d, text, font, width, **kw)
+        data = {"name": "A very long medicine name that cannot fit on a small label at all " * 2, "value": "6221025012340",
+                "code": "", "price": "", "expiry": "", "pharmacy": "", "phone": ""}
+        with mock.patch.object(lb, "_fit", spy):
+            lb.render_label(data, 38, 25, 300, lb.DEFAULT_FIELDS)
+        start = max(10, min(round(25 * 300 / 25.4) // 7, round(3.2 * 300 / 25.4)))
+        self.assertGreaterEqual(dict(sizes)[data["name"]], max(10, int(start * 0.7)))
+
+
+class TestGapOnScreen(DriverCase):
+    def test_preview_follows_the_gap_on_the_screen(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 2})
+        self.use(FakeWindows())
+        _, _, a = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 0})
+        _, _, b = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 4})
+        self.assertEqual((a["size"], b["size"]), ("38x12.5", "38x10.5"))
