@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import notify
 from ..core.errors import ValidationFailed
@@ -62,6 +62,10 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
             "by_hour": by_hour, "top_items": top}
 
 
+def _piasters(v: Decimal) -> int:
+    return int(v.quantize(Decimal("1"), ROUND_HALF_UP))
+
+
 def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
     ctx.require("inventory.read")
     today = today or local_today()
@@ -75,16 +79,24 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
             " AND b.expiry_date <= ? ORDER BY b.expiry_date LIMIT 500", (ctx.org_id, ctx.branch_id, soon)):
         d = dict(r)
         d["days_left"] = (date.fromisoformat(d["expiry_date"]) - today).days
-        d["value"] = int(round((d["price"] or 0) * d["qty"] / max(1, d["pack_size"])))
+        d["value"] = _piasters(Decimal(d["price"] or 0) * d["qty"] / max(1, d["pack_size"]))
         exp.append(d)
     out["expiring"] = exp
     if ctx.can("costs.read"):
-        rows = db.all("SELECT coalesce(c.name, 'بدون قسم') category, sum(sb.qty * coalesce(CAST(ic.avg_cost AS REAL),0) * 100) cost,"
-                      " sum(sb.qty * coalesce(i.public_price,0) * 1.0 / i.pack_size) retail, count(DISTINCT i.id) items"
-                      " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
-                      " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
-                      " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 GROUP BY 1 ORDER BY 2 DESC", (ctx.org_id, ctx.branch_id))
-        out["value_by_category"] = [{**dict(r), "cost": int(round(r["cost"])), "retail": int(round(r["retail"]))} for r in rows]
+        # summed in Decimal from the stored decimal cost, not SQLite REAL; each category rounded half up once
+        cats: dict[str, list] = {}
+        for r in db.all("SELECT coalesce(c.name, 'بدون قسم') category, i.id item_id, sb.qty, ic.avg_cost,"
+                        " coalesce(i.public_price,0) price, i.pack_size"
+                        " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
+                        " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
+                        " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0", (ctx.org_id, ctx.branch_id)):
+            g = cats.setdefault(r["category"], [Decimal(0), Decimal(0), set()])
+            g[0] += r["qty"] * Decimal(r["avg_cost"] or 0) * 100
+            g[1] += Decimal(r["qty"]) * r["price"] / max(1, r["pack_size"])
+            g[2].add(r["item_id"])
+        out["value_by_category"] = sorted(
+            ({"category": k, "cost": _piasters(c), "retail": _piasters(rt), "items": len(ids)}
+             for k, (c, rt, ids) in cats.items()), key=lambda x: -x["cost"])
         out["value_cost"] = sum(r["cost"] for r in out["value_by_category"])
         out["value_retail"] = sum(r["retail"] for r in out["value_by_category"])
     return out

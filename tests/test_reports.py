@@ -12,6 +12,24 @@ from tests.test_cashier_acceptance import Base, T
 PW = "Staff-Pass-2026"
 
 
+class TestStockValueExact(Base):
+    def test_values_are_whole_piasters_half_up_from_the_decimal_cost(self):
+        from app.catalog import service as cat
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Exact Cost", "pack_size": 2, "public_price": 1003})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, it, "EX", (T + timedelta(days=20)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=3, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("0.145"))
+        s = rep.stock_report(self.db, self.ctx)
+        e = next(x for x in s["expiring"] if x["batch_no"] == "EX")
+        self.assertEqual(e["value"], 1505)                 # 3 x 10.03 / 2 = 15.045 pounds; round() half to even gave 1504
+        # cost 20 x 15 + 3 x 0.145 = 300.435 pounds -> 30044, now summed in Decimal rather than SQLite REAL
+        self.assertEqual(s["value_cost"], 30044)
+        self.assertEqual(s["value_retail"], 41505)             # 40000 + 1504.5 in one category (half even gave 41504)
+        self.assertEqual([r["items"] for r in s["value_by_category"]], [2])
+        self.assertIsInstance(s["value_cost"], int)
+
+
 class TestReports(Base):
     def setUp(self):
         super().setUp()
