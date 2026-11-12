@@ -218,3 +218,90 @@ class ApprovalBoxInBrowser(APICase):
         self.assertEqual(with_pin, {"/api/approvals/check"})              # the PIN went to the check only
         self.assertTrue(any(s["path"] == "/api/audit" and s["token"] for s in out["seen"]))
         self.assertFalse(any(s["token"] and s["path"] != "/api/audit" for s in out["seen"]))
+
+
+POS_SCRIPT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, approver, pin, code] = process.argv.slice(1);
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  const seen = [];
+  p.on('request', (r) => { if (r.url().includes('/api/')) {
+    const h = r.headers();
+    seen.push({ method: r.method(), path: new URL(r.url()).pathname, pin: h['x-approver-pin'] || null, token: h['x-approval'] || null });
+  } });
+  await p.goto(base + '/');
+  await p.waitForSelector('#loginForm');
+  await p.evaluate(async ([u, w]) => fetch('/api/auth/login', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ username: u, password: w }) }), [user, pw]);
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posQ');
+  await p.locator('#posQ').focus();
+  await p.keyboard.type(code, { delay: 5 }); await p.keyboard.press('Enter');
+  await p.waitForSelector('table.cart [data-disc]', { timeout: 10000 });
+  await p.locator('table.cart [data-disc]').fill('10');                    // above his 5%
+  await p.locator('table.cart [data-disc]').dispatchEvent('change');
+  await p.waitForSelector('#approveDlg[open]');
+  await p.locator('#approveDlg [name=who]').selectOption(approver);
+  await p.locator('#approveDlg [name=pin]').fill(pin);
+  const resp = p.waitForResponse((r) => r.request().method() === 'PATCH' && r.request().headers()['x-approval']);
+  await p.locator('#approveDlg button[value=ok]').click();
+  const status = (await resp).status();
+  await p.waitForFunction(() => document.querySelector('table.cart [data-disc]').value === '10');
+  console.log(JSON.stringify({ status, seen }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class DiscountApprovalOnTheSaleScreen(APICase):
+    def test_a_discount_above_the_limit_is_approved_once_with_a_token(self):
+        import json
+        import shutil
+        import socket
+        import subprocess
+        import threading
+        import time
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        import uvicorn
+
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        approvals.clear()
+        people.set_pin(self.db, self.ctx, self.ctx.user_id, "9753")
+        uid = people.add_user(self.db, self.ctx, username="asst", full_name="مساعد", password=PW, role_code="assistant")
+        people.set_discount(self.db, self.ctx, uid, 500)
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Approval Item", "public_price": 1000})
+        cat.add_barcode(self.db, self.ctx, it, "6221043010366")
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, it, "B1", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=20, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(self.app, host="127.0.0.1", port=port, log_level="error"))
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        try:
+            for _ in range(100):
+                if server.started:
+                    break
+                time.sleep(0.05)
+            r = subprocess.run([shutil.which("node"), "-e", POS_SCRIPT, f"http://127.0.0.1:{port}", "asst", PW,
+                                self.ctx.user_id, "9753", "6221043010366"], capture_output=True, text=True, timeout=120,
+                               cwd=str(Path(__file__).parent))
+        finally:
+            server.should_exit = True
+            t.join(10)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["status"], 200)
+        self.assertEqual({s["path"] for s in out["seen"] if s["pin"]}, {"/api/approvals/check"})
+        line = self.db.one("SELECT l.discount_bp, l.discount_approved_by FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+                           " WHERE s.org_id=? AND l.item_id=?", (self.ctx.org_id, it))
+        self.assertEqual((line["discount_bp"], line["discount_approved_by"]), (1000, self.ctx.user_id))
