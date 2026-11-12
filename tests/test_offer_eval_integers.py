@@ -46,6 +46,12 @@ class OfferInWholeNumbers(APICase):
         self.assertIn("التكلفة أكبر من السيولة المتاحة", short["reasons"])
         self.assertEqual(short["verdict"], "no")
 
+    def test_a_bad_expiry_date_is_a_422_not_a_server_error(self):
+        for exp in ("2026-02-30", "soon", "31/12/2026"):
+            with self.subTest(exp=exp):
+                r = self.post(packs=1, discount_pct=10, expiry_date=exp)
+                self.assertEqual(r.status_code, 422, r.text)
+
     def test_service_refuses_floats(self):
         p = Procurement(self.db)
         for kw in ({"packs": 2.5, "discount_bp": 0}, {"packs": 1, "discount_bp": 12.5},

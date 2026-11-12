@@ -239,7 +239,10 @@ class Procurement:
                 verdict = "caution"
                 reasons.append("تغطية أكثر من 4 شهور تحبس سيولة")
         if expiry_date:
-            days_left = (date.fromisoformat(expiry_date) - self.today).days
+            try:
+                days_left = (date.fromisoformat(str(expiry_date)) - self.today).days
+            except ValueError:
+                raise ValidationFailed("تاريخ الصلاحية غير صحيح")
             if u["daily"] and (on_hand + base) / u["daily"] > days_left:
                 verdict = "no"
                 reasons.append(f"لن تُباع الكمية قبل انتهاء الصلاحية بعد {days_left} يوم")
