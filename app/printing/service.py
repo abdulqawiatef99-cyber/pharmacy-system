@@ -311,6 +311,10 @@ def win_printer(target: str | None) -> str:
     return name.strip() if kind == "win" else ""
 
 
+# the driver page ran ~1 mm past the right edge of the XP-235B label (photo, 12/11): keep text 1.5 mm in
+DRIVER_EDGE_MM = 1.5
+
+
 def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | None = None):
     """#100: labels through the printer's Windows driver (like E-Stock): drawn at the driver's page size,
     one page per label. Returns the page used. PrinterError on failure."""
@@ -325,7 +329,7 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
         if rows == 1:
             out = []
             for data, n in wanted:
-                img, gone = lb.render_label(data, pg.w_mm, pg.h_mm, pg.dpi_x, cfg["label_fields"])
+                img, gone = lb.render_label(data, pg.w_mm, pg.h_mm, pg.dpi_x, cfg["label_fields"], edge_mm=DRIVER_EDGE_MM)
                 out.append((img.rotate(180) if cfg.get("label_flip") else img, n))
                 if dropped is not None:
                     dropped.update(gone)
@@ -341,7 +345,7 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
         dots = lambda mm: round(mm * pg.dpi_x / 25.4)            # noqa: E731
         labels = []
         for data, n in wanted:
-            img, gone = lb.render_label(data, pg.w_mm, row_mm, pg.dpi_x, cfg["label_fields"])
+            img, gone = lb.render_label(data, pg.w_mm, row_mm, pg.dpi_x, cfg["label_fields"], edge_mm=DRIVER_EDGE_MM)
             labels += [img] * n
             if dropped is not None:
                 dropped.update(gone)
