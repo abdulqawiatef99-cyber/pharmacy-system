@@ -84,7 +84,7 @@ class TestPaidOnce(DBTestCase):
     def test_a_scheduled_expense_is_recorded_once_for_its_period(self):
         s = sc.save(self.db, self.ctx, {"name": "إيجار الصيدلية", "category_id": self.cat, "amount": 500000,
                                          "day_of_month": 1, "remind_days": 3})
-        fired = self.after_first("SELECT 1 FROM expenses WHERE schedule_id",
+        fired = self.after_first("SELECT 1 FROM expenses WHERE org_id=? AND schedule_id",
                                  lambda: sc.pay(self.db, self.ctx, s["id"], paid_from="outside"))
         with self.assertRaises(ValidationFailed):
             sc.pay(self.db, self.ctx, s["id"], paid_from="outside")
