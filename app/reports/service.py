@@ -8,7 +8,7 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import kept_value, local_day_bounds, local_today
+from ..sales.service import cost_piasters, kept_value, local_day_bounds, local_today, retail_value
 
 
 def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
@@ -115,16 +115,29 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
             " AND b.expiry_date <= ? ORDER BY b.expiry_date LIMIT 500", (ctx.org_id, ctx.branch_id, soon)):
         d = dict(r)
         d["days_left"] = (date.fromisoformat(d["expiry_date"]) - today).days
-        d["value"] = int(round((d["price"] or 0) * d["qty"] / max(1, d["pack_size"])))
+        d["value"] = retail_value(d["qty"], d["price"] or 0, d["pack_size"])
         exp.append(d)
     out["expiring"] = exp
     if ctx.can("costs.read"):
-        rows = db.all("SELECT coalesce(c.name, 'بدون قسم') category, sum(sb.qty * coalesce(CAST(ic.avg_cost AS REAL),0) * 100) cost,"
-                      " sum(sb.qty * coalesce(i.public_price,0) * 1.0 / i.pack_size) retail, count(DISTINCT i.id) items"
-                      " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
-                      " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
-                      " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 GROUP BY 1 ORDER BY 2 DESC", (ctx.org_id, ctx.branch_id))
-        out["value_by_category"] = [{**dict(r), "cost": int(round(r["cost"])), "retail": int(round(r["retail"]))} for r in rows]
+        # cost summed in Decimal from the stored decimal cost (not SQLite REAL) and rounded once per category
+        # by the sale's cost rule; retail priced per balance row by the sale's own pricing rule (exact integers)
+        cats: dict[str, list] = {}
+        for r in db.all("SELECT coalesce(c.name, 'بدون قسم') category, i.id item_id, sb.qty, ic.avg_cost,"
+                        " coalesce(i.public_price,0) price, i.pack_size"
+                        " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
+                        " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
+                        " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0", (ctx.org_id, ctx.branch_id)):
+            g = cats.setdefault(r["category"], [Decimal(0), {}])
+            g[0] += r["qty"] * Decimal(r["avg_cost"] or 0) * 100
+            # an item's balances over several batches are one quantity, as a sale prices them (line_gross):
+            # one unit here and two there of a pack of 3 is a whole pack, not three loose units
+            k = (r["item_id"], r["price"], r["pack_size"])
+            g[1][k] = g[1].get(k, 0) + r["qty"]
+        out["value_by_category"] = sorted(
+            ({"category": name, "cost": cost_piasters(c),
+              "retail": sum(retail_value(q, price, ps) for (_, price, ps), q in qty.items()),
+              "items": len({item for item, _, _ in qty})}
+             for name, (c, qty) in cats.items()), key=lambda x: -x["cost"])
         out["value_cost"] = sum(r["cost"] for r in out["value_by_category"])
         out["value_retail"] = sum(r["retail"] for r in out["value_by_category"])
     return out
