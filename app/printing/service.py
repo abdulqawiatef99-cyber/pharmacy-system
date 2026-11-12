@@ -216,9 +216,9 @@ def label_data(db: Database, ctx: Context, it, cfg: dict) -> dict:
                  " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL",
                  (ctx.org_id, ctx.branch_id, it["id"]))["e"]
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    name = (it["name_ar"] or it["name_en"]) if cfg["names"] == "ar" else (it["name_en"] or it["name_ar"])
+    name = (it["name_ar"] or it["name_en"]) if cfg.get("label_text_lang", "en") == "ar" else (it["name_en"] or it["name_ar"])
     return {"name": name or "", "value": str(lb.label_value(dict(it), codes)), "code": it["code"] or "",
-            "price": f"{it['public_price'] / 100:,.2f} ج" if it["public_price"] is not None else "",
+            "price": rs.label_price(it["public_price"], cfg) if it["public_price"] is not None else "",
             "expiry": f"{exp[5:7]}/{exp[2:4]}" if exp else "", "pharmacy": pharmacy, "phone": phone}
 
 
@@ -249,6 +249,10 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
     if data and "label_rows" in data:
         cfg["label_rows"] = rs.label_rows_ok(data["label_rows"])
+    if data and data.get("label_text_lang") in ("ar", "en"):
+        cfg["label_text_lang"] = data["label_text_lang"]
+    if data and "label_pharmacy_en" in data:
+        cfg["label_pharmacy_en"] = str(data["label_pharmacy_en"] or "").strip()[:40]
     if data and "label_target" in data:
         try:
             cfg["label_target"] = rs.check_target(data["label_target"], "win:Xprinter XP-235B")
@@ -263,7 +267,7 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
             h_one = (pg.h_mm - float(cfg.get("label_gap") or 0) * (rows - 1)) / rows
             w, h, cfg["label_dpi"], source = pg.w_mm, h_one, pg.dpi_x, "windows"
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     try:
         img, dropped = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
@@ -427,6 +431,10 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
         cfg["label_flip"] = rs.label_flip_ok(data["label_flip"])
     if "label_rows" in data:
         cfg["label_rows"] = rs.label_rows_ok(data["label_rows"])
+    if data.get("label_text_lang") in ("ar", "en"):
+        cfg["label_text_lang"] = data["label_text_lang"]
+    if "label_pharmacy_en" in data:
+        cfg["label_pharmacy_en"] = str(data["label_pharmacy_en"] or "").strip()[:40]
     cfg["label_variant"] = _variant(cfg)
     if isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
@@ -450,7 +458,7 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
         raise ValidationFailed("طرق الإرسال البديلة لطابعات TSPL فقط", code="variant_tspl_only")
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
+    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
     try:

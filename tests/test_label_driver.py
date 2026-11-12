@@ -269,3 +269,39 @@ class TestTwoLabelsPerPage(DriverCase):
         self.use(FakeWindows())
         _, _, info = label_preview(self.db, self.ctx, {"label_lang": "driver"})
         self.assertEqual(info, {"size": "38x11", "source": "windows"})
+
+
+class TestLabelLanguage(DriverCase):
+    """Owner, 12/11: the label's words in English (default) or Arabic; text shrinks before it is cut."""
+
+    def test_english_by_default_arabic_on_request(self):
+        from app.printing.service import label_data
+        rs.save(self.db, self.ctx, {"label_pharmacy": "صيدلية تجربة", "label_pharmacy_en": "Test Pharmacy"})
+        cfg = rs.get(self.db, self.ctx.org_id)
+        self.assertEqual(cfg["label_text_lang"], "en")
+        it = self.db.one("SELECT * FROM items WHERE id=?", (self.pan,))
+        en = label_data(self.db, self.ctx, it, cfg)
+        self.assertEqual(en["pharmacy"], "Test Pharmacy")
+        self.assertTrue(en["price"].endswith(" EGP"))
+        rs.save(self.db, self.ctx, {"label_text_lang": "ar"})
+        ar = label_data(self.db, self.ctx, it, rs.get(self.db, self.ctx.org_id))
+        self.assertEqual(ar["pharmacy"], "صيدلية تجربة")
+        self.assertTrue(ar["price"].endswith(" ج"))
+        with self.assertRaises(ValidationFailed):
+            rs.save(self.db, self.ctx, {"label_text_lang": "fr"})
+
+    def test_long_text_shrinks_before_it_is_cut(self):
+        from PIL import ImageDraw, ImageFont
+        from app.printing import labels as lb
+        captured = []
+        real = lb._fit
+
+        def spy(d, text, font, width, **kw):
+            captured.append((text, font.size))
+            return real(d, text, font, width, **kw)
+        data = {"name": "X", "value": "6221025012340", "code": "", "price": "40.00 EGP", "expiry": "10/27",
+                "pharmacy": "Abdul Qawi Pharmacy", "phone": "01040300507"}
+        with mock.patch.object(lb, "_fit", spy):
+            lb.render_label(data, 38, 11.5, 203, {**lb.DEFAULT_FIELDS, "pharmacy": True, "phone": True})
+        sizes = dict(captured)
+        self.assertLess(sizes["Abdul Qawi Pharmacy"], max(s for _, s in captured))   # made smaller, not just cut

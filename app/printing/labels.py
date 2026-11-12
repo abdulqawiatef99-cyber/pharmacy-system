@@ -141,6 +141,11 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     def text(x_align: str, s: str, f, yy: int, width: int, rtl: bool = False):
         # numbers (price "40.00 ج", phone) stay left to right: with raqm the base direction must be said
         kw = {"direction": "rtl"} if rtl and _rtl(s) else {"direction": "ltr"} if _rtl(s) and shaping_available() else {}
+        # shrink the type (down to 70%) before cutting the text with "…" (owner, 12/11: names were cut)
+        size = f.size
+        while d.textlength(s, font=f, **kw) > width and size > max(10, int(f.size * 0.7)):
+            size -= 1
+            f = ImageFont.truetype(f.path, size)
         s = _fit(d, s, f, width, **kw)
         tw = d.textlength(s, font=f, **kw)
         x = {"left": pad, "right": W - pad - tw, "center": (W - tw) / 2}[x_align]

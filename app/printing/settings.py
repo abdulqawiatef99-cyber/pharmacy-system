@@ -28,7 +28,9 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             # qr2 = an optional second code at the bottom (e.g. the location); captions blank = from the link
             "qr_text": "", "qr_caption": "", "qr2_text": "", "qr2_caption": "", "show_item_count": True, "show_change": True,
             # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
-            "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24"}
+            "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24",
+            # #100 (owner, 12/11): the label's words in English (default) or Arabic; the English pharmacy name
+            "label_text_lang": "en", "label_pharmacy_en": ""}
 _KEEP = object()
 LABEL_SIZES = ("38x25", "50x30", "58x40")
 DRAWER_TIMINGS = ("before", "with", "after")
@@ -94,11 +96,18 @@ def label_identity(db: Database, org_id: str, cfg: dict) -> tuple[str, str]:
     """Pharmacy name and phone on labels: the label's own values, else the receipt's title and phone line
     (line 2), else the registered name. Nothing invented."""
     name = cfg["label_pharmacy"] or cfg["title"]
+    if cfg.get("label_text_lang", "en") == "en" and cfg.get("label_pharmacy_en"):
+        name = cfg["label_pharmacy_en"]
     if not name:
         r = db.one("SELECT name FROM organizations WHERE id=?", (org_id,))
         name = r["name"] if r else ""
     lines = cfg["lines"] or []
     return name, cfg["label_phone"] or (lines[1] if len(lines) > 1 else "")
+
+
+def label_price(piasters: int, cfg: dict) -> str:
+    """The price on a label in the label's language: "40.00 EGP" or "40.00 ج"."""
+    return f"{piasters / 100:,.2f} " + ("ج" if cfg.get("label_text_lang", "en") == "ar" else "EGP")
 
 
 def label_rows_ok(value) -> int:
@@ -145,9 +154,13 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if not isinstance(data["label_fields"], dict) or set(data["label_fields"]) - set(DEFAULT_FIELDS):
             raise ValidationFailed("حقول الملصق غير صحيحة")
         new["label_fields"] = {**cur["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items()}}
-    for k in ("label_pharmacy", "label_phone"):
+    for k in ("label_pharmacy", "label_phone", "label_pharmacy_en"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:40]
+    if "label_text_lang" in data:
+        if data["label_text_lang"] not in ("ar", "en"):
+            raise ValidationFailed("لغة الملصق: عربي أو إنجليزي")
+        new["label_text_lang"] = data["label_text_lang"]
     if "label_a4" in data:
         c, r = a4_grid(data["label_a4"])
         new["label_a4"] = f"{c}x{r}"
