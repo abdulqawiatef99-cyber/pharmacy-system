@@ -19,7 +19,12 @@ class TestResetOwnerPassword(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="pharm-reset-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        env = mock.patch.dict(os.environ, {"PHARM_DATA_DIR": str(self.tmp / "data")})
+        data = self.tmp / "data"
+        data.mkdir()
+        # every path of its own: the Windows release check runs the suite with PHARM_DB_PATH set for all tests,
+        # which wins over PHARM_DATA_DIR (four tests then met the first one's owner)
+        env = mock.patch.dict(os.environ, {"PHARM_DATA_DIR": str(data), "PHARM_DB_PATH": str(data / "pharmacy.db"),
+                                           "PHARM_UPLOAD_DIR": str(data / "uploads"), "PHARM_BACKUP_DIR": str(data / "backups")})
         env.start()
         self.addCleanup(env.stop)
         with mock.patch("sys.stdout"):
