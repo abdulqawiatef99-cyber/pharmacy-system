@@ -72,11 +72,20 @@ def _static_v(name: str) -> str:
 SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
+def _web_build() -> str:
+    """One id for the whole screen shell (index.html and its assets). An open tab compares the id it was loaded
+    with against /api/health and asks for a reload when an update replaced the files (#153)."""
+    parts = [_static_v(name) for name in SHELL_ASSETS]
+    st = (WEB_DIR / "index.html").stat()
+    parts.append(_content_hash(WEB_DIR / "index.html", st.st_mtime_ns, st.st_size))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+
+
 def _index_html() -> str:
     page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     for name in SHELL_ASSETS:
         page = page.replace(f'"/static/{name}"', f'"{_static_v(name)}"')
-    return page
+    return page.replace("</head>", f'  <meta name="pharm-build" content="{_web_build()}">\n</head>', 1)
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
 
@@ -2166,7 +2175,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def health(req):
         from ..version import __version__
         last = db.one("SELECT max(version) v FROM schema_migrations")["v"]
-        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID")})
+        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
+                  "web": _web_build()})
 
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
