@@ -68,18 +68,22 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             d["revenue"] += r["line_total"]
         else:
             partial.append((d, dict(r)))
-    if partial:              # one read for all of them (same period and organization), not one per line
+    if partial:              # one read for the sales with returns (same period and organization), not one per line
         want = {l["id"] for _, l in partial}
+        cols = "a.sale_line_id, a.id, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
         allocs_of: dict[str, list[dict]] = {}
         for a in db.all(
-                "SELECT a.sale_line_id, a.id, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
-                " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
+                f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
                 " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
-                " AND s.completed_at>=? AND s.completed_at<?", p):
+                " AND s.completed_at>=? AND s.completed_at<? AND (s.returned_total > 0 OR l.line_total IS NULL)", p):
             if a["sale_line_id"] in want:
                 allocs_of.setdefault(a["sale_line_id"], []).append(dict(a))
+        for lid in want - allocs_of.keys():  # a return that refunded nothing (a 0.01 strip): rare, read it alone
+            allocs_of[lid] = [dict(a) for a in db.all(
+                f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
+                " WHERE a.sale_line_id=? AND l.org_id=?", (lid, ctx.org_id))]
         for d, l in partial:
-            allocs = allocs_of.get(l["id"], [])
+            allocs = allocs_of[l["id"]]
             kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
             d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
     ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]

@@ -90,6 +90,19 @@ class TopItemsRevenue(PlanCase):
         totals = rep["totals"]
         self.assertEqual(sum(t["revenue"] for t in rep["top_items"]), totals["total"] - totals["returns"])
 
+    def test_a_return_that_refunded_nothing_is_still_valued(self):
+        """A pack of 2 at 0.01: returning one strip refunds 0.00, so the sale shows no returned money; the
+        line is still read and valued (0.01 kept)."""
+        item = cat.create_item(self.db, self.ctx, {"name_en": "Penny probe", "pack_size": 2, "public_price": 1})
+        self.stock(item, 4, "0")
+        done = self.sell(item, packs=1)
+        self.assertEqual(done["total"], 1)
+        r = self.call("POST", f"/api/sales/{done['id']}/return", json={"lines": {done["lines"][0]["id"]: 1},
+                                                                       "refund_method": "cash", "reason": "مراجعة"})
+        self.assertEqual(r["refund"], 0)
+        top, _ = self.top()
+        self.assertEqual((top[item]["qty"], top[item]["revenue"]), (1, 1))
+
     def test_a_line_sold_under_the_old_per_batch_rule_keeps_its_recorded_total(self):
         """A sale recorded before 0.4 priced each batch alone (2 x 10.33 + 10.33 = 30.99, #72): the report
         shows the money that sale actually took, not today's rule."""
