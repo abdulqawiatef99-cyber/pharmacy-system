@@ -6,6 +6,7 @@ from app.core.errors import Forbidden, ValidationFailed
 from app.finance import expenses as fin
 from tests.test_api import APICase, H
 from tests.test_cashier_acceptance import Base, T
+from tests.helpers import today
 
 PW = "Staff-Pass-2026"
 
@@ -44,12 +45,12 @@ class TestExpenses(Base):
         self.sell(units=4)                                                       # 80.00, cost 4 x 15 = 60
         fin.record(self.db, self.ctx, category_id=self.cat, amount=1500, paid_from="outside")
         fin.record(self.db, self.a, category_id=self.cat, amount=700, paid_from="outside")   # pending: not counted
-        r = fin.profit(self.db, self.ctx, T.isoformat(), T.isoformat())
+        r = fin.profit(self.db, self.ctx, today(), today())
         self.assertEqual((r["revenue"], r["cost"], r["gross_profit"], r["expenses_total"], r["net_profit"]),
                          (8000, 6000, 2000, 1500, 500))
         self.assertEqual(r["pending_expenses"]["n"], 1)
         with self.assertRaises(Forbidden):
-            fin.profit(self.db, self.m, T.isoformat(), T.isoformat())
+            fin.profit(self.db, self.m, today(), today())
 
 
 class TestExpensesAPI(APICase):
@@ -60,5 +61,5 @@ class TestExpensesAPI(APICase):
         cat = r["categories"][0]["id"]
         r = self.c.post("/api/expenses", json={"category_id": cat, "amount": 1000, "paid_from": "outside"}, headers=H)
         self.assertEqual(r.status_code, 201, r.text)
-        d = T.isoformat()
+        d = today()
         self.assertEqual(self.c.get("/api/reports/profit", params={"from": d, "to": d}).json()["expenses_total"], 1000)
