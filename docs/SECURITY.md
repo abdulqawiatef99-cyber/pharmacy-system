@@ -15,6 +15,7 @@
 | Tenant isolation | every query filtered by `ctx.org_id`; cross-tenant tests at service and HTTP level | `test_tenant_isolation` (×3), `test_cross_tenant_via_api` |
 | Audit | append-only (DB triggers), written in the same transaction as the change | `TestAudit`, `test_edits_are_audited_and_original_kept` |
 | Upload safety | magic-byte sniffing, size limit, storage path never from user input, spreadsheets served as attachment | `test_upload_garbage_rejected`, `test_sniff_rejects_unknown` |
+| Spreadsheet formula injection | every exported workbook (screen reports, items export, order suggestions, dead stock, import templates) passes through `core/xlsx_safe.as_text`: a string starting with `=` `+` `-` `@`, tab or CR is stored as text, never as a formula (#139) | `test_sec_xlsx_formulas.py` |
 | Host allowlist (DNS rebinding) | every request whose `Host` is not `127.0.0.1`/`localhost`/`[::1]`, the address the connection arrived on (LAN mode), or a name in `PHARM_ALLOWED_HOSTS` gets 403 `bad_host`; a Host port must be the listening port (#136) | `test_sec_host_header.py` |
 | Headers | strict CSP (no inline script/style), nosniff, frame-ancestors none, no-store on API | API test |
 | Errors | internal exceptions logged, generic message to client | handler |

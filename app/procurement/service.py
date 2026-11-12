@@ -328,6 +328,8 @@ def suggestions_xlsx(rows: list[dict], db: Database, ctx: Context) -> bytes:
                     (ctx.org_id, r["item_id"]))
         ws.append([r["label"], it["code"] if it else None, bc["barcode"] if bc else None,
                    r["suggested_packs"], r["on_hand"], r["days_of_cover"], r["confidence"]])
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
