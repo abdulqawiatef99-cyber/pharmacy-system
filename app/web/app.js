@@ -2895,15 +2895,7 @@ function renderSide() {
     }));
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
-  $("#posCustNew")?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const name = prompt("اسم العميل:"); if (!name) return;
-    const phone = prompt("الهاتف (اختياري):") || null;
-    try {
-      const c = await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: 0 } });
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } }); renderSide();
-    } catch (er) { toast(er.message, true); }
-  });
+  $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
@@ -2925,6 +2917,42 @@ function renderSide() {
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
   $("#posDone").addEventListener("click", () => complete(null));
+}
+
+// A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
+// fills the name or the phone, a refusal (a phone already used) stays on the form, and one click saves once.
+function newCustomerDialog() {
+  const typed = ($("#posCust")?.value || "").trim(), isPhone = /^[+\d\s-]{5,}$/.test(typed);
+  const d = document.createElement("dialog"); d.id = "custNewDlg";
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
+    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">الهاتف (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
+    ${SALE?.kind === "delivery" ? `<label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE.delivery?.address || "")}"></label>` : ""}
+    <p class="badge b-err" data-err hidden></p>
+    <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  document.body.append(d);
+  const f = d.querySelector("form"), err = d.querySelector("[data-err]"), ok = f.querySelector("[value=ok]");
+  const [nameIn, phoneIn, addrIn] = ["name", "phone", "address1"].map((n) => f.elements.namedItem(n));
+  const done = () => { d.close(); d.remove(); $("#posQ")?.focus(); };
+  f.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (ev.submitter?.value === "cancel") { done(); return; }
+    if (ok.disabled) return;
+    const body = { name: nameIn.value.trim(), phone: phoneIn.value.trim() || null, credit_limit: 0 };
+    if (addrIn?.value.trim()) body.address1 = addrIn.value.trim();
+    if (!body.name) { nameIn.focus(); return; }
+    ok.disabled = true;
+    try {
+      const c = await api("/api/customers", { method: "POST", body });
+      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } });
+      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone)
+        SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { phone: body.phone } } });
+      done(); renderSide();
+    } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
+  });
+  d.addEventListener("cancel", (ev) => { ev.preventDefault(); done(); });
+  d.showModal();
+  (isPhone || !typed ? nameIn : phoneIn).focus();
 }
 
 function refreshTabLabel() {
