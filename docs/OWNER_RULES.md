@@ -47,3 +47,28 @@ with this file, this file wins. Change it only through a PR, after the owner agr
 - Before a chat or session ends, or when it gets long: update `docs/HANDOFF.md` (done with evidence,
   not done, assumptions, next step) and push it. The next chat continues from the file, not from a pasted summary.
 - If you find a mistake, fix everything built on it.
+
+## 7. Short sessions ("one batch per chat")
+Long chats drift (contradictions, forgotten rules) and burn usage faster. So every chat and every
+coding session is one batch with a fixed budget, then it stops and reports.
+- Budget: at most 3 tasks from the queue (or 1 large task). The queue is «الطابور» in `docs/HANDOFF.md`;
+  each item is sized so one batch can finish it.
+- Save as you go: after each task, update `docs/HANDOFF.md` and push, so a usage-limit cut loses nothing.
+- Stop early, even mid-budget, when any of these happens: the owner has sent about 25 messages,
+  the chat has run about 2 hours (check the clock), you contradict an earlier decision or re-ask a
+  settled question, or the usage limit is near. Finish the current step, save, report.
+- End report, in this order, in the chat and at the top of `docs/HANDOFF.md`:
+  1. done, with evidence (PR/commit/test result); 2. not done and why; 3. decisions taken;
+  4. the next batch (up to 3 items, in order); 5. the line «المحادثة دي اتحفظت وممكن تتمسح».
+- A chat whose report is in `docs/HANDOFF.md` holds nothing else; the owner can delete it.
+
+## 8. Roles (who manages the project)
+- Manager = the current chat in the claude.ai project «برنامج الصيدلية». There is one manager chat at a
+  time. The role lives in the files (`OWNER_RULES.md`, `STATUS.md`, `HANDOFF.md`), not in one long chat:
+  every new project chat takes over from them. The owner always talks to the newest project chat.
+- The manager: keeps the queue, splits work into batches, gives coding batches to Claude Code with
+  file ownership on #113, merges by §4, runs device tests with the owner, writes the end report.
+- Claude Code sessions: workers. One batch each, own files only, PR + report, then stop.
+- Codex: independent reviewer only, never the manager (the one who builds must not grade itself).
+- Once a week (after the Thursday usage reset): the manager checks progress against `STATUS.md`
+  gates and tells the owner in 5 lines what moved, what is stuck, and the plan for the week.

@@ -12,6 +12,11 @@ Standing rules: [OWNER_RULES.md](OWNER_RULES.md). Work now runs from the claude.
 - No scheduled sessions are enabled, by the owner's decision, until the open work is closed.
 - Pharmacy PC (desktop-5jvh3qd) runs develop fa3ccc2; it can update to c7745bb with «تحديث» (no requirements/migration change since). Still to test there, printer-off first: (1) #98 printer switched off during a sale; (2) scan a label printed in driver mode; (3) update rollback (G6). Then E-Stock export/import rehearsal, #19 trial day, #20 written approval.
 - Progress: official 40% (STATUS.md); raise G6/G7 only with the PC evidence above.
+- «الطابور» (next batches, in order; one batch = up to 3 items, OWNER_RULES §7):
+  - Batch A (no PC needed): merge #213, #163, #225 once Codex is clean on their head; check whether #221 is a duplicate of #219 (close with a note, or rebase); triage the remaining open PRs (#147, #132, #102, #99, #83, #77) into merge / after-launch / close, with a list for the owner before closing anything.
+  - Batch B (owner at the pharmacy PC): press «تحديث» to c7745bb; #98 printer switched off during a sale; scan a driver-mode label.
+  - Batch C (owner at the PC): update rollback (G6); then STATUS.md G6/G7 with the evidence.
+  - Batch D: E-Stock export → import rehearsal on the PC.
 
 ## 11/11 20:45 — زرار التحديث (B13) عمره ما كان هيشتغل على جهاز الصيدلية: السبب والحل
 - الدليل: «حدّث البرنامج الآن» على `desktop-5jvh3qd` (`d24979e` ← `b5d8891`) رجع 500: `التحديث فشل: Dependencies or database migrations changed; a coordinated upgrade is required`، مع إن `requirements.txt` و`app/migrations` واحد في git بين النسختين. سطر `system.update` في السجل `ok: false`.
