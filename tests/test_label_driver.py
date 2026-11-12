@@ -236,3 +236,36 @@ class TestDriverRules(DriverCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTwoLabelsPerPage(DriverCase):
+    """#100 on the PC, 12/11: the driver's 38x25 mm page covers two 38x12.5 labels; one label per page
+    printed across both. With label_rows=2 each page carries two labels, each on its own half."""
+
+    def test_two_labels_share_one_page_with_the_gap_between(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 3})
+        f = self.use(FakeWindows())
+        r = print_labels(self.db, self.ctx, [(self.pan, 3)])
+        self.assertEqual(r["labels"], 3)
+        self.assertEqual(len(f.pages), 2)                       # 3 labels -> 2 pages, the last half empty
+        page = f.images[0].convert("1")
+        self.assertEqual(page.size, (304, 200))
+        row = round((25.025 - 3) / 2 * 203 / 25.4)
+        gap_rows = range(row + 2, round((row * 25.4 / 203 + 3) * 203 / 25.4) - 2)
+        self.assertTrue(all(page.getpixel((x, y)) for y in gap_rows for x in range(304)))   # the gap stays blank
+        top, bottom = page.crop((0, 0, 304, row)), page.crop((0, 200 - row, 304, 200))
+        self.assertLess(top.histogram()[0], top.size[0] * top.size[1])                   # something drawn
+        self.assertLess(bottom.histogram()[0], bottom.size[0] * bottom.size[1])
+        last = f.images[1].convert("1").crop((0, 200 - row, 304, 200))
+        self.assertEqual(last.histogram()[0], 0)                                         # odd label: half empty
+
+    def test_rows_must_be_one_to_four(self):
+        for bad in (0, 5, "2", True):
+            with self.assertRaises(ValidationFailed, msg=repr(bad)):
+                rs.save(self.db, self.ctx, {"label_rows": bad})
+
+    def test_preview_shows_one_label_of_the_page(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 3})
+        self.use(FakeWindows())
+        _, _, info = label_preview(self.db, self.ctx, {"label_lang": "driver"})
+        self.assertEqual(info, {"size": "38x11", "source": "windows"})

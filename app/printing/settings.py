@@ -17,6 +17,7 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
             "label_variant": "current",   # #100: how the TSPL job is built (labels.VARIANTS); saved after a device test
             "label_flip": False,          # #100: driver labels turned 180° (a driver set to print upside down)
+            "label_rows": 1,              # #100: labels on one driver page, top to bottom (the pharmacy's 38x25 page = 2)
             "receipt_target": "",
             # #81: no receipt unless the cashier asks or the amount rule picks one; the drawer opens on cash
             # independently of the receipt (direct ESC/POS printers only).
@@ -100,6 +101,12 @@ def label_identity(db: Database, org_id: str, cfg: dict) -> tuple[str, str]:
     return name, cfg["label_phone"] or (lines[1] if len(lines) > 1 else "")
 
 
+def label_rows_ok(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        raise ValidationFailed("عدد الملصقات في الصفحة من 1 لـ 4")
+    return value
+
+
 def label_flip_ok(value) -> bool:
     if not isinstance(value, bool):
         raise ValidationFailed("قلب الملصق: نعم أو لا")
@@ -169,6 +176,8 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         new["label_variant"] = label_variant_ok(data["label_variant"])
     if "label_flip" in data:
         new["label_flip"] = label_flip_ok(data["label_flip"])
+    if "label_rows" in data:
+        new["label_rows"] = label_rows_ok(data["label_rows"])
     for k in ("title", "footer", "header"):
         if k in data:
             new[k] = str(data[k] or "").strip()[:80]
