@@ -49,3 +49,30 @@ transaction, and the guard test below will refuse any other way.
   movement.
 - Checked by mutation once (12/11): adding a stray `UPDATE stock_balances` in `adjust.py` fails both the static
   and the dynamic test.
+
+## 4. Automatic integrity check (`app/inventory/integrity.py`)
+
+When: on every program start (background thread, the screens do not wait) and on every automatic backup run
+— a refused one (a stock mismatch is one of the reasons `backup.create` refuses to write a backup) and one
+skipped for "no changes" (a change made outside the program does not change the backup's fingerprint). The owner can also run it from the report «مطابقة الأرصدة».
+
+What it compares, per pharmacy, reading only:
+
+| Kind | Meaning |
+|---|---|
+| `batches` | a (branch, item, batch) balance differs from the sum of its movements |
+| `items` | a (branch, item) total differs from the sum of all its movements |
+| `negative` | a balance below zero (`post_movement` refuses those, so it means outside damage) |
+| `foreign_batch` | a movement on a batch of another item or pharmacy |
+| `sales` | a (sale, item) whose net stock moved (sale + returns + void) differs from the invoice (sold − returned; 0 if voided) |
+
+On a mismatch:
+- an audit row `stock.integrity_mismatch` (reason `startup` / `backup` / `manual`, counts, first rows of each kind,
+  a fingerprint) on every detection;
+- an error notification «تنبيه: أرصدة المخزون لا تطابق حركات المخزون» when the mismatch is new (a different
+  fingerprint from the last one recorded), so a lasting problem does not flood the bell;
+- a red banner at the top of every screen for the owner and managers (`audit.read`) until a later check is clean;
+- **nothing is changed** in `stock_movements`, `stock_balances` or `item_costs`.
+
+When a later check is clean, an audit row `stock.integrity_ok` is written and the banner disappears.
+A failure of the check itself (an exception) is logged and never stops the start or the backup.

@@ -166,6 +166,9 @@ class AutoBackup:
             if not force and st.get("last_ok") and st.get("fingerprint") == fp:
                 st["last_check_at"] = datetime.now().isoformat(timespec="seconds")
                 self._write(self.state_path, st)
+                # #202: a change made outside the program (a hand edit, a damaged file) does not change the
+                # fingerprint, so the stock check runs on the "no changes" path too (Codex P2 on #213)
+                self._check_stock()
                 return {"skipped": "no_changes", **st}
             started = time.monotonic()
             try:
@@ -188,7 +191,14 @@ class AutoBackup:
                 self._notify_once(st, "fail_notified", "error", "فشلت النسخة الاحتياطية التلقائية",
                                   str(e)[:200], hours=6)
             self._write(self.state_path, st)
-            return st
+        # #202: recompute every stock balance from the ledger after each backup run (also when it failed: a
+        # stock mismatch is one reason a backup is refused). Alerts and audits only; never repairs.
+        self._check_stock()
+        return st
+
+    def _check_stock(self) -> None:
+        from ..inventory import integrity
+        integrity.check_all(self.db, "backup")
 
     def _offsite(self, newest: Path, cfg: dict, st: dict) -> None:
         d = cfg.get("offsite_dir")
