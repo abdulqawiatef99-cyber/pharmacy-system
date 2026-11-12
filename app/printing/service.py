@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from ..core import accounts, audit
 from ..core.errors import DomainError, ValidationFailed
@@ -229,8 +230,9 @@ def label_size(cfg: dict, size: str | None = None) -> tuple[float, float]:
         raise ValidationFailed(str(e)) from e
 
 
-def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple[bytes, list[str]]:
-    """The label as it will print, for the settings screen (sample item, the saved fields and size)."""
+def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple[bytes, list[str], dict]:
+    """The label as it will print, for the settings screen (sample item, the saved fields and size).
+    Also says which size was drawn and where it came from: the settings, or Windows (driver mode, #100)."""
     import io
     from . import labels as lb, settings as rs
     ctx.require("settings.manage")
@@ -243,7 +245,17 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         cfg["label_size"] = rs.label_size_ok(data["label_size"])
     if data and isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
+    if data and "label_target" in data:
+        try:
+            cfg["label_target"] = rs.check_target(data["label_target"], "win:Xprinter XP-235B")
+        except ValidationFailed:
+            pass                            # half-typed on the screen: the preview keeps the saved printer
     w, h = label_size(cfg)
+    source = "settings"
+    if cfg["label_lang"] == "driver":
+        pg = driver_page(cfg["label_target"])      # #100: the label is drawn on the driver's page
+        if pg:
+            w, h, cfg["label_dpi"], source = pg.w_mm, pg.h_mm, pg.dpi_x, "windows"
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
     sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": "40.00 ج",
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
@@ -253,7 +265,56 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         raise ValidationFailed(str(e), code="label_too_small") from e
     buf = io.BytesIO()
     img.save(buf, "PNG")
-    return buf.getvalue(), dropped
+    return buf.getvalue(), dropped, {"size": f"{round(w, 1):g}x{round(h, 1):g}", "source": source}
+
+
+_PAGE_CACHE: dict[str, tuple[float, object]] = {}
+PAGE_CACHE_S = 30.0
+
+
+def driver_page(target: str):
+    """#100: the label page of a Windows printer's driver for the preview, or None (not Windows, no such
+    printer, not a label size). Kept 30 s: the preview asks on every change on the screen."""
+    from . import driver
+    name = win_printer(target)
+    if not name:
+        return None
+    now = time.monotonic()
+    hit = _PAGE_CACHE.get(name)
+    if hit and now - hit[0] < PAGE_CACHE_S:
+        return hit[1]
+    try:
+        pg = driver.page(name)
+        driver.check_label_page(pg)
+    except escpos.PrinterError:
+        pg = None
+    _PAGE_CACHE[name] = (now, pg)
+    return pg
+
+
+def win_printer(target: str | None) -> str:
+    """The Windows printer name of a "win:NAME" target, else ""."""
+    kind, _, name = str(target or "").partition(":")
+    return name.strip() if kind == "win" else ""
+
+
+def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | None = None):
+    """#100: labels through the printer's Windows driver (like E-Stock): drawn at the driver's page size,
+    one page per label. Returns the page used. PrinterError on failure."""
+    from . import driver, labels as lb
+    name = win_printer(cfg["label_target"])
+    if not name:
+        raise escpos.PrinterError("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز (win:اسم الطابعة)")
+
+    def make(pg):
+        out = []
+        for data, n in wanted:
+            img, gone = lb.render_label(data, pg.w_mm, pg.h_mm, pg.dpi_x, cfg["label_fields"])
+            out.append((img.rotate(180) if cfg.get("label_flip") else img, n))
+            if dropped is not None:
+                dropped.update(gone)
+        return out
+    return driver.print_pages(name, make)
 
 
 def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, size: str | None = None,
@@ -270,24 +331,31 @@ def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, s
         raise ValidationFailed(f"عدد الملصقات من 1 إلى {lb.MAX_LABELS}")
     imgs, dropped = [], set()
     try:
+        datas = []
         for iid, n in wanted:
             it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
             if not it or (it["hidden"] and not ctx.can("items.hidden")):
                 continue
-            img, gone = lb.render_label(label_data(db, ctx, it, cfg), w, h, cfg["label_dpi"], cfg["label_fields"])
-            imgs.append((img, n))
-            dropped.update(gone)
-        if not imgs:
+            datas.append((label_data(db, ctx, it, cfg), n))
+        if not datas:
             raise ValidationFailed("اختر الأصناف")
-        escpos.send(target or cfg["label_target"] or "none",
-                    lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"]),
-                           _variant(cfg), cfg["label_dpi"]))
+        if cfg["label_lang"] == "driver":
+            pg = _driver_labels({**cfg, "label_target": target or cfg["label_target"]}, datas, dropped)
+            w, h = round(pg.w_mm, 1), round(pg.h_mm, 1)
+        else:
+            for data, n in datas:
+                img, gone = lb.render_label(data, w, h, cfg["label_dpi"], cfg["label_fields"])
+                imgs.append((img, n))
+                dropped.update(gone)
+            escpos.send(target or cfg["label_target"] or "none",
+                        lb.job(cfg["label_lang"], imgs, w, h, cfg["label_gap"], lb.shift_dots(cfg["label_shift"], cfg["label_dpi"]),
+                               _variant(cfg), cfg["label_dpi"]))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e) + " — يمكنك الطباعة من المتصفح بدلًا من ذلك") from e
     with db.transaction():
         audit.record(db, ctx, "print.labels", "item", None,
                      after={"labels": total, "size": f"{w:g}x{h:g}", "lang": cfg["label_lang"]})
-    return {"ok": True, "labels": total, "dropped": sorted(dropped)}
+    return {"ok": True, "labels": total, "dropped": sorted(dropped), "size": f"{w:g}x{h:g}"}
 
 
 def _variant(cfg: dict) -> str:
@@ -305,8 +373,9 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
         if data["label_lang"] not in lb.LANGS:
             raise ValidationFailed("نوع طابعة الملصقات غير صحيح")
         cfg["label_lang"] = data["label_lang"]
-    if cfg["label_lang"] not in ("tspl", "zpl"):
-        raise ValidationFailed("اختر نوع طابعة الملصقات (TSPL أو ZPL) لتجربة الطباعة المباشرة", code="labels_in_browser")
+    if cfg["label_lang"] not in lb.DIRECT:
+        raise ValidationFailed("اختر نوع طابعة الملصقات (تعريف ويندوز أو TSPL أو ZPL) لتجربة الطباعة المباشرة",
+                               code="labels_in_browser")
     if "label_size" in data:
         cfg["label_size"] = rs.label_size_ok(data["label_size"])
     if "label_target" in data:
@@ -323,11 +392,15 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
         cfg["label_shift"] = rs.label_shift_ok(data["label_shift"])
     if "label_variant" in data:
         cfg["label_variant"] = rs.label_variant_ok(data["label_variant"])
+    if "label_flip" in data:
+        cfg["label_flip"] = rs.label_flip_ok(data["label_flip"])
     cfg["label_variant"] = _variant(cfg)
     if isinstance(data.get("label_fields"), dict):
         cfg["label_fields"] = {**cfg["label_fields"], **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
     if not cfg["label_target"]:
         raise ValidationFailed("اختر طابعة الملصقات (مكان الطابعة) أولًا", code="no_printer")
+    if cfg["label_lang"] == "driver" and not win_printer(cfg["label_target"]):
+        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز: win:اسم الطابعة", code="driver_needs_windows_printer")
     return cfg
 
 
@@ -338,7 +411,9 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
     ctx.require("settings.manage")
     cfg = _label_cfg(db, ctx, data or {})
     variant = cfg["label_variant"]
-    if variant != "current" and cfg["label_lang"] != "tspl":
+    if cfg["label_lang"] == "driver":
+        variant = "current"                 # the driver builds the job itself: TSPL variants do not apply
+    elif variant != "current" and cfg["label_lang"] != "tspl":
         raise ValidationFailed("طرق الإرسال البديلة لطابعات TSPL فقط", code="variant_tspl_only")
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
@@ -346,17 +421,21 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
     try:
-        img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
-        escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift,
-                                                variant, cfg["label_dpi"]))
+        if cfg["label_lang"] == "driver":
+            pg = _driver_labels(cfg, [(sample, lb.TEST_LABELS)])
+            w, h = round(pg.w_mm, 1), round(pg.h_mm, 1)
+        else:
+            img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
+            escpos.send(cfg["label_target"], lb.job(cfg["label_lang"], [(img, lb.TEST_LABELS)], w, h, cfg["label_gap"], shift,
+                                                    variant, cfg["label_dpi"]))
     except escpos.PrinterError as e:
         raise PrintFailed(str(e)) from e
     with db.transaction():
         audit.record(db, ctx, "print.label_test", "printer", None,
-                     after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"],
+                     after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"], "flip": cfg["label_flip"],
                             "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS,
                             "variant": variant})
-    return {"ok": True, "labels": lb.TEST_LABELS, "variant": variant}
+    return {"ok": True, "labels": lb.TEST_LABELS, "variant": variant, "size": f"{w:g}x{h:g}"}
 
 
 def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> dict:
@@ -366,6 +445,9 @@ def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> di
     ctx.require("settings.manage")
     data = data or {}
     cfg = _label_cfg(db, ctx, data)
+    if cfg["label_lang"] == "driver":
+        raise ValidationFailed("في الطباعة عن طريق تعريف ويندوز، المعايرة من «تفضيلات الطباعة» للطابعة في ويندوز"
+                               " (أو من زرار الطابعة نفسها)", code="calibrate_in_windows")
     if cfg["label_lang"] != "tspl":
         raise ValidationFailed("المعايرة من البرنامج لطابعات TSPL (Xprinter / TSC) فقط", code="calibrate_tspl_only")
     mode = data.get("mode", "sized")

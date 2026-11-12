@@ -150,11 +150,13 @@ def stock_for_item(db: Database, ctx: Context, item_id: str, branch_id: str | No
 def verify_balances(db: Database, org_id: str) -> list[dict]:
     """Returns every (branch,item,batch) whose cached balance differs from the
     ledger. Empty list == consistent."""
+    # One pass over both sides grouped together: the old FULL OUTER JOIN of the grouped ledger with the balances
+    # had no index on either side and compared every pair, ~100 s after a year of sales (#113, PERFORMANCE.md).
+    # ledger_qty / balance_qty stay NULL when that side has no row, as before.
     return [dict(r) for r in db.all(
-        "WITH ledger AS (SELECT branch_id, item_id, coalesce(batch_id,'') bk, sum(qty_delta) q"
-        "  FROM stock_movements WHERE org_id=? GROUP BY 1,2,3)"
-        " SELECT coalesce(l.branch_id, b.branch_id) branch_id, coalesce(l.item_id, b.item_id) item_id,"
-        "  coalesce(l.bk, b.batch_key) batch_key, l.q ledger_qty, b.qty balance_qty"
-        " FROM ledger l FULL OUTER JOIN (SELECT * FROM stock_balances WHERE org_id=?) b"
-        "  ON b.branch_id=l.branch_id AND b.item_id=l.item_id AND b.batch_key=l.bk"
-        " WHERE coalesce(l.q,0) <> coalesce(b.qty,0)", (org_id, org_id))]
+        "SELECT branch_id, item_id, bk batch_key,"
+        "  CASE WHEN sum(nl) > 0 THEN sum(lq) END ledger_qty, CASE WHEN sum(nb) > 0 THEN sum(bq) END balance_qty"
+        " FROM (SELECT branch_id, item_id, coalesce(batch_id,'') bk, qty_delta lq, 1 nl, 0 bq, 0 nb"
+        "       FROM stock_movements WHERE org_id=?"
+        "       UNION ALL SELECT branch_id, item_id, batch_key, 0, 0, qty, 1 FROM stock_balances WHERE org_id=?)"
+        " GROUP BY branch_id, item_id, bk HAVING sum(lq) <> sum(bq)", (org_id, org_id))]
