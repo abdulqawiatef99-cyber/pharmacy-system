@@ -231,6 +231,7 @@ async function askApproval(details, message) {
   });
 }
 
+const API = { busy: 0, last: 0 };
 async function api(path, { method = "GET", body, form, _retried = false } = {}) {
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -241,16 +242,19 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
   if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
-  let r;
-  for (let attempt = 0; ; attempt++) {
-    try { r = await fetch(path, opts); break; }
-    catch (netErr) {
-      if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-      if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
-      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+  let r, data;
+  API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { r = await fetch(path, opts); break; }
+      catch (netErr) {
+        if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
+        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+      }
     }
-  }
-  const data = await r.json().catch(() => ({}));
+    data = await r.json().catch(() => ({}));
+  } finally { API.busy--; API.last = Date.now(); }
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
     if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
   }
@@ -544,8 +548,8 @@ function viewSetup() {
   <form class="panel login" id="setupForm">
     <h1>أهلًا بك</h1>
     <p class="muted">هذه أول مرة يعمل فيها البرنامج على هذا الجهاز. أدخل هذه البيانات مرة واحدة فقط.</p>
-    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية عبد القوي"></label><br>
-    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. عبد القوي"></label><br>
+    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية الشفاء"></label><br>
+    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. أحمد محمود"></label><br>
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة السر <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
@@ -2139,6 +2143,38 @@ function renderBackup(b) {
 async function checkUpdateBadge() {
   if (!ME?.permissions?.includes("settings.manage")) { $("#navSystem")?.setAttribute("hidden", ""); return; }
   try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
+}
+
+// An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
+const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
+function screenIdle() {
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen,
+  // and only while no field holds text the person typed but the screen has not saved yet
+  if ($("dialog[open]")) return false;
+  if (API.busy || Date.now() - API.last < 3000) return false;     // a scan or a save may still be on its way
+  const typed = [...document.querySelectorAll("input, textarea, select")].some((el) =>
+    el.type === "checkbox" || el.type === "radio" ? el.checked !== el.defaultChecked
+      : el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : el.value !== el.defaultValue);
+  if (typed) return false;
+  const h = location.hash || "#/home";
+  if (h === "#/login" || h === "#/home") return true;
+  return h.startsWith("#/pos") && !(SALE?.lines?.length);
+}
+async function checkBuild() {
+  if (!BUILD || checkBuild.stale) return;
+  let h;
+  try { h = await (await fetch("/api/health", { cache: "no-store" })).json(); } catch { return; }   // restarting
+  if (!h?.web || h.web === BUILD) return;
+  if (screenIdle()) { location.reload(); return; }
+  checkBuild.stale = true;
+  $("#staleBar").hidden = false;
+}
+if (BUILD) {
+  $("#staleBar")?.addEventListener("click", () => location.reload());
+  setInterval(checkBuild, 60000);
+  window.addEventListener("focus", checkBuild);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
 }
 
 // ------------------------------------------------------------------ sales history / returns

@@ -72,11 +72,20 @@ def _static_v(name: str) -> str:
 SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
+def _web_build() -> str:
+    """One id for the whole screen shell (index.html and its assets). An open tab compares the id it was loaded
+    with against /api/health and asks for a reload when an update replaced the files (#153)."""
+    parts = [_static_v(name) for name in SHELL_ASSETS]
+    st = (WEB_DIR / "index.html").stat()
+    parts.append(_content_hash(WEB_DIR / "index.html", st.st_mtime_ns, st.st_size))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+
+
 def _index_html() -> str:
     page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     for name in SHELL_ASSETS:
         page = page.replace(f'"/static/{name}"', f'"{_static_v(name)}"')
-    return page
+    return page.replace("</head>", f'  <meta name="pharm-build" content="{_web_build()}">\n</head>', 1)
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
 
@@ -129,8 +138,8 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 
 class RateLimiter:
-    def __init__(self, limit: int, window_s: int):
-        self.limit, self.window = limit, window_s
+    def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
+        self.limit, self.window, self.message = limit, window_s, message
         self.hits: dict[str, deque] = defaultdict(deque)
 
     def check(self, key: str) -> None:
@@ -139,7 +148,7 @@ class RateLimiter:
         while q and now - q[0] > self.window:
             q.popleft()
         if len(q) >= self.limit:
-            raise DomainError("محاولات كثيرة، انتظر دقيقة", code="rate_limited")
+            raise DomainError(self.message, code="rate_limited")
         q.append(now)
 
 
@@ -170,6 +179,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
+    # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
+    # session cannot be used to guess the password at full speed
+    reauth_limiter = RateLimiter(5, 300, "محاولات كثيرة لكلمة المرور، انتظر 5 دقائق")
 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
@@ -499,6 +511,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
         from ..core import security as _sec
+        reauth_limiter.check(ctx.user_id)
         if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
             raise ValidationFailed("كلمة المرور غير صحيحة")
         people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
@@ -1022,6 +1035,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
             u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
             from ..core import security as _sec
+            reauth_limiter.check(ctx.user_id)
             if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
                 raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
@@ -2145,7 +2159,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def health(req):
         from ..version import __version__
         last = db.one("SELECT max(version) v FROM schema_migrations")["v"]
-        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID")})
+        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
+                  "web": _web_build()})
 
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
@@ -2350,7 +2365,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 daily.stop()
                 await run_in_threadpool(autob.stop)
 
-    app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)
+    from .hostcheck import HostAllowlist
+    app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
+                                               Middleware(SecurityHeaders)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app

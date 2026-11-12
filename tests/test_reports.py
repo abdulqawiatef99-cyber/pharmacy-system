@@ -8,6 +8,7 @@ from app.inventory import service as inv
 from app.reports import service as rep
 from tests.test_api import APICase, H
 from tests.test_cashier_acceptance import Base, T
+from tests.helpers import today
 
 PW = "Staff-Pass-2026"
 
@@ -22,14 +23,14 @@ class TestReports(Base):
     def test_sales_report(self):
         self.sell(units=4)
         self.sell(ctx=self.a, units=2)
-        r = rep.sales_report(self.db, self.ctx, T.isoformat(), T.isoformat())
+        r = rep.sales_report(self.db, self.ctx, today(), today())
         self.assertEqual((r["totals"]["n"], r["totals"]["total"]), (2, 12000))
         self.assertEqual(len(r["daily"]), 1)
         self.assertEqual(sorted(u["total"] for u in r["by_user"]), [4000, 8000])
         top = r["top_items"][0]
         self.assertEqual((top["qty"], top["revenue"], top["profit"]), (6, 12000, 3000))     # cost 15/unit
         with self.assertRaises(Forbidden):
-            rep.sales_report(self.db, self.a, T.isoformat(), T.isoformat())
+            rep.sales_report(self.db, self.a, today(), today())
 
     def test_stock_and_home(self):
         with self.db.transaction():

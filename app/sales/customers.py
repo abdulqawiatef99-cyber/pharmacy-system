@@ -50,7 +50,8 @@ def check_phones(db: Database, org_id: str, phones: list[str], exclude: str | No
 
 
 def _bal_sql() -> str:
-    return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.customer_id=c.id),0)"
+    # org_id too: the ledger index is (org_id, customer_id); without it every balance read the whole ledger (#113)
+    return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.org_id=c.org_id AND l.customer_id=c.id),0)"
 
 
 def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
