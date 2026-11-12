@@ -43,6 +43,35 @@ Unchanged by these PRs (same in all three columns): backup 6.3 s (create) + 2.4 
 restore 5.0 s, start-up 0.2–0.4 s, server memory peak ~126 MB, the safety check before completing a sale
 (median 26 ms, max ~247 ms), POS quick buttons 33 ms.
 
+## 1 year (2026-11-12): 82,387 sales, 222,908 lines, 268,729 stock movements, 811 MB database
+
+Same snapshot, three versions: develop `22bda14`, #159 at `97c9a68`, #160 at `a1031b5` (its six indexes).
+Median of 2, milliseconds unless marked.
+
+| Request | develop | queries (#159) | indexes (#160) |
+|---|---:|---:|---:|
+| Invoices report (month) | 86,999 | 616 | 119 |
+| Day report | 182 | 183 | 2.3 |
+| Sales report (day) | 218 | 219 | 3.0 |
+| Sales report (month) | 235 | 230 | 19.8 |
+| Profit (month) | 181 | 176 | 13.5 |
+| Invoice list (day) | 22.0 | 25.4 | 2.9 |
+| Shift report | 42.4 | 52.1 | 1.5 |
+| Customer statement | 28.8 | 34.5 | 2.3 |
+| Item card (top seller) | 130 | 124 | 54 |
+| Home screen | 145 | 153 | 99 |
+| POS quick buttons | 47.3 | 47.6 | 32.1 |
+| Receipt page | 35.4 | 41.8 | 2.1 |
+| Return one unit | 14.1 | 16.7 | 2.7 |
+| Complete sale | 62.8 | 70.5 | 30.1 |
+| Returns report (month) | 17.5 | 20.4 | 4.7 |
+
+Backup and restore, the same in all three (they do not depend on these queries): backup create 137–147 s,
+verify 112–115 s, restore 231–233 s, backup file 225 MB. **103 s of the verify is the stock check**
+(`verify_balances`, a join of every pair): PR #166 makes it 0.5 s on the same file (measured 101.1 s → 0.5 s),
+which removes most of that time from every hourly backup and every restore. Start-up 0.2–0.7 s, server
+memory peak 314–332 MB. While the automatic backup ran, adding a line stayed at p95 6–15 ms (max 136–298 ms).
+
 ## Open findings (not fixed yet)
 - **Database growth:** 89 MB after 30 days of synthetic data; the largest tables are `safety_events`
   (40,731 rows, 16.6 MB) and `audit_log` (16.1 MB). Extrapolated linearly (not measured), a year is about
@@ -51,6 +80,8 @@ restore 5.0 s, start-up 0.2–0.4 s, server memory peak ~126 MB, the safety chec
   basket is checked, about 6 rows a sale. The synthetic items have no clinical data at all; on the pharmacy
   PC most items will not either until the reference catalogue is linked, so the ratio is likely real.
   Tracked in its own issue (whether a "no data" notice must be logged on every check is a safety-log decision).
-- **Safety check** max ~250 ms on the first call of a basket; fine for one cashier, worth a look if it
-  grows with the history.
-- 1-year and 3-year snapshots: not measured yet (a year takes about an hour to generate here).
+- **Safety check** grows with the history: median 26 ms at 30 days, 133–136 ms at one year (all three
+  versions), checked twice per sale. Not looked into yet; next candidate after #166.
+- **Year sales report** 616–622 ms, **stock report** 69–93 ms, **item movements for a year** 145–161 ms:
+  acceptable, not changed by these PRs.
+- 3-year snapshot: not measured yet (generating one year took about an hour here).
