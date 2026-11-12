@@ -197,15 +197,16 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
 def _pay_tx(db: Database, ctx: Context, pr, name: str, cat_id: str, month: str, uid: str, paid_from: str) -> None:
     from . import expenses as fin
     eid = None
+    y, m = _month(month)
+    last = date(y, m, calendar.monthrange(y, m)[1])
+    spent = min(last, local_today()).isoformat()
     if pr["net"] > 0:
-        y, m = _month(month)
-        last = date(y, m, calendar.monthrange(y, m)[1])
-        spent = min(last, local_today()).isoformat()
         eid = fin.record(db, ctx, category_id=cat_id, amount=pr["net"], paid_from=paid_from,
                          note=f"مرتب {name} — {month}", spent_on=spent)["id"]
-        # advances were already paid out when given: book them as salary expense of that month too
-        if pr["advances"]:
-            fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
-                       note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
+    # advances were already paid out when given: book them as salary expense of that month too, also when
+    # they took the whole salary and nothing is left to pay now
+    if pr["advances"]:
+        fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
+                   note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
     db.execute("UPDATE payroll SET status='paid', paid_at=?, expense_id=? WHERE id=?", (_now(), eid, pr["id"]))
     audit.record(db, ctx, "payroll.pay", "user", uid, after={"month": month, "net": pr["net"], "from": paid_from})
