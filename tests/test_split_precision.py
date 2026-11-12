@@ -6,6 +6,7 @@ from decimal import Decimal
 from app.catalog import service as cat
 from app.inventory import service as inv
 from tests.test_cashier_acceptance import Base, T
+from tests.helpers import today
 
 
 class TestSplit(Base):
@@ -84,5 +85,5 @@ class TestPackAcrossBatches(Base):
     def test_report_shows_no_phantom_discount(self):
         from app.reports import invoices
         _, s = self.sale(packs=1)
-        row = next(r for r in invoices.report(self.db, self.ctx, date_from=T.isoformat(), date_to=T.isoformat())["rows"] if r["id"] == s["id"])
+        row = next(r for r in invoices.report(self.db, self.ctx, date_from=today(), date_to=today())["rows"] if r["id"] == s["id"])
         self.assertEqual((row["item_discount"], row["customer_discount"]), (0, 0))

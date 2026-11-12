@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ..catalog import service as catalog
 from ..core.errors import ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database
 from ..purchasing.importers import files
@@ -35,7 +36,18 @@ def read_packs(path: Path) -> dict[str, int]:
     if path.suffix.lower() == ".json":
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw = raw.get("packs", raw)
-        return {str(k): int(v) for k, v in raw.items() if v}
+        out = {}
+        for k, v in raw.items():
+            if not v:
+                continue
+            try:
+                n = whole_number(v)               # 2.5 is refused like in the xlsx sheet, never cut to 2
+            except (TypeError, ValueError):
+                n = 0
+            if n < 1:
+                raise ValidationFailed(f"عدد وحدات غير صحيح للصنف {k}: {v}")
+            out[str(k)] = n
+        return out
     rows = files.read_excel_sheets(path.read_bytes())[0][1]
     head = [str(c or "") for c in rows[0]]
     try:
