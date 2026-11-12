@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.permissions import Context
 from ..db import Database
@@ -289,7 +289,7 @@ def unsold_items(db: Database, ctx: Context, date_from: str, date_to: str) -> di
         d["price_value"] = (d["public_price"] or 0) * d["qty"] // d["pack_size"]
         cost = d.pop("avg_cost")
         if show_cost:
-            d["cost_value"] = int((Decimal(cost) * d["qty"] * 100).to_integral_value()) if cost is not None else None
+            d["cost_value"] = int((Decimal(cost) * d["qty"] * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else None
         rows.append(d)
     key = "cost_value" if show_cost else "price_value"
     rows.sort(key=lambda r: -(r.get(key) or 0))
