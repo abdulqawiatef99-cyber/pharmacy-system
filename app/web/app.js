@@ -364,7 +364,10 @@ async function route() {
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
   }
-  showStockAlert(ME?.stock_alert);
+  if (!ME) showStockAlert(null);
+  else if (ME.stock_alert !== undefined) { showStockAlert(ME.stock_alert); delete ME.stock_alert; }
+  else refreshStockAlert();
+  if (ME && !route.alertTimer) route.alertTimer = setInterval(refreshStockAlert, 60000);
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
@@ -376,6 +379,10 @@ async function route() {
   location.hash = "#/home";
 }
 // #202: red banner while the last stock integrity check found balances that do not match the stock ledger
+async function refreshStockAlert() {
+  if (!ME?.permissions?.includes("audit.read") || document.hidden) { if (!ME) showStockAlert(null); return; }
+  try { showStockAlert((await api("/api/stock/alert")).alert); } catch { /* offline: keep what is shown */ }
+}
 function showStockAlert(a) {
   const bar = $("#stockAlert");
   if (!bar) return;
