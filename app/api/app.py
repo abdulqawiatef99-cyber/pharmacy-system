@@ -34,7 +34,7 @@ from starlette.staticfiles import StaticFiles
 
 from .. import config as config_mod
 from ..catalog import service as catalog
-from ..core import accounts, audit, idempotency, notify, people
+from ..core import accounts, approvals, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..core.numbers import whole_number
 from ..db import Database
@@ -188,9 +188,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
         approver = req.headers.get("x-approver", "").strip()
-        if approver:
+        if approver and req.url.path == "/api/approvals/check":
+            # the PIN is typed once and checked here only; every other request carries the approval token (#137)
             approver_limiter.check(client_ip(req))
             ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
+            req.state.session_token = token
+        elif req.headers.get("x-approval"):
+            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], req.url.path,
+                                  lambda who: accounts.effective_access(db, ctx.org_id, who))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
@@ -991,9 +996,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         if not ctx.approver_id:
             raise ValidationFailed("اختر من سيوافق")
-        perm = str((await body(req)).get("permission", ""))
-        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == "discount"
-        return J({"ok": ok, "discount_limit_bp": ctx.discount_limit_bp})
+        b = await body(req)
+        perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
+        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT
+        out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
+        if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check":
+            # #137: lend only this permission, only on the path that asked for it, for 90 s
+            out["token"], out["expires_in"] = approvals.issue(
+                ctx, req.state.session_token, ctx.approver_id, path, perm,
+                previous=str(b.get("previous") or "")[:128] or None)
+        return J(out)
 
     @handler
     async def users_list(req):

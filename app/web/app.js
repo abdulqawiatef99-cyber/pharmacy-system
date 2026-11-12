@@ -179,16 +179,17 @@ function toast(msg, isError = false) {
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
 // ------------------------------------------------------------------ on-screen approval
-// The owner or a manager types his PIN on this screen; the approval is kept for
-// 90 seconds on this screen only (cleared when leaving it), then asked again.
+// The owner or a manager types his PIN on this screen; the server checks it once and gives back a
+// token for that one action (permission + API path) for 90 seconds, on this screen only (cleared when
+// leaving it). The PIN itself is never kept (#137).
 let APPROVAL = null;
-const approvalHeaders = () => {
-  if (APPROVAL && APPROVAL.until > Date.now()) return { "X-Approver": APPROVAL.id, "X-Approver-Pin": APPROVAL.pin };
+const approvalHeaders = (path) => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.path === path ? { "X-Approval": APPROVAL.token } : {};
   APPROVAL = null; return {};
 };
 window.addEventListener("hashchange", () => { APPROVAL = null; });
 
-async function askApproval(details, message) {
+async function askApproval(details, message, path) {
   let list = [];
   try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
   if (!list.length) {
@@ -216,23 +217,25 @@ async function askApproval(details, message) {
       const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
       const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
         headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
-        body: JSON.stringify({ permission: details?.permission || "" }) });
+        body: JSON.stringify({ permission: details?.permission || "", path,
+          previous: APPROVAL && APPROVAL.id === who && APPROVAL.path === path && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
       const d = await r.json().catch(() => ({}));
-      const enough = r.ok && d.ok && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
+      const enough = r.ok && d.ok && d.token && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
       if (!enough) {
         err.hidden = false;
         err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غير صحيح"}` : "✕ الشخص الذي اخترته لا يملك هذه الصلاحية";
         form.pin.value = ""; form.pin.focus(); return;
       }
-      APPROVAL = { id: who, pin, until: Date.now() + 90000 };
+      APPROVAL = { id: who, path, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
       dlg.close(); resolve(true);
     });
     dlg.addEventListener("cancel", () => resolve(false), { once: true });
   });
 }
 
-async function api(path, { method = "GET", body, form, _retried = false } = {}) {
-  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
+async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
+  const apiPath = path.split("?")[0];
+  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(apiPath) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -251,12 +254,16 @@ async function api(path, { method = "GET", body, form, _retried = false } = {}) 
     }
   }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
-    if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
+  // one approval per permission the action needs (at most 3), each added to the same token
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < 3) {
+    if (await askApproval(data.error.details, data.error.message, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1 });
   }
-  if (!r.ok && opts.headers["X-Approver"] && ["invalid_pin", "pin_locked"].includes(data?.error?.code)) APPROVAL = null;
+  if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
+    APPROVAL = null;
+    if (_approvals < 3) return api(path, { method, body, form, _approvals: _approvals + 1 });
+  }
   if (!r.ok) {
-    if (r.status === 401 && !path.startsWith("/api/auth") && !opts.headers["X-Approver"]) { ME = null; location.hash = "#/login"; }
+    if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
     const err = new Error(data?.error?.message || "خطأ في الاتصال");
     err.code = data?.error?.code; err.details = data?.error?.details;
     throw err;
