@@ -63,3 +63,19 @@ class HalfUpValues(DBTestCase):
         self.assertEqual(up["value"], 13)
         down = adjust.adjust(self.db, self.ctx, self.it, qty_delta=-1, batch_id=self.b, reason="damaged")
         self.assertEqual(down["value"], -13)
+
+    def test_day_summary_cost_and_profit_add_up_to_the_net(self):
+        from app.finance import expenses
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        CashDrawer(self.db).open(self.ctx, 0)
+        s = Sales(self.db)
+        sid = s.create(self.ctx, None)
+        d = s.add_line(self.ctx, sid, self.it, units=1)
+        f = s.safety_check(self.ctx, sid)
+        s.complete(self.ctx, sid, paid_cash=d["total"], paid_card=0, on_credit=0,
+                   safety_decisions={i: "ok" for i in range(len(f))})
+        day = s.day_summary(self.ctx)
+        self.assertEqual((day["cost_egp"], day["gross_profit_egp"]), ("0.13", "0.87"))   # 1.00 = 0.13 + 0.87
+        today = date.today().isoformat()
+        self.assertEqual(expenses.profit(self.db, self.ctx, today, today)["gross_profit"], 87)

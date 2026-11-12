@@ -997,9 +997,9 @@ class Sales:
                     " AND s.completed_at < ?", (ctx.org_id, ctx.branch_id, lo, hi)):
                 if a["unit_cost"] is not None:
                     cost += Decimal(a["unit_cost"]) * a["q"]
-            out["cost_egp"] = str(cost.quantize(Decimal("0.01"), ROUND_HALF_UP))
-            out["gross_profit_egp"] = str((Decimal(out["total"] - out["returns"]) / 100 - cost)
-                                          .quantize(Decimal("0.01"), ROUND_HALF_UP))
+            cost = cost.quantize(Decimal("0.01"), ROUND_HALF_UP)        # rounded once: cost + profit = net
+            out["cost_egp"] = str(cost)
+            out["gross_profit_egp"] = str(Decimal(out["total"] - out["returns"]) / 100 - cost)
             out["unknown_cost_lines"] = self.db.one(
                 "SELECT count(*) c FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
                 " JOIN sales s ON s.id=l.sale_id WHERE s.org_id=? AND s.branch_id=? AND s.status='completed'"
