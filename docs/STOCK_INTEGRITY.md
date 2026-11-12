@@ -76,3 +76,20 @@ On a mismatch:
 
 When a later check is clean, an audit row `stock.integrity_ok` is written and the banner disappears.
 A failure of the check itself (an exception) is logged and never stops the start or the backup.
+
+## 5. Long-run proof (`tests/test_stock_long_run.py`)
+
+Seeded mix of thousands of operations through the real services: sales across several batches, returns,
+same-day voids, purchases (also a real invoice approved, and one approved then cancelled), supplier returns,
+damage/expiry changes, "found" stock, stock counts. Plus: 4 cashiers selling the same items at the same time
+on separate threads; a sale whose process is killed (`kill -9`) inside its transaction after the first
+movement was written (afterwards: the sale is still a draft, no movement was kept, the database works at once);
+a backup taken, more work, then that backup restored (same movement count) and the run continued on the
+restored copy.
+
+An independent Python model of the expected units per item is kept from what each successful operation must
+do. Every 250 operations and at the end: balances = model, `verify_balances` empty, integrity scan clean.
+
+- Default 3000 operations (~10 s, in the normal suite). `PHARM_LONG_RUN=20000` passed on 12/11 in 73 s.
+- Mutation check (12/11): a balance off by one only on returns of exactly 3 units fails the test at the first
+  checkpoint.
