@@ -107,7 +107,8 @@ class SmallSettingsAPI(PlanCase):
     def test_marking_many_items_at_once(self):
         r = self.call("POST", "/api/items/flags", json={"item_ids": [self.pan, self.box, "not-mine"], "rx_required": True})
         self.assertEqual(r["updated"], 2)                                     # only this pharmacy's items
-        self.assertEqual(self.db.one("SELECT rx_required FROM items WHERE id=?", (self.box,))["rx_required"], 1)
+        self.assertEqual(self.db.one("SELECT rx_required FROM items WHERE org_id=? AND id=?",
+                                     (self.ctx.org_id, self.box))["rx_required"], 1)
         self.call("POST", "/api/items/flags", 422, json={"item_ids": [], "rx_required": True})
         self.call("POST", "/api/items/flags", 422, json={"item_ids": [self.pan]})
         self.call("POST", "/api/items/flags", 422, json={"item_ids": ["x"] * 501, "rx_required": True})
