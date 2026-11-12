@@ -2923,6 +2923,7 @@ function renderSide() {
 // fills the name or the phone, a refusal (a phone already used) stays on the form, and one click saves once.
 function newCustomerDialog() {
   const typed = ($("#posCust")?.value || "").trim(), isPhone = /^[+\d\s-]{5,}$/.test(typed);
+  const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
   const d = document.createElement("dialog"); d.id = "custNewDlg";
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
     <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
@@ -2936,23 +2937,23 @@ function newCustomerDialog() {
   const done = () => { d.close(); d.remove(); $("#posQ")?.focus(); };
   f.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    if (ok.disabled) return;                          // saving: no second save, and no closing mid-save
     if (ev.submitter?.value === "cancel") { done(); return; }
-    if (ok.disabled) return;
     const body = { name: nameIn.value.trim(), phone: phoneIn.value.trim() || null, credit_limit: 0 };
     if (addrIn?.value.trim()) body.address1 = addrIn.value.trim();
     if (!body.name) { nameIn.focus(); return; }
     ok.disabled = true;
     try {
       const c = await api("/api/customers", { method: "POST", body });
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } });
+      SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { customer_id: c.id } });
       const fill = {};                                // like choosing an existing customer: fill only what is empty
       if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone) fill.phone = body.phone;
       if (SALE.kind === "delivery" && body.address1 && !SALE.delivery?.address) fill.address = body.address1;
-      if (Object.keys(fill).length) SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: fill } });
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { delivery: fill } });
       done(); renderSide();
     } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
   });
-  d.addEventListener("cancel", (ev) => { ev.preventDefault(); done(); });
+  d.addEventListener("cancel", (ev) => { ev.preventDefault(); if (!ok.disabled) done(); });
   d.showModal();
   (isPhone || !typed ? nameIn : phoneIn).focus();
 }

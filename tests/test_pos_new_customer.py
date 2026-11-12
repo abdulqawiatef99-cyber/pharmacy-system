@@ -81,6 +81,32 @@ const { chromium } = require('playwright');
 })().catch((e) => { console.error(e); process.exit(1); });
 """
 
+SLOW = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  await p.goto(base + '/');
+  await p.waitForSelector('#loginForm');
+  await p.evaluate(async ([u, w]) => fetch('/api/auth/login', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ username: u, password: w }) }), [user, pw]);
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posCustNew');
+  await p.route('**/api/customers', async (r) => { await new Promise((ok) => setTimeout(ok, 1500)); await r.continue(); });
+  await p.locator('#posCustNew').click();
+  await p.locator('#custNewDlg [name=name]').fill('عميل بطيء وهمي');
+  await p.locator('#custNewDlg button[value=ok]').click();
+  await p.waitForTimeout(200);
+  await p.keyboard.press('Escape');
+  await p.locator('#custNewDlg button[value=cancel]').click({ force: true });
+  const stillOpen = !!(await p.$('#custNewDlg[open]'));
+  await p.waitForSelector('#custClear', { timeout: 10000 });
+  console.log(JSON.stringify({ stillOpen, chosen: await p.locator('#posCust').inputValue() }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
 
 class Wiring(unittest.TestCase):
     def test_no_prompt_box_for_a_new_customer(self):
@@ -133,3 +159,7 @@ class NewCustomerInBrowser(APICase):
                         " JOIN customers c ON c.id=s.customer_id WHERE d.org_id=? ORDER BY s.created_at DESC LIMIT 1",
                         (self.ctx.org_id,))
         self.assertEqual((d["address"], d["phone"], d["address1"]), ("شارع وهمي 7", "01000000003", "شارع وهمي 7"))
+
+    def test_a_slow_save_cannot_be_closed_halfway(self):
+        out = self.run_script(SLOW)
+        self.assertEqual(out, {"stillOpen": True, "chosen": "عميل بطيء وهمي"})
