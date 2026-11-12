@@ -19,7 +19,7 @@ from tests.test_sales import SalesCase
 
 # tables that grow with every sale, every day, for years
 GROWING = {"sales", "sale_lines", "sale_allocations", "sale_payments", "stock_movements", "audit_log", "safety_events",
-           "cash_movements", "customer_ledger", "supplier_ledger", "purchase_invoice_lines"}
+           "cash_movements", "customer_ledger", "supplier_ledger", "purchase_invoice_lines", "sale_returns"}
 
 
 # index columns that do not narrow a growing table: every row of the pharmacy's history shares them
