@@ -60,16 +60,18 @@ def _sales(db: Database, org_id: str) -> list[dict]:
     return [dict(r) for r in db.all(
         "WITH mv AS (SELECT ref_id sale_id, item_id, sum(qty_delta) moved FROM stock_movements"
         "            WHERE org_id=? AND ref_type IN ('sale','sale_void') GROUP BY ref_id, item_id),"
-        # sold = the invoice lines themselves (not the allocations, which are written next to the movements)
-        " al AS (SELECT l.sale_id, l.item_id, sum(l.qty_base) sold,"
-        "        sum((SELECT coalesce(sum(a.returned_qty),0) FROM sale_allocations a WHERE a.sale_line_id = l.id)) returned"
-        "        FROM sale_lines l WHERE l.sale_id IN (SELECT sale_id FROM mv) GROUP BY l.sale_id, l.item_id)"
+        # sold = the invoice lines themselves (not the allocations, which are written next to the movements);
+        # each side aggregated once and joined, never a per-line subquery (Codex P2 on #209: that was quadratic)
+        " sd AS (SELECT sale_id, item_id, sum(qty_base) sold FROM sale_lines WHERE org_id=? GROUP BY sale_id, item_id),"
+        " rt AS (SELECT l.sale_id, l.item_id, sum(a.returned_qty) returned FROM sale_allocations a"
+        "        JOIN sale_lines l ON l.id = a.sale_line_id WHERE l.org_id=? GROUP BY l.sale_id, l.item_id)"
         " SELECT s.id sale_id, s.sale_no, s.status, mv.item_id, mv.moved,"
-        "  CASE WHEN s.status='completed' THEN coalesce(al.returned,0) - coalesce(al.sold,0) ELSE 0 END expected"
+        "  CASE WHEN s.status='completed' THEN coalesce(rt.returned,0) - coalesce(sd.sold,0) ELSE 0 END expected"
         " FROM mv JOIN sales s ON s.id = mv.sale_id AND s.org_id=?"
-        " LEFT JOIN al ON al.sale_id = mv.sale_id AND al.item_id = mv.item_id"
-        " WHERE mv.moved <> CASE WHEN s.status='completed' THEN coalesce(al.returned,0) - coalesce(al.sold,0) ELSE 0 END",
-        (org_id, org_id))]
+        " LEFT JOIN sd ON sd.sale_id = mv.sale_id AND sd.item_id = mv.item_id"
+        " LEFT JOIN rt ON rt.sale_id = mv.sale_id AND rt.item_id = mv.item_id"
+        " WHERE mv.moved <> CASE WHEN s.status='completed' THEN coalesce(rt.returned,0) - coalesce(sd.sold,0) ELSE 0 END",
+        (org_id, org_id, org_id, org_id))]
 
 
 def scan(db: Database, org_id: str) -> dict:
