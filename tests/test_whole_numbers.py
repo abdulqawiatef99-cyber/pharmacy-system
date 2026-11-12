@@ -52,3 +52,15 @@ class WholeNumbers(PlanCase):
                 self.call("PUT", "/api/settings/sales", 422, json={"return_window_days": bad})
         self.assertEqual(self.call("GET", "/api/settings/sales")["return_window_days"], before)
         self.assertEqual(self.call("PUT", "/api/settings/sales", json={"return_window_days": "7"})["return_window_days"], 7)
+
+
+class ScreensSendWhatWasTyped(__import__("unittest").TestCase):
+    """The count and return screens cut 2.5 to 2 with parseInt before the server could refuse it."""
+
+    def test_count_and_return_screens_do_not_cut(self):
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('const qty = typedWhole($("#cntQty").value);', js)
+        self.assertNotIn('parseInt($("#cntQty").value', js)
+        self.assertIn("const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v;", js)
+        self.assertNotIn("const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v;", js)
