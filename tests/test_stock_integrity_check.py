@@ -186,6 +186,49 @@ class TestScan(Base):
             self.assertEqual(integrity.check_all(self.db, "startup"), {})
 
 
+class TestScale(Base):
+    """Codex P2 on #209: the sales check once ran a subquery per invoice line over all allocations (no index on
+    sale_line_id), quadratic in the history. It must stay one pass per table."""
+
+    def bulk(self, n):
+        c = sqlite3.connect(self.db.path)
+        c.execute("PRAGMA foreign_keys = OFF")
+        org, br, uid = self.ctx.org_id, self.ctx.branch_id, self.ctx.user_id
+        c.executemany("INSERT INTO sales (id, org_id, branch_id, created_by, status, sale_no) VALUES (?,?,?,?,'completed',?)",
+                      [(f"s{i}", org, br, uid, 10_000 + i) for i in range(n)])
+        c.executemany("INSERT INTO sale_lines (id, sale_id, org_id, line_no, item_id, qty_base) VALUES (?,?,?,1,?,1)",
+                      [(f"l{i}", f"s{i}", org, self.pan) for i in range(n)])
+        c.executemany("INSERT INTO sale_allocations (id, sale_line_id, batch_id, qty_base, unit_price) VALUES (?,?,?,1,2000)",
+                      [(f"a{i}", f"l{i}", self.b1) for i in range(n)])
+        c.executemany("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type,"
+                      " ref_type, ref_id, ref_line_id) VALUES (?,?,?,?,?,-1,'sale','sale',?,?)",
+                      [(f"m{i}", org, br, self.pan, self.b1, f"s{i}", f"l{i}") for i in range(n)])
+        c.execute("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type)"
+                  " VALUES ('m-in',?,?,?,?,?,'purchase')", (org, br, self.pan, self.b1, n))   # stock for every sale
+        c.commit()
+        c.close()
+
+    def test_sales_check_has_no_per_line_subquery(self):
+        sql = []
+        self.db.conn.set_trace_callback(sql.append)
+        try:
+            integrity._sales(self.db, self.ctx.org_id)
+        finally:
+            self.db.conn.set_trace_callback(None)
+        plan = [r[3] for q in sql if q.lstrip().upper().startswith("WITH")
+                for r in self.db.conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()]
+        self.assertTrue(plan)
+        self.assertEqual([d for d in plan if "CORRELATED" in d], [], plan)
+
+    def test_large_history_is_checked_quickly(self):
+        self.bulk(30_000)                       # ~ years of one-line sales; the old query took minutes here
+        t = time.perf_counter()
+        r = integrity.scan(self.db, self.ctx.org_id)
+        took = time.perf_counter() - t
+        self.assertTrue(r["ok"], r["counts"])
+        self.assertLess(took, 20, f"scan took {took:.1f} s")
+
+
 class TestWhenItRuns(Base):
     def test_after_every_backup_run_even_a_refused_one(self):
         ab = AutoBackup(self.db, self.tmp / "uploads", self.tmp / "backups", self.tmp / "state")
