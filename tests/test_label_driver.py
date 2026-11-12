@@ -330,3 +330,12 @@ class TestRowsAndShrinkEdges(DriverCase):
             lb.render_label(data, 38, 25, 300, lb.DEFAULT_FIELDS)
         start = max(10, min(round(25 * 300 / 25.4) // 7, round(3.2 * 300 / 25.4)))
         self.assertGreaterEqual(dict(sizes)[data["name"]], max(10, int(start * 0.7)))
+
+
+class TestGapOnScreen(DriverCase):
+    def test_preview_follows_the_gap_on_the_screen(self):
+        rs.save(self.db, self.ctx, {"label_rows": 2, "label_gap": 2})
+        self.use(FakeWindows())
+        _, _, a = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 0})
+        _, _, b = label_preview(self.db, self.ctx, {"label_lang": "driver", "label_gap": 4})
+        self.assertEqual((a["size"], b["size"]), ("38x12.5", "38x10.5"))

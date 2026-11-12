@@ -249,6 +249,9 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
         cfg["label_fields"] = {**lb.DEFAULT_FIELDS, **{k: bool(v) for k, v in data["label_fields"].items() if k in lb.DEFAULT_FIELDS}}
     if data and "label_rows" in data:
         cfg["label_rows"] = rs.label_rows_ok(data["label_rows"])
+    if data and isinstance(data.get("label_gap"), int) and not isinstance(data["label_gap"], bool) \
+            and 0 <= data["label_gap"] <= 10:
+        cfg["label_gap"] = data["label_gap"]
     if data and data.get("label_text_lang") in ("ar", "en"):
         cfg["label_text_lang"] = data["label_text_lang"]
     if data and "label_pharmacy_en" in data:
