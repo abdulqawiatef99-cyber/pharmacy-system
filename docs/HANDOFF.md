@@ -53,6 +53,7 @@
 - 12/11 12:05 · جلسة 3 · [#192](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/192): اختبارات زرار التحديث (مكان مفتاح جيت هاب، ردود جيت هاب الغلط، ملفات في أرشيف التحديث لازم تترفض زي `COM1` والنقطة في الآخر والاختصار والحجم الكبير)؛ اختبارات بس، مفيش عيب. 717 ناجح. · التالي: `core/backup.py`، ومراجعات Codex على #190–#192.
 - 12/11 12:25 · جلسة 3 · #190: ملاحظة Codex التانية (حفظ بطيء ممكن يتقفل ويتحسب على فاتورة تانية) اتصلحت باختبار. [#193](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/193): تقييم عرض الخصم الكبير كان بيقطع 2.5 علبة لـ 2 ويحسب التكلفة بكسور عشرية؛ دلوقتي علب صحيحة والتكلفة بالقرش بنفس تقريب البيع. 709 ناجح. · التالي: مراجعات Codex على #190 و#192 و#193، وبعدين باقي `int(`/`float(` في المدخلات.
 - 12/11 12:55 · جلسة 3 · تقريب الفلوس (القاعدة: نص قرش لفوق زي الخصم، من غير كسور عشرية): [#194](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/194) كارت الصنف (متوسط تكلفة العلبة كان بيبان أقل بقرش)، [#195](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/195) خصم الغياب في المرتبات (6500.13 على 26 يوم كان بيخصم 250.00 بدل 250.01)، [#196](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/196) تقرير المخزون (قيمة الصلاحية والأقسام). كلهم عرض أو اقتراح، مفيش دفتر اتغيّر. · التالي: مراجعات Codex، وتقرير الرواكد (`procurement/deadstock.py`) لسه بكسور لأنه من ملفات إي ستوك (الكميات هناك كسور أصلًا).
+- 12/11 12:18 · جلسة إضافية · المنسّق دمج 32 PR في develop (10:10–10:15 UTC)، والجلسة الإضافية دمجت #193؛ الجدول تحت في «اللي اتدمج يوم 2026-11-12». #196: ملاحظة Codex P1 (قاعدة تقريب جديدة) اتصلحت: التقرير بقى يستخدم قاعدة البيع نفسها للقيمة وقاعدة تكلفة البيع، باختبار. · التالي: #196 مستني CI وCodex، وبعدين #147.
 
 ## 11/11 20:40 — #100 الحل الجديد: الطباعة عن طريق تعريف ويندوز (زي إي ستوك)
 - الدليل من الجهاز: تعريف Xprinter XP-235B في ويندوز (Seagull) مضبوط USER 38×25 مم، Portrait 180°، وإي ستوك بيطبع عليه «مظبوط بالمللي»؛ أمر TSPL المباشر بتاعنا عمره ما ظبط (إزاحة، معايرة، 8 طرق إرسال).
@@ -67,6 +68,46 @@
 4. #20 بموافقة المالك المكتوبة (الناقص في START_HERE).
 
 **مراجعة 11/11 المستقلة (#131):** الأمان: #134 اتصلح (#135)، والباقي بعد الإطلاق (#136–#140). الفلوس والمخزون: #142 (فوق)، والباقي بعد الإطلاق (#143–#146)؛ اختبارات الأدلة في PR #147 مفتوح ومش متدمج (قاعدة AGENTS: ممنوع إضعاف اختبار). **CI:** مرايات أوبونتو وقعت 11/11؛ #133 بيكمّل بالمتصفح من غير apt (`scripts/ci/install_browser.sh`). **مفتوح لبعد الإطلاق:** #99 (#96)، #132 (#97). **المهام المجدولة:** كلها متوقفة بطلب المالك لحد ما يقرر يجدول تاني.
+
+## اللي اتدمج في `develop` يوم 2026-11-12
+قطار الدمج من المنسّق 10:10–10:15 UTC ([تعليق #113](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/113#issuecomment-6820855899)): 32 PR، كل واحد `CI / linux` أخضر على الـ head بتاعه وCodex من غير ملاحظات ومن غير تعارض ومن غير `requirements.txt` ولا migrations ولا ملفات طباعة. و#193 اتدمج 10:17 UTC من الجلسة الإضافية بنفس الشروط.
+بعد القطار: #155 و#157 و#170 و#195 اتحدّثوا من develop ومستنيين Codex. **#160 (migration `0036`) متساب عمدًا: للمثبّت بس.**
+
+| PR | head | merge | المحتوى |
+|---|---|---|---|
+| [#154](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/154) | `e70c58c` | `8e342ce` | fix(#136): refuse requests whose Host the program does not serve (DNS rebinding) |
+| [#159](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/159) | `c35ad72` | `529bbb0` | perf(#113): invoices report and return/movement lookups without whole-table reads (no migration) |
+| [#162](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/162) | `7b57c45` | `f8bd4b8` | fix(#153): open screens notice an update and reload safely |
+| [#164](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/164) | `722066b` | `33d4b89` | docs: feature gap vs market and E-Stock; second pharmacy pilot plan |
+| [#165](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/165) | `8844b27` | `5b3a8cc` | Setup screen: neutral examples for the pharmacy and owner name |
+| [#166](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/166) | `637ea7f` | `446b8f8` | perf(#113): stock check in every backup runs in 0.5 s instead of 101 s after a year |
+| [#167](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/167) | `0fbb9cc` | `ae2560d` | tests: reports of today ask for the day at call time (midnight CI failure) |
+| [#168](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/168) | `873be50` | `8f29474` | fix(#145): sales report top items show what the invoices charged |
+| [#169](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/169) | `bacdb36` | `48615cd` | fix(#143): credit limit checked again inside the sale's write transaction |
+| [#171](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/171) | `45615d7` | `e6eb4eb` | fix(#134 follow-up): current password in an open session is rate limited |
+| [#172](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/172) | `9e93ba9` | `2b066e5` | Supplier returns: cover the untested paths; a typed value needs the right to see values |
+| [#173](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/173) | `2954f48` | `897d7a8` | E-Stock migration job: test the packs sheet and rules; refuse a fractional JSON pack size |
+| [#174](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/174) | `7d10537` | `0ce4a48` | Users screen: test discount limit, switch-off and password reset; refuse fractional limits |
+| [#175](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/175) | `fb126af` | `072f8de` | Daily checks and automatic backup: test the failure paths; refuse fractional retention counts |
+| [#176](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/176) | `727b0af` | `46951b7` | Typed whole numbers are refused when fractional, never truncated |
+| [#177](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/177) | `68826c9` | `ca8053c` | tests: completion and return guards (concurrent edit, price change, bad returns) |
+| [#178](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/178) | `e0f9c98` | `758bda5` | tests: stock count edges (cancel, open count, refusals, sold below the count) |
+| [#179](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/179) | `8cd725d` | `5fe4166` | Purchase invoices: typed quantities and piasters must be whole, never truncated |
+| [#180](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/180) | `4576c75` | `49b1ba6` | Salaries, scheduled expenses and expense decisions happen once, even from two screens |
+| [#181](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/181) | `1a3f2e4` | `784a904` | tests: a backup edited inside and re-sealed is still refused |
+| [#182](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/182) | `7dae38f` | `2c89a0b` | Payroll: advances are booked as salary expense even when nothing is left to pay |
+| [#183](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/183) | `4de1666` | `03753c4` | tests: API routes the screens use that had no test |
+| [#184](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/184) | `2a38b50` | `c7d65ea` | List routes: ?limit= is a whole number from 1 to the cap |
+| [#185](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/185) | `2d4259a` | `15c6abf` | tests: one sweep that every ledger refuses UPDATE and DELETE in the database |
+| [#186](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/186) | `31f1f33` | `67d4076` | tests: quantity-limit rule and the critical block decision (fictional data) |
+| [#187](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/187) | `a89ff49` | `30b9cc8` | Sale screen: quick-sale buttons read the stock again on every visit |
+| [#188](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/188) | `1a05edc` | `9698691` | Delivery sale: F9 in the address field saves it first, then completes |
+| [#189](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/189) | `9abd759` | `00dd584` | Sale screen: the delivery panel stays inside the side panel |
+| [#190](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/190) | `4e2a5c4` | `61aaf6d` | Sale screen: new customer is a form, not two prompt() boxes |
+| [#191](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/191) | `f8bb597` | `a10c4c6` | tests: the who-did-what log (permission, dates, filters, isolation, approver) |
+| [#192](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/192) | `2e48ffd` | `02ab26e` | tests: update button edges (key, GitHub answers, refused archive members) |
+| [#193](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/193) | `39a802c` | `737f9ff` | Offer evaluation: whole packs, exact percent and pounds, cost in piasters |
+| [#194](https://github.com/abdulqawiatef99-cyber/pharmacy-system/pull/194) | `a496c43` | `399f6ba` | Item card: average pack cost and margin exact, rounded half up |
 
 ## قاعدة الدمج (اتأكدت بحادثة 11/11)
 ادمج PR في `develop` **بعد** ما `CI / linux` يبقى أخضر على آخر head للـ PR نفسه، مش قبل ما يخلص. يوم 11/11 الـ PRs ‏#111 و#112 و#115 و#117 اتدمجوا بعد ما فرعهم اتحدّث بدمج `develop` وقبل ما CI على الـ head الجديد يخلص، فالحارس (`branch-guard.yml`) فتح [#118](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/118)، [#119](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/119)، [#120](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/120)، [#121](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/121). اتقفلوا: مفيش مشكلة في الكود، وCI على `4a93eb2` أخضر linux + windows. لو PR اتحدّث بدمج `develop`، استنى CI على الـ head الجديد.
