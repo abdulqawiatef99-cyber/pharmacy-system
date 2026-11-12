@@ -40,6 +40,24 @@ def gtin_keys(gtin: str) -> list[str]:
     return keys
 
 
+def _split_without_gs(body: str, ai: str) -> int:
+    """Where a variable field (10 batch / 21 serial) ends when the scanner dropped the GS separator.
+
+    Best effort, in this order: a 17<YYMMDD> that is a real date and is followed by the end or by the
+    other variable field (a batch or serial that happens to contain "21" is not cut there); then, for a
+    batch only, the first "21" (serial); otherwise the field runs to the end.
+    """
+    other = "21" if ai == "10" else "10"
+    for m in re.finditer(r"17(\d{6})", body):
+        if m.start() >= 1 and _expiry(m.group(1)) and (m.end() == len(body) or body.startswith(other, m.end())):
+            return m.start()
+    if ai == "10":
+        i = body.find("21", 1)
+        if 0 < i and i + 2 < len(body):              # a "21" at the very end is part of the batch, not an empty serial
+            return i
+    return len(body)
+
+
 def parse(raw: str) -> dict | None:
     """{'gtin', 'expiry', 'batch', 'serial'} or None if this is not a GS1 2D code."""
     s = (raw or "").strip()
@@ -79,12 +97,8 @@ def parse(raw: str) -> dict | None:
             if GS in body:
                 val, rest = body.split(GS, 1)
             else:
-                # no separator: a batch is usually followed by 21 (serial) or 17 (expiry)
-                m = re.search(r"(?:21|17\d{6})", body[1:]) if ai == "10" else None
-                if m:
-                    val, rest = body[:m.start() + 1], body[m.start() + 1:]
-                else:
-                    val, rest = body, ""
+                cut = _split_without_gs(body, ai)
+                val, rest = body[:cut], body[cut:]
             out["batch" if ai == "10" else "serial"] = val[:20]
         else:
             break
