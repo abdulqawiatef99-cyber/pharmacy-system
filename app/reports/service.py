@@ -8,7 +8,7 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import local_day_bounds, local_today
+from ..sales.service import kept_value, local_day_bounds, local_today
 
 
 def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
@@ -39,27 +39,54 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
         " GROUP BY s.created_by ORDER BY 3 DESC", p)]
     by_hour = [dict(r) for r in db.all(
         f"SELECT CAST(strftime('%H', s.completed_at, '{mod}') AS INTEGER) hour, count(*) n, sum(s.total) total{base} GROUP BY 1 ORDER BY 1", p)]
-    show_cost = ctx.can("costs.read")
-    top = []
-    for r in db.all(
-            "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, sum(a.qty_base - a.returned_qty) qty,"
-            " sum(CAST(round((CASE WHEN a.pack_price IS NOT NULL AND a.pack_size > 1"
-            "   THEN ((a.qty_base - a.returned_qty) / a.pack_size) * a.pack_price + ((a.qty_base - a.returned_qty) % a.pack_size) * a.unit_price"
-            "   ELSE (a.qty_base - a.returned_qty) * a.unit_price END) * (10000 - l.discount_bp) / 10000.0) AS INTEGER)) revenue,"
-            " sum((a.qty_base - a.returned_qty) * coalesce(CAST(a.unit_cost AS REAL), 0) * 100) cost,"
-            " sum(a.unit_cost IS NULL) unknown"
-            " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id JOIN items i ON i.id=l.item_id"
-            " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
-            " GROUP BY l.item_id ORDER BY revenue DESC LIMIT 50", p):
-        d = dict(r)
-        if show_cost and not d["unknown"]:
-            d["profit"] = d["revenue"] - int(round(d["cost"]))
-        d.pop("cost"), d.pop("unknown")
-        top.append(d)
+    top = _top_items(db, ctx, p)
     t = db.one(f"SELECT count(*) n, coalesce(sum(s.total),0) total, coalesce(sum(s.returned_total),0) returns,"
                f" coalesce(sum(s.discount_total),0) discount{base}", p)
     return {"from": d1.isoformat(), "to": d2.isoformat(), "totals": dict(t), "daily": daily, "by_user": by_user,
             "by_hour": by_hour, "top_items": top}
+
+
+def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[dict]:
+    """Best-selling items: what the customers kept and what it brought in, priced the way each line was
+    sold (#145). A line nothing was returned from is worth exactly its recorded total; a line with returns
+    is valued like the return screen values it (`kept_value`), so the items add up to the invoices."""
+    show_cost = ctx.can("costs.read")
+    by_item: dict[str, dict] = {}
+    partial: list[tuple[dict, dict]] = []
+    for r in db.all(
+            "SELECT l.id, l.item_id, l.discount_bp, l.line_total, sum(a.qty_base - a.returned_qty) qty,"
+            " sum(a.returned_qty) returned, sum((a.qty_base - a.returned_qty) * coalesce(CAST(a.unit_cost AS REAL), 0) * 100) cost,"
+            " sum(a.unit_cost IS NULL) unknown"
+            " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
+            " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
+            " GROUP BY l.id", p):
+        d = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "qty": 0, "revenue": 0, "cost": 0.0, "unknown": 0})
+        d["qty"] += r["qty"]
+        d["cost"] += r["cost"]
+        d["unknown"] += r["unknown"]
+        if r["returned"] == 0 and r["line_total"] is not None:
+            d["revenue"] += r["line_total"]
+        else:
+            partial.append((d, dict(r)))
+    for d, l in partial:
+        allocs = [dict(a) for a in db.all("SELECT id, qty_base, returned_qty, unit_price, pack_price, pack_size"
+                                          " FROM sale_allocations WHERE sale_line_id=?", (l["id"],))]
+        kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+        d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+    ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]
+    names = {r["id"]: dict(r) for r in db.all(
+        "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
+        % ",".join("?" * len(ranked)), (ctx.org_id, *[d["item_id"] for d in ranked]))} if ranked else {}
+    top = []
+    for d in ranked:
+        i = names.get(d["item_id"], {})
+        out = {"item_id": d["item_id"], "name_en": i.get("name_en"), "name_ar": i.get("name_ar"),
+               "pack_size": i.get("pack_size"), "base_unit_name": i.get("base_unit_name"),
+               "qty": d["qty"], "revenue": d["revenue"]}
+        if show_cost and not d["unknown"]:
+            out["profit"] = d["revenue"] - int(round(d["cost"]))
+        top.append(out)
+    return top
 
 
 def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
