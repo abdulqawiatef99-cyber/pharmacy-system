@@ -60,9 +60,10 @@ def _sales(db: Database, org_id: str) -> list[dict]:
     return [dict(r) for r in db.all(
         "WITH mv AS (SELECT ref_id sale_id, item_id, sum(qty_delta) moved FROM stock_movements"
         "            WHERE org_id=? AND ref_type IN ('sale','sale_void') GROUP BY ref_id, item_id),"
-        " al AS (SELECT l.sale_id, l.item_id, sum(a.qty_base) sold, sum(a.returned_qty) returned"
-        "        FROM sale_lines l JOIN sale_allocations a ON a.sale_line_id = l.id"
-        "        WHERE l.sale_id IN (SELECT sale_id FROM mv) GROUP BY l.sale_id, l.item_id)"
+        # sold = the invoice lines themselves (not the allocations, which are written next to the movements)
+        " al AS (SELECT l.sale_id, l.item_id, sum(l.qty_base) sold,"
+        "        sum((SELECT coalesce(sum(a.returned_qty),0) FROM sale_allocations a WHERE a.sale_line_id = l.id)) returned"
+        "        FROM sale_lines l WHERE l.sale_id IN (SELECT sale_id FROM mv) GROUP BY l.sale_id, l.item_id)"
         " SELECT s.id sale_id, s.sale_no, s.status, mv.item_id, mv.moved,"
         "  CASE WHEN s.status='completed' THEN coalesce(al.returned,0) - coalesce(al.sold,0) ELSE 0 END expected"
         " FROM mv JOIN sales s ON s.id = mv.sale_id AND s.org_id=?"

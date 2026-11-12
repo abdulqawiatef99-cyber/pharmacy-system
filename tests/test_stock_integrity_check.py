@@ -151,6 +151,13 @@ class TestScan(Base):
         self.assertEqual((r["sales"][0]["sale_id"], r["sales"][0]["moved"], r["sales"][0]["expected"]),
                          (a["id"], -5, -4))
 
+    def test_invoice_line_quantity_is_the_reference(self):
+        a = self.sell(5)
+        self.raw("UPDATE sale_lines SET qty_base = 6 WHERE sale_id=?", (a["id"],))   # invoice says 6, shelf gave 5
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertEqual(r["counts"]["sales"], 1)
+        self.assertEqual((r["sales"][0]["moved"], r["sales"][0]["expected"]), (-5, -6))
+
     def test_returns_and_voids_are_not_mismatches(self):
         s = Sales(self.db)
         a = self.sell(6)
@@ -210,6 +217,14 @@ class TestWhenItRuns(Base):
                 self.assertEqual(r.status_code, 200, r.text)
                 me = c.get("/api/me", headers=H).json()
                 self.assertEqual(me["stock_alert"]["counts"]["batches"], 1)
+                # the login answer has no banner, so the screens ask for it on their own (Codex P2 on #209)
+                self.assertNotIn("stock_alert", r.json().get("me", {}))
+                self.assertEqual(c.get("/api/stock/alert", headers=H).json()["alert"]["counts"]["batches"], 1)
+            people.add_user(self.db, self.ctx, username="asst2", full_name="A", password=PW, role_code="assistant")
+            with TestClient(create_app(self.db, s)) as c2:
+                c2.post("/api/auth/login", json={"username": "asst2", "password": PW}, headers=H)
+                self.assertEqual(c2.get("/api/stock/alert", headers=H).status_code, 403)
+                self.assertEqual(TestClient(create_app(self.db, s)).get("/api/stock/alert", headers=H).status_code, 401)
 
 
 if __name__ == "__main__":

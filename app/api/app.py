@@ -530,6 +530,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                   "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx)})
 
     @handler
+    async def stock_alert_api(req):
+        """#202: the red banner, refreshed by the screens on their own (login answers do not carry it)."""
+        from ..inventory import integrity
+        ctx = ctx_of(req)
+        ctx.require("audit.read")
+        return J({"alert": integrity.banner(db, ctx)})
+
+    @handler
     async def ui_settings_api(req):
         from ..core import ui_settings
         ctx = ctx_of(req)
@@ -2268,6 +2276,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
+        Route("/api/stock/alert", stock_alert_api),
         Route("/api/auth/quick-users", quick_users),
         Route("/api/auth/pin", pin_login, methods=["POST"]),
         Route("/api/me/pin", my_pin, methods=["POST"]),
