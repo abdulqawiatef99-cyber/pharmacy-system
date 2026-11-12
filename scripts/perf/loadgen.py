@@ -308,8 +308,13 @@ class Generator:
             try:
                 draft = self.sales.add_line(ctx, sid, it["id"], packs=packs, units=units)
                 it["stock"] -= qty
-            except Conflict:
+            except Conflict as e:
                 self.stats["skipped_lines"] += 1
+                # the program sells unexpired stock only: follow what it says is sellable, so restock() reorders
+                # an item whose remaining batches expired instead of dropping it from the workload
+                avail = (getattr(e, "details", None) or {}).get("available")
+                if isinstance(avail, int):
+                    it["stock"] = min(it["stock"], avail)
         if draft is None:
             self.sales.discard(ctx, sid)
             return
