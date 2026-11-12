@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
@@ -113,7 +113,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
                 cost = sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
-                r["profit"] += value - int(cost.to_integral_value())
+                r["profit"] += value - int(cost.to_integral_value(ROUND_HALF_UP))
             if with_lines:
                 lines.append({"item_id": l["item_id"], "name_en": l["name_en"], "name_ar": l["name_ar"], "pack_size": l["pack_size"],
                               "base_unit_name": l["base_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,

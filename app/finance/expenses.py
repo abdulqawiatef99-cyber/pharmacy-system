@@ -7,7 +7,7 @@ is recorded — that is what physically happened — and a rejected one is flagg
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
@@ -180,7 +180,7 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
             unknown += 1
         else:
             cost += Decimal(a["unit_cost"]) * a["q"] * 100
-    cost_p = int(cost.to_integral_value())
+    cost_p = int(cost.to_integral_value(ROUND_HALF_UP))
     revenue = s["sales"] - s["returns"]
     exp = [dict(r) for r in db.all(
         "SELECT c.name category, sum(e.amount) amount FROM expenses e JOIN expense_categories c ON c.id=e.category_id"

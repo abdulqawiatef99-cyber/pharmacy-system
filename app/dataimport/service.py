@@ -633,7 +633,7 @@ class DataImport:
                     value_total += Decimal(d["qty"]) * Decimal(d["cost"])
         return {"counts": counts, "issues": issue_counts, "rows": sum(counts.values()),
                 "source_qty_total": str(qty_total),
-                "source_value_total": str(value_total.quantize(Decimal("0.01")))}
+                "source_value_total": str(value_total.quantize(Decimal("0.01"), ROUND_HALF_UP))}
 
     # ------------------------------------------------------------ review
     def get(self, ctx: Context, run_id: str, action: str | None = None, limit: int = 500) -> dict:

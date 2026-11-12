@@ -3,6 +3,7 @@ the agreed value, and a numbered slip is printed for the supplier's representati
 from __future__ import annotations
 
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -23,10 +24,9 @@ def suggest_value(db: Database, ctx: Context, item_id: str, batch_id: str | None
         r = db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND batch_id=? AND movement_type IN"
                    " ('purchase','opening') AND unit_cost IS NOT NULL ORDER BY created_at DESC LIMIT 1", (ctx.org_id, item_id, batch_id))
         if r:
-            from decimal import Decimal
-            return int((Decimal(r["unit_cost"]) * 100).to_integral_value())
+            return int((Decimal(r["unit_cost"]) * 100).to_integral_value(ROUND_HALF_UP))
     c = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
-    return int((c * 100).to_integral_value()) if c is not None else 0
+    return int((c * 100).to_integral_value(ROUND_HALF_UP)) if c is not None else 0
 
 
 def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note: str | None = None) -> dict:
