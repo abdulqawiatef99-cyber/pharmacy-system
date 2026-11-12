@@ -51,6 +51,9 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
         value = ln.get("unit_value")
         if value is None:
             value = suggest_value(db, ctx, item_id, batch_id)
+        elif not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
+            # a typed value credits the supplier's account with that amount: only who may see the values
+            ctx.require("suppliers.pay")
         if not isinstance(value, int) or value < 0:
             raise ValidationFailed("قيمة الوحدة غير صحيحة")
         clean.append((item_id, batch_id, qty, value, reason))
