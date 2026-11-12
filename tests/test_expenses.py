@@ -52,6 +52,37 @@ class TestExpenses(Base):
         with self.assertRaises(Forbidden):
             fin.profit(self.db, self.m, today(), today())
 
+    def test_a_drawer_expense_rejected_after_payout_alerts_the_owner(self):
+        # the cash already left the drawer: rejecting it changes nothing in the drawer, it raises an error alert
+        e = fin.record(self.db, self.a, category_id=self.cat, amount=3000, paid_from="drawer", note="تجربة")
+        fin.decide(self.db, self.m, e["id"], False, "مش مصروف صيدلية")
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 97000)
+        alert = [n for n in notify.listing(self.db, self.ctx)["items"] if n["kind"] == "expense_rejected"]
+        self.assertEqual(len(alert), 1)
+        self.assertEqual(alert[0]["severity"], "error")
+        self.assertIn("30.00", alert[0]["title"])
+        self.assertIn("مش مصروف صيدلية", alert[0]["body"])
+        o = fin.record(self.db, self.a, category_id=self.cat, amount=1000, paid_from="outside")
+        fin.decide(self.db, self.m, o["id"], False, "مكرر")                     # not from the drawer: no alert
+        self.assertEqual(len([n for n in notify.listing(self.db, self.ctx)["items"] if n["kind"] == "expense_rejected"]), 1)
+        r = fin.profit(self.db, self.ctx, today(), today())
+        self.assertEqual(r["expenses_total"], 0)                                 # rejected never counts as an expense
+
+    def test_listing_filters(self):
+        day = T.isoformat()[:10]
+        old = (T - timedelta(days=40)).isoformat()[:10]
+        a = fin.record(self.db, self.ctx, category_id=self.cat, amount=100, paid_from="outside", spent_on=old)
+        b = fin.record(self.db, self.a, category_id=self.cat, amount=200, paid_from="outside", spent_on=day)
+        ids = lambda **kw: {x["id"] for x in fin.listing(self.db, self.ctx, **kw)}       # noqa: E731
+        self.assertEqual(ids(status="pending"), {b["id"]})
+        self.assertEqual(ids(status="approved"), {a["id"]})
+        self.assertEqual(ids(month=old[:7]), {a["id"]})
+        self.assertEqual(ids(date_from=day, date_to=day), {b["id"]})
+        self.assertEqual(ids(date_from=old, date_to=day), {a["id"], b["id"]})
+        self.assertEqual({x["id"] for x in fin.listing(self.db, self.a)}, {b["id"]})   # employees: their own only
+        with self.assertRaises(ValidationFailed):
+            fin.record(self.db, self.ctx, category_id=self.cat, amount=100, paid_from="outside", spent_on="2026-13-01")
+
 
 class TestExpensesAPI(APICase):
     def test_flow(self):
