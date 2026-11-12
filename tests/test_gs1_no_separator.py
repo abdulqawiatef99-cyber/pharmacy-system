@@ -42,3 +42,7 @@ class TestWithoutSeparator(unittest.TestCase):
 
     def test_serial_alone_runs_to_the_end(self):
         self.check(GTIN + "21SER1727063099", None, None, "SER1727063099")
+
+    def test_an_expiry_already_read_is_never_replaced_by_digits_in_a_later_field(self):
+        # Codex on #226: a terminal serial ending in 17<YYMMDD>, with every separator present
+        self.check(GTIN + "17280630" + "10BATCH" + G + "21SER17270630", "2028-06-30", "BATCH", "SER17270630")
