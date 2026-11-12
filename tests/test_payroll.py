@@ -114,3 +114,33 @@ class TestStaffAPI(APICase):
         self.assertEqual(r.json()["open"]["source"], "pc")
         month = local_today().isoformat()[:7]
         self.assertEqual(self.c.get("/api/staff", params={"month": month}).json()["people"], [])
+
+
+class TestAdvancesBooked(Base):
+    """Advances are cash already paid: when the salary is paid they are booked as salary expense of that
+    month, also when they took the whole salary (nothing left to pay) or more."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+
+    def booked(self):
+        return sorted(e["amount"] for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب"))
+
+    def pay_with(self, advance, bonus):
+        pay.add_advance(self.db, self.ctx, self.uid, advance, self.month, "سلفة", "outside")
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=bonus)
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+
+    def test_an_advance_that_took_the_whole_salary_is_still_booked(self):
+        self.pay_with(advance=50000, bonus=50000)                 # no attendance: net = 0 after the advance
+        self.assertEqual(self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"], 0)
+        self.assertEqual(self.booked(), [50000])
+
+    def test_an_advance_larger_than_what_was_left_is_booked_in_full(self):
+        self.pay_with(advance=50000, bonus=10000)                 # net = -400.00: he owes the difference
+        self.assertLess(self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"], 0)
+        self.assertEqual(self.booked(), [50000])
