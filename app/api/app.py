@@ -525,8 +525,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def me(req):
         ctx = ctx_of(req)
         from ..core import ui_settings
+        from ..inventory import integrity
         return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx),
-                  "ui": ui_settings.get(db, ctx.org_id)})
+                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx)})
 
     @handler
     async def ui_settings_api(req):
@@ -2444,6 +2445,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if auto_backup:
             autob.start()
             daily.start()
+            # #202: stock integrity check on every start, in the background so the screens open at once
+            from ..inventory import integrity
+            threading.Thread(target=integrity.check_all, args=(db, "startup"), daemon=True,
+                             name="stock-integrity").start()
         try:
             yield
         finally:

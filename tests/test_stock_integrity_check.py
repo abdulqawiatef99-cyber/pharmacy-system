@@ -1,0 +1,217 @@
+"""#202 part 2: the stock integrity check recomputes every balance from the stock ledger on startup and after
+each backup run; a mismatch raises a red alert (error notification + banner on /api/me) and an audit row, and
+is never repaired silently. Damage is simulated with raw SQLite writes, as a damaged file or a hand edit
+would be. Synthetic data only."""
+import sqlite3
+import time
+from dataclasses import replace
+from datetime import date, timedelta
+from decimal import Decimal
+from unittest.mock import patch
+
+from starlette.testclient import TestClient
+
+from app import config
+from app.api.app import create_app
+from app.catalog import service as cat
+from app.core import audit, notify, people
+from app.core.autobackup import AutoBackup
+from app.inventory import integrity, service as inv
+from app.sales.cash import CashDrawer
+from app.sales.service import Sales
+from tests.helpers import DBTestCase
+from tests.test_api import H
+
+PW = "Staff-Pass-2026"
+
+
+class Base(DBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.pan = cat.create_item(self.db, self.ctx, {"name_en": "Panadol 500mg 24 tab", "pack_size": 2,
+                                                       "public_price": 4000})
+        self.aug = cat.create_item(self.db, self.ctx, {"name_en": "Augmentin 1g 14 tab", "pack_size": 2,
+                                                       "public_price": 9000})
+        with self.db.transaction():
+            self.b1 = inv.get_or_create_batch(self.db, self.ctx, self.pan, "B1",
+                                              (date.today() + timedelta(days=400)).isoformat())
+            self.b2 = inv.get_or_create_batch(self.db, self.ctx, self.aug, "A1",
+                                              (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=20, batch_id=self.b1,
+                              movement_type="purchase", unit_cost=Decimal("15"))
+            inv.post_movement(self.db, self.ctx, item_id=self.aug, qty_delta=10, batch_id=self.b2,
+                              movement_type="purchase", unit_cost=Decimal("40"))
+
+    def raw(self, sql, params=()):
+        c = sqlite3.connect(self.db.path)
+        c.execute(sql, params)
+        c.commit()
+        c.close()
+
+    def stock_tables(self):
+        return ([tuple(r) for r in self.db.all("SELECT * FROM stock_balances ORDER BY 1,2,3,4")],
+                self.db.one("SELECT count(*) n FROM stock_movements")["n"])
+
+    def alerts(self):
+        return [n for n in notify.listing(self.db, self.ctx)["items"] if n["kind"] == "stock_integrity"]
+
+    def audits(self, action):
+        return self.db.all("SELECT * FROM audit_log WHERE action=? ORDER BY seq", (action,))
+
+    def sell(self, units):
+        s = Sales(self.db)
+        sid = s.create(self.ctx)
+        d = s.add_line(self.ctx, sid, self.pan, units=units)
+        f = s.safety_check(self.ctx, sid)
+        return s.complete(self.ctx, sid, paid_cash=0, paid_card=d["total"],
+                          safety_decisions={i: "ok" for i in range(len(f))})
+
+
+class TestScan(Base):
+    def test_clean_ledger_records_nothing(self):
+        self.sell(3)
+        r = integrity.check(self.db, self.ctx.org_id, "startup")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["counts"], {k: 0 for k in integrity.KINDS})
+        self.assertEqual(self.audits(integrity.MISMATCH), [])
+        self.assertEqual(self.alerts(), [])
+        self.assertIsNone(integrity.banner(self.db, self.ctx))
+
+    def test_balance_off_is_alerted_audited_and_not_repaired(self):
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        before = self.stock_tables()
+        r = integrity.check(self.db, self.ctx.org_id, "startup")
+        self.assertFalse(r["ok"])
+        self.assertEqual((r["counts"]["batches"], r["counts"]["items"]), (1, 1))
+        self.assertEqual(r["batches"][0]["ledger_qty"], 20)
+        self.assertEqual(r["batches"][0]["balance_qty"], 22)
+        self.assertEqual(self.stock_tables(), before)                     # never repaired
+        self.assertEqual(len(self.audits(integrity.MISMATCH)), 1)
+        self.assertEqual([a["severity"] for a in self.alerts()], ["error"])
+        b = integrity.banner(self.db, self.ctx)
+        self.assertEqual(b["counts"]["batches"], 1)
+        self.assertEqual(audit.verify_chain(self.db), [])
+        # the same mismatch again: a new audit row (each detection is recorded), no second notification
+        integrity.check(self.db, self.ctx.org_id, "backup")
+        self.assertEqual(len(self.audits(integrity.MISMATCH)), 2)
+        self.assertEqual(len(self.alerts()), 1)
+        # a different mismatch notifies again
+        self.raw("UPDATE stock_balances SET qty = qty - 1 WHERE item_id=?", (self.aug,))
+        integrity.check(self.db, self.ctx.org_id, "backup")
+        self.assertEqual(len(self.alerts()), 2)
+
+    def test_clean_again_is_audited_and_clears_the_banner(self):
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        integrity.check(self.db, self.ctx.org_id, "startup")
+        self.raw("UPDATE stock_balances SET qty = qty - 2 WHERE item_id=?", (self.pan,))   # the owner's fix
+        r = integrity.check(self.db, self.ctx.org_id, "backup")
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(self.audits(integrity.CLEAN)), 1)
+        self.assertIsNone(integrity.banner(self.db, self.ctx))
+        integrity.check(self.db, self.ctx.org_id, "backup")              # clean after clean: nothing more
+        self.assertEqual(len(self.audits(integrity.CLEAN)), 1)
+
+    def test_missing_balance_row_and_row_without_ledger(self):
+        self.raw("DELETE FROM stock_balances WHERE item_id=?", (self.aug,))
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertEqual((r["counts"]["batches"], r["counts"]["items"]), (1, 1))
+        self.assertIsNone(r["batches"][0]["balance_qty"])
+
+    def test_negative_balance(self):
+        mid = "00000000-0000-7000-8000-000000000001"
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type)"
+                 " VALUES (?,?,?,?,?,?,'adjustment')", (mid, self.ctx.org_id, self.ctx.branch_id, self.pan, self.b1, -25))
+        self.raw("UPDATE stock_balances SET qty = qty - 25 WHERE item_id=?", (self.pan,))
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertEqual(r["counts"]["batches"], 0)                      # ledger and cache agree ...
+        self.assertEqual(r["counts"]["negative"], 1)                     # ... but below zero is impossible
+        self.assertFalse(r["ok"])
+
+    def test_movement_on_another_items_batch(self):
+        mid = "00000000-0000-7000-8000-000000000002"
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type)"
+                 " VALUES (?,?,?,?,?,?,'adjustment')", (mid, self.ctx.org_id, self.ctx.branch_id, self.aug, self.b1, 1))
+        self.raw("INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty) VALUES (?,?,?,?,1)",
+                 (self.ctx.org_id, self.ctx.branch_id, self.aug, self.b1))
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertEqual((r["counts"]["batches"], r["counts"]["foreign_batch"]), (0, 1))
+
+    def test_sale_that_moved_other_than_its_invoice(self):
+        a = self.sell(4)
+        self.sell(2)
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertTrue(r["ok"], r)
+        mid = "00000000-0000-7000-8000-000000000003"     # one unit more left the shelf than the invoice says
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type,"
+                 " ref_type, ref_id) VALUES (?,?,?,?,?,-1,'sale','sale',?)",
+                 (mid, self.ctx.org_id, self.ctx.branch_id, self.pan, self.b1, a["id"]))
+        self.raw("UPDATE stock_balances SET qty = qty - 1 WHERE item_id=?", (self.pan,))
+        r = integrity.scan(self.db, self.ctx.org_id)
+        self.assertEqual((r["counts"]["batches"], r["counts"]["sales"]), (0, 1))
+        self.assertEqual((r["sales"][0]["sale_id"], r["sales"][0]["moved"], r["sales"][0]["expected"]),
+                         (a["id"], -5, -4))
+
+    def test_returns_and_voids_are_not_mismatches(self):
+        s = Sales(self.db)
+        a = self.sell(6)
+        s.return_items(self.ctx, a["id"], {a["lines"][0]["id"]: 2}, refund_method="card", reason="مرتجع")
+        b = self.sell(2)
+        s.void(self.ctx, b["id"], "خطأ في الفاتورة")
+        self.assertTrue(integrity.scan(self.db, self.ctx.org_id)["ok"])
+
+    def test_other_pharmacy_is_separate(self):
+        org, other = self.second_tenant()
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        res = integrity.check_all(self.db, "startup")
+        self.assertFalse(res[self.ctx.org_id]["ok"])
+        self.assertTrue(res[other.org_id]["ok"])
+        self.assertIsNone(integrity.banner(self.db, other))
+
+    def test_banner_only_for_who_reads_the_audit(self):
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        integrity.check(self.db, self.ctx.org_id, "startup")
+        people.add_user(self.db, self.ctx, username="asst", full_name="A", password=PW, role_code="assistant")
+        self.assertIsNone(integrity.banner(self.db, self.login("asst", PW)))
+        self.assertIsNotNone(integrity.banner(self.db, self.ctx))
+
+    def test_a_failing_check_never_raises(self):
+        with patch.object(integrity, "scan", side_effect=RuntimeError("boom")):
+            self.assertEqual(integrity.check_all(self.db, "startup"), {})
+
+
+class TestWhenItRuns(Base):
+    def test_after_every_backup_run_even_a_refused_one(self):
+        ab = AutoBackup(self.db, self.tmp / "uploads", self.tmp / "backups", self.tmp / "state")
+        st = ab.run()
+        self.assertTrue(st["last_ok"])
+        self.assertEqual(self.audits(integrity.MISMATCH), [])
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        st = ab.run(force=True)
+        self.assertFalse(st["last_ok"])                                  # backup.create refuses a mismatched db
+        self.assertEqual(len(self.audits(integrity.MISMATCH)), 1)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertIn("backup", self.audits(integrity.MISMATCH)[0]["after_json"])
+
+    def test_on_startup_and_the_banner_in_me(self):
+        self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+        s = replace(config.load(), upload_dir=self.tmp / "up", anthropic_api_key=None, data_dir=self.tmp,
+                    backup_dir=self.tmp / "backups")
+        with patch.object(AutoBackup, "start"), patch("app.core.daily.DailyChecks.start"), \
+                patch("app.core.daily.DailyChecks.stop"):
+            app = create_app(self.db, s, auto_backup=True)
+            with TestClient(app) as c:
+                for _ in range(100):                                     # the check runs in the background
+                    if self.audits(integrity.MISMATCH):
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(len(self.audits(integrity.MISMATCH)), 1)
+                self.assertIn("startup", self.audits(integrity.MISMATCH)[0]["after_json"])
+                r = c.post("/api/auth/login", json={"username": "owner", "password": "Owner-Pass-2026"}, headers=H)
+                self.assertEqual(r.status_code, 200, r.text)
+                me = c.get("/api/me", headers=H).json()
+                self.assertEqual(me["stock_alert"]["counts"]["batches"], 1)
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

@@ -188,7 +188,11 @@ class AutoBackup:
                 self._notify_once(st, "fail_notified", "error", "فشلت النسخة الاحتياطية التلقائية",
                                   str(e)[:200], hours=6)
             self._write(self.state_path, st)
-            return st
+        # #202: recompute every stock balance from the ledger after each backup run (also when it failed: a
+        # stock mismatch is one reason a backup is refused). Alerts and audits only; never repairs.
+        from ..inventory import integrity
+        integrity.check_all(self.db, "backup")
+        return st
 
     def _offsite(self, newest: Path, cfg: dict, st: dict) -> None:
         d = cfg.get("offsite_dir")

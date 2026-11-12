@@ -364,6 +364,7 @@ async function route() {
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
   }
+  showStockAlert(ME?.stock_alert);
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
@@ -373,6 +374,15 @@ async function route() {
     if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
   }
   location.hash = "#/home";
+}
+// #202: red banner while the last stock integrity check found balances that do not match the stock ledger
+function showStockAlert(a) {
+  const bar = $("#stockAlert");
+  if (!bar) return;
+  bar.hidden = !a;
+  if (!a) return;
+  const n = Object.values(a.counts || {}).reduce((x, y) => x + y, 0);
+  bar.textContent = `⚠ تنبيه: أرصدة المخزون لا تطابق حركات المخزون (${n} اختلاف، آخر فحص ${String(a.at || "").slice(0, 16).replace("T", " ")}). لم يُصلَّح شيء تلقائيًا — اضغط لفتح «مطابقة الأرصدة».`;
 }
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
