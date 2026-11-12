@@ -116,6 +116,19 @@ class TestStaffAPI(APICase):
         self.assertEqual(self.c.get("/api/staff", params={"month": month}).json()["people"], [])
 
 
+class AbsenceRounding(__import__("unittest").TestCase):
+    def test_absence_deduction_is_whole_piasters_half_up(self):
+        from app.finance.payroll import compute
+        # 6500.13 / 26 = 250.005 a day: half up 25001 piasters (round() of the float gave 25000, half to even)
+        r = compute(650013, 26, 25, 0)
+        self.assertEqual((r["absence_deduction"], r["net"]), (25001, 625012))
+        self.assertEqual(compute(25, 2, 1, 0)["absence_deduction"], 13)
+        self.assertEqual(compute(650013, 26, 26, 0)["absence_deduction"], 0)
+        self.assertEqual(compute(650013, 26, 0, 0)["absence_deduction"], 650013)    # the whole month, never more
+        self.assertEqual(compute(1000, 0, 0, 0)["absence_deduction"], 0)
+        self.assertIsInstance(r["absence_deduction"], int)
+
+
 class TestAdvancesBooked(Base):
     """Advances are cash already paid: when the salary is paid they are booked as salary expense of that
     month, also when they took the whole salary (nothing left to pay) or more."""
