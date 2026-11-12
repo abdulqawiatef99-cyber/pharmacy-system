@@ -83,7 +83,7 @@ const { chromium } = require('playwright');
   out.afterF4 = await p.locator('#posRcpt').isChecked();
   await p.locator('#posQ').focus();
   await p.keyboard.type(code, { delay: 5 }); await p.keyboard.press('Enter');   // total now 20.00: rule says yes
-  await p.waitForFunction(() => /^2\b/.test(document.querySelector('table.cart tbody tr .qty b').innerText));
+  await p.waitForFunction(() => /^2\b/.test(document.querySelector('table.cart tbody tr .qty b')?.innerText ?? ''));
   await p.keyboard.press('F4');                                           // explicit "no" wins over the rule
   out.overrideKept = !(await p.locator('#posRcpt').isChecked());
   await p.keyboard.press('F9');
