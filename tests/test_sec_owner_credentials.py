@@ -66,14 +66,14 @@ class TestOwnerCredentials(APICase):
         a = TestClient(self.app)
         self.http_login("asst", PW, client=a)
         path = f"/api/users/{self.owner}/pin"
-        hdr = approval_headers(a, self.owner, "9753", "users.manage", path)
+        hdr = approval_headers(a, self.owner, "9753", "users.manage", path, "POST")
         self.assertIn("X-Approval", hdr)
         r = a.post(path, json={"pin": "4826"}, headers=hdr)
         self.assertEqual(r.status_code, 403, r.text)
         self.assertTrue(security.verify_password("9753", self._pin_hash(self.owner)))
         # the owner (or his approval) still sets a staff member's PIN as before
         path = f"/api/users/{uid}/pin"
-        r = a.post(path, json={"pin": "5172"}, headers=approval_headers(a, self.owner, "9753", "users.manage", path))
+        r = a.post(path, json={"pin": "5172"}, headers=approval_headers(a, self.owner, "9753", "users.manage", path, "POST"))
         self.assertEqual(r.status_code, 200, r.text)
         self.http_login(client=self.c)
         r = self.c.post(f"/api/users/{uid}/pin", json={"pin": "5283"}, headers=H)

@@ -183,13 +183,13 @@ const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now(
 // token for that one action (permission + API path) for 90 seconds, on this screen only (cleared when
 // leaving it). The PIN itself is never kept (#137).
 let APPROVAL = null;
-const approvalHeaders = (path) => {
-  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.path === path ? { "X-Approval": APPROVAL.token } : {};
+const approvalHeaders = (action) => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.action === action ? { "X-Approval": APPROVAL.token } : {};
   APPROVAL = null; return {};
 };
 window.addEventListener("hashchange", () => { APPROVAL = null; });
 
-async function askApproval(details, message, path) {
+async function askApproval(details, message, method, path) {
   let list = [];
   try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
   if (!list.length) {
@@ -217,8 +217,8 @@ async function askApproval(details, message, path) {
       const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
       const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
         headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
-        body: JSON.stringify({ permission: details?.permission || "", path,
-          previous: APPROVAL && APPROVAL.id === who && APPROVAL.path === path && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
+        body: JSON.stringify({ permission: details?.permission || "", method, path,
+          previous: APPROVAL && APPROVAL.id === who && APPROVAL.action === `${method} ${path}` && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
       const d = await r.json().catch(() => ({}));
       const enough = r.ok && d.ok && d.token && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
       if (!enough) {
@@ -226,7 +226,7 @@ async function askApproval(details, message, path) {
         err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غير صحيح"}` : "✕ الشخص الذي اخترته لا يملك هذه الصلاحية";
         form.pin.value = ""; form.pin.focus(); return;
       }
-      APPROVAL = { id: who, path, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
+      APPROVAL = { id: who, action: `${method} ${path}`, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
       dlg.close(); resolve(true);
     });
     dlg.addEventListener("cancel", () => resolve(false), { once: true });
@@ -235,7 +235,7 @@ async function askApproval(details, message, path) {
 
 async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
   const apiPath = path.split("?")[0];
-  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(apiPath) }, credentials: "same-origin" };
+  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -256,7 +256,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0 } = {}) {
   const data = await r.json().catch(() => ({}));
   // one approval per permission the action needs (at most 3), each added to the same token
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < 3) {
-    if (await askApproval(data.error.details, data.error.message, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1 });
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1 });
   }
   if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;

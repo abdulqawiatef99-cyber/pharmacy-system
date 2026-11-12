@@ -194,7 +194,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
             req.state.session_token = token
         elif req.headers.get("x-approval"):
-            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], req.url.path,
+            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
                                   lambda who: accounts.effective_access(db, ctx.org_id, who))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
@@ -998,12 +998,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
         perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
+        method = str(b.get("method") or "GET").upper()
         ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT
         out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
-        if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check":
-            # #137: lend only this permission, only on the path that asked for it, for 90 s
+        if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check" \
+                and method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            # #137: lend only this permission, only on the action (method + path) that asked for it, for 90 s
             out["token"], out["expires_in"] = approvals.issue(
-                ctx, req.state.session_token, ctx.approver_id, path, perm,
+                ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
                 previous=str(b.get("previous") or "")[:128] or None)
         return J(out)
 

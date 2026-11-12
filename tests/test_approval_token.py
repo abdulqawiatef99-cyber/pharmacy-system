@@ -45,6 +45,13 @@ class ApprovalToken(APICase):
         self.assertEqual(r.status_code, 403, r.text)
         self.assertEqual(r.json()["error"]["code"], "approval_required")
 
+    def test_a_token_is_for_one_method_too(self):
+        hdr = approval_headers(self.a, self.owner, "9753", "settings.manage", SUMMARY)   # GET: read the status
+        self.assertEqual(self.a.get(SUMMARY, headers=hdr).status_code, 200)
+        r = self.a.put(SUMMARY, headers=hdr, json={})                                  # PUT: change settings
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["error"]["code"], "approval_required")
+
     def test_a_token_lends_only_the_permission_approved(self):
         hdr = approval_headers(self.a, self.owner, "9753", "sales.void", USERS)  # approved: void, asked on /users
         r = self.a.get(USERS, headers=hdr)
