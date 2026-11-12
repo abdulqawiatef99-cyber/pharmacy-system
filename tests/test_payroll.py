@@ -50,6 +50,62 @@ class TestPayroll(Base):
         self.assertEqual(sorted(e["amount"] for e in exp), [20000, 50000])          # net + the advance
 
 
+class TestPayOnce(Base):
+    """Two screens paying (or re-approving) the same salary at the same moment: it is paid once, with the
+    figures it was paid with. The check before the write is repeated inside it."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=10000)          # no attendance: net = the bonus
+
+    def meanwhile(self, action):
+        """Run `action` once, right after the first read of the person's name (after the status check,
+        before the write)."""
+        real, fired = self.db.one, []
+
+        def one(sql, params=()):
+            out = real(sql, params)
+            if not fired and sql.startswith("SELECT full_name FROM users"):
+                fired.append(1)
+                action()
+            return out
+        self.db.one = one
+        return fired
+
+    def salary_expenses(self):
+        return [e for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب")]
+
+    def test_two_payments_at_the_same_moment_pay_once(self):
+        fired = self.meanwhile(lambda: pay.pay(self.db, self.ctx, self.uid, self.month, "outside"))
+        with self.assertRaises(Conflict):
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(fired, [1])
+        self.assertEqual(len(self.salary_expenses()), 1)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE action='payroll.pay'")["n"], 1)
+
+    def test_a_reapproval_cannot_change_a_salary_paid_meanwhile(self):
+        paid_net = self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"]
+        real = pay.month_sheet
+
+        def sheet_then_pay(db, ctx, month):
+            out = real(db, ctx, month)
+            pay.month_sheet = real                                            # once
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+            return out
+        pay.month_sheet = sheet_then_pay
+        try:
+            with self.assertRaises(Conflict):
+                pay.approve(self.db, self.ctx, self.uid, self.month, bonus=99999)
+        finally:
+            pay.month_sheet = real
+        row = self.db.one("SELECT net, bonus, status FROM payroll WHERE user_id=?", (self.uid,))
+        self.assertEqual((row["net"], row["bonus"], row["status"]), (paid_net, 10000, "paid"))
+
+
 class TestStaffAPI(APICase):
     def test_attendance_api(self):
         self.http_login()
