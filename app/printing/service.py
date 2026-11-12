@@ -470,9 +470,12 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
     sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
+    count = lb.TEST_LABELS
     try:
         if cfg["label_lang"] == "driver":
-            pg = _driver_labels(cfg, [(sample, lb.TEST_LABELS)])
+            rows = int(cfg.get("label_rows") or 1)
+            count = -(-lb.TEST_LABELS // rows) * rows          # whole pages: no blank half at the end (owner, 12/11)
+            pg = _driver_labels(cfg, [(sample, count)])
             w, h = round(pg.w_mm, 1), round(pg.h_mm, 1)
         else:
             img, _ = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
@@ -483,9 +486,9 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
     with db.transaction():
         audit.record(db, ctx, "print.label_test", "printer", None,
                      after={"target": cfg["label_target"], "size": f"{w:g}x{h:g}", "gap": cfg["label_gap"], "flip": cfg["label_flip"],
-                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": lb.TEST_LABELS,
+                            "shift_mm": cfg["label_shift"], "lang": cfg["label_lang"], "labels": count,
                             "variant": variant})
-    return {"ok": True, "labels": lb.TEST_LABELS, "variant": variant, "size": f"{w:g}x{h:g}"}
+    return {"ok": True, "labels": count, "variant": variant, "size": f"{w:g}x{h:g}"}
 
 
 def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> dict:
