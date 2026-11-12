@@ -22,7 +22,8 @@ class CompletionGuards(PlanCase):
         self.assertEqual(self.qty(self.pan), stock)
         self.assertEqual(self.drawer(), 10000)
         self.assertEqual(self.db.one("SELECT count(*) n FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
-                                     " WHERE l.sale_id=?", (sid,))["n"], 0)
+                                     " JOIN sales s ON s.id=l.sale_id WHERE s.org_id=? AND l.sale_id=?",
+                                     (self.ctx.org_id, sid))["n"], 0)
 
     def complete_with(self, sid, meanwhile):
         """Complete `sid` while `meanwhile()` runs after the preview's checks and before the write."""
@@ -79,7 +80,8 @@ class ReturnGuards(PlanCase):
     def snapshot(self):
         return (self.call("GET", f"/api/sales/{self.sale['id']}")["returned_total"], self.qty(self.pan),
                 self.qty(self.box), self.drawer(),
-                self.db.one("SELECT count(*) n FROM stock_movements WHERE movement_type='sale_return'")["n"])
+                self.db.one("SELECT count(*) n FROM stock_movements WHERE org_id=? AND movement_type='sale_return'",
+                            (self.ctx.org_id,))["n"])
 
     def test_bad_returns_are_refused_and_move_nothing(self):
         other = self.sell(self.box, units=1)
