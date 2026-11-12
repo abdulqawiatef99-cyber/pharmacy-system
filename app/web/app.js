@@ -2635,6 +2635,7 @@ async function openDraft(id) {
 }
 
 async function viewPos() {
+  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "ناقص" (11/01)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
