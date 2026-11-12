@@ -197,3 +197,34 @@ class TestOpeningStock(DBTestCase):
         rows = list(ws.iter_rows(values_only=True))
         self.assertEqual(rows[0][1], "code")
         self.assertEqual(len(rows) - 1, 3)
+
+
+class TestYesNoColumns(DBTestCase):
+    """«محلي/مستورد» and «دواء/غير دواء» as old programs write them (coverage 12/11: never run by a test).
+    Before: "مستوردة", "محلية" and a number written as 1.0 / 0.0 came out unknown."""
+
+    def test_values(self):
+        from app.dataimport.service import _bool
+        for v in ("نعم", "مستورد", "مستوردة", "مستورده", "Imported", "TRUE", True, 1, "1", "1.0", 1.0, "دواء", " yes "):
+            with self.subTest(v=v):
+                self.assertEqual(_bool(v), 1)
+        for v in ("لا", "محلي", "محلى", "محلية", "محليه", "Local", "false", False, 0, "0", "0.0", 0.0, "غير دواء"):
+            with self.subTest(v=v):
+                self.assertEqual(_bool(v), 0)
+        for v in ("x", "2", "ربما", None, ""):
+            with self.subTest(v=v):
+                self.assertIsNone(_bool(v))
+
+    def test_through_an_import_file(self):
+        di = DataImport(self.db)
+        rows = [["كود الصنف", "اسم الصنف", "سعر الجمهور", "محلي/مستورد", "دواء/غير دواء"],
+                [201, "Synthetic Imported 10 tab", 50, "مستوردة", "دواء"],
+                [202, "Synthetic Local 10 tab", 20, "محلية", "غير دواء"],
+                [203, "Synthetic Unknown 10 tab", 20, "؟", 1.0]]
+        r = di.get(self.ctx, di.analyze(self.ctx, sheet(rows), "flags.xlsx"))
+        by = {x["data"]["code"]: x for x in r["rows"]}
+        self.assertEqual((by["201"]["data"]["is_imported"], by["201"]["data"]["is_drug"]), (1, 1))
+        self.assertEqual((by["202"]["data"]["is_imported"], by["202"]["data"]["is_drug"]), (0, 0))
+        self.assertIsNone(by["203"]["data"]["is_imported"])
+        self.assertIn("unknown_is_imported", [i["code"] for i in by["203"]["issues"]])    # shown, never guessed
+        self.assertEqual(by["203"]["data"]["is_drug"], 1)
