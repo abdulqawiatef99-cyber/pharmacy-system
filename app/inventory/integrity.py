@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 
 from ..core import audit, notify
 from ..core.accounts import iso, utcnow
@@ -30,6 +31,9 @@ log = logging.getLogger("pharm.integrity")
 
 MISMATCH, CLEAN = "stock.integrity_mismatch", "stock.integrity_ok"
 KINDS = ("batches", "items", "negative", "foreign_batch", "sales")
+# One check at a time (startup, backup and the owner's report can overlap): an older clean scan must never clear
+# an alert that a newer scan recorded in between (Codex P2 on #213).
+_LOCK = threading.Lock()
 SAMPLE = 50          # rows of each kind kept in the audit row / shown in the report
 
 
@@ -110,6 +114,11 @@ def check(db: Database, org_id: str, reason: str, actor: Context | None = None) 
     """Scan one pharmacy and record the outcome (audit row on mismatch, notification when the mismatch is new,
     audit row when it is clean again). Never touches the stock tables. actor: who asked (the owner's report);
     None = the program itself."""
+    with _LOCK:
+        return _check(db, org_id, reason, actor)
+
+
+def _check(db: Database, org_id: str, reason: str, actor: Context | None) -> dict:
     result = scan(db, org_id)
     prev = last_state(db, org_id)
     fp = _fingerprint(result)

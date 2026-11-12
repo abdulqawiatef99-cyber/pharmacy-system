@@ -100,6 +100,27 @@ class TestReportApi(ReportCase):
         self.http_login()
         self.assertEqual(self.c.get("/api/reports/stock-check", headers=H).status_code, 405)
 
+    def test_backups_stop_only_for_batch_mismatches(self):
+        """Codex P2 on #213: backup.create refuses only a batch difference, so the screen says backups stopped only
+        then. Here a sale moved more than its invoice: the backup still works."""
+        from app.core import backup
+        from app.api import app as api
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        CashDrawer(self.db).open(self.ctx, 0)
+        s = Sales(self.db)
+        sid = s.create(self.ctx)
+        d = s.add_line(self.ctx, sid, self.pan, units=2)
+        f = s.safety_check(self.ctx, sid)
+        s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={i: "ok" for i in range(len(f))})
+        self.raw("UPDATE sale_lines SET qty_base = 3 WHERE sale_id=?", (sid,))
+        self.http_login()
+        r = self.c.post("/api/reports/stock-check", json={}, headers=H).json()
+        self.assertEqual((r["counts"]["sales"], r["counts"]["batches"]), (1, 0))
+        self.assertTrue(backup.create(self.db, self.tmp / "up", self.tmp / "bk").exists())
+        js = (api.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn("${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف", js)
+
     def test_screen_wiring(self):
         from app.api import app as api
         js = (api.WEB_DIR / "app.js").read_text(encoding="utf-8")

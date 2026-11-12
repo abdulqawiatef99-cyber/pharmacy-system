@@ -181,6 +181,30 @@ class TestScan(Base):
         self.assertIsNone(integrity.banner(self.db, self.login("asst", PW)))
         self.assertIsNotNone(integrity.banner(self.db, self.ctx))
 
+    def test_an_older_clean_scan_never_clears_a_newer_alert(self):
+        import threading
+        real, scanned, go = integrity.scan, threading.Event(), threading.Event()
+
+        def slow(db, org_id):
+            r = real(db, org_id)
+            if threading.current_thread().name == "older":
+                scanned.set()
+                go.wait(5)                    # paused after a clean scan, before recording
+            return r
+        with patch.object(integrity, "scan", side_effect=slow):
+            a = threading.Thread(target=integrity.check, args=(self.db, self.ctx.org_id, "startup"), name="older")
+            a.start()
+            self.assertTrue(scanned.wait(5))
+            self.raw("UPDATE stock_balances SET qty = qty + 2 WHERE item_id=?", (self.pan,))
+            b = threading.Thread(target=integrity.check, args=(self.db, self.ctx.org_id, "backup"), name="newer")
+            b.start()
+            time.sleep(0.3)                   # without the lock the newer check records its alert here
+            go.set()
+            a.join(10)
+            b.join(10)
+        self.assertIsNotNone(integrity.banner(self.db, self.ctx))
+        self.assertEqual(self.audits(integrity.CLEAN), [])
+
     def test_a_failing_check_never_raises(self):
         with patch.object(integrity, "scan", side_effect=RuntimeError("boom")):
             self.assertEqual(integrity.check_all(self.db, "startup"), {})
