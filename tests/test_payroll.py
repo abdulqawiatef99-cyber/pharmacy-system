@@ -50,16 +50,6 @@ class TestPayroll(Base):
         self.assertEqual(sorted(e["amount"] for e in exp), [20000, 50000])          # net + the advance
 
 
-class TestStaffAPI(APICase):
-    def test_attendance_api(self):
-        self.http_login()
-        r = self.c.post("/api/attendance", json={"action": "in"}, headers=H)
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["open"]["source"], "pc")
-        month = local_today().isoformat()[:7]
-        self.assertEqual(self.c.get("/api/staff", params={"month": month}).json()["people"], [])
-
-
 class TestPayOnce(Base):
     """Two screens paying (or re-approving) the same salary at the same moment: it is paid once, with the
     figures it was paid with. The check before the write is repeated inside it."""
@@ -114,3 +104,13 @@ class TestPayOnce(Base):
             pay.month_sheet = real
         row = self.db.one("SELECT net, bonus, status FROM payroll WHERE user_id=?", (self.uid,))
         self.assertEqual((row["net"], row["bonus"], row["status"]), (paid_net, 10000, "paid"))
+
+
+class TestStaffAPI(APICase):
+    def test_attendance_api(self):
+        self.http_login()
+        r = self.c.post("/api/attendance", json={"action": "in"}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["open"]["source"], "pc")
+        month = local_today().isoformat()[:7]
+        self.assertEqual(self.c.get("/api/staff", params={"month": month}).json()["people"], [])
