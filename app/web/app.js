@@ -17,6 +17,8 @@ const fmtStock = (q, it) => {
   return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// a typed whole number; "2.5" goes to the server as typed and is refused there, never cut to 2 by parseInt
+const typedWhole = (v) => { const t = String(v ?? "").trim(); if (t === "") return null; const n = Number(t); return Number.isInteger(n) ? n : t; };
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
@@ -1733,8 +1735,8 @@ async function viewCountSession(id) {
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
   const save = async (recount) => {
-    const qty = parseInt($("#cntQty").value, 10);
-    if (Number.isNaN(qty) || qty < 0) return toast("اكتب كمية صحيحة", true);
+    const qty = typedWhole($("#cntQty").value);
+    if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
     try {
       await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
         location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
@@ -2442,7 +2444,7 @@ async function viewSale(id) {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
-    app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
+    app.querySelectorAll("[data-ret]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
     btn.disabled = true;
     try {

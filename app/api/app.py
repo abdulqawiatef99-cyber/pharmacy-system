@@ -979,7 +979,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             b = await body(req)
             a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
             if a == "pay_settings":
-                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), int(b.get("work_days") or 26))
+                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), _int(b.get("work_days") or 26, "work_days"))
             elif a == "advance":
                 pay.add_advance(db, ctx, uid, _int(b.get("amount"), "amount"), month, b.get("note"), str(b.get("paid_from", "outside")))
             elif a == "fix":
@@ -1110,7 +1110,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 if "return_window_days" not in b:
                     return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
             try:
-                days = int(b.get("return_window_days"))
+                days = whole_number(b.get("return_window_days"))
             except (TypeError, ValueError):
                 raise ValidationFailed("اكتب عدد الأيام")
             if not 0 <= days <= 365:
@@ -1481,7 +1481,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         try:
-            qty = int(b.get("qty"))
+            qty = whole_number(b.get("qty"))          # a counted 2.5 is refused, never posted as 2
         except (TypeError, ValueError):
             raise ValidationFailed("الكمية غير صحيحة")
         return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),

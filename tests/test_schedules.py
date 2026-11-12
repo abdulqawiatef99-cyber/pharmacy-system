@@ -58,3 +58,18 @@ class TestSchedules(DBTestCase):
                                      "remind_days": 2, "start_month": "2026-10"})
         self.assertGreaterEqual(daily.run(self.db, date(2026, 10, 4)), 1)
         self.assertEqual(daily.run(self.db, date(2026, 10, 4)), 0)
+
+
+class TestScheduleWholeNumbers(DBTestCase):
+    def test_days_and_months_must_be_whole(self):
+        fin.ensure_defaults(self.db)
+        cat = fin.categories(self.db, self.ctx)[0]["id"]
+        base = {"name": "إيجار الصيدلية", "category_id": cat, "amount": 500000, "day_of_month": 15, "remind_days": 3}
+        for k, bad in (("day_of_month", 15.5), ("remind_days", 2.5), ("every_months", 1.5), ("day_of_month", True),
+                       ("remind_days", "3.5")):
+            with self.subTest(k=k, bad=bad):
+                with self.assertRaises(ValidationFailed):
+                    sc.save(self.db, self.ctx, {**base, k: bad})
+        self.assertEqual(self.db.one("SELECT count(*) n FROM expense_schedules")["n"], 0)
+        s = sc.save(self.db, self.ctx, {**base, "day_of_month": "15"})
+        self.assertEqual(s["day_of_month"], 15)
