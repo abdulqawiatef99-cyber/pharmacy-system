@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -91,7 +92,8 @@ def _month(month: str) -> tuple[int, int]:
 
 def compute(base: int, work_days: int, present: int, advances: int, bonus: int = 0, deduction: int = 0) -> dict:
     missing = max(0, work_days - present)
-    absence = round(base * missing / work_days) if work_days else 0
+    # whole piasters, half up like every other money rounding (round() of a float went half to even)
+    absence = int((Decimal(base) * missing / work_days).quantize(Decimal("1"), ROUND_HALF_UP)) if work_days else 0
     return {"base": base, "absence_deduction": absence, "advances": advances, "bonus": bonus, "deduction": deduction,
             "net": base - absence - advances + bonus - deduction, "missing_days": missing}
 
