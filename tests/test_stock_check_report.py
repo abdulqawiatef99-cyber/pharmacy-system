@@ -149,13 +149,13 @@ class TestReportApi(ReportCase):
         cnt.record(self.ctx, cs, item_id=self.pan, qty=15, batch_id=self.b1)
         cnt.approve(self.ctx, cs)
         self.assertEqual(self.c.post("/api/reports/stock-check", json={}, headers=H).json()["counts"]["sales"], 1)
-        bad = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan, "note": "x"}, headers=H)
+        bad = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan, "note": "x", "moved": -5, "expected": -4}, headers=H)
         self.assertEqual(bad.status_code, 422)
         nf = self.c.post("/api/reports/stock-check/ack", json={"sale_id": "nope", "item_id": self.pan,
-                                                               "note": "جرد الصنف اليوم"}, headers=H)
+                                                               "note": "جرد الصنف اليوم", "moved": -5, "expected": -4}, headers=H)
         self.assertEqual(nf.status_code, 404)
         r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
-                                                              "note": "جرد الصنف اليوم وصحّحنا الرف"}, headers=H)
+                                                              "note": "جرد الصنف اليوم وصحّحنا الرف", "moved": -5, "expected": -4}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         d = r.json()
         self.assertTrue(d["ok"], d["counts"])
@@ -170,17 +170,33 @@ class TestReportApi(ReportCase):
         self.raw("UPDATE stock_balances SET qty = qty - 1 WHERE item_id=?", (self.pan,))
         self.assertEqual(integrity.scan(self.db, self.ctx.org_id)["counts"]["sales"], 1)
 
+    def test_a_review_covers_only_the_numbers_on_the_screen(self):
+        """Codex P2 on #213: the sale moved again after the report loaded -> the review is refused, nothing hidden."""
+        sid = self.sale_mismatch()
+        self.http_login()
+        shown = self.c.post("/api/reports/stock-check", json={}, headers=H).json()["sales"][0]
+        self.raw("INSERT INTO stock_movements (id, org_id, branch_id, item_id, batch_id, qty_delta, movement_type,"
+                 " ref_type, ref_id) VALUES ('00000000-0000-7000-8000-0000000000dd',?,?,?,?,-1,'sale','sale',?)",
+                 (self.ctx.org_id, self.ctx.branch_id, self.pan, self.b1, sid))
+        r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan, "note": "جرد الصنف اليوم",
+                                                              "moved": shown["moved"], "expected": shown["expected"]}, headers=H)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE action=?", (integrity.ACK,))["n"], 0)
+        r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
+                                                              "note": "جرد الصنف اليوم"}, headers=H)
+        self.assertEqual(r.status_code, 409)                           # numbers are required
+
     def test_only_the_owner_reviews_and_only_sales_rows(self):
         sid = self.sale_mismatch()
         people.add_user(self.db, self.ctx, username="mgr1", full_name="M", password=PW, role_code="manager")
         self.http_login("mgr1", PW)
         r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
-                                                              "note": "جرد الصنف اليوم"}, headers=H)
+                                                              "note": "جرد الصنف اليوم", "moved": -5, "expected": -4}, headers=H)
         self.assertEqual(r.status_code, 403)
         self.raw("UPDATE stock_balances SET qty = qty + 5 WHERE item_id=?", (self.pan,))   # a balance difference
         self.http_login()
         r = self.c.post("/api/reports/stock-check/ack", json={"sale_id": sid, "item_id": self.pan,
-                                                              "note": "جرد الصنف اليوم"}, headers=H).json()
+                                                              "note": "جرد الصنف اليوم", "moved": -5, "expected": -4}, headers=H).json()
         self.assertEqual((r["counts"]["sales"], r["counts"]["batches"]), (0, 1))          # never acknowledged away
         self.assertFalse(r["ok"])
 

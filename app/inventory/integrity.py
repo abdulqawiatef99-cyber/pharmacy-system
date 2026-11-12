@@ -226,7 +226,8 @@ def report(db: Database, ctx: Context) -> dict:
     return r
 
 
-def acknowledge(db: Database, ctx: Context, sale_id: str, item_id: str, note: str) -> dict:
+def acknowledge(db: Database, ctx: Context, sale_id: str, item_id: str, note: str, *,
+                moved: int | None = None, expected: int | None = None) -> dict:
     """The owner marks one sale-vs-invoice difference as reviewed (the shelf was corrected by a stock count, which
     posts its own movements). Only that kind: a balance that differs from its ledger is never acknowledged away."""
     from ..core.errors import NotFound, ValidationFailed
@@ -238,6 +239,11 @@ def acknowledge(db: Database, ctx: Context, sale_id: str, item_id: str, note: st
         row = next((r for r in _sales(db, ctx.org_id) if r["sale_id"] == sale_id and r["item_id"] == item_id), None)
         if not row:
             raise NotFound("لا يوجد اختلاف لهذه الفاتورة وهذا الصنف")
+        # only the numbers the owner saw: if the sale moved again since the report loaded, he reviews it again
+        if (moved, expected) != (row["moved"], row["expected"]):
+            from ..core.errors import Conflict
+            raise Conflict("أرقام هذا السطر تغيّرت منذ فتح التقرير — حدّث التقرير وراجعه من جديد",
+                           code="stock_check_changed")
         with db.transaction():
             audit.record(db, ctx, ACK, "sale", sale_id, after={
                 "sale_id": sale_id, "item_id": item_id, "moved": row["moved"], "expected": row["expected"],

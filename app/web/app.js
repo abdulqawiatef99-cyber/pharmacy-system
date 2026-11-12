@@ -4044,7 +4044,7 @@ async function viewStockCheck() {
         if (!r.counts[k]) continue;
         const ack = k === "sales" && ME.permissions.includes("settings.manage");
         html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>${k === "sales" ? "خرج من المخزون" : "حسب الحركات"}</th><th>${k === "sales" ? "حسب الفاتورة" : "المعروض"}</th>${ack ? "<th class=\"noprint\">بعد الجرد</th>" : ""}</tr></thead><tbody>
-          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
+          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}" data-moved="${x.moved}" data-expected="${x.expected}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
           ${ack ? `<p class="muted noprint">فاتورة بيع حركتها مختلفة عن الفاتورة بتفضل مختلفة في السجل للأبد. صحّح الرف بجرد الصنف الأول، وبعدين «تمت المراجعة» بملاحظة: السطر ده بس يختفي، ويرجع لو أرقامه اتغيّرت.</p>` : ""}
           ${r.counts[k] > r[k].length ? `<p class="muted">معروض أول ${r[k].length} فقط.</p>` : ""}`;
       }
@@ -4063,7 +4063,7 @@ async function viewStockCheck() {
       const [sale_id, item_id] = btn.dataset.ack.split("|");
       const note = $("#scBox").querySelector(`[data-ackn="${CSS.escape(btn.dataset.ack)}"]`).value;
       btn.disabled = true;
-      try { await api("/api/reports/stock-check/ack", { method: "POST", body: { sale_id, item_id, note } }); await load(); }
+      try { await api("/api/reports/stock-check/ack", { method: "POST", body: { sale_id, item_id, note, moved: Number(btn.dataset.moved), expected: Number(btn.dataset.expected) } }); await load(); }
       catch (e) { btn.disabled = false; toast(e.message, true); }
     }));
     refreshStockAlert();
