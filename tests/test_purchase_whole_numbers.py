@@ -62,3 +62,34 @@ class PurchaseWholeNumbers(PlanCase):
         d = self.doc()
         self.call("POST", f"/api/purchases/{self.inv}/approve", json={"version": d["invoice"]["version"]})
         self.assertEqual(self.qty(self.pan), stock + 2 * 2)                 # 2 boxes of 2 strips
+
+
+JS_PATH = __import__("pathlib").Path(__file__).resolve().parent.parent / "app" / "web" / "app.js"
+
+
+class PurchaseScreenSendsWhatWasTyped(__import__("unittest").TestCase):
+    """The screen cut 2.5 to 2 with parseInt before the server could refuse it: it now sends what was typed."""
+
+    def setUp(self):
+        self.js = JS_PATH.read_text(encoding="utf-8")
+
+    def test_purchase_fields_and_quick_add_do_not_cut(self):
+        self.assertIn("qty: (v) => typedWhole(v),", self.js)
+        self.assertIn("bonus_qty: (v) => typedWhole(v) ?? 0,", self.js)
+        self.assertIn('const qty = typedWhole($("#qaQty").value);', self.js)
+        self.assertNotIn('parseInt($("#qaQty").value', self.js)
+        self.assertNotIn('parseInt($("#qaBonus").value', self.js)
+
+    def test_typed_whole(self):
+        import json
+        import re
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node not available")
+        fn = re.search(r"\nconst typedWhole = .*?\n", self.js).group(0)
+        code = fn + 'console.log(JSON.stringify(["", " ", "3", " 3 ", "2.5", "abc", "-1", "0", null, undefined, 4].map(typedWhole)));'
+        r = subprocess.run([node, "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [None, None, 3, 3, "2.5", "abc", -1, 0, None, None, 4])
