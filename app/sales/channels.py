@@ -29,23 +29,26 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
     ctx.require("settings.manage")
     name = str(data.get("name", "")).strip()
     kind = data.get("kind")
+    if (cid and "name" in data or not cid) and len(name) < 2:
+        raise ValidationFailed("اكتب الاسم واختر النوع")
     with db.transaction():
-        if cid:
-            row = db.one("SELECT * FROM payment_channels WHERE id=? AND org_id=?", (cid, ctx.org_id))
-            if not row:
-                raise NotFound("غير موجود")
-            db.execute("UPDATE payment_channels SET name=?, is_active=? WHERE id=?",
-                       (name or row["name"], int(bool(data.get("is_active", row["is_active"]))), cid))
-        else:
-            if kind not in ("card", "transfer") or len(name) < 2:
-                raise ValidationFailed("اكتب الاسم واختر النوع")
-            try:
+        try:
+            if cid:
+                row = db.one("SELECT * FROM payment_channels WHERE id=? AND org_id=?", (cid, ctx.org_id))
+                if not row:
+                    raise NotFound("غير موجود")
+                db.execute("UPDATE payment_channels SET name=?, is_active=? WHERE id=?",
+                           (name or row["name"], int(bool(data.get("is_active", row["is_active"]))), cid))
+            else:
+                if kind not in ("card", "transfer"):
+                    raise ValidationFailed("اكتب الاسم واختر النوع")
+                cid = new_id()
                 db.execute("INSERT INTO payment_channels (id, org_id, kind, name, sort) VALUES (?,?,?,?,"
                            " (SELECT coalesce(max(sort),0)+1 FROM payment_channels WHERE org_id=?))",
-                           (new_id(), ctx.org_id, kind, name, ctx.org_id))
-            except Exception as e:
-                if "UNIQUE" in str(e):
-                    raise Conflict("موجود بالفعل") from e
-                raise
+                           (cid, ctx.org_id, kind, name, ctx.org_id))
+        except Exception as e:
+            if "UNIQUE" in str(e):                       # a new one, or a rename onto an existing name
+                raise Conflict("موجود بالفعل") from e
+            raise
         audit.record(db, ctx, "payment_channel.save", "payment_channel", cid, after=data)
     return listing(db, ctx)

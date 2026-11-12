@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from ..core import audit, notify
-from ..core.errors import NotFound, ValidationFailed
+from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..sales import cash
@@ -52,7 +52,12 @@ def update(db: Database, ctx: Context, sid: str, data: dict) -> dict:
         changes["is_active"] = int(bool(data["is_active"]))
     if changes:
         with db.transaction():
-            db.execute(f"UPDATE suppliers SET {', '.join(f'{k}=?' for k in changes)} WHERE id=?", (*changes.values(), sid))
+            try:
+                db.execute(f"UPDATE suppliers SET {', '.join(f'{k}=?' for k in changes)} WHERE id=?", (*changes.values(), sid))
+            except Exception as e:
+                if "UNIQUE" in str(e):                   # renamed onto another supplier's name
+                    raise Conflict("يوجد مورد بالاسم نفسه") from e
+                raise
             audit.record(db, ctx, "supplier.update", "supplier", sid, before={k: row[k] for k in changes}, after=changes)
     return account(db, ctx, sid)
 

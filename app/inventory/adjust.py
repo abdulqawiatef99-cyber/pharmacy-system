@@ -7,7 +7,7 @@ Each movement keeps the item's average cost at that moment, so the loss report c
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -74,7 +74,7 @@ def take(db: Database, ctx: Context, item_id: str, qty: int, *, batch_id: str | 
     for b, n in plan:
         inv.post_movement(db, ctx, item_id=item_id, qty_delta=-n, batch_id=b, movement_type=mtype, unit_cost=cost,
                           ref_type=ref_type, ref_id=ref_id, note=note or label(reason), reason=reason, branch_id=branch_id)
-    return int((cost * qty * 100).to_integral_value()) if cost is not None else 0
+    return int((cost * qty * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else 0
 
 
 def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = None, set_to: int | None = None,
@@ -102,7 +102,7 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
             cost = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
             inv.post_movement(db, ctx, item_id=item_id, qty_delta=qty_delta, batch_id=batch_id, movement_type="adjustment",
                               unit_cost=cost, ref_type="manual_adjust", note=note or label(reason), reason=reason)
-            value = int((cost * qty_delta * 100).to_integral_value()) if cost is not None else 0
+            value = int((cost * qty_delta * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else 0
         else:
             if -qty_delta > current:
                 raise Conflict("الكمية أكبر من الرصيد المسجل", code="insufficient_stock")
@@ -135,7 +135,7 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
     out, by = [], {}
     for r in rows:
         d = dict(r)
-        d["value"] = int((Decimal(r["unit_cost"]) * r["qty_delta"] * 100).to_integral_value()) if r["unit_cost"] else None
+        d["value"] = int((Decimal(r["unit_cost"]) * r["qty_delta"] * 100).to_integral_value(ROUND_HALF_UP)) if r["unit_cost"] else None
         key = "supplier_return" if r["movement_type"] == "supplier_return" else (r["reason"] or "count")
         d["reason_label"] = "مرتجع للمورد" if key == "supplier_return" else ("تسوية جرد" if key == "count" else label(key))
         g = by.setdefault(key, {"reason": key, "label": d["reason_label"], "qty_out": 0, "qty_in": 0, "value": 0, "unknown_cost": 0})

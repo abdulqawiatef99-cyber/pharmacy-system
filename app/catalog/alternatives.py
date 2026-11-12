@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import NotFound, ValidationFailed
@@ -58,7 +58,7 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
         margin = None
         if r["id"] in cost and price:
             pack_cost = cost[r["id"]] * r["pack_size"] * 100
-            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value())
+            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value(ROUND_HALF_UP))
         is_soon = bool(e and q > 0 and e <= soon)
         r["next_expiry"], r["expiry_soon"] = e, is_soon
         if show_stock:

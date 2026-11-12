@@ -107,3 +107,16 @@ class TestExport(Base):
         for bad in ({}, {"sheets": []}, {"sheets": [{"columns": [], "rows": []}]}):
             with self.assertRaises(ValidationFailed):
                 xlsx(bad)
+
+
+class TestSupplierRename(Base):
+    def test_renaming_onto_another_suppliers_name_is_a_conflict_not_a_500(self):
+        from app.core.errors import Conflict
+        a = cat.create_supplier(self.db, self.ctx, name="مخزن النهضة")
+        b = cat.create_supplier(self.db, self.ctx, name="مخزن الشروق")
+        for name in ("مخزن النهضة", "  مخزن النهضة  "):
+            with self.assertRaises(Conflict, msg=name):
+                sup.update(self.db, self.ctx, b, {"name": name, "phone": "0100"})
+        row = self.db.one("SELECT name, phone FROM suppliers WHERE id=?", (b,))
+        self.assertEqual((row["name"], row["phone"]), ("مخزن الشروق", None))      # nothing half-saved
+        self.assertEqual(sup.update(self.db, self.ctx, a, {"name": "مخزن النهضة الجديد"})["name"], "مخزن النهضة الجديد")

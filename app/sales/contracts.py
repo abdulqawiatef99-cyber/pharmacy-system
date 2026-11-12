@@ -36,7 +36,7 @@ def save(db: Database, ctx: Context, data: dict, cid: str | None = None) -> list
     if len(v["name"]) < 2:
         raise ValidationFailed("اكتب اسم الجهة (شركة، نقابة، نادٍ…)")
     for k in ("discount_local_bp", "discount_imported_bp"):
-        if not isinstance(v[k], int) or not 0 <= v[k] <= MAX_BP:
+        if isinstance(v[k], bool) or not isinstance(v[k], int) or not 0 <= v[k] <= MAX_BP:   # true is not 1 bp
             raise ValidationFailed("الخصم من 0 إلى 50%")
     v["note"] = (str(v.get("note") or "").strip()[:200]) or None
     v["is_active"] = int(bool(v["is_active"]))
@@ -63,6 +63,8 @@ def link_customer(db: Database, ctx: Context, customer_id: str, contract_id: str
     c = db.one("SELECT contract_id FROM customers WHERE id=? AND org_id=?", (customer_id, ctx.org_id))
     if not c:
         raise NotFound("العميل غير موجود")
+    if contract_id is not None and not isinstance(contract_id, str):
+        raise ValidationFailed("اختر التعاقد")
     if contract_id and not db.one("SELECT 1 FROM contracts WHERE id=? AND org_id=?", (contract_id, ctx.org_id)):
         raise NotFound("التعاقد غير موجود")
     with db.transaction():
