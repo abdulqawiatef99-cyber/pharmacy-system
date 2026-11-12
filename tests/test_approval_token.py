@@ -248,7 +248,7 @@ const { chromium } = require('playwright');
   const resp = p.waitForResponse((r) => r.request().method() === 'PATCH' && r.request().headers()['x-approval']);
   await p.locator('#approveDlg button[value=ok]').click();
   const status = (await resp).status();
-  await p.waitForFunction(() => document.querySelector('table.cart [data-disc]').value === '10');
+  await p.waitForFunction(() => document.querySelector('table.cart [data-disc]')?.value === '10');
   console.log(JSON.stringify({ status, seen }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });

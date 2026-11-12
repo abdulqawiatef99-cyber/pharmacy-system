@@ -35,7 +35,9 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#topbar:not([hidden])');
   await p.goto(base + '/#/pos');
   await p.waitForSelector('#posQuick .qbtn');
-  await p.waitForFunction(() => !document.querySelector('#posQuick .qbtn').disabled, null, { timeout: 10000 });
+  // the buttons are drawn again when the fresh list arrives, so for a moment there may be none
+  await p.waitForFunction(() => { const q = document.querySelector('#posQuick .qbtn'); return !!q && !q.disabled; },
+      null, { timeout: 10000 });
   const after = await p.locator('#posQuick .qbtn').first().isDisabled();
   console.log(JSON.stringify({ before, after }));
   await b.close();
