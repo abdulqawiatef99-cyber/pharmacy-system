@@ -165,6 +165,10 @@ def approve(db: Database, ctx: Context, uid: str, month: str, bonus: int = 0, de
         raise ValidationFailed("المبالغ غير صحيحة")
     c = compute(p["monthly_salary"], p["work_days"], p["days_present"], p["advances"], bonus, deduction)
     with db.transaction():
+        # a salary paid meanwhile from another screen keeps the figures it was paid with
+        if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
+                  (ctx.org_id, uid, month)):
+            raise Conflict("هذا الراتب صُرف بالفعل")
         db.execute("INSERT INTO payroll (id, org_id, user_id, month, base, work_days, days_present, absence_deduction, advances,"
                    " bonus, deduction, net, note, approved_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                    " ON CONFLICT(org_id, user_id, month) DO UPDATE SET base=excluded.base, work_days=excluded.work_days,"
@@ -190,6 +194,10 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
         cat = db.one("SELECT id FROM expense_categories WHERE org_id=? ORDER BY sort LIMIT 1", (ctx.org_id,))
     name = db.one("SELECT full_name FROM users WHERE id=?", (uid,))["full_name"]
     with db.transaction():          # the expense and the "paid" mark together, or neither
+        # again under the write lock: two clicks from two screens must not pay the salary twice
+        pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
+        if pr["status"] == "paid":
+            raise Conflict("هذا الراتب صُرف بالفعل")
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 
