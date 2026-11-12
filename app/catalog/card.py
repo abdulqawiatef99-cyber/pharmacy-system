@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -169,9 +170,11 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
         c = db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
                    (ctx.org_id, branch, item_id))
         if c and c["avg_cost"] is not None and it["public_price"]:
-            pack_cost = float(c["avg_cost"]) * it["pack_size"] * 100
-            out["avg_cost_pack"] = round(pack_cost)
-            out["margin_pct"] = round((it["public_price"] - pack_cost) / it["public_price"] * 100, 1)
+            # exact: avg_cost is decimal pounds per unit; float() and round() (half to even) moved a piaster
+            pack_cost = Decimal(c["avg_cost"]) * it["pack_size"] * 100
+            out["avg_cost_pack"] = int(pack_cost.quantize(Decimal("1"), ROUND_HALF_UP))
+            out["margin_pct"] = float(((it["public_price"] - pack_cost) / it["public_price"] * 100)
+                                      .quantize(Decimal("0.1"), ROUND_HALF_UP)) + 0.0  # never "-0.0%"
     if it["shortage_by"]:
         u = db.one("SELECT full_name FROM users WHERE id=?", (it["shortage_by"],))
         out["shortage_by_name"] = u["full_name"] if u else None
