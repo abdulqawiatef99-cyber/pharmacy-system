@@ -69,7 +69,9 @@ Median of 2, milliseconds unless marked.
 Backup and restore, the same in all three (they do not depend on these queries): backup create 137–147 s,
 verify 112–115 s, restore 231–233 s, backup file 225 MB. **103 s of the verify is the stock check**
 (`verify_balances`, a join of every pair): PR #166 makes it 0.5 s on the same file (measured 101.1 s → 0.5 s),
-which removes most of that time from every hourly backup and every restore. Start-up 0.2–0.7 s, server
+which removes most of that time from every hourly backup and every restore. Measured with #166 on the same
+file: backup create 142 → 50 s (38 s of it is the xz compression), verify 115 → 9.9 s, restore 231 → 21 s.
+During that shorter backup, adding a line had p95 105 ms (max 341 ms): the compression keeps one core busy. Start-up 0.2–0.7 s, server
 memory peak 314–332 MB. While the automatic backup ran, adding a line stayed at p95 6–15 ms (max 136–298 ms).
 
 ## Open findings (not fixed yet)
