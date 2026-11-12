@@ -68,6 +68,8 @@ class SupplierReturnPaths(Base):
             (ValidationFailed, self.sup, [{**ok, "qty_base": -2}]),
             (ValidationFailed, self.sup, [{**ok, "qty_base": 1.5}]),
             (ValidationFailed, self.sup, [{**ok, "qty_base": "3"}]),
+            (ValidationFailed, self.sup, [{**ok, "qty_base": True}]),                       # not 1 unit
+            (ValidationFailed, self.sup, [{**ok, "unit_value": True}]),
             (ValidationFailed, self.sup, [{**ok, "reason": "because"}]),
             (ValidationFailed, self.sup, [{**ok, "unit_value": -1}]),
             (ValidationFailed, self.sup, [{**ok, "unit_value": 12.5}]),
