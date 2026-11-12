@@ -151,6 +151,8 @@ def to_xlsx(rep: dict) -> bytes:
         for i, col in enumerate(w.columns, 1):
             w.column_dimensions[get_column_letter(i)].width = min(45, max(10, max(len(str(c.value or "")) for c in col) + 2))
         w.freeze_panes = "A2"
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     b = io.BytesIO()
     wb.save(b)
     return b.getvalue()

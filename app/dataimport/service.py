@@ -168,6 +168,8 @@ def template_xlsx(kind: str) -> bytes:
         ins.append([LABELS_AR[f], "نعم" if f in req else "لا", notes.get(f, "")])
     ins.append([])
     ins.append(["يمكنك رفع ملف التصدير من البرنامج القديم كما هو؛ وإذا اختلفت أسماء الأعمدة ستظهر لك صفحة لربطها مرة واحدة."])
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -887,6 +889,8 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
                    bcs, q, it["status"]])
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
