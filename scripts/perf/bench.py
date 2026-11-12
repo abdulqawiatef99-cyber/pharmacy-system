@@ -88,8 +88,13 @@ def facts(db_path: Path) -> dict:
     top = c.execute("SELECT l.item_id, count(*) n FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
                     " WHERE s.completed_at >= ? GROUP BY 1 ORDER BY 2 DESC LIMIT 3",
                     ((day - timedelta(days=30)).isoformat(),)).fetchall()
-    stocked = c.execute("SELECT i.id, i.name_en, b.barcode FROM items i JOIN item_barcodes b ON b.item_id=i.id"
-                        " JOIN stock_balances sb ON sb.item_id=i.id AND sb.qty>20 GROUP BY i.id ORDER BY i.id LIMIT 3").fetchall()
+    # items the cashier can really sell on the snapshot's day: unexpired stock only, as Sales._sellable counts it
+    stocked = c.execute("SELECT i.id, i.name_en, min(bc.barcode) barcode FROM items i"
+                        " JOIN item_barcodes bc ON bc.item_id=i.id"
+                        " JOIN stock_balances sb ON sb.item_id=i.id AND sb.qty>0"
+                        " LEFT JOIN batches bt ON bt.id=nullif(sb.batch_key,'')"
+                        " WHERE bt.expiry_date IS NULL OR bt.expiry_date > ?"
+                        " GROUP BY i.id HAVING sum(sb.qty) > 20 ORDER BY i.id LIMIT 3", (day.isoformat(),)).fetchall()
     sup = c.execute("SELECT supplier_id, count(*) n FROM supplier_ledger GROUP BY 1 ORDER BY 2 DESC LIMIT 1").fetchone()
     cust = c.execute("SELECT customer_id, count(*) n FROM customer_ledger GROUP BY 1 ORDER BY 2 DESC LIMIT 1").fetchone()
     shift = c.execute("SELECT id FROM cash_shifts WHERE status='closed' ORDER BY opened_at DESC LIMIT 1").fetchone()
@@ -215,10 +220,14 @@ def cashier_flow(c: Client, f: dict, n: int = 5) -> dict:
             continue
         sid, draft = s["id"], None
         for it in items:
-            code, draft, t, _ = c.req("POST", f"/api/sales/{sid}/lines", {"item_id": it, "units": 1})
+            code, body, t, _ = c.req("POST", f"/api/sales/{sid}/lines", {"item_id": it, "units": 1})
             res["add line"].append(t)
-            if code != 200:
-                errors.append(("line", code, draft))
+            if code == 200:
+                draft = body                                # the sale as of its last line that went in
+            else:
+                errors.append(("line", code, body))
+        if draft is None:                                   # nothing sellable: skip this sale, keep the others
+            continue
         code, chk, t, _ = c.req("POST", f"/api/sales/{sid}/check", {})
         res["safety check"].append(t)
         findings = (chk or {}).get("findings", [])
