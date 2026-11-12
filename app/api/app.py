@@ -88,6 +88,7 @@ def _index_html() -> str:
     return page.replace("</head>", f'  <meta name="pharm-build" content="{_web_build()}">\n</head>', 1)
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
+MAX_UPLOAD_FILES = 3          # the most files one upload route takes (dead-stock report)
 
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
@@ -219,8 +220,42 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 break
         return ctx
 
+    def _length_guard(req: Request, limit: int, *, required: bool = False) -> None:
+        """Refuse an oversized request from its Content-Length, before reading it (#140)."""
+        cl = req.headers.get("content-length")
+        if cl is None:
+            if required:
+                raise ValidationFailed("حجم الطلب غير معروف", code="length_required")
+            return
+        if not cl.isdigit():
+            raise ValidationFailed("صيغة الطلب غير صحيحة")
+        if int(cl) > limit:
+            raise ValidationFailed("حجم الملف أكبر من المسموح" if limit > MAX_JSON else "الطلب كبير جدًا",
+                                   code="too_large")
+
+    def _body_limit(req: Request) -> int:
+        if "multipart/form-data" in req.headers.get("content-type", ""):
+            return MAX_UPLOAD_FILES * s.max_upload_bytes + 64 * 1024
+        return MAX_JSON
+
+    async def _read_body(req: Request) -> bytes:
+        """req.body() that stops at the limit instead of reading everything first (#140).
+        The bytes are cached on the request, so req.body() and req.form() reuse them."""
+        if hasattr(req, "_body"):
+            return req._body
+        limit = _body_limit(req)
+        _length_guard(req, limit)
+        chunks, n = [], 0
+        async for chunk in req.stream():
+            n += len(chunk)
+            if n > limit:
+                raise ValidationFailed("الطلب كبير جدًا", code="too_large")
+            chunks.append(chunk)
+        req._body = b"".join(chunks)
+        return req._body
+
     async def body(req: Request) -> dict:
-        raw = await req.body()
+        raw = await _read_body(req)
         if len(raw) > MAX_JSON:
             raise ValidationFailed("الطلب كبير جدًا")
         if not raw:
@@ -244,7 +279,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
             return await fn(req)
         ctx = ctx_of(req)
-        raw = await req.body()
+        raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         # Reserve the key (status 0) before running, in one write transaction: a retry that
@@ -465,6 +500,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def logout(req):
+        if req.cookies.get(COOKIE) and req.headers.get("x-requested-with") != "pharm":
+            raise Unauthorized("طلب غير موثّق", code="csrf")
         token = req.cookies.get(COOKIE) or req.headers.get("authorization", "")[7:]
         if token:
             accounts.logout(db, token)
@@ -577,7 +614,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx.require("items.write")
         b = await body(req)
         ids = b.get("item_ids")
-        if not isinstance(ids, list) or not ids or len(ids) > 500:
+        if not isinstance(ids, list) or not ids or len(ids) > 500 or not all(isinstance(i, str) for i in ids):
             raise ValidationFailed("اختر الأصناف (حتى 500 مرة واحدة)")
         ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk", "quick_pin") if k in b}
         if not ch:
@@ -1203,8 +1240,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctype = req.headers.get("content-type", "")
         if "multipart/form-data" not in ctype:
             raise ValidationFailed("ارفع الملف كـ multipart/form-data")
-        if int(req.headers.get("content-length") or 0) > s.max_upload_bytes + 64 * 1024:
-            raise ValidationFailed("حجم الملف أكبر من المسموح")
+        _length_guard(req, s.max_upload_bytes + 64 * 1024, required=True)
         form = await req.form(max_files=1, max_fields=5)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):
@@ -1305,6 +1341,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def _upload(req) -> tuple[bytes, str, dict]:
         if "multipart/form-data" not in req.headers.get("content-type", ""):
             raise ValidationFailed("ارفع الملف كـ multipart/form-data")
+        _length_guard(req, s.max_upload_bytes + 64 * 1024, required=True)
         form = await req.form(max_files=1, max_fields=8)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):
@@ -1321,10 +1358,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def import_analyze(req):
         ctx = ctx_of(req)
         data, name, fields = await _upload(req)
-        mapping = json.loads(fields["mapping"]) if fields.get("mapping") else None
-        options = {"qty_unit": fields.get("qty_unit") or "pack"}
-        if fields.get("header_row"):
-            options["header_row"] = int(fields["header_row"])
+        try:
+            mapping = json.loads(fields["mapping"]) if fields.get("mapping") else None
+            options = {"qty_unit": fields.get("qty_unit") or "pack"}
+            if fields.get("header_row"):
+                options["header_row"] = int(fields["header_row"])
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if mapping is not None and not (isinstance(mapping, dict) and all(
+                k.isdigit() and isinstance(v, str) for k, v in mapping.items())):
+            raise ValidationFailed("قيم غير صحيحة")
         run = dimp.analyze(ctx, data, name, kind=fields.get("kind") or "items", mapping=mapping,
                            source_system=fields.get("source_system") or "generic", options=options)
         return J(dimp.get(ctx, run), status_code=201)
@@ -1588,7 +1631,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx.require("costs.read")
         if "multipart/form-data" not in req.headers.get("content-type", ""):
             raise ValidationFailed("ارفع الملفات كـ multipart/form-data")
-        form = await req.form(max_files=3, max_fields=4)
+        _length_guard(req, MAX_UPLOAD_FILES * s.max_upload_bytes + 64 * 1024, required=True)
+        form = await req.form(max_files=MAX_UPLOAD_FILES, max_fields=4)
         files = {}
         for k in ("stock", "sales", "purchases"):
             up = form.get(k)
