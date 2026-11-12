@@ -198,6 +198,19 @@ def unit_price(pack_price: int, pack_size: int) -> int:
     return int((Decimal(pack_price) / pack_size).quantize(Decimal("1"), ROUND_HALF_UP))
 
 
+def retail_value(qty: int, pack_price: int, pack_size: int) -> int:
+    """What `qty` base units sell for at the shelf price: the sale's own rule (whole packs at the pack
+    price, the rest at `unit_price`), so a report shows the money a sale would take, not a new rounding."""
+    ps = max(1, pack_size or 1)
+    return alloc_gross(qty, {"unit_price": unit_price(pack_price, ps), "pack_price": pack_price, "pack_size": ps})
+
+
+def cost_piasters(cost: Decimal) -> int:
+    """An exact cost in piasters (from the decimal average cost) as whole piasters, half up: the rule
+    the sale already uses for a line's cost (below-cost warning)."""
+    return int(cost.to_integral_value(ROUND_HALF_UP))
+
+
 class Sales:
     def __init__(self, db: Database, today: date | None = None):
         self.db = db
@@ -557,7 +570,7 @@ class Sales:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
-                                           "net": net, "cost": int(cost.to_integral_value(ROUND_HALF_UP))})
+                                           "net": net, "cost": cost_piasters(cost)})
                 self.db.execute("UPDATE sale_lines SET line_total=? WHERE id=?", (net, l["id"]))
                 total += net
             if below_cost:

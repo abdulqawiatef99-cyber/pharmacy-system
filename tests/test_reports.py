@@ -22,12 +22,26 @@ class TestStockValueExact(Base):
                               unit_cost=Decimal("0.145"))
         s = rep.stock_report(self.db, self.ctx)
         e = next(x for x in s["expiring"] if x["batch_no"] == "EX")
-        self.assertEqual(e["value"], 1505)                 # 3 x 10.03 / 2 = 15.045 pounds; round() half to even gave 1504
+        self.assertEqual(e["value"], 1505)                 # one pack 10.03 + one unit at 5.02 (5.015 half up), as a sale charges
         # cost 20 x 15 + 3 x 0.145 = 300.435 pounds -> 30044, now summed in Decimal rather than SQLite REAL
         self.assertEqual(s["value_cost"], 30044)
-        self.assertEqual(s["value_retail"], 41505)             # 40000 + 1504.5 in one category (half even gave 41504)
+        self.assertEqual(s["value_retail"], 41505)             # 40000 + 1505 in one category (round() half even gave 41504)
         self.assertEqual([r["items"] for r in s["value_by_category"]], [2])
         self.assertIsInstance(s["value_cost"], int)
+
+
+    def test_retail_value_is_what_a_sale_of_those_units_charges(self):
+        from app.catalog import service as cat
+        from app.sales.service import alloc_gross, unit_price
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Shelf Rule", "pack_size": 3, "public_price": 1001})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, it, "SR", (T + timedelta(days=10)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=2, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("1"))
+        e = next(x for x in rep.stock_report(self.db, self.ctx)["expiring"] if x["batch_no"] == "SR")
+        # two loose units sell at 3.34 each (10.01 / 3 = 3.3367 half up): 6.68, not 2 x 10.01 / 3 = 6.67
+        self.assertEqual(e["value"], 668)
+        self.assertEqual(e["value"], alloc_gross(2, {"unit_price": unit_price(1001, 3), "pack_price": 1001, "pack_size": 3}))
 
 
 class TestReports(Base):
