@@ -236,7 +236,8 @@ async function askApproval(details, message, method, path) {
 }
 
 const API = { busy: 0, last: 0 };
-async function api(path, { method = "GET", body, form, _approvals = 0, _key = null } = {}) {
+const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
+async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0];
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -260,14 +261,16 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
     }
     data = await r.json().catch(() => ({}));
   } finally { API.busy--; API.last = Date.now(); }
-  // one approval per permission the action needs (at most 3), each added to the same token
-  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < 3) {
-    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"] });
+  // one approval per distinct permission the action needs (a late restricted return of someone else's
+  // invoice needs four), each added to the same token; a permission asked twice means it was not granted
+  const perm = data?.error?.details?.permission;
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)) {
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
   if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;
     // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
-    if (_approvals < 3) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"] });
+    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
   }
   if (!r.ok) {
     if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }

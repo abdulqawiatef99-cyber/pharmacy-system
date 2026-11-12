@@ -305,3 +305,50 @@ class DiscountApprovalOnTheSaleScreen(APICase):
         line = self.db.one("SELECT l.discount_bp, l.discount_approved_by FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
                            " WHERE s.org_id=? AND l.item_id=?", (self.ctx.org_id, it))
         self.assertEqual((line["discount_bp"], line["discount_approved_by"]), (1000, self.ctx.user_id))
+
+
+class TestScreenAsksEachPermissionOnce(__import__("unittest").TestCase):
+    """Codex on #170: a late return of a restricted item from someone else's invoice needs four permissions
+    (return, others, late, restricted); the screen stopped after three approvals. It now asks for each distinct
+    permission once and never for the same one twice."""
+
+    def run_api(self, needed, grants=True):
+        import json
+        import shutil
+        import subprocess
+        from pathlib import Path
+        if not shutil.which("node"):
+            self.skipTest("node is not installed")
+        src = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        start = src.index("const API = { busy: 0, last: 0 };")
+        end = src.index("\n}\n", src.index("async function api(")) + 3
+        harness = """
+let APPROVAL = null, ME = {}; const location = { hash: "" };
+const granted = new Set(), asked = [], NEEDED = %s, GRANTS = %s;
+function newKey() { return "k"; }
+function approvalHeaders() { return {}; }
+async function askApproval(details) { asked.push(details.permission); if (GRANTS) granted.add(details.permission); return true; }
+async function fetch() {
+  const missing = NEEDED.find((p) => !granted.has(p));
+  if (missing) return { ok: false, status: 403, json: async () => ({ error: { code: "approval_required", message: "no", details: { permission: missing, label: missing } } }) };
+  return { ok: true, status: 200, json: async () => ({ ok: true }) };
+}
+""" % (json.dumps(needed), "true" if grants else "false")
+        code = harness + src[start:end] + """
+api("/api/sales/s1/returns", { method: "POST", body: {} })
+  .then((r) => console.log(JSON.stringify({ r, asked })), (e) => console.log(JSON.stringify({ err: e.message, asked })));
+"""
+        out = subprocess.run(["node", "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_four_permissions_are_each_approved_once(self):
+        needed = ["sales.return", "sales.return_others", "sales.return_late", "sales.return_restricted"]
+        res = self.run_api(needed)
+        self.assertEqual(res["r"], {"ok": True})
+        self.assertEqual(res["asked"], needed)
+
+    def test_a_permission_still_refused_is_not_asked_again(self):
+        res = self.run_api(["sales.return"], grants=False)
+        self.assertEqual(res["asked"], ["sales.return"])                   # asked once, then the refusal shows
+        self.assertEqual(res["err"], "no")
