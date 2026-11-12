@@ -32,6 +32,7 @@ class TestSales(unittest.TestCase):
     def test_refusals(self):
         for name, rows in {"no footer": SALES[:-1], "count missing": sales(c6=None), "count not a number": sales(c6="x"),
                            "count wrong": sales(c6=2), "count fractional": sales(c6=1.5),
+                           "count huge exponent": sales(c6="1e10000000"),
                            "cost edited": sales(c2=33)}.items():
             with self.subTest(name), self.assertRaises(ValidationFailed) as e:
                 estock.parse_sales(rows)

@@ -75,7 +75,9 @@ def _whole(v) -> int | None:
         d = Decimal(str(v).strip())
     except (ArithmeticError, ValueError):
         return None
-    return int(d) if d.is_finite() and d == d.to_integral_value() else None
+    if not d.is_finite() or d.adjusted() > 15:      # "1e10000000" would make int() expand a huge number first
+        return None
+    return int(d) if d == d.to_integral_value() else None
 
 
 def _check(label: str, got: Decimal, printed) -> None:
