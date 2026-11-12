@@ -8,6 +8,7 @@ from app.inventory import service as inv
 from app.reports import service as rep
 from tests.test_api import APICase, H
 from tests.test_cashier_acceptance import Base, T
+from tests.helpers import today
 
 PW = "Staff-Pass-2026"
 
@@ -44,6 +45,19 @@ class TestStockValueExact(Base):
         self.assertEqual(e["value"], alloc_gross(2, {"unit_price": unit_price(1001, 3), "pack_price": 1001, "pack_size": 3}))
 
 
+    def test_one_item_over_two_batches_is_priced_as_one_quantity(self):
+        from app.catalog import service as cat
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Two Batches", "pack_size": 3, "public_price": 1001})
+        before = rep.stock_report(self.db, self.ctx)["value_retail"]
+        with self.db.transaction():
+            for no, q in (("TB1", 1), ("TB2", 2)):
+                b = inv.get_or_create_batch(self.db, self.ctx, it, no, (T + timedelta(days=200)).isoformat())
+                inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=q, batch_id=b, movement_type="purchase",
+                                  unit_cost=Decimal("1"))
+        # 1 + 2 units of a pack of 3 are one whole pack (10.01), not 3 loose units at 3.34 (10.02)
+        self.assertEqual(rep.stock_report(self.db, self.ctx)["value_retail"] - before, 1001)
+
+
 class TestReports(Base):
     def setUp(self):
         super().setUp()
@@ -54,14 +68,14 @@ class TestReports(Base):
     def test_sales_report(self):
         self.sell(units=4)
         self.sell(ctx=self.a, units=2)
-        r = rep.sales_report(self.db, self.ctx, T.isoformat(), T.isoformat())
+        r = rep.sales_report(self.db, self.ctx, today(), today())
         self.assertEqual((r["totals"]["n"], r["totals"]["total"]), (2, 12000))
         self.assertEqual(len(r["daily"]), 1)
         self.assertEqual(sorted(u["total"] for u in r["by_user"]), [4000, 8000])
         top = r["top_items"][0]
         self.assertEqual((top["qty"], top["revenue"], top["profit"]), (6, 12000, 3000))     # cost 15/unit
         with self.assertRaises(Forbidden):
-            rep.sales_report(self.db, self.a, T.isoformat(), T.isoformat())
+            rep.sales_report(self.db, self.a, today(), today())
 
     def test_stock_and_home(self):
         with self.db.transaction():

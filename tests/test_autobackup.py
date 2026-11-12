@@ -156,3 +156,65 @@ class TestBackupAPI(APICase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(r.json()["state"]["last_ok"])
         self.assertEqual(len(r.json()["files"]), 1)
+
+
+class TestAutoBackupFailures(DBTestCase):
+    """A failed backup never takes the program down, tells the owner once (not every attempt), and is
+    retried after one interval; settings refuse what they cannot honour."""
+
+    def setUp(self):
+        super().setUp()
+        self.bdir, self.sdir = self.tmp / "backups", self.tmp / "state"
+        self.ab = AutoBackup(self.db, self.tmp / "uploads", self.bdir, self.sdir)
+
+    def fails(self):
+        from app.core import notify
+        return [n for n in notify.listing(self.db, self.ctx)["items"] if n["title"] == "فشلت النسخة الاحتياطية التلقائية"]
+
+    def test_a_failure_is_recorded_and_told_once_then_cleared_by_a_success(self):
+        from unittest import mock
+        with mock.patch("app.core.backup.create", side_effect=OSError("disk full")), \
+                self.assertLogs("pharm.backup", level="ERROR"):
+            st = self.ab.run()
+            self.assertEqual((st["last_ok"], st["last_error"]), (False, "disk full"))
+            self.ab.run(force=True)                                   # fails again within 6 hours
+        self.assertEqual(len(self.fails()), 1)
+        st = self.ab.run(force=True)
+        self.assertTrue(st["last_ok"])
+        self.assertIsNone(st["last_error"])
+        self.assertIsNone(st.get("fail_notified"))                    # the next failure is told again
+
+    def test_a_backup_that_fails_its_own_check_is_deleted(self):
+        from unittest import mock
+        with mock.patch("app.core.backup.quick_check", return_value=["damaged archive"]), \
+                self.assertLogs("pharm.backup", level="ERROR"):
+            st = self.ab.run()
+        self.assertFalse(st["last_ok"])
+        self.assertIn("damaged archive", st["last_error"])
+        self.assertEqual(list(self.bdir.glob("*.zip")), [])           # no half-good file left to restore from
+
+    def test_when_a_backup_is_due(self):
+        from datetime import datetime, timedelta
+        self.assertTrue(self.ab._due())                               # never ran
+        self.ab.run()
+        self.assertFalse(self.ab._due())
+        st = self.ab.state()
+        old = (datetime.now() - timedelta(minutes=61)).isoformat(timespec="seconds")
+        st.update(last_at=old, last_check_at=old)
+        self.ab._write(self.ab.state_path, st)
+        self.assertTrue(self.ab._due())                               # default interval: 60 minutes
+        st.update(last_ok=False, last_fail_at=datetime.now().isoformat(timespec="seconds"))
+        self.ab._write(self.ab.state_path, st)
+        self.assertFalse(self.ab._due())                              # a failure is retried after one interval
+
+    def test_settings_refuse_what_they_cannot_honour(self):
+        before = self.ab.settings()
+        for changes in ({"interval_min": 7}, {"keep_last": "x"}, {"keep_last": 0}, {"keep_last": 101},
+                        {"keep_daily": -1}, {"keep_weekly": 53}, {"keep_last": 2.5}, {"keep_last": True},
+                        {"offsite_dir": "relative/folder"}, {"offsite_dir": str(self.bdir)}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValidationFailed):
+                    self.ab.update_settings(self.ctx, changes)
+                self.assertEqual(self.ab.settings(), before)
+        new = self.ab.update_settings(self.ctx, {"keep_last": 5, "on_shift_close": False, "offsite_dir": ""})
+        self.assertEqual((new["keep_last"], new["on_shift_close"], new["offsite_dir"]), (5, False, ""))
