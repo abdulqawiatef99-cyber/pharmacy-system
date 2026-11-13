@@ -12,7 +12,7 @@
    - #163: red CI is the billing stop, not its content. Its night log is carried in this PR (merged in), so merging this PR also merges #163.
    - #238: Codex clean on `ebbc6ba`; CI red (billing). Also carried in this PR.
    - Triage (on #113): **merge** #147 (CI green + Codex clean on `56dd876`, no expectedFailure left, its 16 tests pass on today's develop), #77 (owner's cost rule of 30/10; needs folding into AGENTS §5, it duplicates the heading); **after launch** #132 (touches `app/printing/`), #99 (auto-updates, #96), #83 (F20 doc, class C); **close (owner decides)** #102: holds real pharmacy data (supplier invoice photos, E-Stock data pickles under `work/`); never merge; keep only `docs/SMART_ORDER_REPORT.md` in a clean PR later; deleting the branch is the owner's call.
-2. Not done and why: no merge at all (#238, #213, #221, #163, this PR) — CI cannot run. Codex on #213/#221 new heads pending.
+2. Not done and why: no merge at all (#238, #213, #221, #163, this PR) — CI cannot run. Codex is clean on every new head (#213 `634b098`, #221 `46064e9`, this PR `6cc75bd`), so each needs only a green `CI / linux` (re-run the failed job once billing is fixed; a docs edit would need Codex again).
 3. Decisions: merge `develop` into PR branches instead of rebase (AGENTS §2: no force push on shared branches). One combined handoff PR (#238 + #163 + this report) so the owner merges one PR, not three that each edit HANDOFF.
 4. Next goal: when CI runs again — re-run CI on #238/this PR, #213, #221, #147; merge each when CI linux is green and Codex is clean on its head; then check CI on `develop`. N2 (PC test script) does not need CI.
 5. المحادثة دي اتحفظت وممكن تتمسح
