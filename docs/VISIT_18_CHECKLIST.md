@@ -26,9 +26,9 @@ and says so on #18) · note which of #240 (#98 warning) and #241 (#206 clock) ar
 | 3.3 | Claude | `await visit.post(s.snapshot, {audit: 1})` | New `boot_id`, `installed` = B, data counts identical, audit +1 (`system.update`, `ok: true`) |
 | 3.4 | Claude | Rollback (command below), then stop the old server | `Previous code selected. Restart the program; no database restore was performed.`; then `/api/health` no longer answers |
 | 3.5 | Owner | افتح البرنامج من الأيقونة اللي على سطح المكتب «منصة الصيدلية»، وادخل الإعدادات ← «البرنامج». | البرنامج يفتح عادي، و«النسخة المثبتة» رجعت **A**، ومكتوب «يوجد تحديث جديد» |
-| 3.6 | Claude | `await visit.post(s.snapshot)` | `installed` = A, a new `boot_id`, data counts identical to 3.1 |
+| 3.6 | Claude | `await visit.post(s.snapshot)` (no `audit` option: the rollback writes no audit row, a new login may) | `installed` = A, a new `boot_id`, data counts identical to 3.1 |
 | 3.7 | Owner | دوس «حدّث البرنامج الآن» تاني عشان الجهاز يفضل على آخر نسخة. | زي 3.2، و«النسخة المثبتة» = **B** |
-| 3.8 | Claude | `visit.post` once more; post the 3.1–3.8 table on #18 | G6 «Windows حقيقي» can move to ✅ in `STATUS.md` (manager) |
+| 3.8 | Claude | `await visit.post(s.snapshot)` once more (still before any test sale); post the 3.1–3.8 table on #18 | G6 «Windows حقيقي» can move to ✅ in `STATUS.md` (manager) |
 
 Rollback commands for 3.4 (Claude, `cmd` on the PC; the program keeps running the new code until it is stopped):
 ```bat
@@ -69,7 +69,7 @@ Use the test item only. If #240 is not merged, step 1.3 shows only the drawer li
 | 2.7 | Owner | شيل الأصناف من السلة وماتكملش البيع. | السلة فاضية، مفيش فاتورة |
 | 2.8 | Claude | Post on #18 with a photo of the 2 labels | If 2.1–2.6 pass: driver labels and scanner pass for G7 |
 
-**After (Claude):** `visit.post` once more (settings unchanged: B14), post the summary on #18, and the end report in `docs/HANDOFF.md`.
+**After (Claude):** read the receipt and label settings again and compare them with 1.0 and 2.0 (B14). Do **not** run `visit.post` against the test-3 snapshot here: tests 1 and 2 added sales, stock and cash on purpose, so its data rows would FAIL. Post the summary on #18 and the end report in `docs/HANDOFF.md`.
 
 ## Visit runner (coordinator, browser tab only)
 `docs/visit/visit_runner.js` replaces the hand-written fetch calls. In the tab logged in to
