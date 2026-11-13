@@ -4,6 +4,10 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 13/11 07:30 UTC — N2 (goal: tomorrow's pharmacy PC tests ready) — in progress
+- Step 1 done: #98 re-read. Gap: with the printer off, the drawer toast replaced the receipt toast, so the receipt warning was never seen. Fixed + 5 server tests + 1 browser test → PR #240 (full suite 997 OK locally; CI blocked by billing).
+- Step 2 (script in `docs/VISIT_18_CHECKLIST.md`) and step 3 (#206) next.
+
 ## 13/11 02:30 UTC — N1 end report (goal: open PR queue clean) — NOT reached
 **Blocker:** GitHub Actions has run no job since 12/11 20:17 UTC (every CI / linux fails in ~3 s with no log; GitHub billing/spending limit). Under OWNER_RULES §4 nothing can merge until it runs again. Only the owner can fix it: github.com → Settings → Billing and plans. Note: #225 was merged at 01:20 UTC with that same failing CI, so `develop` `d8fa571` has no CI result.
 1. Done, with evidence
