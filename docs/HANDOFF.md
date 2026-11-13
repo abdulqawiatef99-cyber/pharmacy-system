@@ -4,10 +4,15 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 13/11 07:30 UTC — N2 (goal: tomorrow's pharmacy PC tests ready) — in progress
-- Step 1 done: #98 re-read. Gap: with the printer off, the drawer toast replaced the receipt toast, so the receipt warning was never seen. Fixed + 5 server tests + 1 browser test → PR #240 (full suite 997 OK locally; CI blocked by billing).
-- Step 2 done: day script for the 3 PC tests at the top of `docs/VISIT_18_CHECKLIST.md` (order: G6 update+rollback, #98, driver label scan).
-- Step 3 done: #206 sweep → PR #241 (screens, hours chart, print header, shift report and supplier return pages; 5 tests; 996 OK).
+## 13/11 07:30 UTC — N2 end report (goal: tomorrow's pharmacy PC tests ready) — REACHED (merges blocked by CI billing)
+1. Done, with evidence
+   - #98 re-read: the fix holds (job cancelled, nothing fires later, audit `not_printed`). **Gap found:** each toast replaced the last, so with the printer off the cashier saw only the drawer warning, never the receipt one. Fix + 5 server tests (every drawer timing with 2 copies, card sale, delivery, retried F9, next sale after power-on) + 1 browser test that fails before the fix → **PR #240**, head `8fb0ba1`, full suite 997 OK locally, **Codex clean**.
+   - Day script for the 3 PC tests at the top of `docs/VISIT_18_CHECKLIST.md`: G6 update → rollback → update again (first, so the PC gets the latest code), #98 printer off, driver-mode label scan. Each step: who, the owner's Arabic line, what he should see; rollback commands included. **PR #242** (stacked on #239). Codex P2 (final `visit.post` would FAIL after the test sales) fixed in `f5729c7`; re-review requested.
+   - #206 sweep: the 12/24-hour setting applied only to the receipt. Screens, hours chart, print header, shift report and supplier return pages now follow it; `/api/me` carries it → **PR #241**, head `e9dd019`, 5 tests (fail on develop), full suite 996 OK, **Codex clean**.
+2. Not done and why: nothing merged. `CI / linux` still fails in ~3 s with no log (GitHub billing, since 12/11 20:17 UTC), so no PR meets the merge rule. **Ready to merge once CI is green:** #240, #241 (Codex clean on their heads); #242 after Codex on its last head (it also merges #239/#238/#163).
+3. Decisions: G6 test runs first in the day (its update delivers #240/#241 if merged); the owner presses «إلغاء» on the browser print window after a failed receipt (printing from it would queue in Windows and come out later); device warnings stay 15 s in one toast; the time setting stays in the receipt settings (one place), label renamed to say it covers all screens.
+4. Next goal (day, owner at the pharmacy): owner fixes GitHub billing → manager merges #240 #241 #242 on green CI and checks CI on `develop` → owner runs the day script (3 tests) → evidence on #18, `STATUS.md` G6/G7.
+5. المحادثة دي اتحفظت وممكن تتمسح
 
 ## 13/11 02:30 UTC — N1 end report (goal: open PR queue clean) — NOT reached
 **Blocker:** GitHub Actions has run no job since 12/11 20:17 UTC (every CI / linux fails in ~3 s with no log; GitHub billing/spending limit). Under OWNER_RULES §4 nothing can merge until it runs again. Only the owner can fix it: github.com → Settings → Billing and plans. Note: #225 was merged at 01:20 UTC with that same failing CI, so `develop` `d8fa571` has no CI result.
