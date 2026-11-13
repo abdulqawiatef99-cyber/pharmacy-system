@@ -4,6 +4,19 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 13/11 02:30 UTC — N1 end report (goal: open PR queue clean) — NOT reached
+**Blocker:** GitHub Actions has run no job since 12/11 20:17 UTC (every CI / linux fails in ~3 s with no log; GitHub billing/spending limit). Under OWNER_RULES §4 nothing can merge until it runs again. Only the owner can fix it: github.com → Settings → Billing and plans. Note: #225 was merged at 01:20 UTC with that same failing CI, so `develop` `d8fa571` has no CI result.
+1. Done, with evidence
+   - #213: `develop` merged in (merge commit, no force push; HANDOFF conflict kept both sides). Head `634b098`, full suite locally 1003 OK (2 skip). `@codex review` requested.
+   - #221: not a pure duplicate. Its `channels.py` fix equals #219's (kept `develop`'s); what remains is one new test file (6 tests: channels, contracts, notifications). Head `46064e9`, full suite 997 OK. `@codex review` requested.
+   - #163: red CI is the billing stop, not its content. Its night log is carried in this PR (merged in), so merging this PR also merges #163.
+   - #238: Codex clean on `ebbc6ba`; CI red (billing). Also carried in this PR.
+   - Triage (on #113): **merge** #147 (CI green + Codex clean on `56dd876`, no expectedFailure left, its 16 tests pass on today's develop), #77 (owner's cost rule of 30/10; needs folding into AGENTS §5, it duplicates the heading); **after launch** #132 (touches `app/printing/`), #99 (auto-updates, #96), #83 (F20 doc, class C); **close (owner decides)** #102: holds real pharmacy data (supplier invoice photos, E-Stock data pickles under `work/`); never merge; keep only `docs/SMART_ORDER_REPORT.md` in a clean PR later; deleting the branch is the owner's call.
+2. Not done and why: no merge at all (#238, #213, #221, #163, this PR) — CI cannot run. Codex on #213/#221 new heads pending.
+3. Decisions: merge `develop` into PR branches instead of rebase (AGENTS §2: no force push on shared branches). One combined handoff PR (#238 + #163 + this report) so the owner merges one PR, not three that each edit HANDOFF.
+4. Next goal: when CI runs again — re-run CI on #238/this PR, #213, #221, #147; merge each when CI linux is green and Codex is clean on its head; then check CI on `develop`. N2 (PC test script) does not need CI.
+5. المحادثة دي اتحفظت وممكن تتمسح
+
 ## 12/11 21:45 — CURRENT STATE (read this first)
 Standing rules: [OWNER_RULES.md](OWNER_RULES.md). Work now runs from the claude.ai project «برنامج الصيدلية»; no pasted handoffs.
 - Open reminders (end every owner reply with them): book the doctor session; data export from the 3 accounts; buy a USB flash drive (later).
