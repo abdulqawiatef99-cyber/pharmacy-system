@@ -4,6 +4,20 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 12/11 21:45 — CURRENT STATE (read this first)
+Standing rules: [OWNER_RULES.md](OWNER_RULES.md). Work now runs from the claude.ai project «برنامج الصيدلية»; no pasted handoffs.
+- Open reminders (end every owner reply with them): book the doctor session; data export from the 3 accounts; buy a USB flash drive (later).
+- `develop` @ `c7745bb`, CI linux + windows green. Merged 12/11 evening: #207 #209 #211 (#202 parts 1-3), #196 #197 #204 #205 #210 #212 #214 #216 #217 #218 #219 #220.
+- Waiting: #213 (#202 parts 4-5) and #163 need Codex on their latest head (requested); #221 conflicts with #219 (overlapping payment-channel rename, check if it is now a duplicate, then rebase); #225 (this rules file); #147 held; #160 installer-only.
+- No scheduled sessions are enabled, by the owner's decision, until the open work is closed.
+- Pharmacy PC (desktop-5jvh3qd) runs develop fa3ccc2; it can update to c7745bb with «تحديث» (no requirements/migration change since). Still to test there, printer-off first: (1) #98 printer switched off during a sale; (2) scan a label printed in driver mode; (3) update rollback (G6). Then E-Stock export/import rehearsal, #19 trial day, #20 written approval.
+- Progress: official 40% (STATUS.md); raise G6/G7 only with the PC evidence above.
+- «الطابور» (next batches, in order; one batch = up to 3 items, OWNER_RULES §7):
+  - Batch A (no PC needed): merge #213, #163, #225 once Codex is clean on their head; check whether #221 is a duplicate of #219 (close with a note, or rebase); triage the remaining open PRs (#147, #132, #102, #99, #83, #77) into merge / after-launch / close, with a list for the owner before closing anything.
+  - Batch B (owner at the pharmacy PC): press «تحديث» to c7745bb; #98 printer switched off during a sale; scan a driver-mode label.
+  - Batch C (owner at the PC): update rollback (G6); then STATUS.md G6/G7 with the evidence.
+  - Batch D: E-Stock export → import rehearsal on the PC.
+
 ## 11/11 20:45 — زرار التحديث (B13) عمره ما كان هيشتغل على جهاز الصيدلية: السبب والحل
 - الدليل: «حدّث البرنامج الآن» على `desktop-5jvh3qd` (`d24979e` ← `b5d8891`) رجع 500: `التحديث فشل: Dependencies or database migrations changed; a coordinated upgrade is required`، مع إن `requirements.txt` و`app/migrations` واحد في git بين النسختين. سطر `system.update` في السجل `ok: false`.
 - السبب: ملفات البرنامج في المثبّت جاية من `git archive` على جهاز ويندوز في جيت هاب (`core.autocrlf=true` ← CRLF)، وأرشيف التحديث من جيت هاب LF. `release_bootstrap._contract` بيقارن البايتات، فكل تحديث بيبان تغيير في المكتبات/الـ migrations. اختبار R8 في بناء المثبّت ماكشفهوش لأن الطرفين هناك CRLF. (`db.migrate` بيقرا الملفات نصّي فـ checksum قاعدة البيانات مش متأثر.)
