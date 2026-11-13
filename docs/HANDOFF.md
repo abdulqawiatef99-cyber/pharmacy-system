@@ -6,7 +6,8 @@
 
 ## 13/11 07:30 UTC — N2 (goal: tomorrow's pharmacy PC tests ready) — in progress
 - Step 1 done: #98 re-read. Gap: with the printer off, the drawer toast replaced the receipt toast, so the receipt warning was never seen. Fixed + 5 server tests + 1 browser test → PR #240 (full suite 997 OK locally; CI blocked by billing).
-- Step 2 (script in `docs/VISIT_18_CHECKLIST.md`) and step 3 (#206) next.
+- Step 2 done: day script for the 3 PC tests at the top of `docs/VISIT_18_CHECKLIST.md` (order: G6 update+rollback, #98, driver label scan).
+- Step 3 done: #206 sweep → PR #241 (screens, hours chart, print header, shift report and supplier return pages; 5 tests; 996 OK).
 
 ## 13/11 02:30 UTC — N1 end report (goal: open PR queue clean) — NOT reached
 **Blocker:** GitHub Actions has run no job since 12/11 20:17 UTC (every CI / linux fails in ~3 s with no log; GitHub billing/spending limit). Under OWNER_RULES §4 nothing can merge until it runs again. Only the owner can fix it: github.com → Settings → Billing and plans. Note: #225 was merged at 01:20 UTC with that same failing CI, so `develop` `d8fa571` has no CI result.

@@ -8,6 +8,69 @@ printer drivers or Windows security settings; start the app from its own shortcu
 results on #18 right away (hostname, installer run, table of step / result / evidence, settings left).
 Any failure = its own `launch-critical` Issue.
 
+## Day script 14/11 — the 3 pharmacy PC tests (run in this order)
+Written by the N2 night session, 13/11. One table per test: **Owner** = the owner by hand, **Claude** = the day chat
+on the PC through the device bridge. The Arabic line is what the owner reads; the last column is what he should see.
+Order: test 3 first (its update also brings the latest `develop` for tests 1 and 2), then 1, then 2.
+Stop rule: a step that does not give the expected result → photo/screenshot, stop that test, post on #18, go to the next test.
+
+**Before (Claude, 5 min):** `hostname` = `DESKTOP-5JVH3QD` (else stop) · `visit.pre()` (backup + snapshot) and post `r.md` on #18 ·
+`CI / linux` on the `develop` head is green (OWNER_RULES §4; if CI is still blocked by GitHub billing, the day chat decides,
+and says so on #18) · note which of #240 (#98 warning) and #241 (#206 clock) are merged: only merged PRs reach the PC.
+
+### Test 3 — update and rollback (gate G6), 15 min
+| # | Who | Step (owner's line in Arabic) | Expected |
+|---|---|---|---|
+| 3.1 | Claude | `s = await visit.pre({backup: false})`; write down «النسخة المثبتة» = **A** | Snapshot on #18 |
+| 3.2 | Owner | افتح الإعدادات ← «البرنامج»، ودوس «حدّث البرنامج الآن»، واستنى من غير ما تقفل حاجة. | «جارٍ التحديث…» ثم «يعيد البرنامج تشغيل نفسه…»، والصفحة ترجع لوحدها في أقل من دقيقتين، و«النسخة المثبتة» بقت رقم جديد (**B**) |
+| 3.3 | Claude | `await visit.post(s.snapshot, {audit: 1})` | New `boot_id`, `installed` = B, data counts identical, audit +1 (`system.update`, `ok: true`) |
+| 3.4 | Claude | Rollback (command below), then stop the old server | `Previous code selected. Restart the program; no database restore was performed.`; then `/api/health` no longer answers |
+| 3.5 | Owner | افتح البرنامج من الأيقونة اللي على سطح المكتب «منصة الصيدلية»، وادخل الإعدادات ← «البرنامج». | البرنامج يفتح عادي، و«النسخة المثبتة» رجعت **A**، ومكتوب «يوجد تحديث جديد» |
+| 3.6 | Claude | `await visit.post(s.snapshot)` | `installed` = A, a new `boot_id`, data counts identical to 3.1 |
+| 3.7 | Owner | دوس «حدّث البرنامج الآن» تاني عشان الجهاز يفضل على آخر نسخة. | زي 3.2، و«النسخة المثبتة» = **B** |
+| 3.8 | Claude | `visit.post` once more; post the 3.1–3.8 table on #18 | G6 «Windows حقيقي» can move to ✅ in `STATUS.md` (manager) |
+
+Rollback commands for 3.4 (Claude, `cmd` on the PC; the program keeps running the new code until it is stopped):
+```bat
+cd /d "%LOCALAPPDATA%\PharmacyPlatform"
+set PHARM_DATA_DIR=%LOCALAPPDATA%\PharmacyPlatform\data
+"%LOCALAPPDATA%\Programs\PharmacyPlatform\python\python.exe" "%LOCALAPPDATA%\Programs\PharmacyPlatform\program\manage.py" update --rollback
+powershell -NoProfile -Command "Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -like \"$env:LOCALAPPDATA\Programs\PharmacyPlatform\*\" } | Stop-Process -Force"
+curl.exe -s http://127.0.0.1:8000/api/health
+```
+The filter stops only this program's Python, never E-Stock. Rollback changes the code only, never the data
+(`docs/UPDATE.md`). If 3.2 fails (red message), copy the message to #18 and skip to test 1: a failed update keeps the old code.
+
+### Test 1 — receipt printer switched off during a sale (#98), 15 min
+Use the test item only. If #240 is not merged, step 1.3 shows only the drawer line; that is the known gap #240 fixes, not a new failure.
+| # | Who | Step (owner's line in Arabic) | Expected |
+|---|---|---|---|
+| 1.0 | Claude | Read the receipt settings | Printer `win:POS-80C`, drawer with cash on; note the drawer timing |
+| 1.1 | Owner | الطابعة شغالة: اعمل بيع نقدي لصنف التجربة، دوس F4 (إيصال) وبعدين F9. | الإيصال يطلع والدرج يفتح، ومفيش أي تحذير |
+| 1.2 | Owner | اقفل طابعة الإيصال من زرار الكهربا بتاعها، وسيب السلك متوصل. | — |
+| 1.3 | Owner | اعمل نفس البيع تاني: صنف التجربة، F4، وبعدين F9. | البيع يتحفظ (رقم فاتورة)، وفي خلال 6 ثواني يظهر تحذير أحمر فيه سطرين: «الإيصال لم يُطبع مباشرة… الطابعة لا تستجيب… اتلغى أمر الطباعة» و«أمر فتح الدرج لم يصل للطابعة». **مفيش** «أُرسل» |
+| 1.4 | Owner | لو ظهرت شاشة طباعة من المتصفح: دوس «إلغاء». ماتطبعش منها. | الشاشة تتقفل (الطباعة منها كانت هتستنى في ويندوز وتطلع بعدين) |
+| 1.5 | Claude | `Get-PrintJob -PrinterName POS-80C`; `await visit.printAudit("<time before 1.3>")` | Queue empty; audit `print.receipt` = `not_printed`, `cash.drawer_auto` = `failed` |
+| 1.6 | Owner | استنى دقيقة، وبعدين شغّل الطابعة وبص عليها وعلى الدرج نص دقيقة. | **مفيش حاجة تطبع والدرج مايفتحش** |
+| 1.7 | Owner | دوس «اطبع إيصال آخر فاتورة». | إيصال واحد يطلع، والدرج مايفتحش |
+| 1.8 | Owner | اقفل الطابعة تاني، ودوس F8 (فتح الدرج، السبب «فكة»). وبعدين شغّلها. | تحذير إن الأمر ماوصلش، وبعد التشغيل مفيش حاجة تطبع والدرج مايفتحش |
+| 1.9 | Claude | Post 1.0–1.8 on #18 (Arabic answers as said by the owner) | If all pass, #98 can be closed with this evidence |
+
+### Test 2 — scanning a label printed in Windows-driver mode, 10 min
+| # | Who | Step (owner's line in Arabic) | Expected |
+|---|---|---|---|
+| 2.0 | Claude | Read the label settings | Type «تعريف ويندوز» (`driver`), printer `win:Xprinter XP-235B`; if not, set them with the owner and save |
+| 2.1 | Owner | من كارت صنف التجربة اللي ليه باركود 13 رقم: اطبع ملصق واحد. ومن صنف مالوش باركود (بالكود الداخلي): ملصق واحد. | ملصقين كاملين، الباركود مش مقطوع، والكتابة معدولة مش مقلوبة |
+| 2.2 | Owner | في شاشة الكاشير، والمؤشر في خانة البحث: امسح الملصق الأول بالقارئ. | الصنف يتضاف **مرة واحدة** (الكمية 1) |
+| 2.3 | Owner | امسحه تاني. | نفس السطر يبقى الكمية 2، مش سطر جديد |
+| 2.4 | Owner | امسح الملصق التاني (الكود الداخلي). | الصنف التاني يتضاف |
+| 2.5 | Owner | دوس في خانة العميل، وامسح الملصق الأول. | الصنف يتضاف، وخانة العميل تفضل فاضية، ومفيش شاشة غريبة تفتح |
+| 2.6 | Owner | امسح ملصق متلزق على علبة (مش مفرود) من مسافة شبر. | يتقري من أول أو تاني مرة |
+| 2.7 | Owner | شيل الأصناف من السلة وماتكملش البيع. | السلة فاضية، مفيش فاتورة |
+| 2.8 | Claude | Post on #18 with a photo of the 2 labels | If 2.1–2.6 pass: driver labels and scanner pass for G7 |
+
+**After (Claude):** `visit.post` once more (settings unchanged: B14), post the summary on #18, and the end report in `docs/HANDOFF.md`.
+
 ## Visit runner (coordinator, browser tab only)
 `docs/visit/visit_runner.js` replaces the hand-written fetch calls. In the tab logged in to
 http://127.0.0.1:8000, evaluate the whole file once (again after any reload), then one call per tool
