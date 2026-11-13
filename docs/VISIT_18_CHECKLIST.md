@@ -21,14 +21,14 @@ and says so on #18) · note which of #240 (#98 warning) and #241 (#206 clock) ar
 ### Test 3 — update and rollback (gate G6), 15 min
 | # | Who | Step (owner's line in Arabic) | Expected |
 |---|---|---|---|
-| 3.1 | Claude | `s = await visit.pre({backup: false})`; write down «النسخة المثبتة» = **A** | Snapshot on #18 |
+| 3.1 | Claude | `s = await visit.pre({backup: false})`; write down «النسخة المثبتة» = **A** | Snapshot on #18; its `snapshot` row says PASS (saved in localStorage), so it survives the reloads below |
 | 3.2 | Owner | افتح الإعدادات ← «البرنامج»، ودوس «حدّث البرنامج الآن»، واستنى من غير ما تقفل حاجة. | «جارٍ التحديث…» ثم «يعيد البرنامج تشغيل نفسه…»، والصفحة ترجع لوحدها في أقل من دقيقتين، و«النسخة المثبتة» بقت رقم جديد (**B**) |
-| 3.3 | Claude | `await visit.post(s.snapshot, {audit: 1})` | New `boot_id`, `installed` = B, data counts identical, audit +1 (`system.update`, `ok: true`) |
+| 3.3 | Claude | The page reloaded, so `s` is gone: evaluate the runner file again, then `await visit.post(undefined, {audit: 1})` (it takes the 3.1 snapshot from localStorage) | New `boot_id`, `installed` = B, data counts identical, audit +1 (`system.update`, `ok: true`) |
 | 3.4 | Claude | Rollback (command below), then stop the old server | `Previous code selected. Restart the program; no database restore was performed.`; then `/api/health` no longer answers |
 | 3.5 | Owner | افتح البرنامج من الأيقونة اللي على سطح المكتب «منصة الصيدلية»، وادخل الإعدادات ← «البرنامج». | البرنامج يفتح عادي، و«النسخة المثبتة» رجعت **A**، ومكتوب «يوجد تحديث جديد» |
-| 3.6 | Claude | `await visit.post(s.snapshot)` (no `audit` option: the rollback writes no audit row, a new login may) | `installed` = A, a new `boot_id`, data counts identical to 3.1 |
+| 3.6 | Claude | Evaluate the runner again, then `await visit.post()` (snapshot from localStorage; no `audit` option: the rollback writes no audit row, a new login may) | `installed` = A, a new `boot_id`, data counts identical to 3.1 |
 | 3.7 | Owner | دوس «حدّث البرنامج الآن» تاني عشان الجهاز يفضل على آخر نسخة. | زي 3.2، و«النسخة المثبتة» = **B** |
-| 3.8 | Claude | `await visit.post(s.snapshot)` once more (still before any test sale); post the 3.1–3.8 table on #18 | G6 «Windows حقيقي» can move to ✅ in `STATUS.md` (manager) |
+| 3.8 | Claude | Evaluate the runner again, then `await visit.post()` once more (still before any test sale); post the 3.1–3.8 table on #18 | G6 «Windows حقيقي» can move to ✅ in `STATUS.md` (manager) |
 
 Rollback commands for 3.4 (Claude, `cmd` on the PC; the program keeps running the new code until it is stopped):
 ```bat
