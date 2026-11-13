@@ -169,13 +169,13 @@ const hintHtml = (h) => (!h ? "" : h.kind === "layout"
 
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 
-function toast(msg, isError = false) {
+function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
   t.textContent = msg;
   t.className = isError ? "error" : "";
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => (t.hidden = true), isError ? 7000 : 3000);
+  toast._t = setTimeout(() => (t.hidden = true), ms || (isError ? 7000 : 3000));
 }
 
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
@@ -3094,9 +3094,13 @@ async function complete(findings) {
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
-    if (dv.receipt === "failed") toast(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`, true);
-    if (dv.drawer === "failed") toast("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح", true);
-    if (dv.drawer === "unsupported") toast("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات", true);
+    // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
+    // under the drawer one when the printer was off), and it stays longer than a normal error
+    const warn = [];
+    if (dv.receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
+    if (dv.drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
+    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات");
+    if (warn.length) toast(warn.join("\n"), true, 15000);
     SALE = null; viewPos();
   } catch (er) {
     toast(er.message, true);
