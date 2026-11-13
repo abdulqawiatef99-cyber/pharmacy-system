@@ -35,6 +35,13 @@ with this file, this file wins. Change it only through a PR, after the owner agr
   use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
   keep them grouped.
 - After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
+- Temporary, while GitHub Actions is blocked by billing: a PR may be merged into `develop` when
+  (a) Codex reviewed its latest head with no unresolved P0/P1, (b) the merging session ran the full
+  suite locally on the merge result (current `develop` + the PR) and posted the exact command and
+  counts on the PR, (c) it does not change `app/printing/`, `installer/`, Windows-only scripts,
+  `requirements.txt` or `app/migrations` (those wait for real CI). Note "merged under the temporary
+  rule, CI blocked" on the PR. The rule ends the day CI runs again; then re-run CI on `develop` and
+  fix anything red first.
 
 ## 5. Pharmacy PC and data
 - E-Stock is the live cashier. Never use full-screen computer control while the owner is working.
