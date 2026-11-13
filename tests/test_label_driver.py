@@ -381,3 +381,12 @@ class TestLabelClarity(DriverCase):
                 left, right = self._edges(f.images[-1])
                 self.assertGreaterEqual(left, edge - 1)
                 self.assertLessEqual(right, f.images[-1].size[0] - edge)
+
+
+class TestTestFillsPages(DriverCase):
+    def test_two_per_page_prints_four_test_labels(self):
+        """Owner, 12/11: the 3-label test left a blank half page; it now prints whole pages."""
+        rs.save(self.db, self.ctx, {"label_rows": 2})
+        f = self.use(FakeWindows())
+        r = print_label_test(self.db, self.ctx, {})
+        self.assertEqual((r["labels"], len(f.pages)), (4, 2))

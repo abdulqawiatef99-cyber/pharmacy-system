@@ -218,3 +218,67 @@ class TestAutoBackupFailures(DBTestCase):
                 self.assertEqual(self.ab.settings(), before)
         new = self.ab.update_settings(self.ctx, {"keep_last": 5, "on_shift_close": False, "offsite_dir": ""})
         self.assertEqual((new["keep_last"], new["on_shift_close"], new["offsite_dir"]), (5, False, ""))
+
+
+class TestScheduler(DBTestCase):
+    """The scheduler thread itself (coverage 12/11: never run by a test)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ab = AutoBackup(self.db, self.tmp / "uploads", self.tmp / "backups", self.tmp / "state")
+        self.ab.stop_event.wait = lambda timeout=None: self.ab.stop_event.is_set()   # skip the 20 s start delay
+        self.runs = []
+        self.ab.run = lambda reason="manual": self.runs.append(reason) or {}
+
+    def tearDown(self):
+        autobackup._instance = None
+        super().tearDown()
+
+    def until(self, cond, seconds=5):
+        import time
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not cond():
+            time.sleep(0.01)
+        return cond()
+
+    def test_a_trigger_runs_with_its_reason_and_stop_makes_a_last_backup(self):
+        with patch.object(self.ab, "_due", return_value=False):
+            self.ab.start()
+            autobackup.trigger("manual_test")
+            self.assertTrue(self.until(lambda: self.runs == ["manual_test"]), self.runs)
+            self.ab.stop()
+        self.assertFalse(self.ab.thread.is_alive())
+        self.assertEqual(self.runs, ["manual_test", "shutdown"])
+        self.assertIsNone(autobackup._instance)
+
+    def test_a_due_backup_runs_on_schedule(self):
+        with patch.object(self.ab, "_due", side_effect=[True] + [False] * 1000):
+            self.ab.start()
+            self.ab.wake.set()
+            self.assertTrue(self.until(lambda: self.runs == ["schedule"]), self.runs)
+            self.ab.stop()
+
+    def test_the_thread_survives_a_bad_check(self):
+        # e.g. a state file edited by hand: fromisoformat("garbage") raised and the thread died silently,
+        # so no automatic backup ran again until the program was restarted
+        with patch.object(self.ab, "_due", side_effect=[ValueError("bad state")] + [False] * 1000):
+            self.ab.start()
+            self.ab.wake.set()
+            self.assertTrue(self.until(lambda: not self.ab.wake.is_set()))
+            autobackup.trigger("after_error")
+            self.assertTrue(self.until(lambda: self.runs == ["after_error"]), self.runs)
+            self.assertTrue(self.ab.thread.is_alive())
+            self.ab.stop()
+
+    def test_a_state_file_with_a_bad_date_does_not_stop_the_schedule(self):
+        self.ab.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ab.state_path.write_text(json.dumps({"last_ok": True, "last_at": "garbage"}), encoding="utf-8")
+        self.assertTrue(self.ab._due())                   # unreadable date: back up now, never raise
+        self.ab.cfg_path.write_text(json.dumps({"interval_min": "60"}), encoding="utf-8")
+        self.ab.state_path.write_text(json.dumps({"last_ok": True, "last_at": "2026-11-12T10:00:00"}), encoding="utf-8")
+        self.assertTrue(self.ab._due())
+        self.ab.start()
+        self.ab.wake.set()
+        self.assertTrue(self.until(lambda: "schedule" in self.runs), self.runs)
+        self.assertTrue(self.ab.thread.is_alive())
+        self.ab.stop()

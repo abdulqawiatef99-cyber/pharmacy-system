@@ -16,7 +16,7 @@ None so the caller falls back to the generic importer / manual mapping.
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 
 from ..catalog.normalize import normalize_text
@@ -133,8 +133,8 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
     _check("تكلفة كل المخازن", sum((a["cost"] for a in acc.values()), Decimal(0)), grand[3])
     for s, a in acc.items():
         summary["stores"][s] = {"batches": a["rows"], "items": len(a["items"]),
-                                "cost": str(a["cost"].quantize(Decimal("0.01"))),
-                                "sale": str(a["sale"].quantize(Decimal("0.01")))}
+                                "cost": str(a["cost"].quantize(Decimal("0.01"), ROUND_HALF_UP)),
+                                "sale": str(a["sale"].quantize(Decimal("0.01"), ROUND_HALF_UP))}
     return out, summary
 
 

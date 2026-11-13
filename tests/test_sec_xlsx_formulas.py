@@ -65,3 +65,38 @@ class TestExports(FormulaGuard):
     def test_import_templates(self):
         for kind in ("items", "opening_stock", "suppliers", "customers"):
             self.assertEqual([c for c in self.cells(template_xlsx(kind)) if c.data_type == "f"], [])
+
+
+class TestEveryWorkbookIsGuarded(FormulaGuard):
+    """A new exporter must not forget the guard: every function in app/ that builds a Workbook and
+    saves it calls ``as_text`` on that workbook before ``save``."""
+
+    def test_source_scan(self):
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "app"
+        builders, unguarded = [], []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                books = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                         and isinstance(n.value, ast.Call)
+                         and getattr(n.value.func, "attr", getattr(n.value.func, "id", None)) == "Workbook"
+                         for t in n.targets if isinstance(t, ast.Name)}
+                if not books:
+                    continue
+                calls = sorted((n for n in ast.walk(fn) if isinstance(n, ast.Call)), key=lambda n: (n.lineno, n.col_offset))
+                for wb in books:
+                    builders.append(f"{path.name}:{fn.name}")
+                    guarded_at = [c.lineno for c in calls if getattr(c.func, "id", getattr(c.func, "attr", None)) == "as_text"
+                                  and c.args and isinstance(c.args[0], ast.Name) and c.args[0].id == wb]
+                    for c in calls:
+                        if isinstance(c.func, ast.Attribute) and c.func.attr == "save" \
+                                and isinstance(c.func.value, ast.Name) and c.func.value.id == wb \
+                                and not any(g <= c.lineno for g in guarded_at):
+                            unguarded.append(f"{path.relative_to(root.parent)}:{c.lineno} {fn.name}")
+        self.assertGreaterEqual(len(builders), 5, builders)      # the scan really sees the known exporters
+        self.assertEqual(unguarded, [], "call app.core.xlsx_safe.as_text(wb) before wb.save()")
