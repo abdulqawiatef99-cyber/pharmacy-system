@@ -35,6 +35,13 @@ with this file, this file wins. Change it only through a PR, after the owner agr
   use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
   keep them grouped.
 - After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
+- Temporary, while GitHub Actions is blocked by billing: a PR may be merged into `develop` when
+  (a) Codex reviewed its latest head with no unresolved P0/P1, (b) the merging session ran the full
+  suite locally on the merge result (current `develop` + the PR) and posted the exact command and
+  counts on the PR, (c) it does not change `app/printing/`, `installer/`, Windows-only scripts,
+  `requirements.txt` or `app/migrations` (those wait for real CI). Note "merged under the temporary
+  rule, CI blocked" on the PR. The rule ends the day CI runs again; then re-run CI on `develop` and
+  fix anything red first.
 
 ## 5. Pharmacy PC and data
 - E-Stock is the live cashier. Never use full-screen computer control while the owner is working.
@@ -48,19 +55,24 @@ with this file, this file wins. Change it only through a PR, after the owner agr
   not done, assumptions, next step) and push it. The next chat continues from the file, not from a pasted summary.
 - If you find a mistake, fix everything built on it.
 
-## 7. Short sessions ("one batch per chat")
+## 7. Short sessions (one goal per session)
 Long chats drift (contradictions, forgotten rules) and burn usage faster. So every chat and every
-coding session is one batch with a fixed budget, then it stops and reports.
-- Budget: at most 3 tasks from the queue (or 1 large task). The queue is «الطابور» in `docs/HANDOFF.md`;
-  each item is sized so one batch can finish it.
-- Save as you go: after each task, update `docs/HANDOFF.md` and push, so a usage-limit cut loses nothing.
-- Stop early, even mid-budget, when any of these happens: the owner has sent about 25 messages,
-  the chat has run about 2 hours (check the clock), you contradict an earlier decision or re-ask a
-  settled question, or the usage limit is near. Finish the current step, save, report.
+coding session has ONE goal (one outcome, e.g. "PR queue clean" or "the 3 PC tests done"); tasks are
+just the steps toward it. When the goal is reached, the session stops and reports.
+- Two kinds of work (§2): cloud work (coding, review, cloud tests) runs at night in scheduled sessions;
+  hands-on work (tests on the pharmacy PC) runs in the day, only when the owner says he is at the pharmacy.
+- Save as you go: after each step, update `docs/HANDOFF.md` and push, so a usage-limit cut loses nothing.
+- Stop early when: you contradict an earlier decision, re-ask a settled question or forget a rule
+  (the real signs of drift); or the usage limit is near. Provisional extra limits: about 25 owner
+  messages or about 2 hours. These numbers are estimates; review them after 5 sessions using the end reports.
+- Who starts the next session: day = the owner, by writing «كمّل» in a new chat inside the project;
+  night = scheduled sessions (only when the owner asked for them). A session never opens another session by itself.
 - End report, in this order, in the chat and at the top of `docs/HANDOFF.md`:
   1. done, with evidence (PR/commit/test result); 2. not done and why; 3. decisions taken;
-  4. the next batch (up to 3 items, in order); 5. the line «المحادثة دي اتحفظت وممكن تتمسح».
+  4. the next goal; 5. the line «المحادثة دي اتحفظت وممكن تتمسح».
 - A chat whose report is in `docs/HANDOFF.md` holds nothing else; the owner can delete it.
+- Known gap: the claude.ai project instructions still say "3 tasks per batch"; this file wins. Fix the
+  project instructions in the next day chat.
 
 ## 8. Roles (who manages the project)
 - Manager = the current chat in the claude.ai project «برنامج الصيدلية». There is one manager chat at a
