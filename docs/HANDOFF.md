@@ -12,11 +12,11 @@ Standing rules: [OWNER_RULES.md](OWNER_RULES.md). Work now runs from the claude.
 - No scheduled sessions are enabled, by the owner's decision, until the open work is closed.
 - Pharmacy PC (desktop-5jvh3qd) runs develop fa3ccc2; it can update to c7745bb with «تحديث» (no requirements/migration change since). Still to test there, printer-off first: (1) #98 printer switched off during a sale; (2) scan a label printed in driver mode; (3) update rollback (G6). Then E-Stock export/import rehearsal, #19 trial day, #20 written approval.
 - Progress: official 40% (STATUS.md); raise G6/G7 only with the PC evidence above.
-- «الطابور» (next batches, in order; one batch = up to 3 items, OWNER_RULES §7):
-  - Batch A (no PC needed): merge #213, #163, #225 once Codex is clean on their head; check whether #221 is a duplicate of #219 (close with a note, or rebase); triage the remaining open PRs (#147, #132, #102, #99, #83, #77) into merge / after-launch / close, with a list for the owner before closing anything.
-  - Batch B (owner at the pharmacy PC): press «تحديث» to c7745bb; #98 printer switched off during a sale; scan a driver-mode label.
-  - Batch C (owner at the PC): update rollback (G6); then STATUS.md G6/G7 with the evidence.
-  - Batch D: E-Stock export → import rehearsal on the PC.
+- «الطابور» (one goal per session, OWNER_RULES §7). Night 13/11 has two scheduled sessions (N1 ~03:40, N2 ~08:45 Cairo).
+  - N1 goal: open PR queue clean. Steps: rebase #213 on develop (conflict in docs/HANDOFF.md only after #225) and merge after CI + Codex on the new head; fix #163 (CI red) or close it if its content is already in HANDOFF (note why); decide #221 (duplicate of #219 → close with a note, else rebase); triage #147 #132 #102 #99 #83 #77 into merge / after-launch / close — write the list on #113, close nothing without the owner.
+  - N2 goal: tomorrow's PC tests ready. Steps: re-read the #98 fix and its tests (printer off during a sale → warning, no later print, no drawer); write one plain step-by-step script for the 3 PC tests (#98, scanning a driver-mode label, update rollback G6) in docs/VISIT_18_CHECKLIST.md with the expected result of each step; check #206 (12/24-hour clock) coverage on every screen that shows a time, fix gaps with tests.
+  - Day goal (owner at the pharmacy, he says «أنا في الصيدلية»): press «تحديث», run the 3 PC tests from the N2 script, record evidence on #18, update STATUS.md G6/G7.
+  - The project chat «طلبات الدمج المفتوحة» (opened 12/11 22:00) never started (waiting for repo approval); N1 replaces it, the owner can delete it.
 
 ## 11/11 20:45 — زرار التحديث (B13) عمره ما كان هيشتغل على جهاز الصيدلية: السبب والحل
 - الدليل: «حدّث البرنامج الآن» على `desktop-5jvh3qd` (`d24979e` ← `b5d8891`) رجع 500: `التحديث فشل: Dependencies or database migrations changed; a coordinated upgrade is required`، مع إن `requirements.txt` و`app/migrations` واحد في git بين النسختين. سطر `system.update` في السجل `ok: false`.
