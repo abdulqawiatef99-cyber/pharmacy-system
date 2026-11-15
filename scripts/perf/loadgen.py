@@ -34,7 +34,8 @@ ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().pare
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-os.environ.setdefault("TZ", "Africa/Cairo")
+if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+    os.environ.setdefault("TZ", "Africa/Cairo")
 if hasattr(time, "tzset"):
     time.tzset()
 
