@@ -38,6 +38,10 @@ with this file, this file wins. Change it only through a PR, after the owner agr
   use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
   keep them grouped.
 - After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
+- GitHub minutes (owner decision 15/11, after they ran out on 12/11): run the full suite locally first;
+  add the label `ci` to a PR only when its head is final, so GitHub CI runs once per PR, not on every push.
+  Docs-only PRs run the check without the tests; Windows runs only for Windows-relevant files, PRs into
+  `main` or on demand. Target: under 1,000 of the 2,000 free minutes a month.
 - Temporary, while GitHub Actions is blocked by billing: a PR may be merged into `develop` when
   (a) Codex reviewed its latest head with no unresolved P0/P1, (b) the merging session ran the full
   suite locally on the merge result (current `develop` + the PR) and posted the exact command and
