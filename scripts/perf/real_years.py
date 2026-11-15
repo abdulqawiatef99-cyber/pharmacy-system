@@ -170,6 +170,18 @@ def copy_live(live_db: Path, dest: Path) -> None:
 
 
 # ------------------------------------------------------------------------------------------ generator
+_CLOCK: list = []
+
+# Pharmacy sizes (owner, 15/11: the test must cover the smallest to the largest pharmacy).
+# per_day = sales a day, items = catalog items that sell, staff = cashiers taking turns.
+PROFILES = {
+    "small":  {"per_day": "30-60",     "items": 2000,  "customers": 100,  "suppliers": 6},
+    "medium": {"per_day": "150-300",   "items": 4000,  "customers": 300,  "suppliers": 12},
+    "large":  {"per_day": "800-1200",  "items": 15000, "customers": 1500, "suppliers": 25},
+    "huge":   {"per_day": "2500-3500", "items": 30000, "customers": 5000, "suppliers": 40},
+}
+
+
 def make_generator(a, work: Path):
     import loadgen
     from loadgen import GenDatabase, Generator, OWNER_PW, STAFF_PW
@@ -187,9 +199,15 @@ def make_generator(a, work: Path):
             self.work = work / "gen" / "data"
             self.upload_dir = self.work / "uploads"
             self.start = date.today()
-            self.clock = SimClock(datetime(self.start.year, self.start.month, self.start.day, 8, 0).astimezone())
+            start = datetime(self.start.year, self.start.month, self.start.day, 8, 0).astimezone()
+            if _CLOCK:                                   # one clock per process: install_python patches modules once
+                self.clock = _CLOCK[0]
+                self.clock.now_utc = SimClock(start).now_utc
+            else:
+                self.clock = SimClock(start)
+                _CLOCK.append(self.clock)
+                install_python(self.clock)
             GenDatabase.clock = self.clock
-            install_python(self.clock)
             self.db = GenDatabase(self.work / "pharmacy.db")
             self.lo, self.hi = (int(x) for x in a.per_day.split("-"))
             self.stats = {k: 0 for k in ("sales", "sale_lines", "returns", "voids", "purchases", "purchase_lines",
@@ -443,11 +461,91 @@ def summary(snaps: list[dict]) -> list[str]:
 
 
 # ------------------------------------------------------------------------------------------ main
+def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: Report) -> bool:
+    """One pharmacy size on its own fresh copy. Returns False when the night ran out (stop-at or disk)."""
+    labels = {d: (f"{d} days" if a.days else f"{d / 365:g} year" + ("s" if d != 365 else "")) for d in days}
+    lo, hi = (int(x) for x in a.per_day.split("-"))
+    work_parent = Path(a.work) if a.work else Path(tempfile.gettempdir())
+    work = Path(tempfile.mkdtemp(prefix="pharm-real-years-", dir=work_parent))
+    need = 3 * (live_db.stat().st_size + days[-1] * (lo + hi) // 2 * 10_000)   # ~10 KB a sale (PERFORMANCE.md)
+    if free_bytes(work) < need:
+        report.note(f"{pname}: free disk {free_bytes(work) / 1e9:.1f} GB, estimated need {need / 1e9:.1f} GB:"
+                    " it stops when the disk is short")
+    gen = None
+    went_on = True
+    try:
+        report.progress(f"{pname}: copying the live database (read-only)")
+        (work / "gen" / "data").mkdir(parents=True)
+        copy_live(live_db, work / "gen" / "data" / "pharmacy.db")
+        report.progress(f"{pname}: preparing the copy")
+        gen = make_generator(a, work)
+        t0 = time.perf_counter()
+        gen.setup()
+        gen.restock(gen.start, initial=True)
+        report.data["base"].setdefault("catalog_items", gen.base_counts["catalog_items"])
+        report.data["base"].setdefault("items_in_stock", gen.base_counts["items_in_stock"])
+        report.data["base"][f"{pname}_setup_s"] = round(time.perf_counter() - t0, 1)
+        report.write()
+        recent: list = []
+        t1 = time.perf_counter()
+        d = 0
+        for target in days:
+            stopped = False
+            while d < target:
+                if stop_at and datetime.now() >= stop_at:
+                    stopped = True
+                    break
+                if free_bytes(work) < 3 * (work / "gen" / "data" / "pharmacy.db").stat().st_size + 500_000_000:
+                    report.note(f"{pname}: disk almost full after {d} days: stopped adding days")
+                    stopped = True
+                    break
+                d += 1
+                gen.run_day(gen.start + timedelta(days=d), recent)
+                if d % 10 == 0:
+                    el = time.perf_counter() - t1
+                    rate = gen.stats["sales"] / el
+                    left = (days[-1] - d) * (lo + hi) / 2 / rate / 3600
+                    report.progress(f"{pname}: day {d} of {days[-1]}, {gen.stats['sales']} sales, {rate:.1f} sales a second,"
+                                    f" about {left:.1f} h left for this size")
+            label = f"{pname} - " + (labels[target] if not stopped else f"{d} days (stopped early)")
+            rec = {"label": label, "profile": pname, "days": d, "gen_s": round(time.perf_counter() - t1),
+                   "stats": dict(gen.stats)}
+            report.data["snapshots"].append(rec)
+            if d == 0:
+                rec["error"] = "no day was added"
+                went_on = False
+                break
+            snap = work / f"snap-{d}" / "data"
+            gen.snapshot_to(snap)
+            try:
+                measure(snap, gen.owner_username, gen.start, a.repeat, rec, report)
+            except Exception as e:                               # keep what was measured, go on with the next snapshot
+                rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+            finally:
+                shutil.rmtree(snap.parent, ignore_errors=True)
+            report.data["summary"] = summary(report.data["snapshots"])
+            report.write()
+            if stopped:
+                went_on = False
+                break
+    finally:
+        if gen is not None:
+            try:
+                gen.db.close()
+            except Exception:
+                pass
+        if not a.keep_work:
+            shutil.rmtree(work, ignore_errors=True)
+    return went_on
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--live-data", default="", help="the program's data folder (default: the installed program's)")
     ap.add_argument("--out-txt", required=True, help="results text file (timings only); a .json is written next to it")
     ap.add_argument("--work", default="", help="folder for the temporary copy (default: the system temp folder)")
+    ap.add_argument("--profiles", default="small,medium", help=f"pharmacy sizes in order, from {', '.join(PROFILES)};"
+                    " empty = use --per-day/--items/--customers/--suppliers as given")
     ap.add_argument("--years", default="1,3,5", help="snapshots, in years of activity")
     ap.add_argument("--days", default="", help="snapshots in days (overrides --years; smoke runs)")
     ap.add_argument("--stop-at", default="", help="local HH:MM: stop adding days at this time and measure what exists")
@@ -474,9 +572,12 @@ def main(argv=None):
         report.data["status"] = "stopped"
         report.note("the program's database was not found")
         return 2
+    names = [p.strip() for p in a.profiles.split(",") if p.strip()]
+    bad = [p for p in names if p not in PROFILES]
+    if bad:
+        raise SystemExit(f"unknown size {bad}; choose from {list(PROFILES)}")
     days = [int(x) for x in a.days.split(",") if x] if a.days else [int(round(float(y) * 365)) for y in a.years.split(",") if y]
     days = sorted(set(days))
-    labels = {d: (f"{d} days" if a.days else f"{d / 365:g} year" + ("s" if d != 365 else "")) for d in days}
     stop_at = None
     if a.stop_at:
         hh, mm = (int(x) for x in a.stop_at.split(":"))
@@ -484,63 +585,17 @@ def main(argv=None):
         stop_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if stop_at <= now:
             stop_at += timedelta(days=1)
-    report.data["plan"] = {"snapshot_days": days, "per_day": a.per_day, "items": a.items, "stop_at": stop_at.isoformat(timespec="minutes") if stop_at else None,
+    report.data["plan"] = {"sizes": {p: PROFILES[p] for p in names} if names else {"custom": {"per_day": a.per_day, "items": a.items}},
+                           "snapshot_days": days, "stop_at": stop_at.isoformat(timespec="minutes") if stop_at else None,
                            "cpus": os.cpu_count(), "python": sys.version.split()[0]}
+    report.data["base"] = {"db_mb": round(live_db.stat().st_size / 1e6, 1)}
     keep_awake()
-    work_parent = Path(a.work) if a.work else Path(tempfile.gettempdir())
-    work = Path(tempfile.mkdtemp(prefix="pharm-real-years-", dir=work_parent))
-    db_bytes = live_db.stat().st_size
-    report.data["base"] = {"db_mb": round(db_bytes / 1e6, 1)}
-    need = 3 * (db_bytes + days[-1] * 2_300_000)        # ~0.8 GB per synthetic year at 150-300 sales a day (PERFORMANCE.md)
-    if free_bytes(work) < need:
-        report.note(f"free disk {free_bytes(work) / 1e9:.1f} GB, estimated need {need / 1e9:.1f} GB: it stops when the disk is short")
-    gen = None
     try:
-        report.progress("copying the live database (read-only)")
-        (work / "gen" / "data").mkdir(parents=True)
-        copy_live(live_db, work / "gen" / "data" / "pharmacy.db")
-        report.progress("preparing the copy")
-        gen = make_generator(a, work)
-        t0 = time.perf_counter()
-        gen.setup()
-        gen.restock(gen.start, initial=True)
-        report.data["base"].update(gen.base_counts, setup_s=round(time.perf_counter() - t0, 1))
-        report.write()
-        recent: list = []
-        t1 = time.perf_counter()
-        d = 0
-        for target in days:
-            stopped = False
-            while d < target:
-                if stop_at and datetime.now() >= stop_at:
-                    stopped = True
-                    break
-                if free_bytes(work) < 3 * (work / "gen" / "data" / "pharmacy.db").stat().st_size + 500_000_000:
-                    report.note(f"disk almost full after {d} days: stopped adding days")
-                    stopped = True
-                    break
-                d += 1
-                gen.run_day(gen.start + timedelta(days=d), recent)
-                if d % 10 == 0:
-                    rate = d / (time.perf_counter() - t1)
-                    report.progress(f"day {d} of {days[-1]} ({rate * 3600:.0f} days an hour), sales {gen.stats['sales']}")
-            label = labels[target] if not stopped else f"{d} days (stopped early)"
-            rec = {"label": label, "days": d, "gen_s": round(time.perf_counter() - t1), "stats": dict(gen.stats)}
-            report.data["snapshots"].append(rec)
-            if d == 0:
-                rec["error"] = "no day was added"
-                break
-            snap = work / f"snap-{d}" / "data"
-            gen.snapshot_to(snap)
-            try:
-                measure(snap, gen.owner_username, gen.start, a.repeat, rec, report)
-            except Exception as e:                               # keep what was measured, go on with the next snapshot
-                rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
-            finally:
-                shutil.rmtree(snap.parent, ignore_errors=True)
-            report.data["summary"] = summary(report.data["snapshots"])
-            report.write()
-            if stopped:
+        for pname in names or ["custom"]:
+            if pname != "custom":
+                for k, v in PROFILES[pname].items():
+                    setattr(a, k, v)
+            if not run_profile(a, pname, live_db, days, stop_at, report):
                 break
         report.data["status"] = "finished"
     except BaseException as e:
@@ -549,14 +604,7 @@ def main(argv=None):
         report.note("where: " + " <- ".join(f"{Path(fr.filename).name}:{fr.lineno}" for fr in traceback.extract_tb(e.__traceback__)[-4:]))
         raise
     finally:
-        if gen is not None:
-            try:
-                gen.db.close()
-            except Exception:
-                pass
-        if not a.keep_work:
-            shutil.rmtree(work, ignore_errors=True)
-        report.progress(report.data["progress"] + ("" if a.keep_work else "  (work folder deleted)"))
+        report.progress(report.data["progress"] + ("" if a.keep_work else "  (work folders deleted)"))
     print("\n".join(report.data.get("summary") or []))
     return 0
 
