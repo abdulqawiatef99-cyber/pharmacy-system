@@ -13,6 +13,11 @@
 - Owner requests saved for after launch (15/11): #246 F35 two UI looks, #247 F36 first-run guided tour, #248 F37 import from any program/format (`docs/FUTURE_REQUIREMENTS.md`).
 - Test 1 (#98 printer off) PASS on the PC (1.1–1.6; evidence on #18). Test 2 (label scan) parked by the owner. Now: E-Stock import dry run on the PC (`PHARMACY-TEST\estock-test.bat`, files in `C:\estock`, copy of the DB, counts only leave the PC).
 
+- 19:25 **real E-Stock import applied on the pharmacy PC** (owner decision: use the 24/10 exports as real data for the trial): 30,470 items, 3,031 batches, reconciliation OK, backup `pharmacy-backup-20261115-192414.zip` first (#19 comment).
+- 19:30 **launch-critical #249**: stock report 118 s and the whole server frozen on real data (stale `sqlite_stat1` + sync report on the event loop). Workaround on the PC: `ANALYZE` + restart → 0.23 s. Code fix still needed (next coding batch, first).
+- Owner requests saved 15/11 evening: #250 phone access + auto layout, #251 customize UI, #252 security review (launch-critical), #253 real-scale multi-year tests on the PC (launch-critical), #254 lessons from the E-Stock main/sub/branch setup. Multi-invoice tabs already exist (F2).
+- **Next coding batch (Claude Code), in order:** #249 → #253 → #252. Then the #19 trial day.
+
 ## 13/11 19:45 Cairo — owner decisions (manager chat)
 - New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
 - Rules added to `OWNER_RULES.md`: every model uses the same critical, constructive mindset and short Arabic with the owner; model-to-model talk in short English; «إحنا فين؟» = 5-line status from the files.
