@@ -36,7 +36,8 @@ from pathlib import Path
 # PHARM_PROGRAM_DIR: run these scripts from a folder outside the installed program (real_years.py on the PC)
 ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().parents[2])
 sys.path.insert(0, str(ROOT))
-os.environ.setdefault("TZ", "Africa/Cairo")
+if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+    os.environ.setdefault("TZ", "Africa/Cairo")
 if hasattr(time, "tzset"):
     time.tzset()
 
