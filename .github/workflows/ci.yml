@@ -17,8 +17,14 @@ on:
 permissions:
   contents: read
 
+# Only an event that will run joins the shared group (and cancels the older run): an unlabelled push or an
+# unrelated label gets a group of its own, so it never cancels a running "ci" validation.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: >-
+    ${{ (github.event_name != 'pull_request' ||
+         (contains(github.event.pull_request.labels.*.name, 'ci') &&
+          (github.event.action != 'labeled' || github.event.label.name == 'ci')))
+        && format('ci-{0}', github.ref) || format('ci-skip-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

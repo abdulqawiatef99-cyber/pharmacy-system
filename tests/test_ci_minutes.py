@@ -21,6 +21,14 @@ class TestCiMinutes(unittest.TestCase):
         self.assertIn("github.event.label.name == 'ci'", self.ci)       # another label must not start a run
         self.assertRegex(self.ci, r"  linux:\n    needs: changes\n")
 
+    def test_skipped_events_never_cancel_a_running_validation(self):
+        conc = self.ci[self.ci.index("concurrency:"):self.ci.index("jobs:")]
+        self.assertIn("format('ci-{0}', github.ref)", conc)
+        self.assertIn("format('ci-skip-{0}', github.run_id)", conc)     # unique group for events that run nothing
+        gate = "contains(github.event.pull_request.labels.*.name, 'ci')"
+        self.assertIn(gate, conc)
+        self.assertIn("github.event.label.name == 'ci'", conc)
+
     def test_docs_only_changes_skip_the_test_steps_but_keep_the_check(self):
         linux = self.ci[self.ci.index("\n  linux:\n"):self.ci.index("\n  windows:\n")]
         for step in ("Release channel source", "Install", "Browser for the UI tests", "Tests"):
