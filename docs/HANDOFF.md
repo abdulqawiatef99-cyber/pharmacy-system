@@ -4,6 +4,12 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 15/11 17:45 Cairo — day chat (owner at the pharmacy)
+- Merged under the OWNER_RULES §4 temporary rule (CI still blocked by GitHub billing; last Actions run 13/11 17:52 UTC failed): **#241** (12/24-hour clock everywhere, Codex clean on `e9dd019`) and **#244** (owner rules + queue #243; Codex P2 only). Each: local full suite on the merge result, 1002 OK (2 skip), command and counts on the PR.
+- Correction (Codex P2 on #244): billing does **not** stop every merge. Under §4's temporary rule a PR merges after a clean Codex review (no P0/P1) and a local full-suite run on the merge result, unless it touches `app/printing/`, `installer/`, Windows-only scripts, `requirements.txt` or `app/migrations`; only those wait for real CI.
+- `develop` now has #240 (#98 one printer-off warning) and #241; no migration or `requirements.txt` change since the PC's `fa3ccc2`, so «تحديث» can deliver them.
+- Pharmacy PC: program up (`/api/health` ok, schema `0033`), browser pane not logged in. Next with the owner: he logs in, presses «حدّث البرنامج الآن» (day script test 3), then tests 1 and 2 (`docs/VISIT_18_CHECKLIST.md`). The rollback step 3.4 needs a shell on the PC (not available in this chat) or the owner.
+
 ## 13/11 19:45 Cairo — owner decisions (manager chat)
 - New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
 - Rules added to `OWNER_RULES.md`: every model uses the same critical, constructive mindset and short Arabic with the owner; model-to-model talk in short English; «إحنا فين؟» = 5-line status from the files.
