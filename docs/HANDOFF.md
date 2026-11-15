@@ -4,6 +4,11 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 13/11 19:45 Cairo — owner decisions (manager chat)
+- New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
+- Rules added to `OWNER_RULES.md`: every model uses the same critical, constructive mindset and short Arabic with the owner; model-to-model talk in short English; «إحنا فين؟» = 5-line status from the files.
+- Still blocked: CI (GitHub billing since 12/11 20:17 UTC; last run 13/11 10:08 UTC failed). Nothing merges until the owner fixes billing.
+
 ## 13/11 07:30 UTC — N2 end report (goal: tomorrow's pharmacy PC tests ready) — REACHED (merges blocked by CI billing)
 1. Done, with evidence
    - #98 re-read: the fix holds (job cancelled, nothing fires later, audit `not_printed`). **Gap found:** each toast replaced the last, so with the printer off the cashier saw only the drawer warning, never the receipt one. Fix + 5 server tests (every drawer timing with 2 copies, card sale, delivery, retried F9, next sale after power-on) + 1 browser test that fails before the fix → **PR #240**, head `8fb0ba1`, full suite 997 OK locally, **Codex clean**.
