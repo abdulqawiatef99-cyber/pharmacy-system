@@ -158,6 +158,13 @@ CASHIER_GETS = {"search name (4 letters)", "search barcode", "POS quick buttons"
 
 
 # ------------------------------------------------------------------------------------------ copy
+def safe_error(e: BaseException) -> str:
+    """Error type and where it happened only: program messages can carry the pharmacy's name or item names."""
+    where = " <- ".join(f"{Path(fr.filename).name}:{fr.lineno}" for fr in traceback.extract_tb(e.__traceback__)[-4:])
+    own = isinstance(e, SystemExit) and isinstance(e.code, str)      # this script's own messages hold no data
+    return f"{type(e).__name__}" + (f": {e.code}" if own else "") + (f" at {where}" if where else "")
+
+
 def copy_live(live_db: Path, dest: Path) -> None:
     """One read-only open of the live database; a consistent copy even while the program is running."""
     src = sqlite3.connect(f"file:{live_db.as_posix()}?mode=ro", uri=True, timeout=60)
@@ -441,22 +448,45 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
 
 
 def summary(snaps: list[dict]) -> list[str]:
+    """Per snapshot: ALL PASS only when everything was measured and nothing failed."""
     out = []
     for s in snaps:
-        slow = []
-        for name, r in (s.get("cashier") or {}).items():
-            if isinstance(r, dict) and r["max_ms"] >= CASHIER_MS:
-                slow.append(f"{name} {r['max_ms']} ms")
+        slow, failed = [], []
+        if s.get("error"):
+            failed.append(s["error"])
+        cashier = s.get("cashier")
+        if cashier is None:
+            failed.append("cashier flow not measured")
+        else:
+            if cashier.get("errors"):
+                failed.append(f"cashier refused {cashier['errors']} steps")
+            for name, r in cashier.items():
+                if isinstance(r, dict) and r["max_ms"] >= CASHIER_MS:
+                    slow.append(f"{name} {r['max_ms']} ms")
+        if not s.get("requests"):
+            failed.append("reports not measured")
         for name, r in (s.get("requests") or {}).items():
             lim = CASHIER_MS if name in CASHIER_GETS else REPORT_MS
-            if r["max_ms"] >= lim or r.get("status") != 200:
-                slow.append(f"{name} {r['max_ms']} ms" + ("" if r.get("status") == 200 else f" HTTP {r.get('status')}"))
+            if r.get("status") != 200:
+                failed.append(f"{name} HTTP {r.get('status')}")
+            elif r["max_ms"] >= lim:
+                slow.append(f"{name} {r['max_ms']} ms")
         for key in ("during_backup", "during_report"):
-            b = s.get(key) or {}
+            b = s.get(key)
+            if b is None:
+                failed.append(f"{key} not measured")
+                continue
+            if b.get("error") or b.get("status") != 200:
+                failed.append(f"{key} {b.get('error') or 'HTTP ' + str(b.get('status'))}")
             if b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
                 slow.append(f"{key} scan {b['add_line_max_ms']} ms")
-        verdict = "ERROR" if s.get("error") and not s.get("requests") else ("ALL PASS" if not slow else f"{len(slow)} SLOW")
-        out.append(f"{s['label']}: {verdict}" + (": " + "; ".join(slow) if slow else ""))
+        bk = s.get("backup")
+        if bk is None:
+            failed.append("backup not measured")
+        elif bk.get("verify_problems") or bk.get("quick_check_problems"):
+            failed.append("backup check found problems")
+        verdict = "INCOMPLETE" if failed else ("ALL PASS" if not slow else f"{len(slow)} SLOW")
+        out.append(f"{s['label']}: {verdict}" + (": " + "; ".join(failed + slow) if failed or slow else ""))
     return out
 
 
@@ -467,7 +497,9 @@ def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: 
     lo, hi = (int(x) for x in a.per_day.split("-"))
     work_parent = Path(a.work) if a.work else Path(tempfile.gettempdir())
     work = Path(tempfile.mkdtemp(prefix="pharm-real-years-", dir=work_parent))
-    need = 3 * (live_db.stat().st_size + days[-1] * (lo + hi) // 2 * 10_000)   # ~10 KB a sale (PERFORMANCE.md)
+    uploads = live_db.parent / "uploads"
+    up_bytes = sum(f.stat().st_size for f in uploads.rglob("*") if f.is_file()) if uploads.is_dir() else 0
+    need = 3 * (live_db.stat().st_size + up_bytes + days[-1] * (lo + hi) // 2 * 10_000)   # ~10 KB a sale (PERFORMANCE.md)
     if free_bytes(work) < need:
         report.note(f"{pname}: free disk {free_bytes(work) / 1e9:.1f} GB, estimated need {need / 1e9:.1f} GB:"
                     " it stops when the disk is short")
@@ -477,6 +509,8 @@ def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: 
         report.progress(f"{pname}: copying the live database (read-only)")
         (work / "gen" / "data").mkdir(parents=True)
         copy_live(live_db, work / "gen" / "data" / "pharmacy.db")
+        if (live_db.parent / "uploads").is_dir():         # registered attachments: a restore refuses an archive without them
+            shutil.copytree(live_db.parent / "uploads", work / "gen" / "data" / "uploads")
         report.progress(f"{pname}: preparing the copy")
         gen = make_generator(a, work)
         t0 = time.perf_counter()
@@ -520,7 +554,7 @@ def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: 
             try:
                 measure(snap, gen.owner_username, gen.start, a.repeat, rec, report)
             except Exception as e:                               # keep what was measured, go on with the next snapshot
-                rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                rec["error"] = safe_error(e)
             finally:
                 shutil.rmtree(snap.parent, ignore_errors=True)
             report.data["summary"] = summary(report.data["snapshots"])
@@ -600,8 +634,7 @@ def main(argv=None):
         report.data["status"] = "finished"
     except BaseException as e:
         report.data["status"] = "failed"
-        report.note(f"{type(e).__name__}: {str(e)[:300]}")
-        report.note("where: " + " <- ".join(f"{Path(fr.filename).name}:{fr.lineno}" for fr in traceback.extract_tb(e.__traceback__)[-4:]))
+        report.note(safe_error(e))
         raise
     finally:
         report.progress(report.data["progress"] + ("" if a.keep_work else "  (work folders deleted)"))
