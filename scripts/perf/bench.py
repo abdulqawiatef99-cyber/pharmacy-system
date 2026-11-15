@@ -33,7 +33,8 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# PHARM_PROGRAM_DIR: run these scripts from a folder outside the installed program (real_years.py on the PC)
+ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().parents[2])
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("TZ", "Africa/Cairo")
 if hasattr(time, "tzset"):
@@ -155,7 +156,7 @@ class Server:
         env = {**os.environ, "PHARM_DATA_DIR": str(data), "PHARM_BACKUP_DIR": str(data.parent / "backups"),
                "PYTHONUNBUFFERED": "1", **(env_extra or {})}
         self.t0 = time.perf_counter()
-        self.p = subprocess.Popen([sys.executable, str(ROOT / "scripts/perf/serve_at.py"), "--at", at, "--port", str(self.port)],
+        self.p = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "serve_at.py"), "--at", at, "--port", str(self.port)],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.log: list[str] = []
         threading.Thread(target=self._drain, daemon=True).start()
@@ -340,7 +341,7 @@ def backup_measure(data: Path, work: Path) -> dict:
 # ------------------------------------------------------------------------------------------ explain
 def explain(data: Path, f: dict, slow_ms: float) -> list[dict]:
     """Run the same requests in-process with a timing Database; EXPLAIN QUERY PLAN for slow SQL."""
-    sys.path.insert(0, str(ROOT / "scripts/perf"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from serve_at import _RunningClock
     from simclock import install_python
     install_python(_RunningClock(datetime.fromisoformat(f["end_local"]).astimezone()))
