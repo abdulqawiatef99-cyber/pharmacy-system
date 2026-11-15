@@ -4,6 +4,11 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 15/11 21:00 Cairo — manager chat (cloud)
+- #253: `scripts/perf/real_years.py` + `tests/test_perf_real_years.py` (copy-only, timings-only; live DB sha unchanged, work folder deleted, no names in results). Runs from `PHARMACY-TEST\perf\` with `PHARM_PROGRAM_DIR` (installed program untouched); one-click `PHARMACY-TEST\real-years-test.bat`, `--stop-at 08:30`. Smoke runs pass here.
+- Owner asked for a full review + two-track plan (pharmacy / cloud) by priority: `docs/WORK_PLAN.md` (also in the claude.ai project). Key findings: ~10 KB per sale (5 years ≈ 4 GB DB, ≈ 24 GB kept backups, hourly backup ≈ 4 min); `app/core/retention.py` says 20–40 MB/year (wrong); #19 must run on a copy now that the PC holds real data; real daily invoice count to be taken from E-Stock exports on the PC.
+- Blocked: this chat got read-only GitHub access (push denied), so the branch `claude/253-real-years` is local only until the owner grants push.
+
 ## 15/11 17:45 Cairo — day chat (owner at the pharmacy)
 - Merged under the OWNER_RULES §4 temporary rule (CI still blocked by GitHub billing; last Actions run 13/11 17:52 UTC failed): **#241** (12/24-hour clock everywhere, Codex clean on `e9dd019`) and **#244** (owner rules + queue #243; Codex P2 only). Each: local full suite on the merge result, 1002 OK (2 skip), command and counts on the PR.
 - Correction (Codex P2 on #244): billing does **not** stop every merge. Under §4's temporary rule a PR merges after a clean Codex review (no P0/P1) and a local full-suite run on the merge result, unless it touches `app/printing/`, `installer/`, Windows-only scripts, `requirements.txt` or `app/migrations`; only those wait for real CI.
