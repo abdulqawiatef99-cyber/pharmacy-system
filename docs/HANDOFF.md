@@ -16,7 +16,8 @@
 - 19:25 **real E-Stock import applied on the pharmacy PC** (owner decision: use the 24/10 exports as real data for the trial): 30,470 items, 3,031 batches, reconciliation OK, backup `pharmacy-backup-20261115-192414.zip` first (#19 comment).
 - 19:30 **launch-critical #249**: stock report 118 s and the whole server frozen on real data (stale `sqlite_stat1` + sync report on the event loop). Workaround on the PC: `ANALYZE` + restart → 0.23 s. Code fix still needed (next coding batch, first).
 - Owner requests saved 15/11 evening: #250 phone access + auto layout, #251 customize UI, #252 security review (launch-critical), #253 real-scale multi-year tests on the PC (launch-critical), #254 lessons from the E-Stock main/sub/branch setup. Multi-invoice tabs already exist (F2).
-- **Next coding batch (Claude Code), in order:** #249 → #253 → #252. Then the #19 trial day.
+- 20:10 **#249 fixed by #255** (merged under the temporary rule, Codex clean, 1008 OK), PC updated to `4c7a7d6`: stock report 133 ms (was 118 s), `/api/health` answers during a report; #249 closed.
+- **Next, in order:** #253 (multi-year real-scale tests on the PC, on a copy) → #252 (security review) → #19 trial day.
 
 ## 13/11 19:45 Cairo — owner decisions (manager chat)
 - New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
