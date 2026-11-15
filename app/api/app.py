@@ -530,8 +530,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         from ..core import ui_settings
         from ..inventory import integrity
+        from ..printing import settings as rs
         return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx),
-                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx)})
+                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx),
+                  "time_format": rs.get(db, ctx.org_id)["time_format"]})   # #206: every screen shows times this way
 
     @handler
     async def stock_alert_api(req):
@@ -742,7 +744,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
-        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        from ..printing import settings as rs
+        when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
             f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
@@ -1918,7 +1921,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
-        t = lambda iso: accounts.parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M") if iso else "—"  # noqa: E731
+        from ..printing import settings as rs
+        tf = rs.get(db, ctx.org_id)["time_format"]                                                        # #206
+        t = lambda iso: rs.fmt_when(accounts.parse_iso(iso).astimezone(), tf) if iso else "—"  # noqa: E731
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
                 ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
