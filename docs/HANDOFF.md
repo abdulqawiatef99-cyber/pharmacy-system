@@ -10,6 +10,9 @@
 - `develop` now has #240 (#98 one printer-off warning) and #241; no migration or `requirements.txt` change since the PC's `fa3ccc2`, so «تحديث» can deliver them.
 - Pharmacy PC: day script **test 3 PASS end to end** (18:38 update `213b773 → 1c5cab6`; 18:55 rollback via `rollback-test.bat`, restart from the program entry, installed back to `213b773`, data unchanged; 18:57 update again to `1c5cab6`; evidence on #18). `STATUS.md` G6 → L2, total 40% → 45.25%. The PC runs #240 and #241. Left with the owner: tests 1 (printer off) and 2 (driver label scan).
 
+- Owner requests saved for after launch (15/11): #246 F35 two UI looks, #247 F36 first-run guided tour, #248 F37 import from any program/format (`docs/FUTURE_REQUIREMENTS.md`).
+- Test 1 (#98 printer off) PASS on the PC (1.1–1.6; evidence on #18). Test 2 (label scan) parked by the owner. Now: E-Stock import dry run on the PC (`PHARMACY-TEST\estock-test.bat`, files in `C:\estock`, copy of the DB, counts only leave the PC).
+
 ## 13/11 19:45 Cairo — owner decisions (manager chat)
 - New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
 - Rules added to `OWNER_RULES.md`: every model uses the same critical, constructive mindset and short Arabic with the owner; model-to-model talk in short English; «إحنا فين؟» = 5-line status from the files.
