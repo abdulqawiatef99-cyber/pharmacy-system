@@ -4,6 +4,12 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 15/11 20:40 Cairo — ideas chat (cloud only, no code)
+- Owner asked for program/operations ideas, smart survey questions, and other models' opinions. Sent the prompt to 6 AI sites: only ChatGPT answered (Gemini/Grok no reply with the pane hidden; Perplexity/DeepSeek/Copilot need sign-in).
+- Double-checked against `develop` @ `db8a3b9`: offer evaluator, customer credit limit, per-batch legal price, purchase-cost rise warning and recalls already exist, so dropped. New entries **F38–F49** in `FUTURE_REQUIREMENTS.md`; ranked plan and timeline in `docs/IDEAS_PLAN.md`. All after launch, except **F47-a** (track-and-trace research, no code, class B): queue it after #253 and #252, before #19.
+- Verified at the source: EDA Decree 475/2025 covers pharmacies (registry, devices, linkage; imported from 1/2/2026, local from 1/8/2026, phased); Decree 380/2009 requires visible thermometer/hygrometer, readings at fixed intervals, max 30°C.
+- New owner reminders: ask the accountant whether the pharmacy is in an e-receipt phase; start a paper temperature log now (until F38).
+
 ## 15/11 17:45 Cairo — day chat (owner at the pharmacy)
 - Merged under the OWNER_RULES §4 temporary rule (CI still blocked by GitHub billing; last Actions run 13/11 17:52 UTC failed): **#241** (12/24-hour clock everywhere, Codex clean on `e9dd019`) and **#244** (owner rules + queue #243; Codex P2 only). Each: local full suite on the merge result, 1002 OK (2 skip), command and counts on the PR.
 - Correction (Codex P2 on #244): billing does **not** stop every merge. Under §4's temporary rule a PR merges after a clean Codex review (no P0/P1) and a local full-suite run on the merge result, unless it touches `app/printing/`, `installer/`, Windows-only scripts, `requirements.txt` or `app/migrations`; only those wait for real CI.
