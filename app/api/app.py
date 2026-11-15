@@ -354,6 +354,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                          status_code=500)
         return wrapped
 
+    async def off_loop(fn, *args, **kwargs):
+        """#249: a report reads in a worker thread, on that thread's own connection and inside one
+        read snapshot, so a long report never stops the cashier screen or /api/health."""
+        def run():
+            with db.read_snapshot():
+                return fn(*args, **kwargs)
+        return await run_in_threadpool(run)
+
     # ------------------------------------------------------------- auth
     @handler
     async def login(req):
@@ -678,7 +686,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
-        return J(invoices.report(db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
+        return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
                                  item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
 
@@ -689,13 +697,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not fn:
             raise NotFound("التقرير غير موجود")
         qp = req.query_params
-        return J(fn(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fn, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def warnings_rep(req):
         from ..sales.service import warnings_report
         qp = req.query_params
-        return J(warnings_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(warnings_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def stock_reasons(req):
@@ -717,7 +725,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def losses_report(req):
         from ..inventory import adjust
         qp = req.query_params
-        return J(adjust.loss_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(adjust.loss_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def supplier_returns_api(req):
@@ -861,7 +869,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def transfers_report(req):
         from ..sales import attachments as att
         qp = req.query_params
-        return J(att.transfers(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(att.transfers, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def exp_sched(req):
@@ -953,13 +961,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def profit_report(req):
         qp = req.query_params
-        return J(fin.profit(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fin.profit, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def home_view(req):
         from ..reports import service as rep_svc
         ctx = ctx_of(req)
-        out = rep_svc.home(db, ctx)
+        out = await off_loop(rep_svc.home, db, ctx)
         if ctx.can("settings.manage"):
             st = autob.state()
             out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
@@ -969,12 +977,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def reports_sales(req):
         from ..reports import service as rep_svc
         qp = req.query_params
-        return J(rep_svc.sales_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(rep_svc.sales_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def reports_stock(req):
         from ..reports import service as rep_svc
-        return J(rep_svc.stock_report(db, ctx_of(req)))
+        return J(await off_loop(rep_svc.stock_report, db, ctx_of(req)))
 
     @handler
     async def feedback_view(req):
