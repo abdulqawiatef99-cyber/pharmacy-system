@@ -28,7 +28,8 @@ If something here conflicts with an older document, this file wins.
 
 ## 2a. Review loop (Claude Code implements, Codex reviews)
 1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)
-   and comments `@codex review` on it.
+   and comments `@codex review` on it. GitHub CI runs only once the PR has the label `ci`: add it when the
+   head is final and the full suite passed locally (OWNER_RULES §4, GitHub minutes).
 2. Codex reviews on GitHub. Its findings are the record; nothing is passed through chat.
 3. The implementing agent fixes every P0/P1 finding, or replies on the thread with the reason it does
    not apply, then pushes. CI must be green on the final head.
