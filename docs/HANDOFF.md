@@ -4,6 +4,25 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 15/11 17:45 Cairo — day chat (owner at the pharmacy)
+- Merged under the OWNER_RULES §4 temporary rule (CI still blocked by GitHub billing; last Actions run 13/11 17:52 UTC failed): **#241** (12/24-hour clock everywhere, Codex clean on `e9dd019`) and **#244** (owner rules + queue #243; Codex P2 only). Each: local full suite on the merge result, 1002 OK (2 skip), command and counts on the PR.
+- Correction (Codex P2 on #244): billing does **not** stop every merge. Under §4's temporary rule a PR merges after a clean Codex review (no P0/P1) and a local full-suite run on the merge result, unless it touches `app/printing/`, `installer/`, Windows-only scripts, `requirements.txt` or `app/migrations`; only those wait for real CI.
+- `develop` now has #240 (#98 one printer-off warning) and #241; no migration or `requirements.txt` change since the PC's `fa3ccc2`, so «تحديث» can deliver them.
+- Pharmacy PC: day script **test 3 PASS end to end** (18:38 update `213b773 → 1c5cab6`; 18:55 rollback via `rollback-test.bat`, restart from the program entry, installed back to `213b773`, data unchanged; 18:57 update again to `1c5cab6`; evidence on #18). `STATUS.md` G6 → L2, total 40% → 45.25%. The PC runs #240 and #241. Left with the owner: tests 1 (printer off) and 2 (driver label scan).
+
+- Owner requests saved for after launch (15/11): #246 F35 two UI looks, #247 F36 first-run guided tour, #248 F37 import from any program/format (`docs/FUTURE_REQUIREMENTS.md`).
+- Test 1 (#98 printer off) PASS on the PC (1.1–1.6; evidence on #18). Test 2 (label scan) parked by the owner. Now: E-Stock import dry run on the PC (`PHARMACY-TEST\estock-test.bat`, files in `C:\estock`, copy of the DB, counts only leave the PC).
+
+- 19:25 **real E-Stock import applied on the pharmacy PC** (owner decision: use the 24/10 exports as real data for the trial): 30,470 items, 3,031 batches, reconciliation OK, backup `pharmacy-backup-20261115-192414.zip` first (#19 comment).
+- 19:30 **launch-critical #249**: stock report 118 s and the whole server frozen on real data (stale `sqlite_stat1` + sync report on the event loop). Workaround on the PC: `ANALYZE` + restart → 0.23 s. Code fix still needed (next coding batch, first).
+- Owner requests saved 15/11 evening: #250 phone access + auto layout, #251 customize UI, #252 security review (launch-critical), #253 real-scale multi-year tests on the PC (launch-critical), #254 lessons from the E-Stock main/sub/branch setup. Multi-invoice tabs already exist (F2).
+- 20:10 **#249 fixed by #255** (merged under the temporary rule, Codex clean, 1008 OK), PC updated to `4c7a7d6`: stock report 133 ms (was 118 s), `/api/health` answers during a report; #249 closed.
+- #254 closed by the owner (branches not needed; Heikal PC = a separate branch with its own stock, old E-Stock setup, context only).
+- **Next, in order (owner 15/11 20:14):**
+  1. New project chat, cloud only: write `scripts/perf/real_years.py` + a one-click `.bat` for the PC (#253): copies the live DB to a temp folder ON the PC, adds 1, 3 and 5 years of synthetic sales/purchases/returns using the real catalog through the app services, times every report (short and long ranges), search, sale, backup/verify/restore and start-up, and writes timings only to `PHARMACY-TEST\real-years-results.txt`. Test it first on synthetic data in the cloud; PR + Codex + merge.
+  2. Owner leaves the PC on overnight and double-clicks the `.bat` before leaving (no Claude needed overnight; E-Stock untouched; the live DB is only read once to copy it).
+  3. Next day chat: read the results, fix anything slow (pass limits: cashier actions < 0.3 s, any report < 5 s, nothing blocks other users), then #252 security review, then the #19 trial day.
+
 ## 13/11 19:45 Cairo — owner decisions (manager chat)
 - New feature, owner request: before closing a shift, warn about courier cash not handed in and open draft invoices → **#243** (warn, never block; no migration, ships by «تحديث»). Gap found: the courier line is hidden in blind-count mode. **Queue place:** first coding batch after #240 #241 #242 merge (same files `app/web/app.js`); before #97, which rebases on it.
 - Rules added to `OWNER_RULES.md`: every model uses the same critical, constructive mindset and short Arabic with the owner; model-to-model talk in short English; «إحنا فين؟» = 5-line status from the files.
