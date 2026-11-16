@@ -47,6 +47,7 @@ MESSAGES = {
     "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
     "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
+    "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
 }
 
 
@@ -168,6 +169,12 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         if (l.get("bonus_qty") or 0) < 0:
             add("error", "bonus_invalid", lid, "bonus_qty")
         pub, disc, net = l.get("public_price"), l.get("discount_bp"), l.get("unit_net_price")
+        # a file can carry what the screen refuses: a negative price gave a negative unit and average cost
+        for f in ("public_price", "unit_net_price", "tax_amount", "line_total"):
+            if (l.get(f) or 0) < 0:
+                add("error", "negative_amount", lid, f)
+        if disc is not None and not 0 <= disc <= 10000:
+            add("error", "negative_amount", lid, "discount_bp")
         if net is None:
             add("error", "price_missing", lid, "unit_net_price")
         if pub is not None and net is not None:
@@ -205,6 +212,9 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("warning", "duplicate_line", lid, None, other_line=seen[key])
         seen[key] = lid
 
+    for f in ("extra_discount", "extra_tax", "declared_total"):
+        if (invoice.get(f) or 0) < 0:
+            add("error", "negative_amount", None, f)
     comp = computed_total(invoice, lines)
     if comp is not None:      # a negative total would give a negative supplier balance and unit cost
         lines_amount = sum(effective_amount(l) for l in lines)

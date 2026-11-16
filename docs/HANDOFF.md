@@ -4,7 +4,21 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 16/11 evening — manager chat: deep review R3-R7 done in one afternoon, fixes merged (READ THIS FIRST)
+## 16/11 21:30 Cairo — manager chat: second-pass review A (R8-A) turned into PRs (READ THIS FIRST, then the entry below)
+- 18:20: the manager chat was at its usage limit and its push attach was refused, so it scheduled review A (19:45) and
+  review B (00:50 Cairo 17/11). Review A ran read-only (no push, no GitHub API) and left its three fixes as patch files
+  in the claude.ai project «برنامج الصيدلية» (`claude/r8-a-review-2026-11-16.md`).
+- 21:10: push attach worked in the manager chat. The three fixes are now PRs (numbers in the `R8-A log` comment on #203),
+  each with a test that fails on `develop`, full suite run locally, `@codex review` requested, label `ci`.
+  Two of them touch `app/sales/service.py`: merge one, then update the other and re-run CI + Codex (OWNER_RULES §3).
+- The old scheduled session «Pharmacy review R3» (01:00 Cairo 17/11) was disabled by the manager chat at 21:16 (its work was done).
+- Scheduled cloud sessions may again get read-only git (as review A did). If review B leaves patch files in the project
+  instead of PRs, the manager chat applies them the same way.
+- New standing rule (owner, 18:15): every session ends by saying where the next one starts and with which model (`OWNER_RULES.md` §9).
+- Still open from the entry below: (a) owner presses «تحديث» on the cashier PC + stock check, (c) Heikal PC results,
+  (d) #104 + #274 decision, (e) #19 trial day.
+
+## 16/11 evening — manager chat: deep review R3-R7 done in one afternoon, fixes merged
 Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 1. Done, with evidence
    - Owner asked to intensify now (he is at the pharmacy, quiet days) instead of waiting for night sessions. Deep review #203 parts R3, R4, R6, R7 ran as four parallel read-only reviews; R5 (auth, sessions, CSRF, unauthenticated routes, PIN, SQL building, update/network routes, approvals) read by the manager: no new P0/P1 there.

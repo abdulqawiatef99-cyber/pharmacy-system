@@ -1014,7 +1014,10 @@ class Sales:
             lo, hi = local_day_bounds(local_today())
             if not lo <= s["completed_at"] < hi:
                 raise Forbidden("إلغاء الفاتورة مسموح في نفس اليوم فقط؛ استخدم المرتجع", code="void_too_late")
-            if s["returned_total"]:
+            # any return, not only one that refunded money: a line sold for nothing (100% discount) returns
+            # with a refund of 0, and voiding after it would put the same units on the shelf a second time
+            if s["returned_total"] or self.db.one("SELECT 1 FROM sale_returns WHERE sale_id=? AND org_id=?",
+                                                  (sid, ctx.org_id)):
                 raise Conflict("الفاتورة عليها مرتجع؛ لا يمكن إلغاؤها")
             for a in self.db.all("SELECT a.*, l.item_id FROM sale_allocations a JOIN sale_lines l"
                                  " ON l.id=a.sale_line_id JOIN items i ON i.id=l.item_id WHERE l.sale_id=? AND i.is_service=0",
