@@ -422,7 +422,10 @@ class Sales:
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ pricing preview
-    def _plan(self, ctx: Context, s: dict, line: dict, item: dict) -> list[dict]:
+    def _plan(self, ctx: Context, s: dict, line: dict, item: dict, used: dict | None = None) -> list[dict]:
+        """`used` (preview of a draft): units the earlier lines of this invoice already take from each batch,
+        so a second line of the same item is priced from the batch it will really leave from. At completion
+        the earlier lines have already left the stock, so nothing is passed."""
         need = line["qty_base"]
         if item.get("is_service"):          # sold without stock: one allocation, no batch, no movement
             pp = item["public_price"]
@@ -433,7 +436,12 @@ class Sales:
         for b in self._sellable(ctx, s["branch_id"], line["item_id"]):
             if need == 0:
                 break
-            take = min(need, b["qty"])
+            free = b["qty"] - (used.get((line["item_id"], b["batch_key"]), 0) if used is not None else 0)
+            take = min(need, free)
+            if take <= 0:
+                continue
+            if used is not None:
+                used[(line["item_id"], b["batch_key"])] = used.get((line["item_id"], b["batch_key"]), 0) + take
             pack_price = b["public_price"] if b["public_price"] is not None else item["public_price"]
             plan.append({"batch_id": b["batch_key"] or None, "batch_no": b["batch_no"],
                          "expiry_date": b["expiry_date"], "qty": take,
@@ -454,6 +462,7 @@ class Sales:
         self._may_view(ctx, s)
         lines = []
         subtotal = discount = 0
+        used: dict = {}
         for l in self.db.all("SELECT * FROM sale_lines WHERE sale_id=? ORDER BY line_no", (sid,)):
             l = dict(l)
             item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
@@ -470,7 +479,7 @@ class Sales:
                          "mark": cat["mark"] if cat else None, "no_return": bool(cat["no_return"]) if cat else False}
             if s["status"] == "draft":
                 try:
-                    plan = self._plan(ctx, s, l, item)
+                    plan = self._plan(ctx, s, l, item, used)
                 except Conflict:
                     plan, l["problem"] = [], "insufficient_stock"
             else:
