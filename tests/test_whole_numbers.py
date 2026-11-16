@@ -64,3 +64,23 @@ class ScreensSendWhatWasTyped(__import__("unittest").TestCase):
         self.assertNotIn('parseInt($("#cntQty").value', js)
         self.assertIn("const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v;", js)
         self.assertNotIn("const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v;", js)
+
+
+class WholeNumberRange(PlanCase):
+    """A number too big for the browser to hold exactly (or for SQLite at all) is refused with 422.
+    Before: 10**21 as an opening float reached SQLite and answered 500 (OverflowError)."""
+
+    def test_the_helper(self):
+        from app.core.numbers import MAX_SAFE, whole_number
+        self.assertEqual(whole_number(MAX_SAFE), MAX_SAFE)
+        self.assertEqual(whole_number(-MAX_SAFE), -MAX_SAFE)
+        for bad in (MAX_SAFE + 1, -MAX_SAFE - 1, 10**21, 1e21, "62212345678906221234567890", 2**63):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                whole_number(bad)
+
+    def test_an_opening_float_too_big_is_a_422_not_a_500(self):
+        for bad in (10**21, 1e21, 2**63, "62212345678906221234567890"):
+            with self.subTest(bad=bad):
+                self.call("POST", "/api/cash/open", 422, json={"opening_cash": bad})
+        self.call("POST", "/api/cash/open", 201, json={"opening_cash": 10000})
+        self.call("POST", "/api/cash/close", 422, json={"counted_cash": 10**21})
