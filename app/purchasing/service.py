@@ -525,6 +525,9 @@ class Purchasing:
             amounts = [validation.effective_amount(l) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []
+            if any(a < 0 for a in amounts) or inv["extra_discount"] < 0 or inv["extra_tax"] < 0:
+                # second line of defence, as for the total below: never a negative unit cost
+                raise Conflict("في الفاتورة قيمة بالسالب؛ لا يمكن اعتمادها", code="negative_amount")
             gross = sum(amounts)
             net_total = gross - inv["extra_discount"] + inv["extra_tax"]
             if net_total < 0:     # never a negative supplier balance or unit cost, whatever validation said
