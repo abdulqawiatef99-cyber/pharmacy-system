@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 from app.core import approvals, people
 from tests.helpers import needs_browser
 from tests.test_api import APICase, H, approval_headers
+from tests.r3_debt import owe
 
 PW = "Staff-Pass-2026"
 JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
@@ -111,6 +112,7 @@ class ApprovalToken(APICase):
         again, and the same Idempotency-Key replays the first answer: one payment, not two."""
         self.http_login()
         cid = self.c.post("/api/customers", json={"name": "عميل تجربة"}, headers=H).json()["id"]
+        owe(self.db, self.ctx, cid, 1500)                # a collection above the balance is refused
         self.assertEqual(self.a.post("/api/cash/open", json={"opening_cash": 0}, headers=H).status_code, 201)
         path = f"/api/customers/{cid}/payments"
         key = {"Idempotency-Key": "pay-once-1"}
@@ -125,7 +127,7 @@ class ApprovalToken(APICase):
         self.assertEqual(again.status_code, 200, again.text)
         self.assertEqual(again.headers.get("Idempotent-Replay"), "true")
         self.assertEqual(again.json(), first.json())
-        n = self.db.one("SELECT count(*) n FROM customer_ledger WHERE customer_id=?", (cid,))["n"]
+        n = self.db.one("SELECT count(*) n FROM customer_ledger WHERE customer_id=? AND kind='payment'", (cid,))["n"]
         self.assertEqual(n, 1)
 
     def test_the_screen_keeps_the_idempotency_key_when_it_asks_again(self):

@@ -527,6 +527,9 @@ class Purchasing:
             price_changes: list[str] = []
             gross = sum(amounts)
             net_total = gross - inv["extra_discount"] + inv["extra_tax"]
+            if net_total < 0:     # never a negative supplier balance or unit cost, whatever validation said
+                raise Conflict("إجمالي الفاتورة بالسالب (الخصم الإضافي أكبر من إجمالي الأصناف)؛ لا يمكن اعتمادها",
+                               code="negative_total", details={"lines_amount": gross, "total": net_total})
             moved = 0
             for l, amount in zip(lines, amounts):
                 item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?",

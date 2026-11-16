@@ -2,7 +2,9 @@
 
 Two jobs:
   derive_line()   fill values that follow arithmetically from others
-                  (net = public x (1 - discount), total = net x qty + tax),
+                  (net = public x (1 - discount), total = net x qty + tax;
+                  integers only, rounded half up; with an inferred net the total
+                  is qty x public x (1 - discount) rounded once),
                   tagging them source='inferred'. Never invents a quantity,
                   batch or expiry.
   validate()      list issues. level 'error' blocks approval; 'warning' is
@@ -43,6 +45,8 @@ MESSAGES = {
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
     "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
+    "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
+    "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
 }
 
 
@@ -66,6 +70,11 @@ def _j(v) -> dict:
     return json.loads(v or "{}")
 
 
+def half_up_div(n: int, d: int) -> int:
+    """n / d as an integer, rounded half up, with integers only (float round() is half to even)."""
+    return (2 * n + d) // (2 * d)
+
+
 def derive_line(line: dict) -> dict:
     """Mutates and returns line (DB-shaped dict). Only arithmetic consequences."""
     src, conf = _j(line.get("field_sources")), _j(line.get("field_confidence"))
@@ -78,12 +87,16 @@ def derive_line(line: dict) -> dict:
         conf[k] = 1.0
 
     if net is None and pub is not None and disc is not None:
-        put("unit_net_price", round(pub * (10000 - disc) / 10000))
+        put("unit_net_price", half_up_div(pub * (10000 - disc), 10000))
     elif disc is None and pub and net is not None and net <= pub:
-        put("discount_bp", round((pub - net) * 10000 / pub))
+        put("discount_bp", half_up_div((pub - net) * 10000, pub))
     net = line.get("unit_net_price")
     if total is None and net is not None and qty:
-        put("line_total", net * qty + (tax or 0))
+        if src.get("unit_net_price") == "inferred" and pub is not None and disc is not None:
+            # the net is itself a rounded value: round the line once, from the exact figures
+            put("line_total", half_up_div(qty * pub * (10000 - disc), 10000) + (tax or 0))
+        else:
+            put("line_total", net * qty + (tax or 0))
     line["field_sources"], line["field_confidence"] = src, conf
     return line
 
@@ -161,7 +174,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             if net > pub:
                 add("warning", "net_above_public", lid, "unit_net_price")
             if disc is not None and _j(l.get("field_sources")).get("unit_net_price") != "inferred":
-                exp = round(pub * (10000 - disc) / 10000)
+                exp = half_up_div(pub * (10000 - disc), 10000)
                 if abs(exp - net) > max(2, round(pub * 0.005)):
                     add("warning", "net_price_mismatch", lid, "unit_net_price",
                         expected=exp, actual=net)
@@ -193,6 +206,13 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         seen[key] = lid
 
     comp = computed_total(invoice, lines)
+    if comp is not None:      # a negative total would give a negative supplier balance and unit cost
+        lines_amount = sum(effective_amount(l) for l in lines)
+        if (invoice.get("extra_discount") or 0) > lines_amount:
+            add("error", "extra_discount_too_large", None, "extra_discount",
+                extra_discount=invoice.get("extra_discount"), lines_amount=lines_amount)
+        elif comp < 0:
+            add("error", "negative_total", None, None, computed=comp)
     declared = invoice.get("declared_total")
     if declared is None:
         add("warning", "total_missing")

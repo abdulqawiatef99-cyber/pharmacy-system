@@ -15,6 +15,7 @@ from app.inventory import service as inventory
 from app.sales import service as sales_service
 from app.sales.service import Sales
 from tests.test_owner_plan_priority_1_2 import PlanCase
+from tests.r3_debt import owe
 
 
 class AuditCase(PlanCase):
@@ -80,6 +81,7 @@ class TestCashDrawer(AuditCase):
         close of the sale's shift is taken from the new shift and never changes the closed one."""
         self.open_shift(10000)
         s1 = self.sell(self.a, units=3)                           # 31.00 cash
+        owe(self.db, self.ctx, self.cust, 2000)                   # a collection above the balance is refused
         self.call("POST", f"/api/customers/{self.cust}/payments", json={"amount": 2000, "method": "cash"})
         self.call("POST", "/api/cash/movements", json={"amount": 1500, "kind": "payout", "note": "مراجعة"})
         self.assertEqual(self.drawer(), 10000 + 3100 + 2000 - 1500)
