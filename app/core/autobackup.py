@@ -41,6 +41,7 @@ OFFSITE_STALE_DAYS = 3
 # "-auto-incomplete": the database inside is good but a registered attachment was missing or changed
 NAME = re.compile(r"^pharmacy-backup-(\d{8})-(\d{6})(?:-\d+)?-auto(-incomplete)?\.zip$")
 INCOMPLETE = "-auto-incomplete.zip"
+PART_STALE_SECONDS = 3600
 
 _instance: "AutoBackup | None" = None
 
@@ -93,6 +94,16 @@ def prune(folder: Path, cfg: dict) -> list[str]:
                 removed.append(f.name)
             except OSError as e:
                 log.warning("could not delete old backup %s: %s", f, e)
+    # half-written backups left by a crash or a power cut. Only old ones: a fresh one may be a backup
+    # (manual, or a copy to this folder) being written right now.
+    now = time.time()
+    for f in folder.glob("pharmacy-backup-*.zip.part"):
+        try:
+            if f.is_file() and abs(now - f.stat().st_mtime) > PART_STALE_SECONDS:
+                f.unlink()
+                removed.append(f.name)
+        except OSError as e:
+            log.warning("could not delete unfinished backup %s: %s", f, e)
     return removed
 
 

@@ -167,14 +167,21 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
         with open(snap, "rb") as src, lzma.open(xz, "wb", preset=XZ_PRESET) as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
         part = out.with_suffix(".zip.part")
-        with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(xz, "pharmacy.db.xz", compress_type=zipfile.ZIP_STORED)
-            if upload_dir.exists():
-                for f in sorted(upload_dir.rglob("*")):
-                    if f.is_file() and not f.name.endswith(".part"):
-                        z.write(f, "uploads/" + f.relative_to(upload_dir).as_posix())
-            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-        part.replace(out)
+        try:
+            with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(xz, "pharmacy.db.xz", compress_type=zipfile.ZIP_STORED)
+                if upload_dir.exists():
+                    for f in sorted(upload_dir.rglob("*")):
+                        if f.is_file() and not f.name.endswith(".part"):
+                            z.write(f, "uploads/" + f.relative_to(upload_dir).as_posix())
+                z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            part.replace(out)
+        except BaseException:                       # disk full, locked file, Ctrl+C: no half file left behind
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     return out
 
 
