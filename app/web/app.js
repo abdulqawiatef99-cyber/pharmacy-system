@@ -3088,6 +3088,15 @@ async function complete(findings) {
   // for a missing address that is right there on the screen (device test 11/01)
   if (document.activeElement?.dataset?.dl) document.activeElement.blur();
   await POS.saving;
+  // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
+  // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows
+  // another name, so the sale waits until the box and the invoice say the same customer.
+  const custBox = $("#posCust"), bare = (v) => String(v ?? "").replace(/\s+/g, "");
+  if (SALE.customer && custBox && bare(custBox.value) !== bare(SALE.customer.name)) {
+    toast(`الفاتورة مسجلة على العميل «${SALE.customer.name}» والمكتوب في خانة العميل غيره. اختر العميل من القائمة أو اضغط «إزالة العميل»، ثم أتمم البيع`, true);
+    custBox.focus();
+    return;
+  }
   const payments = currentPayments();
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
@@ -3135,7 +3144,16 @@ async function complete(findings) {
     btn.disabled = false;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = null; viewPos(); }
-    if (er.code === "price_changed") { try { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); } catch { /* the message is already shown */ } }
+    // the invoice on the server is not the one on the screen (a price, a contract discount or the stock
+    // moved, or it was edited elsewhere): show it again, the amount due included, before the next F9.
+    // The side panel was left as it was, so the sale could complete at a total the cashier never saw.
+    if (["price_changed", "payment_mismatch", "stale_version"].includes(er.code)) {
+      try {
+        const was = SALE.total;
+        SALE = await api(`/api/sales/${SALE.id}`); renderCart(); renderSide();
+        if (er.code === "payment_mismatch" && SALE.total !== was) toast("تغيّر إجمالي الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع", true);
+      } catch { /* the message is already shown */ }
+    }
     if (er.code === "no_open_shift") $("#posShift").click();
     if (er.code === "below_cost_confirm") {
       const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
@@ -3675,7 +3693,9 @@ async function viewCustomer(id) {
       catch (err) { toast(err.message, true); }
     });
   });
-  const toPos = async (sid) => { SALE = await api(`/api/sales/${sid}`); location.hash = "#/pos"; };
+  // openDraft, not a bare SALE: the payment choice (credit, a split) left on another open invoice must not
+  // become this invoice's payment
+  const toPos = async (sid) => { await openDraft(sid); location.hash = "#/pos"; };
   $("#cuSale")?.addEventListener("click", async () => {
     try { const d = await api("/api/sales", { method: "POST", body: { customer_id: id } }); await toPos(d.id); } catch (err) { toast(err.message, true); }
   });
