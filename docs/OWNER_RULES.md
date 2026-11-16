@@ -129,3 +129,27 @@ just the steps toward it. When the goal is reached, the session stops and report
 - Where the next session starts (owner, 16/11 18:15): at the end of every session, tell the owner where to start
   the next one (a normal Claude chat or a Claude Code session) and with which model, chosen by the task.
 
+## 10. Work chain (owner, 16/11 23:43: approved)
+The owner wants the work to run like automation: when one session ends, the next one starts, without him.
+This section replaces "a session never opens another session by itself" (§7) and "merging stays with the
+manager chat" (§9) inside the limits below.
+- One queue file: `docs/QUEUE.md`. A session takes the first open item, finishes it, marks it, and starts or
+  schedules the next session. Nothing outside the queue is started.
+- Who can do what (checked 16/11: scheduled cloud sessions get read-only git and no GitHub API):
+  - The manager chat has push access. It keeps itself going with timed wake-ups into the same chat; each
+    wake-up applies the workers' patches, opens PRs, merges, and updates the queue.
+  - A scheduled cloud session is a worker: it reads `develop`, does one queue item, and leaves its result as
+    patch files and a log in the claude.ai project «برنامج الصيدلية» (`claude/...`). If a worker does have
+    push access, it opens PRs instead and may merge under the next rule.
+- Merging without the owner: into `develop` only, only when `CI / linux` is green and Codex is clean on the
+  same head (§4). Never by a session: `main`, an installer build, anything under `app/printing/`,
+  `app/migrations/`, `installer/` or `requirements.txt`. Those wait for the owner and the day chat.
+- Brakes: at most 6 sessions or wake-ups a day; the chain stops when the queue is empty, when two in a row
+  fail, or when the usage limit is near. Anything that needs the owner goes to «مستني المالك» in
+  `docs/QUEUE.md` and does not stop the chain.
+- Every day at about 13:00 the manager (day chat) reviews what the chain merged since the last review, before
+  anything else, and tells the owner in plain words.
+- Sign-in on the pharmacy PC (owner, 16/11): never stop to ask the owner to sign in. Folder-access requests
+  are refused automatically; read the test login file with computer use (Notepad, open by path), sign in
+  in the browser pane, close Notepad, release the screen.
+
