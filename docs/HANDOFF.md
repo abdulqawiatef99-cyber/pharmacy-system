@@ -11,8 +11,7 @@
 - 21:10: push attach worked in the manager chat. The three fixes are now PRs (numbers in the `R8-A log` comment on #203),
   each with a test that fails on `develop`, full suite run locally, `@codex review` requested, label `ci`.
   Two of them touch `app/sales/service.py`: merge one, then update the other and re-run CI + Codex (OWNER_RULES §3).
-- The old scheduled session «Pharmacy review R3» (01:00 Cairo 17/11) is still enabled: the tool refused to disable it;
-  the owner turns it off from the scheduled tasks list. Its work is done.
+- The old scheduled session «Pharmacy review R3» (01:00 Cairo 17/11) was disabled by the manager chat at 21:16 (its work was done).
 - Scheduled cloud sessions may again get read-only git (as review A did). If review B leaves patch files in the project
   instead of PRs, the manager chat applies them the same way.
 - New standing rule (owner, 18:15): every session ends by saying where the next one starts and with which model (`OWNER_RULES.md` §9).
