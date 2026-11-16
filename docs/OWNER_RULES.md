@@ -113,4 +113,17 @@ just the steps toward it. When the goal is reached, the session stops and report
   proven ones as program features in `docs/FUTURE_REQUIREMENTS.md`. Nothing is built without the owner.
 - Reports to the owner: one short status of everything in progress, in plain words, no flattery, and the
   manager fills gaps the owner did not mention instead of waiting to be asked.
+- Model per task (owner, 16/11 evening): before any task, batch or new session starts, the manager names the
+  model that is enough for it (the cheapest that does it well) and whether it is a normal chat or a Claude
+  Code session. Strongest model: reviews and fixes of money, stock and security. Opus: routine coding and
+  device work. Sonnet: docs, routine merges, status.
+- Scheduling comes last (owner, 16/11 evening): schedule only at the end of a working day, for what is
+  really left. Anything that needs the owner is timed inside his hours (13:00-24:00) and gets a phone
+  alarm or reminder for him. When the owner is present and free, work is intensified now instead of waiting
+  for the night: parallel review and fix sessions, each on its own claimed files.
+- Two PCs inside the pharmacy: the cashier PC (desktop-5jvh3qd, E-Stock live) and the Heikal PC
+  (desktop-gqgl6uf). The Heikal PC is the test machine (installer, performance at scale, trial day) with
+  synthetic data only; its own E-Stock data is never touched. Every device chat reads the device name first.
+- While working, the manager sends the owner one or two plain lines whenever a stage ends.
+- The manager says at once when a new chat is needed (long chat, risk of mistakes).
 
