@@ -104,3 +104,54 @@ class TestStalePartyBalances(StaleCase):
                              "s2.xlsx", kind="suppliers")
         self.di.apply(self.ctx, r1)
         self.assertTrue(self.di.apply(self.ctx, r2)["reconciliation"]["ok"])
+
+
+class TestLinkDecisionOnOpeningStock(StaleCase):
+    def setUp(self):
+        super().setUp()
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.caf, qty_delta=10, movement_type="purchase",
+                              unit_cost=Decimal("3"))
+
+    def test_link_to_an_item_with_history_is_refused(self):
+        from app.core.errors import ValidationFailed
+        run = self.di.analyze(self.ctx, sheet([["كود", "الصنف", "الرصيد", "التكلفة"], [102, "Cataflam", 5, 49.2]]),
+                              "s.xlsx", kind="opening_stock")
+        row = self.di.get(self.ctx, run)["rows"][0]
+        self.assertEqual([i["code"] for i in row["issues"]], ["item_has_history"])
+        with self.assertRaises(ValidationFailed):
+            self.di.decide(self.ctx, run, row["id"], f"link:{self.caf}")
+        self.assertIsNone(self.db.one("SELECT decision FROM import_rows WHERE id=?", (row["id"],))["decision"])
+        with self.assertRaises(Conflict) as e:
+            self.di.apply(self.ctx, run)
+        self.assertEqual(e.exception.code, "pending_review")
+        self.assertEqual(self.qty(self.caf), 10)
+
+    def test_link_of_another_row_to_an_item_with_history_is_refused(self):
+        """The row's own item is clean, but the decision points at one that has history."""
+        from app.core.errors import ValidationFailed
+        run = self.di.analyze(self.ctx, sheet([["كود", "الصنف", "الرصيد", "التكلفة"], [103, "Augmentin", 5, 120]]),
+                              "s.xlsx", kind="opening_stock")
+        row = self.di.get(self.ctx, run)["rows"][0]
+        with self.assertRaises(ValidationFailed):
+            self.di.decide(self.ctx, run, row["id"], f"link:{self.caf}")
+
+    def test_a_link_decision_stored_before_the_rule_does_not_apply(self):
+        run = self.di.analyze(self.ctx, sheet([["كود", "الصنف", "الرصيد", "التكلفة"], [102, "Cataflam", 5, 49.2]]),
+                              "s.xlsx", kind="opening_stock")
+        row = self.di.get(self.ctx, run)["rows"][0]
+        with self.db.transaction():
+            self.db.execute("UPDATE import_rows SET decision=? WHERE id=?", (f"link:{self.caf}", row["id"]))
+        with self.assertRaises(Conflict) as e:
+            self.di.apply(self.ctx, run)
+        self.assertEqual(e.exception.code, "stale_plan")
+        self.assertEqual(self.qty(self.caf), 10)
+
+    def test_link_to_an_item_without_history_still_works(self):
+        run = self.di.analyze(self.ctx, sheet([["كود", "الصنف", "الرصيد", "التكلفة"], [999, "Augmentin 1gm 14 tab", 5, 120]]),
+                              "s.xlsx", kind="opening_stock")
+        row = self.di.get(self.ctx, run)["rows"][0]
+        self.assertEqual(row["action"], "review")                 # matched by name only
+        self.di.decide(self.ctx, run, row["id"], f"link:{self.aug}")
+        self.di.apply(self.ctx, run)
+        self.assertEqual(self.qty(self.aug), 10)

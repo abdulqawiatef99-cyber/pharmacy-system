@@ -694,6 +694,11 @@ class DataImport:
             issues = {i["code"] for i in json.loads(row["issues"])}
             if "item_has_history" in issues:
                 raise ValidationFailed("الصنف له حركات سابقة؛ استخدم الجرد/التسوية بدل الرصيد الافتتاحي")
+        if run["kind"] == "opening_stock" and decision.startswith("link:"):
+            # the same rule for a link: the item the balance would land on must have no history
+            if self.db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? LIMIT 1",
+                           (ctx.org_id, ctx.branch_id, decision[5:])):
+                raise ValidationFailed("الصنف له حركات سابقة؛ استخدم الجرد/التسوية بدل الرصيد الافتتاحي")
         with self.db.transaction():
             self.db.execute("UPDATE import_rows SET decision=? WHERE id=?", (decision, row_id))
             audit.record(self.db, ctx, "import.decide", "import_run", run_id,
