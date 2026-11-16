@@ -244,22 +244,34 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
+    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة"}
+
     def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
                          method: str = "cash") -> int:
         ctx.require("customers.manage")
-        if amount <= 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
-        if method not in ("cash", "card"):
+        if method not in self.COLLECTION_METHODS:
             raise ValidationFailed("طريقة الدفع غير صحيحة")
         with self.db.transaction():
             if not self.db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (customer_id, ctx.org_id)):
                 raise NotFound("العميل غير موجود")
+            # under the write lock: two screens together cannot collect more than the customer owes
+            owed = self.balance(ctx, customer_id)
+            if amount > owed:
+                raise ValidationFailed(
+                    "المبلغ أكبر من المستحق على العميل" if owed > 0 else "لا يوجد مبلغ مستحق على هذا العميل",
+                    code="over_collection", details={"balance": owed, "amount": amount})
             if method == "cash":
                 cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
+            # how it was paid stays with the row (no column for it): a card collection has no drawer movement
+            said = (str(note).strip() if note else "")[:200]
+            how = self.COLLECTION_METHODS[method] + (f" — {said}" if said else "")
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
-                            (new_id(), ctx.org_id, customer_id, -amount, note, ctx.user_id))
-            audit.record(self.db, ctx, "customer.payment", "customer", customer_id, after={"amount": amount})
+                            (new_id(), ctx.org_id, customer_id, -amount, how, ctx.user_id))
+            audit.record(self.db, ctx, "customer.payment", "customer", customer_id,
+                         after={"amount": amount, "method": method})
         return self.balance(ctx, customer_id)
 
     # ------------------------------------------------------------ draft

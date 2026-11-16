@@ -14,6 +14,7 @@ from app.core import people
 from app.finance import expenses as fin, schedules
 from app.sales.cash import CashDrawer
 from app.sales.service import Sales
+from tests.r3_debt import owe
 from tests.test_api import APICase, H
 
 JS = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
@@ -120,10 +121,7 @@ class TestARepeatedKeyPostsOnce(APICase):
 
     def test_customer_collection(self):
         cid = Sales(self.db).create_customer(self.ctx, name="عميل تجربة", credit_limit=100000)
-        with self.db.transaction():
-            self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, created_by)"
-                            " SELECT lower(hex(randomblob(16))), ?, ?, 9000, 'credit_sale', ?",
-                            (self.ctx.org_id, cid, self.ctx.user_id))
+        owe(self.db, self.ctx, cid, 9000)
         self.twice(f"/api/customers/{cid}/payments", {"amount": 4000, "method": "cash"}, "c-1")
         self.assertEqual(self.count("SELECT count(*) FROM customer_ledger WHERE kind='payment'"), 1)
 
