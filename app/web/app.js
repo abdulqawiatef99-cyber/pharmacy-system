@@ -4045,7 +4045,7 @@ async function viewStockCheck() {
     $("#scBox").innerHTML = `<p class="muted">جارٍ الفحص…</p>`;
     const r = await api("/api/reports/stock-check", { method: "POST", body: {} });
     const n = Object.values(r.counts).reduce((a, b) => a + b, 0);
-    const when = (x) => String(x || "").slice(0, 16).replace("T", " ");
+    const when = (x) => stamp(x);                       // local day + the 12/24-hour setting (#206)
     let html = `<div class="totals"><div>الحالة<b><span class="badge ${r.ok ? "b-ok" : "b-err"}">${r.ok ? "✔ كل الأرصدة مطابقة" : `✖ ${n} اختلاف`}</span></b></div>
       <div>أصناف تم فحصها<b>${r.items_checked}</b></div><div>حركات مخزون<b>${r.movements}</b></div><div>وقت الفحص<b>${esc(when(r.checked_at))}</b></div></div>`;
     if (!r.ok) {
