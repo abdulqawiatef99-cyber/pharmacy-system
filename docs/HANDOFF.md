@@ -4,6 +4,20 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 16/11 17:00 Cairo — manager chat: full re-check, plan v2, queue cleared (READ THIS FIRST)
+Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+1. Done, with evidence
+   - Windows-only failure of `tests/test_perf_real_years.py`: cause = `scripts/validate_local_release.py` exports `PHARM_DB_PATH`, `bench.Server` set only `PHARM_DATA_DIR`, so the measured server opened another database. Fixed in #263 (CI linux + windows green, Codex clean). Not a product defect; the PC sets no `PHARM_DB_PATH`.
+   - Merged into `develop` (each: CI linux green + Codex clean on its head; owner approved the batch): #147 #221 #222 #224 #226 #227 #228 #230 #231 #232 #233 #234 #235 #236, then #237 (updated after #236, same file), #263. `develop` @ `4f8bc93`; local full suite on the 14-merge result: 1085 OK (2 skipped). None touches migrations, `requirements.txt`, `app/printing/` or `installer/`, so «تحديث» can deliver them.
+   - Closed with evidence (WORK_PLAN P3): #142 #134 #151 #107 #98 #100. Left on the #18 visit list: scan a driver-mode label, reprint/F8 with the printer off, one real owner-password reset on the test account.
+   - #213 (#202 parts 4-5): merged `develop` in, kept both sides of `docs/FUTURE_REQUIREMENTS.md`; the merge result broke `tests/test_time_format` (hand-cut ISO time), fixed with `stamp()`; local full suite 1097 OK; Codex + CI requested on the new head.
+   - `docs/WORK_PLAN.md` v2: four tracks (review / coding / device tests / development), day-by-day timetable to a first release on 21/11 (estimate), tool and model per task, 12 risks with their answers, monthly cycle after launch. `docs/OWNER_RULES.md` §9: the owner's decisions of 16/11.
+   - Two scheduled night sessions for 17/11: 01:00 Cairo = R3, 06:00 Cairo = R4 (review + fix PRs only, log on #203).
+2. Not done and why: #213 waits for Codex and CI on its new head. #160 (indexes, migration 0036) waits for the bundled installer. R3-R7 not started in this chat (night sessions). The real-years test still has no results file on the PC.
+3. Decisions: owner 16/11 — repo stays public for now, the #102 data is ordinary in his view, back to private when the reason ends (manager's check: item-level sales, cost and profit, supplier invoices, employee names; no customer names or phones seen in the headers). Parallel-week method is an open owner decision for 18/11 (WORK_PLAN §6 risk 1).
+4. Next goal (17/11 day chat): read the #203 night log; merge the night's Codex-clean fix PRs and #213; read `PHARMACY-TEST\real-years-results.txt`; owner presses «تحديث»; the 3 small PC tests above. Then the nights of 17/11 (R5 security #252, R6) need two new scheduled sessions: create them in that chat.
+5. المحادثة دي اتحفظت وممكن تتمسح
+
 ## 15/11 20:40 Cairo — ideas chat (cloud only, no code)
 - Owner asked for program/operations ideas, smart survey questions, and other models' opinions. Sent the prompt to 6 AI sites: only ChatGPT answered (Gemini/Grok no reply with the pane hidden; Perplexity/DeepSeek/Copilot need sign-in).
 - Double-checked against `develop` @ `db8a3b9`: offer evaluator, customer credit limit, per-batch legal price, purchase-cost rise warning and recalls already exist, so dropped. New entries **F38–F49** in `FUTURE_REQUIREMENTS.md`; ranked plan and timeline in `docs/IDEAS_PLAN.md`. All after launch, except **F47-a** (track-and-trace research, no code, class B): queue it after #253 and #252, before #19.
