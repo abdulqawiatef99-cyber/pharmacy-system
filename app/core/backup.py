@@ -159,9 +159,20 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
     return out
 
 
+UNREADABLE = "not a readable backup file (cut off while copying, or not a ZIP)"
+
+
 def verify_archive(archive: Path) -> dict:
     """Open a backup in a temp folder and check everything. Returns the manifest
-    plus 'problems' (empty = good)."""
+    plus 'problems' (empty = good). A file that is not a ZIP at all (a copy cut off on a USB stick) is a
+    problem like any other, never an exception."""
+    try:
+        return _verify_archive(archive)
+    except (zipfile.BadZipFile, EOFError, json.JSONDecodeError, KeyError) as e:
+        return {"problems": [f"{UNREADABLE}: {type(e).__name__}"]}
+
+
+def _verify_archive(archive: Path) -> dict:
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
         bad = z.testzip()
         if bad:
@@ -240,6 +251,13 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
 
 def quick_check(archive: Path) -> list[str]:
     """Check ZIP CRCs, snapshot checksum and registered originals after writing."""
+    try:
+        return _quick_check(archive)
+    except (zipfile.BadZipFile, EOFError, json.JSONDecodeError, KeyError, lzma.LZMAError) as e:
+        return [f"{UNREADABLE}: {type(e).__name__}"]
+
+
+def _quick_check(archive: Path) -> list[str]:
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
         bad = z.testzip()
         if bad:
