@@ -308,6 +308,9 @@ class Sales:
             raise NotFound("الفاتورة غير موجودة")
         if s["status"] != "draft":
             raise Conflict("الفاتورة مكتملة أو ملغاة", code="not_draft")
+        # before any write: an open invoice is changed by whoever may open it (its seller, or sales.totals /
+        # an approver). The check used to come only with the answer, after the change was already saved.
+        self._may_view(ctx, dict(s))
         return dict(s)
 
     def _stock_rows(self, ctx: Context, branch_id: str, item_id: str) -> list[dict]:
