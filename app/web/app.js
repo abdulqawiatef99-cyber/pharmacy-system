@@ -3776,7 +3776,7 @@ async function renderSchedules(cats, edit = null) {
       <td class="num">${x.amount ? money(x.amount) : "<span class='muted'>متغير</span>"}</td><td>يوم ${x.day_of_month} · ${EVERY_T[x.every_months]}</td><td>${x.remind_days} يوم</td>
       <td>${!x.is_active ? "موقوف" : x.next ? `<span class="badge ${SC_ST[x.next.state][0]}">${SC_ST[x.next.state][1]} ${esc(x.next.due)}</span>` : "—"}${x.last_paid ? `<div class="muted small">آخر مرة: ${esc(x.last_paid)}</div>` : ""}</td>
       <td class="row">${x.is_active && x.next ? `${x.amount ? "" : `<input class="narrow" type="number" min="0" step="0.01" placeholder="المبلغ" data-scamt="${esc(x.id)}">`}
-        <button class="btn small" data-scpay="${esc(x.id)}">سجّل الدفع</button><button class="btn small secondary" data-scskip="${esc(x.id)}" data-p="${esc(x.next.period)}">ليس هذه المرة</button>` : ""}
+        <button class="btn small" data-scpay="${esc(x.id)}" data-p="${esc(x.next.period)}">سجّل الدفع</button><button class="btn small secondary" data-scskip="${esc(x.id)}" data-p="${esc(x.next.period)}">ليس هذه المرة</button>` : ""}
         <button class="btn small secondary" data-scedit="${esc(x.id)}">تعديل</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">لا توجد بنود مجدولة بعد</td></tr>`}</tbody></table></div>
     <form id="scForm" class="mt"><h3>${e ? `تعديل: ${esc(e.name)}` : "بند مجدول جديد"}</h3><div class="formgrid">
       <label class="f">الاسم <input name="name" required value="${v("name")}" placeholder="مثال: إيجار الصيدلية"></label>
@@ -3804,7 +3804,7 @@ async function renderSchedules(cats, edit = null) {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
     await withBusy(b, async () => {
-      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", amount: amt ? toPiasters(amt.value) : null } });
+      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null } });
         toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
       catch (err) { toast(err.message, true); }
     });

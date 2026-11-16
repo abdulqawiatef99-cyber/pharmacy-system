@@ -900,7 +900,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if sid and b.get("action") == "pay":
             amt = b.get("amount")
             return J(schedules.pay(db, ctx, sid, _int(amt, "amount") if amt not in (None, "") else None,
-                                   b.get("paid_from") or None, b.get("note")))
+                                   b.get("paid_from") or None, b.get("note"),
+                                   period=b["period"] if b.get("period") not in (None, "") else None))
         if sid and b.get("action") == "skip":
             return J({"schedules": schedules.skip(db, ctx, sid, str(b.get("period", "")))})
         if "amount" in b and b["amount"] not in (None, ""):
