@@ -41,7 +41,10 @@ def _db(s: config.Settings, create: bool = False) -> Database:
                  "حدد مكان البيانات: set PHARM_DATA_DIR=%LOCALAPPDATA%\\PharmacyPlatform\\data ثم أعد الأمر. "
                  "(no database here; nothing was created)")
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    existed = s.db_path.exists()
     db = Database(s.db_path)
+    if existed:
+        _backup_before_migration(db, s)
     applied = db.migrate()
     if applied:
         print("migrations applied:", ", ".join(applied))
@@ -55,6 +58,38 @@ def _db(s: config.Settings, create: bool = False) -> Database:
     _ch(db)
     _ex(db)
     return db
+
+
+def _backup_before_migration(db: Database, s: config.Settings) -> None:
+    """A new installer brings new migrations and the first start applies them to the live data: take a
+    verified backup first, and stop without migrating when it cannot be made. Only when the database
+    holds a pharmacy and something is pending, so new, empty and up-to-date databases start as fast as before."""
+    pending = db.pending_migrations()
+    if not pending:
+        return
+    if not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizations'") or \
+            not db.one("SELECT count(*) n FROM organizations")["n"]:
+        return
+    if os.environ.get("PHARM_MIGRATE_WITHOUT_BACKUP") == "1":      # developer's decision, after a copy by hand
+        print("WARNING: migrating WITHOUT a backup (PHARM_MIGRATE_WITHOUT_BACKUP=1)", file=sys.stderr)
+        return
+    from app.core import backup
+    try:
+        out = backup.create(db, s.upload_dir, s.backup_path, tag="pre-migrate")
+        hard, soft = backup.split_problems(backup.quick_check(out))
+        if hard:
+            out.unlink(missing_ok=True)
+            raise RuntimeError("; ".join(hard))
+    except Exception as e:  # noqa: BLE001 - whatever stops the backup stops the migration
+        db.close()
+        sys.exit("لم يتم تحديث قاعدة البيانات: تعذّر عمل نسخة احتياطية قبل التحديث، فالبرنامج توقف والبيانات كما هي"
+                 " لم تتغير. أرسل هذه الرسالة للمطوّر.\n"
+                 f"(pre-migration backup failed, nothing was migrated; pending: {', '.join(pending)})\n"
+                 f"السبب / reason: {e}")
+    print(f"backup before database update: {out}")
+    if soft:
+        print(f"WARNING: {len(soft)} attachment file(s) are missing or changed; the backup holds the data without them:",
+              "; ".join(soft), file=sys.stderr)
 
 
 def _backups(chosen: str | None, s: config.Settings, sub: str = "") -> Path:

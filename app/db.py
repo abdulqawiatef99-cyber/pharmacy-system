@@ -139,6 +139,14 @@ class Database:
                 conn.execute("COMMIT")
 
     # -- migrations ----------------------------------------------------------
+    def pending_migrations(self, directory: Path = MIGRATIONS_DIR) -> list[str]:
+        """Migrations migrate() would apply now. Read-only: creates nothing."""
+        conn = self.conn
+        applied: set[str] = set()
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone():
+            applied = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations")}
+        return [f.stem for f in sorted(directory.glob("*.sql")) if f.stem not in applied]
+
     def migrate(self, directory: Path = MIGRATIONS_DIR) -> list[str]:
         conn = self.conn
         conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
