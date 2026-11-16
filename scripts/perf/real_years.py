@@ -426,29 +426,7 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
         code, body, _, _ = c.req("POST", "/api/auth/login", {"username": owner_username, "password": OWNER_PW})
         if code != 200:
             why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
-            diag = {}                                         # booleans and counts only: no names, no hashes
-            try:
-                from app.core import security as _sec
-                _c = sqlite3.connect(f"file:{(data / 'pharmacy.db').as_posix()}?mode=ro", uri=True)
-                _rows = _c.execute("SELECT password_hash, is_active, failed_logins, locked_until IS NOT NULL FROM users"
-                                   " WHERE username=?", (owner_username,)).fetchall()
-                diag["users_total"] = _c.execute("SELECT count(*) FROM users").fetchone()[0]
-                diag["orgs_total"] = _c.execute("SELECT count(*) FROM organizations").fetchone()[0]
-                _c.close()
-                diag["user_rows"] = len(_rows)
-                if _rows:
-                    diag["hash_prefix_ok"] = _rows[0][0].startswith("scrypt$")
-                    diag["hash_n"] = _rows[0][0].split("$")[1]
-                    diag["verify_here"] = _sec.verify_password(OWNER_PW, _rows[0][0])
-                    diag["is_active"], diag["failed_logins"], diag["locked"] = _rows[0][1], _rows[0][2], _rows[0][3]
-                diag["username_ascii"] = owner_username.isascii()
-                diag["server_cmdline_data"] = str(data).isascii()
-                code2, body2, _, _ = c.req("GET", "/api/setup/status")
-                diag["setup_needed"] = body2.get("needed") if isinstance(body2, dict) else code2
-                diag["server_log_tail"] = [l[-160:] for l in srv.log[-12:]]
-            except Exception as e:                            # the diagnosis must never hide the real failure
-                diag["diag_error"] = type(e).__name__
-            raise SystemExit(f"benchmark login refused (HTTP {code}, {why}) diag={json.dumps(diag)}")
+            raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
         c.req("POST", "/api/cash/open", {"opening_cash": 10000})
         rec["requests"] = {}
         scen = bench.scenarios(f) + long_scenarios(f, start)

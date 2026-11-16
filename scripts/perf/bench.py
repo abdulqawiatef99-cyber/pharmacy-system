@@ -154,7 +154,10 @@ def scenarios(f: dict) -> list[tuple[str, str]]:
 class Server:
     def __init__(self, data: Path, at: str, env_extra: dict | None = None):
         self.port = free_port()
-        env = {**os.environ, "PHARM_DATA_DIR": str(data), "PHARM_BACKUP_DIR": str(data.parent / "backups"),
+        # every path explicitly: an inherited PHARM_DB_PATH / PHARM_UPLOAD_DIR (the Windows release validation sets
+        # them) would make the server open another database than the snapshot
+        env = {**os.environ, "PHARM_DATA_DIR": str(data), "PHARM_DB_PATH": str(data / "pharmacy.db"),
+               "PHARM_UPLOAD_DIR": str(data / "uploads"), "PHARM_BACKUP_DIR": str(data.parent / "backups"),
                "PYTHONUNBUFFERED": "1", **(env_extra or {})}
         self.t0 = time.perf_counter()
         self.p = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "serve_at.py"), "--at", at, "--port", str(self.port)],
