@@ -215,7 +215,15 @@ class TestCalibrate(Sent):
 
 class TestReceiptUntouched(Sent):
     def test_receipt_and_drawer_bytes_do_not_depend_on_label_variant(self):
-        from app.printing import service as ps
+        from app.printing import escpos, service as ps
+        if not escpos.shaping_available():
+            # Windows CI has no raqm (receipts fall back to browser printing there); the property under
+            # test is that label settings never reach receipt bytes, so a fixed receipt image is enough.
+            from PIL import Image
+            stub = mock.patch("app.printing.escpos.render_receipt",
+                              side_effect=lambda *a, **k: Image.new("L", (escpos.DOTS_80MM, 64), 255))
+            stub.start()
+            self.addCleanup(stub.stop)
         rs.save(self.db, self.ctx, {"receipt_target": "win:POS-80C"})
         ps.print_test(self.db, self.ctx, "win:POS-80C")
         before = list(self.sent)

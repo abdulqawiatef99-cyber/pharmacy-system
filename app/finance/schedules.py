@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date
 
 from ..core import audit, notify
 from ..core.errors import NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 from . import expenses as fin
@@ -83,10 +85,13 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         raise ValidationFailed("اختر بند المصروف")
     if v["amount"] in ("", 0):
         v["amount"] = None
-    if v["amount"] is not None and (not isinstance(v["amount"], int) or v["amount"] < 0):
+    if v["amount"] is not None and (isinstance(v["amount"], bool) or not isinstance(v["amount"], int)
+                                    or not 0 < v["amount"] <= 2 ** 53 - 1):          # true is not 1 piaster
         raise ValidationFailed("المبلغ غير صحيح")
     try:
-        v["day_of_month"], v["every_months"], v["remind_days"] = int(v["day_of_month"]), int(v["every_months"]), int(v["remind_days"])
+        # 15.5 or true is refused, never cut to 15 or 1
+        v["day_of_month"], v["every_months"], v["remind_days"] = (whole_number(v["day_of_month"]), whole_number(v["every_months"]),
+                                                                  whole_number(v["remind_days"]))
     except (TypeError, ValueError, KeyError):
         raise ValidationFailed("اكتب يوم الاستحقاق وعدد أيام التذكير")
     if not 1 <= v["day_of_month"] <= 31:
@@ -124,20 +129,40 @@ def _get(db: Database, ctx: Context, sid: str) -> dict:
     return dict(s)
 
 
+def _own_period(s: dict, period) -> str:
+    """The month sent by the screen, only if it is written YYYY-MM and is one of this item's due months."""
+    if not isinstance(period, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+        raise ValidationFailed("الشهر غير صحيح")
+    (y, m), (y0, m0) = (map(int, x.split("-")) for x in (period, s["start_month"]))
+    months = (y - y0) * 12 + (m - m0)
+    if months < 0 or months % s["every_months"]:
+        raise ValidationFailed("هذا الشهر ليس من مواعيد هذا البند")
+    return period
+
+
 def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_from: str | None = None,
         note: str | None = None, period: str | None = None) -> dict:
-    """Records this period's expense (normal approval rules) and moves the schedule on."""
+    """Records one period's expense (normal approval rules) and moves the schedule on. With `period` (the month
+    the screen showed) exactly that month is paid or refused; a second press never pays the month after it."""
+    ctx.require("expenses.approve")
     s = _get(db, ctx, sid)
-    nxt = next_open(db, s, date.today())
-    period = period or (nxt or {}).get("period")
+    if period is not None:
+        period = _own_period(s, period)
+    else:
+        period = (next_open(db, s, date.today()) or {}).get("period")
     if not period:
         raise ValidationFailed("لا يوجد موعد مفتوح لهذا البند")
     amount = amount if amount is not None else s["amount"]
     if not amount:
         raise ValidationFailed("اكتب المبلغ هذه المرة")
-    if db.one("SELECT 1 FROM expenses WHERE schedule_id=? AND schedule_period=? AND status<>'rejected'", (sid, period)):
+    taken = ("SELECT 1 FROM expenses WHERE org_id=? AND schedule_id=? AND schedule_period=? AND status<>'rejected'",
+             (ctx.org_id, sid, period))
+    if db.one(*taken):
         raise ValidationFailed("هذا الشهر سُجّل من قبل")
     with db.transaction():
+        # again under the write lock: two screens must not record this period twice
+        if db.one(*taken):
+            raise ValidationFailed("هذا الشهر سُجّل من قبل")
         e = fin.record(db, ctx, category_id=s["category_id"], amount=amount, paid_from=paid_from or s["paid_from"],
                        note=(note or s["name"]) + f" ({period})")
         db.execute("UPDATE expenses SET schedule_id=?, schedule_period=? WHERE id=?", (sid, period, e["id"]))

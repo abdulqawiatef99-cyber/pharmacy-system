@@ -9,13 +9,16 @@
 * Sales during the count are handled: each entry remembers the ledger
   position when it was counted; expected quantity now = counted + movements
   posted after that position.
+* A manual adjustment or another count's adjustment after that position is a
+  book correction, not a physical move: the line is marked
+  'adjusted_since_count' and must be recounted before approval.
 * Approval (inventory.adjust) posts 'adjustment' movements for the variances.
   Uncounted items are NOT zeroed unless the approver explicitly says so.
 """
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -138,6 +141,19 @@ class Counting:
             params.append(batch_key)
         return int(self.db.one(q, tuple(params))["q"])
 
+    def _adjusted_after(self, ctx: Context, sid: str, branch_id: str, item_id: str,
+                        batch_key: str | None, after_seq: int) -> bool:
+        """A book correction posted after the entry was counted: a manual adjustment or another
+        count's adjustment. It is not a physical move, so "counted + movements after" would apply
+        the same difference a second time; the line must be counted again."""
+        q = ("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND rowid > ?"
+             " AND (ref_type='manual_adjust' OR (ref_type='count_session' AND coalesce(ref_id,'')<>?))")
+        params: list = [ctx.org_id, branch_id, item_id, after_seq, sid]
+        if batch_key is not None:
+            q += " AND coalesce(batch_id,'')=?"
+            params.append(batch_key)
+        return self.db.one(q + " LIMIT 1", tuple(params)) is not None
+
     def variances(self, ctx: Context, sid: str) -> dict:
         ctx.require("inventory.adjust")
         s = self._session(ctx, sid)
@@ -171,12 +187,16 @@ class Counting:
                      difference=expected_now - system)
             c = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
                             (ctx.org_id, s["branch_id"], item_id))
-            r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"))) \
+            r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"), ROUND_HALF_UP)) \
                 if c and ctx.can("costs.read") else None
             r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
                                      (item_id,))["n"]
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
+            if self._adjusted_after(ctx, sid, s["branch_id"], item_id, bk or None, r["seq"]):
+                r["problem"] = "adjusted_since_count"
+                r["problem_message"] = (f"«{r['label']}»: تم تعديل رصيده (تسوية يدوية أو جرد آخر) بعد عدّه"
+                                        " في هذا الجرد؛ أعد عدّه قبل الاعتماد")
             out.append(r)
         counted_items = {r["item_id"] for r in out}
         uncounted = []
@@ -213,7 +233,12 @@ class Counting:
             v = self.variances(ctx, sid)
             bad = [r for r in v["lines"] if r.get("problem")]
             if bad:
-                raise Conflict("توجد أصناف تحتاج إلى مراجعة قبل الاعتماد", code="count_problems",
+                stale = [r["problem_message"] for r in bad if r["problem"] == "adjusted_since_count"]
+                msg = "توجد أصناف تحتاج إلى مراجعة قبل الاعتماد"
+                if stale:
+                    msg = "لا يمكن اعتماد الجرد: " + stale[0] + (
+                        f" (و{len(stale) - 1} صنف آخر بالحالة نفسها)" if len(stale) > 1 else "")
+                raise Conflict(msg, code="count_problems",
                                details={"lines": bad})
             posted = 0
             for r in v["lines"]:

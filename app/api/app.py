@@ -34,7 +34,7 @@ from starlette.staticfiles import StaticFiles
 
 from .. import config as config_mod
 from ..catalog import service as catalog
-from ..core import accounts, audit, idempotency, notify, people
+from ..core import accounts, approvals, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..core.numbers import whole_number
 from ..db import Database
@@ -72,13 +72,27 @@ def _static_v(name: str) -> str:
 SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
+def _web_build() -> str:
+    """One id for the whole screen shell (index.html and its assets). An open tab compares the id it was loaded
+    with against /api/health and asks for a reload when an update replaced the files (#153)."""
+    parts = [_static_v(name) for name in SHELL_ASSETS]
+    st = (WEB_DIR / "index.html").stat()
+    parts.append(_content_hash(WEB_DIR / "index.html", st.st_mtime_ns, st.st_size))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+
+
 def _index_html() -> str:
     page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     for name in SHELL_ASSETS:
         page = page.replace(f'"/static/{name}"', f'"{_static_v(name)}"')
-    return page
+    return page.replace("</head>", f'  <meta name="pharm-build" content="{_web_build()}">\n</head>', 1)
 COOKIE = "pharm_sid"
 MAX_JSON = 256 * 1024
+MAX_UPLOAD_FILES = 3          # the most files one upload route takes (dead-stock report)
+# A screen's table sent back for an Excel file (reports/export.py, up to MAX_ROWS rows): the range
+# invoice list alone can hold 5,000 invoices, about 0.6 MB, so the general JSON limit is too small here.
+MAX_EXPORT_JSON = 8 * 1024 * 1024
+JSON_LIMITS = {"/api/export/xlsx": MAX_EXPORT_JSON}
 
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
@@ -129,8 +143,8 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 
 class RateLimiter:
-    def __init__(self, limit: int, window_s: int):
-        self.limit, self.window = limit, window_s
+    def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
+        self.limit, self.window, self.message = limit, window_s, message
         self.hits: dict[str, deque] = defaultdict(deque)
 
     def check(self, key: str) -> None:
@@ -139,7 +153,7 @@ class RateLimiter:
         while q and now - q[0] > self.window:
             q.popleft()
         if len(q) >= self.limit:
-            raise DomainError("محاولات كثيرة، انتظر دقيقة", code="rate_limited")
+            raise DomainError(self.message, code="rate_limited")
         q.append(now)
 
 
@@ -170,9 +184,29 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     counting = Counting(db)
     login_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
+    # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
+    # session cannot be used to guess the password at full speed
+    reauth_limiter = RateLimiter(5, 300, "محاولات كثيرة لكلمة المرور، انتظر 5 دقائق")
+
+    def _qlimit(req: Request, default: int, most: int) -> int:
+        """?limit= as a whole number from 1 to `most`: "abc" is a 422, not a server error, and -1 is not
+        SQLite's "no limit" (every row of the table)."""
+        raw = req.query_params.get("limit") or default
+        try:
+            n = whole_number(raw)
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيمة غير صحيحة: limit")
+        return max(1, min(n, most))
 
     def client_ip(req: Request) -> str:
         return req.client.host if req.client else "?"
+
+    def approver_access(org_id: str, who: str) -> dict:
+        """The approver's permissions now; nothing once he is disabled (#137: a token never outlives that)."""
+        if not db.one("SELECT 1 FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
+                      " WHERE u.id=? AND u.is_active=1 AND m.is_active=1", (org_id, who)):
+            return {"permissions": frozenset(), "role_code": None, "max_discount_bp": 0}
+        return accounts.effective_access(db, org_id, who)
 
     def ctx_of(req: Request):
         token = None
@@ -188,19 +222,58 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
         approver = req.headers.get("x-approver", "").strip()
-        if approver:
+        if approver and req.url.path == "/api/approvals/check":
+            # the PIN is typed once and checked here only; every other request carries the approval token (#137)
             approver_limiter.check(client_ip(req))
             ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
+            req.state.session_token = token
+        elif req.headers.get("x-approval"):
+            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
+                                  lambda who: approver_access(ctx.org_id, who))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
                 break
         return ctx
 
+    def _length_guard(req: Request, limit: int, *, required: bool = False) -> None:
+        """Refuse an oversized request from its Content-Length, before reading it (#140)."""
+        cl = req.headers.get("content-length")
+        if cl is None:
+            if required:
+                raise ValidationFailed("حجم الطلب غير معروف", code="length_required")
+            return
+        if not cl.isdigit():
+            raise ValidationFailed("صيغة الطلب غير صحيحة")
+        if int(cl) > limit:
+            raise ValidationFailed("حجم الملف أكبر من المسموح" if limit > MAX_JSON else "الطلب كبير جدًا",
+                                   code="too_large")
+
+    def _body_limit(req: Request) -> int:
+        if "multipart/form-data" in req.headers.get("content-type", ""):
+            return MAX_UPLOAD_FILES * s.max_upload_bytes + 64 * 1024
+        return JSON_LIMITS.get(req.url.path, MAX_JSON)
+
+    async def _read_body(req: Request) -> bytes:
+        """req.body() that stops at the limit instead of reading everything first (#140).
+        The bytes are cached on the request, so req.body() and req.form() reuse them."""
+        if hasattr(req, "_body"):
+            return req._body
+        limit = _body_limit(req)
+        _length_guard(req, limit)
+        chunks, n = [], 0
+        async for chunk in req.stream():
+            n += len(chunk)
+            if n > limit:
+                raise ValidationFailed("الطلب كبير جدًا", code="too_large")
+            chunks.append(chunk)
+        req._body = b"".join(chunks)
+        return req._body
+
     async def body(req: Request) -> dict:
-        raw = await req.body()
-        if len(raw) > MAX_JSON:
-            raise ValidationFailed("الطلب كبير جدًا")
+        raw = await _read_body(req)
+        if len(raw) > JSON_LIMITS.get(req.url.path, MAX_JSON):
+            raise ValidationFailed("الطلب كبير جدًا", code="too_large")
         if not raw:
             return {}
         try:
@@ -222,7 +295,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
             return await fn(req)
         ctx = ctx_of(req)
-        raw = await req.body()
+        raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         # Reserve the key (status 0) before running, in one write transaction: a retry that
@@ -281,6 +354,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                          status_code=500)
         return wrapped
 
+    async def off_loop(fn, *args, **kwargs):
+        """#249: a report reads in a worker thread, on that thread's own connection and inside one
+        read snapshot, so a long report never stops the cashier screen or /api/health."""
+        def run():
+            with db.read_snapshot():
+                return fn(*args, **kwargs)
+        return await run_in_threadpool(run)
+
     # ------------------------------------------------------------- auth
     @handler
     async def login(req):
@@ -305,6 +386,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _setup_needed() -> bool:
         return db.one("SELECT count(*) n FROM organizations")["n"] == 0
 
+    def _own_screen_only(req) -> None:
+        """Setup runs before any session exists, so nothing else stops a web page open in the browser on
+        this PC from posting here (a form or text/plain POST needs no CORS permission). The program's
+        own screens send this header; a cross-site page cannot (same rule as ctx_of for sessions)."""
+        if req.headers.get("x-requested-with") != "pharm":
+            raise Forbidden("طلب غير موثّق", code="csrf")
+
     @handler
     async def setup_status(req):
         return J({"needed": _setup_needed()})
@@ -314,6 +402,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """First run only: creates the pharmacy and its owner, then logs in. Refused once any
         pharmacy exists, and (unless PHARM_ALLOW_REMOTE_SETUP=1) from any machine but this PC."""
         import os as _os
+        _own_screen_only(req)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
             raise Forbidden("الإعداد الأول يتم من جهاز الصيدلية نفسه فقط")
@@ -403,6 +492,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         or to the installed version). The file is verified now and applied by the launcher on
         restart, when no database connection is open."""
         from ..core import backup as backup_mod
+        _own_screen_only(req)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
             raise Forbidden("الاسترجاع يتم من جهاز الصيدلية نفسه فقط")
         if not _setup_needed():
@@ -443,6 +533,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def logout(req):
+        if req.cookies.get(COOKIE) and req.headers.get("x-requested-with") != "pharm":
+            raise Unauthorized("طلب غير موثّق", code="csrf")
         token = req.cookies.get(COOKIE) or req.headers.get("authorization", "")[7:]
         if token:
             accounts.logout(db, token)
@@ -454,8 +546,37 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def me(req):
         ctx = ctx_of(req)
         from ..core import ui_settings
+        from ..inventory import integrity
+        from ..printing import settings as rs
         return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx),
-                  "ui": ui_settings.get(db, ctx.org_id)})
+                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx),
+                  "time_format": rs.get(db, ctx.org_id)["time_format"]})   # #206: every screen shows times this way
+
+    @handler
+    async def stock_alert_api(req):
+        """#202: the red banner, refreshed by the screens on their own (login answers do not carry it)."""
+        from ..inventory import integrity
+        ctx = ctx_of(req)
+        ctx.require("audit.read")
+        return J({"alert": integrity.banner(db, ctx)})
+
+    @handler
+    async def stock_check_report(req):
+        """#202 «مطابقة الأرصدة»: POST runs the stock integrity check now and returns the report."""
+        from ..inventory import integrity
+        return J(await run_in_threadpool(integrity.report, db, ctx_of(req)))
+
+    @handler
+    async def stock_check_ack(req):
+        """#202: the owner marks one sale-vs-invoice difference as reviewed (audited), then the report again."""
+        from ..inventory import integrity
+        ctx = ctx_of(req)
+        b = await body(req)
+        # in a worker thread: it may wait for a running check's lock and re-runs the check (Codex P2)
+        await run_in_threadpool(lambda: integrity.acknowledge(
+            db, ctx, str(b.get("sale_id") or ""), str(b.get("item_id") or ""), b.get("note"),
+            moved=b.get("moved"), expected=b.get("expected")))
+        return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler
     async def ui_settings_api(req):
@@ -499,6 +620,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
         from ..core import security as _sec
+        reauth_limiter.check(ctx.user_id)
         if not _sec.verify_password(str(b.get("password", "")), u["password_hash"]):
             raise ValidationFailed("كلمة المرور غير صحيحة")
         people.set_pin(db, ctx, ctx.user_id, str(b.get("pin", "")))
@@ -554,7 +676,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx.require("items.write")
         b = await body(req)
         ids = b.get("item_ids")
-        if not isinstance(ids, list) or not ids or len(ids) > 500:
+        if not isinstance(ids, list) or not ids or len(ids) > 500 or not all(isinstance(i, str) for i in ids):
             raise ValidationFailed("اختر الأصناف (حتى 500 مرة واحدة)")
         ch = {k: int(bool(b[k])) for k in ("rx_required", "misuse_risk", "quick_pin") if k in b}
         if not ch:
@@ -591,7 +713,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
-        return J(invoices.report(db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
+        return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
                                  item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
 
@@ -602,13 +724,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not fn:
             raise NotFound("التقرير غير موجود")
         qp = req.query_params
-        return J(fn(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fn, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def warnings_rep(req):
         from ..sales.service import warnings_report
         qp = req.query_params
-        return J(warnings_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(warnings_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def stock_reasons(req):
@@ -630,7 +752,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def losses_report(req):
         from ..inventory import adjust
         qp = req.query_params
-        return J(adjust.loss_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(adjust.loss_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def supplier_returns_api(req):
@@ -657,7 +779,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
-        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        from ..printing import settings as rs
+        when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
             f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
@@ -773,7 +896,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def transfers_report(req):
         from ..sales import attachments as att
         qp = req.query_params
-        return J(att.transfers(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(att.transfers, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def exp_sched(req):
@@ -786,7 +909,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if sid and b.get("action") == "pay":
             amt = b.get("amount")
             return J(schedules.pay(db, ctx, sid, _int(amt, "amount") if amt not in (None, "") else None,
-                                   b.get("paid_from") or None, b.get("note")))
+                                   b.get("paid_from") or None, b.get("note"),
+                                   period=b["period"] if b.get("period") not in (None, "") else None))
         if sid and b.get("action") == "skip":
             return J({"schedules": schedules.skip(db, ctx, sid, str(b.get("period", "")))})
         if "amount" in b and b["amount"] not in (None, ""):
@@ -865,13 +989,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def profit_report(req):
         qp = req.query_params
-        return J(fin.profit(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fin.profit, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def home_view(req):
         from ..reports import service as rep_svc
         ctx = ctx_of(req)
-        out = rep_svc.home(db, ctx)
+        out = await off_loop(rep_svc.home, db, ctx)
         if ctx.can("settings.manage"):
             st = autob.state()
             out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
@@ -881,12 +1005,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def reports_sales(req):
         from ..reports import service as rep_svc
         qp = req.query_params
-        return J(rep_svc.sales_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(rep_svc.sales_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def reports_stock(req):
         from ..reports import service as rep_svc
-        return J(rep_svc.stock_report(db, ctx_of(req)))
+        return J(await off_loop(rep_svc.stock_report, db, ctx_of(req)))
 
     @handler
     async def feedback_view(req):
@@ -964,9 +1088,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         month = req.query_params.get("month") or ""
         if req.method == "POST":
             b = await body(req)
-            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
+            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), b.get("month", month)
+            if a in ("pay_settings", "fix"):          # not about a month: never save and then answer 422
+                month = pay.sheet_month(month)
             if a == "pay_settings":
-                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), int(b.get("work_days") or 26))
+                pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), _int(b.get("work_days") or 26, "work_days"))
             elif a == "advance":
                 pay.add_advance(db, ctx, uid, _int(b.get("amount"), "amount"), month, b.get("note"), str(b.get("paid_from", "outside")))
             elif a == "fix":
@@ -991,9 +1117,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         if not ctx.approver_id:
             raise ValidationFailed("اختر من سيوافق")
-        perm = str((await body(req)).get("permission", ""))
-        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == "discount"
-        return J({"ok": ok, "discount_limit_bp": ctx.discount_limit_bp})
+        b = await body(req)
+        perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
+        method = str(b.get("method") or "GET").upper()
+        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT
+        out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
+        if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check" \
+                and method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            # #137: lend only this permission, only on the action (method + path) that asked for it, for 90 s
+            out["token"], out["expires_in"] = approvals.issue(
+                ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+                previous=str(b.get("previous") or "")[:128] or None)
+        return J(out)
 
     @handler
     async def users_list(req):
@@ -1022,6 +1157,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             # #131: an open session alone must not change its own sign-in (owner lock-out, PIN take-over)
             u = db.one("SELECT password_hash FROM users WHERE id=?", (ctx.user_id,))
             from ..core import security as _sec
+            reauth_limiter.check(ctx.user_id)
             if not _sec.verify_password(str(b.get("current_password", "")), u["password_hash"]):
                 raise ValidationFailed("اكتب كلمة المرور الحالية الصحيحة", code="current_password_required")
         if action == "permission":
@@ -1052,7 +1188,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def notifications_list(req):
         ctx = ctx_of(req)
         return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
-                                limit=int(req.query_params.get("limit", 50) or 50)))
+                                limit=_qlimit(req, 50, 200)))
 
     @handler
     async def notifications_read(req):
@@ -1096,7 +1232,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 if "return_window_days" not in b:
                     return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
             try:
-                days = int(b.get("return_window_days"))
+                days = whole_number(b.get("return_window_days"))
             except (TypeError, ValueError):
                 raise ValidationFailed("اكتب عدد الأيام")
             if not 0 <= days <= 365:
@@ -1113,7 +1249,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), min(int(req.query_params.get("limit", 20)), 200),
+        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -1179,8 +1315,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctype = req.headers.get("content-type", "")
         if "multipart/form-data" not in ctype:
             raise ValidationFailed("ارفع الملف كـ multipart/form-data")
-        if int(req.headers.get("content-length") or 0) > s.max_upload_bytes + 64 * 1024:
-            raise ValidationFailed("حجم الملف أكبر من المسموح")
+        _length_guard(req, s.max_upload_bytes + 64 * 1024, required=True)
         form = await req.form(max_files=1, max_fields=5)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):
@@ -1281,6 +1416,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def _upload(req) -> tuple[bytes, str, dict]:
         if "multipart/form-data" not in req.headers.get("content-type", ""):
             raise ValidationFailed("ارفع الملف كـ multipart/form-data")
+        _length_guard(req, s.max_upload_bytes + 64 * 1024, required=True)
         form = await req.form(max_files=1, max_fields=8)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):
@@ -1297,10 +1433,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def import_analyze(req):
         ctx = ctx_of(req)
         data, name, fields = await _upload(req)
-        mapping = json.loads(fields["mapping"]) if fields.get("mapping") else None
-        options = {"qty_unit": fields.get("qty_unit") or "pack"}
-        if fields.get("header_row"):
-            options["header_row"] = int(fields["header_row"])
+        try:
+            mapping = json.loads(fields["mapping"]) if fields.get("mapping") else None
+            options = {"qty_unit": fields.get("qty_unit") or "pack"}
+            if fields.get("header_row"):
+                options["header_row"] = int(fields["header_row"])
+        except (TypeError, ValueError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if mapping is not None and not (isinstance(mapping, dict) and all(
+                k.isdigit() and isinstance(v, str) for k, v in mapping.items())):
+            raise ValidationFailed("قيم غير صحيحة")
         run = dimp.analyze(ctx, data, name, kind=fields.get("kind") or "items", mapping=mapping,
                            source_system=fields.get("source_system") or "generic", options=options)
         return J(dimp.get(ctx, run), status_code=201)
@@ -1467,7 +1609,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         try:
-            qty = int(b.get("qty"))
+            qty = whole_number(b.get("qty"))          # a counted 2.5 is refused, never posted as 2
         except (TypeError, ValueError):
             raise ValidationFailed("الكمية غير صحيحة")
         return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),
@@ -1495,13 +1637,30 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True})
 
     # ------------------------------------------------------------- procurement
+    def _hundredths(v) -> int:
+        """Pounds or percent as typed ("12.5", 12.5, 30) -> whole hundredths (piasters / basis points).
+        More than two decimals, non-numbers and booleans are refused, never rounded."""
+        if isinstance(v, bool) or v is None:
+            raise ValueError("not a number")
+        d = Decimal(str(v).strip()) * 100
+        if not d.is_finite() or d.adjusted() > 15:      # "1e10000000": int() would spend seconds building it
+            raise ValueError("out of range")
+        if d != d.to_integral_value():
+            raise ValueError("more than two decimals")
+        return int(d)
+
     def _sugg_params(req):
         qp = req.query_params
         try:
-            return {"cover_days": int(qp.get("cover_days", 30)), "lead_days": int(qp.get("lead_days", 2)),
-                    "safety_days": int(qp.get("safety_days", 5)), "window_days": int(qp.get("window_days", 90))}
+            out = {"cover_days": int(qp.get("cover_days", 30)), "lead_days": int(qp.get("lead_days", 2)),
+                   "safety_days": int(qp.get("safety_days", 5)), "window_days": int(qp.get("window_days", 90))}
         except ValueError:
             raise ValidationFailed("قيم غير صحيحة")
+        # the screen's own limits (min 1/0/0/7); the top ends keep a typo from overflowing a date (500)
+        bounds = {"cover_days": (1, 730), "lead_days": (0, 365), "safety_days": (0, 365), "window_days": (7, 3650)}
+        if any(not lo <= out[k] <= hi for k, (lo, hi) in bounds.items()):
+            raise ValidationFailed("قيم غير صحيحة: التغطية 1–730 يوم، التوريد والأمان 0–365، فترة الاستهلاك 7–3650")
+        return out
 
     @handler
     async def proc_suggest(req):
@@ -1528,13 +1687,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def proc_offer(req):
         ctx = ctx_of(req)
         b = await body(req)
-        try:
-            return J(Procurement(db).evaluate_offer(
-                ctx, str(b.get("item_id", "")), packs=int(b.get("packs", 0)),
-                discount_pct=float(b.get("discount_pct", -1)), expiry_date=b.get("expiry_date") or None,
-                cash_available=float(b["cash_available"]) if b.get("cash_available") else None))
-        except (TypeError, ValueError):
+        try:                       # typed in pounds and percent; exact, never through float (2.5 packs is refused)
+            packs = whole_number(b.get("packs", 0))
+            bp = _hundredths(b.get("discount_pct", -1))
+            cash = _hundredths(b["cash_available"]) if b.get("cash_available") not in (None, "") else None
+        except (TypeError, ValueError, ArithmeticError):
             raise ValidationFailed("قيم غير صحيحة")
+        return J(Procurement(db).evaluate_offer(ctx, str(b.get("item_id", "")), packs=packs, discount_bp=bp,
+                                                expiry_date=b.get("expiry_date") or None, cash_available=cash))
 
     @handler
     async def proc_consumption(req):
@@ -1553,7 +1713,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx.require("costs.read")
         if "multipart/form-data" not in req.headers.get("content-type", ""):
             raise ValidationFailed("ارفع الملفات كـ multipart/form-data")
-        form = await req.form(max_files=3, max_fields=4)
+        _length_guard(req, MAX_UPLOAD_FILES * s.max_upload_bytes + 64 * 1024, required=True)
+        form = await req.form(max_files=MAX_UPLOAD_FILES, max_fields=4)
         files = {}
         for k in ("stock", "sales", "purchases"):
             up = form.get(k)
@@ -1682,7 +1843,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def sales_return(req):
         ctx = ctx_of(req)
         b = await body(req)
-        lines = {str(k): _int(v, "qty") for k, v in (b.get("lines") or {}).items()}
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
                                         reason=str(b.get("reason", ""))))
@@ -1805,7 +1969,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
-        t = lambda iso: accounts.parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M") if iso else "—"  # noqa: E731
+        from ..printing import settings as rs
+        tf = rs.get(db, ctx.org_id)["time_format"]                                                        # #206
+        t = lambda iso: rs.fmt_when(accounts.parse_iso(iso).astimezone(), tf) if iso else "—"  # noqa: E731
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
                 ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
@@ -2145,7 +2311,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def health(req):
         from ..version import __version__
         last = db.one("SELECT max(version) v FROM schema_migrations")["v"]
-        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID")})
+        return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
+                  "web": _web_build()})
 
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
@@ -2166,6 +2333,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
+        Route("/api/stock/alert", stock_alert_api),
+        Route("/api/reports/stock-check", stock_check_report, methods=["POST"]),
+        Route("/api/reports/stock-check/ack", stock_check_ack, methods=["POST"]),
         Route("/api/auth/quick-users", quick_users),
         Route("/api/auth/pin", pin_login, methods=["POST"]),
         Route("/api/me/pin", my_pin, methods=["POST"]),
@@ -2343,6 +2513,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if auto_backup:
             autob.start()
             daily.start()
+            # #202: stock integrity check on every start, in the background so the screens open at once
+            from ..inventory import integrity
+            threading.Thread(target=integrity.check_all, args=(db, "startup"), daemon=True,
+                             name="stock-integrity").start()
         try:
             yield
         finally:
@@ -2350,7 +2524,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 daily.stop()
                 await run_in_threadpool(autob.stop)
 
-    app = Starlette(routes=routes, middleware=[Middleware(SecurityHeaders)], lifespan=lifespan)
+    from .hostcheck import HostAllowlist
+    app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
+                                               Middleware(SecurityHeaders)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app

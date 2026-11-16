@@ -4,7 +4,9 @@ Steps (spec 03): read → map columns → normalize → detect duplicates / miss
 conflicting data → dry-run report → user review → apply once, atomically →
 reconcile counts and quantities → final report. Nothing is written to items or
 stock before apply(); a failure during apply rolls back everything; applying the
-same file twice is refused (DB unique index + status check).
+same file twice is refused (DB unique index + status check); a run whose plan
+went stale since analyze (the item got stock movements, the party got ledger
+rows) is refused whole with 'stale_plan'.
 
 Rules honoured:
 - opening balances are 'opening' movements and are refused for items that
@@ -168,16 +170,25 @@ def template_xlsx(kind: str) -> bytes:
         ins.append([LABELS_AR[f], "نعم" if f in req else "لا", notes.get(f, "")])
     ins.append([])
     ins.append(["يمكنك رفع ملف التصدير من البرنامج القديم كما هو؛ وإذا اختلفت أسماء الأعمدة ستظهر لك صفحة لربطها مرة واحدة."])
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
+_YES = {normalize_text(w) for w in ("1", "1.0", "نعم", "yes", "true", "مستورد", "مستوردة", "imported", "دواء", "drug")}
+_NO = {normalize_text(w) for w in ("0", "0.0", "لا", "no", "false", "محلي", "محلية", "local", "غير دواء", "non drug",
+                                   "nondrug")}
+
+
 def _bool(v) -> int | None:
+    """Yes/no columns as old programs export them; anything else is None (the row shows unknown_..., never a guess).
+    Both sides go through normalize_text, so spelling variants (ة/ه, ى/ي) match."""
     t = normalize_text(str(v)) if v not in (None, "") else ""
-    if t in ("1", "نعم", "yes", "true", "مستورد", "imported", "دواء", "drug"):
+    if t in _YES:
         return 1
-    if t in ("0", "لا", "no", "false", "محلي", "local", "غير دواء", "non drug", "nondrug"):
+    if t in _NO:
         return 0
     return None
 
@@ -435,8 +446,8 @@ class DataImport:
                     normalize_text(d.get("supplier_type") or ""), "other")
                 target = catalog.create_supplier(
                     self.db, ctx, name=d["name"], supplier_type=stype, phone=d.get("phone"),
-                    base_discount_local_bp=round(Decimal(d["discount_local"]) * 100) if d.get("discount_local") else None,
-                    base_discount_imported_bp=round(Decimal(d["discount_imported"]) * 100) if d.get("discount_imported") else None)
+                    base_discount_local_bp=int((Decimal(d["discount_local"]) * 100).to_integral_value(ROUND_HALF_UP)) if d.get("discount_local") else None,
+                    base_discount_imported_bp=int((Decimal(d["discount_imported"]) * 100).to_integral_value(ROUND_HALF_UP)) if d.get("discount_imported") else None)
                 done["created"] += 1
             else:
                 done["updated" if action == "update" else "linked"] += 1
@@ -633,7 +644,7 @@ class DataImport:
                     value_total += Decimal(d["qty"]) * Decimal(d["cost"])
         return {"counts": counts, "issues": issue_counts, "rows": sum(counts.values()),
                 "source_qty_total": str(qty_total),
-                "source_value_total": str(value_total.quantize(Decimal("0.01")))}
+                "source_value_total": str(value_total.quantize(Decimal("0.01"), ROUND_HALF_UP))}
 
     # ------------------------------------------------------------ review
     def get(self, ctx: Context, run_id: str, action: str | None = None, limit: int = 500) -> dict:
@@ -683,6 +694,11 @@ class DataImport:
             issues = {i["code"] for i in json.loads(row["issues"])}
             if "item_has_history" in issues:
                 raise ValidationFailed("الصنف له حركات سابقة؛ استخدم الجرد/التسوية بدل الرصيد الافتتاحي")
+        if run["kind"] == "opening_stock" and decision.startswith("link:"):
+            # the same rule for a link: the item the balance would land on must have no history
+            if self.db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? LIMIT 1",
+                           (ctx.org_id, ctx.branch_id, decision[5:])):
+                raise ValidationFailed("الصنف له حركات سابقة؛ استخدم الجرد/التسوية بدل الرصيد الافتتاحي")
         with self.db.transaction():
             self.db.execute("UPDATE import_rows SET decision=? WHERE id=?", (decision, row_id))
             audit.record(self.db, ctx, "import.decide", "import_run", run_id,
@@ -718,6 +734,11 @@ class DataImport:
                                            " حدد عدد الوحدات أو تجاهل هذه الأسطر صراحةً",
                                            code="fractional_qty", details={"rows": frac[:50],
                                                                           "count": len(frac)})
+            stale = self._stale_rows(ctx, run, rows)
+            if stale:
+                raise Conflict("تغيّرت البيانات بعد تحليل هذا الملف (صنف أصبحت له حركات مخزون، أو مورد/عميل"
+                               " أصبح له رصيد مسجل)؛ لم يُطبَّق شيء. ارفع الملف وحلّله من جديد",
+                               code="stale_plan", details={"rows": stale[:50], "count": len(stale)})
             options = json.loads(run["options"])
             done = {"created": 0, "updated": 0, "linked": 0, "skipped": 0, "errors": 0,
                     "stock_rows": 0, "posted_qty_packs": Decimal(0), "posted_base_units": 0,
@@ -785,6 +806,42 @@ class DataImport:
             audit.record(self.db, ctx, "import.apply", "import_run", run_id, after=done)
         matching.invalidate(ctx.org_id)
         return report
+
+    def _stale_rows(self, ctx: Context, run, rows: list[dict]) -> list[int]:
+        """Rows whose plan is no longer true. The "no opening balance over existing history" rule was
+        checked at analyze only; another run (the per-file "already applied" guard does not see a
+        different file) or another screen may have posted to the same item or party since. Runs
+        inside apply's transaction, before anything is written."""
+        if run["kind"] not in ("opening_stock", "suppliers", "customers"):
+            return []
+        ledger = {"suppliers": ("supplier_ledger", "supplier_id"),
+                  "customers": ("customer_ledger", "customer_id")}.get(run["kind"])
+        stale = []
+        for r in rows:
+            if r["decision"] == "skip" or r["action"] in ("skip", "error"):
+                continue
+            linked = bool(r["decision"]) and r["decision"].startswith("link:")
+            target = r["decision"][5:] if linked else r["target_id"]
+            if not target:
+                continue
+            if ledger is None:
+                if self.db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=?"
+                               " AND NOT (coalesce(ref_type,'')='import_run' AND coalesce(ref_id,'')=?)"
+                               " LIMIT 1", (ctx.org_id, ctx.branch_id, target, run["id"])):
+                    stale.append(r["row_no"])
+                continue
+            if r["decision"] == "create":        # posts to a new party, not to the target
+                continue
+            d = json.loads(r["data"])
+            if d.get("balance") is None or to_piasters(Decimal(d["balance"])) == 0:
+                continue
+            if any(i["code"] == "party_has_history" for i in json.loads(r["issues"])):
+                continue                         # known at analyze and decided by a person
+            table, col = ledger
+            if self.db.one(f"SELECT 1 FROM {table} WHERE org_id=? AND {col}=? AND coalesce(ref_id,'')<>?"
+                           " LIMIT 1", (ctx.org_id, target, run["id"])):
+                stale.append(r["row_no"])
+        return stale
 
     def _apply_item(self, ctx: Context, d: dict, action: str, target: str | None, run_id: str,
                     done: dict, keep_duplicate=None) -> None:
@@ -887,6 +944,8 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
                    bcs, q, it["status"]])
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

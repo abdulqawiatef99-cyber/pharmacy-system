@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   driver-labels:
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross_as_sold
-from .service import _period
+from ..sales.service import line_gross_as_sold, retail_value
+from .service import _period, local_buckets
 
 MAX_ROWS = 5000
 SOURCES = {"manual": "يدوي", "purchase_invoice": "فاتورة شراء", "import": "استيراد"}
@@ -22,11 +22,6 @@ METHODS = {"cash": "نقدي", "card": "بطاقة", "credit": "على الحس�
 
 def _out(d1: date, d2: date, rows: list, **kw) -> dict:
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows[:MAX_ROWS], "truncated": len(rows) > MAX_ROWS, **kw}
-
-
-def _day_mod() -> str:
-    off = datetime.now().astimezone().utcoffset()
-    return f"{int(off.total_seconds() // 60):+d} minutes"
 
 
 # ------------------------------------------------------------------ prices and units
@@ -242,11 +237,14 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
         g["approved_lines"] += 1 if l["discount_approved_by"] else 0
     for g in by_who.values():
         g["discount_bp"] = int(round(g["discount"] * 10000 / g["gross"])) if g["gross"] else 0
-    mod = _day_mod()
-    daily = [dict(r) for r in db.all(
-        f"SELECT date(completed_at, '{mod}') day, count(*) n, sum(subtotal) gross, sum(discount_total) discount FROM sales"
-        " WHERE org_id=? AND branch_id=? AND status='completed' AND completed_at>=? AND completed_at<? GROUP BY 1 ORDER BY 1",
-        (o, b, lo, hi))]
+    days: dict = {}
+    for when, r in local_buckets(
+            db, "completed_at", "count(*) n, sum(subtotal) gross, sum(discount_total) discount",
+            " FROM sales WHERE org_id=? AND branch_id=? AND status='completed' AND completed_at>=? AND completed_at<?", (o, b, lo, hi)):
+        d = days.setdefault(when.date().isoformat(), {"day": when.date().isoformat(), "n": 0, "gross": 0, "discount": 0})
+        for k, v in r.items():
+            d[k] += v or 0
+    daily = [days[k] for k in sorted(days)]
     for d in daily:
         d["discount_bp"] = int(round(d["discount"] * 10000 / d["gross"])) if d["gross"] else 0
     rows = [dict(r) for r in db.all(
@@ -286,10 +284,10 @@ def unsold_items(db: Database, ctx: Context, date_from: str, date_to: str) -> di
         d = dict(r)
         if d.pop("hidden") and not ctx.can("items.hidden"):
             continue
-        d["price_value"] = (d["public_price"] or 0) * d["qty"] // d["pack_size"]
+        d["price_value"] = retail_value(d["qty"], d["public_price"] or 0, d["pack_size"])   # the sale's own rule
         cost = d.pop("avg_cost")
         if show_cost:
-            d["cost_value"] = int((Decimal(cost) * d["qty"] * 100).to_integral_value()) if cost is not None else None
+            d["cost_value"] = int((Decimal(cost) * d["qty"] * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else None
         rows.append(d)
     key = "cost_value" if show_cost else "price_value"
     rows.sort(key=lambda r: -(r.get(key) or 0))

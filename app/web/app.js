@@ -17,6 +17,8 @@ const fmtStock = (q, it) => {
   return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// a typed whole number; "2.5" goes to the server as typed and is refused there, never cut to 2 by parseInt
+const typedWhole = (v) => { const t = String(v ?? "").trim(); if (t === "") return null; const n = Number(t); return Number.isInteger(n) ? n : t; };
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
@@ -167,28 +169,29 @@ const hintHtml = (h) => (!h ? "" : h.kind === "layout"
 
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 
-function toast(msg, isError = false) {
+function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
   t.textContent = msg;
   t.className = isError ? "error" : "";
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => (t.hidden = true), isError ? 7000 : 3000);
+  toast._t = setTimeout(() => (t.hidden = true), ms || (isError ? 7000 : 3000));
 }
 
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
 // ------------------------------------------------------------------ on-screen approval
-// The owner or a manager types his PIN on this screen; the approval is kept for
-// 90 seconds on this screen only (cleared when leaving it), then asked again.
+// The owner or a manager types his PIN on this screen; the server checks it once and gives back a
+// token for that one action (permission + API path) for 90 seconds, on this screen only (cleared when
+// leaving it). The PIN itself is never kept (#137).
 let APPROVAL = null;
-const approvalHeaders = () => {
-  if (APPROVAL && APPROVAL.until > Date.now()) return { "X-Approver": APPROVAL.id, "X-Approver-Pin": APPROVAL.pin };
+const approvalHeaders = (action) => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.action === action ? { "X-Approval": APPROVAL.token } : {};
   APPROVAL = null; return {};
 };
 window.addEventListener("hashchange", () => { APPROVAL = null; });
 
-async function askApproval(details, message) {
+async function askApproval(details, message, method, path) {
   let list = [];
   try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
   if (!list.length) {
@@ -216,52 +219,90 @@ async function askApproval(details, message) {
       const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
       const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
         headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
-        body: JSON.stringify({ permission: details?.permission || "" }) });
+        body: JSON.stringify({ permission: details?.permission || "", method, path,
+          previous: APPROVAL && APPROVAL.id === who && APPROVAL.action === `${method} ${path}` && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
       const d = await r.json().catch(() => ({}));
-      const enough = r.ok && d.ok && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
+      const enough = r.ok && d.ok && d.token && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
       if (!enough) {
         err.hidden = false;
         err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غير صحيح"}` : "✕ الشخص الذي اخترته لا يملك هذه الصلاحية";
         form.pin.value = ""; form.pin.focus(); return;
       }
-      APPROVAL = { id: who, pin, until: Date.now() + 90000 };
+      APPROVAL = { id: who, action: `${method} ${path}`, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
       dlg.close(); resolve(true);
     });
     dlg.addEventListener("cancel", () => resolve(false), { once: true });
   });
 }
 
-async function api(path, { method = "GET", body, form, _retried = false } = {}) {
-  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders() }, credentials: "same-origin" };
+const API = { busy: 0, last: 0 };
+const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
+// Money forms: the same POST (path + body) sent again within 4 seconds is a double click or a double
+// Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
+// twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
+const ONCE_MS = 4000, ONCE_SENT = new Map();
+const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/];
+function onceKey(method, apiPath, bodyText) {
+  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
+  const hit = ONCE_SENT.get(sig);
+  if (hit) return hit.key;
+  const key = newKey();
+  ONCE_SENT.set(sig, { key, at: now });
+  return key;
+}
+async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
+  const apiPath = path.split("?")[0];
+  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
+    _key = _key || onceKey(method, apiPath, opts.body);
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = newKey();
-  let r;
-  for (let attempt = 0; ; attempt++) {
-    try { r = await fetch(path, opts); break; }
-    catch (netErr) {
-      if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-      if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
-      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = _key || newKey();
+  let r, data;
+  API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { r = await fetch(path, opts); break; }
+      catch (netErr) {
+        if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
+        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+      }
     }
+    data = await r.json().catch(() => ({}));
+  } finally { API.busy--; API.last = Date.now(); }
+  // one approval per distinct permission the action needs (a late restricted return of someone else's
+  // invoice needs four), each added to the same token; a permission asked twice means it was not granted
+  const perm = data?.error?.details?.permission;
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)) {
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && !_retried) {
-    if (await askApproval(data.error.details, data.error.message)) return api(path, { method, body, form, _retried: true });
+  if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
+    APPROVAL = null;
+    // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
+    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
   }
-  if (!r.ok && opts.headers["X-Approver"] && ["invalid_pin", "pin_locked"].includes(data?.error?.code)) APPROVAL = null;
   if (!r.ok) {
-    if (r.status === 401 && !path.startsWith("/api/auth") && !opts.headers["X-Approver"]) { ME = null; location.hash = "#/login"; }
+    if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
     const err = new Error(data?.error?.message || "خطأ في الاتصال");
     err.code = data?.error?.code; err.details = data?.error?.details;
     throw err;
   }
   return data;
+}
+
+// One request per press: the button is off while its request runs (a double click or a second Enter does nothing).
+async function withBusy(btn, fn) {
+  if (btn?.disabled) return;
+  if (btn) btn.disabled = true;
+  try { return await fn(); } finally { if (btn) btn.disabled = false; }
 }
 
 // A hidden frame prints the page (print.js prints on load): no new tab, so a pop-up blocker cannot stop it
@@ -301,6 +342,7 @@ const routes = [
   [/^#\/feedback$/, viewFeedback],
   [/^#\/reports$/, viewReports],
   [/^#\/owner-reports$/, viewOwnerReports],
+  [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
@@ -347,6 +389,10 @@ async function route() {
     if (ME.notifications_unread === undefined) { ME.notifications_unread = 0; refreshBell(); } else setBell(ME.notifications_unread);
     if (!route.bellTimer) route.bellTimer = setInterval(refreshBell, 60000);
   }
+  if (!ME) showStockAlert(null);
+  else if (ME.stock_alert !== undefined) { showStockAlert(ME.stock_alert); delete ME.stock_alert; }
+  else refreshStockAlert();
+  if (ME && !route.alertTimer) route.alertTimer = setInterval(refreshStockAlert, 60000);
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
@@ -356,6 +402,19 @@ async function route() {
     if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
   }
   location.hash = "#/home";
+}
+// #202: red banner while the last stock integrity check found balances that do not match the stock ledger
+async function refreshStockAlert() {
+  if (!ME?.permissions?.includes("audit.read") || document.hidden) { if (!ME) showStockAlert(null); return; }
+  try { showStockAlert((await api("/api/stock/alert")).alert); } catch { /* offline: keep what is shown */ }
+}
+function showStockAlert(a) {
+  const bar = $("#stockAlert");
+  if (!bar) return;
+  bar.hidden = !a;
+  if (!a) return;
+  const n = Object.values(a.counts || {}).reduce((x, y) => x + y, 0);
+  bar.textContent = `⚠ تنبيه: أرصدة المخزون لا تطابق حركات المخزون (${n} اختلاف، آخر فحص ${stamp(a.at)}). لم يُصلَّح شيء تلقائيًا — اضغط لفتح «مطابقة الأرصدة».`;
 }
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
@@ -544,8 +603,8 @@ function viewSetup() {
   <form class="panel login" id="setupForm">
     <h1>أهلًا بك</h1>
     <p class="muted">هذه أول مرة يعمل فيها البرنامج على هذا الجهاز. أدخل هذه البيانات مرة واحدة فقط.</p>
-    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية عبد القوي"></label><br>
-    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. عبد القوي"></label><br>
+    <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية الشفاء"></label><br>
+    <label class="f">اسمك <input name="full_name" placeholder="مثال: د. أحمد محمود"></label><br>
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة السر <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
@@ -876,9 +935,9 @@ function bindQuickAdd() {
   q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
   const add = async () => {
     if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
-    const qty = parseInt($("#qaQty").value, 10);
-    if (!(qty > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: parseInt($("#qaBonus").value || "0", 10) };
+    const qty = typedWhole($("#qaQty").value);
+    if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
+    const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
@@ -957,8 +1016,8 @@ async function purchaseTabs(curId) {
 
 const CONVERT = {
   public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters, tax_amount: toPiasters,
-  discount_bp: toBp, qty: (v) => (v === "" ? null : parseInt(v, 10)),
-  bonus_qty: (v) => (v === "" ? 0 : parseInt(v, 10)), batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
+  discount_bp: toBp, qty: (v) => typedWhole(v),
+  bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
 async function save(path, body, method = "PATCH") {
@@ -1729,8 +1788,8 @@ async function viewCountSession(id) {
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
   const save = async (recount) => {
-    const qty = parseInt($("#cntQty").value, 10);
-    if (Number.isNaN(qty) || qty < 0) return toast("اكتب كمية صحيحة", true);
+    const qty = typedWhole($("#cntQty").value);
+    if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
     try {
       await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
         location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
@@ -1780,7 +1839,7 @@ async function viewCountSession(id) {
         <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد بالنظام</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
         <tbody>${v.lines.map((l) => `<tr class="${l.difference ? "has-err" : ""}"><td>${esc(l.label)}</td><td>${l.system_qty}</td>
           <td>${l.counted}</td><td>${l.moves_after_count}</td><td>${l.difference}</td><td>${esc(l.value ?? "")}</td>
-          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : "رصيد سالب"}</span>`
+          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : l.problem === "adjusted_since_count" ? "اتعدّل بعد العدّ: أعد عدّه" : "رصيد سالب"}</span>`
             : l.difference < 0 ? `<select data-why="${esc(l.item_id)}|${esc(l.batch_key || "")}" class="noprint"><option value="">السبب: مثل الافتراضي</option>${reasonOpts(R.adjust, null, false)}</select>` : l.difference > 0 ? "زيادة وُجدت" : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="row mt noprint"><label class="f">سبب العجز (الافتراضي لكل الأصناف) <select id="cntWhy">${reasonOpts(R.adjust, "lost", false)}</select></label>
           ${v.summary.uncounted_items ? `<label class="f">الأصناف التي لم تُجرد (${v.summary.uncounted_items}) <select id="cntZero"><option value="">اتركها كما هي</option>${reasonOpts(R.adjust, null, false).replace(/<option value="/g, '<option value="zero:')}</select></label>` : ""}
@@ -1930,7 +1989,7 @@ async function renderReceiptCfg(c) {
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
     <label class="f">رقم التسجيل الضريبي (اختياري) <input name="tax_no" dir="ltr" value="${esc(c.tax_no || "")}"></label>
     <label class="f">رقم السجل التجاري (اختياري) <input name="cr_no" dir="ltr" value="${esc(c.cr_no || "")}"></label>
-    <label class="f">الوقت على الإيصال <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
+    <label class="f">شكل الوقت (في كل الشاشات والإيصال) <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
     <fieldset class="lblp"><legend>الإيصال والدرج عند إتمام البيع</legend>
       <p class="muted">الافتراضي: بدون إيصال، والكاشير يختار «🧾 إيصال» (F4) بجانب زر الإتمام. فاتورة التوصيل تطبع إيصالًا واحدًا تلقائيًا.</p>
       ${chk("auto_receipt", "اختيار الإيصال تلقائيًا حسب قيمة الفاتورة")}
@@ -1965,9 +2024,12 @@ async function renderReceiptCfg(c) {
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
       <label class="chk lbDrv"><input type="checkbox" name="label_flip" ${c.label_flip ? "checked" : ""}> اقلب الملصق (لو بيطلع مقلوب)</label>
+      <label class="f">لغة بيانات الملصق <select name="label_text_lang"><option value="en" ${(c.label_text_lang || "en") === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.label_text_lang === "ar" ? "selected" : ""}>عربي</option></select></label>
+      <label class="f">اسم الصيدلية بالإنجليزي (للملصق) <input name="label_pharmacy_en" dir="ltr" maxlength="40" value="${esc(c.label_pharmacy_en || "")}" placeholder="Abdul Qawi Pharmacy"></label>
+      <label class="f lbDrv">عدد الملصقات في صفحة ويندوز (لو الصفحة فيها ملصقين فوق بعض اختار 2) <select name="label_rows">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(c.label_rows || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
       <p class="muted lbDrv">البرنامج بيطبع عن طريق تعريف الطابعة في ويندوز، زي إي ستوك بالظبط: مقاس الملصق والمسافة بين الملصقات والاتجاه بتتاخد من «تفضيلات الطباعة» للطابعة في ويندوز (نفس اللي إي ستوك بيطبع بيه). المقاس اللي فوق بيُستخدم بس لو اتطبع من المتصفح.</p>
       <label class="f lbRaw">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
-      <label class="f lbRaw">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
+      <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
       <label class="f lbRaw">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
       <p class="muted lbRaw">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
       <label class="f lbRaw">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
@@ -2007,7 +2069,7 @@ async function renderReceiptCfg(c) {
     try {
       const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
         body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
-          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim() }) });
+          label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim(), label_rows: +lf.label_rows.value, label_gap: +lf.label_gap.value || 0, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() }) });
       if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
       const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
       if (prevUrl) URL.revokeObjectURL(prevUrl);
@@ -2020,7 +2082,7 @@ async function renderReceiptCfg(c) {
   // #100: through the Windows driver, size, gap and direction come from Windows: the raw-printer fields hide
   const lbMode = () => { const drv = lf.label_lang.value === "driver";
     lf.querySelectorAll(".lbRaw").forEach((x) => { x.hidden = drv; }); lf.querySelectorAll(".lbDrv").forEach((x) => { x.hidden = !drv; }); };
-  lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview);
+  lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview); lf.label_rows.addEventListener("change", preview); lf.label_gap.addEventListener("change", preview); lf.label_text_lang.addEventListener("change", preview); lf.label_pharmacy_en.addEventListener("change", preview);
   showCustom(); preview();
   lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
   ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
@@ -2033,11 +2095,11 @@ async function renderReceiptCfg(c) {
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim(), show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
       qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
-      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; toast("تم الحفظ"); }
+      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
@@ -2050,7 +2112,7 @@ async function renderReceiptCfg(c) {
     try {
       const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
-        label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked } });
+        label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked, label_rows: +lf.label_rows.value, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() } });
       toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — لو تمام دوس «احفظ»`);
     } catch (err) { toast(err.message, true); }
   });
@@ -2114,7 +2176,7 @@ function renderBackup(b) {
           <input name="offsite_dir" value="${esc(c.offsite_dir)}" placeholder="E:\\نسخ الصيدلية" dir="auto"></label>
         ${!c.offsite_dir ? `<p class="badge b-warn">⚠ لا توجد نسخة خارج الجهاز — إذا تعطل الجهاز ستضيع النسخ معه</p>`
           : b.offsite_stale ? `<p class="badge b-warn">⚠ آخر نسخة خارج الجهاز ${st.offsite_at ? esc(st.offsite_at.slice(0, 10)) : "لا يوجد"}${st.offsite_error ? ` — ${esc(st.offsite_error)}` : ""}</p>`
-          : `<p class="badge b-ok">✓ آخر نسخة خارج الجهاز ${esc((st.offsite_at || "").replace("T", " ").slice(0, 16))}</p>`}</div>
+          : `<p class="badge b-ok">✓ آخر نسخة خارج الجهاز ${esc(stamp(st.offsite_at))}</p>`}</div>
       <div class="row"><button class="btn">احفظ</button><button class="btn secondary" type="button" id="bkNow">اعمل نسخة الآن</button></div>
     </form>
     <details class="mt"><summary>النسخ الموجودة (${b.files.length}) — المساحة ${MB(b.total_bytes)} — المجلد ${esc(b.folder)}</summary>
@@ -2141,11 +2203,46 @@ async function checkUpdateBadge() {
   try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
 }
 
+// An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
+const BUILD = document.querySelector('meta[name="pharm-build"]')?.content || null;
+function screenIdle() {
+  // reloading by itself is safe only where nothing typed can be lost: sign-in, home, an empty sale screen,
+  // and only while no field holds text the person typed but the screen has not saved yet
+  if ($("dialog[open]")) return false;
+  if (API.busy || Date.now() - API.last < 3000) return false;     // a scan or a save may still be on its way
+  const typed = [...document.querySelectorAll("input, textarea, select")].some((el) =>
+    el.type === "checkbox" || el.type === "radio" ? el.checked !== el.defaultChecked
+      : el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : el.value !== el.defaultValue);
+  if (typed) return false;
+  const h = location.hash || "#/home";
+  if (h === "#/login" || h === "#/home") return true;
+  return h.startsWith("#/pos") && !(SALE?.lines?.length);
+}
+async function checkBuild() {
+  if (!BUILD || checkBuild.stale) return;
+  let h;
+  try { h = await (await fetch("/api/health", { cache: "no-store" })).json(); } catch { return; }   // restarting
+  if (!h?.web || h.web === BUILD) return;
+  if (screenIdle()) { location.reload(); return; }
+  checkBuild.stale = true;
+  $("#staleBar").hidden = false;
+}
+if (BUILD) {
+  $("#staleBar")?.addEventListener("click", () => location.reload());
+  setInterval(checkBuild, 60000);
+  window.addEventListener("focus", checkBuild);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
+}
+
 // ------------------------------------------------------------------ sales history / returns
 const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
 const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const LOC = () => (I18N.on ? "en-GB" : "ar-EG");   // dates and times follow the screen language
-const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }) : "");
+// #206: every time shown follows the pharmacy's setting (12-hour with ص/م by default, or 24-hour); stored values unchanged
+const H12 = () => (ME?.time_format ?? "12") !== "24";
+const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit", hour12: H12() }) : "");
+const hourLabel = (h) => (H12() ? `${h % 12 || 12}${h < 12 ? "ص" : "م"}` : String(h));
 const dayOf = (iso) => (iso ? isoDay(new Date(iso)) : "");   // local day of a UTC timestamp
 
 async function viewSales() {
@@ -2180,7 +2277,7 @@ async function viewSalesAdvanced() {
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
     draw();
   };
-  const sub = () => `${R.from.replace("T", " ")} ← ${R.to.replace("T", " ")}`;
+  const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -2399,14 +2496,14 @@ async function viewSale(id) {
       ${refundOptions(s).map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
       <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
-    ${s.status === "completed" && can("sales.void") && !s.returned_total ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
+    ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
       <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
   </section>`;
   $("#rGo")?.addEventListener("click", async (ev) => {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
     const lines = {};
-    app.querySelectorAll("[data-ret]").forEach((i) => { const v = parseInt(i.value, 10); if (v > 0) lines[i.dataset.ret] = v; });
+    app.querySelectorAll("[data-ret]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.ret] = v; });
     if (!Object.keys(lines).length) { toast("اكتب كمية المرتجع", true); return; }
     btn.disabled = true;
     try {
@@ -2472,7 +2569,7 @@ async function viewDeadstock() {
       $("#dsXlsx").disabled = false;
       const tbl = (rows) => `<div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد</th><th>التكلفة المحبوسة</th>
         <th>بيع الفترة</th><th>يكفي (شهر)</th><th>أقرب صلاحية</th><th>آخر شراء</th><th>المورد</th></tr></thead><tbody>
-        ${rows.map((x) => `<tr><td>${esc(x.name)}<div class="raw">${esc(x.company || "")} · ${x.code}</div></td><td>${x.qty}</td>
+        ${rows.map((x) => `<tr><td>${esc(x.name)}<div class="raw">${esc(x.company || "")} · ${esc(x.code)}</div></td><td>${x.qty}</td>
         <td><b>${x.value.toFixed(2)}</b></td><td>${x.sold_in_period || 0}</td><td>${x.months_of_cover ?? "—"}</td>
         <td>${esc(x.nearest_expiry || "غير مسجلة")}</td><td>${esc(x.last_purchase || "قبل الفترة")}</td><td>${esc(x.supplier || x.note || "")}</td></tr>`).join("")}
         </tbody></table></div>`;
@@ -2572,7 +2669,7 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {} };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -2597,6 +2694,7 @@ async function openDraft(id) {
 }
 
 async function viewPos() {
+  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "ناقص" (11/01)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
@@ -2878,8 +2976,11 @@ function renderSide() {
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
-    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
-    catch (er) { toast(er.message, true); }
+    POS.saving = (async () => {        // complete() waits for it: F9 typed in the address field (11/01)
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
+      catch (er) { toast(er.message, true); }
+    })();
+    await POS.saving;
   }));
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
@@ -2895,15 +2996,7 @@ function renderSide() {
     }));
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
-  $("#posCustNew")?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const name = prompt("اسم العميل:"); if (!name) return;
-    const phone = prompt("الهاتف (اختياري):") || null;
-    try {
-      const c = await api("/api/customers", { method: "POST", body: { name, phone, credit_limit: 0 } });
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: c.id } }); renderSide();
-    } catch (er) { toast(er.message, true); }
-  });
+  $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
@@ -2927,6 +3020,45 @@ function renderSide() {
   $("#posDone").addEventListener("click", () => complete(null));
 }
 
+// A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
+// fills the name or the phone, a refusal (a phone already used) stays on the form, and one click saves once.
+function newCustomerDialog() {
+  const typed = ($("#posCust")?.value || "").trim(), isPhone = /^[+\d\s-]{5,}$/.test(typed);
+  const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
+  const d = document.createElement("dialog"); d.id = "custNewDlg";
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
+    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">الهاتف (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
+    ${SALE?.kind === "delivery" ? `<label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE.delivery?.address || "")}"></label>` : ""}
+    <p class="badge b-err" data-err hidden></p>
+    <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+  document.body.append(d);
+  const f = d.querySelector("form"), err = d.querySelector("[data-err]"), ok = f.querySelector("[value=ok]");
+  const [nameIn, phoneIn, addrIn] = ["name", "phone", "address1"].map((n) => f.elements.namedItem(n));
+  const done = () => { d.close(); d.remove(); $("#posQ")?.focus(); };
+  f.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (ok.disabled) return;                          // saving: no second save, and no closing mid-save
+    if (ev.submitter?.value === "cancel") { done(); return; }
+    const body = { name: nameIn.value.trim(), phone: phoneIn.value.trim() || null, credit_limit: 0 };
+    if (addrIn?.value.trim()) body.address1 = addrIn.value.trim();
+    if (!body.name) { nameIn.focus(); return; }
+    ok.disabled = true;
+    try {
+      const c = await api("/api/customers", { method: "POST", body });
+      SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { customer_id: c.id } });
+      const fill = {};                                // like choosing an existing customer: fill only what is empty
+      if (SALE.kind === "delivery" && body.phone && !SALE.delivery?.phone) fill.phone = body.phone;
+      if (SALE.kind === "delivery" && body.address1 && !SALE.delivery?.address) fill.address = body.address1;
+      if (Object.keys(fill).length) SALE = await api(`/api/sales/${saleId}`, { method: "PATCH", body: { delivery: fill } });
+      done(); renderSide();
+    } catch (er) { err.hidden = false; err.textContent = `✕ ${er.message}`; ok.disabled = false; }
+  });
+  d.addEventListener("cancel", (ev) => { ev.preventDefault(); if (!ok.disabled) done(); });
+  d.showModal();
+  (isPhone || !typed ? nameIn : phoneIn).focus();
+}
+
 function refreshTabLabel() {
   const t = document.querySelector(`.tab.on`);
   if (!t || !SALE) return;
@@ -2938,7 +3070,7 @@ function refreshTabLabel() {
 function renderFindings(findings) {
   const needs = (f) => ["override", "block", "acknowledge"].includes(f.requires);
   $("#posSafety").innerHTML = `<div class="panel mt"><h2>فحص السلامة الدوائية</h2>
-    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${{ item_rx: "📋 بوصفة طبية فقط", item_misuse: "⚠ يُساء استخدامه", item_note: "📝 ملاحظة" }[f.code] || SEV[f.severity][0]}</span> ${esc(f.message)}
+    ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${{ item_rx: "📋 بوصفة طبية فقط", item_misuse: "⚠ يُساء استخدامه", item_note: "📝 ملاحظة", item_recall_pending: "⚠ منشور سحب لم يُراجَع" }[f.code] || SEV[f.severity][0]}</span> ${esc(f.message)}
       ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
       ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
       ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
@@ -2952,6 +3084,19 @@ function currentPayments() {
 }
 
 async function complete(findings) {
+  // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
+  // for a missing address that is right there on the screen (device test 11/01)
+  if (document.activeElement?.dataset?.dl) document.activeElement.blur();
+  await POS.saving;
+  // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
+  // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows
+  // another name, so the sale waits until the box and the invoice say the same customer.
+  const custBox = $("#posCust"), bare = (v) => String(v ?? "").replace(/\s+/g, "");
+  if (SALE.customer && custBox && bare(custBox.value) !== bare(SALE.customer.name)) {
+    toast(`الفاتورة مسجلة على العميل «${SALE.customer.name}» والمكتوب في خانة العميل غيره. اختر العميل من القائمة أو اضغط «إزالة العميل»، ثم أتمم البيع`, true);
+    custBox.focus();
+    return;
+  }
   const payments = currentPayments();
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
@@ -2986,15 +3131,29 @@ async function complete(findings) {
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
-    if (dv.receipt === "failed") toast(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`, true);
-    if (dv.drawer === "failed") toast("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح", true);
-    if (dv.drawer === "unsupported") toast("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات", true);
+    // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
+    // under the drawer one when the printer was off), and it stays longer than a normal error
+    const warn = [];
+    if (dv.receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
+    if (dv.drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
+    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات");
+    if (warn.length) toast(warn.join("\n"), true, 15000);
     SALE = null; viewPos();
   } catch (er) {
     toast(er.message, true);
     btn.disabled = false;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = null; viewPos(); }
+    // the invoice on the server is not the one on the screen (a price, a contract discount or the stock
+    // moved, or it was edited elsewhere): show it again, the amount due included, before the next F9.
+    // The side panel was left as it was, so the sale could complete at a total the cashier never saw.
+    if (["price_changed", "payment_mismatch", "stale_version"].includes(er.code)) {
+      try {
+        const was = SALE.total;
+        SALE = await api(`/api/sales/${SALE.id}`); renderCart(); renderSide();
+        if (er.code === "payment_mismatch" && SALE.total !== was) toast("تغيّر إجمالي الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع", true);
+      } catch { /* the message is already shown */ }
+    }
     if (er.code === "no_open_shift") $("#posShift").click();
     if (er.code === "below_cost_confirm") {
       const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
@@ -3048,7 +3207,7 @@ async function viewShift() {
   const seeAll = ME.permissions.includes("cash.see_expected");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
   const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الورديات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
-    ${recent.map((r) => `<tr><td>${esc(new Date(r.opened_at).toLocaleString(LOC()))}</td><td>${r.closed_at ? esc(new Date(r.closed_at).toLocaleString(LOC())) : `<span class="badge b-info">مفتوح</span>`}</td>
+    ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
@@ -3065,7 +3224,7 @@ async function viewShift() {
     return;
   }
   const k = sh.cash_by_kind || {};
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الوردية المفتوحة</h1><span class="muted">من ${esc(new Date(sh.opened_at).toLocaleString(LOC()))}</span></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الوردية المفتوحة</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
@@ -3091,7 +3250,7 @@ async function viewShift() {
   wireHist();
   function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الورديات", subtitle: "", el: $("#shHist"), sheets: [
     { name: "الورديات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
-      rows: recent.map((r) => [new Date(r.opened_at).toLocaleString(LOC()), r.closed_at ? new Date(r.closed_at).toLocaleString(LOC()) : "مفتوح", r.closed_by_name || "",
+      rows: recent.map((r) => [stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",
         r.expected_cash, r.counted_cash, r.difference, r.close_note || ""]) }] })); }
   $("#shPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -3195,8 +3354,11 @@ async function viewSupplier(id) {
   });
   $("#supPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value, ref: e.target.r.value || null, note: e.target.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
-    catch (err) { toast(err.message, true); }
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, ref: f.r.value || null, note: f.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
+      catch (err) { toast(err.message, true); }
+    });
   });
   if (a.balance == null) return;
   let st = null;
@@ -3525,10 +3687,15 @@ async function viewCustomer(id) {
   });
   $("#cPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
-    catch (err) { toast(err.message, true); }
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
+      catch (err) { toast(err.message, true); }
+    });
   });
-  const toPos = async (sid) => { SALE = await api(`/api/sales/${sid}`); location.hash = "#/pos"; };
+  // openDraft, not a bare SALE: the payment choice (credit, a split) left on another open invoice must not
+  // become this invoice's payment
+  const toPos = async (sid) => { await openDraft(sid); location.hash = "#/pos"; };
   $("#cuSale")?.addEventListener("click", async () => {
     try { const d = await api("/api/sales", { method: "POST", body: { customer_id: id } }); await toPos(d.id); } catch (err) { toast(err.message, true); }
   });
@@ -3602,9 +3769,11 @@ async function viewExpenses(period) {
   $("#exNew").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
-    try { const x = await api("/api/expenses", { method: "POST", body: { category_id: f.cat.value, amount: toPiasters(f.a.value), paid_from: f.from.value, spent_on: f.d.value, note: f.n.value || null } });
-      toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
-    catch (err) { toast(err.message, true); }
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { const x = await api("/api/expenses", { method: "POST", body: { category_id: f.cat.value, amount: toPiasters(f.a.value), paid_from: f.from.value, spent_on: f.d.value, note: f.n.value || null } });
+        toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
+      catch (err) { toast(err.message, true); }
+    });
   });
   $("#exCat")?.addEventListener("submit", async (e) => { e.preventDefault(); try { await api("/api/expenses", { method: "POST", body: { new_category: e.target.n.value } }); viewExpenses(); } catch (err) { toast(err.message, true); } });
   document.querySelectorAll("[data-exok]").forEach((b) => b.addEventListener("click", async () => {
@@ -3628,7 +3797,7 @@ async function renderSchedules(cats, edit = null) {
       <td class="num">${x.amount ? money(x.amount) : "<span class='muted'>متغير</span>"}</td><td>يوم ${x.day_of_month} · ${EVERY_T[x.every_months]}</td><td>${x.remind_days} يوم</td>
       <td>${!x.is_active ? "موقوف" : x.next ? `<span class="badge ${SC_ST[x.next.state][0]}">${SC_ST[x.next.state][1]} ${esc(x.next.due)}</span>` : "—"}${x.last_paid ? `<div class="muted small">آخر مرة: ${esc(x.last_paid)}</div>` : ""}</td>
       <td class="row">${x.is_active && x.next ? `${x.amount ? "" : `<input class="narrow" type="number" min="0" step="0.01" placeholder="المبلغ" data-scamt="${esc(x.id)}">`}
-        <button class="btn small" data-scpay="${esc(x.id)}">سجّل الدفع</button><button class="btn small secondary" data-scskip="${esc(x.id)}" data-p="${esc(x.next.period)}">ليس هذه المرة</button>` : ""}
+        <button class="btn small" data-scpay="${esc(x.id)}" data-p="${esc(x.next.period)}">سجّل الدفع</button><button class="btn small secondary" data-scskip="${esc(x.id)}" data-p="${esc(x.next.period)}">ليس هذه المرة</button>` : ""}
         <button class="btn small secondary" data-scedit="${esc(x.id)}">تعديل</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">لا توجد بنود مجدولة بعد</td></tr>`}</tbody></table></div>
     <form id="scForm" class="mt"><h3>${e ? `تعديل: ${esc(e.name)}` : "بند مجدول جديد"}</h3><div class="formgrid">
       <label class="f">الاسم <input name="name" required value="${v("name")}" placeholder="مثال: إيجار الصيدلية"></label>
@@ -3655,9 +3824,11 @@ async function renderSchedules(cats, edit = null) {
   box.querySelectorAll("[data-scpay]").forEach((b) => b.addEventListener("click", async () => {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
-    try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", amount: amt ? toPiasters(amt.value) : null } });
-      toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
-    catch (err) { toast(err.message, true); }
+    await withBusy(b, async () => {
+      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null } });
+        toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
+      catch (err) { toast(err.message, true); }
+    });
   }));
   box.querySelectorAll("[data-scskip]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmInline(b)) return;
@@ -3714,12 +3885,12 @@ async function viewHome() {
     <div class="quick">
       ${(ME.ui?.home || []).filter(canScreen).map((k, i) => `<a class="btn ${i === 0 ? "big" : "secondary"}" href="#/${k}">${esc(SCREENS[k][0])}</a>`).join("")}
       ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
-        <span class="muted">${att.open ? `حاضر من ${esc(new Date(att.open.check_in).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }))}` : ""} · <a href="#/attendance">حضوري هذا الشهر (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
+        <span class="muted">${att.open ? `حاضر من ${esc(hhmm(att.open.check_in))}` : ""} · <a href="#/attendance">حضوري هذا الشهر (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
   <div class="totals">
     ${h.sales ? `<div>مبيعات اليوم<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن اليوم نفسه من الأسبوع الماضي` : ""}</span></div>` : ""}
     <div>فواتيرك اليوم<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
     <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الوردية مفتوحة" : "⚠ الوردية مغلقة"}<b>${h.shift_open ? "جارية" : "افتحها"}</b></div>
-    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(h.backup.last_at.slice(11, 16)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
+    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(hhmm(h.backup.last_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
   </div>
   <section class="panel mt"><h2>يحتاج إلى انتباهك</h2>
     <ul class="notes">${h.alerts.map((a) => `<li><span class="badge ${lvl[a.level][0]}">${lvl[a.level][1]}</span><div>${esc(a.text)} ${a.link ? `<a href="${a.link}">افتح</a>` : ""}</div></li>`).join("")
@@ -3785,7 +3956,7 @@ async function exportXlsx(filename, subtitle, sheets) {
 function printPreview(el, title, subtitle = "") {
   let area = $("#printArea");
   if (!area) { area = document.createElement("div"); area.id = "printArea"; document.body.append(area); }
-  const now = new Date().toLocaleString(LOC(), { dateStyle: "medium", timeStyle: "short" });
+  const now = new Date().toLocaleString(LOC(), { dateStyle: "medium", timeStyle: "short", hour12: H12() });
   area.innerHTML = `<header class="print-head"><b>${esc(ME.organization.name)}</b><h1>${esc(title)}</h1>${subtitle ? `<p>${esc(subtitle)}</p>` : ""}
     <small>طُبع ${esc(now)} — ${esc(ME.user.full_name)}</small></header>`;
   const copy = el.cloneNode(true);
@@ -3910,6 +4081,62 @@ const OWNER_REPORTS = [
       total: ["الإجمالي", "", null, ...(r.totals.cost_value != null ? [r.totals.cost_value] : []), r.totals.price_value, "", "", ""] }] },
 ];
 
+// #202 «مطابقة الأرصدة»: every balance recomputed from the stock ledger, now; nothing is changed by this screen
+const STOCK_KINDS = {
+  batches: ["رصيد تشغيلة لا يساوي مجموع حركاتها", (r) => [r.batch_no || "بدون تشغيلة", r.ledger_qty ?? "لا توجد حركات", r.balance_qty ?? "لا يوجد رصيد"]],
+  items: ["رصيد صنف لا يساوي مجموع حركاته", (r) => ["", r.ledger_qty, r.balance_qty]],
+  negative: ["رصيد بالسالب", (r) => [r.batch_no || "بدون تشغيلة", "", r.qty]],
+  foreign_batch: ["حركة على تشغيلة صنف آخر", (r) => [r.batch_no || "", "", ""]],
+  sales: ["فاتورة بيع حركتها لا تساوي الفاتورة", (r) => [`فاتورة ${r.sale_no}`, r.moved, r.expected]],
+};
+const CHECK_REASONS = { startup: "تشغيل البرنامج", backup: "بعد النسخة الاحتياطية", manual: "من هذا التقرير" };
+async function viewStockCheck() {
+  if (!ME.permissions.includes("audit.read")) { app.innerHTML = `<section class="panel"><p>هذا التقرير للمالك والمدير.</p></section>`; return; }
+  app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/reports">← التقارير</a><h1>مطابقة الأرصدة</h1></div>
+    <span class="row noprint"><button type="button" class="btn" id="scRun">افحص الآن</button><button type="button" class="btn small secondary" id="scPrint">🖨 طباعة</button></span></div>
+    <p class="muted">البرنامج يحسب رصيد كل صنف وكل تشغيلة من جديد من سجل حركات المخزون ويقارنه بالرصيد المعروض. الفحص ده بيحصل لوحده عند تشغيل البرنامج وبعد كل نسخة احتياطية. التقرير ده ما بيغيّرش أي رصيد.</p>
+    <div id="scBox"><p class="muted">جارٍ الفحص…</p></div></section>`;
+  const load = async () => {
+    $("#scBox").innerHTML = `<p class="muted">جارٍ الفحص…</p>`;
+    const r = await api("/api/reports/stock-check", { method: "POST", body: {} });
+    const n = Object.values(r.counts).reduce((a, b) => a + b, 0);
+    const when = (x) => stamp(x);                       // local day + the 12/24-hour setting (#206)
+    let html = `<div class="totals"><div>الحالة<b><span class="badge ${r.ok ? "b-ok" : "b-err"}">${r.ok ? "✔ كل الأرصدة مطابقة" : `✖ ${n} اختلاف`}</span></b></div>
+      <div>أصناف تم فحصها<b>${r.items_checked}</b></div><div>حركات مخزون<b>${r.movements}</b></div><div>وقت الفحص<b>${esc(when(r.checked_at))}</b></div></div>`;
+    if (!r.ok) {
+      html += `<p class="mt"><b>لم يُصلَّح أي رصيد تلقائيًا.</b> اطبع التقرير ده واتبع الخطوات في «ماذا أفعل عند ظهور اختلاف» تحت.</p>`;
+      for (const [k, [title, cols]] of Object.entries(STOCK_KINDS)) {
+        if (!r.counts[k]) continue;
+        const ack = k === "sales" && ME.permissions.includes("settings.manage");
+        html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>${k === "sales" ? "خرج من المخزون" : "حسب الحركات"}</th><th>${k === "sales" ? "حسب الفاتورة" : "المعروض"}</th>${ack ? "<th class=\"noprint\">بعد الجرد</th>" : ""}</tr></thead><tbody>
+          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}" data-moved="${x.moved}" data-expected="${x.expected}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
+          ${ack ? `<p class="muted noprint">فاتورة بيع حركتها مختلفة عن الفاتورة بتفضل مختلفة في السجل للأبد. صحّح الرف بجرد الصنف الأول، وبعدين «تمت المراجعة» بملاحظة: السطر ده بس يختفي، ويرجع لو أرقامه اتغيّرت.</p>` : ""}
+          ${r.counts[k] > r[k].length ? `<p class="muted">معروض أول ${r[k].length} فقط.</p>` : ""}`;
+      }
+      html += `<section class="panel mt"><h2>ماذا أفعل عند ظهور اختلاف</h2><ol>
+        <li>ما تعدّلش أي رصيد بإيدك وما تمسحش البرنامج. سجل الحركات هو الأصل ومحفوظ.</li>
+        <li>اطبع التقرير ده وابعته للدعم، ومعاه آخر نسخة احتياطية سليمة.</li>
+        ${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف لحد ما اختلاف أرصدة التشغيلات يتحل، عشان ما نحفظش بيانات فيها مشكلة. النسخ القديمة السليمة موجودة.</li>` : `<li>النسخ الاحتياطية شغالة عادي، لأن الاختلاف ده مش في أرصدة التشغيلات.</li>`}
+        <li>الإصلاح بيتعمل بأمر مسجّل من الدعم بعد مراجعة السبب، وبعده افتح التقرير تاني: لازم يطلع «كل الأرصدة مطابقة».</li></ol></section>`;
+    }
+    if (r.history.length) {
+      html += `<h2 class="mt">آخر الفحوصات اللي لقت اختلاف أو رجعت سليمة</h2><table><thead><tr><th>الوقت</th><th>النتيجة</th><th>الفحص</th><th>بواسطة</th></tr></thead><tbody>
+        ${r.history.map((h) => `<tr${h.ok || h.ack ? "" : ` class="has-err"`}><td>${esc(when(h.at))}</td><td>${h.ack ? `مراجعة فاتورة ${esc(h.sale_no)}: ${esc(h.note)}` : h.ok ? "مطابقة" : `${Object.values(h.counts || {}).reduce((a, b) => a + b, 0)} اختلاف`}</td><td>${h.ack ? "" : esc(CHECK_REASONS[h.reason] || h.reason || "")}</td><td>${esc(h.who)}</td></tr>`).join("")}</tbody></table>`;
+    }
+    $("#scBox").innerHTML = html;
+    $("#scBox").querySelectorAll("[data-ack]").forEach((btn) => btn.addEventListener("click", async () => {
+      const [sale_id, item_id] = btn.dataset.ack.split("|");
+      const note = $("#scBox").querySelector(`[data-ackn="${CSS.escape(btn.dataset.ack)}"]`).value;
+      btn.disabled = true;
+      try { await api("/api/reports/stock-check/ack", { method: "POST", body: { sale_id, item_id, note, moved: Number(btn.dataset.moved), expected: Number(btn.dataset.expected) } }); await load(); }
+      catch (e) { btn.disabled = false; toast(e.message, true); }
+    }));
+    refreshStockAlert();
+  };
+  $("#scRun").onclick = () => load().catch((e) => toast(e.message, true));
+  $("#scPrint").onclick = () => window.print();
+  await load();
+}
 async function viewOwnerReports() {
   const list = OWNER_REPORTS.filter((x) => ME.permissions.includes(x.perm));
   if (!list.length) { app.innerHTML = `<section class="panel"><p>هذه التقارير للمالك والمدير.</p></section>`; return; }
@@ -3943,7 +4170,7 @@ async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${can("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والمالك.</p>`}
-    <p class="muted noprint">تقارير أخرى: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
+    <p class="muted noprint">تقارير أخرى: ${can("audit.read") ? `<a href="#/stock-check">مطابقة الأرصدة</a> · ` : ""}<a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف المؤكدة وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   const sales = async (f, t) => {
@@ -3956,7 +4183,7 @@ async function viewReports() {
       <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
       ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
     <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table>
-      <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${h}:00 — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${h}</small></div>`; }).join("")}</div></section></div>
+      <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${hourLabel(h)} — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${hourLabel(h)}</small></div>`; }).join("")}</div></section></div>
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
@@ -4050,7 +4277,7 @@ async function viewFeedback() {
   const items = (await api("/api/feedback")).items, owner = ME.permissions.includes("users.manage");
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الشكاوي والمقترحات</h1>
       <div class="row"><button class="btn" id="fbNew">+ ملاحظة جديدة</button>${owner && items.length ? `<button class="btn secondary" id="fbDl">نزّلها (لإرسالها إلى التطوير)</button>` : ""}</div></div>
-    <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(f.created_at.slice(0, 16).replace("T", " "))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
+    <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(stamp(f.created_at))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
       <div>${esc(f.text)}</div>${f.reply ? `<div class="muted">الرد: ${esc(f.reply)}</div>` : ""}</div>
       ${owner ? `<select data-fb="${esc(f.id)}">${Object.entries(FB_ST).map(([k, [, t]]) => `<option value="${k}" ${f.status === k ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}</li>`).join("")
       || `<li class="muted">لا توجد ملاحظات بعد</li>`}</ul></section>`;
@@ -4066,7 +4293,7 @@ async function viewFeedback() {
 }
 
 // ------------------------------------------------------------------ attendance and payroll
-const tm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }) : "—");
+const tm = (iso) => (iso ? hhmm(iso) : "—");
 async function viewAttendance() {
   const a = await api("/api/attendance");
   app.innerHTML = `<section class="panel narrowpanel"><h1>حضوري هذا الشهر</h1><p>${a.days_this_month} يوم</p>
@@ -4076,7 +4303,7 @@ async function viewAttendance() {
 async function viewStaff(month) {
   month = month || isoDay(new Date()).slice(0, 7);
   const r = await api(`/api/staff?month=${month}`);
-  const post = async (body) => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } };
+  const post = (body, btn) => withBusy(btn, async () => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } });
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
     <p class="muted">المرتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
   ${r.people.map((p) => { const pr = p.payroll, sg = p.suggested; return `<section class="panel staff" data-u="${esc(p.id)}">
@@ -4107,11 +4334,11 @@ async function viewStaff(month) {
       rows: r.people.flatMap((p) => p.attendance.map((x) => [p.full_name, x.day, tm(x.check_in), tm(x.check_out), x.source === "owner" ? `تعديل: ${x.note || ""}` : ""])) }] }));
   document.querySelectorAll(".staff [data-a]").forEach((b) => b.addEventListener("click", () => {
     const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
-    if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 });
-    if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null });
-    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") });
-    if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" });
-    if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") });
+    if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 }, b);
+    if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null }, b);
+    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") }, b);
+    if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" }, b);
+    if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") }, b);
   }));
 }
 
@@ -4133,7 +4360,7 @@ async function viewNotifications() {
       const [cls, ic] = NSEV[n.severity] || NSEV.info;
       return `<li class="${n.seen ? "" : "new"}"><span class="badge ${cls}">${ic}</span>
         <div><b>${esc(n.title)}</b>${n.body ? `<div>${esc(n.body)}</div>` : ""}
-        <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${new Date(n.created_at).toLocaleString(LOC())}
+        <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${esc(stamp(n.created_at))}
         ${n.entity_type === "sale" ? ` · <a href="#/sales/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "item" ? ` · <a href="#/items/${esc(n.entity_id)}">بطاقة الصنف</a>` : ""}

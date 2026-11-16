@@ -25,11 +25,16 @@ SEGMENTS = [("dead", "ديد ستوك"), ("stagnant", "راكد"), ("slow", "ب�
 
 def _rows(data: bytes) -> list[list]:
     import openpyxl
+    from ..purchasing.importers.files import MAX_XLSX_CELLS, check_xlsx_size, sheet_rows
+    check_xlsx_size(data)
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:  # noqa: BLE001 - any unreadable workbook
         raise ValidationFailed("الملف ليس Excel سليم (صدّره XLSX Data Only)") from e
-    return [list(r) for r in wb.active.iter_rows(values_only=True)]
+    try:
+        return sheet_rows(wb.active, [MAX_XLSX_CELLS])
+    finally:
+        wb.close()
 
 
 def compute(stock: bytes, sales: bytes, purchases: bytes, *, as_of: date | None = None,
@@ -146,6 +151,8 @@ def to_xlsx(rep: dict) -> bytes:
         for i, col in enumerate(w.columns, 1):
             w.column_dimensions[get_column_letter(i)].width = min(45, max(10, max(len(str(c.value or "")) for c in col) + 2))
         w.freeze_panes = "A2"
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     b = io.BytesIO()
     wb.save(b)
     return b.getvalue()

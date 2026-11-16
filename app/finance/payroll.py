@@ -6,7 +6,9 @@ The owner reviews and approves each line; paying it records an approved expense 
 from __future__ import annotations
 
 import calendar
+import re
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -81,17 +83,31 @@ def month_sheet(db: Database, ctx: Context, month: str) -> dict:
 
 
 def _month(month: str) -> tuple[int, int]:
+    """Exactly YYYY-MM: "2026-1" or " 2026-10" named a month no salary is ever computed for, so an advance
+    booked on it was never deducted."""
+    if not isinstance(month, str) or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month):
+        raise ValidationFailed("الشهر غير صحيح")
     try:
-        y, m = (int(x) for x in month.split("-"))
+        y, m = int(month[:4]), int(month[5:])
         calendar.monthrange(y, m)
         return y, m
     except (ValueError, TypeError):
         raise ValidationFailed("الشهر غير صحيح")
 
 
+def sheet_month(month: str | None) -> str:
+    """The month whose sheet answers an action that is not about a month (pay settings, an attendance fix):
+    the one sent, checked before anything is saved, or the current month when none was sent."""
+    if month in (None, ""):
+        return local_today().isoformat()[:7]
+    _month(month)
+    return month
+
+
 def compute(base: int, work_days: int, present: int, advances: int, bonus: int = 0, deduction: int = 0) -> dict:
     missing = max(0, work_days - present)
-    absence = round(base * missing / work_days) if work_days else 0
+    # whole piasters, half up like every other money rounding (round() of a float went half to even)
+    absence = int((Decimal(base) * missing / work_days).quantize(Decimal("1"), ROUND_HALF_UP)) if work_days else 0
     return {"base": base, "absence_deduction": absence, "advances": advances, "bonus": bonus, "deduction": deduction,
             "net": base - absence - advances + bonus - deduction, "missing_days": missing}
 
@@ -115,8 +131,14 @@ def add_advance(db: Database, ctx: Context, uid: str, amount: int, month: str, n
     _month(month)
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
+    if paid_from not in ("drawer", "outside"):
+        raise ValidationFailed("اختر مصدر المبلغ المدفوع")
     from ..sales import cash
     with db.transaction():
+        # a month already paid cannot take a new advance: it would never be deducted or booked
+        if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
+                  (ctx.org_id, uid, month)):
+            raise Conflict("راتب هذا الشهر صُرف بالفعل؛ سجّل السلفة على الشهر التالي", code="payroll_paid")
         aid = new_id()
         db.execute("INSERT INTO staff_advances (id, org_id, user_id, amount, month, note, created_by) VALUES (?,?,?,?,?,?,?)",
                    (aid, ctx.org_id, uid, amount, month, (note or "").strip()[:200] or None, ctx.user_id))
@@ -165,6 +187,10 @@ def approve(db: Database, ctx: Context, uid: str, month: str, bonus: int = 0, de
         raise ValidationFailed("المبالغ غير صحيحة")
     c = compute(p["monthly_salary"], p["work_days"], p["days_present"], p["advances"], bonus, deduction)
     with db.transaction():
+        # a salary paid meanwhile from another screen keeps the figures it was paid with
+        if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
+                  (ctx.org_id, uid, month)):
+            raise Conflict("هذا الراتب صُرف بالفعل")
         db.execute("INSERT INTO payroll (id, org_id, user_id, month, base, work_days, days_present, absence_deduction, advances,"
                    " bonus, deduction, net, note, approved_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                    " ON CONFLICT(org_id, user_id, month) DO UPDATE SET base=excluded.base, work_days=excluded.work_days,"
@@ -190,6 +216,16 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
         cat = db.one("SELECT id FROM expense_categories WHERE org_id=? ORDER BY sort LIMIT 1", (ctx.org_id,))
     name = db.one("SELECT full_name FROM users WHERE id=?", (uid,))["full_name"]
     with db.transaction():          # the expense and the "paid" mark together, or neither
+        # again under the write lock: two clicks from two screens must not pay the salary twice
+        pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
+        if pr["status"] == "paid":
+            raise Conflict("هذا الراتب صُرف بالفعل")
+        # an advance given after the approval would be paid again in full and never booked: approve again first
+        now_adv = db.one("SELECT coalesce(sum(amount),0) a FROM staff_advances WHERE org_id=? AND user_id=? AND month=?",
+                         (ctx.org_id, uid, month))["a"]
+        if now_adv != pr["advances"]:
+            raise Conflict("تغيّرت السلف بعد اعتماد الراتب؛ اعتمد الراتب مرة أخرى قبل الصرف", code="payroll_changed",
+                           details={"approved_advances": pr["advances"], "advances_now": now_adv})
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 
@@ -197,15 +233,16 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
 def _pay_tx(db: Database, ctx: Context, pr, name: str, cat_id: str, month: str, uid: str, paid_from: str) -> None:
     from . import expenses as fin
     eid = None
+    y, m = _month(month)
+    last = date(y, m, calendar.monthrange(y, m)[1])
+    spent = min(last, local_today()).isoformat()
     if pr["net"] > 0:
-        y, m = _month(month)
-        last = date(y, m, calendar.monthrange(y, m)[1])
-        spent = min(last, local_today()).isoformat()
         eid = fin.record(db, ctx, category_id=cat_id, amount=pr["net"], paid_from=paid_from,
                          note=f"مرتب {name} — {month}", spent_on=spent)["id"]
-        # advances were already paid out when given: book them as salary expense of that month too
-        if pr["advances"]:
-            fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
-                       note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
+    # advances were already paid out when given: book them as salary expense of that month too, also when
+    # they took the whole salary and nothing is left to pay now
+    if pr["advances"]:
+        fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
+                   note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
     db.execute("UPDATE payroll SET status='paid', paid_at=?, expense_id=? WHERE id=?", (_now(), eid, pr["id"]))
     audit.record(db, ctx, "payroll.pay", "user", uid, after={"month": month, "net": pr["net"], "from": paid_from})

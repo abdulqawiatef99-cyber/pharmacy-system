@@ -17,12 +17,14 @@ report); nothing else is decided silently:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
 
 from ..catalog import service as catalog
 from ..core.errors import ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database
 from ..purchasing.importers import files
@@ -35,7 +37,18 @@ def read_packs(path: Path) -> dict[str, int]:
     if path.suffix.lower() == ".json":
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw = raw.get("packs", raw)
-        return {str(k): int(v) for k, v in raw.items() if v}
+        out = {}
+        for k, v in raw.items():
+            if not v:
+                continue
+            try:
+                n = whole_number(v)               # 2.5 is refused like in the xlsx sheet, never cut to 2
+            except (TypeError, ValueError):
+                n = 0
+            if n < 1:
+                raise ValidationFailed(f"عدد وحدات غير صحيح للصنف {k}: {v}")
+            out[str(k)] = n
+        return out
     rows = files.read_excel_sheets(path.read_bytes())[0][1]
     head = [str(c or "") for c in rows[0]]
     try:
@@ -47,8 +60,11 @@ def read_packs(path: Path) -> dict[str, int]:
     out = {}
     for r in rows[1:]:
         if len(r) > max(ci, ni) and r[ci] not in (None, "") and r[ni] not in (None, ""):
-            n = Decimal(str(r[ni]))
-            if n != n.to_integral_value() or n < 1:
+            try:
+                n = Decimal(str(r[ni]).strip())
+            except ArithmeticError:                       # InvalidOperation: not a number at all
+                n = Decimal("NaN")
+            if not n.is_finite() or n.adjusted() > 6 or n != n.to_integral_value() or n < 1:
                 raise ValidationFailed(f"عدد وحدات غير صحيح للصنف {r[ci]}: {r[ni]}")
             out[str(int(r[ci])) if isinstance(r[ci], float) else str(r[ci])] = int(n)
     return out
@@ -60,16 +76,25 @@ def run(db: Database, ctx: Context, *, catalog_file: Path, stock_file: Path, pac
     di = DataImport(db)
     rep: dict = {"rules": {"keep_duplicates": keep_duplicates, "accept_zero_cost": accept_zero_cost,
                            "max_unit_error": max_unit_error, "stores": stores}}
-    # 1) catalog
-    run_id = di.analyze(ctx, catalog_file.read_bytes(), catalog_file.name, kind="items",
-                        source_system="estock")
-    reviews = db.all("SELECT id, data FROM import_rows WHERE run_id=? AND action='review'", (run_id,))
-    if reviews and not keep_duplicates:
-        raise ValidationFailed(f"{len(reviews)} صنفًا بالاسم نفسه تحتاج إلى قرار؛ راجعها من الشاشة")
-    for r in reviews:
-        di.decide(ctx, run_id, r["id"], "create")
-    a = di.apply(ctx, run_id)
-    rep["catalog"] = {**a["applied"], "kept_duplicates": len(reviews)}
+    # 1) catalog. Each step commits on its own, so after a failure in a later step the catalog is
+    # already in and its file would be refused as "already imported": go on from step 2 instead.
+    data = catalog_file.read_bytes()
+    done = db.one("SELECT id, report FROM import_runs WHERE org_id=? AND kind='items' AND file_sha256=?"
+                  " AND status='applied'", (ctx.org_id, hashlib.sha256(data).hexdigest()))
+    if done:      # the figures of the run that applied it (the summary in manage.py reads these keys)
+        kept = db.one("SELECT count(*) n FROM import_rows WHERE run_id=? AND action='review'"
+                      " AND decision='create'", (done["id"],))["n"]
+        rep["catalog"] = {**json.loads(done["report"]).get("applied", {}), "kept_duplicates": kept,
+                          "already_applied": True}
+    else:
+        run_id = di.analyze(ctx, data, catalog_file.name, kind="items", source_system="estock")
+        reviews = db.all("SELECT id, data FROM import_rows WHERE run_id=? AND action='review'", (run_id,))
+        if reviews and not keep_duplicates:
+            raise ValidationFailed(f"{len(reviews)} صنفًا بالاسم نفسه تحتاج إلى قرار؛ راجعها من الشاشة")
+        for r in reviews:
+            di.decide(ctx, run_id, r["id"], "create")
+        a = di.apply(ctx, run_id)
+        rep["catalog"] = {**a["applied"], "kept_duplicates": len(reviews)}
     # 2) pack sizes (reviewed file only)
     packs = read_packs(packs_file) if packs_file else {}
     unknown = []

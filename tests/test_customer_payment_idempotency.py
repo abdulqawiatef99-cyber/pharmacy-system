@@ -9,6 +9,7 @@ from app.core import audit, people
 from app.sales.service import Sales
 from app.sales.cash import CashDrawer
 from starlette.testclient import TestClient
+from tests.r3_debt import owe
 from tests.test_api import APICase, H
 
 
@@ -17,6 +18,7 @@ class TestCustomerPaymentIdempotency(APICase):
         super().setUp()
         CashDrawer(self.db).open(self.ctx, 10000)
         self.customer = Sales(self.db).create_customer(self.ctx, name='Synthetic customer')
+        owe(self.db, self.ctx, self.customer, 5000)      # a collection above the balance is refused
         self.http_login()
         self.headers = {**H, 'Idempotency-Key': 'collection-once'}
         self.url = f'/api/customers/{self.customer}/payments'

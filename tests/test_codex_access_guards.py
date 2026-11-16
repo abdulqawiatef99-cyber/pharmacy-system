@@ -74,8 +74,12 @@ class TestCodexAccessGuards(APICase):
         other = TestClient(self.app)
         self.http_login("review-assistant", "Review-Pass-2026", client=other)
         before = self._rows()
-        r = other.patch("/api/items/" + self.pan,
-                        headers={**H, "X-Approver": foreign.user_id, "X-Approver-Pin": "573921"},
+        path = "/api/items/" + self.pan
+        r = other.post("/api/approvals/check", json={"permission": "items.write", "path": path},
+                       headers={**H, "X-Approver": foreign.user_id, "X-Approver-Pin": "573921"})
+        self.assertIn(r.status_code, (401, 403), r.text)                 # no token for a foreign approver
+        self.assertNotIn("token", r.json())
+        r = other.patch(path, headers={**H, "X-Approver": foreign.user_id, "X-Approver-Pin": "573921"},
                         json={"name_en": "Unauthorized approved rename"})
         self.assertEqual(r.status_code, 403, r.text)
         self.assertEqual(self._rows(), before)

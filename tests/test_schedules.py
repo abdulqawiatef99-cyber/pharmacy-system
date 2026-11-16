@@ -2,11 +2,67 @@
 from datetime import date
 
 from app.core import daily, notify, people
-from app.core.errors import Forbidden, ValidationFailed
+from app.core.errors import Conflict, Forbidden, ValidationFailed
 from app.finance import expenses as fin, schedules as sc
 from tests.helpers import DBTestCase
 
 PW = "Staff-Pass-2026"
+
+
+class TestPaidOnce(DBTestCase):
+    """Two screens acting on the same money at the same moment: the check before the write is repeated
+    inside it, so it happens once."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.cat = fin.categories(self.db, self.ctx)[0]["id"]
+
+    def after_first(self, prefix, action):
+        real, fired = self.db.one, []
+
+        def one(sql, params=()):
+            out = real(sql, params)
+            if not fired and sql.startswith(prefix):
+                fired.append(1)
+                action()
+            return out
+        self.db.one = one
+        return fired
+
+    def test_a_scheduled_expense_is_recorded_once_for_its_period(self):
+        s = sc.save(self.db, self.ctx, {"name": "إيجار الصيدلية", "category_id": self.cat, "amount": 500000,
+                                         "day_of_month": 1, "remind_days": 3})
+        fired = self.after_first("SELECT 1 FROM expenses WHERE org_id=? AND schedule_id",
+                                 lambda: sc.pay(self.db, self.ctx, s["id"], paid_from="outside"))
+        with self.assertRaises(ValidationFailed):
+            sc.pay(self.db, self.ctx, s["id"], paid_from="outside")
+        self.assertEqual(fired, [1])
+        self.assertEqual(self.db.one("SELECT count(*) n FROM expenses WHERE org_id=? AND schedule_id=?",
+                                     (self.ctx.org_id, s["id"]))["n"], 1)
+
+    def test_an_approval_and_a_rejection_at_the_same_moment_do_not_both_stand(self):
+        people.add_user(self.db, self.ctx, username="asst", full_name="مساعد", password=PW, role_code="assistant")
+        a = self.login("asst", PW)
+        e = fin.record(self.db, a, category_id=self.cat, amount=12000, paid_from="outside", note="فاتورة كهرباء")
+        self.assertEqual(e["status"], "pending")
+        real, fired = fin.get, []
+
+        def get_then_reject(db, ctx, eid):
+            out = real(db, ctx, eid)
+            if not fired:
+                fired.append(1)
+                fin.decide(self.db, self.ctx, eid, False, "مكرر")
+            return out
+        fin.get = get_then_reject
+        try:
+            with self.assertRaises(Conflict):
+                fin.decide(self.db, self.ctx, e["id"], True)
+        finally:
+            fin.get = real
+        self.assertEqual(fin.get(self.db, self.ctx, e["id"])["status"], "rejected")
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE org_id=? AND action IN"
+                                     " ('expense.approve','expense.reject')", (self.ctx.org_id,))["n"], 1)
 
 
 class TestSchedules(DBTestCase):
@@ -58,3 +114,54 @@ class TestSchedules(DBTestCase):
                                      "remind_days": 2, "start_month": "2026-10"})
         self.assertGreaterEqual(daily.run(self.db, date(2026, 10, 4)), 1)
         self.assertEqual(daily.run(self.db, date(2026, 10, 4)), 0)
+
+
+class TestScheduleWholeNumbers(DBTestCase):
+    def test_days_and_months_must_be_whole(self):
+        fin.ensure_defaults(self.db)
+        cat = fin.categories(self.db, self.ctx)[0]["id"]
+        base = {"name": "إيجار الصيدلية", "category_id": cat, "amount": 500000, "day_of_month": 15, "remind_days": 3}
+        for k, bad in (("day_of_month", 15.5), ("remind_days", 2.5), ("every_months", 1.5), ("day_of_month", True),
+                       ("remind_days", "3.5")):
+            with self.subTest(k=k, bad=bad):
+                with self.assertRaises(ValidationFailed):
+                    sc.save(self.db, self.ctx, {**base, k: bad})
+        self.assertEqual(self.db.one("SELECT count(*) n FROM expense_schedules")["n"], 0)
+        s = sc.save(self.db, self.ctx, {**base, "day_of_month": "15"})
+        self.assertEqual(s["day_of_month"], 15)
+
+
+class TestEditSchedule(DBTestCase):
+    """Editing a scheduled expense (coverage 12/11: the edit path never ran). Before: amount true was saved as
+    1 piaster, and an amount past 2**63 reached SQLite (500)."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.cat = fin.categories(self.db, self.ctx)[0]["id"]
+        self.s = sc.save(self.db, self.ctx, {"name": "إيجار الصيدلية", "category_id": self.cat, "amount": 500000,
+                                              "day_of_month": 1, "remind_days": 3})
+
+    def test_edit_keeps_what_is_not_sent_and_is_audited(self):
+        out = sc.save(self.db, self.ctx, {"amount": 550000, "day_of_month": 5}, self.s["id"])
+        self.assertEqual((out["amount"], out["day_of_month"], out["name"], out["remind_days"]), (550000, 5, "إيجار الصيدلية", 3))
+        row = self.db.one("SELECT before_json, after_json FROM audit_log WHERE action='expense_schedule.update'")
+        self.assertIn('"amount": 500000', row["before_json"])
+        self.assertIn('"amount": 550000', row["after_json"])
+        out = sc.save(self.db, self.ctx, {"amount": "", "is_active": False}, self.s["id"])  # amount asked each time
+        self.assertEqual((out["amount"], out["is_active"], out["next"]), (None, 0, None))
+
+    def test_refusals_leave_it_unchanged(self):
+        for bad in ({"amount": True}, {"amount": -1}, {"amount": 2.5}, {"amount": "500"}, {"amount": 10**21},
+                    {"name": "x"}, {"category_id": "no-such"}, {"day_of_month": 32}, {"day_of_month": 15.5},
+                    {"every_months": 5}, {"remind_days": 61}, {"paid_from": "bank"}, {"start_month": "2026-13"}):
+            with self.subTest(bad=bad), self.assertRaises(ValidationFailed):
+                sc.save(self.db, self.ctx, bad, self.s["id"])
+        row = self.db.one("SELECT amount, day_of_month FROM expense_schedules WHERE id=?", (self.s["id"],))
+        self.assertEqual((row["amount"], row["day_of_month"]), (500000, 1))
+        from app.core.errors import NotFound
+        with self.assertRaises(NotFound):
+            sc.save(self.db, self.ctx, {"amount": 1}, "no-such-id")
+        _, other = self.second_tenant()
+        with self.assertRaises((NotFound, Forbidden)):
+            sc.save(self.db, other, {"amount": 1}, self.s["id"])

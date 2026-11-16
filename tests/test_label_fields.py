@@ -129,7 +129,7 @@ class TestLabelData(Base):
         rs.save(self.db, self.ctx, {"title": "صيدلية تجربة", "lines": ["شارع تجربة", "0100 111 2222"]})
         row = self.db.one("SELECT * FROM items WHERE id=?", (it,))
         d = label_data(self.db, self.ctx, row, rs.get(self.db, self.ctx.org_id))
-        self.assertEqual((d["code"], d["price"], d["pharmacy"], d["phone"]), ("26824", "4.00 ج", "صيدلية تجربة", "0100 111 2222"))
+        self.assertEqual((d["code"], d["price"], d["pharmacy"], d["phone"]), ("26824", "4.00 EGP", "صيدلية تجربة", "0100 111 2222"))  # label words in English by default (owner, 12/11)
         self.assertEqual(d["expiry"], f"{near[5:7]}/{near[2:4]}")             # the empty older batch is skipped
         rs.save(self.db, self.ctx, {"label_pharmacy": "Pharmacy X", "label_phone": "02 000"})
         d = label_data(self.db, self.ctx, row, rs.get(self.db, self.ctx.org_id))

@@ -41,8 +41,18 @@ def _db(s: config.Settings, create: bool = False) -> Database:
                  "حدد مكان البيانات: set PHARM_DATA_DIR=%LOCALAPPDATA%\\PharmacyPlatform\\data ثم أعد الأمر. "
                  "(no database here; nothing was created)")
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    existed = s.db_path.exists()
     db = Database(s.db_path)
-    applied = db.migrate()
+    from app.db import MigrationError
+    try:
+        if existed:
+            _backup_before_migration(db, s)
+        applied = db.migrate()
+    except MigrationError as e:
+        db.close()
+        sys.exit("البرنامج لم يفتح البيانات: " + ("البيانات دي مكتوبة بنسخة أحدث من البرنامج؛ ثبّت آخر مثبّت. "
+                                                   if "newer version" in str(e) else "")
+                 + f"البيانات كما هي لم تتغير. أرسل هذه الرسالة للمطوّر.\n({e})")
     if applied:
         print("migrations applied:", ", ".join(applied))
     accounts.sync_system_roles(db)
@@ -55,6 +65,52 @@ def _db(s: config.Settings, create: bool = False) -> Database:
     _ch(db)
     _ex(db)
     return db
+
+
+def _backup_before_migration(db: Database, s: config.Settings) -> None:
+    """A new installer brings new migrations and the first start applies them to the live data: take a
+    verified backup first, and stop without migrating when it cannot be made. Only when the database
+    holds a pharmacy and something is pending, so new, empty and up-to-date databases start as fast as before."""
+    pending = db.pending_migrations()
+    if not pending or db.unknown_migrations():      # data from a newer program: migrate() refuses it unchanged
+        return
+    if not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizations'") or \
+            not db.one("SELECT count(*) n FROM organizations")["n"]:
+        return
+    if os.environ.get("PHARM_MIGRATE_WITHOUT_BACKUP") == "1":      # developer's decision, after a copy by hand
+        print("WARNING: migrating WITHOUT a backup (PHARM_MIGRATE_WITHOUT_BACKUP=1)", file=sys.stderr)
+        return
+    from app.core import backup
+    try:
+        out = backup.create(db, s.upload_dir, s.backup_path, tag="pre-migrate")
+        hard, soft = backup.split_problems(backup.quick_check(out))
+        if hard:
+            out.unlink(missing_ok=True)
+            raise RuntimeError("; ".join(hard))
+    except Exception as e:  # noqa: BLE001 - a live database that fails its own check must still get its upgrade:
+        # keep a plain copy of the file instead (SQLite's online copy); only when that fails too does the start stop
+        from datetime import datetime
+        try:
+            s.backup_path.mkdir(parents=True, exist_ok=True)
+            stamp, n = datetime.now().strftime('%Y%m%d-%H%M%S'), 1
+            raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}.db"
+            while raw.exists():                      # a retry in the same second never overwrites the first copy
+                n += 1
+                raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}-{n}.db"
+            db.backup_to(raw)
+        except Exception as e2:  # noqa: BLE001
+            db.close()
+            sys.exit("لم يتم تحديث قاعدة البيانات: تعذّر عمل نسخة احتياطية قبل التحديث، فالبرنامج توقف والبيانات كما هي"
+                     " لم تتغير. أرسل هذه الرسالة للمطوّر.\n"
+                     f"(pre-migration backup failed, nothing was migrated; pending: {', '.join(pending)})\n"
+                     f"السبب / reason: {e}; plain copy: {e2}")
+        print(f"WARNING: the verified backup before the database update failed ({e}); a plain copy was kept: {raw}",
+              file=sys.stderr)
+        return
+    print(f"backup before database update: {out}")
+    if soft:
+        print(f"WARNING: {len(soft)} attachment file(s) are missing or changed; the backup holds the data without them:",
+              "; ".join(soft), file=sys.stderr)
 
 
 def _backups(chosen: str | None, s: config.Settings, sub: str = "") -> Path:
@@ -79,8 +135,9 @@ def cmd_serve(a, s):
         print("تنبيه: البرنامج مفتوح على شبكة الصيدلية (واي فاي) من غير HTTPS — استخدمه على شبكة الصيدلية المقفولة بباسورد بس.",
               file=sys.stderr)
     os.environ["PHARM_HOST"] = a.host
+    from app.core.accesslog import uvicorn_log_config
     uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
-                server_header=False)
+                server_header=False, log_config=uvicorn_log_config())
 
 
 def cmd_backup(a, s):
@@ -123,9 +180,26 @@ def cmd_restore(a, s):
     if not a.yes:
         print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
         sys.exit(2)
-    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
-                       _backups(a.pre_dir, s, "pre-restore"))
-    print("restored and verified. previous data saved in:", r["pre_restore_backup"])
+    try:
+        r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
+                           _backups(a.pre_dir, s, "pre-restore"),
+                           allow_missing_attachments=a.allow_missing_attachments)
+    except RuntimeError as e:
+        print("RESTORE REFUSED:", e)
+        if not a.allow_missing_attachments and "attachment" in str(e):
+            print("If only invoice/transfer files are missing and you accept losing them, repeat with"
+                  " --allow-missing-attachments: the database is restored and the missing files are listed.")
+        sys.exit(1)
+    for m in r["missing_attachments"]:
+        print(f"MISSING FILE (not restored): {m['filename']} — {m['problem']}")
+    if r["missing_attachments"]:
+        print(f"WARNING: {len(r['missing_attachments'])} attachment file(s) were not in the backup; the data itself is restored.")
+    if r["pre_restore_kind"] == "raw_copy":
+        print("WARNING: the previous database could not be backed up normally (" + str(r["pre_restore_error"])[:300] + ").")
+        print("A RAW copy of its file(s) was kept instead (not a verified backup) in:", r["pre_restore_backup"])
+        print("restored and verified.")
+    else:
+        print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
 def cmd_selftest(a, s):
@@ -394,6 +468,8 @@ def main(argv=None):
     rs.add_argument("archive")
     rs.add_argument("--yes", action="store_true")
     rs.add_argument("--pre-dir", default=None)
+    rs.add_argument("--allow-missing-attachments", action="store_true",
+                    help="restore the database even when invoice/transfer files are missing from the backup")
     f = sub.add_parser("feature")
     f.add_argument("org_id")
     f.add_argument("feature")

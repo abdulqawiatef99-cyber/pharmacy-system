@@ -63,7 +63,7 @@ class Recalls:
     def add_notice(self, ctx: Context, *, title: str, items: list[dict], source: str = "EDA",
                    notice_no: str | None = None, notice_date: str | None = None,
                    url: str | None = None, raw_text: str | None = None) -> str:
-        ctx.require("inventory.read")
+        ctx.require("inventory.adjust")     # writes a notice: the same right as deciding on an alert
         if not title.strip():
             raise ValidationFailed("عنوان المنشور مطلوب")
         clean = []
@@ -97,7 +97,9 @@ class Recalls:
         return nid
 
     def match(self, ctx: Context, notice_id: str) -> int:
-        """(Re)run matching for one notice; returns number of new matches."""
+        """(Re)run matching for one notice; returns number of new matches.
+        Stays with inventory.read: it is not on any screen, it only derives alerts from saved
+        notices, and Purchasing.approve runs it as the approving user (who may lack inventory.adjust)."""
         ctx.require("inventory.read")
         notice = self.db.one("SELECT * FROM regulatory_notices WHERE id=? AND org_id=?",
                              (notice_id, ctx.org_id))

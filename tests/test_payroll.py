@@ -50,6 +50,62 @@ class TestPayroll(Base):
         self.assertEqual(sorted(e["amount"] for e in exp), [20000, 50000])          # net + the advance
 
 
+class TestPayOnce(Base):
+    """Two screens paying (or re-approving) the same salary at the same moment: it is paid once, with the
+    figures it was paid with. The check before the write is repeated inside it."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=10000)          # no attendance: net = the bonus
+
+    def meanwhile(self, action):
+        """Run `action` once, right after the first read of the person's name (after the status check,
+        before the write)."""
+        real, fired = self.db.one, []
+
+        def one(sql, params=()):
+            out = real(sql, params)
+            if not fired and sql.startswith("SELECT full_name FROM users"):
+                fired.append(1)
+                action()
+            return out
+        self.db.one = one
+        return fired
+
+    def salary_expenses(self):
+        return [e for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب")]
+
+    def test_two_payments_at_the_same_moment_pay_once(self):
+        fired = self.meanwhile(lambda: pay.pay(self.db, self.ctx, self.uid, self.month, "outside"))
+        with self.assertRaises(Conflict):
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(fired, [1])
+        self.assertEqual(len(self.salary_expenses()), 1)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE action='payroll.pay'")["n"], 1)
+
+    def test_a_reapproval_cannot_change_a_salary_paid_meanwhile(self):
+        paid_net = self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"]
+        real = pay.month_sheet
+
+        def sheet_then_pay(db, ctx, month):
+            out = real(db, ctx, month)
+            pay.month_sheet = real                                            # once
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+            return out
+        pay.month_sheet = sheet_then_pay
+        try:
+            with self.assertRaises(Conflict):
+                pay.approve(self.db, self.ctx, self.uid, self.month, bonus=99999)
+        finally:
+            pay.month_sheet = real
+        row = self.db.one("SELECT net, bonus, status FROM payroll WHERE user_id=?", (self.uid,))
+        self.assertEqual((row["net"], row["bonus"], row["status"]), (paid_net, 10000, "paid"))
+
+
 class TestStaffAPI(APICase):
     def test_attendance_api(self):
         self.http_login()
@@ -58,3 +114,89 @@ class TestStaffAPI(APICase):
         self.assertEqual(r.json()["open"]["source"], "pc")
         month = local_today().isoformat()[:7]
         self.assertEqual(self.c.get("/api/staff", params={"month": month}).json()["people"], [])
+
+
+class AbsenceRounding(__import__("unittest").TestCase):
+    def test_absence_deduction_is_whole_piasters_half_up(self):
+        from app.finance.payroll import compute
+        # 6500.13 / 26 = 250.005 a day: half up 25001 piasters (round() of the float gave 25000, half to even)
+        r = compute(650013, 26, 25, 0)
+        self.assertEqual((r["absence_deduction"], r["net"]), (25001, 625012))
+        self.assertEqual(compute(25, 2, 1, 0)["absence_deduction"], 13)
+        self.assertEqual(compute(650013, 26, 26, 0)["absence_deduction"], 0)
+        self.assertEqual(compute(650013, 26, 0, 0)["absence_deduction"], 650013)    # the whole month, never more
+        self.assertEqual(compute(1000, 0, 0, 0)["absence_deduction"], 0)
+        self.assertIsInstance(r["absence_deduction"], int)
+
+
+class TestAdvancesBooked(Base):
+    """Advances are cash already paid: when the salary is paid they are booked as salary expense of that
+    month, also when they took the whole salary (nothing left to pay) or more."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+
+    def booked(self):
+        return sorted(e["amount"] for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب"))
+
+    def pay_with(self, advance, bonus):
+        pay.add_advance(self.db, self.ctx, self.uid, advance, self.month, "سلفة", "outside")
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=bonus)
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+
+    def test_an_advance_that_took_the_whole_salary_is_still_booked(self):
+        self.pay_with(advance=50000, bonus=50000)                 # no attendance: net = 0 after the advance
+        self.assertEqual(self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"], 0)
+        self.assertEqual(self.booked(), [50000])
+
+    def test_an_advance_larger_than_what_was_left_is_booked_in_full(self):
+        self.pay_with(advance=50000, bonus=10000)                 # net = -400.00: he owes the difference
+        self.assertLess(self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"], 0)
+        self.assertEqual(self.booked(), [50000])
+
+
+class TestAdvanceAfterApproval(Base):
+    """An advance given after the salary was approved used to be paid again in full and never booked: approve,
+    advance 1,000, pay → 5,200 paid, advance lost. And an advance on a month already paid was accepted."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=520000)       # no attendance: the bonus makes net 5,200
+
+    def booked(self):
+        return sorted(e["amount"] for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب"))
+
+    def test_pay_refuses_until_approved_again(self):
+        pay.add_advance(self.db, self.ctx, self.uid, 100000, self.month, "سلفة بعد الاعتماد", "outside")
+        with self.assertRaises(Conflict) as e:
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(e.exception.code, "payroll_changed")
+        self.assertEqual(self.booked(), [])                                     # nothing paid, nothing booked
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=520000)
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(self.db.one("SELECT net, advances FROM payroll WHERE user_id=?", (self.uid,))[:], (420000, 100000))
+        self.assertEqual(self.booked(), [100000, 420000])                       # 5,200 in all: net + the advance
+
+    def test_no_advance_on_a_paid_month(self):
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.cd.open(self.ctx, 100000)
+        with self.assertRaises(Conflict) as e:
+            pay.add_advance(self.db, self.ctx, self.uid, 20000, self.month, "متأخرة", "drawer")
+        self.assertEqual(e.exception.code, "payroll_paid")
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 100000)    # no cash left the drawer
+        y, m = (int(x) for x in self.month.split("-"))
+        nxt = f"{y + (m == 12):04d}-{m % 12 + 1:02d}"
+        pay.add_advance(self.db, self.ctx, self.uid, 20000, nxt, "على الشهر التالي", "drawer")
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 80000)
+
+    def test_unknown_source_is_refused(self):
+        with self.assertRaises(ValidationFailed):
+            pay.add_advance(self.db, self.ctx, self.uid, 20000, self.month, "سلفة", "bank")

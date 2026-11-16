@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 
@@ -91,8 +92,11 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
     if any(k.startswith("phone") for k in ch):
         check_phones(db, ctx.org_id, [p for p in phones if p], exclude=cid)
     if "credit_limit" in data:
-        v = data["credit_limit"]
-        if not isinstance(v, int) or v < 0:
+        try:                                   # as on create: true is not 1 piaster, and no number SQLite cannot hold
+            v = whole_number(data["credit_limit"])
+        except (TypeError, ValueError):
+            raise ValidationFailed("حد الآجل غير صحيح")
+        if v < 0:
             raise ValidationFailed("حد الآجل غير صحيح")
         ch["credit_limit"] = v
     if "whatsapp_ok" in data:

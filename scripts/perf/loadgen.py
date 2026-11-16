@@ -29,11 +29,13 @@ import zlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# PHARM_PROGRAM_DIR: run these scripts from a folder outside the installed program (real_years.py on the PC)
+ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().parents[2])
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-os.environ.setdefault("TZ", "Africa/Cairo")
+if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+    os.environ.setdefault("TZ", "Africa/Cairo")
 if hasattr(time, "tzset"):
     time.tzset()
 
@@ -172,9 +174,12 @@ class Generator:
                                                         "public_price": price}, barcodes=[ean13(i)], force=True)
             self.items.append({"id": iid, "pack": pack, "price": price, "stock": 0,
                                "supplier": self.suppliers[i % len(self.suppliers)]})
-        # demand: a few items sell every day, most rarely (Zipf-like)
         order = list(range(len(self.items)))
         rng.shuffle(order)
+        self.set_demand(order)
+
+    def set_demand(self, order: list[int]):
+        """Demand: a few items sell every day, most rarely (Zipf-like); order[0] is the best seller."""
         self.weights = [0.0] * len(self.items)
         for rank, idx in enumerate(order):
             self.weights[idx] = 1.0 / (rank + 1) ** 0.9

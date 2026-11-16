@@ -148,6 +148,7 @@ class TestNoFullScans(SalesCase):
             item_card.movements(self.db, self.ctx, self.pan, self.month, self.today)
             cu.profile(self.db, self.ctx, self.cust)
         self.assertNoScan(rec)
+
     def test_ledger_moves_audit_and_couriers_read_only_their_rows(self):
         # customer balance (ledger index needs org_id), a batch's last supplier (the item's moves only), the drawer
         # sent count (from the shift's sales) and the cash with couriers (from open deliveries): no new index needed
