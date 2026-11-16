@@ -202,7 +202,10 @@ class TestRestoreWithMissingAttachments(Base):
 
     def test_cli_switch(self):
         arch = self.incomplete()
-        env = {**os.environ, "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
+        cli = self.tmp / "cli"       # every path explicitly: the Windows release validation exports PHARM_DB_PATH etc.
+        env = {**os.environ, "PHARM_DATA_DIR": str(cli), "PHARM_DB_PATH": str(cli / "pharmacy.db"),
+               "PHARM_UPLOAD_DIR": str(cli / "uploads"), "PHARM_BACKUP_DIR": str(self.tmp / "cli-backups"),
+               "PYTHONPATH": str(ROOT)}
         run = lambda *a: subprocess.run([sys.executable, "manage.py", *a], cwd=ROOT, env=env,  # noqa: E731
                                         capture_output=True, text=True, encoding="utf-8")
         r = run("restore", str(arch), "--yes")
