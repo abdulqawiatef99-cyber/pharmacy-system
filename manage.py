@@ -85,7 +85,11 @@ def _backup_before_migration(db: Database, s: config.Settings) -> None:
         from datetime import datetime
         try:
             s.backup_path.mkdir(parents=True, exist_ok=True)
-            raw = s.backup_path / f"pre-migrate-UNVERIFIED-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+            stamp, n = datetime.now().strftime('%Y%m%d-%H%M%S'), 1
+            raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}.db"
+            while raw.exists():                      # a retry in the same second never overwrites the first copy
+                n += 1
+                raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}-{n}.db"
             db.backup_to(raw)
         except Exception as e2:  # noqa: BLE001
             db.close()
