@@ -161,7 +161,7 @@ def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = No
             raise ValidationFailed("اكتب سبب فتح الدرج")
         label = DRAWER_REASONS[reason]
     elif len(reason) < 3:
-        raise ValidationFailed("اكتب سبب فتح الخزينة")
+        raise ValidationFailed("اكتب سبب فتح الدرج")
     else:
         label = reason
     from ..sales import cash
