@@ -6,6 +6,7 @@ The owner reviews and approves each line; paying it records an approved expense 
 from __future__ import annotations
 
 import calendar
+import re
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -82,12 +83,25 @@ def month_sheet(db: Database, ctx: Context, month: str) -> dict:
 
 
 def _month(month: str) -> tuple[int, int]:
+    """Exactly YYYY-MM: "2026-1" or " 2026-10" named a month no salary is ever computed for, so an advance
+    booked on it was never deducted."""
+    if not isinstance(month, str) or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month):
+        raise ValidationFailed("الشهر غير صحيح")
     try:
-        y, m = (int(x) for x in month.split("-"))
+        y, m = int(month[:4]), int(month[5:])
         calendar.monthrange(y, m)
         return y, m
     except (ValueError, TypeError):
         raise ValidationFailed("الشهر غير صحيح")
+
+
+def sheet_month(month: str | None) -> str:
+    """The month whose sheet answers an action that is not about a month (pay settings, an attendance fix):
+    the one sent, checked before anything is saved, or the current month when none was sent."""
+    if month in (None, ""):
+        return local_today().isoformat()[:7]
+    _month(month)
+    return month
 
 
 def compute(base: int, work_days: int, present: int, advances: int, bonus: int = 0, deduction: int = 0) -> dict:

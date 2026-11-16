@@ -1079,7 +1079,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         month = req.query_params.get("month") or ""
         if req.method == "POST":
             b = await body(req)
-            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
+            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), b.get("month", month)
+            if a in ("pay_settings", "fix"):          # not about a month: never save and then answer 422
+                month = pay.sheet_month(month)
             if a == "pay_settings":
                 pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), _int(b.get("work_days") or 26, "work_days"))
             elif a == "advance":
