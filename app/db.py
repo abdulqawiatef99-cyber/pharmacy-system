@@ -44,6 +44,12 @@ class MigrationError(RuntimeError):
     pass
 
 
+# #104/#274: two additive migrations that exist only on `main` (reference catalog, never in the first
+# release). Data written by a `main` build carries them; their tables are unused here and harmless, so
+# such data is accepted. Any other applied migration without a file means a newer program: refused.
+MAIN_ONLY_MIGRATIONS = frozenset({"0034_reference_catalog", "0035_reference_links_prices"})
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -154,7 +160,7 @@ class Database:
         conn = self.conn
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone():
             return []
-        known = {f.stem for f in directory.glob("*.sql")}
+        known = {f.stem for f in directory.glob("*.sql")} | MAIN_ONLY_MIGRATIONS
         return sorted(r["version"] for r in conn.execute("SELECT version FROM schema_migrations")
                       if r["version"] not in known)
 

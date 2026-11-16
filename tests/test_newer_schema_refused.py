@@ -77,3 +77,20 @@ class TestNewerSchema(DBTestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("نسخة أحدث من البرنامج", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+
+class TestMainOnlyMigrations(DBTestCase):
+    """#104/#274: data from a `main` build carries 0034/0035 (reference catalog); it stays accepted."""
+
+    def test_main_only_versions_are_not_newer(self):
+        make_newer(self.db, "0034_reference_catalog")
+        make_newer(self.db, "0035_reference_links_prices")
+        self.assertEqual(self.db.unknown_migrations(), [])
+        self.db.migrate()                       # no error
+
+    def test_a_real_unknown_version_next_to_them_is_still_refused(self):
+        make_newer(self.db, "0034_reference_catalog")
+        make_newer(self.db, "0036_something_newer")
+        self.assertEqual(self.db.unknown_migrations(), ["0036_something_newer"])
+        with self.assertRaises(MigrationError):
+            self.db.migrate()
