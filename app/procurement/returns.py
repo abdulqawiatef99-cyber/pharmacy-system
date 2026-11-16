@@ -18,8 +18,18 @@ MAX_LINES = 200
 
 
 def suggest_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
+    """The value the return screen proposes. It is a purchase cost, so it is shown only to who may
+    record a return and see its values (the same rights create() asks for a typed value)."""
+    ctx.require("purchases.approve")
+    if not (ctx.can("costs.read") or ctx.can("suppliers.pay")):
+        ctx.require("suppliers.pay")
+    return _unit_value(db, ctx, item_id, batch_id)
+
+
+def _unit_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
     """Piasters per base unit: the net price paid for that batch on its purchase invoice,
-    else the item's average cost."""
+    else the item's average cost. No permission check: create() values a return with it for a
+    user who never sees the figure."""
     if batch_id:
         r = db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND batch_id=? AND movement_type IN"
                    " ('purchase','opening') AND unit_cost IS NOT NULL ORDER BY created_at DESC LIMIT 1", (ctx.org_id, item_id, batch_id))
@@ -50,7 +60,7 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
             raise ValidationFailed("اختر سبب المرتجع لكل صنف")
         value = ln.get("unit_value")
         if value is None:
-            value = suggest_value(db, ctx, item_id, batch_id)
+            value = _unit_value(db, ctx, item_id, batch_id)
         elif not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
             # a typed value credits the supplier's account with that amount: only who may see the values
             ctx.require("suppliers.pay")
