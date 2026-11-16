@@ -244,8 +244,7 @@ def make_generator(a, work: Path):
             from app.sales.service import Sales
             db = self.db
             db.migrate()
-            with db.transaction():
-                db.execute(f"CREATE INDEX IF NOT EXISTS {loadgen.GEN_INDEX} ON sale_allocations(sale_line_id)")
+            loadgen.create_gen_indexes(db)
             accounts.sync_system_roles(db)
             org = db.one("SELECT o.id FROM organizations o LEFT JOIN items i ON i.org_id=o.id WHERE o.status='active'"
                          " GROUP BY o.id ORDER BY count(i.id) DESC LIMIT 1")
@@ -351,7 +350,7 @@ def make_generator(a, work: Path):
             dest.mkdir(parents=True)
             self.db.backup_to(dest / "pharmacy.db")
             snap = sqlite3.connect(dest / "pharmacy.db")
-            snap.execute(f"DROP INDEX IF EXISTS {loadgen.GEN_INDEX}")
+            loadgen.drop_gen_indexes(snap)
             snap.close()                                   # no VACUUM: it would need the database size again in disk
             if self.upload_dir.exists():
                 shutil.copytree(self.upload_dir, dest / "uploads")
@@ -508,10 +507,12 @@ def summary(snaps: list[dict]) -> list[str]:
                 failed.append(f"{name} HTTP {r.get('status')}")
             elif r["max_ms"] >= lim:
                 slow.append(f"{name} {r['max_ms']} ms")
+        no_backup = bool(s.get("indexes_sql"))        # scale.py's second pass repeats the requests only
         for key in ("during_backup", "during_report"):
             b = s.get(key)
             if b is None:
-                failed.append(f"{key} not measured")
+                if not (no_backup and key == "during_backup"):
+                    failed.append(f"{key} not measured")
                 continue
             if b.get("error") or b.get("status") != 200:
                 failed.append(f"{key} {b.get('error') or 'HTTP ' + str(b.get('status'))}")
@@ -523,7 +524,9 @@ def summary(snaps: list[dict]) -> list[str]:
             elif b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
                 slow.append(f"scan during {name} {b['add_line_max_ms']} ms")
         bk = s.get("backup")
-        if bk is None:
+        if bk is None and no_backup:
+            pass
+        elif bk is None:
             failed.append("backup not measured")
         elif bk.get("verify_problems") or bk.get("quick_check_problems"):
             failed.append("backup check found problems")

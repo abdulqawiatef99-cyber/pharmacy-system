@@ -127,6 +127,9 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=253)
     ap.add_argument("--turns", default="", help="a folder shared by scale.py runs started together: only one measures"
                     " at a time and the others wait meanwhile, so the timings are not disturbed")
+    ap.add_argument("--indexes-sql", default="", help="a .sql file of CREATE INDEX statements (a proposed migration):"
+                    " every snapshot is measured a second time with them (requests only)")
+    ap.add_argument("--analyze", action="store_true", help="with --indexes-sql: also run ANALYZE before the second pass")
     ap.add_argument("--keep-last", default="", help="move the last snapshot's data folder here instead of deleting it")
     a = ap.parse_args(argv)
     if a.profile:
@@ -197,7 +200,7 @@ def main(argv=None):
                 if gen.upload_dir.exists():
                     shutil.copytree(gen.upload_dir, snap / "uploads")
             c = sqlite3.connect(snap / "pharmacy.db")  # the snapshot keeps the program's own schema only
-            c.execute(f"DROP INDEX IF EXISTS {loadgen.GEN_INDEX}")
+            loadgen.drop_gen_indexes(c)
             c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             c.close()
             try:
@@ -214,6 +217,20 @@ def main(argv=None):
                                              f" {size / 1e9:.1f} GB database needs about {1.7 * size / 1e9 + 0.5:.1f} GB")
                     report.note(f"{rec['label']}: backup not measured: {rec['backup_skipped']}")
                 ry.measure(snap, "owner", gen.start, a.repeat, rec, report, backup=room)
+                if a.indexes_sql:
+                    # the same snapshot again with proposed indexes (a migration file that is not in the program
+                    # yet): what the owner would get after that migration. Requests only, no second backup.
+                    rec2 = {"label": rec["label"] + " + indexes", "profile": pname, "days": d, "gen_s": rec["gen_s"],
+                            "stats": rec["stats"], "stock_check": rec["stock_check"], "indexes_sql": Path(a.indexes_sql).name}
+                    report.data["snapshots"].append(rec2)
+                    report.progress(f"{rec2['label']}: creating the indexes")
+                    t = time.perf_counter()
+                    c = sqlite3.connect(snap / "pharmacy.db")
+                    c.executescript(Path(a.indexes_sql).read_text(encoding="utf-8"))
+                    c.execute("ANALYZE") if a.analyze else None
+                    c.close()
+                    rec2["indexes_s"] = round(time.perf_counter() - t, 1)
+                    ry.measure(snap, "owner", gen.start, a.repeat, rec2, report, backup=False)
             except Exception as e:                       # keep what was measured, go on with the next snapshot
                 rec["error"] = ry.safe_error(e)
             finally:

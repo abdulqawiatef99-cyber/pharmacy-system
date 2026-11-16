@@ -207,8 +207,14 @@ class Server:
 def timed(client: Client, method: str, path: str, body=None, n: int = 5) -> dict:
     ms, size, code = [], 0, None
     for _ in range(n):
-        code, out, t, size = client.req(method, path, body)
+        t0 = time.perf_counter()
+        try:
+            code, out, t, size = client.req(method, path, body)
+        except OSError as e:                       # no answer within the client's timeout: recorded, not fatal
+            code, t = type(e).__name__, (time.perf_counter() - t0) * 1000
         ms.append(t)
+        if t >= 30_000 or not isinstance(code, int):
+            break                                  # half a minute or more: once is enough
     return {"median_ms": round(statistics.median(ms), 1), "max_ms": round(max(ms), 1), "status": code, "bytes": size}
 
 

@@ -66,11 +66,12 @@ class TestLoadGenerator(unittest.TestCase):
                 db.close()
 
     def test_remembered_name_matches_give_the_same_data(self):
-        # the generator remembers fuzzy name matches (loadgen.install_fast_matching) to be fast enough for large
-        # catalogs; the data must be what the program's own matching gives: same seed, both ways, compared
+        # the generator remembers fuzzy name matches (loadgen.install_fast_matching) and adds generator-only indexes
+        # (loadgen.GEN_INDEXES) to be fast enough for large pharmacies; the data must be what the program gives
+        # without them: same seed, both ways (--plain), compared
         with tempfile.TemporaryDirectory() as tmp:
             got = {}
-            for mode, extra in (("fast", []), ("exact", ["--exact-matching"])):
+            for mode, extra in (("fast", []), ("exact", ["--plain"])):
                 out = Path(tmp) / mode
                 r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/loadgen.py"), "--out", str(out), "--days", "18",
                                     "--items", "150", "--customers", "10", "--suppliers", "3", "--per-day", "30-30",
