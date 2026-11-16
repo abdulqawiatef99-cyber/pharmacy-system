@@ -94,15 +94,29 @@ def local_today() -> date:
     return datetime.now().astimezone().date()
 
 
-def item_warnings(db: Database, item_ids: list[str]) -> list[Finding]:
+def item_warnings(db: Database, item_ids: list[str], *, org_id: str | None = None,
+                  branch_id: str | None = None) -> list[Finding]:
     """The owner's own marks on items: the pharmacist must confirm each one before the sale
-    completes, and the confirmation is logged with his name (safety_events)."""
+    completes, and the confirmation is logged with his name (safety_events).
+    With org_id (and the branch being sold from): also a notice, which does not stop the sale, for an item
+    with stock in a batch named in a recall notice nobody has decided yet (recall_matches 'pending')."""
     out = []
     for iid in dict.fromkeys(item_ids):
         it = db.one("SELECT id, name_en, name_ar, rx_required, misuse_risk, sale_note FROM items WHERE id=?", (iid,))
         if not it:
             continue
         name = it["name_en"] or it["name_ar"]
+        if org_id:
+            pend = [r["batch_no"] for r in db.all(
+                "SELECT DISTINCT b.batch_no FROM recall_matches m JOIN batches b ON b.id=m.batch_id"
+                " JOIN stock_balances sb ON sb.org_id=m.org_id AND sb.item_id=m.item_id AND sb.batch_key=m.batch_id"
+                " WHERE m.org_id=? AND m.item_id=? AND m.status='pending' AND sb.qty>0 AND (? IS NULL OR sb.branch_id=?)"
+                " AND NOT EXISTS (SELECT 1 FROM recall_matches c WHERE c.org_id=m.org_id AND c.batch_id=m.batch_id"
+                "                 AND c.status='confirmed') ORDER BY b.batch_no", (org_id, iid, branch_id, branch_id))]
+            if pend:
+                out.append(Finding(code="item_recall_pending", severity="high", item_ids=[iid], requires="none", basis="owner",
+                                   message=f"{name}: تشغيلة {'، '.join(pend)} عليها منشور سحب لم يُراجَع بعد."
+                                           " راجع تنبيهات السحب قبل صرفها."))
         if it["rx_required"]:
             out.append(Finding(code="item_rx", severity="high", item_ids=[iid], requires="acknowledge", basis="owner",
                                message=f"{name}: يُصرف بوصفة طبية فقط (عليه غرامة إذا صُرف دون وصفة طبية). تأكد من الوصفة الطبية."))
@@ -244,22 +258,34 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
+    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة"}
+
     def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
                          method: str = "cash") -> int:
         ctx.require("customers.manage")
-        if amount <= 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
-        if method not in ("cash", "card"):
+        if method not in self.COLLECTION_METHODS:
             raise ValidationFailed("طريقة الدفع غير صحيحة")
         with self.db.transaction():
             if not self.db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (customer_id, ctx.org_id)):
                 raise NotFound("العميل غير موجود")
+            # under the write lock: two screens together cannot collect more than the customer owes
+            owed = self.balance(ctx, customer_id)
+            if amount > owed:
+                raise ValidationFailed(
+                    "المبلغ أكبر من المستحق على العميل" if owed > 0 else "لا يوجد مبلغ مستحق على هذا العميل",
+                    code="over_collection", details={"balance": owed, "amount": amount})
             if method == "cash":
                 cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
+            # how it was paid stays with the row (no column for it): a card collection has no drawer movement
+            said = (str(note).strip() if note else "")[:200]
+            how = self.COLLECTION_METHODS[method] + (f" — {said}" if said else "")
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
-                            (new_id(), ctx.org_id, customer_id, -amount, note, ctx.user_id))
-            audit.record(self.db, ctx, "customer.payment", "customer", customer_id, after={"amount": amount})
+                            (new_id(), ctx.org_id, customer_id, -amount, how, ctx.user_id))
+            audit.record(self.db, ctx, "customer.payment", "customer", customer_id,
+                         after={"amount": amount, "method": method})
         return self.balance(ctx, customer_id)
 
     # ------------------------------------------------------------ draft
@@ -284,22 +310,43 @@ class Sales:
             raise Conflict("الفاتورة مكتملة أو ملغاة", code="not_draft")
         return dict(s)
 
-    def _sellable(self, ctx: Context, branch_id: str, item_id: str) -> list[dict]:
-        """Batches with stock, FEFO, expired excluded (returned separately)."""
+    def _stock_rows(self, ctx: Context, branch_id: str, item_id: str) -> list[dict]:
+        """Batches with stock, FEFO, each marked `expired` and `recalled` (a recall the pharmacy confirmed
+        for this batch: status 'confirmed'; 'pending', 'not_ours' and 'handled' do not hold the stock)."""
         rows = self.db.all(
-            "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price"
+            "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price,"
+            " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.batch_id=sb.batch_key"
+            "         AND m.status='confirmed') recalled"
             " FROM stock_balances sb LEFT JOIN batches b ON b.id = nullif(sb.batch_key,'')"
             " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0"
             " ORDER BY b.expiry_date IS NULL, b.expiry_date", (ctx.org_id, branch_id, item_id))
         today = self.today.isoformat()
-        return [dict(r) for r in rows if not r["expiry_date"] or r["expiry_date"] >= today]
+        return [{**dict(r), "expired": bool(r["expiry_date"] and r["expiry_date"] < today)} for r in rows]
+
+    def _sellable(self, ctx: Context, branch_id: str, item_id: str) -> list[dict]:
+        """Batches with stock, FEFO; expired and recalled ones excluded (counted separately)."""
+        return [r for r in self._stock_rows(ctx, branch_id, item_id) if not r["expired"] and not r["recalled"]]
+
+    def _held(self, ctx: Context, branch_id: str, item_id: str) -> tuple[int, int, int]:
+        """(sellable, expired, recalled) base units; a batch both expired and recalled counts as expired."""
+        rows = self._stock_rows(ctx, branch_id, item_id)
+        expired = sum(r["qty"] for r in rows if r["expired"])
+        recalled = sum(r["qty"] for r in rows if r["recalled"] and not r["expired"])
+        return sum(r["qty"] for r in rows) - expired - recalled, expired, recalled
 
     def _available(self, ctx: Context, branch_id: str, item_id: str) -> tuple[int, int]:
-        sellable = sum(r["qty"] for r in self._sellable(ctx, branch_id, item_id))
-        total = int(self.db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND"
-                                " branch_id=? AND item_id=? AND qty>0",
-                                (ctx.org_id, branch_id, item_id))["q"])
-        return sellable, total - sellable
+        sellable, expired, recalled = self._held(ctx, branch_id, item_id)
+        return sellable, expired + recalled
+
+    @staticmethod
+    def _short(sellable: int, expired: int, recalled: int) -> Conflict:
+        msg = f"الكمية المتاحة للبيع {sellable} وحدة"
+        if expired:
+            msg += f" (يوجد {expired} وحدة منتهية الصلاحية لا تُباع)"
+        if recalled:
+            msg += f" (يوجد {recalled} وحدة من تشغيلة عليها منشور سحب مؤكد لا تُباع)"
+        return Conflict(msg, code="insufficient_stock",
+                        details={"available": sellable, "expired": expired, **({"recalled": recalled} if recalled else {})})
 
     def add_line(self, ctx: Context, sid: str, item_id: str, *, packs: int = 0, units: int = 0,
                  discount_bp: int = 0, client_ref: str | None = None) -> dict:
@@ -329,13 +376,9 @@ class Sales:
             qty = packs * item["pack_size"] + units
             already = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=?"
                                   " AND item_id=?", (sid, item_id))["q"]
-            sellable, expired = (10 ** 9, 0) if item["is_service"] else self._available(ctx, s["branch_id"], item_id)
+            sellable, expired, recalled = (10 ** 9, 0, 0) if item["is_service"] else self._held(ctx, s["branch_id"], item_id)
             if already + qty > sellable:
-                msg = f"الكمية المتاحة للبيع {sellable} وحدة"
-                if expired:
-                    msg += f" (يوجد {expired} وحدة منتهية الصلاحية لا تُباع)"
-                raise Conflict(msg, code="insufficient_stock",
-                               details={"available": sellable, "expired": expired})
+                raise self._short(sellable, expired, recalled)
             # the same item again (scanned twice, quick button tapped twice) goes on its line, so whole
             # packs are priced as packs and not as loose units on separate lines
             same = self.db.one("SELECT id, qty_base, client_ref FROM sale_lines WHERE sale_id=? AND item_id=? AND discount_bp=?"
@@ -485,7 +528,8 @@ class Sales:
         found = self.safety.check(ctx, [{"item_id": l["item_id"], "base_qty": l["qty_base"],
                                          "partial_pack": bool(l["partial_pack"])} for l in s["lines"]],
                                   context_type="sale", context_id=sid)
-        return item_warnings(self.db, [l["item_id"] for l in s["lines"]]) + found   # the owner's marks first
+        return item_warnings(self.db, [l["item_id"] for l in s["lines"]], org_id=ctx.org_id,
+                             branch_id=s["branch_id"]) + found   # the owner's marks first
 
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
@@ -502,6 +546,12 @@ class Sales:
                 out = self.get(ctx, sid)
                 out["replayed"] = True
                 return out
+        self.get(ctx, sid)        # the caller may see this invoice (_may_view) before anything is written to it
+        if self._reprice_contract(ctx, sid):
+            # a contract stopped, changed or unlinked since the draft was priced: the draft now carries
+            # today's terms and the cashier confirms the new total, as with any price that moved
+            raise Conflict("تغيّر خصم التعاقد على هذه الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع",
+                           code="price_changed", details={"reason": "contract"})
         if payments is None:          # older screens: three amounts
             payments = [{"method": m, "amount": a} for m, a in
                         (("cash", paid_cash), ("card", paid_card), ("credit", on_credit)) if a]
@@ -627,6 +677,32 @@ class Sales:
                                      for b in below_cost[:4]), "sale", sid)
         return self.get(ctx, sid)
 
+    def _reprice_contract(self, ctx: Context, sid: str) -> bool:
+        """Put the customer's contract terms of this moment on a draft (saved); True when a line's discount
+        changed, so the total the cashier saw is no longer the total."""
+        from . import contracts
+        q = ("SELECT l.id, l.discount_bp, l.discount_source FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+             " WHERE l.sale_id=? AND s.org_id=? ORDER BY l.line_no")
+
+        def state():
+            head = self.db.one("SELECT contract_id FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            return head["contract_id"], [tuple(r) for r in self.db.all(q, (sid, ctx.org_id))]
+
+        with self.db.transaction():
+            s = self.db.one("SELECT status FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            if not s or s["status"] != "draft":
+                return False                      # the checks below answer for a missing or finished sale
+            before = state()
+            contracts.apply(self.db, sid)
+            if state() == before:
+                return False
+            if state()[1] != before[1]:           # the header alone (contract tag) is not a new price
+                self.db.execute("UPDATE sales SET version=version+1 WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            audit.record(self.db, ctx, "sale.contract_repriced", "sale", sid,
+                         before={"contract": before[0], "lines": [[bp, src] for _, bp, src in before[1]]},
+                         after={"contract": state()[0], "lines": [[bp, src] for _, bp, src in state()[1]]})
+            return state()[1] != before[1]
+
     def _next_no(self, ctx: Context, branch_id: str, kind: str) -> int:
         self.db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,?,1)"
                         " ON CONFLICT(org_id, branch_id, kind) DO NOTHING", (ctx.org_id, branch_id, kind))
@@ -737,10 +813,9 @@ class Sales:
                 others = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=? AND"
                                      " item_id=? AND id<>?", (sid, l["item_id"], line_id))["q"]
                 svc = self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"]
-                sellable, _ = (10 ** 9, 0) if svc else self._available(ctx, s["branch_id"], l["item_id"])
+                sellable, expired, recalled = (10 ** 9, 0, 0) if svc else self._held(ctx, s["branch_id"], l["item_id"])
                 if others + qty_base > sellable:
-                    raise Conflict(f"الكمية المتاحة للبيع {sellable} وحدة", code="insufficient_stock",
-                                   details={"available": sellable})
+                    raise self._short(sellable, expired, recalled)
                 item = self.db.one("SELECT pack_size FROM items WHERE id=?", (l["item_id"],))
                 self.db.execute("UPDATE sale_lines SET qty_base=?, partial_pack=? WHERE id=?",
                                 (qty_base, 1 if qty_base % item["pack_size"] else 0, line_id))
@@ -798,6 +873,8 @@ class Sales:
             raise ValidationFailed("طريقة الاسترداد غير صحيحة")
         if len((reason or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب المرتجع")
+        if not isinstance(lines, dict) or not lines:      # a return of nothing is not a return
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
         with self.db.transaction():
             s = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
             if not s:

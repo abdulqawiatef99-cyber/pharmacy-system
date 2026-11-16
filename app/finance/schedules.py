@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date
 
 from ..core import audit, notify
@@ -128,12 +129,27 @@ def _get(db: Database, ctx: Context, sid: str) -> dict:
     return dict(s)
 
 
+def _own_period(s: dict, period) -> str:
+    """The month sent by the screen, only if it is written YYYY-MM and is one of this item's due months."""
+    if not isinstance(period, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+        raise ValidationFailed("الشهر غير صحيح")
+    (y, m), (y0, m0) = (map(int, x.split("-")) for x in (period, s["start_month"]))
+    months = (y - y0) * 12 + (m - m0)
+    if months < 0 or months % s["every_months"]:
+        raise ValidationFailed("هذا الشهر ليس من مواعيد هذا البند")
+    return period
+
+
 def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_from: str | None = None,
         note: str | None = None, period: str | None = None) -> dict:
-    """Records this period's expense (normal approval rules) and moves the schedule on."""
+    """Records one period's expense (normal approval rules) and moves the schedule on. With `period` (the month
+    the screen showed) exactly that month is paid or refused; a second press never pays the month after it."""
+    ctx.require("expenses.approve")
     s = _get(db, ctx, sid)
-    nxt = next_open(db, s, date.today())
-    period = period or (nxt or {}).get("period")
+    if period is not None:
+        period = _own_period(s, period)
+    else:
+        period = (next_open(db, s, date.today()) or {}).get("period")
     if not period:
         raise ValidationFailed("لا يوجد موعد مفتوح لهذا البند")
     amount = amount if amount is not None else s["amount"]

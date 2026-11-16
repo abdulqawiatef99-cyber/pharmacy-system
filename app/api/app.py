@@ -900,7 +900,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if sid and b.get("action") == "pay":
             amt = b.get("amount")
             return J(schedules.pay(db, ctx, sid, _int(amt, "amount") if amt not in (None, "") else None,
-                                   b.get("paid_from") or None, b.get("note")))
+                                   b.get("paid_from") or None, b.get("note"),
+                                   period=b["period"] if b.get("period") not in (None, "") else None))
         if sid and b.get("action") == "skip":
             return J({"schedules": schedules.skip(db, ctx, sid, str(b.get("period", "")))})
         if "amount" in b and b["amount"] not in (None, ""):
@@ -1078,7 +1079,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         month = req.query_params.get("month") or ""
         if req.method == "POST":
             b = await body(req)
-            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), str(b.get("month", month))
+            a, uid, month = str(b.get("action", "")), str(b.get("user_id", "")), b.get("month", month)
+            if a in ("pay_settings", "fix"):          # not about a month: never save and then answer 422
+                month = pay.sheet_month(month)
             if a == "pay_settings":
                 pay.set_pay(db, ctx, uid, _int(b.get("monthly_salary"), "salary"), _int(b.get("work_days") or 26, "work_days"))
             elif a == "advance":
@@ -1831,7 +1834,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def sales_return(req):
         ctx = ctx_of(req)
         b = await body(req)
-        lines = {str(k): _int(v, "qty") for k, v in (b.get("lines") or {}).items()}
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
                                         reason=str(b.get("reason", ""))))
