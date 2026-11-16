@@ -60,3 +60,18 @@ class TestStaleContractDiscount(Base):
         done = self.complete(d["total"], version=d["version"])   # same total: nothing for the cashier to confirm
         self.assertEqual((done["lines"][0]["discount_bp"], done["discount_total"]), (300, 120))
         self.assertIsNone(done["contract_id"])               # but the sale no longer counts for the contract
+
+    def test_someone_who_may_not_see_the_draft_cannot_reprice_it(self):
+        from app.core import people
+        from app.core.errors import DomainError
+        people.add_user(self.db, self.ctx, username="asst9", full_name="A", password="Asst-Pass-2026x", role_code="assistant")
+        other = self.login("asst9", "Asst-Pass-2026x")
+        k.save(self.db, self.ctx, {"is_active": False}, self.kid)
+        with self.assertRaises(DomainError) as e:
+            self.s.complete(other, self.sid, paid_cash=3200, safety_decisions={})
+        self.assertNotEqual(e.exception.code, "price_changed")
+        d = self.s.get(self.ctx, self.sid)
+        self.assertEqual((d["total"], d["version"], d["contract_id"]), (3200, self.draft["version"], self.kid))
+        self.assertEqual(self.db.one("SELECT count(*) FROM audit_log WHERE org_id=? AND action='sale.contract_repriced'"
+                                     " AND entity_id=?", (self.ctx.org_id, self.sid))[0], 0)
+

@@ -546,6 +546,7 @@ class Sales:
                 out = self.get(ctx, sid)
                 out["replayed"] = True
                 return out
+        self.get(ctx, sid)        # the caller may see this invoice (_may_view) before anything is written to it
         if self._reprice_contract(ctx, sid):
             # a contract stopped, changed or unlinked since the draft was priced: the draft now carries
             # today's terms and the cashier confirms the new total, as with any price that moved
