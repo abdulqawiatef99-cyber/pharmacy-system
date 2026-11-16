@@ -94,3 +94,23 @@ just the steps toward it. When the goal is reached, the session stops and report
   starts no new work, and does not use a long chat for it.
 - Once a week (after the Thursday usage reset): the manager checks progress against `STATUS.md`
   gates and tells the owner in 5 lines what moved, what is stuck, and the plan for the week.
+
+## 9. Owner decisions of 16/11/2026
+- Hours: the owner is at the pharmacy about 13:00-24:00 Cairo every day, at home otherwise. Device tests run
+  inside that window; cloud work (review, coding) runs 00:00-13:00.
+- Plan: the Claude account is on Max. Scheduled night sessions are allowed again when they follow the
+  timetable in `docs/WORK_PLAN.md` §4 (one goal each). They open PRs only; merging stays with the manager chat.
+- Pick the tool and model by the task (`docs/WORK_PLAN.md` §5). A chat cannot change its own model: the
+  manager says at the start of a batch which model is enough, the owner picks it.
+- Group the work by kind: review together, coding together, device tests together, development together.
+- Night sessions write their log as comments on #203, not in `docs/HANDOFF.md` (no merge conflicts); the
+  manager folds the result into `docs/HANDOFF.md` the next day.
+- Repository visibility: public for now (free CI). The owner judged the old data files on the #102 branch
+  as ordinary; the repo goes back to private once the reason for making it public is over. No new real
+  data is ever added (§5 unchanged).
+- After launch, once a month: review competing programs and their known faults, update
+  `docs/MARKET_RESEARCH.md` and `docs/FEATURE_GAP.md`; review the pharmacy Claude skills and record the
+  proven ones as program features in `docs/FUTURE_REQUIREMENTS.md`. Nothing is built without the owner.
+- Reports to the owner: one short status of everything in progress, in plain words, no flattery, and the
+  manager fills gaps the owner did not mention instead of waiting to be asked.
+
