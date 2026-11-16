@@ -5,8 +5,10 @@ deleted afterwards); it never opens the live database and never changes or delet
 anything. Its verdict is `verify_archive`'s, so "can restore" here means restore accepts
 the archive; the extra part is the per-attachment detail the owner needs to decide.
 
-Every attachment problem blocks restore (the rule is deliberate: no partial restore).
-Importance only says what is lost if that file cannot be recovered:
+Every attachment problem blocks a normal restore (no silent partial restore). When attachment
+problems are the only ones, `manage.py restore --allow-missing-attachments` restores the data
+without those files, as an explicit decision. Importance says what is lost if a file cannot be
+recovered:
   financial  original of an approved purchase invoice, transfer screenshot of a completed sale
   optional   draft/cancelled purchase, voided sale, "other" attachment, file nothing uses
 """
@@ -98,4 +100,7 @@ def render(r: dict) -> list[str]:
     lines.append("النتيجة: النسخة تنفع للنقل" if r["can_restore"]
                  else "النتيجة: النسخة لا تنفع للنقل كما هي — الاسترجاع سيرفضها ولن يغيّر أي بيانات."
                       " أرسل هذا التقرير للمطوّر قبل أي خطوة.")
+    if r["problems"] and not backup.split_problems(r["problems"])[0]:
+        lines.append("ملحوظة: البيانات نفسها سليمة والناقص ملفات مرفقة فقط. لو الملفات دي مش هترجع، الاسترجاع ممكن"
+                     " بالأمر restore مع --allow-missing-attachments (بقرار صريح، والملفات الناقصة بتتكتب في الآخر).")
     return lines

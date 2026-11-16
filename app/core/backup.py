@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import lzma
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -114,6 +115,23 @@ def _attachment_checks(db: Database, z: zipfile.ZipFile) -> list[tuple[dict, str
         out.append((row, None if digest.hexdigest() == row["sha256"]
                     else f"attachment checksum mismatch for source {row['id']}"))
     return out
+
+
+# The per-file messages of _attachment_checks. Only these are "attachment problems": the database part of
+# the archive is good and one registered original is missing or differs. Everything else is a hard problem.
+ATTACHMENT_PROBLEM = re.compile(r"^(?:invalid attachment path|unknown attachment layout|missing original attachment"
+                                r"|attachment size mismatch|attachment checksum mismatch) for source (\S+)$")
+
+
+def attachment_source(problem: str) -> str | None:
+    """The source_files id an attachment problem is about, or None for any other problem."""
+    m = ATTACHMENT_PROBLEM.match(problem)
+    return m.group(1) if m else None
+
+
+def split_problems(problems: list[str]) -> tuple[list[str], list[str]]:
+    """(hard problems, attachment problems)."""
+    return ([p for p in problems if not attachment_source(p)], [p for p in problems if attachment_source(p)])
 
 
 def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
@@ -225,17 +243,24 @@ def _raw_copy(db_path: Path, dest_dir: Path) -> Path:
     return folder
 
 
-def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Path) -> dict:
+def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Path, *,
+            allow_missing_attachments: bool = False) -> dict:
     """Server must be stopped. Returns {'pre_restore_backup', 'pre_restore_kind', 'pre_restore_error',
-    'manifest'}.
+    'missing_attachments', 'manifest'}.
 
     The current data is always kept first. pre_restore_kind says how: 'verified_backup' (a normal backup
     ZIP), or 'raw_copy' when the current database fails verification or cannot be read at all, which is
     exactly when a restore is needed: then pre_restore_backup is a folder with the raw database file(s)
     and pre_restore_error says why. None when there was no database. If no safety copy can be made,
-    nothing is restored."""
+    nothing is restored.
+
+    An archive whose registered attachments are missing or differ is refused, unless
+    allow_missing_attachments: then the database and the files that are there are restored and
+    missing_attachments lists the rest ({'source_id', 'filename', 'problem'}). Any other problem
+    (database, checksum, counts) is always refused."""
     info = verify_archive(archive)
-    if info["problems"]:
+    hard, soft = split_problems(info["problems"])
+    if hard or (soft and not allow_missing_attachments):
         raise RuntimeError("backup failed verification, nothing restored: " + "; ".join(info["problems"]))
     pre, pre_kind, pre_error = None, None, None
     if db_path.exists():
@@ -276,13 +301,18 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
     restored = Database(db_path)
     try:
         problems = integrity_problems(restored)
+        missing = []
+        for p in soft:
+            row = restored.one("SELECT filename FROM source_files WHERE id=?", (attachment_source(p),))
+            missing.append({"source_id": attachment_source(p), "filename": row["filename"] if row else None,
+                            "problem": p})
     finally:
         restored.close()
     if problems:
         raise RuntimeError("restored database failed verification: " + "; ".join(problems)
                            + f" — previous data kept in {pre}")
     return {"pre_restore_backup": str(pre) if pre else None, "pre_restore_kind": pre_kind,
-            "pre_restore_error": pre_error, "manifest": info}
+            "pre_restore_error": pre_error, "missing_attachments": missing, "manifest": info}
 
 
 def quick_check(archive: Path) -> list[str]:

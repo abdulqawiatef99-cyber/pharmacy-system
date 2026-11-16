@@ -6,6 +6,9 @@
   last 7 days and of each of the last 4 weeks, so a mistake found days later still has a
   copy from before it. Only files tagged "-auto" are ever deleted; manual, pre-update and
   pre-restore backups are never touched.
+- A registered attachment (invoice file, transfer screenshot) that is missing or changed on disk does
+  not stop the backups: the database is backed up, the file is named "-auto-incomplete", the owner is
+  warned with the file names, and the newest complete backup is never pruned.
 - Off-site copy: the newest backup is also copied to a folder the owner picks (USB disk,
   external drive, a Google Drive folder synced on the PC), with the same retention.
   A warning appears when that copy is older than 3 days.
@@ -35,7 +38,9 @@ INTERVALS = (15, 30, 60, 360)
 DEFAULTS = {"interval_min": 60, "keep_last": 10, "keep_daily": 7, "keep_weekly": 4,
             "offsite_dir": "", "on_shift_close": True}
 OFFSITE_STALE_DAYS = 3
-NAME = re.compile(r"^pharmacy-backup-(\d{8})-(\d{6})(?:-\d+)?-auto\.zip$")
+# "-auto-incomplete": the database inside is good but a registered attachment was missing or changed
+NAME = re.compile(r"^pharmacy-backup-(\d{8})-(\d{6})(?:-\d+)?-auto(-incomplete)?\.zip$")
+INCOMPLETE = "-auto-incomplete.zip"
 
 _instance: "AutoBackup | None" = None
 
@@ -72,8 +77,14 @@ def plan_retention(files: list[Path], keep_last: int, keep_daily: int, keep_week
 
 
 def prune(folder: Path, cfg: dict) -> list[str]:
-    files = [f for f in folder.glob("pharmacy-backup-*-auto.zip") if f.is_file()]
+    files = [f for pattern in ("pharmacy-backup-*-auto.zip", "pharmacy-backup-*" + INCOMPLETE)
+             for f in folder.glob(pattern) if f.is_file()]
     keep = plan_retention(files, cfg["keep_last"], cfg["keep_daily"], cfg["keep_weekly"])
+    # the newest complete backup may hold the only copy of a file that later went missing: incomplete
+    # backups, however many, never push it out
+    complete = sorted(((t, f) for f in files if (t := _stamp(f)) and not f.name.endswith(INCOMPLETE)), reverse=True)
+    if complete:
+        keep.add(complete[0][1])
     removed = []
     for f in files:
         if f not in keep:
@@ -173,15 +184,33 @@ class AutoBackup:
             started = time.monotonic()
             try:
                 out = backup.create(self.db, self.upload_dir, self.backup_dir, tag="auto")
-                problems = backup.quick_check(out)
-                if problems:
+                hard, soft = backup.split_problems(backup.quick_check(out))
+                if hard:
                     out.unlink(missing_ok=True)
-                    raise RuntimeError("; ".join(problems))
+                    raise RuntimeError("; ".join(hard + soft))
+                warning, lost = None, []
+                if soft:
+                    # the database part is good: one lost upload must not stop every backup. Keep the
+                    # file under a name that says so, and tell the owner which files are affected.
+                    marked = out.with_name(out.name[:-len("-auto.zip")] + INCOMPLETE)
+                    out.replace(marked)
+                    out = marked
+                    lost = self._file_names(soft)
+                    warning = (f"{len(soft)} attachment file(s) missing or changed; the backup holds the data"
+                               " without them: " + "، ".join(lost))[:500]
+                    log.warning("automatic backup kept as incomplete (%s): %s", out.name, "; ".join(soft))
                 cfg = self.settings()
                 removed = prune(self.backup_dir, cfg)
                 st.update(last_at=datetime.now().isoformat(timespec="seconds"), last_file=out.name,
                           last_bytes=out.stat().st_size, last_seconds=round(time.monotonic() - started, 1),
-                          last_ok=True, last_error=None, last_reason=reason, fingerprint=fp, fail_notified=None)
+                          last_ok=True, last_error=None, last_reason=reason, fingerprint=fp, fail_notified=None,
+                          last_warning=warning, last_warning_files=lost)
+                if soft:
+                    self._notify_once(st, "warn_notified", "warning", "النسخة الاحتياطية ناقصها ملفات فواتير",
+                                      ("البيانات اتحفظت، لكن الملفات دي ناقصة أو متغيّرة على الجهاز: "
+                                       + "، ".join(lost))[:400], hours=24)
+                else:
+                    st["warn_notified"] = None
                 if removed:
                     log.info("removed old backups: %s", removed)
                 self._offsite(out, cfg, st)
@@ -195,6 +224,15 @@ class AutoBackup:
         # stock mismatch is one reason a backup is refused). Alerts and audits only; never repairs.
         self._check_stock()
         return st
+
+    def _file_names(self, problems: list[str]) -> list[str]:
+        """Names the owner knows (as uploaded) for the attachments these problems are about."""
+        names = []
+        for p in problems:
+            sid = backup.attachment_source(p)
+            row = self.db.one("SELECT filename FROM source_files WHERE id=?", (sid,))
+            names.append(row["filename"] if row and row["filename"] else str(sid))
+        return names
 
     def _check_stock(self) -> None:
         from ..inventory import integrity
@@ -255,7 +293,7 @@ class AutoBackup:
                 "offsite_stale": bool(cfg.get("offsite_dir")) and (
                     not off or datetime.fromisoformat(off) < datetime.now() - timedelta(days=OFFSITE_STALE_DAYS)),
                 "total_bytes": sum(f.stat().st_size for f in files),
-                "files": [{"name": f.name, "bytes": f.stat().st_size, "auto": f.name.endswith("-auto.zip"),
+                "files": [{"name": f.name, "bytes": f.stat().st_size, "auto": bool(NAME.match(f.name)),
                            "at": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="minutes")}
                           for f in files[:60]]}
 

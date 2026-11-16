@@ -124,8 +124,20 @@ def cmd_restore(a, s):
     if not a.yes:
         print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
         sys.exit(2)
-    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
-                       _backups(a.pre_dir, s, "pre-restore"))
+    try:
+        r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
+                           _backups(a.pre_dir, s, "pre-restore"),
+                           allow_missing_attachments=a.allow_missing_attachments)
+    except RuntimeError as e:
+        print("RESTORE REFUSED:", e)
+        if not a.allow_missing_attachments and "attachment" in str(e):
+            print("If only invoice/transfer files are missing and you accept losing them, repeat with"
+                  " --allow-missing-attachments: the database is restored and the missing files are listed.")
+        sys.exit(1)
+    for m in r["missing_attachments"]:
+        print(f"MISSING FILE (not restored): {m['filename']} — {m['problem']}")
+    if r["missing_attachments"]:
+        print(f"WARNING: {len(r['missing_attachments'])} attachment file(s) were not in the backup; the data itself is restored.")
     if r["pre_restore_kind"] == "raw_copy":
         print("WARNING: the previous database could not be backed up normally (" + str(r["pre_restore_error"])[:300] + ").")
         print("A RAW copy of its file(s) was kept instead (not a verified backup) in:", r["pre_restore_backup"])
@@ -400,6 +412,8 @@ def main(argv=None):
     rs.add_argument("archive")
     rs.add_argument("--yes", action="store_true")
     rs.add_argument("--pre-dir", default=None)
+    rs.add_argument("--allow-missing-attachments", action="store_true",
+                    help="restore the database even when invoice/transfer files are missing from the backup")
     f = sub.add_parser("feature")
     f.add_argument("org_id")
     f.add_argument("feature")
