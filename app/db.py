@@ -9,8 +9,7 @@ Rules enforced here:
   writers never interleave a read-modify-write.
 - migrations are plain .sql files applied in order and recorded in
   schema_migrations with a checksum; an edited, already-applied migration is a
-  hard error (never silently diverge), and so is an applied migration this
-  program has no file for (data from a newer version of the program).
+  hard error (never silently diverge).
 """
 from __future__ import annotations
 
@@ -148,23 +147,8 @@ class Database:
             applied = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations")}
         return [f.stem for f in sorted(directory.glob("*.sql")) if f.stem not in applied]
 
-    def unknown_migrations(self, directory: Path = MIGRATIONS_DIR) -> list[str]:
-        """Applied migrations this program has no file for: the data was written by a newer version of
-        the program. Read-only: creates nothing."""
-        conn = self.conn
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone():
-            return []
-        known = {f.stem for f in directory.glob("*.sql")}
-        return sorted(r["version"] for r in conn.execute("SELECT version FROM schema_migrations")
-                      if r["version"] not in known)
-
     def migrate(self, directory: Path = MIGRATIONS_DIR) -> list[str]:
         conn = self.conn
-        newer = self.unknown_migrations(directory)
-        if newer:                                   # before anything is created or applied
-            raise MigrationError(
-                "this data was written by a newer version of the program (unknown database update: "
-                + ", ".join(newer) + "); install the newer program, nothing was changed")
         conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
             version TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)""")
         applied = {r["version"]: r["checksum"] for r in
