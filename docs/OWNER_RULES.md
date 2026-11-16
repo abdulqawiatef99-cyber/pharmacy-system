@@ -126,4 +126,6 @@ just the steps toward it. When the goal is reached, the session stops and report
   synthetic data only; its own E-Stock data is never touched. Every device chat reads the device name first.
 - While working, the manager sends the owner one or two plain lines whenever a stage ends.
 - The manager says at once when a new chat is needed (long chat, risk of mistakes).
+- Where the next session starts (owner, 16/11 18:15): at the end of every session, tell the owner where to start
+  the next one (a normal Claude chat or a Claude Code session) and with which model, chosen by the task.
 
