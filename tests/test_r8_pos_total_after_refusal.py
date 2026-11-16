@@ -89,7 +89,8 @@ class TotalAfterRefusal(APICase):
 
         def reprice():                       # as a purchase approved on another screen would
             with self.db.transaction():
-                self.db.execute("UPDATE batches SET public_price=4400 WHERE id=?", (self.batch,))
+                self.db.execute("UPDATE batches SET public_price=4400 WHERE org_id=? AND id=?",
+                                (self.ctx.org_id, self.batch))
         out = self.run_script(reprice)
         self.assertEqual(out["shown"], "40.00")
         self.assertEqual(out["after"], "44.00", out)            # was 40.00, and every F9 was refused
