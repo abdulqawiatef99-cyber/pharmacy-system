@@ -136,3 +136,65 @@ class TestJobRules(DBTestCase):
         self.assertEqual(rep["stock"]["applied"]["posted_base_units"], 47 + 2 + 1)   # + the free box (pack of 1)
         self.assertTrue(rep["rules"]["accept_zero_cost"])
         self.assertTrue(rep["stock"]["reconciliation"]["ok"])
+
+
+class TestJobRerun(DBTestCase):
+    """`manage.py import-estock --apply` after a failure in a later step: the catalog (step 1) is already
+    in, and its file is refused as "already imported"; the job must go on from there (R4 review)."""
+
+    def files(self, stock):
+        d = Path(tempfile.mkdtemp(dir=self.tmp))
+        (d / "c.xlsx").write_bytes(xlsx(CATALOG))
+        (d / "s.xlsx").write_bytes(xlsx(stock))
+        (d / "p.json").write_text(json.dumps({"packs": {"30906": 3}}), encoding="utf-8")
+        return d
+
+    def run_job(self, d):
+        return estock_job.run(self.db, self.ctx, catalog_file=d / "c.xlsx", stock_file=d / "s.xlsx",
+                              packs_file=d / "p.json", stores=["الصيدلية"])
+
+    def counts(self):
+        return (self.db.one("SELECT count(*) n FROM items WHERE org_id=?", (self.ctx.org_id,))["n"],
+                self.db.one("SELECT count(*) n FROM stock_movements WHERE org_id=?", (self.ctx.org_id,))["n"])
+
+    def test_rerun_after_the_stock_step_failed_skips_the_applied_catalog(self):
+        from unittest import mock
+        from app.core.errors import Conflict
+        from app.dataimport.service import DataImport
+        d = self.files(stock_rows())
+        real, calls = DataImport.apply, []
+
+        def fail_on_stock(di, ctx, run_id):
+            calls.append(run_id)
+            if len(calls) == 2:                       # step 3: the opening stock
+                raise Conflict("الأرصدة بعد الاستيراد لا تطابق الملف", code="reconciliation_failed")
+            return real(di, ctx, run_id)
+        with mock.patch.object(DataImport, "apply", fail_on_stock):
+            with self.assertRaises(Conflict):
+                self.run_job(d)
+        items, moves = self.counts()
+        self.assertGreater(items, 0)                  # the catalog stayed
+        self.assertEqual(moves, 0)                    # no stock was posted
+        rep = self.run_job(d)                         # the same command again
+        self.assertTrue(rep["catalog"]["already_applied"])
+        self.assertEqual(rep["catalog"]["created"], items)            # the first run's figures, for the summary
+        self.assertIn("updated", rep["catalog"])
+        self.assertIn("kept_duplicates", rep["catalog"])
+        self.assertTrue(rep["stock"]["reconciliation"]["ok"])
+        self.assertEqual(rep["stock"]["applied"]["posted_base_units"], 47 + 2)
+        self.assertEqual(self.counts()[0], items)     # no item was added twice
+
+    def test_a_first_run_reports_the_catalog_as_before(self):
+        rep = self.run_job(self.files(stock_rows()))
+        self.assertNotIn("already_applied", rep["catalog"])
+        self.assertGreater(rep["catalog"]["created"], 0)
+
+    def test_a_complete_run_is_still_refused_the_second_time(self):
+        from app.core.errors import Conflict
+        d = self.files(stock_rows())
+        self.run_job(d)
+        before = self.counts()
+        with self.assertRaises(Conflict) as e:        # the stock file was applied: never twice
+            self.run_job(d)
+        self.assertEqual(e.exception.code, "already_applied")
+        self.assertEqual(self.counts(), before)
