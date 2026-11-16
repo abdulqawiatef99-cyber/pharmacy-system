@@ -87,12 +87,22 @@ def _backup_before_migration(db: Database, s: config.Settings) -> None:
         if hard:
             out.unlink(missing_ok=True)
             raise RuntimeError("; ".join(hard))
-    except Exception as e:  # noqa: BLE001 - whatever stops the backup stops the migration
-        db.close()
-        sys.exit("لم يتم تحديث قاعدة البيانات: تعذّر عمل نسخة احتياطية قبل التحديث، فالبرنامج توقف والبيانات كما هي"
-                 " لم تتغير. أرسل هذه الرسالة للمطوّر.\n"
-                 f"(pre-migration backup failed, nothing was migrated; pending: {', '.join(pending)})\n"
-                 f"السبب / reason: {e}")
+    except Exception as e:  # noqa: BLE001 - a live database that fails its own check must still get its upgrade:
+        # keep a plain copy of the file instead (SQLite's online copy); only when that fails too does the start stop
+        from datetime import datetime
+        try:
+            s.backup_path.mkdir(parents=True, exist_ok=True)
+            raw = s.backup_path / f"pre-migrate-UNVERIFIED-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+            db.backup_to(raw)
+        except Exception as e2:  # noqa: BLE001
+            db.close()
+            sys.exit("لم يتم تحديث قاعدة البيانات: تعذّر عمل نسخة احتياطية قبل التحديث، فالبرنامج توقف والبيانات كما هي"
+                     " لم تتغير. أرسل هذه الرسالة للمطوّر.\n"
+                     f"(pre-migration backup failed, nothing was migrated; pending: {', '.join(pending)})\n"
+                     f"السبب / reason: {e}; plain copy: {e2}")
+        print(f"WARNING: the verified backup before the database update failed ({e}); a plain copy was kept: {raw}",
+              file=sys.stderr)
+        return
     print(f"backup before database update: {out}")
     if soft:
         print(f"WARNING: {len(soft)} attachment file(s) are missing or changed; the backup holds the data without them:",

@@ -79,10 +79,39 @@ class TestBackupBeforeMigration(unittest.TestCase):
         self.open().close()                                            # next start: nothing pending
         self.assertEqual(len(self.backups()), 1)
 
-    def test_failed_backup_stops_before_migrating(self):
+    def test_failed_verified_backup_keeps_a_plain_copy_and_upgrades(self):
+        # a live database that fails its own check (or a zip that cannot be written) must not leave the
+        # cashier without a program after an installer upgrade: a plain copy is kept, then the upgrade runs
+        self.with_pharmacy()
+        self.new_installer()
+        with mock.patch("app.core.backup.create", side_effect=RuntimeError("the live database failed verification")):
+            db = self.open(create=True)
+        try:
+            self.assertIsNotNone(db.one("SELECT 1 FROM schema_migrations WHERE version='9999_new'"))
+        finally:
+            db.close()
+        raw = list(self.s.backup_path.glob("pre-migrate-UNVERIFIED-*.db"))
+        self.assertEqual(len(raw), 1)
+        old = Database(raw[0])
+        try:
+            self.assertEqual(old.one("SELECT name FROM organizations")["name"], "صيدلية تجربة")
+            self.assertIsNone(old.one("SELECT 1 FROM schema_migrations WHERE version='9999_new'"))
+        finally:
+            old.close()
+
+    def test_a_backup_that_fails_its_check_keeps_a_plain_copy_too(self):
+        self.with_pharmacy()
+        self.new_installer()
+        with mock.patch("app.core.backup.quick_check", return_value=["database checksum does not match the manifest"]):
+            self.open(create=True).close()
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(len(list(self.s.backup_path.glob("pre-migrate-UNVERIFIED-*.db"))), 1)
+
+    def test_no_copy_at_all_stops_before_migrating(self):
         self.with_pharmacy()
         self.new_installer()
         with mock.patch("app.core.backup.create", side_effect=OSError("disk full")), \
+                mock.patch("app.db.Database.backup_to", side_effect=OSError("disk full")), \
                 self.assertRaises(SystemExit) as e:
             self.open(create=True)
         self.assertIn("disk full", str(e.exception.code))
@@ -90,19 +119,6 @@ class TestBackupBeforeMigration(unittest.TestCase):
         db = Database(self.s.db_path)
         try:
             self.assertEqual(db.one("SELECT name FROM organizations")["name"], "صيدلية تجربة")
-            self.assertIsNone(db.one("SELECT 1 FROM schema_migrations WHERE version='9999_new'"))
-        finally:
-            db.close()
-
-    def test_a_backup_that_fails_its_check_stops_too(self):
-        self.with_pharmacy()
-        self.new_installer()
-        with mock.patch("app.core.backup.quick_check", return_value=["database checksum does not match the manifest"]), \
-                self.assertRaises(SystemExit):
-            self.open(create=True)
-        self.assertEqual(self.backups(), [])
-        db = Database(self.s.db_path)
-        try:
             self.assertIsNone(db.one("SELECT 1 FROM schema_migrations WHERE version='9999_new'"))
         finally:
             db.close()
