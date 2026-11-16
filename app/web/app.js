@@ -318,6 +318,7 @@ const routes = [
   [/^#\/feedback$/, viewFeedback],
   [/^#\/reports$/, viewReports],
   [/^#\/owner-reports$/, viewOwnerReports],
+  [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
   [/^#\/customers\/([\w-]+)$/, viewCustomer],
   [/^#\/import$/, viewImport],
@@ -4025,6 +4026,62 @@ const OWNER_REPORTS = [
       total: ["الإجمالي", "", null, ...(r.totals.cost_value != null ? [r.totals.cost_value] : []), r.totals.price_value, "", "", ""] }] },
 ];
 
+// #202 «مطابقة الأرصدة»: every balance recomputed from the stock ledger, now; nothing is changed by this screen
+const STOCK_KINDS = {
+  batches: ["رصيد تشغيلة لا يساوي مجموع حركاتها", (r) => [r.batch_no || "بدون تشغيلة", r.ledger_qty ?? "لا توجد حركات", r.balance_qty ?? "لا يوجد رصيد"]],
+  items: ["رصيد صنف لا يساوي مجموع حركاته", (r) => ["", r.ledger_qty, r.balance_qty]],
+  negative: ["رصيد بالسالب", (r) => [r.batch_no || "بدون تشغيلة", "", r.qty]],
+  foreign_batch: ["حركة على تشغيلة صنف آخر", (r) => [r.batch_no || "", "", ""]],
+  sales: ["فاتورة بيع حركتها لا تساوي الفاتورة", (r) => [`فاتورة ${r.sale_no}`, r.moved, r.expected]],
+};
+const CHECK_REASONS = { startup: "تشغيل البرنامج", backup: "بعد النسخة الاحتياطية", manual: "من هذا التقرير" };
+async function viewStockCheck() {
+  if (!ME.permissions.includes("audit.read")) { app.innerHTML = `<section class="panel"><p>هذا التقرير للمالك والمدير.</p></section>`; return; }
+  app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/reports">← التقارير</a><h1>مطابقة الأرصدة</h1></div>
+    <span class="row noprint"><button type="button" class="btn" id="scRun">افحص الآن</button><button type="button" class="btn small secondary" id="scPrint">🖨 طباعة</button></span></div>
+    <p class="muted">البرنامج يحسب رصيد كل صنف وكل تشغيلة من جديد من سجل حركات المخزون ويقارنه بالرصيد المعروض. الفحص ده بيحصل لوحده عند تشغيل البرنامج وبعد كل نسخة احتياطية. التقرير ده ما بيغيّرش أي رصيد.</p>
+    <div id="scBox"><p class="muted">جارٍ الفحص…</p></div></section>`;
+  const load = async () => {
+    $("#scBox").innerHTML = `<p class="muted">جارٍ الفحص…</p>`;
+    const r = await api("/api/reports/stock-check", { method: "POST", body: {} });
+    const n = Object.values(r.counts).reduce((a, b) => a + b, 0);
+    const when = (x) => stamp(x);                       // local day + the 12/24-hour setting (#206)
+    let html = `<div class="totals"><div>الحالة<b><span class="badge ${r.ok ? "b-ok" : "b-err"}">${r.ok ? "✔ كل الأرصدة مطابقة" : `✖ ${n} اختلاف`}</span></b></div>
+      <div>أصناف تم فحصها<b>${r.items_checked}</b></div><div>حركات مخزون<b>${r.movements}</b></div><div>وقت الفحص<b>${esc(when(r.checked_at))}</b></div></div>`;
+    if (!r.ok) {
+      html += `<p class="mt"><b>لم يُصلَّح أي رصيد تلقائيًا.</b> اطبع التقرير ده واتبع الخطوات في «ماذا أفعل عند ظهور اختلاف» تحت.</p>`;
+      for (const [k, [title, cols]] of Object.entries(STOCK_KINDS)) {
+        if (!r.counts[k]) continue;
+        const ack = k === "sales" && ME.permissions.includes("settings.manage");
+        html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>${k === "sales" ? "خرج من المخزون" : "حسب الحركات"}</th><th>${k === "sales" ? "حسب الفاتورة" : "المعروض"}</th>${ack ? "<th class=\"noprint\">بعد الجرد</th>" : ""}</tr></thead><tbody>
+          ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}" data-moved="${x.moved}" data-expected="${x.expected}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
+          ${ack ? `<p class="muted noprint">فاتورة بيع حركتها مختلفة عن الفاتورة بتفضل مختلفة في السجل للأبد. صحّح الرف بجرد الصنف الأول، وبعدين «تمت المراجعة» بملاحظة: السطر ده بس يختفي، ويرجع لو أرقامه اتغيّرت.</p>` : ""}
+          ${r.counts[k] > r[k].length ? `<p class="muted">معروض أول ${r[k].length} فقط.</p>` : ""}`;
+      }
+      html += `<section class="panel mt"><h2>ماذا أفعل عند ظهور اختلاف</h2><ol>
+        <li>ما تعدّلش أي رصيد بإيدك وما تمسحش البرنامج. سجل الحركات هو الأصل ومحفوظ.</li>
+        <li>اطبع التقرير ده وابعته للدعم، ومعاه آخر نسخة احتياطية سليمة.</li>
+        ${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف لحد ما اختلاف أرصدة التشغيلات يتحل، عشان ما نحفظش بيانات فيها مشكلة. النسخ القديمة السليمة موجودة.</li>` : `<li>النسخ الاحتياطية شغالة عادي، لأن الاختلاف ده مش في أرصدة التشغيلات.</li>`}
+        <li>الإصلاح بيتعمل بأمر مسجّل من الدعم بعد مراجعة السبب، وبعده افتح التقرير تاني: لازم يطلع «كل الأرصدة مطابقة».</li></ol></section>`;
+    }
+    if (r.history.length) {
+      html += `<h2 class="mt">آخر الفحوصات اللي لقت اختلاف أو رجعت سليمة</h2><table><thead><tr><th>الوقت</th><th>النتيجة</th><th>الفحص</th><th>بواسطة</th></tr></thead><tbody>
+        ${r.history.map((h) => `<tr${h.ok || h.ack ? "" : ` class="has-err"`}><td>${esc(when(h.at))}</td><td>${h.ack ? `مراجعة فاتورة ${esc(h.sale_no)}: ${esc(h.note)}` : h.ok ? "مطابقة" : `${Object.values(h.counts || {}).reduce((a, b) => a + b, 0)} اختلاف`}</td><td>${h.ack ? "" : esc(CHECK_REASONS[h.reason] || h.reason || "")}</td><td>${esc(h.who)}</td></tr>`).join("")}</tbody></table>`;
+    }
+    $("#scBox").innerHTML = html;
+    $("#scBox").querySelectorAll("[data-ack]").forEach((btn) => btn.addEventListener("click", async () => {
+      const [sale_id, item_id] = btn.dataset.ack.split("|");
+      const note = $("#scBox").querySelector(`[data-ackn="${CSS.escape(btn.dataset.ack)}"]`).value;
+      btn.disabled = true;
+      try { await api("/api/reports/stock-check/ack", { method: "POST", body: { sale_id, item_id, note, moved: Number(btn.dataset.moved), expected: Number(btn.dataset.expected) } }); await load(); }
+      catch (e) { btn.disabled = false; toast(e.message, true); }
+    }));
+    refreshStockAlert();
+  };
+  $("#scRun").onclick = () => load().catch((e) => toast(e.message, true));
+  $("#scPrint").onclick = () => window.print();
+  await load();
+}
 async function viewOwnerReports() {
   const list = OWNER_REPORTS.filter((x) => ME.permissions.includes(x.perm));
   if (!list.length) { app.innerHTML = `<section class="panel"><p>هذه التقارير للمالك والمدير.</p></section>`; return; }
@@ -4058,7 +4115,7 @@ async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${can("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والمالك.</p>`}
-    <p class="muted noprint">تقارير أخرى: <a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
+    <p class="muted noprint">تقارير أخرى: ${can("audit.read") ? `<a href="#/stock-check">مطابقة الأرصدة</a> · ` : ""}<a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف المؤكدة وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   const sales = async (f, t) => {

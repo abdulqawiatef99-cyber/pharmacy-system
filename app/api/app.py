@@ -552,6 +552,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"alert": integrity.banner(db, ctx)})
 
     @handler
+    async def stock_check_report(req):
+        """#202 «مطابقة الأرصدة»: POST runs the stock integrity check now and returns the report."""
+        from ..inventory import integrity
+        return J(await run_in_threadpool(integrity.report, db, ctx_of(req)))
+
+    @handler
+    async def stock_check_ack(req):
+        """#202: the owner marks one sale-vs-invoice difference as reviewed (audited), then the report again."""
+        from ..inventory import integrity
+        ctx = ctx_of(req)
+        b = await body(req)
+        # in a worker thread: it may wait for a running check's lock and re-runs the check (Codex P2)
+        await run_in_threadpool(lambda: integrity.acknowledge(
+            db, ctx, str(b.get("sale_id") or ""), str(b.get("item_id") or ""), b.get("note"),
+            moved=b.get("moved"), expected=b.get("expected")))
+        return J(await run_in_threadpool(integrity.report, db, ctx))
+
+    @handler
     async def ui_settings_api(req):
         from ..core import ui_settings
         ctx = ctx_of(req)
@@ -2301,6 +2319,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/me", me),
         Route("/api/stock/alert", stock_alert_api),
+        Route("/api/reports/stock-check", stock_check_report, methods=["POST"]),
+        Route("/api/reports/stock-check/ack", stock_check_ack, methods=["POST"]),
         Route("/api/auth/quick-users", quick_users),
         Route("/api/auth/pin", pin_login, methods=["POST"]),
         Route("/api/me/pin", my_pin, methods=["POST"]),

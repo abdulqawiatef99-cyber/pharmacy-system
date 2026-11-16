@@ -93,3 +93,41 @@ do. Every 250 operations and at the end: balances = model, `verify_balances` emp
 - Default 3000 operations (~10 s, in the normal suite). `PHARM_LONG_RUN=20000` passed on 12/11 in 73 s.
 - Mutation check (12/11): a balance off by one only on returns of exactly 3 units fails the test at the first
   checkpoint.
+
+## 6. Owner's report «مطابقة الأرصدة» (`#/stock-check`)
+
+Reports → «مطابقة الأرصدة», or a click on the red banner. Owner and manager only (`audit.read`).
+Opening it (or «افحص الآن») runs the check now (`POST /api/reports/stock-check`), recorded like any other run
+but with the user's name and reason `manual`. It shows: the status (all matching / N differences), how many
+items and stock movements were checked, every difference with item name, code and batch (first 50 of each
+kind), what to do (below), and the last 20 checks that found or cleared a mismatch. Printable. It changes no
+balance. Tests: `tests/test_stock_check_report.py` (API + a real browser: banner after sign-in → report →
+fixed → clean → banner gone).
+
+## 7. What happens on a detected mismatch (decision 12/11, #202)
+
+1. **Nothing is repaired automatically, ever.** The ledger (`stock_movements`) is the truth and is never
+   edited; the check only reads.
+2. **The program tells the owner at once:** red banner on every screen for owner and manager, an error
+   notification in the bell, and an audit row on every detection (`stock.integrity_mismatch`, tamper-evident chain).
+3. **Backups are refused while a batch balance differs** (existing rule in `backup.create`: a backup must pass
+   the same verification as a restore). Older good backups stay; the backup screen shows the failure. This keeps
+   a damaged state from replacing good copies, at the cost of no new backup until it is resolved — so the
+   owner must act the same day.
+4. **Who fixes:** support (the lead agent on GitHub) with the owner, never a cashier. Steps:
+   - the owner prints «مطابقة الأرصدة» and sends it with the newest good backup (no real data in GitHub: the
+     backup goes by hand, the Issue gets counts and item codes only);
+   - support finds the cause from the ledger and the audit log (which document, which update, what damage);
+   - **cached balance ≠ ledger** (the ledger is complete): the balances are rebuilt from the ledger. There is
+     no button for it yet; until a dedicated, audited command exists, the safe way is restoring the newest
+     backup that verifies (`manage.py restore`) — **the owner's approval is required** (`AGENTS.md` §5); a
+     rebuild command is proposed as F53 in `FUTURE_REQUIREMENTS.md`, not built;
+   - **a sale moved stock differently from its invoice** (`sales` kind): the shelf is corrected by a stock count
+     on that item, approved by the owner (normal, audited movements; the old rows stay). The sale's own movements
+     can never equal its invoice afterwards (the ledger is append-only and the count posts under
+     `count_session`), so the owner then marks **that exact row** «تمت المراجعة» on the report with a note
+     (`POST /api/reports/stock-check/ack`, `settings.manage` = owner only, audit `stock.integrity_ack`). The row
+     stays out only while its numbers are exactly the reviewed ones; any later change brings it back. Only
+     `sales` rows can be reviewed; a balance that differs from its ledger is never acknowledged away.
+5. **Closed when** a check is clean again (after a review, the report runs the check at once): the audit row `stock.integrity_ok` is written, the banner goes away,
+   and the next backup succeeds. The cause and the fix go on the Issue.
