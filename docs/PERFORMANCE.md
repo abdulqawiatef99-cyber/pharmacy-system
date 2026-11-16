@@ -2,9 +2,10 @@
 
 Synthetic data only. `scripts/perf/loadgen.py` builds a pharmacy through the program's own services
 (purchases, sales, returns, voids, shifts, ledgers, expenses, transfer screenshots) on a simulated clock;
+`scripts/perf/scale.py` does the same for one pharmacy size and measures every snapshot (#253, below);
 `scripts/perf/bench.py` copies a snapshot and measures backup, restore, start-up, memory, the cashier's hot
-paths and the owner's reports over HTTP. Neither runs in CI (only a tiny generator run in
-`tests/test_perf_loadgen.py`); the query plans are guarded by `tests/test_perf_queries.py`.
+paths and the owner's reports over HTTP. Neither runs in CI (only tiny runs in
+`tests/test_perf_loadgen.py` and `tests/test_perf_scale.py`); the query plans are guarded by `tests/test_perf_queries.py`.
 
 ```
 python3 scripts/perf/loadgen.py --out /tmp/perf --days 30 --quiet          # or --years 1 --snapshots 1
@@ -73,6 +74,28 @@ which removes most of that time from every hourly backup and every restore. Meas
 file: backup create 142 → 50 s (38 s of it is the xz compression), verify 115 → 9.9 s, restore 231 → 21 s.
 During that shorter backup, adding a line had p95 105 ms (max 341 ms): the compression keeps one core busy. Start-up 0.2–0.7 s, server
 memory peak 314–332 MB. While the automatic backup ran, adding a line stayed at p95 6–15 ms (max 136–298 ms).
+
+## Large and huge pharmacies (#253)
+
+`scripts/perf/scale.py` builds one size from an empty database (sizes in `real_years.PROFILES`: large = 800-1200
+sales a day and 15,000 items, huge = 2500-3500 a day and 30,000 items), runs the owner's stock check on every
+snapshot, then measures what `real_years.py` measures against the owner's limits (cashier < 0.3 s, report < 5 s,
+nothing blocks the cashier). Several sizes can run at once, one process a core; with `--turns` only one measures
+at a time and the others wait.
+
+```
+python3 scripts/perf/scale.py --profile large --years 1,3 --out-txt /tmp/scale-large.txt --turns /tmp/turns
+python3 scripts/perf/scale.py --profile huge  --years 1   --out-txt /tmp/scale-huge.txt  --turns /tmp/turns
+```
+
+Generator speed: with 15,000 items the service-level generator made 16.5 sales a second. 90% of its time was the
+catalog's fuzzy name matching (`matching.fuzzy_candidates`): the look-alike notice of the safety check, for every
+basket line, twice a sale, plus every purchase line; each call scores the name against every item that shares a
+3-letter prefix and rebuilds the name index when any item row changed. `loadgen.install_fast_matching` remembers the
+program's own answer per name while generating (the catalog is fixed then); `tests/test_perf_loadgen.py` compares
+the data with and without it. The program is unchanged, so the measured server still pays that cost: see the
+safety-check rows of the results. Disk: about 10 KB a sale; a backup needs about 1.7 times the database in free
+disk on top of it (copy, compressed copy, check), and `scale.py` skips the backup timings when that is missing.
 
 ## Open findings (not fixed yet)
 - **Database growth:** 89 MB after 30 days of synthetic data; the largest tables are `safety_events`
