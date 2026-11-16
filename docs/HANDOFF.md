@@ -4,6 +4,18 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 17/11 00:30 Cairo — manager chat: cashier PC done, R8-B applied, work chain starts (READ THIS FIRST)
+Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); OK for the bundled installer; ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+1. Done, with evidence
+   - Cashier PC (desktop-5jvh3qd): «تحديث» to `c627f32` (22:47) then `69d87f8` (23:36), backup first each time, stock check all matching (2765 items, 3050 movements). #18: driver labels + scanner PASS, reprint and F8 with the printer off PASS (owner watched: nothing printed after power on).
+   - Merged (CI linux green + Codex clean on the merged head): #287 (#286 audit label «فتح الدرج»), #288 (#274: data from a newer program is refused; main's 0034/0035 accepted, #104 option 1).
+   - Review R8-B ran early (23:10); read-only git again, 4 patches in the project. Applied as #289 (three sale-screen money fixes) and #290 (permission check before a draft write); after-launch issues #291 #292 #293. Merge state: see `docs/QUEUE.md` and #113.
+   - Sign-in on the PC is solved for good: OWNER_RULES §10 last bullet.
+2. Not done and why: owner-password reset on the PC (console is not reachable by computer use; covered by `tests/test_reset_owner_password.py`; dropped). #160 not touched (stale, overlaps Night A). The cashier PC is off for the night, so #288 #289 #290 reach it at the next «تحديث».
+3. Decisions: owner approved the work chain (OWNER_RULES §10, queue in `docs/QUEUE.md`). Scheduled cloud sessions are read-only workers; the manager chat wakes itself (04:30, 08:30, 12:30 Cairo on 17/11) to apply and merge. Zero-stock label: allowed, will ask «متأكد؟» (after launch, #292).
+4. Next goal: `docs/QUEUE.md`, first open item. Day chat 17/11 13:00: a new normal chat in the project, strongest model (it reviews money merges).
+5. المحادثة دي اتحفظت وممكن تتمسح (after the 12:30 report)
+
 ## 16/11 21:30 Cairo — manager chat: second-pass review A (R8-A) turned into PRs (READ THIS FIRST, then the entry below)
 - 18:20: the manager chat was at its usage limit and its push attach was refused, so it scheduled review A (19:45) and
   review B (00:50 Cairo 17/11). Review A ran read-only (no push, no GitHub API) and left its three fixes as patch files
