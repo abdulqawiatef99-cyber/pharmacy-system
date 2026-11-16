@@ -121,7 +121,7 @@ fixed → clean → banner gone).
    - **cached balance ≠ ledger** (the ledger is complete): the balances are rebuilt from the ledger. There is
      no button for it yet; until a dedicated, audited command exists, the safe way is restoring the newest
      backup that verifies (`manage.py restore`) — **the owner's approval is required** (`AGENTS.md` §5); a
-     rebuild command is proposed as F29 in `FUTURE_REQUIREMENTS.md`, not built;
+     rebuild command is proposed as F53 in `FUTURE_REQUIREMENTS.md`, not built;
    - **a sale moved stock differently from its invoice** (`sales` kind): the shelf is corrected by a stock count
      on that item, approved by the owner (normal, audited movements; the old rows stay). The sale's own movements
      can never equal its invoice afterwards (the ledger is append-only and the count posts under
