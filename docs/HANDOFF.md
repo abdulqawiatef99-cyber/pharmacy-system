@@ -9,6 +9,13 @@
 - Double-checked against `develop` @ `db8a3b9`: offer evaluator, customer credit limit, per-batch legal price, purchase-cost rise warning and recalls already exist, so dropped. New entries **F38–F49** in `FUTURE_REQUIREMENTS.md`; ranked plan and timeline in `docs/IDEAS_PLAN.md`. All after launch, except **F47-a** (track-and-trace research, no code, class B): queue it after #253 and #252, before #19.
 - Verified at the source: EDA Decree 475/2025 covers pharmacies (registry, devices, linkage; imported from 1/2/2026, local from 1/8/2026, phased); Decree 380/2009 requires visible thermometer/hygrometer, readings at fixed intervals, max 30°C.
 - New owner reminders: ask the accountant whether the pharmacy is in an e-receipt phase; start a paper temperature log now (until F38).
+## 16/11 14:30 Cairo — manager chat: master plan + deep review started (#203)
+- `docs/WORK_PLAN.md` is the master plan: critical path P1-P8 (ح1-ح8), roles, risks; target first release 20-23/11.
+- Deep review R1 sales/returns/void: card refund on a credit-only sale passed uncapped, fixed + merged (#261). R2 cash/shifts: clean. Next in order: R3 credit/customers/contracts/expenses/payroll, R4 purchasing/stock/counting/#202, R5 auth/permissions/security (#252), R6 backup/restore/update/installer, R7 reports/printing/UI.
+- GitHub minutes: owner chose the best free option = repo public until the reset; the visibility switch must be done by the owner (blocked for the agent). All 185 branches scanned: no secrets.
+- Queue for the next chat (one package each): P3 verify-and-close stale launch-critical issues (#142 #134 #151 #107 #98 #100), P4 merge the 15 ready PRs + #213, then R3.
+- The real-years test was not run on the PC yet (no results file).
+
 ## 15/11 23:00 Cairo — manager chat: GitHub minutes decision (owner: "choose the best and do it")
 - Cause: 435 CI runs in 12 days used the 2,000 free minutes (Windows counts 2x); they reset at the start of each month.
 - Decision: no payment, no second account, repo stays private. Full suite runs locally first; GitHub CI only once per PR via the label `ci`; docs-only PRs skip tests; Windows only when Windows-relevant files change; images pinned (#260). Until the reset, merges follow OWNER_RULES §4 temporary rule. Home-laptop runner kept as a fallback only if minutes get tight.
