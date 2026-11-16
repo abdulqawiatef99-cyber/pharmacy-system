@@ -43,9 +43,16 @@ def _db(s: config.Settings, create: bool = False) -> Database:
     s.data_dir.mkdir(parents=True, exist_ok=True)
     existed = s.db_path.exists()
     db = Database(s.db_path)
-    if existed:
-        _backup_before_migration(db, s)
-    applied = db.migrate()
+    from app.db import MigrationError
+    try:
+        if existed:
+            _backup_before_migration(db, s)
+        applied = db.migrate()
+    except MigrationError as e:
+        db.close()
+        sys.exit("البرنامج لم يفتح البيانات: " + ("البيانات دي مكتوبة بنسخة أحدث من البرنامج؛ ثبّت آخر مثبّت. "
+                                                   if "newer version" in str(e) else "")
+                 + f"البيانات كما هي لم تتغير. أرسل هذه الرسالة للمطوّر.\n({e})")
     if applied:
         print("migrations applied:", ", ".join(applied))
     accounts.sync_system_roles(db)
@@ -65,7 +72,7 @@ def _backup_before_migration(db: Database, s: config.Settings) -> None:
     verified backup first, and stop without migrating when it cannot be made. Only when the database
     holds a pharmacy and something is pending, so new, empty and up-to-date databases start as fast as before."""
     pending = db.pending_migrations()
-    if not pending:
+    if not pending or db.unknown_migrations():      # data from a newer program: migrate() refuses it unchanged
         return
     if not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizations'") or \
             not db.one("SELECT count(*) n FROM organizations")["n"]:

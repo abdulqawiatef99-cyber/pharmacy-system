@@ -217,6 +217,10 @@ def _verify_archive(archive: Path) -> dict:
         try:
             db = Database(snap)
             try:
+                newer = db.unknown_migrations()
+                if newer:
+                    problems.append("this backup was written by a newer version of the program (unknown database"
+                                    " update: " + ", ".join(newer) + "); install the newer program to restore it")
                 problems += integrity_problems(db)
                 problems += _attachment_problems(db, z)
                 if _counts(db) != manifest.get("counts"):
