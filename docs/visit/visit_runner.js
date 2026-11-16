@@ -8,7 +8,10 @@
  *   await visit.flows()               API-checkable checklist rows with TEST- data (B9 #114, L2/L3 #116)
  *   await visit.print("test")         printer/drawer steps: returns NEEDS-OWNER with the question to ask
  *   await visit.printAudit(since)     B8(b): reads the audit for print/drawer outcomes since a time
- *   await visit.day19()               #19 end-of-day figures (DAY19_SCRIPT.md) against the app
+ *   await visit.day19()               #19 end-of-day figures (DAY19_SCRIPT.md) against the app; run it before the
+ *                                     close (step 12) and again after it. It reads today's sales report and the
+ *                                     open or last shift, so no other sale may be made that day (visit.flows()
+ *                                     and visit.print("sale") add TEST sales: not on the trial day)
  *   visit.help()                      this list
  *
  * Every phase returns {md, rows, ...}: md is a Markdown table (id | result | evidence) with results
@@ -20,7 +23,7 @@
  */
 (() => {
   "use strict";
-  const VERSION = "1";
+  const VERSION = "2";
   const KEY = "visit.snapshot";
   const TAG = "TEST-VISIT";
   const PHASE_MS = 25000;
@@ -564,7 +567,14 @@
       eq("D-expenses", -(k.payout || 0), 1500, "expenses from the drawer");
       if (shift.credit_total !== undefined) eq("D-credit", shift.credit_total, 5000, "credit");
       if (shift.sales_count !== undefined) eq("D-shift-count", shift.sales_count, 3, "invoices in the shift", false);
-      if (shift.status === "closed") rows.push(row("D-close", shift.difference === 0 ? "PASS" : "FAIL", `difference ${money(shift.difference)}`));
+      if (shift.status === "closed") {
+        // The close screen counts notes and coins and the smallest coin is 0.25, so 170.66 cannot be counted:
+        // the script closes at 170.50 with a note, a shortage of exactly 0.16 (a close posted with the exact
+        // amount gives 0). Any other difference is a real one.
+        const ok = shift.difference === 0 || (shift.counted_cash === 17050 && shift.difference === -16);
+        rows.push(row("D-close", ok ? "PASS" : "FAIL",
+          `counted ${money(shift.counted_cash)}, difference ${money(shift.difference)}; expected counted 170.50, difference -0.16`));
+      }
     } else rows.push(row("D-shift", "FAIL", "no open or recent shift"));
     const one = (r, n) => (Array.isArray(r.data) ? r.data : []).find((x) => (x.name_ar || x.name || "") === n);
     const a = one(ia, names.a), b = one(ib, names.b), c = (Array.isArray(cu.data) ? cu.data : []).find((x) => x.name === names.cust);
