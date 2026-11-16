@@ -56,6 +56,9 @@ class _IndexedItem:
 class _OrgIndex:
     def __init__(self, items: list[_IndexedItem]):
         self.items = {i.item_id: i for i in items}
+        # answers already worked out for this catalog version (the index is rebuilt when any item changes,
+        # so an answer here can never be stale). The sale screen asks for the same names all day.
+        self.memo: dict[tuple[str, int], list[Candidate]] = {}
         self.by_key: dict[str, set[str]] = {}
         for it in items:
             for p in it.parsed:
@@ -77,6 +80,7 @@ class _OrgIndex:
         return ids
 
 
+MEMO_MAX = 5000
 _cache: dict[str, tuple[str, _OrgIndex]] = {}
 _cache_lock = threading.Lock()
 
@@ -171,11 +175,19 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
 
 
 def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5) -> list[Candidate]:
-    q = parse_name(raw_name)
     idx = _index(db, org_id)
-    scored = [score_item(q, idx.items[i]) for i in idx.candidates(q)]
-    scored.sort(key=lambda c: c.score, reverse=True)
-    return [c for c in scored if c.score >= SUGGEST_MIN * 0.6][:limit]
+    key = (raw_name, limit)
+    hit = idx.memo.get(key)
+    if hit is None:
+        q = parse_name(raw_name)
+        scored = [score_item(q, idx.items[i]) for i in idx.candidates(q)]
+        scored.sort(key=lambda c: c.score, reverse=True)
+        hit = [c for c in scored if c.score >= SUGGEST_MIN * 0.6][:limit]
+        if len(idx.memo) >= MEMO_MAX:              # bounded: a long import of new names must not grow it forever
+            idx.memo.clear()
+        idx.memo[key] = hit
+    # copies: a caller may change what it gets without changing the remembered answer
+    return [Candidate(c.item_id, c.label, c.score, list(c.reasons)) for c in hit]
 
 
 def _label_score(db: Database, org_id: str, item_id: str, raw_name: str) -> float:
