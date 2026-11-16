@@ -563,8 +563,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..inventory import integrity
         ctx = ctx_of(req)
         b = await body(req)
-        integrity.acknowledge(db, ctx, str(b.get("sale_id") or ""), str(b.get("item_id") or ""), b.get("note"),
-                              moved=b.get("moved"), expected=b.get("expected"))
+        # in a worker thread: it may wait for a running check's lock and re-runs the check (Codex P2)
+        await run_in_threadpool(lambda: integrity.acknowledge(
+            db, ctx, str(b.get("sale_id") or ""), str(b.get("item_id") or ""), b.get("note"),
+            moved=b.get("moved"), expected=b.get("expected")))
         return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler

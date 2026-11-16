@@ -186,6 +186,30 @@ class TestReportApi(ReportCase):
                                                               "note": "جرد الصنف اليوم"}, headers=H)
         self.assertEqual(r.status_code, 409)                           # numbers are required
 
+    def test_review_runs_off_the_event_loop(self):
+        """Codex P2 on #213: a review may wait for a running check's lock and re-runs the check, so it must run in a
+        worker thread, never on the server's event loop (which would stall every other request)."""
+        import asyncio
+        from unittest.mock import patch
+        sid = self.sale_mismatch()
+        self.http_login()
+        shown = self.c.post("/api/reports/stock-check", json={}, headers=H).json()["sales"][0]
+        real, seen = integrity.acknowledge, {}
+
+        def spy(*a, **k):
+            try:
+                asyncio.get_running_loop()
+                seen["on_loop"] = True
+            except RuntimeError:
+                seen["on_loop"] = False
+            return real(*a, **k)
+        with patch.object(integrity, "acknowledge", side_effect=spy):
+            r = self.c.post("/api/reports/stock-check/ack", json={
+                "sale_id": sid, "item_id": self.pan, "note": "جرد الصنف اليوم",
+                "moved": shown["moved"], "expected": shown["expected"]}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIs(seen["on_loop"], False)
+
     def test_only_the_owner_reviews_and_only_sales_rows(self):
         sid = self.sale_mismatch()
         people.add_user(self.db, self.ctx, username="mgr1", full_name="M", password=PW, role_code="manager")
