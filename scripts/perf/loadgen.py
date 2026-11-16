@@ -73,6 +73,59 @@ class GenDatabase(Database):
         return conn
 
 
+def install_fast_matching(db=None, org_id: str | None = None) -> dict:
+    """Generator-only speed-up, same results: remember the catalog's fuzzy name matches.
+
+    The safety check looks for look-alike names of every basket line (matching.fuzzy_candidates) on every check,
+    and a purchase line matches its name the same way; each call scores the name against every item that shares a
+    prefix, and the name index is rebuilt whenever an item row changes, so with 15,000-30,000 items that is nearly
+    all of the generator's time (PERFORMANCE.md). During generation the catalog is fixed (items are made once in
+    setup; no name, strength, form or status changes afterwards), so the answer for a name never changes: it is
+    computed once by the program's own code and returned again. `_ratio` keeps difflib's exact value and only
+    skips the work when the answer is already known (equal strings, no common character, the same pair again).
+    With db and org_id every item's name is matched now, on one build of the index.
+    The program itself is not changed: the measured server (bench.py) runs without this.
+    """
+    from difflib import SequenceMatcher
+    from app.catalog import matching
+    if getattr(matching.fuzzy_candidates, "perf_memo", None) is None:
+        original = matching.fuzzy_candidates
+        memo: dict = {}
+        seen: dict = {}
+        KEEP = 12                                          # the program asks for 5 or 6
+
+        def ratio(a: str, b: str) -> float:
+            if not a or not b:
+                return 0.0
+            if a == b:
+                return 1.0                                 # 2*len/(len+len)
+            r = seen.get((a, b))
+            if r is None:
+                # no common character = no matching block (an English name against an Arabic one)
+                r = 0.0 if set(a).isdisjoint(b) else SequenceMatcher(None, a, b).ratio()
+                if len(seen) > 400_000:
+                    seen.clear()
+                seen[(a, b)] = r
+            return r
+
+        def fuzzy_candidates(db, org_id, raw_name, limit=5):
+            if limit > KEEP:
+                return original(db, org_id, raw_name, limit)
+            key = (org_id, raw_name)
+            hit = memo.get(key)
+            if hit is None:                                # the ranked list once; every smaller limit is a prefix of it
+                hit = memo[key] = tuple(original(db, org_id, raw_name, KEEP))
+            return list(hit[:limit])
+
+        fuzzy_candidates.perf_memo = memo
+        matching._ratio = ratio
+        matching.fuzzy_candidates = fuzzy_candidates
+    if db is not None:
+        for r in db.all("SELECT coalesce(name_en, name_ar) n FROM items WHERE org_id=? AND status='active'", (org_id,)):
+            matching.fuzzy_candidates(db, org_id, r["n"])
+    return matching.fuzzy_candidates.perf_memo
+
+
 def ean13(n: int) -> str:
     body = f"299{n:09d}"                                   # 2xx = restricted circulation: never a real product
     s = sum(int(c) * (3 if i % 2 else 1) for i, c in enumerate(body))
@@ -394,6 +447,8 @@ class Generator:
     def run(self):
         t0 = time.perf_counter()
         self.setup()
+        if not getattr(self.a, "exact_matching", False):
+            install_fast_matching(self.db, self.owner.org_id)   # after setup: the catalog is complete and stays as it is
         self.restock(self.start, initial=True)
         self.timing["setup_s"] = round(time.perf_counter() - t0, 1)
         snaps = {int(round(float(y) * 365)): f"y{y}" for y in self.a.snapshots.split(",") if y} if not self.a.days else {}
@@ -434,6 +489,8 @@ def main(argv=None):
     ap.add_argument("--attachment-kb", type=float, default=60, help="average transfer screenshot size")
     ap.add_argument("--seed", type=int, default=113)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--exact-matching", action="store_true",
+                    help="do not remember fuzzy name matches (slow; the test compares both ways)")
     a = ap.parse_args(argv)
     if Path(a.out).exists():
         sys.exit(f"{a.out} exists; the generator only writes to a new folder")

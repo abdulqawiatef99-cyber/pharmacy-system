@@ -73,6 +73,8 @@ def free_bytes(p: Path) -> int:
 class Report:
     """Timings only. Rewritten after every step."""
 
+    title = "REAL-YEARS PERFORMANCE TEST (#253) - timings only, synthetic activity on a copy of the database"
+
     def __init__(self, txt: Path):
         self.txt = txt
         self.json = txt.with_suffix(".json")
@@ -90,7 +92,7 @@ class Report:
 
     def write(self):
         d = self.data
-        L = ["REAL-YEARS PERFORMANCE TEST (#253) - timings only, synthetic activity on a copy of the database",
+        L = [self.title,
              f"started {d['started']}   status {d['status']}   updated {datetime.now().isoformat(timespec='seconds')}",
              f"limits: cashier < {CASHIER_MS} ms, report < {REPORT_MS / 1000:.0f} s, nothing blocks other users", ""]
         if d.get("plan"):
@@ -127,6 +129,10 @@ def format_snapshot(s: dict) -> list[str]:
     if s.get("sizes"):
         z = s["sizes"]
         L.append(f"database {z['db_bytes'] / 1e6:.0f} MB")
+    if s.get("stock_check"):
+        k = s["stock_check"]
+        L.append(f"stock check: {'all balances match' if k['ok'] else 'DIFFERENCES ' + str(k['counts'])}"
+                 f" ({k['movements']} movements, {k['balances']} balances, {k['seconds']} s)")
     st = s.get("startup") or {}
     if st:
         L.append(f"start-up until it answers: {st.get('health_s')} s (second start {st.get('health_warm_s')} s)")
@@ -147,6 +153,9 @@ def format_snapshot(s: dict) -> list[str]:
         elif b:
             L.append(f"blocking {title:<38} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
                      f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
+    for name, b in (s.get("during_slow") or {}).items():
+        L.append(f"blocking scanning during: {name:<25} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
+                 f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
     bk = s.get("backup") or {}
     if bk:
         L.append(f"backup   create {bk.get('create_s')} s, check {bk.get('quick_check_s')} s, verify {bk.get('verify_s')} s,"
@@ -155,6 +164,7 @@ def format_snapshot(s: dict) -> list[str]:
     return L
 
 
+SLOWEST = 3          # how many of the slowest requests get the "cashier keeps scanning meanwhile" probe
 CASHIER_GETS = {"search name (4 letters)", "search barcode", "POS quick buttons"}
 
 
@@ -355,7 +365,8 @@ def long_scenarios(f: dict, start: date) -> list[tuple[str, str]]:
     day = date.fromisoformat(f["day"])
     d, s0 = day.isoformat(), start.isoformat()
     w0 = (day - timedelta(days=6)).isoformat()
-    return [
+    m0 = day.replace(day=1).isoformat()
+    out = [
         ("invoice list (week)", f"/api/sales?from={w0}&to={d}"),
         ("invoices report (all years)", f"/api/reports/invoices?from={s0}&to={d}"),
         ("sales report (all years)", f"/api/reports/sales?from={s0}&to={d}"),
@@ -363,10 +374,21 @@ def long_scenarios(f: dict, start: date) -> list[tuple[str, str]]:
         ("profit (all years)", f"/api/reports/profit?from={s0}&to={d}"),
         ("item movements (all years, top seller)", f"/api/items/{f['top_item']}/movements?from={s0}&to={d}"),
         ("supplier statement (all years)", f"/api/suppliers/{f['supplier']}/statement?from={s0}&to={d}"),
-        ("audit log (month)", f"/api/audit?from={day.replace(day=1).isoformat()}&to={d}"),
+        ("audit log (month)", f"/api/audit?from={m0}&to={d}"),
         ("returns report (all years)", f"/api/reports/owner/returns?from={s0}&to={d}"),
         ("staff report (all years)", f"/api/reports/owner/staff?from={s0}&to={d}"),
     ]
+    # the rest of the owner's reports, each over the month and over everything (#253: every report, short and long)
+    for name, path in (("price changes", "/api/reports/owner/prices"), ("unit changes", "/api/reports/owner/units"),
+                       ("customer sales", "/api/reports/owner/customers"), ("shift closings", "/api/reports/owner/shifts"),
+                       ("discounts", "/api/reports/owner/discounts"), ("unsold items", "/api/reports/owner/unsold"),
+                       ("transfers", "/api/reports/transfers"), ("losses", "/api/reports/losses"),
+                       ("item warnings", "/api/reports/item-warnings"), ("expenses", "/api/expenses")):
+        out.append((f"{name} (month)", f"{path}?from={m0}&to={d}"))
+        out.append((f"{name} (all years)", f"{path}?from={s0}&to={d}"))
+    out += [("order suggestions", "/api/procurement/suggestions"), ("stock health", "/api/procurement/health"),
+            ("notifications", "/api/notifications"), ("stock alert banner", "/api/stock/alert")]
+    return out
 
 
 def during_report(c, f: dict, path: str) -> dict:
@@ -403,8 +425,10 @@ def during_report(c, f: dict, path: str) -> dict:
     return res
 
 
-def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict, report: Report) -> None:
-    """bench.py's measurements on one snapshot, with the copy's owner; results go into rec as they come."""
+def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict, report: Report,
+            backup: bool = True) -> None:
+    """bench.py's measurements on one snapshot, with the copy's owner; results go into rec as they come.
+    backup=False leaves out the backup timings and the scan-during-backup probe (scale.py, when the disk is short)."""
     import bench
     from loadgen import OWNER_PW
     work = snap.parent
@@ -415,9 +439,10 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
     rec["counts"] = f["counts"]
     rec["sizes"] = {"db_bytes": (data / "pharmacy.db").stat().st_size}
     report.write()
-    report.progress(f"{rec['label']}: backup, verify, restore")
-    rec["backup"] = bench.backup_measure(data, work)
-    report.write()
+    if backup:
+        report.progress(f"{rec['label']}: backup, verify, restore")
+        rec["backup"] = bench.backup_measure(data, work)
+        report.write()
     report.progress(f"{rec['label']}: server and requests")
     srv = bench.Server(data, f["end_local"])
     rec["startup"] = {"health_s": round(srv.ready_s, 2)}
@@ -439,9 +464,19 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
                 cf["errors"] = len(cf["errors"])           # error texts can carry item names: count only
             rec["cashier"] = cf
             report.write()
-            rec["during_backup"] = bench.during_backup(c, f)
+            if backup:
+                rec["during_backup"] = bench.during_backup(c, f)
             rec["during_report"] = during_report(c, f, dict(long_scenarios(f, start))["sales report (all years)"])
             report.write()
+            # nothing may block the cashier: scan again while each of the slowest requests runs (a second or more)
+            slowest = sorted(((r["median_ms"], n) for n, r in rec["requests"].items()
+                              if r.get("status") == 200 and r["median_ms"] >= 1000 and n != "sales report (all years)"),
+                             reverse=True)[:SLOWEST]
+            rec["during_slow"] = {n: during_report(c, f, dict(scen)[n]) for _, n in slowest}
+            report.write()
+        # the owner's stock check «مطابقة الأرصدة» reads every stock movement: once, it is a button, not a screen
+        rec["requests"]["stock check (run now)"] = bench.timed(c, "POST", "/api/reports/stock-check", n=1)
+        report.write()
     finally:
         srv.stop()
     srv = bench.Server(data, f["end_local"])
@@ -482,6 +517,11 @@ def summary(snaps: list[dict]) -> list[str]:
                 failed.append(f"{key} {b.get('error') or 'HTTP ' + str(b.get('status'))}")
             if b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
                 slow.append(f"{key} scan {b['add_line_max_ms']} ms")
+        for name, b in (s.get("during_slow") or {}).items():
+            if b.get("error") or b.get("status") != 200:
+                failed.append(f"scan during {name}: {b.get('error') or 'HTTP ' + str(b.get('status'))}")
+            elif b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
+                slow.append(f"scan during {name} {b['add_line_max_ms']} ms")
         bk = s.get("backup")
         if bk is None:
             failed.append("backup not measured")
