@@ -4,7 +4,24 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 16/11 17:00 Cairo — manager chat: full re-check, plan v2, queue cleared (READ THIS FIRST)
+## 16/11 evening — manager chat: deep review R3-R7 done in one afternoon, fixes merged (READ THIS FIRST)
+Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+1. Done, with evidence
+   - Owner asked to intensify now (he is at the pharmacy, quiet days) instead of waiting for night sessions. Deep review #203 parts R3, R4, R6, R7 ran as four parallel read-only reviews; R5 (auth, sessions, CSRF, unauthenticated routes, PIN, SQL building, update/network routes, approvals) read by the manager: no new P0/P1 there.
+   - Findings fixed, each with a test that failed first, CI green + Codex clean on the merged head:
+     - #270 reports: day/hour rows per sale's own local time (daylight saving), hidden items in the expiry list, unsold shelf value.
+     - #272 stock/import/purchasing: count approval applied a shortage twice after an adjustment; opening balances could post twice from a stale import run; link decision bypass; negative purchase total; float rounding of derived net price; cost leak on supplier-return suggest; recall notice permission; import-estock re-run.
+     - #273 money forms: double click posted twice on five money forms; scheduled expense paid the next month; customer collection method not stored and over-collection accepted (now refused); stale contract discount on a draft; payroll month text; credit_limit PATCH; empty return; a batch with a confirmed recall is no longer sellable (pending warns); two screen fixes.
+     - #271 backups (see its last comments for the merge state): restore over a damaged live database; one missing attachment stopped every automatic backup; verified backup (or plain copy) before an installer upgrade migrates; .zip.part leftovers; cross-site first-run setup; clock moved back.
+   - Pharmacy PC (desktop-5jvh3qd) updated by the manager through the in-app update to `cba64f9` (16:41), backup `pharmacy-backup-20261116-164118.zip`; stock-check report on the real data: 2765 items, 3050 movements, all matching. It still needs one more «تحديث» for #270/#272/#273/#271.
+   - Heikal PC (desktop-gqgl6uf): its own project chat «جهاز صيدلية هيكل» is the device worker (instructions on #113 and pasted into that chat; it has read-only GitHub, so it reports in chat): install the program, then the #253 scale test with synthetic data, then the #19 trial day.
+   - Recorded, not fixed: #265 #266 #267 (launcher, need Windows), #268 (payroll/attendance small gaps), #269 (thermal receipt: delivery fee printed after the amount due), #274 (refuse newer-schema data: blocked by #104, main's 0034/0035), and the Codex P2 on partial restore (issue linked from #271).
+2. Not done and why: the real-years test has no result yet (moves to the Heikal PC). #160 (indexes 0036) and the bundled installer wait for the owner's OK. Scheduled session «Pharmacy review R3» (01:00 Cairo 17/11) could not be deleted by the tool: its work is done, the owner deletes it from the scheduled tasks list or the next chat disables it.
+3. Decisions (changes the owner will notice): a collection larger than the customer's debt is refused; an identical money entry repeated within 4 seconds counts once; pharmacist/assistant can read recall alerts but only manager/owner record a notice; a pharmacist gets no suggested value on supplier returns; a count line adjusted after it was counted must be recounted. Owner rules of the evening are in `OWNER_RULES.md` §9.
+4. Next goal (new chat, model: strongest for the re-review, Opus is enough for device work): (a) press «تحديث» on the cashier PC and re-run the stock check; (b) second-pass review of what the parallel reviews did not finish: purchasing importers/extractors, sales return/void/update_line stock paths, POS credit/customer picker in app.js, labels/qr layout, migrations ordering; (c) read the Heikal PC results; (d) decide #104 + #274, then ask the owner for the bundled installer (with #160); (e) #19 trial day, possibly on 17/11 instead of 19/11.
+5. المحادثة دي اتحفظت وممكن تتمسح
+
+## 16/11 17:00 Cairo — manager chat: full re-check, plan v2, queue cleared
 Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 1. Done, with evidence
    - Windows-only failure of `tests/test_perf_real_years.py`: cause = `scripts/validate_local_release.py` exports `PHARM_DB_PATH`, `bench.Server` set only `PHARM_DATA_DIR`, so the measured server opened another database. Fixed in #263 (CI linux + windows green, Codex clean). Not a product defect; the PC sets no `PHARM_DB_PATH`.
