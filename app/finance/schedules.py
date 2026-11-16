@@ -84,7 +84,8 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         raise ValidationFailed("اختر بند المصروف")
     if v["amount"] in ("", 0):
         v["amount"] = None
-    if v["amount"] is not None and (not isinstance(v["amount"], int) or v["amount"] < 0):
+    if v["amount"] is not None and (isinstance(v["amount"], bool) or not isinstance(v["amount"], int)
+                                    or not 0 < v["amount"] <= 2 ** 53 - 1):          # true is not 1 piaster
         raise ValidationFailed("المبلغ غير صحيح")
     try:
         # 15.5 or true is refused, never cut to 15 or 1
