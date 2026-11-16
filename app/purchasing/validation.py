@@ -43,6 +43,8 @@ MESSAGES = {
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
     "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
+    "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
+    "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
 }
 
 
@@ -193,6 +195,13 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         seen[key] = lid
 
     comp = computed_total(invoice, lines)
+    if comp is not None:      # a negative total would give a negative supplier balance and unit cost
+        lines_amount = sum(effective_amount(l) for l in lines)
+        if (invoice.get("extra_discount") or 0) > lines_amount:
+            add("error", "extra_discount_too_large", None, "extra_discount",
+                extra_discount=invoice.get("extra_discount"), lines_amount=lines_amount)
+        elif comp < 0:
+            add("error", "negative_total", None, None, computed=comp)
     declared = invoice.get("declared_total")
     if declared is None:
         add("warning", "total_missing")
