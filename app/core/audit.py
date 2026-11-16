@@ -95,7 +95,7 @@ def list_for_entity(db: Database, ctx: Context, entity_type: str, entity_id: str
 
 ACTION_LABELS = {
     "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري خاطئ",
-    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الخزينة", "cash.shift_close": "إغلاق وردية",
+    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_auto": "فتح الدرج مع البيع", "cash.drawer_open": "فتح الدرج بدون بيع", "cash.shift_close": "إغلاق وردية",
     "cash.shift_open": "فتح وردية", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
     "count.create": "بدء جرد", "customer.create": "عميل جديد", "customer.payment": "تحصيل من عميل",
     "customer.refill_remove": "إزالة من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
