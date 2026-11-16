@@ -8,8 +8,9 @@ A backup is ONE zip file containing:
   uploads/...   the original invoice files (needed for audits)
   manifest.json counts + sha256 of the snapshot, for verification
 
-Restore refuses a backup that fails verification, always snapshots the current
-database first (pre-restore backup), and verifies the result afterwards.
+Restore refuses a backup that fails verification, always keeps the current
+database first (a pre-restore backup, or a raw copy of the file when the current
+database is itself damaged), and verifies the result afterwards.
 The server must be stopped during restore.
 """
 from __future__ import annotations
@@ -204,18 +205,52 @@ def _verify_archive(archive: Path) -> dict:
         return manifest
 
 
+def _raw_copy(db_path: Path, dest_dir: Path) -> Path:
+    """Safety copy of a live database that cannot be backed up the normal way (it fails verification or
+    is not a readable database): the file and its -wal/-shm, byte for byte, in their own folder.
+    NOT a verified backup: it is the damaged data as it was, kept for repair by hand."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder = dest_dir / f"RAW-damaged-database-{stamp}"
+    n = 1
+    while folder.exists():
+        folder = dest_dir / f"RAW-damaged-database-{stamp}-{n}"
+        n += 1
+    folder.mkdir(parents=True)
+    for suffix in ("", "-wal", "-shm"):
+        src = Path(str(db_path) + suffix)
+        if src.exists():
+            shutil.copy2(src, folder / src.name)
+            if src.stat().st_size != (folder / src.name).stat().st_size:
+                raise OSError(f"raw copy of {src.name} is incomplete")
+    return folder
+
+
 def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Path) -> dict:
-    """Server must be stopped. Returns {'pre_restore_backup', 'manifest'}."""
+    """Server must be stopped. Returns {'pre_restore_backup', 'pre_restore_kind', 'pre_restore_error',
+    'manifest'}.
+
+    The current data is always kept first. pre_restore_kind says how: 'verified_backup' (a normal backup
+    ZIP), or 'raw_copy' when the current database fails verification or cannot be read at all, which is
+    exactly when a restore is needed: then pre_restore_backup is a folder with the raw database file(s)
+    and pre_restore_error says why. None when there was no database. If no safety copy can be made,
+    nothing is restored."""
     info = verify_archive(archive)
     if info["problems"]:
         raise RuntimeError("backup failed verification, nothing restored: " + "; ".join(info["problems"]))
-    pre = None
+    pre, pre_kind, pre_error = None, None, None
     if db_path.exists():
-        live = Database(db_path)
+        # raw copy first: merely opening a damaged database lets SQLite discard its -wal file
+        raw = _raw_copy(db_path, pre_restore_dir)
         try:
-            pre = create(live, upload_dir, pre_restore_dir)
-        finally:
-            live.close()
+            live = Database(db_path)
+            try:
+                pre = create(live, upload_dir, pre_restore_dir)
+            finally:
+                live.close()
+            pre_kind = "verified_backup"
+            shutil.rmtree(raw, ignore_errors=True)      # the verified backup replaces it
+        except (RuntimeError, sqlite3.Error) as e:      # damaged live data must not block its own repair
+            pre, pre_kind, pre_error = raw, "raw_copy", str(e)
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
         for name in z.namelist():
             if name.startswith("uploads/") and ".." not in name.split("/"):
@@ -246,7 +281,8 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
     if problems:
         raise RuntimeError("restored database failed verification: " + "; ".join(problems)
                            + f" — previous data kept in {pre}")
-    return {"pre_restore_backup": str(pre) if pre else None, "manifest": info}
+    return {"pre_restore_backup": str(pre) if pre else None, "pre_restore_kind": pre_kind,
+            "pre_restore_error": pre_error, "manifest": info}
 
 
 def quick_check(archive: Path) -> list[str]:

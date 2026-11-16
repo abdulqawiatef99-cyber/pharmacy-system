@@ -126,7 +126,12 @@ def cmd_restore(a, s):
         sys.exit(2)
     r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
                        _backups(a.pre_dir, s, "pre-restore"))
-    print("restored and verified. previous data saved in:", r["pre_restore_backup"])
+    if r["pre_restore_kind"] == "raw_copy":
+        print("WARNING: the previous database could not be backed up normally (" + str(r["pre_restore_error"])[:300] + ").")
+        print("A RAW copy of its file(s) was kept instead (not a verified backup) in:", r["pre_restore_backup"])
+        print("restored and verified.")
+    else:
+        print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
 def cmd_selftest(a, s):
