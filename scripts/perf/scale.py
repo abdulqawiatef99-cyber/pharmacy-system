@@ -160,7 +160,12 @@ def main(argv=None):
         lo, hi = gen.lo, gen.hi
         d = 0
         for target in days:
+            stopped = False
             while d < target:
+                if ry.free_bytes(work) < 1_500_000_000:
+                    report.note(f"{pname}: disk almost full after {d} days: stopped adding days")
+                    stopped = True
+                    break
                 d += 1
                 turns.day(True)
                 try:
@@ -172,7 +177,9 @@ def main(argv=None):
                     left = (days[-1] - d) * (lo + hi) / 2 / rate / 3600
                     report.progress(f"{pname}: day {d} of {days[-1]}, {gen.stats['sales']} sales, {rate:.0f} sales a second,"
                                     f" about {left:.1f} h of generating left, database {db_path.stat().st_size / 1e9:.1f} GB")
-            rec = {"label": f"{pname} - {labels[target]}", "profile": pname, "days": d,
+            last = stopped or target == days[-1]
+            rec = {"label": f"{pname} - " + (labels[target] if not stopped else f"{d} days (stopped early)"),
+                   "profile": pname, "days": d,
                    "gen_s": round(time.perf_counter() - t1), "stats": dict(gen.stats)}
             report.data["snapshots"].append(rec)
             snap = work / f"snap-{d}" / "data"
@@ -180,7 +187,7 @@ def main(argv=None):
             report.progress(f"{rec['label']}: waiting for its turn to measure" if a.turns else f"{rec['label']}: snapshot")
             turns.measure(True)
             report.progress(f"{rec['label']}: snapshot")
-            if target == days[-1]:                    # the last one: the generator's own file, no second copy on disk
+            if last:                                  # the last one: the generator's own file, no second copy on disk
                 gen.db.close()
                 shutil.move(str(db_path), str(snap / "pharmacy.db"))
                 if gen.upload_dir.exists():
@@ -211,11 +218,13 @@ def main(argv=None):
                 rec["error"] = ry.safe_error(e)
             finally:
                 turns.measure(False)
-                if a.keep_last and target == days[-1]:
+                if a.keep_last and last:
                     shutil.move(str(snap), a.keep_last)
                 shutil.rmtree(snap.parent, ignore_errors=True)
             report.data["summary"] = ry.summary(report.data["snapshots"])
             report.write()
+            if stopped:
+                break
         report.data["status"] = "finished"
     except BaseException as e:
         report.data["status"] = "failed"

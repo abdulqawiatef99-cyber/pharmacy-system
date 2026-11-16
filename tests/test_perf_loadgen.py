@@ -72,8 +72,8 @@ class TestLoadGenerator(unittest.TestCase):
             got = {}
             for mode, extra in (("fast", []), ("exact", ["--exact-matching"])):
                 out = Path(tmp) / mode
-                r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/loadgen.py"), "--out", str(out), "--days", "2",
-                                    "--items", "300", "--customers", "10", "--suppliers", "3", "--per-day", "25-25",
+                r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/loadgen.py"), "--out", str(out), "--days", "18",
+                                    "--items", "150", "--customers", "10", "--suppliers", "3", "--per-day", "30-30",
                                     "--attachment-kb", "0", "--end", "2026-01-15", "--quiet", *extra],
                                    capture_output=True, text=True, timeout=600, cwd=str(ROOT))
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -111,6 +111,8 @@ class TestLoadGenerator(unittest.TestCase):
                 finally:
                     db.close()
             self.assertIn("lookalike", got["exact"]["finding_codes"])     # the remembered matches were really used
+            # 18 days: some items were bought again; that line is matched by alias (the remembered own-name score)
+            self.assertIn("alias", {r[2] for r in got["exact"]["purchase_lines"]})
             self.assertGreater(got["exact"]["stats"]["sales"], 40)
             for key in got["exact"]:
                 self.assertEqual(got["fast"][key], got["exact"][key], key)

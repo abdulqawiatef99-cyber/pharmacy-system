@@ -557,6 +557,8 @@ def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: 
         gen = make_generator(a, work)
         t0 = time.perf_counter()
         gen.setup()
+        import loadgen
+        loadgen.install_fast_matching(gen.db, gen.owner.org_id)      # the catalog is fixed from here (same data, faster)
         gen.restock(gen.start, initial=True)
         report.data["base"].setdefault("catalog_items", gen.base_counts["catalog_items"])
         report.data["base"].setdefault("items_in_stock", gen.base_counts["items_in_stock"])

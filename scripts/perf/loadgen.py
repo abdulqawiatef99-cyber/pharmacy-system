@@ -83,7 +83,8 @@ def install_fast_matching(db=None, org_id: str | None = None) -> dict:
     setup; no name, strength, form or status changes afterwards), so the answer for a name never changes: it is
     computed once by the program's own code and returned again. `_ratio` keeps difflib's exact value and only
     skips the work when the answer is already known (equal strings, no common character, the same pair again).
-    With db and org_id every item's name is matched now, on one build of the index.
+    With db and org_id every item's name is matched now, on one build of the index, and so is each item against
+    its own name (what a purchase line of a known item asks).
     The program itself is not changed: the measured server (bench.py) runs without this.
     """
     from difflib import SequenceMatcher
@@ -117,12 +118,27 @@ def install_fast_matching(db=None, org_id: str | None = None) -> dict:
                 hit = memo[key] = tuple(original(db, org_id, raw_name, KEEP))
             return list(hit[:limit])
 
+        own_label = matching._label_score
+        labels: dict = {}
+
+        def label_score(db, org_id, item_id, raw_name):
+            # a repeat purchase is matched by its alias and then compared with the item's own name; asked through
+            # the name index, that rebuilds the whole index after every approved invoice (an item row changed)
+            key = (org_id, item_id, raw_name)
+            hit = labels.get(key)
+            if hit is None:
+                hit = labels[key] = own_label(db, org_id, item_id, raw_name)
+            return hit
+
         fuzzy_candidates.perf_memo = memo
+        fuzzy_candidates.perf_labels = labels
         matching._ratio = ratio
         matching.fuzzy_candidates = fuzzy_candidates
+        matching._label_score = label_score
     if db is not None:
-        for r in db.all("SELECT coalesce(name_en, name_ar) n FROM items WHERE org_id=? AND status='active'", (org_id,)):
+        for r in db.all("SELECT id, coalesce(name_en, name_ar) n FROM items WHERE org_id=? AND status='active'", (org_id,)):
             matching.fuzzy_candidates(db, org_id, r["n"])
+            matching._label_score(db, org_id, r["id"], r["n"])     # the name a manual purchase line of the item carries
     return matching.fuzzy_candidates.perf_memo
 
 
