@@ -386,6 +386,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _setup_needed() -> bool:
         return db.one("SELECT count(*) n FROM organizations")["n"] == 0
 
+    def _own_screen_only(req) -> None:
+        """Setup runs before any session exists, so nothing else stops a web page open in the browser on
+        this PC from posting here (a form or text/plain POST needs no CORS permission). The program's
+        own screens send this header; a cross-site page cannot (same rule as ctx_of for sessions)."""
+        if req.headers.get("x-requested-with") != "pharm":
+            raise Forbidden("طلب غير موثّق", code="csrf")
+
     @handler
     async def setup_status(req):
         return J({"needed": _setup_needed()})
@@ -395,6 +402,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """First run only: creates the pharmacy and its owner, then logs in. Refused once any
         pharmacy exists, and (unless PHARM_ALLOW_REMOTE_SETUP=1) from any machine but this PC."""
         import os as _os
+        _own_screen_only(req)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
             raise Forbidden("الإعداد الأول يتم من جهاز الصيدلية نفسه فقط")
@@ -484,6 +492,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         or to the installed version). The file is verified now and applied by the launcher on
         restart, when no database connection is open."""
         from ..core import backup as backup_mod
+        _own_screen_only(req)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
             raise Forbidden("الاسترجاع يتم من جهاز الصيدلية نفسه فقط")
         if not _setup_needed():
