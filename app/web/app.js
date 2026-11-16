@@ -237,6 +237,22 @@ async function askApproval(details, message, method, path) {
 
 const API = { busy: 0, last: 0 };
 const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
+// Money forms: the same POST (path + body) sent again within 4 seconds is a double click or a double
+// Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
+// twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
+const ONCE_MS = 4000, ONCE_SENT = new Map();
+const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/];
+function onceKey(method, apiPath, bodyText) {
+  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
+  const hit = ONCE_SENT.get(sig);
+  if (hit) return hit.key;
+  const key = newKey();
+  ONCE_SENT.set(sig, { key, at: now });
+  return key;
+}
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0];
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
@@ -244,6 +260,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
+    _key = _key || onceKey(method, apiPath, opts.body);
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
@@ -279,6 +296,13 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
     throw err;
   }
   return data;
+}
+
+// One request per press: the button is off while its request runs (a double click or a second Enter does nothing).
+async function withBusy(btn, fn) {
+  if (btn?.disabled) return;
+  if (btn) btn.disabled = true;
+  try { return await fn(); } finally { if (btn) btn.disabled = false; }
 }
 
 // A hidden frame prints the page (print.js prints on load): no new tab, so a pop-up blocker cannot stop it
@@ -3311,8 +3335,11 @@ async function viewSupplier(id) {
   });
   $("#supPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value, ref: e.target.r.value || null, note: e.target.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
-    catch (err) { toast(err.message, true); }
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, ref: f.r.value || null, note: f.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
+      catch (err) { toast(err.message, true); }
+    });
   });
   if (a.balance == null) return;
   let st = null;
@@ -3641,8 +3668,11 @@ async function viewCustomer(id) {
   });
   $("#cPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(e.target.a.value), method: e.target.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
-    catch (err) { toast(err.message, true); }
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
+      catch (err) { toast(err.message, true); }
+    });
   });
   const toPos = async (sid) => { SALE = await api(`/api/sales/${sid}`); location.hash = "#/pos"; };
   $("#cuSale")?.addEventListener("click", async () => {
@@ -3718,9 +3748,11 @@ async function viewExpenses(period) {
   $("#exNew").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
-    try { const x = await api("/api/expenses", { method: "POST", body: { category_id: f.cat.value, amount: toPiasters(f.a.value), paid_from: f.from.value, spent_on: f.d.value, note: f.n.value || null } });
-      toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
-    catch (err) { toast(err.message, true); }
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { const x = await api("/api/expenses", { method: "POST", body: { category_id: f.cat.value, amount: toPiasters(f.a.value), paid_from: f.from.value, spent_on: f.d.value, note: f.n.value || null } });
+        toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
+      catch (err) { toast(err.message, true); }
+    });
   });
   $("#exCat")?.addEventListener("submit", async (e) => { e.preventDefault(); try { await api("/api/expenses", { method: "POST", body: { new_category: e.target.n.value } }); viewExpenses(); } catch (err) { toast(err.message, true); } });
   document.querySelectorAll("[data-exok]").forEach((b) => b.addEventListener("click", async () => {
@@ -3771,9 +3803,11 @@ async function renderSchedules(cats, edit = null) {
   box.querySelectorAll("[data-scpay]").forEach((b) => b.addEventListener("click", async () => {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
-    try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", amount: amt ? toPiasters(amt.value) : null } });
-      toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
-    catch (err) { toast(err.message, true); }
+    await withBusy(b, async () => {
+      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", amount: amt ? toPiasters(amt.value) : null } });
+        toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
+      catch (err) { toast(err.message, true); }
+    });
   }));
   box.querySelectorAll("[data-scskip]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmInline(b)) return;
@@ -4248,7 +4282,7 @@ async function viewAttendance() {
 async function viewStaff(month) {
   month = month || isoDay(new Date()).slice(0, 7);
   const r = await api(`/api/staff?month=${month}`);
-  const post = async (body) => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } };
+  const post = (body, btn) => withBusy(btn, async () => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } });
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
     <p class="muted">المرتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
   ${r.people.map((p) => { const pr = p.payroll, sg = p.suggested; return `<section class="panel staff" data-u="${esc(p.id)}">
@@ -4279,11 +4313,11 @@ async function viewStaff(month) {
       rows: r.people.flatMap((p) => p.attendance.map((x) => [p.full_name, x.day, tm(x.check_in), tm(x.check_out), x.source === "owner" ? `تعديل: ${x.note || ""}` : ""])) }] }));
   document.querySelectorAll(".staff [data-a]").forEach((b) => b.addEventListener("click", () => {
     const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
-    if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 });
-    if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null });
-    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") });
-    if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" });
-    if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") });
+    if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 }, b);
+    if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null }, b);
+    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") }, b);
+    if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" }, b);
+    if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") }, b);
   }));
 }
 
