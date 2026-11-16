@@ -311,13 +311,18 @@ class AutoBackup:
     # ----------------------------------------------------------------- scheduler
     def _due(self) -> bool:
         st, cfg = self.state(), self.settings()
-        last = max(filter(None, (st.get("last_check_at"), st.get("last_at"))), default=None)
-        if not st.get("last_ok"):
-            last = st.get("last_fail_at") or None      # retry a failed backup after one interval too
-        if not last:
-            return True
+        now = datetime.now()
         try:
-            return datetime.fromisoformat(last) + timedelta(minutes=cfg["interval_min"]) <= datetime.now()
+            if not st.get("last_ok"):                  # retry a failed backup after one interval too
+                times = [datetime.fromisoformat(st["last_fail_at"])] if st.get("last_fail_at") else []
+            else:
+                times = [datetime.fromisoformat(t) for t in (st.get("last_check_at"), st.get("last_at")) if t]
+            # a time in the future means the PC clock moved backwards: it says nothing about when the
+            # last backup really was, so it never postpones the next one
+            times = [t for t in times if t <= now]
+            if not times:
+                return True
+            return max(times) + timedelta(minutes=cfg["interval_min"]) <= now
         except (TypeError, ValueError):               # a state or settings file edited by hand: back up now
             return True
 
