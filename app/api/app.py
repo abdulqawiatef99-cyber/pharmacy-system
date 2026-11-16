@@ -1834,7 +1834,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def sales_return(req):
         ctx = ctx_of(req)
         b = await body(req)
-        lines = {str(k): _int(v, "qty") for k, v in (b.get("lines") or {}).items()}
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
                                         reason=str(b.get("reason", ""))))

@@ -841,6 +841,8 @@ class Sales:
             raise ValidationFailed("طريقة الاسترداد غير صحيحة")
         if len((reason or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب المرتجع")
+        if not isinstance(lines, dict) or not lines:      # a return of nothing is not a return
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
         with self.db.transaction():
             s = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
             if not s:
