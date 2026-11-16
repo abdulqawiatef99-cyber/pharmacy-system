@@ -199,27 +199,33 @@ class AutoBackup:
                 if hard:
                     out.unlink(missing_ok=True)
                     raise RuntimeError("; ".join(hard + soft))
-                warning, lost = None, []
+                warning, lost = None, {}
                 if soft:
                     # the database part is good: one lost upload must not stop every backup. Keep the
                     # file under a name that says so, and tell the owner which files are affected.
-                    marked = out.with_name(out.name[:-len("-auto.zip")] + INCOMPLETE)
+                    stem = out.name[:-len("-auto.zip")]
+                    parts = stem.split("-")          # pharmacy-backup-<date>-<time>[-<n>]
+                    base, n = "-".join(parts[:4]), int(parts[4]) if len(parts) > 4 else 0
+                    marked = out.with_name(stem + INCOMPLETE)
+                    while marked.exists():           # two incomplete backups in one second: never overwrite
+                        n += 1
+                        marked = out.with_name(f"{base}-{n}{INCOMPLETE}")
                     out.replace(marked)
                     out = marked
-                    lost = self._file_names(soft)
+                    lost = self._file_names(soft)    # per pharmacy: a file name is that pharmacy's own data
                     warning = (f"{len(soft)} attachment file(s) missing or changed; the backup holds the data"
-                               " without them: " + "، ".join(lost))[:500]
+                               " without them")
                     log.warning("automatic backup kept as incomplete (%s): %s", out.name, "; ".join(soft))
                 cfg = self.settings()
                 removed = prune(self.backup_dir, cfg)
                 st.update(last_at=datetime.now().isoformat(timespec="seconds"), last_file=out.name,
                           last_bytes=out.stat().st_size, last_seconds=round(time.monotonic() - started, 1),
                           last_ok=True, last_error=None, last_reason=reason, fingerprint=fp, fail_notified=None,
-                          last_warning=warning, last_warning_files=lost)
+                          last_warning=warning, last_warning_files=lost or {})
                 if soft:
                     self._notify_once(st, "warn_notified", "warning", "النسخة الاحتياطية ناقصها ملفات فواتير",
-                                      ("البيانات اتحفظت، لكن الملفات دي ناقصة أو متغيّرة على الجهاز: "
-                                       + "، ".join(lost))[:400], hours=24)
+                                      {o: ("البيانات اتحفظت، لكن الملفات دي ناقصة أو متغيّرة على الجهاز: "
+                                           + "، ".join(names))[:400] for o, names in lost.items()}, hours=24)
                 else:
                     st["warn_notified"] = None
                 if removed:
@@ -236,13 +242,14 @@ class AutoBackup:
         self._check_stock()
         return st
 
-    def _file_names(self, problems: list[str]) -> list[str]:
-        """Names the owner knows (as uploaded) for the attachments these problems are about."""
-        names = []
+    def _file_names(self, problems: list[str]) -> dict[str, list[str]]:
+        """Per pharmacy, the names its owner knows (as uploaded) for the attachments these problems are about."""
+        names: dict[str, list[str]] = {}
         for p in problems:
             sid = backup.attachment_source(p)
-            row = self.db.one("SELECT filename FROM source_files WHERE id=?", (sid,))
-            names.append(row["filename"] if row and row["filename"] else str(sid))
+            row = self.db.one("SELECT org_id, filename FROM source_files WHERE id=?", (sid,))
+            if row:
+                names.setdefault(row["org_id"], []).append(row["filename"] or str(sid))
         return names
 
     def _check_stock(self) -> None:
@@ -277,15 +284,18 @@ class AutoBackup:
                                   f"آخر نسخة خارج الجهاز: {last[:10] if last else 'لا يوجد'} — وصّل ذاكرة الفلاش أو القرص",
                                   hours=24)
 
-    def _notify_once(self, st: dict, key: str, severity: str, title: str, body: str, *, hours: int) -> None:
+    def _notify_once(self, st: dict, key: str, severity: str, title: str, body, *, hours: int) -> None:
+        """`body`: one text for every pharmacy, or {org_id: text} to tell each pharmacy only about its own files."""
         last = st.get(key)
         if last and datetime.fromisoformat(last) > datetime.now() - timedelta(hours=hours):
             return
         try:
             with self.db.transaction():
                 for o in self.db.all("SELECT id FROM organizations WHERE status='active'"):
-                    notify.emit(self.db, Context(user_id="system", org_id=o["id"], branch_id=None),
-                                "backup", severity, title, body, "system", None)
+                    text = body.get(o["id"]) if isinstance(body, dict) else body
+                    if text:
+                        notify.emit(self.db, Context(user_id="system", org_id=o["id"], branch_id=None),
+                                    "backup", severity, title, text, "system", None)
             st[key] = datetime.now().isoformat(timespec="seconds")
         except Exception:
             log.exception("could not record backup notification")
@@ -299,7 +309,10 @@ class AutoBackup:
         last = st.get("last_at")
         due = (datetime.fromisoformat(last) + timedelta(minutes=cfg["interval_min"])) if last else None
         off = st.get("offsite_at")
-        return {"settings": cfg, "state": {k: v for k, v in st.items() if k != "fingerprint"},
+        shown = {k: v for k, v in st.items() if k != "fingerprint"}
+        by_org = shown.get("last_warning_files")
+        shown["last_warning_files"] = (by_org or {}).get(ctx.org_id, []) if isinstance(by_org, dict) else []
+        return {"settings": cfg, "state": shown,
                 "folder": str(self.backup_dir), "next_at": due.isoformat(timespec="minutes") if due else None,
                 "offsite_stale": bool(cfg.get("offsite_dir")) and (
                     not off or datetime.fromisoformat(off) < datetime.now() - timedelta(days=OFFSITE_STALE_DAYS)),

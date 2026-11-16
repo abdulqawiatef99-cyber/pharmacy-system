@@ -65,8 +65,9 @@ class TestAutomaticBackupWithAMissingFile(Base):
         self.assertIsNone(st["last_error"])
         self.assertTrue(st["last_file"].endswith("-auto-incomplete.zip"))
         self.assertTrue((self.bdir / st["last_file"]).exists())
-        self.assertIn("invoice-march.xlsx", st["last_warning"])
-        self.assertEqual(st["last_warning_files"], ["invoice-march.xlsx"])
+        self.assertNotIn("invoice-march.xlsx", st["last_warning"])     # names go to their own pharmacy only
+        self.assertEqual(st["last_warning_files"], {self.ctx.org_id: ["invoice-march.xlsx"]})
+        self.assertEqual(self.ab.status(self.ctx)["state"]["last_warning_files"], ["invoice-march.xlsx"])
         w = self.warnings()
         self.assertEqual(len(w), 1)
         self.assertIn("invoice-march.xlsx", w[0]["body"])
@@ -82,6 +83,33 @@ class TestAutomaticBackupWithAMissingFile(Base):
             self.assertTrue(self.ab.run()["last_warning"])
         self.assertEqual(len(self.warnings()), 1)                      # told once a day, not every hour
 
+    def test_another_pharmacy_never_sees_this_pharmacys_file_names(self):
+        from app.core import accounts
+        accounts.create_organization(self.db, name="صيدلية تانية", owner_username="owner2", owner_full_name="O2",
+                                     owner_password="Owner2-Pass-2026")
+        other = self.login("owner2", "Owner2-Pass-2026")
+        self.ab.run()
+        self.lose_the_file()
+        with self.assertLogs("pharm.backup", level="WARNING"):
+            self.ab.run()
+        theirs = [n for n in notify.listing(self.db, other)["items"] if n["kind"] == "backup"]
+        self.assertEqual([n for n in theirs if "invoice-march.xlsx" in (n["body"] or "")], [])
+        self.assertEqual(self.ab.status(other)["state"]["last_warning_files"], [])
+        self.assertNotIn("invoice-march.xlsx", str(self.ab.status(other)["state"]))
+        self.assertEqual(len(self.warnings()), 1)                      # its own pharmacy is still told
+
+    def test_two_incomplete_backups_in_one_second_are_both_kept(self):
+        self.ab.run()
+        self.lose_the_file()
+        frozen = mock.Mock(wraps=backup.datetime)
+        frozen.now.return_value = backup.datetime(2026, 11, 16, 12, 0, 0)
+        with mock.patch("app.core.backup.datetime", frozen), self.assertLogs("pharm.backup", level="WARNING"):
+            a = self.ab.run()["last_file"]
+            self.change()
+            b = self.ab.run()["last_file"]
+        self.assertNotEqual(a, b)
+        self.assertTrue((self.bdir / a).exists() and (self.bdir / b).exists())
+
     def test_a_changed_file_is_a_warning_too(self):
         self.ab.run()
         f = next(p for p in self.up.rglob("*") if p.is_file())
@@ -90,7 +118,7 @@ class TestAutomaticBackupWithAMissingFile(Base):
         with self.assertLogs("pharm.backup", level="WARNING"):
             st = self.ab.run()
         self.assertTrue(st["last_ok"])
-        self.assertEqual(st["last_warning_files"], ["invoice-march.xlsx"])
+        self.assertEqual(st["last_warning_files"], {self.ctx.org_id: ["invoice-march.xlsx"]})
 
     def test_a_damaged_database_part_still_fails_and_is_deleted(self):
         with mock.patch("app.core.backup.quick_check", return_value=[
@@ -111,7 +139,7 @@ class TestAutomaticBackupWithAMissingFile(Base):
         self.change()
         st = self.ab.run()
         self.assertIsNone(st["last_warning"])
-        self.assertEqual(st["last_warning_files"], [])
+        self.assertEqual(st["last_warning_files"], {})
         self.assertTrue(st["last_file"].endswith("-auto.zip"))
 
 
