@@ -857,7 +857,8 @@ class Sales:
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
                 refund += before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
-            if refund_method == "cash":
+            if refund_method in ("cash", "card"):
+                # a refund to the card follows the same cap: money never received cannot go back to a card either
                 # #142 (owner's rule, 11/11): cash can be paid back only for money the shop actually received
                 # on this sale (cash, card or transfer; a courier's cash only once it was handed in), minus what
                 # was already paid back in cash or to the card. The part sold on the customer's account goes
@@ -872,7 +873,8 @@ class Sales:
                                        " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
                 if refund > can:
-                    raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد نقدًا (الحد الأقصى نقدًا"
+                    how = "نقدًا" if refund_method == "cash" else "على البطاقة"
+                    raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
             rid = new_id()
