@@ -59,8 +59,11 @@ def read_packs(path: Path) -> dict[str, int]:
     out = {}
     for r in rows[1:]:
         if len(r) > max(ci, ni) and r[ci] not in (None, "") and r[ni] not in (None, ""):
-            n = Decimal(str(r[ni]))
-            if n != n.to_integral_value() or n < 1:
+            try:
+                n = Decimal(str(r[ni]).strip())
+            except ArithmeticError:                       # InvalidOperation: not a number at all
+                n = Decimal("NaN")
+            if not n.is_finite() or n.adjusted() > 6 or n != n.to_integral_value() or n < 1:
                 raise ValidationFailed(f"عدد وحدات غير صحيح للصنف {r[ci]}: {r[ni]}")
             out[str(int(r[ci])) if isinstance(r[ci], float) else str(r[ci])] = int(n)
     return out

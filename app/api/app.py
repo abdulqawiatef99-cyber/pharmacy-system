@@ -1613,7 +1613,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if isinstance(v, bool) or v is None:
             raise ValueError("not a number")
         d = Decimal(str(v).strip()) * 100
-        if not d.is_finite() or d != d.to_integral_value():
+        if not d.is_finite() or d.adjusted() > 15:      # "1e10000000": int() would spend seconds building it
+            raise ValueError("out of range")
+        if d != d.to_integral_value():
             raise ValueError("more than two decimals")
         return int(d)
 
