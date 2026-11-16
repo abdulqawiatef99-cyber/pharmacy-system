@@ -58,3 +58,19 @@ class OfferInWholeNumbers(APICase):
                    {"packs": 1, "discount_bp": 0, "cash_available": 10.5}):
             with self.subTest(kw=kw), self.assertRaises(ValidationFailed):
                 p.evaluate_offer(self.ctx, self.it, **kw)
+
+
+class OfferHugeExponent(APICase):
+    """Codex on #232, same pattern here: "1e10000000" as a percent or cash passed the checks and int() spent
+    seconds (or minutes) building the number on the server."""
+
+    def test_refused_at_once(self):
+        import time
+        self.http_login()
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Offer Item", "public_price": 1001})
+        for body in ({"discount_pct": "1e10000000"}, {"discount_pct": 10, "cash_available": "1e10000000"}):
+            with self.subTest(body=body):
+                t = time.monotonic()
+                r = self.c.post("/api/procurement/offer", headers=H, json={"item_id": it, "packs": 1, **body})
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertLess(time.monotonic() - t, 1)

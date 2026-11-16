@@ -117,8 +117,14 @@ def add_advance(db: Database, ctx: Context, uid: str, amount: int, month: str, n
     _month(month)
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
+    if paid_from not in ("drawer", "outside"):
+        raise ValidationFailed("اختر مصدر المبلغ المدفوع")
     from ..sales import cash
     with db.transaction():
+        # a month already paid cannot take a new advance: it would never be deducted or booked
+        if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
+                  (ctx.org_id, uid, month)):
+            raise Conflict("راتب هذا الشهر صُرف بالفعل؛ سجّل السلفة على الشهر التالي", code="payroll_paid")
         aid = new_id()
         db.execute("INSERT INTO staff_advances (id, org_id, user_id, amount, month, note, created_by) VALUES (?,?,?,?,?,?,?)",
                    (aid, ctx.org_id, uid, amount, month, (note or "").strip()[:200] or None, ctx.user_id))
@@ -200,6 +206,12 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
         pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
         if pr["status"] == "paid":
             raise Conflict("هذا الراتب صُرف بالفعل")
+        # an advance given after the approval would be paid again in full and never booked: approve again first
+        now_adv = db.one("SELECT coalesce(sum(amount),0) a FROM staff_advances WHERE org_id=? AND user_id=? AND month=?",
+                         (ctx.org_id, uid, month))["a"]
+        if now_adv != pr["advances"]:
+            raise Conflict("تغيّرت السلف بعد اعتماد الراتب؛ اعتمد الراتب مرة أخرى قبل الصرف", code="payroll_changed",
+                           details={"approved_advances": pr["advances"], "advances_now": now_adv})
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 

@@ -67,6 +67,23 @@ class TestCashRefundCap(Base):
         self.assertEqual(self.balance(), 5000 - 2000)                                 # the credit part goes back
         self.assertEqual(self.drawer(), 10000 - 2000)                                 # to the account, not cash
 
+    def test_card_refund_on_a_sale_wholly_on_credit_is_refused(self):
+        """Found in the full review 16/11: a refund to the card passed with no cap, so the customer got card
+        money the shop never received and still owed the debt."""
+        sale = self.sell(units=2, credit=4000, customer=self.cust)
+        line = sale["lines"][0]["id"]
+        with self.assertRaises(Conflict) as e:
+            self.s.return_items(self.ctx, sale["id"], {line: 2}, refund_method="card", reason="مرتجع تجربة")
+        self.assertEqual(e.exception.code, "cash_refund_exceeds_paid")
+        self.assertEqual((self.balance(), self.db.one("SELECT count(*) FROM sale_returns")[0]), (4000, 0))
+
+    def test_card_sale_still_refunds_to_the_card(self):
+        sale = self.sell(units=2, cash=0, card=4000)
+        r = self.s.return_items(self.ctx, sale["id"], {sale["lines"][0]["id"]: 2}, refund_method="card",
+                                reason="مرتجع تجربة")
+        self.assertEqual((r["refund"], self.drawer()), (4000, 10000))
+
+
 class TestDeliveryCashRefund(Base):
     """#142: a delivery's cash is with the courier until it is handed in; before that the drawer has
     nothing to pay back."""

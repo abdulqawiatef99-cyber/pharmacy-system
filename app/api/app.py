@@ -354,6 +354,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                          status_code=500)
         return wrapped
 
+    async def off_loop(fn, *args, **kwargs):
+        """#249: a report reads in a worker thread, on that thread's own connection and inside one
+        read snapshot, so a long report never stops the cashier screen or /api/health."""
+        def run():
+            with db.read_snapshot():
+                return fn(*args, **kwargs)
+        return await run_in_threadpool(run)
+
     # ------------------------------------------------------------- auth
     @handler
     async def login(req):
@@ -530,8 +538,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         from ..core import ui_settings
         from ..inventory import integrity
+        from ..printing import settings as rs
         return J({**accounts.me(db, ctx), "notifications_unread": notify.unread_count(db, ctx),
-                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx)})
+                  "ui": ui_settings.get(db, ctx.org_id), "stock_alert": integrity.banner(db, ctx),
+                  "time_format": rs.get(db, ctx.org_id)["time_format"]})   # #206: every screen shows times this way
 
     @handler
     async def stock_alert_api(req):
@@ -692,7 +702,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
-        return J(invoices.report(db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
+        return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
                                  item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
 
@@ -703,13 +713,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not fn:
             raise NotFound("التقرير غير موجود")
         qp = req.query_params
-        return J(fn(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fn, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def warnings_rep(req):
         from ..sales.service import warnings_report
         qp = req.query_params
-        return J(warnings_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(warnings_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def stock_reasons(req):
@@ -731,7 +741,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def losses_report(req):
         from ..inventory import adjust
         qp = req.query_params
-        return J(adjust.loss_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(adjust.loss_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def supplier_returns_api(req):
@@ -758,7 +768,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
-        when = accounts.parse_iso(r["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
+        from ..printing import settings as rs
+        when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
             f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
@@ -874,7 +885,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def transfers_report(req):
         from ..sales import attachments as att
         qp = req.query_params
-        return J(att.transfers(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(att.transfers, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def exp_sched(req):
@@ -966,13 +977,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def profit_report(req):
         qp = req.query_params
-        return J(fin.profit(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(fin.profit, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def home_view(req):
         from ..reports import service as rep_svc
         ctx = ctx_of(req)
-        out = rep_svc.home(db, ctx)
+        out = await off_loop(rep_svc.home, db, ctx)
         if ctx.can("settings.manage"):
             st = autob.state()
             out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
@@ -982,12 +993,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def reports_sales(req):
         from ..reports import service as rep_svc
         qp = req.query_params
-        return J(rep_svc.sales_report(db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(rep_svc.sales_report, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def reports_stock(req):
         from ..reports import service as rep_svc
-        return J(rep_svc.stock_report(db, ctx_of(req)))
+        return J(await off_loop(rep_svc.stock_report, db, ctx_of(req)))
 
     @handler
     async def feedback_view(req):
@@ -1618,7 +1629,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if isinstance(v, bool) or v is None:
             raise ValueError("not a number")
         d = Decimal(str(v).strip()) * 100
-        if not d.is_finite() or d != d.to_integral_value():
+        if not d.is_finite() or d.adjusted() > 15:      # "1e10000000": int() would spend seconds building it
+            raise ValueError("out of range")
+        if d != d.to_integral_value():
             raise ValueError("more than two decimals")
         return int(d)
 
@@ -1934,7 +1947,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
-        t = lambda iso: accounts.parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M") if iso else "—"  # noqa: E731
+        from ..printing import settings as rs
+        tf = rs.get(db, ctx.org_id)["time_format"]                                                        # #206
+        t = lambda iso: rs.fmt_when(accounts.parse_iso(iso).astimezone(), tf) if iso else "—"  # noqa: E731
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
                 ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),

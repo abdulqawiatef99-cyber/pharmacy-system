@@ -86,7 +86,7 @@ input.ai { border-color: var(--ai); }
 .totals b { display: block; font-size: 1.125rem; direction: ltr; text-align: right; }
 .list a { color: var(--brand); }
 #toast { position: fixed; bottom: 16px; inset-inline: 16px; max-width: 520px; margin: auto; padding: 12px 16px;
-  border-radius: 10px; background: var(--ink); color: var(--bg); z-index: 20; }
+  border-radius: 10px; background: var(--ink); color: var(--bg); z-index: 20; white-space: pre-line; }
 #toast.error { background: var(--err); color: #fff; }
 .stale-bar { display: block; width: 100%; padding: 10px 16px; border: 0; background: var(--warn-bg); color: var(--warn);
   border-bottom: 2px solid var(--warn); font: inherit; font-weight: 700; text-align: center; cursor: pointer; }

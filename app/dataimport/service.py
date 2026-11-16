@@ -175,11 +175,18 @@ def template_xlsx(kind: str) -> bytes:
     return buf.getvalue()
 
 
+_YES = {normalize_text(w) for w in ("1", "1.0", "نعم", "yes", "true", "مستورد", "مستوردة", "imported", "دواء", "drug")}
+_NO = {normalize_text(w) for w in ("0", "0.0", "لا", "no", "false", "محلي", "محلية", "local", "غير دواء", "non drug",
+                                   "nondrug")}
+
+
 def _bool(v) -> int | None:
+    """Yes/no columns as old programs export them; anything else is None (the row shows unknown_..., never a guess).
+    Both sides go through normalize_text, so spelling variants (ة/ه, ى/ي) match."""
     t = normalize_text(str(v)) if v not in (None, "") else ""
-    if t in ("1", "نعم", "yes", "true", "مستورد", "imported", "دواء", "drug"):
+    if t in _YES:
         return 1
-    if t in ("0", "لا", "no", "false", "محلي", "local", "غير دواء", "non drug", "nondrug"):
+    if t in _NO:
         return 0
     return None
 

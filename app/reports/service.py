@@ -55,14 +55,12 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
     partial: list[tuple[dict, dict]] = []
     for r in db.all(
             "SELECT l.id, l.item_id, l.discount_bp, l.line_total, sum(a.qty_base - a.returned_qty) qty,"
-            " sum(a.returned_qty) returned, sum((a.qty_base - a.returned_qty) * coalesce(CAST(a.unit_cost AS REAL), 0) * 100) cost,"
-            " sum(a.unit_cost IS NULL) unknown"
+            " sum(a.returned_qty) returned, sum(a.unit_cost IS NULL) unknown"
             " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
             " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
             " AND s.completed_at>=? AND s.completed_at<? GROUP BY l.id", p):
-        d = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "qty": 0, "revenue": 0, "cost": 0.0, "unknown": 0})
+        d = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "qty": 0, "revenue": 0, "unknown": 0})
         d["qty"] += r["qty"]
-        d["cost"] += r["cost"]
         d["unknown"] += r["unknown"]
         if r["returned"] == 0 and r["line_total"] is not None:
             d["revenue"] += r["line_total"]
@@ -90,6 +88,15 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
     names = {r["id"]: dict(r) for r in db.all(
         "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
         % ",".join("?" * len(ranked)), (ctx.org_id, *[d["item_id"] for d in ranked]))} if ranked else {}
+    cost: dict[str, Decimal] = {}
+    if show_cost and ranked:     # exact: the stored decimal unit costs, one row per item and cost, never SQLite REAL
+        for r in db.all(
+                "SELECT l.item_id, a.unit_cost, sum(a.qty_base - a.returned_qty) q"
+                " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
+                " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
+                " AND s.completed_at>=? AND s.completed_at<? AND a.unit_cost IS NOT NULL AND l.item_id IN (%s)"
+                " GROUP BY l.item_id, a.unit_cost" % ",".join("?" * len(ranked)), (*p, *[d["item_id"] for d in ranked])):
+            cost[r["item_id"]] = cost.get(r["item_id"], Decimal(0)) + Decimal(r["unit_cost"]) * r["q"] * 100
     top = []
     for d in ranked:
         i = names.get(d["item_id"], {})
@@ -97,7 +104,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
                "pack_size": i.get("pack_size"), "base_unit_name": i.get("base_unit_name"),
                "qty": d["qty"], "revenue": d["revenue"]}
         if show_cost and not d["unknown"]:
-            out["profit"] = d["revenue"] - int(round(d["cost"]))
+            out["profit"] = d["revenue"] - cost_piasters(cost.get(d["item_id"], Decimal(0)))
         top.append(out)
     return top
 
