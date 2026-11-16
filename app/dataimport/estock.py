@@ -67,6 +67,19 @@ def _expiry(v):
     return v
 
 
+def _whole(v) -> int | None:
+    """A count printed in the report (int, 3.0 or "3"); None when it is missing or not a whole number."""
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        d = Decimal(str(v).strip())
+    except (ArithmeticError, ValueError):
+        return None
+    if not d.is_finite() or d.adjusted() > 15:      # "1e10000000" would make int() expand a huge number first
+        return None
+    return int(d) if d == d.to_integral_value() else None
+
+
 def _check(label: str, got: Decimal, printed) -> None:
     if printed is None or abs(got - _dec(printed)) > _TOL:
         raise ValidationFailed(f"إجمالي {label} في الملف ({printed}) لا يساوي مجموع الأسطر ({got})؛"
@@ -153,7 +166,7 @@ def parse_sales(rows: list[list]) -> tuple[list[list], dict]:
         raise ValidationFailed("سطر الإجمالي ناقص من تقرير المبيعات", code="estock_totals_mismatch")
     _check("تكلفة المبيعات", cost, footer[2])
     _check("قيمة المبيعات", sale, footer[4])
-    if int(footer[6]) != len(out) - 1:
+    if _whole(footer[6]) != len(out) - 1:
         raise ValidationFailed("عدد أصناف تقرير المبيعات لا يطابق", code="estock_totals_mismatch")
     return out, {"items": len(out) - 1, "cost": str(cost), "sale": str(sale)}
 
@@ -174,8 +187,12 @@ def parse_purchases(rows: list[list]) -> tuple[list[dict], dict]:
         elif r[0] == "الموظف":
             if not isinstance(r[13], (datetime, date)):
                 raise ValidationFailed("تاريخ فاتورة مش مفهوم في تقرير المشتريات", code="estock_layout")
-            when, inv = r[13], (sup, str(r[22]))
-            expected[inv] = int(r[20] or 0)
+            when = r[13] if isinstance(r[13], datetime) else datetime(r[13].year, r[13].month, r[13].day)
+            inv = (sup, str(r[22]))
+            n = _whole(r[20] if r[20] is not None else 0)
+            if n is None:
+                raise ValidationFailed("عدد أصناف فاتورة مش مفهوم في تقرير المشتريات", code="estock_layout")
+            expected[inv] = n
         elif isinstance(r[12], int) and _is_num(r[8]):
             if inv is None:
                 raise ValidationFailed("سطر صنف قبل رأس الفاتورة", code="estock_layout")
@@ -188,9 +205,10 @@ def parse_purchases(rows: list[list]) -> tuple[list[dict], dict]:
     if bad:
         raise ValidationFailed(f"عدد أصناف {len(bad)} فاتورة مش مطابق لرأسها؛ الملف ناقص",
                                code="estock_totals_mismatch")
-    dates = [x["date"] for x in lines]
-    return lines, {"invoices": len(expected), "lines": len(lines),
-                   "from": min(dates).date().isoformat(), "to": max(dates).date().isoformat()}
+    dates = [x["date"] for x in lines]              # always datetime (a date-only cell is widened above)
+    return lines, {"invoices": len(expected), "lines": len(lines),           # invoices may all be empty
+                   "from": min(dates).date().isoformat() if dates else None,
+                   "to": max(dates).date().isoformat() if dates else None}
 
 
 def normalize(rows: list[list], kind: str, options: dict | None = None) -> list[list] | None:

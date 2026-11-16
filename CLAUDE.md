@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Read and follow `AGENTS.md` first; it holds all shared rules. Then `docs/STATUS.md` and `docs/HANDOFF.md`.
+Read and follow `AGENTS.md` first; it holds all shared rules. Then `docs/OWNER_RULES.md`, `docs/STATUS.md` and `docs/HANDOFF.md`.
 
 Claude-specific notes:
 - Claude Code is the primary execution agent and project lead; Codex does independent reviews and

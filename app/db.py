@@ -101,9 +101,29 @@ class Database:
         return self.conn.execute(sql, params)
 
     @contextmanager
+    def read_snapshot(self) -> Iterator["Database"]:
+        """Read-only block that sees one consistent state of the database (one WAL snapshot), for
+        reports that run off the event loop while sales keep writing (#249). Writes are refused
+        inside it; nothing to commit, so it always ends with ROLLBACK."""
+        conn = self.conn
+        if conn.in_transaction:
+            yield self
+            return
+        conn.execute("BEGIN")
+        self._local.snapshot = True
+        try:
+            yield self
+        finally:
+            self._local.snapshot = False
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+
+    @contextmanager
     def transaction(self) -> Iterator["Database"]:
         """Nested calls join the outer transaction (savepoint-free on purpose:
         a business operation is atomic as a whole)."""
+        if getattr(self._local, "snapshot", False):
+            raise RuntimeError("no writes inside a read snapshot")
         conn = self.conn
         if conn.in_transaction:
             yield self
@@ -159,7 +179,32 @@ class Database:
                     if fk_off:
                         conn.execute("PRAGMA foreign_keys = ON")
             done.append(version)
+        self.drop_planner_stats()
         return done
+
+    def drop_planner_stats(self) -> bool:
+        """Remove SQLite's planner statistics (sqlite_stat1/stat4), if any (#249).
+
+        Every query was written and measured for SQLite's default plans (primary keys and indexes).
+        Statistics gathered on a small database and kept after a bulk load (E-Stock import, restore)
+        made the planner scan whole tables: the stock report took 118 s on 30k items. Dropping the
+        tables changes the schema, so every open connection, in any process, re-plans without them.
+        Changes no pharmacy data. Returns True when something was dropped."""
+        conn = self.conn
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sqlite_stat1','sqlite_stat4')")]
+        if not names:
+            return False
+        with self._write_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for n in names:
+                    conn.execute(f"DROP TABLE {n}")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return True
 
     def backup_to(self, dest: str | Path) -> None:
         """Online, consistent backup (safe while the app is running)."""

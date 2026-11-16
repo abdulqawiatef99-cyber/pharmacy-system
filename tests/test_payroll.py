@@ -157,3 +157,46 @@ class TestAdvancesBooked(Base):
         self.pay_with(advance=50000, bonus=10000)                 # net = -400.00: he owes the difference
         self.assertLess(self.db.one("SELECT net FROM payroll WHERE user_id=?", (self.uid,))["net"], 0)
         self.assertEqual(self.booked(), [50000])
+
+
+class TestAdvanceAfterApproval(Base):
+    """An advance given after the salary was approved used to be paid again in full and never booked: approve,
+    advance 1,000, pay → 5,200 paid, advance lost. And an advance on a month already paid was accepted."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.uid = people.add_user(self.db, self.ctx, username="asst", full_name="أحمد", password=PW, role_code="assistant")
+        self.month = local_today().isoformat()[:7]
+        pay.set_pay(self.db, self.ctx, self.uid, 520000, 26)
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=520000)       # no attendance: the bonus makes net 5,200
+
+    def booked(self):
+        return sorted(e["amount"] for e in fin.listing(self.db, self.ctx) if e["category"].startswith("رواتب"))
+
+    def test_pay_refuses_until_approved_again(self):
+        pay.add_advance(self.db, self.ctx, self.uid, 100000, self.month, "سلفة بعد الاعتماد", "outside")
+        with self.assertRaises(Conflict) as e:
+            pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(e.exception.code, "payroll_changed")
+        self.assertEqual(self.booked(), [])                                     # nothing paid, nothing booked
+        pay.approve(self.db, self.ctx, self.uid, self.month, bonus=520000)
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.assertEqual(self.db.one("SELECT net, advances FROM payroll WHERE user_id=?", (self.uid,))[:], (420000, 100000))
+        self.assertEqual(self.booked(), [100000, 420000])                       # 5,200 in all: net + the advance
+
+    def test_no_advance_on_a_paid_month(self):
+        pay.pay(self.db, self.ctx, self.uid, self.month, "outside")
+        self.cd.open(self.ctx, 100000)
+        with self.assertRaises(Conflict) as e:
+            pay.add_advance(self.db, self.ctx, self.uid, 20000, self.month, "متأخرة", "drawer")
+        self.assertEqual(e.exception.code, "payroll_paid")
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 100000)    # no cash left the drawer
+        y, m = (int(x) for x in self.month.split("-"))
+        nxt = f"{y + (m == 12):04d}-{m % 12 + 1:02d}"
+        pay.add_advance(self.db, self.ctx, self.uid, 20000, nxt, "على الشهر التالي", "drawer")
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 80000)
+
+    def test_unknown_source_is_refused(self):
+        with self.assertRaises(ValidationFailed):
+            pay.add_advance(self.db, self.ctx, self.uid, 20000, self.month, "سلفة", "bank")

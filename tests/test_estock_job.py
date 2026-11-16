@@ -76,6 +76,17 @@ class TestPacksFile(DBTestCase):
         p.write_text(json.dumps({"30906": 3, "77": 0}), encoding="utf-8")
         self.assertEqual(estock_job.read_packs(p), {"30906": 3})
 
+    def test_sheet_refuses_text_and_huge_numbers_quickly(self):
+        # "1e10000000" passed the whole-number check and int() spent seconds building it; "x" crashed (Decimal)
+        import time
+        for bad in ("1e10000000", "x", "NaN", "Infinity", 0, -2, 2.5):
+            with self.subTest(bad=bad):
+                t = time.monotonic()
+                with self.assertRaises(ValidationFailed) as e:
+                    self.packs([["الكود", "الاسم", "القرار"], [30906, "ليثيومود", bad]])
+                self.assertIn("30906", str(e.exception))
+                self.assertLess(time.monotonic() - t, 1)
+
     def test_json_packs_refuse_a_fraction_like_the_sheet(self):
         for bad in (2.5, "2.5", -3, True, "x"):
             with self.subTest(bad=bad):

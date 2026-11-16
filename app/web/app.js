@@ -169,13 +169,13 @@ const hintHtml = (h) => (!h ? "" : h.kind === "layout"
 
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 
-function toast(msg, isError = false) {
+function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
   t.textContent = msg;
   t.className = isError ? "error" : "";
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => (t.hidden = true), isError ? 7000 : 3000);
+  toast._t = setTimeout(() => (t.hidden = true), ms || (isError ? 7000 : 3000));
 }
 
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
@@ -389,7 +389,7 @@ function showStockAlert(a) {
   bar.hidden = !a;
   if (!a) return;
   const n = Object.values(a.counts || {}).reduce((x, y) => x + y, 0);
-  bar.textContent = `⚠ تنبيه: أرصدة المخزون لا تطابق حركات المخزون (${n} اختلاف، آخر فحص ${String(a.at || "").slice(0, 16).replace("T", " ")}). لم يُصلَّح شيء تلقائيًا — اضغط لفتح «مطابقة الأرصدة».`;
+  bar.textContent = `⚠ تنبيه: أرصدة المخزون لا تطابق حركات المخزون (${n} اختلاف، آخر فحص ${stamp(a.at)}). لم يُصلَّح شيء تلقائيًا — اضغط لفتح «مطابقة الأرصدة».`;
 }
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
@@ -1964,7 +1964,7 @@ async function renderReceiptCfg(c) {
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
     <label class="f">رقم التسجيل الضريبي (اختياري) <input name="tax_no" dir="ltr" value="${esc(c.tax_no || "")}"></label>
     <label class="f">رقم السجل التجاري (اختياري) <input name="cr_no" dir="ltr" value="${esc(c.cr_no || "")}"></label>
-    <label class="f">الوقت على الإيصال <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
+    <label class="f">شكل الوقت (في كل الشاشات والإيصال) <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
     <fieldset class="lblp"><legend>الإيصال والدرج عند إتمام البيع</legend>
       <p class="muted">الافتراضي: بدون إيصال، والكاشير يختار «🧾 إيصال» (F4) بجانب زر الإتمام. فاتورة التوصيل تطبع إيصالًا واحدًا تلقائيًا.</p>
       ${chk("auto_receipt", "اختيار الإيصال تلقائيًا حسب قيمة الفاتورة")}
@@ -2074,7 +2074,7 @@ async function renderReceiptCfg(c) {
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
       qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
-      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; toast("تم الحفظ"); }
+      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
@@ -2151,7 +2151,7 @@ function renderBackup(b) {
           <input name="offsite_dir" value="${esc(c.offsite_dir)}" placeholder="E:\\نسخ الصيدلية" dir="auto"></label>
         ${!c.offsite_dir ? `<p class="badge b-warn">⚠ لا توجد نسخة خارج الجهاز — إذا تعطل الجهاز ستضيع النسخ معه</p>`
           : b.offsite_stale ? `<p class="badge b-warn">⚠ آخر نسخة خارج الجهاز ${st.offsite_at ? esc(st.offsite_at.slice(0, 10)) : "لا يوجد"}${st.offsite_error ? ` — ${esc(st.offsite_error)}` : ""}</p>`
-          : `<p class="badge b-ok">✓ آخر نسخة خارج الجهاز ${esc((st.offsite_at || "").replace("T", " ").slice(0, 16))}</p>`}</div>
+          : `<p class="badge b-ok">✓ آخر نسخة خارج الجهاز ${esc(stamp(st.offsite_at))}</p>`}</div>
       <div class="row"><button class="btn">احفظ</button><button class="btn secondary" type="button" id="bkNow">اعمل نسخة الآن</button></div>
     </form>
     <details class="mt"><summary>النسخ الموجودة (${b.files.length}) — المساحة ${MB(b.total_bytes)} — المجلد ${esc(b.folder)}</summary>
@@ -2214,7 +2214,10 @@ if (BUILD) {
 const SALE_ST = { completed: "مكتملة", voided: "ملغاة" };
 const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const LOC = () => (I18N.on ? "en-GB" : "ar-EG");   // dates and times follow the screen language
-const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }) : "");
+// #206: every time shown follows the pharmacy's setting (12-hour with ص/م by default, or 24-hour); stored values unchanged
+const H12 = () => (ME?.time_format ?? "12") !== "24";
+const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit", hour12: H12() }) : "");
+const hourLabel = (h) => (H12() ? `${h % 12 || 12}${h < 12 ? "ص" : "م"}` : String(h));
 const dayOf = (iso) => (iso ? isoDay(new Date(iso)) : "");   // local day of a UTC timestamp
 
 async function viewSales() {
@@ -2249,7 +2252,7 @@ async function viewSalesAdvanced() {
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
     draw();
   };
-  const sub = () => `${R.from.replace("T", " ")} ← ${R.to.replace("T", " ")}`;
+  const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -3094,9 +3097,13 @@ async function complete(findings) {
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
-    if (dv.receipt === "failed") toast(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`, true);
-    if (dv.drawer === "failed") toast("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح", true);
-    if (dv.drawer === "unsupported") toast("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات", true);
+    // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
+    // under the drawer one when the printer was off), and it stays longer than a normal error
+    const warn = [];
+    if (dv.receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
+    if (dv.drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
+    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات");
+    if (warn.length) toast(warn.join("\n"), true, 15000);
     SALE = null; viewPos();
   } catch (er) {
     toast(er.message, true);
@@ -3156,7 +3163,7 @@ async function viewShift() {
   const seeAll = ME.permissions.includes("cash.see_expected");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
   const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الورديات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
-    ${recent.map((r) => `<tr><td>${esc(new Date(r.opened_at).toLocaleString(LOC()))}</td><td>${r.closed_at ? esc(new Date(r.closed_at).toLocaleString(LOC())) : `<span class="badge b-info">مفتوح</span>`}</td>
+    ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
@@ -3173,7 +3180,7 @@ async function viewShift() {
     return;
   }
   const k = sh.cash_by_kind || {};
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الوردية المفتوحة</h1><span class="muted">من ${esc(new Date(sh.opened_at).toLocaleString(LOC()))}</span></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الوردية المفتوحة</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
@@ -3199,7 +3206,7 @@ async function viewShift() {
   wireHist();
   function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الورديات", subtitle: "", el: $("#shHist"), sheets: [
     { name: "الورديات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
-      rows: recent.map((r) => [new Date(r.opened_at).toLocaleString(LOC()), r.closed_at ? new Date(r.closed_at).toLocaleString(LOC()) : "مفتوح", r.closed_by_name || "",
+      rows: recent.map((r) => [stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",
         r.expected_cash, r.counted_cash, r.difference, r.close_note || ""]) }] })); }
   $("#shPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -3822,12 +3829,12 @@ async function viewHome() {
     <div class="quick">
       ${(ME.ui?.home || []).filter(canScreen).map((k, i) => `<a class="btn ${i === 0 ? "big" : "secondary"}" href="#/${k}">${esc(SCREENS[k][0])}</a>`).join("")}
       ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
-        <span class="muted">${att.open ? `حاضر من ${esc(new Date(att.open.check_in).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }))}` : ""} · <a href="#/attendance">حضوري هذا الشهر (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
+        <span class="muted">${att.open ? `حاضر من ${esc(hhmm(att.open.check_in))}` : ""} · <a href="#/attendance">حضوري هذا الشهر (${att.days_this_month} يوم)</a></span>` : ""}</div></section>
   <div class="totals">
     ${h.sales ? `<div>مبيعات اليوم<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن اليوم نفسه من الأسبوع الماضي` : ""}</span></div>` : ""}
     <div>فواتيرك اليوم<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
     <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الوردية مفتوحة" : "⚠ الوردية مغلقة"}<b>${h.shift_open ? "جارية" : "افتحها"}</b></div>
-    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(h.backup.last_at.slice(11, 16)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
+    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(hhmm(h.backup.last_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
   </div>
   <section class="panel mt"><h2>يحتاج إلى انتباهك</h2>
     <ul class="notes">${h.alerts.map((a) => `<li><span class="badge ${lvl[a.level][0]}">${lvl[a.level][1]}</span><div>${esc(a.text)} ${a.link ? `<a href="${a.link}">افتح</a>` : ""}</div></li>`).join("")
@@ -3893,7 +3900,7 @@ async function exportXlsx(filename, subtitle, sheets) {
 function printPreview(el, title, subtitle = "") {
   let area = $("#printArea");
   if (!area) { area = document.createElement("div"); area.id = "printArea"; document.body.append(area); }
-  const now = new Date().toLocaleString(LOC(), { dateStyle: "medium", timeStyle: "short" });
+  const now = new Date().toLocaleString(LOC(), { dateStyle: "medium", timeStyle: "short", hour12: H12() });
   area.innerHTML = `<header class="print-head"><b>${esc(ME.organization.name)}</b><h1>${esc(title)}</h1>${subtitle ? `<p>${esc(subtitle)}</p>` : ""}
     <small>طُبع ${esc(now)} — ${esc(ME.user.full_name)}</small></header>`;
   const copy = el.cloneNode(true);
@@ -4064,7 +4071,7 @@ async function viewReports() {
       <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
       ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
     <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table>
-      <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${h}:00 — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${h}</small></div>`; }).join("")}</div></section></div>
+      <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${hourLabel(h)} — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${hourLabel(h)}</small></div>`; }).join("")}</div></section></div>
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
@@ -4158,7 +4165,7 @@ async function viewFeedback() {
   const items = (await api("/api/feedback")).items, owner = ME.permissions.includes("users.manage");
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الشكاوي والمقترحات</h1>
       <div class="row"><button class="btn" id="fbNew">+ ملاحظة جديدة</button>${owner && items.length ? `<button class="btn secondary" id="fbDl">نزّلها (لإرسالها إلى التطوير)</button>` : ""}</div></div>
-    <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(f.created_at.slice(0, 16).replace("T", " "))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
+    <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(stamp(f.created_at))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
       <div>${esc(f.text)}</div>${f.reply ? `<div class="muted">الرد: ${esc(f.reply)}</div>` : ""}</div>
       ${owner ? `<select data-fb="${esc(f.id)}">${Object.entries(FB_ST).map(([k, [, t]]) => `<option value="${k}" ${f.status === k ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}</li>`).join("")
       || `<li class="muted">لا توجد ملاحظات بعد</li>`}</ul></section>`;
@@ -4174,7 +4181,7 @@ async function viewFeedback() {
 }
 
 // ------------------------------------------------------------------ attendance and payroll
-const tm = (iso) => (iso ? new Date(iso).toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" }) : "—");
+const tm = (iso) => (iso ? hhmm(iso) : "—");
 async function viewAttendance() {
   const a = await api("/api/attendance");
   app.innerHTML = `<section class="panel narrowpanel"><h1>حضوري هذا الشهر</h1><p>${a.days_this_month} يوم</p>
@@ -4241,7 +4248,7 @@ async function viewNotifications() {
       const [cls, ic] = NSEV[n.severity] || NSEV.info;
       return `<li class="${n.seen ? "" : "new"}"><span class="badge ${cls}">${ic}</span>
         <div><b>${esc(n.title)}</b>${n.body ? `<div>${esc(n.body)}</div>` : ""}
-        <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${new Date(n.created_at).toLocaleString(LOC())}
+        <div class="muted">${esc(n.actor || "")}${n.approver ? ` · بموافقة ${esc(n.approver)}` : ""} · ${esc(stamp(n.created_at))}
         ${n.entity_type === "sale" ? ` · <a href="#/sales/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "purchase_invoice" ? ` · <a href="#/purchases/${esc(n.entity_id)}">الفاتورة</a>` : ""}
         ${n.entity_type === "item" ? ` · <a href="#/items/${esc(n.entity_id)}">بطاقة الصنف</a>` : ""}

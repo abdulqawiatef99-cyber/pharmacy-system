@@ -176,3 +176,50 @@ class TestCheckoutPrinterOff(CheckoutCase):
             printing.open_drawer(self.db, self.ctx, "change")
         self.assertEqual(self.spool.deleted, [7, 7])
         self.assertEqual(self.audits("cash.drawer_open", "failed"), 1)
+
+
+    # #98 re-read before the pharmacy PC test (13/11): the cases the first tests did not cover
+
+    def test_every_drawer_timing_and_two_copies_leave_nothing_queued(self):
+        for i, timing in enumerate(("before", "with", "after")):
+            rs.save(self.db, self.ctx, {"drawer_timing": timing, "copies": 2})
+            self.spool.deleted.clear()
+            sid = self.draft()
+            out = self.complete(sid, [{"method": "cash", "amount": 3000}], receipt=True, rid=f"t{i}")
+            self.assertEqual((out["devices"]["receipt"], out["devices"]["drawer"]), ("failed", "failed"), timing)
+            self.assertEqual(self.spool.deleted, [7], timing)                 # one job, cancelled
+            self.assertEqual(self.spool.jobs, {}, timing)                     # nothing fires when it comes back
+            self.assertEqual(self.spool.data[-1].count(KICK), 1, timing)      # the one pulse was in that job
+        self.assertEqual(self.audits("cash.drawer_auto", "sent"), 0)
+        self.assertEqual(self.audits("print.receipt", "not_printed"), 3)
+
+    def test_card_sale_warns_for_the_receipt_only(self):
+        out = self.complete(self.draft(), [{"method": "card", "amount": 3000, "channel_id": self.card}], receipt=True)
+        self.assertEqual((out["devices"]["receipt"], out["devices"]["drawer"]), ("failed", "none"))
+        self.assertNotIn(KICK, self.spool.data[0])
+        self.assertEqual((self.spool.deleted, self.spool.jobs), ([7], {}))
+        self.assertEqual(self.audits("cash.drawer_auto"), 0)
+
+    def test_delivery_sale_warns_and_never_opens_the_drawer(self):
+        out = self.complete(self.draft(delivery=True), [{"method": "cash", "amount": 3000}])
+        self.assertEqual((out["devices"]["receipt"], out["devices"]["drawer"]), ("failed", "none"))
+        self.assertNotIn(KICK, self.spool.data[0])
+        self.assertEqual((self.spool.deleted, self.spool.jobs), ([7], {}))
+
+    def test_a_retry_of_the_failed_sale_sends_nothing_again(self):
+        sid = self.draft()
+        self.complete(sid, [{"method": "cash", "amount": 3000}], receipt=True)
+        self.spool.mode = "takes"                                             # printer back on, cashier presses F9 again
+        again = self.complete(sid, [{"method": "cash", "amount": 3000}], receipt=True)
+        self.assertEqual(again["status"], "completed")
+        self.assertEqual((len(self.spool.data), self.spool.deleted), (1, [7]))  # no second job, no late pulse
+        self.assertEqual(self.audits("cash.drawer_auto", "sent"), 0)
+
+    def test_next_sale_after_power_on_prints_once_with_one_pulse(self):
+        self.complete(self.draft(), [{"method": "cash", "amount": 3000}], receipt=True)
+        self.spool.mode = "takes"
+        out = self.complete(self.draft(), [{"method": "cash", "amount": 3000}], receipt=True, rid="r2")
+        self.assertEqual((out["devices"]["receipt"], out["devices"]["drawer"]), ("sent", "sent"))
+        self.assertEqual(len(self.spool.data), 2)                             # the cancelled job is not resent
+        self.assertEqual(self.spool.data[-1].count(KICK), 1)
+        self.assertEqual(self.audits("cash.drawer_auto", "sent"), 1)
