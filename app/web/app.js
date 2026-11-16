@@ -3135,6 +3135,7 @@ async function complete(findings) {
     btn.disabled = false;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = null; viewPos(); }
+    if (er.code === "price_changed") { try { SALE = await api(`/api/sales/${SALE.id}`); renderCart(); } catch { /* the message is already shown */ } }
     if (er.code === "no_open_shift") $("#posShift").click();
     if (er.code === "below_cost_confirm") {
       const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");

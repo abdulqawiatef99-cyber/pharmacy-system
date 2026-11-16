@@ -514,6 +514,11 @@ class Sales:
                 out = self.get(ctx, sid)
                 out["replayed"] = True
                 return out
+        if self._reprice_contract(ctx, sid):
+            # a contract stopped, changed or unlinked since the draft was priced: the draft now carries
+            # today's terms and the cashier confirms the new total, as with any price that moved
+            raise Conflict("تغيّر خصم التعاقد على هذه الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع",
+                           code="price_changed", details={"reason": "contract"})
         if payments is None:          # older screens: three amounts
             payments = [{"method": m, "amount": a} for m, a in
                         (("cash", paid_cash), ("card", paid_card), ("credit", on_credit)) if a]
@@ -638,6 +643,32 @@ class Sales:
                             "، ".join(f"{b['name']}: {egp(b['net'])} والتكلفة {egp(b['cost'])}"
                                      for b in below_cost[:4]), "sale", sid)
         return self.get(ctx, sid)
+
+    def _reprice_contract(self, ctx: Context, sid: str) -> bool:
+        """Put the customer's contract terms of this moment on a draft (saved); True when a line's discount
+        changed, so the total the cashier saw is no longer the total."""
+        from . import contracts
+        q = ("SELECT l.id, l.discount_bp, l.discount_source FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+             " WHERE l.sale_id=? AND s.org_id=? ORDER BY l.line_no")
+
+        def state():
+            head = self.db.one("SELECT contract_id FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            return head["contract_id"], [tuple(r) for r in self.db.all(q, (sid, ctx.org_id))]
+
+        with self.db.transaction():
+            s = self.db.one("SELECT status FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            if not s or s["status"] != "draft":
+                return False                      # the checks below answer for a missing or finished sale
+            before = state()
+            contracts.apply(self.db, sid)
+            if state() == before:
+                return False
+            if state()[1] != before[1]:           # the header alone (contract tag) is not a new price
+                self.db.execute("UPDATE sales SET version=version+1 WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            audit.record(self.db, ctx, "sale.contract_repriced", "sale", sid,
+                         before={"contract": before[0], "lines": [[bp, src] for _, bp, src in before[1]]},
+                         after={"contract": state()[0], "lines": [[bp, src] for _, bp, src in state()[1]]})
+            return state()[1] != before[1]
 
     def _next_no(self, ctx: Context, branch_id: str, kind: str) -> int:
         self.db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,?,1)"
