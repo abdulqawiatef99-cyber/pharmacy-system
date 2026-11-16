@@ -21,24 +21,43 @@ def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
     return d1, d2, local_day_bounds(d1)[0], local_day_bounds(d2)[1]
 
 
+def local_buckets(db: Database, column: str, cols: str, from_where: str, params: tuple):
+    """Sums per UTC quarter-hour of `column`, each with the local time of that quarter-hour: the caller groups them
+    by local day or hour. One fixed offset for the whole report is wrong across a daylight-saving change (Egypt
+    has one again since 2023), and quarter-hours also fit the time zones that are 30 or 45 minutes off."""
+    from datetime import datetime, timedelta, timezone
+    out = []
+    for r in db.all(f"SELECT substr({column}, 1, 13) h, CAST(substr({column}, 15, 2) AS INTEGER) / 15 q, {cols}"
+                    f"{from_where} GROUP BY 1, 2 ORDER BY 1, 2", params):
+        d = dict(r)
+        utc = datetime.strptime(d.pop("h"), "%Y-%m-%dT%H").replace(tzinfo=timezone.utc) + timedelta(minutes=15 * d.pop("q"))
+        out.append((utc.astimezone(), d))
+    return out
+
+
 def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
     ctx.require("sales.totals")
     d1, d2, lo, hi = _period(date_from, date_to)
     base = " FROM sales s WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
     p = (ctx.org_id, ctx.branch_id, lo, hi)
-    # local day/hour: completed_at is UTC; shift by the PC's current UTC offset (Egypt has no DST change mid-report risk worth more)
-    from datetime import datetime
-    off = datetime.now().astimezone().utcoffset()
-    mod = f"{int(off.total_seconds() // 60):+d} minutes"
-    daily = [dict(r) for r in db.all(
-        f"SELECT date(s.completed_at, '{mod}') day, count(*) n, sum(s.total) total, sum(s.paid_cash) cash, sum(s.paid_card) card,"
-        f" sum(s.paid_transfer) transfer, sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.returned_total) returns"
-        f"{base} GROUP BY 1 ORDER BY 1", p)]
+    # local day/hour: completed_at is UTC and the offset of each moment is its own (daylight saving time), so the
+    # sums come per UTC quarter-hour and are put on their local day and hour here (R7, 16/11)
+    cols = ("count(*) n, sum(s.total) total, sum(s.paid_cash) cash, sum(s.paid_card) card, sum(s.paid_transfer) transfer,"
+            " sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.returned_total) returns")
+    days: dict = {}
+    hours: dict = {}
+    for when, r in local_buckets(db, "s.completed_at", cols, base, p):
+        d = days.setdefault(when.date().isoformat(), {"day": when.date().isoformat(), **{k: 0 for k in r}})
+        h = hours.setdefault(when.hour, {"hour": when.hour, "n": 0, "total": 0})
+        for k, v in r.items():
+            d[k] += v or 0
+        h["n"] += r["n"]
+        h["total"] += r["total"] or 0
+    daily = [days[k] for k in sorted(days)]
+    by_hour = [hours[k] for k in sorted(hours)]
     by_user = [dict(r) for r in db.all(
         f"SELECT u.full_name name, count(*) n, sum(s.total) total, sum(s.discount_total) discount{base.replace('FROM sales s', 'FROM sales s JOIN users u ON u.id=s.created_by')}"
         " GROUP BY s.created_by ORDER BY 3 DESC", p)]
-    by_hour = [dict(r) for r in db.all(
-        f"SELECT CAST(strftime('%H', s.completed_at, '{mod}') AS INTEGER) hour, count(*) n, sum(s.total) total{base} GROUP BY 1 ORDER BY 1", p)]
     top = _top_items(db, ctx, p)
     t = db.one(f"SELECT count(*) n, coalesce(sum(s.total),0) total, coalesce(sum(s.returned_total),0) returns,"
                f" coalesce(sum(s.discount_total),0) discount{base}", p)
@@ -119,7 +138,8 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
             "SELECT i.id item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, b.batch_no, b.expiry_date, sb.qty,"
             " coalesce(b.public_price, i.public_price) price FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
             " JOIN items i ON i.id=sb.item_id WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL"
-            " AND b.expiry_date <= ? ORDER BY b.expiry_date LIMIT 500", (ctx.org_id, ctx.branch_id, soon)):
+            " AND b.expiry_date <= ? AND (i.hidden=0 OR ?) ORDER BY b.expiry_date LIMIT 500",
+            (ctx.org_id, ctx.branch_id, soon, int(ctx.can("items.hidden")))):
         d = dict(r)
         d["days_left"] = (date.fromisoformat(d["expiry_date"]) - today).days
         d["value"] = retail_value(d["qty"], d["price"] or 0, d["pack_size"])
