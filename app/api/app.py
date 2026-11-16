@@ -1622,10 +1622,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _sugg_params(req):
         qp = req.query_params
         try:
-            return {"cover_days": int(qp.get("cover_days", 30)), "lead_days": int(qp.get("lead_days", 2)),
-                    "safety_days": int(qp.get("safety_days", 5)), "window_days": int(qp.get("window_days", 90))}
+            out = {"cover_days": int(qp.get("cover_days", 30)), "lead_days": int(qp.get("lead_days", 2)),
+                   "safety_days": int(qp.get("safety_days", 5)), "window_days": int(qp.get("window_days", 90))}
         except ValueError:
             raise ValidationFailed("قيم غير صحيحة")
+        # the screen's own limits (min 1/0/0/7); the top ends keep a typo from overflowing a date (500)
+        bounds = {"cover_days": (1, 730), "lead_days": (0, 365), "safety_days": (0, 365), "window_days": (7, 3650)}
+        if any(not lo <= out[k] <= hi for k, (lo, hi) in bounds.items()):
+            raise ValidationFailed("قيم غير صحيحة: التغطية 1–730 يوم، التوريد والأمان 0–365، فترة الاستهلاك 7–3650")
+        return out
 
     @handler
     async def proc_suggest(req):
