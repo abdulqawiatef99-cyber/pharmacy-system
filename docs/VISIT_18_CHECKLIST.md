@@ -160,8 +160,8 @@ keeps every quoted screen text and every figure true.
 |---|---|---|---|
 | T0 | `hostname` | Claude | `DESKTOP-GQGL6UF` (any letter case); anything else: stop |
 | T1 | The database is the trial one: no real items, customers or sales; `r = await visit.pre()` | Claude | Backup PASS; counts noted on #19 |
-| T2 | Hands list rows 1–5 (printer chosen and saved, test page, drawer, a barcode on «صنف تجربة أ») | Owner | As the list says; a missing device is written down, not a failure of the program |
-| T3 | Script «قبل اليوم» then steps 1–11, with hands rows 6–11 inside steps 3, 4, 5 and 7 | Owner | Each «المفروض تشوف» cell |
+| T2 | Hands list rows 1–4 (printer chosen and saved, test page, drawer) | Owner | As the list says; a missing device is written down, not a failure of the program |
+| T3 | Script «قبل اليوم» (the two trial items), then hands row 5 (a barcode on «صنف تجربة أ»), then steps 1–11, with hands rows 6–11 inside steps 3, 4, 5 and 7 | Owner | Each «المفروض تشوف» cell |
 | T4 | `(await visit.day19()).md` before step 12 | Claude | Every row PASS (no `D-close` row yet) |
 | T5 | Script step 12 (count 170.50 with a note) and hands row 12 | Owner | «عجز» 0.16; shift report printed |
 | T6 | `(await visit.day19()).md` again | Claude | Every row PASS, `D-close` included |
