@@ -8,7 +8,7 @@ or schedule the next session. Only the manager chat edits this file (workers wri
 2. [x] Night B: #19 trial-day script refresh → #295 merged 17/11 02:00 (+ `docs/DAY19_OWNER_HANDS.md`).
 3. [x] Morning report 17/11 12:30 at the top of `docs/HANDOFF.md`.
 4. [x] Day chat 17/11: cashier PC updated + #18 closed; Heikal PC installed `cc99311`, functional + screen run (#19 comment), fixes #311 #312 merged.
-4b. [ ] New review installer from develop (with #311 #312) → Heikal PC → cashier PC (owner OK); restore drill + scale.py small/medium/giant on the Heikal PC (needs a command window there).
+4b. [~] New review installer from develop (with #311 #312) → Heikal PC → cashier PC (owner OK); restore drill + scale.py on the Heikal PC. 17/11: `installer-review` from `de9a79c` (run 44111228424) installed on both PCs; G4 PASS on the Heikal PC; restore drill + scale via `scripts/windows/heikal-tests.bat` (#315) pending.
 5. [x] #160 + #301 merged 17/11 14:48 (owner OK), #306 fixed the Windows test that stopped the build; bundled installer
        `installer-review` from `cc99311` (run 44091400377). Open: `scale.py` second pass on the Heikal PC (item 4).
 6. [ ] #252: code side done (see its 17/11 comment); owner/device side with the owner in the day chat.
