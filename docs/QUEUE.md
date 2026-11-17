@@ -7,8 +7,8 @@ or schedule the next session. Only the manager chat edits this file (workers wri
 1. [x] Night A: #253 cloud scale test → #296 merged, table on #253, fixes #297 #302 #303, rest in #304.
 2. [x] Night B: #19 trial-day script refresh → #295 merged 17/11 02:00 (+ `docs/DAY19_OWNER_HANDS.md`).
 3. [x] Morning report 17/11 12:30 at the top of `docs/HANDOFF.md`.
-4. [ ] Day chat 17/11: cashier PC «تحديث» to `41c9510` + stock check DONE 14:32 (#18). Open: Heikal PC (worker chat,
-       driven by the manager): install the bundled installer → #19 → #253 small/medium run alone (roles: #113, 17/11).
+4. [x] Day chat 17/11: cashier PC updated + #18 closed; Heikal PC installed `cc99311`, functional + screen run (#19 comment), fixes #311 #312 merged.
+4b. [ ] New review installer from develop (with #311 #312) → Heikal PC → cashier PC (owner OK); restore drill + scale.py small/medium/giant on the Heikal PC (needs a command window there).
 5. [x] #160 + #301 merged 17/11 14:48 (owner OK), #306 fixed the Windows test that stopped the build; bundled installer
        `installer-review` from `cc99311` (run 44091400377). Open: `scale.py` second pass on the Heikal PC (item 4).
 6. [ ] #252: code side done (see its 17/11 comment); owner/device side with the owner in the day chat.

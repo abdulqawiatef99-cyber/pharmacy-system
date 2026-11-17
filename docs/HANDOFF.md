@@ -4,7 +4,22 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 17/11 15:40 Cairo — day chat (manager, cashier PC): bundled installer built, Heikal worker started (READ THIS FIRST)
+## 17/11 16:40 Cairo — day chat (manager, cashier PC), end report (READ THIS FIRST)
+Open reminders: product name + USB flash drive (18/11); Windows password + uninstall Radmin VPN (and AnyDesk if unused) on both PCs before launch; Wi-Fi: check the router's connected devices, then change the password; odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+1. Done, with evidence
+   - #18 closed (scan steps 2.5/2.6 PASS 15:50): G7 → L2. Heikal PC (desktop-gqgl6uf) on the bundled installer `cc99311`, synthetic data; functional run 55/58 PASS + screens 15/16 PASS (#19 comment; full log in the claude.ai project `claude/heikal-log-2026-11-17.md`): G2, G3 → L2. Total **61.0%**.
+   - Fixed + merged (CI linux green, Codex clean, full suite 1268-1270 OK locally): #311 purchase price on the item card owner-only by default (owner can open it per person: «عرض التكلفة والربح»), #312 drug-safety panel scrolled into view (Heikal S1), #313 giant size for the scale test (6000-9000 sales/day, 45,000 items).
+   - #252: owner answers + decisions on the issue (16:02). #310 opened: supplier returns, owner's bonus-line rule (after launch). #307: CI windows job test (small).
+   - Heikal worker chat is driven from the manager chat through the browser pane on the cashier PC (works; queued messages need «Send now»). Owner must click any computer-use permission card there himself (the manager may not).
+2. Not done and why
+   - Restore drill on Windows (G5) and `scale.py` small/medium/giant on the Heikal PC: the Heikal chat has no shell on that PC. Next chat: find a one-click way (a .bat delivered with the program, or the owner opens one command window) and do both.
+   - G4 → L2 needs #311 seen on a device; the Heikal PC's «تحديث» fails (no GitHub key file `%USERPROFILE%\.pharmacy\github_token.txt`): fix by a new installer build later, or give that PC the key file.
+   - Cashier PC still on `41c9510` (no 0036): it gets the bundled installer after the owner's OK (Heikal passed).
+3. Decisions (owner 17/11): purchase price owner-only by default; supplier return = net invoice price, no partial return of a bonus line (#310); test sizes up to the largest pharmacies, never capped by his own; he talks to one chat only.
+4. Next goal (new normal chat in the project; Opus, effort high): (a) new review installer from develop (includes #311 #312) → Heikal PC, then cashier PC with the owner's OK; (b) restore drill + scale run on the Heikal PC; (c) #20 preparation.
+5. المحادثة دي اتحفظت وممكن تتمسح
+
+## 17/11 15:40 Cairo — day chat (manager, cashier PC): bundled installer built, Heikal worker started
 Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 Roles today: #113, the three comments of 17/11 (14:35, 14:40, 14:45 Cairo). The owner talks only to the manager chat «جهاز كاشير صيدلية عبد القوي».
 1. Done, with evidence
