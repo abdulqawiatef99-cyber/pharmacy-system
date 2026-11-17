@@ -60,8 +60,28 @@ class Client:
         self.base = base
         self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
                                               urllib.request.ProxyHandler({}))
+        self.creds: dict | None = None
+
+    def login(self, username: str, password: str):
+        """Sign in and remember how: a snapshot that ends more than 30 days before the real today loses its
+        sessions to the daily clean-up (it compares with SQLite's own clock, which serve_at.py does not move),
+        so a request answered 401 signs in again and is asked once more."""
+        self.creds = None
+        out = self.req("POST", "/api/auth/login", {"username": username, "password": password})
+        if out[0] == 200:
+            self.creds = {"username": username, "password": password}
+        return out
 
     def req(self, method: str, path: str, body=None, timeout=600):
+        out = self._req(method, path, body, timeout)
+        if out[0] == 401 and self.creds:
+            creds, self.creds = self.creds, None
+            if self._req("POST", "/api/auth/login", creds, 60)[0] == 200:
+                self.creds = creds
+                out = self._req(method, path, body, timeout)
+        return out
+
+    def _req(self, method: str, path: str, body=None, timeout=600):
         data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
         r = urllib.request.Request(self.base + path, data=data, method=method, headers=H)
         t = time.perf_counter()
@@ -395,7 +415,7 @@ def explain(data: Path, f: dict, slow_ms: float) -> list[dict]:
     while not srv.started:
         time.sleep(0.05)
     c = Client(f"http://127.0.0.1:{port}")
-    c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
+    c.login("owner", OWNER_PW)
     c.req("POST", "/api/cash/open", {"opening_cash": 10000})
     for name, path in scenarios(f):
         c.req("GET", path)
@@ -449,7 +469,7 @@ def main(argv=None):
         res["startup"] = {"health_s": round(srv.ready_s, 2), "mem_after_start_mb": srv.mem()}
         try:
             c = Client(srv.base)
-            code, _, _, _ = c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
+            code, _, _, _ = c.login("owner", OWNER_PW)
             assert code == 200, code
             c.req("POST", "/api/cash/open", {"opening_cash": 10000})
             res["requests"] = {}

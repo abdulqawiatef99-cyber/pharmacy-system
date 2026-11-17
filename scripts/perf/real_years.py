@@ -490,7 +490,7 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
     rec["startup"] = {"health_s": round(srv.ready_s, 2)}
     try:
         c = bench.Client(srv.base)
-        code, body, _, _ = c.req("POST", "/api/auth/login", {"username": owner_username, "password": OWNER_PW})
+        code, body, _, _ = c.login(owner_username, OWNER_PW)
         if code != 200:
             why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
             raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
