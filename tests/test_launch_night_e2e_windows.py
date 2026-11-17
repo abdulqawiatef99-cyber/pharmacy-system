@@ -142,7 +142,7 @@ class LaunchNightOnWindows(unittest.TestCase):
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            r = self.run_bat("launch-fresh-start.bat", "YES\n")
+            r = self.run_bat("launch-fresh-start.bat", "YES\n", {"PHARM_E2E_ANSWER": "YES"})
             text = self.log("fresh-start.txt")
             self.assertEqual(r.returncode, 0, text + r.stdout + r.stderr)
             self.assertIn("PASS - ALL DONE", text)
@@ -170,7 +170,7 @@ class LaunchNightOnWindows(unittest.TestCase):
         ESTOCK.mkdir()
         (ESTOCK / "قائمة الأصناف.xlsx").write_bytes(xlsx(CATALOG))
         (ESTOCK / "كميات الأصناف طبقا لتواريخ الصلاحية.xlsx").write_bytes(xlsx(stock_rows()))
-        r = self.run_bat("estock-import.bat", "owner\nYES\n", {"PHARM_IMPORT_PASSWORD": PASSWORD})
+        r = self.run_bat("estock-import.bat", "owner\nYES\n", {"PHARM_IMPORT_PASSWORD": PASSWORD, "PHARM_E2E_OWNER": "owner", "PHARM_E2E_ANSWER": "YES"})
         text = self.log("estock-import.txt")
         self.assertEqual(r.returncode, 0, text + r.stdout + r.stderr)
         self.assertIn("PASS - ALL DONE", text)
@@ -193,7 +193,7 @@ class LaunchNightOnWindows(unittest.TestCase):
         srv = http.server.HTTPServer(("127.0.0.1", 8000), NotFound)   # the program cannot start on its port
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            r = self.run_bat("launch-fresh-start.bat", "YES\n")
+            r = self.run_bat("launch-fresh-start.bat", "YES\n", {"PHARM_E2E_ANSWER": "YES"})
         finally:
             srv.shutdown()
             srv.server_close()

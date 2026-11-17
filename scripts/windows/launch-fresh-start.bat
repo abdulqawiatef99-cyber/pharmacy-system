@@ -61,6 +61,8 @@ echo This keeps today's data in a folder named %TRIAL% and starts the program EM
 echo E-Stock is not touched.
 set "ANS="
 set /p "ANS=Type YES to continue: "
+REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the answer is typed
+if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed, nothing was changed" & goto fail)
 call :log PASS "confirmed by the user"
 

@@ -52,6 +52,8 @@ call :log PASS "E-Stock files found and copied to %WORK%"
 echo.
 set "OWNER="
 set /p "OWNER=Owner user name (the one made on the setup screen): "
+REM automated check on synthetic data only (CI): never set on the pharmacy PC
+if defined PHARM_E2E_OWNER set "OWNER=%PHARM_E2E_OWNER%"
 if "%OWNER%"=="" (set "MSG=no user name given" & goto fail)
 set "PWARG="
 REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the program asks
@@ -79,6 +81,7 @@ echo.
 echo Read the dry run above (also in %DRY%).
 set "ANS="
 set /p "ANS=Type YES to apply the import to the real database: "
+if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was imported" & goto fail)
 call :log PASS "apply confirmed by the user"
 

@@ -205,7 +205,7 @@ class EstockImportBat(Common, unittest.TestCase):
         confirm = first(L, 'set /p "ANS=Type YES to apply')
         check = first(L, '"%MANAGE%" verify')
         self.assertTrue(stop < dry < confirm < apply < check)
-        self.assertIn('if /i not "%ANS%"=="YES"', L[confirm + 1])
+        self.assertIn('if /i not "%ANS%"=="YES"', L[confirm + 2])
         for at in (dry, apply):
             block = L[at:at + 7]
             self.assertIn('if not "%RC%"=="0"', " ".join(block))
