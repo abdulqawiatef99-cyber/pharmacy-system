@@ -48,5 +48,138 @@ class TestScale(unittest.TestCase):
             self.assertIn("stock check: all balances match", out.read_text(encoding="utf-8"))
 
 
+TURNS_WORKER = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+import scale
+real_sleep = time.sleep
+scale.time.sleep = lambda s: real_sleep(0.0005)          # the waits of Turns, shortened
+folder, rounds = sys.argv[2], int(sys.argv[3])
+t = scale.Turns(folder)
+inside = os.path.join(folder, "inside")
+while not os.path.exists(os.path.join(folder, "go")):     # all workers start their first attempt together
+    real_sleep(0.0005)
+overlaps = 0
+for _ in range(rounds):
+    t.measure(True)
+    try:
+        os.close(os.open(inside, os.O_CREAT | os.O_EXCL | os.O_WRONLY))   # fails when another one is inside too
+        real_sleep(0.0005)
+        os.unlink(inside)
+    except FileExistsError:
+        overlaps += 1
+    t.measure(False)
+print(overlaps)
+"""
+
+RESTART_SCRIPT = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import bench, real_years as ry
+tmp = Path(sys.argv[2])
+data = tmp / "snap" / "data"
+data.mkdir(parents=True)
+(data / "pharmacy.db").write_bytes(b"")
+servers, asked = [], []
+
+class FakeServer:
+    def __init__(self, data, at, env_extra=None):
+        self.base, self.ready_s, self.stopped = f"fake-{len(servers)}", 0.1, False
+        servers.append(self)
+    def stop(self):
+        self.stopped = True
+
+class FakeClient:
+    def __init__(self, base):
+        self.base = base
+    def login(self, u, p):
+        return 200, {}, 1.0, 0
+    def req(self, method, path, body=None, timeout=600):
+        return 200, {}, 1.0, 0
+
+def timed(client, method, path, body=None, n=5, timeout=600):
+    asked.append((path.split("?")[0], client.base))
+    gone = "unsold" in path and "from=2026-01-01" in path           # the month report never answers
+    return {"median_ms": 1.0, "max_ms": 1.0, "status": "TimeoutError" if gone else 200, "bytes": 0}
+
+bench.Server, bench.Client, bench.timed = FakeServer, FakeClient, timed
+bench.facts = lambda p: {"day": "2026-01-15", "end_local": "2026-01-15T20:00", "top_item": "i", "supplier": "s",
+                         "stocked": [{"id": "x", "name_en": "Abcd 5mg Tab", "barcode": "2990000000001", "public_price": 100}],
+                         "customer": "c", "shift": "h", "counts": {}, "largest_tables": {}}
+rec = {"label": "fake"}
+ry.measure(data, "owner", ry.date(2025, 12, 1), 1, rec, ry.Report(tmp / "r.txt"), backup=False)
+unsold = [(p, b) for p, b in asked if "unsold" in p]
+after = asked[asked.index(unsold[0]) + 1]
+print(rec.get("restarts"), unsold[0][1] != after[1], servers[0].stopped, all(s.stopped for s in servers), len(servers))
+"""
+
+
+class TestTurns(unittest.TestCase):
+    """scale.py --turns: one process measures at a time and no simulated day starts under a measurement."""
+
+    def run_py(self, code, *args, timeout=120):
+        return subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts/perf"), *map(str, args)],
+                              capture_output=True, text=True, timeout=timeout, cwd=str(ROOT))
+
+    def test_simultaneous_attempts_never_measure_together(self):
+        # three processes take the turn 200 times each, the first attempt at the same moment (Codex P2/P1 on #296:
+        # "look for a marker, then write your own" let two in together)
+        with tempfile.TemporaryDirectory() as tmp:
+            ps = [subprocess.Popen([sys.executable, "-c", TURNS_WORKER, str(ROOT / "scripts/perf"), tmp, "200"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(ROOT)) for _ in range(3)]
+            (Path(tmp) / "go").touch()
+            outs = [p.communicate(timeout=120) for p in ps]
+            self.assertEqual([p.returncode for p in ps], [0, 0, 0], outs)
+            self.assertEqual([o[0].strip() for o in outs], ["0", "0", "0"])
+            self.assertEqual(sorted(f.name for f in Path(tmp).iterdir()), ["go"])       # lock and marks are gone
+
+    def test_a_day_waits_for_the_measurement_and_the_measurement_for_the_day(self):
+        code = r"""
+import os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import scale
+real_sleep = time.sleep
+scale.time.sleep = lambda s: real_sleep(0.002)
+folder = sys.argv[2]
+me = scale.Turns(folder)
+lock, other_day = os.path.join(folder, "measure.lock"), os.path.join(folder, "day.999999")
+out = []
+# 1. somebody else measures: my day does not start, and leaves no mark while it waits
+open(lock, "w").close()
+th = threading.Thread(target=lambda: me.day(True)); th.start(); real_sleep(0.1)
+out.append(th.is_alive())
+os.unlink(lock); th.join(5)
+out.append((not th.is_alive(), os.path.exists(me.mine)))
+me.day(False)
+# 2. somebody else is in the middle of a day: I hold the lock but do not measure until that day ends
+open(other_day, "w").close()
+th = threading.Thread(target=lambda: me.measure(True)); th.start(); real_sleep(0.1)
+out.append((th.is_alive(), os.path.exists(lock)))
+os.unlink(other_day); th.join(5)
+out.append(not th.is_alive())
+me.measure(False)
+out.append(os.listdir(folder))
+print(out)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_py(code, tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "[True, (True, True), (True, True), True, []]")
+
+
+class TestMeasureOrder(unittest.TestCase):
+    def test_a_report_that_never_answers_gets_a_new_server(self):
+        # its query goes on inside the server after the client gave up; the next request must not be measured
+        # under it (Codex P2 on #296). Fake server and client: only the order of real_years.measure is under test.
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run([sys.executable, "-c", RESTART_SCRIPT, str(ROOT / "scripts/perf"), tmp],
+                               capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # one restart; the request after the silent one went to another server; every server was stopped;
+            # 3 servers: the first, the one after the restart, the second start-up at the end
+            self.assertEqual(r.stdout.strip(), "1 True True True 3")
+
+
 if __name__ == "__main__":
     unittest.main()

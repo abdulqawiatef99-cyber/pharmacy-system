@@ -176,9 +176,13 @@ class Server:
         self.port = free_port()
         # every path explicitly: an inherited PHARM_DB_PATH / PHARM_UPLOAD_DIR (the Windows release validation sets
         # them) would make the server open another database than the snapshot
+        # its temp folder next to the snapshot: a server stopped in the middle of a backup (it starts one when it
+        # is closed) leaves its copy of the database behind, and there it is deleted with the work folder
+        tmp = data.parent / "tmp"
+        tmp.mkdir(exist_ok=True)
         env = {**os.environ, "PHARM_DATA_DIR": str(data), "PHARM_DB_PATH": str(data / "pharmacy.db"),
                "PHARM_UPLOAD_DIR": str(data / "uploads"), "PHARM_BACKUP_DIR": str(data.parent / "backups"),
-               "PYTHONUNBUFFERED": "1", **(env_extra or {})}
+               "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp), "PYTHONUNBUFFERED": "1", **(env_extra or {})}
         self.t0 = time.perf_counter()
         self.p = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "serve_at.py"), "--at", at, "--port", str(self.port)],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

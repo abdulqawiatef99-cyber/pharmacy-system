@@ -488,62 +488,78 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
         rec["backup"] = bench.backup_measure(data, work)
         report.write()
     report.progress(f"{rec['label']}: server and requests")
-    srv = bench.Server(data, f["end_local"])
-    rec["startup"] = {"health_s": round(srv.ready_s, 2)}
+
+    class Measured:
+        """The measured server and a signed-in client."""
+
+        def __init__(self):
+            self.srv = bench.Server(data, f["end_local"])
+            self.c = bench.Client(self.srv.base)
+            code, body, _, _ = self.c.login(owner_username, OWNER_PW)
+            if code != 200:
+                self.srv.stop()
+                why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
+                raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
+
+    m = Measured()
+    rec["startup"] = {"health_s": round(m.srv.ready_s, 2)}
     try:
-        c = bench.Client(srv.base)
-        code, body, _, _ = c.login(owner_username, OWNER_PW)
-        if code != 200:
-            why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
-            raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
-        c.req("POST", "/api/cash/open", {"opening_cash": 10000})
+        m.c.req("POST", "/api/cash/open", {"opening_cash": 10000})
         rec["requests"] = {}
         short, long = bench.scenarios(f), long_scenarios(f, start)
         # A report that does not answer in time keeps a server thread busy after the client gave up, and whatever is
-        # measured next is measured under that load. So: the daily screens, the cashier and a purchase invoice first,
-        # then the long reports, then the blocking probes, and last the reports known to need minutes on a large
-        # catalog (LAST).
+        # measured next is measured under that load. So the server is started again after such a report (run()), and
+        # the order keeps the damage small anyway: the daily screens, the cashier and a purchase invoice first, then
+        # the long reports, then the blocking probes, and last the reports known to need minutes on a large catalog.
         last = [x for x in long if x[0] in LAST]
 
         def run(scen):
+            nonlocal m
             for name, path in scen:
-                rec["requests"][name] = bench.timed(c, "GET", path, n=repeat, timeout=REQUEST_TIMEOUT)
+                r = rec["requests"][name] = bench.timed(m.c, "GET", path, n=repeat, timeout=REQUEST_TIMEOUT)
                 report.write()
+                if not isinstance(r["status"], int):
+                    # no answer: the report goes on inside the server after the client gave up, and the next
+                    # request would be measured under it. A new server (the shift stays open in the database).
+                    rec["restarts"] = rec.get("restarts", 0) + 1
+                    m.srv.stop()
+                    m = Measured()
 
         run(short)
         if f["stocked"]:
-            cf = bench.cashier_flow(c, f, n=repeat)
+            cf = bench.cashier_flow(m.c, f, n=repeat)
             if "errors" in cf:
                 cf["errors"] = len(cf["errors"])           # error texts can carry item names: count only
             rec["cashier"] = cf
             report.write()
             report.progress(f"{rec['label']}: a purchase invoice")
-            rec["purchase"] = purchase_flow(c, f)
+            rec["purchase"] = purchase_flow(m.c, f)
             report.write()
         report.progress(f"{rec['label']}: long reports")
         run([x for x in long if x not in last])
         if f["stocked"]:
             report.progress(f"{rec['label']}: scanning while the server is busy")
             if backup:
-                rec["during_backup"] = bench.during_backup(c, f)
-            rec["during_report"] = during_report(c, f, dict(long)["sales report (all years)"])
+                rec["during_backup"] = bench.during_backup(m.c, f)
+            rec["during_report"] = during_report(m.c, f, dict(long)["sales report (all years)"])
             report.write()
             # nothing may block the cashier: scan again while each of the slowest requests runs (a second or more)
             slowest = sorted(((r["median_ms"], n) for n, r in rec["requests"].items()
                               if r.get("status") == 200 and r["median_ms"] >= 1000 and n != "sales report (all years)"),
                              reverse=True)[:SLOWEST]
-            rec["during_slow"] = {n: during_report(c, f, dict(short + long)[n]) for _, n in slowest}
+            rec["during_slow"] = {n: during_report(m.c, f, dict(short + long)[n]) for _, n in slowest}
             report.write()
         # the owner's stock check «مطابقة الأرصدة» reads every stock movement: once, it is a button, not a screen
-        rec["requests"]["stock check (run now)"] = bench.timed(c, "POST", "/api/reports/stock-check", n=1)
+        rec["requests"]["stock check (run now)"] = bench.timed(m.c, "POST", "/api/reports/stock-check", n=1)
         report.write()
         report.progress(f"{rec['label']}: the heaviest reports")
         run(last)
     finally:
-        srv.stop()
+        m.srv.stop()
     srv = bench.Server(data, f["end_local"])
     rec["startup"]["health_warm_s"] = round(srv.ready_s, 2)
     srv.stop()
+    shutil.rmtree(work / "tmp", ignore_errors=True)          # the servers' temp folder (bench.Server)
 
 
 def summary(snaps: list[dict]) -> list[str]:

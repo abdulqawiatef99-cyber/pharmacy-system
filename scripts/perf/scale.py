@@ -168,7 +168,11 @@ def measure_existing(a, report) -> int:
     rec = {"label": a.label or snap.parent.name, "profile": a.profile or "custom", "days": (day(last) - start).days}
     report.data["plan"] = {"snapshot": rec["label"], "machine": machine()}
     report.data["snapshots"].append(rec)
+    turns = Turns(a.turns)
     try:
+        if a.turns:
+            report.progress(f"{rec['label']}: waiting for its turn to measure")
+        turns.measure(True)
         measure_snapshot(snap, rec, start, a, report)
         report.data["status"] = "finished"
     except BaseException as e:
@@ -176,6 +180,7 @@ def measure_existing(a, report) -> int:
         report.data["status"] = "failed"
         raise
     finally:
+        turns.measure(False)
         report.data["summary"] = ry.summary(report.data["snapshots"])
         report.progress("done")
     print("\n".join(report.data["summary"]))
