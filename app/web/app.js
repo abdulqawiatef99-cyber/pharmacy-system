@@ -3076,6 +3076,10 @@ function renderFindings(findings) {
       ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
     <button class="btn mt" id="posConfirm">تأكيد وإتمام البيع</button></div>`;
   $("#posConfirm").addEventListener("click", () => complete(findings));
+  // Heikal PC 17/11 (S1): the panel opens under the cart; on a short window «إتمام البيع» seemed to do nothing.
+  // Bring it into view and put the cursor where the cashier must act (first reason box, else the confirm button).
+  $("#posSafety").scrollIntoView({ block: "center" });
+  ($("#posSafety [data-dec]") || $("#posConfirm")).focus({ preventScroll: true });
 }
 
 function currentPayments() {
