@@ -27,7 +27,7 @@ set "LOG=%OUT%\estock-import.txt"
 set "DRY=%OUT%\import-dry-run.txt"
 set "APPLIED=%OUT%\import-apply.txt"
 set "STAMP="
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "STAMP=%%t"
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" ^<nul') do set "STAMP=%%t"
 set "WORK=%TEMP%\pharm-estock-%STAMP%"
 set "STOPPED=0"
 echo ==== estock import %DATE% %TIME% ==== >> "%LOG%"
@@ -52,7 +52,12 @@ call :log PASS "E-Stock files found and copied to %WORK%"
 echo.
 set "OWNER="
 set /p "OWNER=Owner user name (the one made on the setup screen): "
+REM automated check on synthetic data only (CI): never set on the pharmacy PC
+if defined PHARM_E2E_OWNER set "OWNER=%PHARM_E2E_OWNER%"
 if "%OWNER%"=="" (set "MSG=no user name given" & goto fail)
+set "PWARG="
+REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the program asks
+if defined PHARM_IMPORT_PASSWORD set "PWARG=--password "%PHARM_IMPORT_PASSWORD%""
 echo The program asks for that user's password twice (dry run, then apply); typing is hidden.
 
 REM stop the program: the import writes the database itself
@@ -63,7 +68,7 @@ call :log PASS "program stopped (only its own python processes)"
 set "PHARM_DATA_DIR=%DATA%"
 
 REM dry run: on a copy of the database, nothing is written to the real one
-"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" > "%DRY%" 2>&1
+"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%DRY%"
 type "%DRY%" >> "%LOG%"
@@ -76,11 +81,12 @@ echo.
 echo Read the dry run above (also in %DRY%).
 set "ANS="
 set /p "ANS=Type YES to apply the import to the real database: "
+if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was imported" & goto fail)
 call :log PASS "apply confirmed by the user"
 
 REM the real import: import-estock --apply takes its own verified backup first
-"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" --apply > "%APPLIED%" 2>&1
+"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%APPLIED%"
 type "%APPLIED%" >> "%LOG%"
@@ -114,11 +120,12 @@ endlocal
 exit /b 1
 
 :log
-echo %DATE% %TIME% %~1 - %~2>> "%LOG%"
+REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
+>> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
 exit /b 0
 
 :stopprog
 REM Only python.exe / pythonw.exe whose executable is inside this program's python folder (same rule as the installer).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" <nul >> "%LOG%" 2>&1
 exit /b
