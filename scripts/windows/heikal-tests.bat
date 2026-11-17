@@ -47,6 +47,8 @@ rmdir /s /q "%DRILL%"
 :scale
 if /i "%~1"=="restore" goto done
 set "WORK=%TEMP%\pharm-scale"
+REM scale.py makes its temporary folder inside --work, which must already exist
+if not exist "%WORK%" mkdir "%WORK%"
 if /i "%~1"=="giant" (
   "%PY%" scripts\perf\scale.py --profile giant --years 1 --out-txt "%OUT%\scale-giant.txt" --work "%WORK%" > "%OUT%\scale-giant-log.txt" 2>&1
   goto done
