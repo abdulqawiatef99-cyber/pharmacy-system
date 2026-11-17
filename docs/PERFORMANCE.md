@@ -123,8 +123,10 @@ FAIL: the Night A comment on issue #253. Stock check after generation: all balan
 | Cashier's scan while a long report runs (median / max) | 7 / 11 | 3 / 51 | 6 / 14 | 8 / 14 |
 | Unsold items (month) | no answer in 180 s | same | same | same |
 
-Large 1 year (364,000 sales, 3.99 GB): backup create 183 s, check after writing 25 s, verify 48 s, restore 108 s,
-file 0.92 GB. The 11-12 GB databases were not backed up: the machine's 30 GB disk cannot hold it.
+Large 1 year (364,000 sales, 3.99 GB, fits in memory): complete sale 266 (92 with the indexes), receipt page 183 (2),
+day report 908 (8), purchase approval 2.0 s with the cashier's scan waiting 1.9 s. Backup: create 181 s, check after
+writing 27 s, verify 48 s, restore 103 s, file 0.91 GB; the cashier's scan while it ran: median 6, max 180.
+The 11-12 GB databases were not backed up: the machine's 30 GB disk cannot hold it.
 
 What the numbers say:
 - Without #160's indexes the cashier's own steps fail the 0.3 s limit at these sizes; with them they pass.
@@ -133,7 +135,10 @@ What the numbers say:
 - Requests that run on the server's event loop hold every screen: purchase approval (its last-purchase-cost query has
   no `branch_id` and sorts every stock movement of the pharmacy), the stock-alert banner (reads the whole audit log
   when there never was a mismatch), the audit log screen, order suggestions, stock health, the quick buttons.
-- Reports that run in a worker thread (#249) do not hold the cashier.
+- Reports that run in a worker thread (#249) keep the cashier's median scan at 4-8 ms. While the year sales report
+  runs, single scans waited 0.3-0.6 s (it adds its rows up in Python); other long reports and the backup did not.
+- After one year of a large pharmacy the cashier still passes without the indexes, just (266 against 300); after
+  three years it does not.
 
 ## Open findings (not fixed yet)
 - **Database growth:** 89 MB after 30 days of synthetic data; the largest tables are `safety_events`
