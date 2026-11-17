@@ -18,3 +18,8 @@ CREATE INDEX IF NOT EXISTS ix_sales_customer ON sales(org_id, customer_id);
 CREATE INDEX IF NOT EXISTS ix_pinv_lines_item ON purchase_invoice_lines(org_id, item_id);
 -- 7. a sale's returns: every receipt, return and invoice detail lists them.
 CREATE INDEX IF NOT EXISTS ix_sale_returns_sale ON sale_returns(sale_id);
+-- 8. an item's last purchase cost (approving a purchase invoice asks it once per line; the order report too).
+--    The lookup has no branch, so ix_moves_item(org_id, branch_id, item_id) could not serve it and it walked the
+--    movements backwards: 29 ms a line after 100 days of a large pharmacy (#253 scale run), growing with every
+--    movement; an 80-line invoice held the server for seconds.
+CREATE INDEX IF NOT EXISTS ix_moves_item_type ON stock_movements(org_id, item_id, movement_type);
