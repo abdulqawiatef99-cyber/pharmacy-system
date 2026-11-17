@@ -71,6 +71,9 @@ GEN_INDEXES = {
     "perf_loadgen_sales_customer": "sales(org_id, customer_id)",
     "perf_loadgen_pinv_lines_item": "purchase_invoice_lines(org_id, item_id)",
     "perf_loadgen_sale_returns_sale": "sale_returns(sale_id)",
+    # approving a purchase line asks for the item's last purchase cost without the branch, so ix_moves_item gives
+    # it every movement of the pharmacy to sort: 29 ms a line after 100 days of a large pharmacy, and growing
+    "perf_loadgen_moves_item_type": "stock_movements(org_id, item_id, movement_type)",
 }
 
 
