@@ -27,7 +27,7 @@ set "LOG=%OUT%\estock-import.txt"
 set "DRY=%OUT%\import-dry-run.txt"
 set "APPLIED=%OUT%\import-apply.txt"
 set "STAMP="
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "STAMP=%%t"
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" ^<nul') do set "STAMP=%%t"
 set "WORK=%TEMP%\pharm-estock-%STAMP%"
 set "STOPPED=0"
 echo ==== estock import %DATE% %TIME% ==== >> "%LOG%"
@@ -124,5 +124,5 @@ exit /b 0
 
 :stopprog
 REM Only python.exe / pythonw.exe whose executable is inside this program's python folder (same rule as the installer).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" <nul >> "%LOG%" 2>&1
 exit /b

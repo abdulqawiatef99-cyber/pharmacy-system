@@ -61,6 +61,13 @@ class Common:
         self.assertIn('call :log FAIL "%MSG%"', self.lines)
         self.assertIn('>> "%LOG%" echo %DATE% %TIME% %~1 - %~2', self.lines)
 
+    def test_powershell_never_reads_the_answers(self):
+        # powershell -Command reads a redirected stdin to its end: the YES meant for set /p was eaten (e2e on #319)
+        calls = [l for l in self.lines if "powershell" in l]
+        self.assertTrue(calls)
+        for l in calls:
+            self.assertIn("<nul", l)
+
     def test_manage_commands_and_flags_exist(self):
         src = (ROOT / "manage.py").read_text(encoding="utf-8")
         for cmd in re.findall(r'"%MANAGE%" ([a-z-]+)', self.text):
