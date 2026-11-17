@@ -11,6 +11,7 @@ from datetime import timedelta
 
 from app.catalog import card as item_card
 from app.reports import invoices, owner
+from app.reports import service as reports
 from app.sales import customers as cu
 from app.sales.cash import CashDrawer
 from app.sales.service import local_today
@@ -18,7 +19,7 @@ from tests.test_sales import SalesCase
 
 # tables that grow with every sale, every day, for years
 GROWING = {"sales", "sale_lines", "sale_allocations", "sale_payments", "stock_movements", "audit_log", "safety_events",
-           "cash_movements", "customer_ledger", "supplier_ledger", "purchase_invoice_lines"}
+           "cash_movements", "customer_ledger", "supplier_ledger", "purchase_invoice_lines", "sale_returns"}
 
 
 # index columns that do not narrow a growing table: every row of the pharmacy's history shares them
@@ -119,6 +120,34 @@ class TestNoFullScans(SalesCase):
             self.s.return_receipt(self.ctx, self.return_id)
             owner.returns_report(self.db, self.ctx, self.month, self.today)
         self.assertEqual([p for p, q in rec.full_scans() if "audit_log" in q.split(" WHERE")[0]], [], rec.full_scans())
+
+    def test_cashier_flow(self):
+        with QueryRecorder(self.db) as rec:
+            sid = self.s.create(self.ctx)
+            d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+            done = self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+            self.s.get(self.ctx, done["id"])                                   # receipt / reprint
+            self.s.return_items(self.ctx, done["id"], {done["lines"][0]["id"]: 1}, refund_method="cash", reason="اختبار")
+            self.s.return_receipt(self.ctx, self.return_id)
+            CashDrawer(self.db).summary(self.ctx)                              # the cashier's drawer panel
+        self.assertNoScan(rec)
+
+    def test_daily_lists_and_reports(self):
+        drawer = CashDrawer(self.db)
+        shift = self.db.one("SELECT id FROM cash_shifts WHERE status='open'")["id"]
+        with QueryRecorder(self.db) as rec:
+            self.s.list_sales(self.ctx, day=self.today)
+            self.s.day_summary(self.ctx, self.today)
+            invoices.report(self.db, self.ctx, date_from=self.month, date_to=self.today)
+            reports.sales_report(self.db, self.ctx, self.month, self.today)
+            reports.home(self.db, self.ctx)
+            owner.returns_report(self.db, self.ctx, self.month, self.today)
+            owner.discounts_report(self.db, self.ctx, self.month, self.today)
+            drawer.report(self.ctx, shift)
+            item_card.card(self.db, self.ctx, self.pan)
+            item_card.movements(self.db, self.ctx, self.pan, self.month, self.today)
+            cu.profile(self.db, self.ctx, self.cust)
+        self.assertNoScan(rec)
 
     def test_ledger_moves_audit_and_couriers_read_only_their_rows(self):
         # customer balance (ledger index needs org_id), a batch's last supplier (the item's moves only), the drawer
