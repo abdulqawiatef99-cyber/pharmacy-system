@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.core import backup
 from app.db import Database
+from app.inventory import integrity
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,6 +64,59 @@ class TestLoadGenerator(unittest.TestCase):
                 self.assertGreaterEqual(db.one("SELECT count(*) n FROM sales WHERE status='completed'")["n"], 40)
             finally:
                 db.close()
+
+    def test_remembered_name_matches_give_the_same_data(self):
+        # the generator remembers fuzzy name matches (loadgen.install_fast_matching) and adds generator-only indexes
+        # (loadgen.GEN_INDEXES) to be fast enough for large pharmacies; the data must be what the program gives
+        # without them: same seed, both ways (--plain), compared
+        with tempfile.TemporaryDirectory() as tmp:
+            got = {}
+            for mode, extra in (("fast", []), ("exact", ["--plain"])):
+                out = Path(tmp) / mode
+                r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/loadgen.py"), "--out", str(out), "--days", "18",
+                                    "--items", "150", "--customers", "10", "--suppliers", "3", "--per-day", "30-30",
+                                    "--attachment-kb", "0", "--end", "2026-01-15", "--quiet", *extra],
+                                   capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                info = json.loads((out / "loadgen.json").read_text())
+                db = Database(out / "final" / "data" / "pharmacy.db")
+                try:
+                    org = db.one("SELECT id FROM organizations")["id"]
+                    scan = integrity.scan(db, org)                     # the owner's stock check: every balance matches
+                    self.assertTrue(scan["ok"], scan["counts"])
+                    self.assertEqual(backup.integrity_problems(db), [])
+                    tables = [r["name"] for r in db.all("SELECT name FROM sqlite_master WHERE type='table'"
+                                                        " AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+
+                    def rows(sql):
+                        return [tuple(r) for r in db.all(sql)]
+                    got[mode] = {
+                        "stats": info["snapshots"][-1]["stats"], "finding_codes": info["finding_codes"],
+                        "counts": {t: db.one(f"SELECT count(*) n FROM {t}")["n"] for t in tables},
+                        "sales": rows("SELECT sale_no, status, completed_at, subtotal, discount_total, total, paid_cash,"
+                                      " paid_card, paid_transfer, on_credit FROM sales ORDER BY created_at, sale_no"),
+                        "sale_lines": rows("SELECT s.sale_no, l.line_no, i.name_en, l.qty_base, l.line_total FROM sale_lines l"
+                                           " JOIN sales s ON s.id=l.sale_id JOIN items i ON i.id=l.item_id"
+                                           " ORDER BY s.created_at, s.sale_no, l.line_no"),
+                        "stock": rows("SELECT i.name_en, sum(b.qty) FROM stock_balances b JOIN items i ON i.id=b.item_id"
+                                      " GROUP BY 1 ORDER BY 1"),
+                        "movements": rows("SELECT i.name_en, m.movement_type, count(*), sum(m.qty_delta) FROM stock_movements m"
+                                          " JOIN items i ON i.id=m.item_id GROUP BY 1, 2 ORDER BY 1, 2"),
+                        "purchase_lines": rows("SELECT raw_name, i.name_en, match_method, match_score, match_status, qty,"
+                                               " line_total FROM purchase_invoice_lines l LEFT JOIN items i ON i.id=l.item_id"
+                                               " ORDER BY l.raw_name, l.qty, l.line_total"),
+                        "safety_events": rows("SELECT finding_code, severity, decision, message, count(*) FROM safety_events"
+                                              " GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"),
+                        "cash": rows("SELECT kind, count(*), sum(amount) FROM cash_movements GROUP BY 1 ORDER BY 1"),
+                    }
+                finally:
+                    db.close()
+            self.assertIn("lookalike", got["exact"]["finding_codes"])     # the remembered matches were really used
+            # 18 days: some items were bought again; that line is matched by alias (the remembered own-name score)
+            self.assertIn("alias", {r[2] for r in got["exact"]["purchase_lines"]})
+            self.assertGreater(got["exact"]["stats"]["sales"], 40)
+            for key in got["exact"]:
+                self.assertEqual(got["fast"][key], got["exact"][key], key)
 
 
 if __name__ == "__main__":

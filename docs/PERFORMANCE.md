@@ -2,9 +2,10 @@
 
 Synthetic data only. `scripts/perf/loadgen.py` builds a pharmacy through the program's own services
 (purchases, sales, returns, voids, shifts, ledgers, expenses, transfer screenshots) on a simulated clock;
+`scripts/perf/scale.py` does the same for one pharmacy size and measures every snapshot (#253, below);
 `scripts/perf/bench.py` copies a snapshot and measures backup, restore, start-up, memory, the cashier's hot
-paths and the owner's reports over HTTP. Neither runs in CI (only a tiny generator run in
-`tests/test_perf_loadgen.py`); the query plans are guarded by `tests/test_perf_queries.py`.
+paths and the owner's reports over HTTP. Neither runs in CI (only tiny runs in
+`tests/test_perf_loadgen.py` and `tests/test_perf_scale.py`); the query plans are guarded by `tests/test_perf_queries.py`.
 
 ```
 python3 scripts/perf/loadgen.py --out /tmp/perf --days 30 --quiet          # or --years 1 --snapshots 1
@@ -74,6 +75,71 @@ file: backup create 142 → 50 s (38 s of it is the xz compression), verify 115 
 During that shorter backup, adding a line had p95 105 ms (max 341 ms): the compression keeps one core busy. Start-up 0.2–0.7 s, server
 memory peak 314–332 MB. While the automatic backup ran, adding a line stayed at p95 6–15 ms (max 136–298 ms).
 
+## Large and huge pharmacies (#253)
+
+`scripts/perf/scale.py` builds one size from an empty database (sizes in `real_years.PROFILES`: large = 800-1200
+sales a day and 15,000 items, huge = 2500-3500 a day and 30,000 items), runs the owner's stock check on every
+snapshot, then measures what `real_years.py` measures against the owner's limits (cashier < 0.3 s, report < 5 s,
+nothing blocks the cashier). Several sizes can run at once, one process a core; with `--turns` only one measures
+at a time and the others wait.
+
+```
+python3 scripts/perf/scale.py --profile large --years 1,3 --out-txt /tmp/scale-large.txt --turns /tmp/turns
+python3 scripts/perf/scale.py --profile huge  --years 1   --out-txt /tmp/scale-huge.txt  --turns /tmp/turns
+```
+
+Generator speed: with 15,000 items the service-level generator made 16.5 sales a second. 90% of its time was the
+catalog's fuzzy name matching (`matching.fuzzy_candidates`): the look-alike notice of the safety check, for every
+basket line, twice a sale, plus every purchase line; each call scores the name against every item that shares a
+3-letter prefix and rebuilds the name index when any item row changed. `loadgen.install_fast_matching` remembers the
+program's own answer per name while generating (the catalog is fixed then); `tests/test_perf_loadgen.py` compares
+the data with and without it. The program is unchanged, so the measured server still pays that cost: see the
+safety-check rows of the results. Disk: about 10 KB a sale; a backup needs about 1.7 times the database in free
+disk on top of it (copy, compressed copy, check), and `scale.py` skips the backup timings when that is missing.
+
+### Results 2026-11-17 (`develop` @ `2a47dcc`, 2-core cloud machine, 8 GB RAM)
+
+Full table (58 screens and reports, cashier flow, purchase invoice, blocking probes) and the suggested fix for every
+FAIL: the Night A comment on issue #253. Stock check after generation: all balances match at every size.
+"+ indexes" = the same database with #160's `0036_perf_indexes.sql`. Max of 3, milliseconds unless marked.
+
+| | large 3 years | + indexes | huge 1 year | + indexes |
+|---|---:|---:|---:|---:|
+| sales / stock movements | 1.09 M / 3.5 M | | 1.10 M / 3.4 M | |
+| database | 11.8 GB | | 11.4 GB | |
+| Add line | 8 | 26 | 6 | 8 |
+| Safety check (median / max) | 48 / 980 | 52 / 998 | 177 / 1,951 | 174 / 1,931 |
+| Complete sale | 825 | 56 | 807 | 188 |
+| Receipt page | 582 | 3 | 597 | 2 |
+| Search by name / barcode | 9 / 2 | 28 / 2 | 27 / 2 | 16 / 3 |
+| POS quick buttons | 1,397 | 297 | 5,791 | 1,106 |
+| Day report | 11.1 s | 2 | 3.9 s | 2 |
+| Sales report (month) | 7.8 s | 279 | 11.6 s | 1.1 s |
+| Sales report (year) | 11.0 s | 13.4 s | 26.4 s | 39.9 s |
+| Invoices report (month) | 11.1 s | 177 | 9.7 s | 193 |
+| Stock-alert banner (asked once a minute) | 4.7 s | 972 | 13.3 s | 13.4 s |
+| Purchase invoice, approve 20 lines | 6.5 s | 6.2 s | 7.3 s | 6.7 s |
+| Cashier's scan while it is approved | 6.5 s | 6.1 s | 7.3 s | 6.6 s |
+| Cashier's scan while a long report runs (median / max) | 7 / 11 | 3 / 51 | 6 / 14 | 8 / 14 |
+| Unsold items (month) | no answer in 180 s | same | same | same |
+
+Large 1 year (364,000 sales, 3.99 GB, fits in memory): complete sale 266 (92 with the indexes), receipt page 183 (2),
+day report 908 (8), purchase approval 2.0 s with the cashier's scan waiting 1.9 s. Backup: create 181 s, check after
+writing 27 s, verify 48 s, restore 103 s, file 0.91 GB; the cashier's scan while it ran: median 6, max 180.
+The 11-12 GB databases were not backed up: the machine's 30 GB disk cannot hold it.
+
+What the numbers say:
+- Without #160's indexes the cashier's own steps fail the 0.3 s limit at these sizes; with them they pass.
+- `ix_sale_lines_item ON sale_lines(item_id)` as #160 has it makes `Sales.add_line` read every line the item ever
+  had (156 ms for the best seller of large 3 years); it must be `(item_id, sale_id)`.
+- Requests that run on the server's event loop hold every screen: purchase approval (its last-purchase-cost query has
+  no `branch_id` and sorts every stock movement of the pharmacy), the stock-alert banner (reads the whole audit log
+  when there never was a mismatch), the audit log screen, order suggestions, stock health, the quick buttons.
+- Reports that run in a worker thread (#249) keep the cashier's median scan at 4-8 ms. While the year sales report
+  runs, single scans waited 0.3-0.6 s (it adds its rows up in Python); other long reports and the backup did not.
+- After one year of a large pharmacy the cashier still passes without the indexes, just (266 against 300); after
+  three years it does not.
+
 ## Open findings (not fixed yet)
 - **Database growth:** 89 MB after 30 days of synthetic data; the largest tables are `safety_events`
   (40,731 rows, 16.6 MB) and `audit_log` (16.1 MB). Extrapolated linearly (not measured), a year is about
@@ -87,4 +153,4 @@ memory peak 314–332 MB. While the automatic backup ran, adding a line stayed a
   file). The bench's median of 2 runs (133–136 ms) includes that first build; at 30 days it ran 3 times.
 - **Year sales report** 616–622 ms, **stock report** 69–93 ms, **item movements for a year** 145–161 ms:
   acceptable, not changed by these PRs.
-- 3-year snapshot: not measured yet (generating one year took about an hour here).
+- 3-year snapshot of the default (medium) shape: not measured; large 3 years is above.

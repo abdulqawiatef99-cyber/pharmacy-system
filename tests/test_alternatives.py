@@ -147,3 +147,44 @@ class TestSameItemOneLine(Base):
         self.assertEqual(d["lines"][0]["qty_base"], 2)
         d = self.s.add_line(self.ctx, sid, self.pan, units=1, discount_bp=500)  # a different discount: own line
         self.assertEqual(len(d["lines"]), 2)
+
+
+class TestQuickButtonsRanking(Base):
+    """#253: the best-seller ranking is kept for a few minutes; the items on the buttons are always read fresh."""
+
+    def setUp(self):
+        super().setUp()
+        alts.forget_best_sellers()
+        self.cd.open(self.ctx, 0)
+        self.sell(units=1)
+
+    def ids(self):
+        return [x["id"] for x in alts.quick_items(self.db, self.ctx)["items"]]
+
+    def test_second_call_does_not_count_the_sale_lines_again(self):
+        self.assertEqual(self.ids(), [self.pan])
+        real, seen = self.db.all, []
+        self.db.all = lambda sql, *a, **k: (seen.append(sql), real(sql, *a, **k))[1]
+        try:
+            self.assertEqual(self.ids(), [self.pan])
+        finally:
+            del self.db.all
+        self.assertFalse([q for q in seen if "sale_lines" in q], seen)
+
+    def test_a_stopped_item_leaves_the_buttons_at_once(self):
+        self.assertEqual(self.ids(), [self.pan])
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET status='inactive' WHERE org_id=? AND id=?", (self.ctx.org_id, self.pan))
+        self.assertEqual(self.ids(), [])
+
+    def test_the_ranking_is_counted_again_after_its_time(self):
+        self.assertEqual(self.ids(), [self.pan])
+        with self.db.transaction():
+            self.db.execute("UPDATE sales SET status='voided' WHERE org_id=?", (self.ctx.org_id,))
+        self.assertEqual(self.ids(), [self.pan])                 # still the kept ranking
+        old = alts._TOP_TTL
+        alts._TOP_TTL = 0
+        try:
+            self.assertEqual(self.ids(), [])
+        finally:
+            alts._TOP_TTL = old

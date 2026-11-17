@@ -50,6 +50,7 @@ class TestRealYears(unittest.TestCase):
                 self.assertNotIn("error", s)
                 self.assertEqual(s["requests"]["sales report (all years)"]["status"], 200)
                 self.assertIn("complete sale", s["cashier"])
+                self.assertEqual(s["purchase"]["approve"]["status"], 200)       # a typed purchase invoice, approved
                 self.assertEqual(s["backup"]["verify_problems"], [])
             self.assertIn("SUMMARY", text)
             self.assertEqual([l.split(": ")[1] for l in data["summary"]], ["ALL PASS", "ALL PASS"])

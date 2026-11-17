@@ -73,6 +73,8 @@ def free_bytes(p: Path) -> int:
 class Report:
     """Timings only. Rewritten after every step."""
 
+    title = "REAL-YEARS PERFORMANCE TEST (#253) - timings only, synthetic activity on a copy of the database"
+
     def __init__(self, txt: Path):
         self.txt = txt
         self.json = txt.with_suffix(".json")
@@ -90,7 +92,7 @@ class Report:
 
     def write(self):
         d = self.data
-        L = ["REAL-YEARS PERFORMANCE TEST (#253) - timings only, synthetic activity on a copy of the database",
+        L = [self.title,
              f"started {d['started']}   status {d['status']}   updated {datetime.now().isoformat(timespec='seconds')}",
              f"limits: cashier < {CASHIER_MS} ms, report < {REPORT_MS / 1000:.0f} s, nothing blocks other users", ""]
         if d.get("plan"):
@@ -127,6 +129,10 @@ def format_snapshot(s: dict) -> list[str]:
     if s.get("sizes"):
         z = s["sizes"]
         L.append(f"database {z['db_bytes'] / 1e6:.0f} MB")
+    if s.get("stock_check"):
+        k = s["stock_check"]
+        L.append(f"stock check: {'all balances match' if k['ok'] else 'DIFFERENCES ' + str(k['counts'])}"
+                 f" ({k['movements']} movements, {k['balances']} balances, {k['seconds']} s)")
     st = s.get("startup") or {}
     if st:
         L.append(f"start-up until it answers: {st.get('health_s')} s (second start {st.get('health_warm_s')} s)")
@@ -147,6 +153,22 @@ def format_snapshot(s: dict) -> list[str]:
         elif b:
             L.append(f"blocking {title:<38} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
                      f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
+    pu = s.get("purchase") or {}
+    if pu.get("error"):
+        L.append(f"purchase invoice: {pu['error']}")
+    if pu.get("add line"):
+        r = pu["add line"]
+        L.append(f"purchase add line ({PURCHASE_LINES} lines){'':<17} median {r['median_ms']:>8} ms  max {r['max_ms']:>8} ms  {mark(r['max_ms'], CASHIER_MS)}")
+    if pu.get("approve"):
+        b = pu["approve"]
+        ms = b.get("busy_s", 0) * 1000
+        L.append(f"purchase approve ({PURCHASE_LINES} lines){'':<18} {b.get('busy_s')} s  {mark(ms, REPORT_MS)}"
+                 + ("" if b.get("status") == 200 else f"  HTTP {b.get('status')}"))
+        L.append(f"blocking scanning while it is approved{'':<8} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
+                 f"  ({b.get('scans')} scans)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
+    for name, b in (s.get("during_slow") or {}).items():
+        L.append(f"blocking scanning during: {name:<25} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
+                 f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
     bk = s.get("backup") or {}
     if bk:
         L.append(f"backup   create {bk.get('create_s')} s, check {bk.get('quick_check_s')} s, verify {bk.get('verify_s')} s,"
@@ -155,6 +177,9 @@ def format_snapshot(s: dict) -> list[str]:
     return L
 
 
+REQUEST_TIMEOUT = 180                                             # seconds a report may take before it is given up
+LAST = {"unsold items (month)", "unsold items (all years)"}      # see measure()
+SLOWEST = 3          # how many of the slowest requests get the "cashier keeps scanning meanwhile" probe
 CASHIER_GETS = {"search name (4 letters)", "search barcode", "POS quick buttons"}
 
 
@@ -234,8 +259,7 @@ def make_generator(a, work: Path):
             from app.sales.service import Sales
             db = self.db
             db.migrate()
-            with db.transaction():
-                db.execute(f"CREATE INDEX IF NOT EXISTS {loadgen.GEN_INDEX} ON sale_allocations(sale_line_id)")
+            loadgen.create_gen_indexes(db)
             accounts.sync_system_roles(db)
             org = db.one("SELECT o.id FROM organizations o LEFT JOIN items i ON i.org_id=o.id WHERE o.status='active'"
                          " GROUP BY o.id ORDER BY count(i.id) DESC LIMIT 1")
@@ -341,7 +365,7 @@ def make_generator(a, work: Path):
             dest.mkdir(parents=True)
             self.db.backup_to(dest / "pharmacy.db")
             snap = sqlite3.connect(dest / "pharmacy.db")
-            snap.execute(f"DROP INDEX IF EXISTS {loadgen.GEN_INDEX}")
+            loadgen.drop_gen_indexes(snap)
             snap.close()                                   # no VACUUM: it would need the database size again in disk
             if self.upload_dir.exists():
                 shutil.copytree(self.upload_dir, dest / "uploads")
@@ -355,7 +379,8 @@ def long_scenarios(f: dict, start: date) -> list[tuple[str, str]]:
     day = date.fromisoformat(f["day"])
     d, s0 = day.isoformat(), start.isoformat()
     w0 = (day - timedelta(days=6)).isoformat()
-    return [
+    m0 = day.replace(day=1).isoformat()
+    out = [
         ("invoice list (week)", f"/api/sales?from={w0}&to={d}"),
         ("invoices report (all years)", f"/api/reports/invoices?from={s0}&to={d}"),
         ("sales report (all years)", f"/api/reports/sales?from={s0}&to={d}"),
@@ -363,13 +388,24 @@ def long_scenarios(f: dict, start: date) -> list[tuple[str, str]]:
         ("profit (all years)", f"/api/reports/profit?from={s0}&to={d}"),
         ("item movements (all years, top seller)", f"/api/items/{f['top_item']}/movements?from={s0}&to={d}"),
         ("supplier statement (all years)", f"/api/suppliers/{f['supplier']}/statement?from={s0}&to={d}"),
-        ("audit log (month)", f"/api/audit?from={day.replace(day=1).isoformat()}&to={d}"),
+        ("audit log (month)", f"/api/audit?from={m0}&to={d}"),
         ("returns report (all years)", f"/api/reports/owner/returns?from={s0}&to={d}"),
         ("staff report (all years)", f"/api/reports/owner/staff?from={s0}&to={d}"),
     ]
+    # the rest of the owner's reports, each over the month and over everything (#253: every report, short and long)
+    for name, path in (("price changes", "/api/reports/owner/prices"), ("unit changes", "/api/reports/owner/units"),
+                       ("customer sales", "/api/reports/owner/customers"), ("shift closings", "/api/reports/owner/shifts"),
+                       ("discounts", "/api/reports/owner/discounts"), ("unsold items", "/api/reports/owner/unsold"),
+                       ("transfers", "/api/reports/transfers"), ("losses", "/api/reports/losses"),
+                       ("item warnings", "/api/reports/item-warnings"), ("expenses", "/api/expenses")):
+        out.append((f"{name} (month)", f"{path}?from={m0}&to={d}"))
+        out.append((f"{name} (all years)", f"{path}?from={s0}&to={d}"))
+    out += [("order suggestions", "/api/procurement/suggestions"), ("stock health", "/api/procurement/health"),
+            ("notifications", "/api/notifications"), ("stock alert banner", "/api/stock/alert")]
+    return out
 
 
-def during_report(c, f: dict, path: str) -> dict:
+def during_report(c, f: dict, path: str, method: str = "GET", body=None) -> dict:
     """The cashier keeps scanning while the owner opens the longest report (nothing may block the cashier)."""
     code, s, _, _ = c.req("POST", "/api/sales", {"customer_id": None})
     if code != 201:
@@ -381,7 +417,7 @@ def during_report(c, f: dict, path: str) -> dict:
 
     def run():
         t = time.perf_counter()
-        code, _, _, _ = c.req("GET", path, timeout=1800)
+        code, _, _, _ = c.req(method, path, body, timeout=1800)
         res.update(busy_s=round(time.perf_counter() - t, 1), status=code)
         done.set()
 
@@ -403,8 +439,40 @@ def during_report(c, f: dict, path: str) -> dict:
     return res
 
 
-def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict, report: Report) -> None:
-    """bench.py's measurements on one snapshot, with the copy's owner; results go into rec as they come."""
+PURCHASE_LINES = 20
+
+
+def purchase_flow(c, f: dict) -> dict:
+    """A purchase invoice typed by hand (PURCHASE_LINES lines) and approved while the cashier keeps scanning:
+    receiving goods happens during opening hours, and it writes stock, cost and the supplier's account at once."""
+    day = date.fromisoformat(f["day"])
+    code, inv, _, _ = c.req("POST", "/api/purchases", {"supplier_id": f["supplier"], "invoice_date": day.isoformat(),
+                                                       "invoice_no": f"PERF-{int(time.time())}"})
+    if code != 201:
+        return {"error": f"create HTTP {code}"}
+    pid, ver = inv["invoice"]["id"], inv["invoice"]["version"]
+    lat = []
+    for k in range(PURCHASE_LINES):
+        it = f["stocked"][k % len(f["stocked"])]
+        price = it.get("public_price") or 1000
+        net = max(1, price * 80 // 100)
+        code, inv, t, _ = c.req("POST", f"/api/purchases/{pid}/lines", {"version": ver, "line": {
+            "item_id": it["id"], "qty": 2, "bonus_qty": 0, "unit_net_price": net, "public_price": price, "line_total": 2 * net,
+            "batch_no": f"PERF{k}", "expiry_date": (day + timedelta(days=500 + k)).isoformat()}})
+        lat.append(t)
+        if code != 200:
+            return {"error": f"line {k + 1} HTTP {code}"}
+        ver = inv["invoice"]["version"]
+    out = {"add line": {"median_ms": round(statistics.median(lat), 1), "max_ms": round(max(lat), 1)}}
+    b = during_report(c, f, f"/api/purchases/{pid}/approve", "POST", {"version": ver})
+    out["approve"] = b
+    return out
+
+
+def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict, report: Report,
+            backup: bool = True) -> None:
+    """bench.py's measurements on one snapshot, with the copy's owner; results go into rec as they come.
+    backup=False leaves out the backup timings and the scan-during-backup probe (scale.py, when the disk is short)."""
     import bench
     from loadgen import OWNER_PW
     work = snap.parent
@@ -415,38 +483,83 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
     rec["counts"] = f["counts"]
     rec["sizes"] = {"db_bytes": (data / "pharmacy.db").stat().st_size}
     report.write()
-    report.progress(f"{rec['label']}: backup, verify, restore")
-    rec["backup"] = bench.backup_measure(data, work)
-    report.write()
+    if backup:
+        report.progress(f"{rec['label']}: backup, verify, restore")
+        rec["backup"] = bench.backup_measure(data, work)
+        report.write()
     report.progress(f"{rec['label']}: server and requests")
-    srv = bench.Server(data, f["end_local"])
-    rec["startup"] = {"health_s": round(srv.ready_s, 2)}
+
+    class Measured:
+        """The measured server and a signed-in client."""
+
+        def __init__(self):
+            self.srv = bench.Server(data, f["end_local"])
+            self.c = bench.Client(self.srv.base)
+            code, body, _, _ = self.c.login(owner_username, OWNER_PW)
+            if code != 200:
+                self.srv.stop()
+                why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
+                raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
+
+    m = Measured()
+    rec["startup"] = {"health_s": round(m.srv.ready_s, 2)}
     try:
-        c = bench.Client(srv.base)
-        code, body, _, _ = c.req("POST", "/api/auth/login", {"username": owner_username, "password": OWNER_PW})
-        if code != 200:
-            why = (body.get("error") or {}).get("code") if isinstance(body, dict) else None   # code only, no message
-            raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
-        c.req("POST", "/api/cash/open", {"opening_cash": 10000})
+        m.c.req("POST", "/api/cash/open", {"opening_cash": 10000})
         rec["requests"] = {}
-        scen = bench.scenarios(f) + long_scenarios(f, start)
-        for name, path in scen:
-            rec["requests"][name] = bench.timed(c, "GET", path, n=repeat)
-            report.write()
+        short, long = bench.scenarios(f), long_scenarios(f, start)
+        # A report that does not answer in time keeps a server thread busy after the client gave up, and whatever is
+        # measured next is measured under that load. So the server is started again after such a report (run()), and
+        # the order keeps the damage small anyway: the daily screens, the cashier and a purchase invoice first, then
+        # the long reports, then the blocking probes, and last the reports known to need minutes on a large catalog.
+        last = [x for x in long if x[0] in LAST]
+
+        def run(scen):
+            nonlocal m
+            for name, path in scen:
+                r = rec["requests"][name] = bench.timed(m.c, "GET", path, n=repeat, timeout=REQUEST_TIMEOUT)
+                report.write()
+                if not isinstance(r["status"], int):
+                    # no answer: the report goes on inside the server after the client gave up, and the next
+                    # request would be measured under it. A new server (the shift stays open in the database).
+                    rec["restarts"] = rec.get("restarts", 0) + 1
+                    m.srv.stop()
+                    m = Measured()
+
+        run(short)
         if f["stocked"]:
-            cf = bench.cashier_flow(c, f, n=repeat)
+            cf = bench.cashier_flow(m.c, f, n=repeat)
             if "errors" in cf:
                 cf["errors"] = len(cf["errors"])           # error texts can carry item names: count only
             rec["cashier"] = cf
             report.write()
-            rec["during_backup"] = bench.during_backup(c, f)
-            rec["during_report"] = during_report(c, f, dict(long_scenarios(f, start))["sales report (all years)"])
+            report.progress(f"{rec['label']}: a purchase invoice")
+            rec["purchase"] = purchase_flow(m.c, f)
             report.write()
+        report.progress(f"{rec['label']}: long reports")
+        run([x for x in long if x not in last])
+        if f["stocked"]:
+            report.progress(f"{rec['label']}: scanning while the server is busy")
+            if backup:
+                rec["during_backup"] = bench.during_backup(m.c, f)
+            rec["during_report"] = during_report(m.c, f, dict(long)["sales report (all years)"])
+            report.write()
+            # nothing may block the cashier: scan again while each of the slowest requests runs (a second or more)
+            slowest = sorted(((r["median_ms"], n) for n, r in rec["requests"].items()
+                              if r.get("status") == 200 and r["median_ms"] >= 1000 and n != "sales report (all years)"),
+                             reverse=True)[:SLOWEST]
+            rec["during_slow"] = {n: during_report(m.c, f, dict(short + long)[n]) for _, n in slowest}
+            report.write()
+        # the owner's stock check «مطابقة الأرصدة» reads every stock movement: once, it is a button, not a screen
+        rec["requests"]["stock check (run now)"] = bench.timed(m.c, "POST", "/api/reports/stock-check", n=1)
+        report.write()
+        report.progress(f"{rec['label']}: the heaviest reports")
+        run(last)
     finally:
-        srv.stop()
+        m.srv.stop()
     srv = bench.Server(data, f["end_local"])
     rec["startup"]["health_warm_s"] = round(srv.ready_s, 2)
     srv.stop()
+    shutil.rmtree(work / "tmp", ignore_errors=True)          # the servers' temp folder (bench.Server)
 
 
 def summary(snaps: list[dict]) -> list[str]:
@@ -473,17 +586,38 @@ def summary(snaps: list[dict]) -> list[str]:
                 failed.append(f"{name} HTTP {r.get('status')}")
             elif r["max_ms"] >= lim:
                 slow.append(f"{name} {r['max_ms']} ms")
+        no_backup = bool(s.get("indexes_sql"))        # scale.py's second pass repeats the requests only
         for key in ("during_backup", "during_report"):
             b = s.get(key)
             if b is None:
-                failed.append(f"{key} not measured")
+                if not (no_backup and key == "during_backup"):
+                    failed.append(f"{key} not measured")
                 continue
             if b.get("error") or b.get("status") != 200:
                 failed.append(f"{key} {b.get('error') or 'HTTP ' + str(b.get('status'))}")
             if b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
                 slow.append(f"{key} scan {b['add_line_max_ms']} ms")
+        for name, b in (s.get("during_slow") or {}).items():
+            if b.get("error") or b.get("status") != 200:
+                failed.append(f"scan during {name}: {b.get('error') or 'HTTP ' + str(b.get('status'))}")
+            elif b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
+                slow.append(f"scan during {name} {b['add_line_max_ms']} ms")
+        pu = s.get("purchase")
+        if pu is not None:                            # (absent in results written before this was measured)
+            ap = pu.get("approve") or {}
+            if pu.get("error") or ap.get("error") or ap.get("status") != 200:
+                failed.append(f"purchase invoice: {pu.get('error') or ap.get('error') or 'approve HTTP ' + str(ap.get('status'))}")
+            else:
+                if pu["add line"]["max_ms"] >= CASHIER_MS:
+                    slow.append(f"purchase add line {pu['add line']['max_ms']} ms")
+                if ap.get("busy_s", 0) * 1000 >= REPORT_MS:
+                    slow.append(f"purchase approve {ap['busy_s']} s")
+                if ap.get("add_line_max_ms") is not None and ap["add_line_max_ms"] >= CASHIER_MS:
+                    slow.append(f"scan during purchase approve {ap['add_line_max_ms']} ms")
         bk = s.get("backup")
-        if bk is None:
+        if bk is None and no_backup:
+            pass
+        elif bk is None:
             failed.append("backup not measured")
         elif bk.get("verify_problems") or bk.get("quick_check_problems"):
             failed.append("backup check found problems")
@@ -517,6 +651,8 @@ def run_profile(a, pname: str, live_db: Path, days: list[int], stop_at, report: 
         gen = make_generator(a, work)
         t0 = time.perf_counter()
         gen.setup()
+        import loadgen
+        loadgen.install_fast_matching(gen.db, gen.owner.org_id)      # the catalog is fixed from here (same data, faster)
         gen.restock(gen.start, initial=True)
         report.data["base"].setdefault("catalog_items", gen.base_counts["catalog_items"])
         report.data["base"].setdefault("items_in_stock", gen.base_counts["items_in_stock"])

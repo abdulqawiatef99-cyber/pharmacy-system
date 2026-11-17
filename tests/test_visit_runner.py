@@ -404,11 +404,19 @@ class TestRunnerInBrowser(APICase):
         res = self.results(out["open"])
         self.assertFalse([k for k, v in res.items() if v != "PASS"], out["open"]["md"])
         self.assertGreaterEqual(len(res), 13)
-        req("POST", "/api/cash/close", json={"counted_cash": 17066})
+        # the close as the screen does it: notes and coins, smallest coin 0.25, so 170.50 and a note (-0.16)
+        closed = req("POST", "/api/cash/close", json={"denominations": {"10000": 1, "5000": 1, "2000": 1, "50": 1},
+                                                      "note": "تجربة: كسور القروش"})
+        self.assertEqual((closed["counted_cash"], closed["difference"]), (17050, -16))
         out = self.run_plan([{"fn": "day19", "as": "closed"}])
         res = self.results(out["closed"])
         self.assertEqual(res.get("D-close"), "PASS", out["closed"]["md"])
         self.assertFalse([k for k, v in res.items() if v != "PASS"], out["closed"]["md"])
+        # a close with any other difference is a real one: reported, not hidden
+        req("POST", "/api/cash/open", expected=201, json={"opening_cash": 0})
+        req("POST", "/api/cash/close", json={"denominations": {"100": 1}, "note": "تجربة: فرق حقيقي"})
+        out = self.run_plan([{"fn": "day19", "as": "short"}])
+        self.assertEqual(self.results(out["short"]).get("D-close"), "FAIL", out["short"]["md"])
         # a wrong figure is reported, not hidden
         req("POST", f"/api/items/{b}/adjust", json={"qty_delta": -1, "reason": "damaged", "note": "تجربة"})
         out = self.run_plan([{"fn": "day19", "as": "wrong"}])
