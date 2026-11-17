@@ -153,6 +153,19 @@ def format_snapshot(s: dict) -> list[str]:
         elif b:
             L.append(f"blocking {title:<38} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
                      f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
+    pu = s.get("purchase") or {}
+    if pu.get("error"):
+        L.append(f"purchase invoice: {pu['error']}")
+    if pu.get("add line"):
+        r = pu["add line"]
+        L.append(f"purchase add line ({PURCHASE_LINES} lines){'':<17} median {r['median_ms']:>8} ms  max {r['max_ms']:>8} ms  {mark(r['max_ms'], CASHIER_MS)}")
+    if pu.get("approve"):
+        b = pu["approve"]
+        ms = b.get("busy_s", 0) * 1000
+        L.append(f"purchase approve ({PURCHASE_LINES} lines){'':<18} {b.get('busy_s')} s  {mark(ms, REPORT_MS)}"
+                 + ("" if b.get("status") == 200 else f"  HTTP {b.get('status')}"))
+        L.append(f"blocking scanning while it is approved{'':<8} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
+                 f"  ({b.get('scans')} scans)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
     for name, b in (s.get("during_slow") or {}).items():
         L.append(f"blocking scanning during: {name:<25} median {b.get('add_line_median_ms')} ms  max {b.get('add_line_max_ms')} ms"
                  f"  ({b.get('scans')} scans, {b.get('busy_s')} s)  {mark(b.get('add_line_max_ms'), CASHIER_MS)}")
@@ -390,7 +403,7 @@ def long_scenarios(f: dict, start: date) -> list[tuple[str, str]]:
     return out
 
 
-def during_report(c, f: dict, path: str) -> dict:
+def during_report(c, f: dict, path: str, method: str = "GET", body=None) -> dict:
     """The cashier keeps scanning while the owner opens the longest report (nothing may block the cashier)."""
     code, s, _, _ = c.req("POST", "/api/sales", {"customer_id": None})
     if code != 201:
@@ -402,7 +415,7 @@ def during_report(c, f: dict, path: str) -> dict:
 
     def run():
         t = time.perf_counter()
-        code, _, _, _ = c.req("GET", path, timeout=1800)
+        code, _, _, _ = c.req(method, path, body, timeout=1800)
         res.update(busy_s=round(time.perf_counter() - t, 1), status=code)
         done.set()
 
@@ -422,6 +435,36 @@ def during_report(c, f: dict, path: str) -> dict:
     if lat:
         res.update(add_line_median_ms=round(statistics.median(lat), 1), add_line_max_ms=round(max(lat), 1), scans=len(lat))
     return res
+
+
+PURCHASE_LINES = 20
+
+
+def purchase_flow(c, f: dict) -> dict:
+    """A purchase invoice typed by hand (PURCHASE_LINES lines) and approved while the cashier keeps scanning:
+    receiving goods happens during opening hours, and it writes stock, cost and the supplier's account at once."""
+    day = date.fromisoformat(f["day"])
+    code, inv, _, _ = c.req("POST", "/api/purchases", {"supplier_id": f["supplier"], "invoice_date": day.isoformat(),
+                                                       "invoice_no": f"PERF-{int(time.time())}"})
+    if code != 201:
+        return {"error": f"create HTTP {code}"}
+    pid, ver = inv["invoice"]["id"], inv["invoice"]["version"]
+    lat = []
+    for k in range(PURCHASE_LINES):
+        it = f["stocked"][k % len(f["stocked"])]
+        price = it.get("public_price") or 1000
+        net = max(1, price * 80 // 100)
+        code, inv, t, _ = c.req("POST", f"/api/purchases/{pid}/lines", {"version": ver, "line": {
+            "item_id": it["id"], "qty": 2, "bonus_qty": 0, "unit_net_price": net, "public_price": price, "line_total": 2 * net,
+            "batch_no": f"PERF{k}", "expiry_date": (day + timedelta(days=500 + k)).isoformat()}})
+        lat.append(t)
+        if code != 200:
+            return {"error": f"line {k + 1} HTTP {code}"}
+        ver = inv["invoice"]["version"]
+    out = {"add line": {"median_ms": round(statistics.median(lat), 1), "max_ms": round(max(lat), 1)}}
+    b = during_report(c, f, f"/api/purchases/{pid}/approve", "POST", {"version": ver})
+    out["approve"] = b
+    return out
 
 
 def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict, report: Report,
@@ -473,6 +516,10 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
                              reverse=True)[:SLOWEST]
             rec["during_slow"] = {n: during_report(c, f, dict(scen)[n]) for _, n in slowest}
             report.write()
+        if f["stocked"]:
+            report.progress(f"{rec['label']}: a purchase invoice")
+            rec["purchase"] = purchase_flow(c, f)
+            report.write()
         # the owner's stock check «مطابقة الأرصدة» reads every stock movement: once, it is a button, not a screen
         rec["requests"]["stock check (run now)"] = bench.timed(c, "POST", "/api/reports/stock-check", n=1)
         report.write()
@@ -523,6 +570,18 @@ def summary(snaps: list[dict]) -> list[str]:
                 failed.append(f"scan during {name}: {b.get('error') or 'HTTP ' + str(b.get('status'))}")
             elif b.get("add_line_max_ms") is not None and b["add_line_max_ms"] >= CASHIER_MS:
                 slow.append(f"scan during {name} {b['add_line_max_ms']} ms")
+        pu = s.get("purchase")
+        if pu is not None:                            # (absent in results written before this was measured)
+            ap = pu.get("approve") or {}
+            if pu.get("error") or ap.get("error") or ap.get("status") != 200:
+                failed.append(f"purchase invoice: {pu.get('error') or ap.get('error') or 'approve HTTP ' + str(ap.get('status'))}")
+            else:
+                if pu["add line"]["max_ms"] >= CASHIER_MS:
+                    slow.append(f"purchase add line {pu['add line']['max_ms']} ms")
+                if ap.get("busy_s", 0) * 1000 >= REPORT_MS:
+                    slow.append(f"purchase approve {ap['busy_s']} s")
+                if ap.get("add_line_max_ms") is not None and ap["add_line_max_ms"] >= CASHIER_MS:
+                    slow.append(f"scan during purchase approve {ap['add_line_max_ms']} ms")
         bk = s.get("backup")
         if bk is None and no_backup:
             pass

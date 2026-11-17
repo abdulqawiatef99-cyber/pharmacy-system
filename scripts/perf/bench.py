@@ -91,7 +91,7 @@ def facts(db_path: Path) -> dict:
                     " WHERE s.completed_at >= ? GROUP BY 1 ORDER BY 2 DESC LIMIT 3",
                     ((day - timedelta(days=30)).isoformat(),)).fetchall()
     # items the cashier can really sell on the snapshot's day: unexpired stock only, as Sales._sellable counts it
-    stocked = c.execute("SELECT i.id, i.name_en, min(bc.barcode) barcode FROM items i"
+    stocked = c.execute("SELECT i.id, i.name_en, min(bc.barcode) barcode, i.public_price FROM items i"
                         " JOIN item_barcodes bc ON bc.item_id=i.id"
                         " JOIN stock_balances sb ON sb.item_id=i.id AND sb.qty>0"
                         " LEFT JOIN batches bt ON bt.id=nullif(sb.batch_key,'')"
