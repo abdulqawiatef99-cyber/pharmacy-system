@@ -59,7 +59,7 @@ class Common:
             if "errorlevel" in l.lower() and l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
         self.assertIn('call :log FAIL "%MSG%"', self.lines)
-        self.assertIn('echo %DATE% %TIME% %~1 - %~2>> "%LOG%"', self.lines)
+        self.assertIn('>> "%LOG%" echo %DATE% %TIME% %~1 - %~2', self.lines)
 
     def test_manage_commands_and_flags_exist(self):
         src = (ROOT / "manage.py").read_text(encoding="utf-8")

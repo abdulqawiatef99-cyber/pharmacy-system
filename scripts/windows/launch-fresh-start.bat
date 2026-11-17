@@ -159,7 +159,8 @@ endlocal
 exit /b 1
 
 :log
-echo %DATE% %TIME% %~1 - %~2>> "%LOG%"
+REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
+>> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
 exit /b 0
 

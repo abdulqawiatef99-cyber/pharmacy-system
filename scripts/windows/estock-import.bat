@@ -53,6 +53,9 @@ echo.
 set "OWNER="
 set /p "OWNER=Owner user name (the one made on the setup screen): "
 if "%OWNER%"=="" (set "MSG=no user name given" & goto fail)
+set "PWARG="
+REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the program asks
+if defined PHARM_IMPORT_PASSWORD set "PWARG=--password "%PHARM_IMPORT_PASSWORD%""
 echo The program asks for that user's password twice (dry run, then apply); typing is hidden.
 
 REM stop the program: the import writes the database itself
@@ -63,7 +66,7 @@ call :log PASS "program stopped (only its own python processes)"
 set "PHARM_DATA_DIR=%DATA%"
 
 REM dry run: on a copy of the database, nothing is written to the real one
-"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" > "%DRY%" 2>&1
+"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%DRY%"
 type "%DRY%" >> "%LOG%"
@@ -80,7 +83,7 @@ if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was imported" & goto f
 call :log PASS "apply confirmed by the user"
 
 REM the real import: import-estock --apply takes its own verified backup first
-"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" --apply > "%APPLIED%" 2>&1
+"%PY%" "%MANAGE%" import-estock --catalog "%WORK%\catalog.xlsx" --stock "%WORK%\stock.xlsx" %PACKS% --accept-zero-cost --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%APPLIED%"
 type "%APPLIED%" >> "%LOG%"
@@ -114,7 +117,8 @@ endlocal
 exit /b 1
 
 :log
-echo %DATE% %TIME% %~1 - %~2>> "%LOG%"
+REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
+>> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
 exit /b 0
 
