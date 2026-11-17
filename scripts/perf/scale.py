@@ -11,7 +11,8 @@ the slowest reports run, and backup / verify / restore. The stock check of every
   python scripts/perf/scale.py --profile huge --years 1 --out-txt /tmp/scale-huge.txt
   python scripts/perf/scale.py --profile "" --days 2,3 --items 60 --per-day 8-12 --out-txt /tmp/s.txt   (smoke)
 
-Sizes (real_years.PROFILES): large = 800-1200 sales a day, 15,000 items; huge = 2500-3500 a day, 30,000 items.
+Sizes (real_years.PROFILES): large = 800-1200 sales a day, 15,000 items; huge = 2500-3500 a day, 30,000 items;
+giant = 6000-9000 a day, 45,000 items.
 Disk: about 10 KB a sale, and the last snapshot needs about 2.5 times its database while it is measured.
 """
 from __future__ import annotations

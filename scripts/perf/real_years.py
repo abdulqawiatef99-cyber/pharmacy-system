@@ -212,6 +212,8 @@ PROFILES = {
     "medium": {"per_day": "150-300",   "items": 4000,  "customers": 300,  "suppliers": 12},
     "large":  {"per_day": "800-1200",  "items": 15000, "customers": 1500, "suppliers": 25},
     "huge":   {"per_day": "2500-3500", "items": 30000, "customers": 5000, "suppliers": 40},
+    # owner 17/11: some pharmacies sell over a million EGP a day; the program is sold to every size
+    "giant":  {"per_day": "6000-9000", "items": 45000, "customers": 10000, "suppliers": 60},
 }
 
 
