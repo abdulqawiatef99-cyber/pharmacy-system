@@ -238,9 +238,13 @@ def main(argv=None):
     try:
         report.progress(f"{pname}: catalog, suppliers, customers, first purchases")
         t0 = time.perf_counter()
-        gen.setup()
-        loadgen.install_fast_matching(gen.db, gen.owner.org_id)
-        gen.restock(gen.start, initial=True)
+        turns.day(True)                               # the setup is generating too: not under a measurement
+        try:
+            gen.setup()
+            loadgen.install_fast_matching(gen.db, gen.owner.org_id)
+            gen.restock(gen.start, initial=True)
+        finally:
+            turns.day(False)
         report.data["plan"]["setup_s"] = round(time.perf_counter() - t0, 1)
         recent: list = []
         t1 = time.perf_counter()

@@ -168,6 +168,94 @@ print(out)
             self.assertEqual(r.stdout.strip(), "[True, (True, True), (True, True), True, []]")
 
 
+SNAPSHOT_TURN = r"""
+import os, sqlite3, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import scale
+real_sleep = time.sleep
+scale.time.sleep = lambda s: real_sleep(0.002)
+tmp = sys.argv[2]
+data, turns = os.path.join(tmp, "snap", "data"), os.path.join(tmp, "turns")
+os.makedirs(data); os.makedirs(turns)
+c = sqlite3.connect(os.path.join(data, "pharmacy.db"))
+c.execute("CREATE TABLE sales (status TEXT, completed_at TEXT)")
+c.execute("INSERT INTO sales VALUES ('completed', '2026-01-14T10:00:00.000Z'), ('completed', '2026-01-15T10:00:00.000Z')")
+c.commit(); c.close()
+lock = os.path.join(turns, "measure.lock")
+calls, out = [], []
+
+def fake(snap, rec, start, a, report):
+    calls.append(os.path.exists(lock))
+    if len(calls) == 2:
+        raise RuntimeError("measurement failed")
+
+scale.measure_snapshot = fake
+args = ["--snapshot", data, "--label", "kept", "--turns", turns, "--out-txt", os.path.join(tmp, "r.txt")]
+# 1. somebody else measures: the kept snapshot waits, then measures holding the lock, then gives it back
+open(lock, "w").close()
+th = threading.Thread(target=lambda: scale.main(args)); th.start(); real_sleep(0.3)
+out.append((th.is_alive(), calls == []))
+os.unlink(lock); th.join(20)
+out.append((not th.is_alive(), list(calls), os.listdir(turns)))
+# 2. a measurement that fails gives the turn back too
+try:
+    scale.main(args)
+    out.append("no error")
+except RuntimeError:
+    out.append((calls, os.listdir(turns)))
+print(out)
+"""
+
+SETUP_TURN = r"""
+import os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import scale, loadgen
+real_sleep = time.sleep
+scale.time.sleep = lambda s: real_sleep(0.002)
+tmp = sys.argv[2]
+turns = os.path.join(tmp, "turns")
+os.makedirs(turns)
+lock = os.path.join(turns, "measure.lock")
+seen = []
+real_setup = loadgen.Generator.setup
+
+def setup(self):
+    seen.append(("setup", os.path.exists(lock), [f for f in os.listdir(turns) if f.startswith("day.")] != []))
+    raise SystemExit("stop here")                 # the rest of the run is not under test
+
+loadgen.Generator.setup = setup
+args = ["--profile", "", "--days", "1", "--items", "5", "--per-day", "1-1", "--turns", turns,
+        "--out-txt", os.path.join(tmp, "r.txt"), "--work", tmp]
+open(lock, "w").close()
+th = threading.Thread(target=lambda: scale.main(args)); th.start(); real_sleep(0.4)
+waited = th.is_alive() and seen == []
+os.unlink(lock); th.join(20)
+print(waited, seen, os.listdir(turns))
+"""
+
+
+class TestTurnsInRuns(unittest.TestCase):
+    """The two places of a run that take a turn besides the simulated days (Codex on #296)."""
+
+    def run_py(self, code, tmp):
+        return subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts/perf"), tmp],
+                              capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+
+    def test_a_kept_snapshot_waits_for_its_turn_and_gives_it_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_py(SNAPSHOT_TURN, tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip().splitlines()[-1],
+                             "[(True, True), (True, [True], []), ([True, True], [])]")
+
+    def test_the_generator_setup_waits_for_a_measurement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_py(SETUP_TURN, tmp)
+            # it waited while the lock was there; setup then ran without the lock and with its own day mark;
+            # nothing is left in the turns folder
+            self.assertEqual(r.stdout.strip().splitlines()[-1], "True [('setup', False, True)] []", r.stderr)
+
+
 class TestMeasureOrder(unittest.TestCase):
     def test_a_report_that_never_answers_gets_a_new_server(self):
         # its query goes on inside the server after the client gave up; the next request must not be measured
