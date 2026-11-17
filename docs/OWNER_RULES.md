@@ -16,8 +16,10 @@ with this file, this file wins. Change it only through a PR, after the owner agr
 - End every reply with «التذكيرات المفتوحة» (the current list is at the top of `docs/HANDOFF.md`).
 
 ## 2. How the work is split
-- Day = testing with the owner on the pharmacy PC and finding defects. The owner's time at the
-  pharmacy is not fixed; ask him at the start of a day chat whether he is there.
+- Day = testing with the owner on the pharmacy PC and finding defects. Never ask him whether he is at the
+  pharmacy: he is there about 13:00-24:00 (§9; owner, 17/11).
+- One chat for the owner (17/11): he talks only to the manager chat, even when two PCs work. The manager drives
+  the other PC's chat itself (one self-contained message per stage) and relays any physical step to him.
 - Night = building, review and merging, only from the written queue «الطابور الليلي» in `docs/HANDOFF.md`.
 - Group tasks by place: needs the pharmacy PC / can be done from anywhere.
 - No scheduled sessions unless the owner asks, and never before the current open work is closed

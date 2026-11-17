@@ -4,7 +4,23 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 17/11 12:30 Cairo — morning report after the first chain night (READ THIS FIRST)
+## 17/11 15:40 Cairo — day chat (manager, cashier PC): bundled installer built, Heikal worker started (READ THIS FIRST)
+Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+Roles today: #113, the three comments of 17/11 (14:35, 14:40, 14:45 Cairo). The owner talks only to the manager chat «جهاز كاشير صيدلية عبد القوي».
+1. Done, with evidence
+   - Cashier PC (desktop-5jvh3qd) 14:32: «تحديث» `69d87f8` → `41c9510`, backup `pharmacy-backup-20261117-143222.zip` first, stock check all matching (2765 items, 3050 movements). Comment on #18.
+   - Owner OK for the bundled installer (14:48). Merged #160 (migration 0036, 9 indexes) and #301 (version 0.4.0): `develop` @ `8049a0e`, CI linux green.
+   - First installer build (run 44086683981) failed in its Windows tests: `tests.test_perf_scale` turn lock (`PermissionError` on Windows while the holder's delete is pending). Fixed by #306 (one line in `scripts/perf/scale.py`, Codex clean, CI linux green, Windows run shows the test passing). `develop` @ `cc99311`.
+   - Bundled installer built: run 44091400377, pre-release `installer-review` from `cc99311`, 34378617 bytes, sha256 `f15bae18891a64af3af306ad375af9abf876f642cb57975308857fe0c7a41ead`.
+   - Heikal worker chat driven from the manager chat through the browser pane on the cashier PC (works: message typed and sent at 15:33). Stage 1 (install + synthetic first-run setup) sent; stages 2 (#19) and 3 (#253 small/medium) go one message each.
+2. Not done and why
+   - #18 steps 2.5 (scan with the cursor in the customer field) and 2.6 (label on a box): the owner judged them low value today; do them in one minute when the bundled installer reaches the cashier PC.
+   - #307 (new): `CI / windows` job fails `test_cli_stops_with_a_clear_message` since #288 (only under `validate_local_release.py`; green in the installer workflow's own Windows tests). Small Claude Code task.
+   - #252 device side, #19, #253 small/medium: in progress / next.
+3. Decisions: the cashier PC gets the bundled installer only after the Heikal PC passes, with the owner's OK. Until then its «تحديث» button will refuse `develop` (migration 0036), which is the intended protection.
+4. Next goal: read the worker's «STAGE 1 RESULT» in its chat, then send stage 2 (#19). After the Heikal PC passes: installer on the cashier PC + the two scan steps + #252 device side.
+
+## 17/11 12:30 Cairo — morning report after the first chain night
 Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); OK for the bundled installer; odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 1. Done, with evidence (`develop` @ `12e1b5e`, CI linux green, 1264 tests locally on the #160 branch merged with it)
    - Merged since 16/11 23:00, each with CI linux green + Codex clean on the merged head: #287 #288 (drawer audit label; newer-program data refused) · #289 #290 (review R8-B: 4 sale-screen / permission defects) · #294 #300 (chain rule, queue, status) · #295 (trial-day script + `docs/DAY19_OWNER_HANDS.md`) · #297 (look-alike search remembered per catalog version) · #298 (search: exact name first; Enter added the wrong item) · #296 (scale-test tooling `scripts/perf/scale.py`) · #302 (quick buttons ranking kept 10 min) · #303 (purchase approval + stock-alert banner no longer read a whole table).
