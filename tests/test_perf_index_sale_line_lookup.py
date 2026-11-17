@@ -30,3 +30,16 @@ class LastPurchaseCostLookup(DBTestCase):
         plan = " | ".join(r["detail"] for r in self.db.all("EXPLAIN QUERY PLAN " + self.SQL, ("o", "i")))
         self.assertIn("ix_moves_item_type", plan, plan)
         self.assertNotIn("TEMP B-TREE", plan, plan)
+
+
+class PeriodLookups(DBTestCase):
+    """#253 A3: one month of losses is found by its period."""
+
+    def plan(self, sql, n):
+        return " | ".join(r["detail"] for r in self.db.all("EXPLAIN QUERY PLAN " + sql, ("x",) * n))
+
+    def test_losses_report_month(self):
+        p = self.plan("SELECT m.created_at FROM stock_movements m JOIN items i ON i.id=m.item_id"
+                      " WHERE m.org_id=? AND m.movement_type IN ('adjustment','damage','supplier_return')"
+                      " AND m.created_at>=? AND m.created_at<? ORDER BY m.created_at", 3)
+        self.assertIn("ix_moves_type_time", p, p)

@@ -23,3 +23,7 @@ CREATE INDEX IF NOT EXISTS ix_sale_returns_sale ON sale_returns(sale_id);
 --    movements backwards: 29 ms a line after 100 days of a large pharmacy (#253 scale run), growing with every
 --    movement; an 80-line invoice held the server for seconds.
 CREATE INDEX IF NOT EXISTS ix_moves_item_type ON stock_movements(org_id, item_id, movement_type);
+-- (no audit_log(org_id, at): tried for the audit screen's period, but SQLite then answered the drawer-opening and
+--  other per-action lookups from it and read every audit row of the pharmacy; tests/test_perf_queries.py caught it.)
+-- 9. the losses report's period (#253: 7.4 s for one month on 3.5 M movements, read whole).
+CREATE INDEX IF NOT EXISTS ix_moves_type_time ON stock_movements(org_id, movement_type, created_at);
