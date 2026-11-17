@@ -55,36 +55,49 @@ def machine() -> dict:
 
 class Turns:
     """Several sizes generated at once on one machine (one process a core): a measurement runs alone.
-    A process that measures leaves a `measure.<pid>` file in the shared folder and waits until the others finished
-    their simulated day (`day.<pid>` files); the others do not start a new day while a `measure.*` file exists.
+    The process that measures holds `measure.lock` in the shared folder (created atomically, so two cannot hold it)
+    and waits until the others finished their simulated day (`day.<pid>` files). A generator marks its day first and
+    then looks for the lock; if it is there it takes the mark back and waits, so a day never starts under a measurement.
     The simulated clock does not move while a generator waits, so the data is the same as without waiting."""
 
     def __init__(self, folder: str):
         self.dir = Path(folder) if folder else None
+        self.holding = False
         if self.dir:
             self.dir.mkdir(parents=True, exist_ok=True)
-
-    def _others(self, kind: str) -> list[Path]:
-        return [p for p in self.dir.glob(f"{kind}.*") if p.suffix != f".{os.getpid()}"]
-
-    def _mark(self, kind: str, on: bool, wait_for: str) -> None:
-        if not self.dir:
-            return
-        me = self.dir / f"{kind}.{os.getpid()}"
-        if on:
-            while self._others("measure"):            # somebody measures: wait for the turn
-                time.sleep(2)
-            me.touch()
-            while wait_for and self._others(wait_for):
-                time.sleep(2)
-        else:
-            me.unlink(missing_ok=True)
+            self.lock = self.dir / "measure.lock"
+            self.mine = self.dir / f"day.{os.getpid()}"
 
     def day(self, on: bool) -> None:
-        self._mark("day", on, "")
+        if not self.dir:
+            return
+        if not on:
+            self.mine.unlink(missing_ok=True)
+            return
+        while True:
+            self.mine.touch()
+            if self.holding or not self.lock.exists():
+                return
+            self.mine.unlink(missing_ok=True)         # somebody measures: no new day until it is done
+            time.sleep(2)
 
     def measure(self, on: bool) -> None:
-        self._mark("measure", on, "day")
+        if not self.dir:
+            return
+        if not on:
+            if self.holding:
+                self.lock.unlink(missing_ok=True)
+                self.holding = False
+            return
+        while True:
+            try:
+                os.close(os.open(self.lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                break
+            except FileExistsError:                   # another process measures: wait for the turn
+                time.sleep(2)
+        self.holding = True
+        while [p for p in self.dir.glob("day.*") if p != self.mine]:
+            time.sleep(2)
 
 
 def stock_check(db_path: Path) -> dict:
