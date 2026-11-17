@@ -8,7 +8,10 @@ CREATE INDEX IF NOT EXISTS ix_sales_completed ON sales(org_id, branch_id, status
 -- 3. the cashier's drawer panel and the shift report sum the sales of one shift.
 CREATE INDEX IF NOT EXISTS ix_sales_shift ON sales(shift_id);
 -- 4. an item's sales (item card: 12 months sold): from the item's lines, not from every completed sale.
-CREATE INDEX IF NOT EXISTS ix_sale_lines_item ON sale_lines(item_id);
+--    sale_id is the second column on purpose: with item_id alone SQLite answered the sale screen's
+--    "this item on this invoice" lookup (sale_id=? AND item_id=?) from this index and read every line the
+--    item ever had (measured in the #253 scale run: 9 us -> 199 us after 6,000 sales, growing with history).
+CREATE INDEX IF NOT EXISTS ix_sale_lines_item ON sale_lines(item_id, sale_id);
 -- 5. a customer's invoices and items (customer profile, statement).
 CREATE INDEX IF NOT EXISTS ix_sales_customer ON sales(org_id, customer_id);
 -- 6. an item's purchase prices by supplier (item card): from the item's invoice lines.
