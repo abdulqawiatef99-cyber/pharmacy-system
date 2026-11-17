@@ -7,15 +7,15 @@ or schedule the next session. Only the manager chat edits this file (workers wri
 1. [x] Night A: #253 cloud scale test → #296 merged, table on #253, fixes #297 #302 #303, rest in #304.
 2. [x] Night B: #19 trial-day script refresh → #295 merged 17/11 02:00 (+ `docs/DAY19_OWNER_HANDS.md`).
 3. [x] Morning report 17/11 12:30 at the top of `docs/HANDOFF.md`.
-4. [ ] Day chat 17/11 (owner at the pharmacy, 13:00): review the chain's merges; «تحديث» on the cashier PC +
-       stock check; Heikal PC: install, #253 small/medium run, start #19.
-5. [ ] #160 (migration 0036, 9 indexes): CI green + Codex clean on `03441fc`. Merge with #301 (version 0.4.0) right
-       before the bundled installer build (owner OK). Then `scale.py` second pass on the Heikal PC.
+4. [ ] Day chat 17/11: cashier PC «تحديث» to `41c9510` + stock check DONE 14:32 (#18). Open: Heikal PC (worker chat,
+       driven by the manager): install the bundled installer → #19 → #253 small/medium run alone (roles: #113, 17/11).
+5. [x] #160 + #301 merged 17/11 14:48 (owner OK), #306 fixed the Windows test that stopped the build; bundled installer
+       `installer-review` from `cc99311` (run 44091400377). Open: `scale.py` second pass on the Heikal PC (item 4).
 6. [ ] #252: code side done (see its 17/11 comment); owner/device side with the owner in the day chat.
 7. [ ] #20 preparation (after #19 passes): release PR by `docs/RELEASE_RUNBOOK.md` (merge -s ours origin/main).
 
 ## مستني المالك (does not stop the chain)
-- OK to build the bundled installer (with #160).
+- OK to put the bundled installer on the cashier PC (after the Heikal PC passes).
 - Product name; USB flash drive (before 18/11).
 - Odd piastres at shift close (#299): tolerance under 0.25 or leave as is.
 - Parallel-week method (WORK_PLAN §6 risk 1).
