@@ -4,7 +4,14 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 17/11 22:10 Cairo — manager chat (new, cashier PC), in progress (READ THIS FIRST)
+## 17/11 23:10 Cairo — manager chat (new, cashier PC), in progress (READ THIS FIRST)
+- Hardware sheet line 10 PASS 23:05 (shift close + report printed from Chrome on the cashier PC, test account tester; the login file IS valid: the earlier Chrome was on another PC, boot_id differed). G8 to L2: total **69.75%**. Temp user line10 created then deactivated.
+- Worker sessions: the owner approved the launch-night e2e session (#319 opened); the owner asked the manager to relay his approval to the tour (#247) and updater sessions (sent 22:58).
+- Backup interim: the program on the cashier PC is pre-launch data (replaced at launch), so no interim copy tonight; USB drive tomorrow → R6/R7 (G5). A network share needs a Windows sharing-security change on the Heikal PC: owner only.
+- Owner decisions 17/11: F60 default «عابر» + one-tap «مألوف» without a name; F64 delivery change to a round 200; F65 low-change warning; F63 ships with the proofreading pass before launch.
+- Next: merge #318 #319 + the two worker PRs after Codex/CI; final review (strongest model) + Codex + AR/EN proofreading + F63 tonight; tomorrow: USB R6/R7, owner 2FA + Windows password + remove Radmin/AnyDesk, launch after closing, #20.
+
+## 17/11 21:50 Cairo — manager chat (new, cashier PC), in progress
 Open reminders: final review = strongest model + Codex + Arabic/English proofreading (owner 17/11); GitHub two-step sign-in (2FA); USB flash drive (also closes G5 R6/R7); Windows password + uninstall Radmin VPN / AnyDesk / UltraViewer on both PCs; Wi-Fi password (before phone access); odd piastres (#299); accountant e-receipt phase; paper temperature log; doctor session; data export from the 3 accounts.
 - #318 fixed after Codex: G5 stays L1 (the Heikal drill restored a local backup; G5 also needs R6/R7 = an off-device copy restored on another device, waits for the USB drive). Total stays **64.5%**. New IDs F54–F59 (were F50–F55, clashing with the clock/login log/payroll/rebuild IDs), plus F60 customer type on sales (automatic known/new/walk-in; regular buyers of an item feed the order suggestion; builds on F8/F9), F61 strong-password guide, F62 feedback reaches the owner from other pharmacies (today it stays on that PC, no send or export), F63 «شيفت» instead of «الوردية» everywhere (owner 17/11; ~73 places in 10 files; with the proofreading batch, after the F36 tour PR frees app.js). One table for every idea: `IDEAS_PLAN.md` section 17/11 (rule: no owner idea is dropped).
 - Dropped item found: F47-a track-and-trace research (planned before #19, never queued). Now: before E-Stock is switched off.
