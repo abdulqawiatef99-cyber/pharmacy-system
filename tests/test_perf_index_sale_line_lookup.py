@@ -22,13 +22,9 @@ class SaleLineLookup(DBTestCase):
 
 
 class LastPurchaseCostLookup(DBTestCase):
+    """The order report's per-item lookup (procurement) has no branch; the approval's has one since #303."""
     SQL = ("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND"
            " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY rowid DESC LIMIT 1")
-
-    def test_the_program_still_asks_it_this_way(self):
-        from pathlib import Path
-        src = " ".join(Path("app/purchasing/service.py").read_text(encoding="utf-8").split())
-        self.assertIn('WHERE org_id=? AND item_id=? AND" " movement_type=\'purchase\' AND unit_cost IS NOT NULL ORDER BY rowid DESC LIMIT 1', src)
 
     def test_it_is_answered_from_the_item_index_without_sorting(self):
         plan = " | ".join(r["detail"] for r in self.db.all("EXPLAIN QUERY PLAN " + self.SQL, ("o", "i")))
