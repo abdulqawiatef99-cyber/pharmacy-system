@@ -4,6 +4,22 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 17/11 12:30 Cairo — morning report after the first chain night (READ THIS FIRST)
+Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); OK for the bundled installer; odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
+1. Done, with evidence (`develop` @ `12e1b5e`, CI linux green, 1264 tests locally on the #160 branch merged with it)
+   - Merged since 16/11 23:00, each with CI linux green + Codex clean on the merged head: #287 #288 (drawer audit label; newer-program data refused) · #289 #290 (review R8-B: 4 sale-screen / permission defects) · #294 #300 (chain rule, queue, status) · #295 (trial-day script + `docs/DAY19_OWNER_HANDS.md`) · #297 (look-alike search remembered per catalog version) · #298 (search: exact name first; Enter added the wrong item) · #296 (scale-test tooling `scripts/perf/scale.py`) · #302 (quick buttons ranking kept 10 min) · #303 (purchase approval + stock-alert banner no longer read a whole table).
+   - #253 cloud part finished: large 1y, large 3y, huge 1y generated through the program's services; stock check clean on all three; full table on #253. Today's schema fails the cashier limits at those sizes; with #160's indexes it passes. Remaining code items in #304 (after launch).
+   - #160: now 9 indexes (sale_lines index fixed to (item_id, sale_id); last-purchase-cost and losses-period added; audit (org_id, at) tried and rejected by the guard tests); plans compared with/without on 6 screens, one accepted regression (item card of the top seller at huge size, in #304). CI green + Codex clean on `03441fc`. NOT merged: migration = installer = owner OK.
+   - Second-pass review complete (A + B). #274 closed. #252 code side closed out on the issue.
+2. Not done and why
+   - Cashier PC is still on `69d87f8` (it was off): #288 #289 #290 #297 #298 #302 #303 arrive with the next «تحديث».
+   - #18 two scan steps (customer field, label on a box), #19, #252 device side, #253 small/medium on the Heikal PC: need the owner / devices.
+   - Backup timings at 11-12 GB not measured (cloud disk). Large 1y: backup 183 s, restore 108 s, 0 problems.
+   - PR #301 (version 0.4.0, opened 02:03 by another session of the owner's account): left open on purpose; it belongs right before the candidate installer build.
+3. Decisions: the chain works. Workers created from the manager chat after the repo was attached DO get push + API (the read-only ones were created before). Wake-ups into the manager chat fired on time (02:15, 04:30, 08:30, 12:30).
+4. Next goal (day chat, 13:00, owner at the pharmacy; new normal chat in the project, strongest model): (a) owner OK → merge #160 + #301, build the bundled installer; (b) cashier PC «تحديث» + stock check + the two #18 scan steps; (c) Heikal PC: install, `scale.py` small/medium with the second pass on 0036, then #19 with `docs/DAY19_OWNER_HANDS.md`; (d) #252 device side (15 min).
+5. المحادثة دي اتحفظت وممكن تتمسح
+
 ## 17/11 00:30 Cairo — manager chat: cashier PC done, R8-B applied, work chain starts (READ THIS FIRST)
 Open reminders (end every owner reply with them): product name + USB flash drive (before 18/11); OK for the bundled installer; ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 1. Done, with evidence
