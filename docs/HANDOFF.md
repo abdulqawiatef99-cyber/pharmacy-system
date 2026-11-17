@@ -4,6 +4,16 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 17/11 20:10 Cairo — manager chat «100% اليوم» (cashier PC), in progress (READ THIS FIRST)
+Open reminders: GitHub two-step sign-in (2FA) on the owner's account (new, security: whoever controls the account can push updates to every pharmacy); USB flash drive; Windows password + uninstall Radmin VPN / AnyDesk / UltraViewer on both PCs; Wi-Fi password (before phone access); odd piastres (#299); accountant e-receipt phase; paper temperature log; doctor session; data export from the 3 accounts.
+- G5 to L2: Heikal PC restore drill PASS 18:24 (newest backup restored into a new temp folder and verified, 0.9 s) via `heikal-tests.bat` (#315). #253 on Windows: small + medium 1 year done, stock check matching (58,721 movements in small); one SLOW: drug-safety check max 327.8 ms (limit 300, median 45). Total 68.0%.
+- Merged: #316 (docs), #317 (launch night: `launch-fresh-start.bat` + `estock-import.bat`, RELEASE_RUNBOOK section; Codex clean on 725a43c, CI linux green). `develop` @ `573297e`.
+- Running Claude Code sessions (claims on #113): updater works without a token (public repo), F36 first-run tour (#247).
+- Owner hardware sheet on the cashier PC test account (built-in browser pane): lines 1-9 PASS. Line 10 (shift close + print): the pane cannot print; redo in Chrome. Then G8 to L2 (73.25%).
+- Owner findings 17/11 (recorded in FUTURE_REQUIREMENTS F50-F55): return quantity field shows 0 and typing appends (3 becomes 30) = bug, fix before sales move to the program (after the tour PR, same file); invoice-wide discount; better receipt layout; Enter moves to the next field; shift report straight to the receipt printer; import E-Stock sales history; plus F35 newer look and F37 import from any program stay as recorded.
+- Owner wants: a complete test plan for every screen (not only the 10 lines); after launch, the release installer for his uncle and relatives (programming / security) to review, reports go to the owner privately, never public issues; a final review by the strongest model + Codex before #20.
+- Owner decisions 17/11: hardware sheet may be finished after launch only while E-Stock stays the live cashier; customers: add/edit = customers.manage (owner, manager, pharmacist), no delete (by design).
+
 ## 17/11 18:30 Cairo — manager chat «100% اليوم» (cashier PC), in progress (READ THIS FIRST)
 Open reminders: USB flash drive (backup goes to the Heikal PC for now); Windows password + uninstall Radmin VPN / AnyDesk / UltraViewer on both PCs before launch; Wi-Fi: check the router's connected devices, then change the password; odd piastres at shift close (#299); ask the accountant about the e-receipt phase; paper temperature log until F38; book the doctor session; data export from the 3 accounts.
 - Push attach is refused in this chat (auto-mode check). GitHub is driven through the signed-in browser pane on the cashier PC: upload files to a branch, PR, labels, comments, merge and workflow dispatch all work there.
