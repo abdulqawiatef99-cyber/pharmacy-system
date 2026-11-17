@@ -60,8 +60,28 @@ class Client:
         self.base = base
         self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
                                               urllib.request.ProxyHandler({}))
+        self.creds: dict | None = None
+
+    def login(self, username: str, password: str):
+        """Sign in and remember how: a snapshot that ends more than 30 days before the real today loses its
+        sessions to the daily clean-up (it compares with SQLite's own clock, which serve_at.py does not move),
+        so a request answered 401 signs in again and is asked once more."""
+        self.creds = None
+        out = self.req("POST", "/api/auth/login", {"username": username, "password": password})
+        if out[0] == 200:
+            self.creds = {"username": username, "password": password}
+        return out
 
     def req(self, method: str, path: str, body=None, timeout=600):
+        out = self._req(method, path, body, timeout)
+        if out[0] == 401 and self.creds:
+            creds, self.creds = self.creds, None
+            if self._req("POST", "/api/auth/login", creds, 60)[0] == 200:
+                self.creds = creds
+                out = self._req(method, path, body, timeout)
+        return out
+
+    def _req(self, method: str, path: str, body=None, timeout=600):
         data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
         r = urllib.request.Request(self.base + path, data=data, method=method, headers=H)
         t = time.perf_counter()
@@ -91,7 +111,7 @@ def facts(db_path: Path) -> dict:
                     " WHERE s.completed_at >= ? GROUP BY 1 ORDER BY 2 DESC LIMIT 3",
                     ((day - timedelta(days=30)).isoformat(),)).fetchall()
     # items the cashier can really sell on the snapshot's day: unexpired stock only, as Sales._sellable counts it
-    stocked = c.execute("SELECT i.id, i.name_en, min(bc.barcode) barcode FROM items i"
+    stocked = c.execute("SELECT i.id, i.name_en, min(bc.barcode) barcode, i.public_price FROM items i"
                         " JOIN item_barcodes bc ON bc.item_id=i.id"
                         " JOIN stock_balances sb ON sb.item_id=i.id AND sb.qty>0"
                         " LEFT JOIN batches bt ON bt.id=nullif(sb.batch_key,'')"
@@ -156,9 +176,13 @@ class Server:
         self.port = free_port()
         # every path explicitly: an inherited PHARM_DB_PATH / PHARM_UPLOAD_DIR (the Windows release validation sets
         # them) would make the server open another database than the snapshot
+        # its temp folder next to the snapshot: a server stopped in the middle of a backup (it starts one when it
+        # is closed) leaves its copy of the database behind, and there it is deleted with the work folder
+        tmp = data.parent / "tmp"
+        tmp.mkdir(exist_ok=True)
         env = {**os.environ, "PHARM_DATA_DIR": str(data), "PHARM_DB_PATH": str(data / "pharmacy.db"),
                "PHARM_UPLOAD_DIR": str(data / "uploads"), "PHARM_BACKUP_DIR": str(data.parent / "backups"),
-               "PYTHONUNBUFFERED": "1", **(env_extra or {})}
+               "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp), "PYTHONUNBUFFERED": "1", **(env_extra or {})}
         self.t0 = time.perf_counter()
         self.p = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "serve_at.py"), "--at", at, "--port", str(self.port)],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -204,11 +228,17 @@ class Server:
             self.p.kill()
 
 
-def timed(client: Client, method: str, path: str, body=None, n: int = 5) -> dict:
+def timed(client: Client, method: str, path: str, body=None, n: int = 5, timeout: float = 600) -> dict:
     ms, size, code = [], 0, None
     for _ in range(n):
-        code, out, t, size = client.req(method, path, body)
+        t0 = time.perf_counter()
+        try:
+            code, out, t, size = client.req(method, path, body, timeout)
+        except OSError as e:                       # no answer within the client's timeout: recorded, not fatal
+            code, t = type(e).__name__, (time.perf_counter() - t0) * 1000
         ms.append(t)
+        if t >= 30_000 or not isinstance(code, int):
+            break                                  # half a minute or more: once is enough
     return {"median_ms": round(statistics.median(ms), 1), "max_ms": round(max(ms), 1), "status": code, "bytes": size}
 
 
@@ -389,7 +419,7 @@ def explain(data: Path, f: dict, slow_ms: float) -> list[dict]:
     while not srv.started:
         time.sleep(0.05)
     c = Client(f"http://127.0.0.1:{port}")
-    c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
+    c.login("owner", OWNER_PW)
     c.req("POST", "/api/cash/open", {"opening_cash": 10000})
     for name, path in scenarios(f):
         c.req("GET", path)
@@ -443,7 +473,7 @@ def main(argv=None):
         res["startup"] = {"health_s": round(srv.ready_s, 2), "mem_after_start_mb": srv.mem()}
         try:
             c = Client(srv.base)
-            code, _, _, _ = c.req("POST", "/api/auth/login", {"username": "owner", "password": OWNER_PW})
+            code, _, _, _ = c.login("owner", OWNER_PW)
             assert code == 200, code
             c.req("POST", "/api/cash/open", {"opening_cash": 10000})
             res["requests"] = {}
