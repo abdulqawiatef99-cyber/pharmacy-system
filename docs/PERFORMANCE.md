@@ -97,6 +97,44 @@ the data with and without it. The program is unchanged, so the measured server s
 safety-check rows of the results. Disk: about 10 KB a sale; a backup needs about 1.7 times the database in free
 disk on top of it (copy, compressed copy, check), and `scale.py` skips the backup timings when that is missing.
 
+### Results 2026-11-17 (`develop` @ `2a47dcc`, 2-core cloud machine, 8 GB RAM)
+
+Full table (58 screens and reports, cashier flow, purchase invoice, blocking probes) and the suggested fix for every
+FAIL: the Night A comment on issue #253. Stock check after generation: all balances match at every size.
+"+ indexes" = the same database with #160's `0036_perf_indexes.sql`. Max of 3, milliseconds unless marked.
+
+| | large 3 years | + indexes | huge 1 year | + indexes |
+|---|---:|---:|---:|---:|
+| sales / stock movements | 1.09 M / 3.5 M | | 1.10 M / 3.4 M | |
+| database | 11.8 GB | | 11.4 GB | |
+| Add line | 8 | 26 | 6 | 8 |
+| Safety check (median / max) | 48 / 980 | 52 / 998 | 177 / 1,951 | 174 / 1,931 |
+| Complete sale | 825 | 56 | 807 | 188 |
+| Receipt page | 582 | 3 | 597 | 2 |
+| Search by name / barcode | 9 / 2 | 28 / 2 | 27 / 2 | 16 / 3 |
+| POS quick buttons | 1,397 | 297 | 5,791 | 1,106 |
+| Day report | 11.1 s | 2 | 3.9 s | 2 |
+| Sales report (month) | 7.8 s | 279 | 11.6 s | 1.1 s |
+| Sales report (year) | 11.0 s | 13.4 s | 26.4 s | 39.9 s |
+| Invoices report (month) | 11.1 s | 177 | 9.7 s | 193 |
+| Stock-alert banner (asked once a minute) | 4.7 s | 972 | 13.3 s | 13.4 s |
+| Purchase invoice, approve 20 lines | 6.5 s | 6.2 s | 7.3 s | 6.7 s |
+| Cashier's scan while it is approved | 6.5 s | 6.1 s | 7.3 s | 6.6 s |
+| Cashier's scan while a long report runs (median / max) | 7 / 11 | 3 / 51 | 6 / 14 | 8 / 14 |
+| Unsold items (month) | no answer in 180 s | same | same | same |
+
+Large 1 year (364,000 sales, 3.99 GB): backup create 183 s, check after writing 25 s, verify 48 s, restore 108 s,
+file 0.92 GB. The 11-12 GB databases were not backed up: the machine's 30 GB disk cannot hold it.
+
+What the numbers say:
+- Without #160's indexes the cashier's own steps fail the 0.3 s limit at these sizes; with them they pass.
+- `ix_sale_lines_item ON sale_lines(item_id)` as #160 has it makes `Sales.add_line` read every line the item ever
+  had (156 ms for the best seller of large 3 years); it must be `(item_id, sale_id)`.
+- Requests that run on the server's event loop hold every screen: purchase approval (its last-purchase-cost query has
+  no `branch_id` and sorts every stock movement of the pharmacy), the stock-alert banner (reads the whole audit log
+  when there never was a mismatch), the audit log screen, order suggestions, stock health, the quick buttons.
+- Reports that run in a worker thread (#249) do not hold the cashier.
+
 ## Open findings (not fixed yet)
 - **Database growth:** 89 MB after 30 days of synthetic data; the largest tables are `safety_events`
   (40,731 rows, 16.6 MB) and `audit_log` (16.1 MB). Extrapolated linearly (not measured), a year is about
@@ -110,4 +148,4 @@ disk on top of it (copy, compressed copy, check), and `scale.py` skips the backu
   file). The bench's median of 2 runs (133–136 ms) includes that first build; at 30 days it ran 3 times.
 - **Year sales report** 616–622 ms, **stock report** 69–93 ms, **item movements for a year** 145–161 ms:
   acceptable, not changed by these PRs.
-- 3-year snapshot: not measured yet (generating one year took about an hour here).
+- 3-year snapshot of the default (medium) shape: not measured; large 3 years is above.
