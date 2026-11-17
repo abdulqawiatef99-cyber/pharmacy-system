@@ -111,11 +111,20 @@ class LaunchNightOnWindows(unittest.TestCase):
                         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"])
         wait_http("http://127.0.0.1:8000/api/health", want_ok=False, timeout=20)
 
-    def run_bat(self, name, answers, extra_env=None, timeout=400):
+    def run_bat(self, name, answers, extra_env=None, timeout=300):
+        # files, not pipes: the program the script starts inherits the handles and would keep a pipe open forever
         env = {**self.env, **(extra_env or {})}
-        r = subprocess.run(["cmd.exe", "/d", "/c", str(self.scripts / name)], input=answers, env=env, cwd=self.t,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-        return r
+        n = len(list(self.t.glob("bat-*.out")))
+        inp, out = self.t / f"bat-{n}.in", self.t / f"bat-{n}.out"
+        inp.write_text(answers, encoding="ascii")
+        with open(inp, "rb") as i, open(out, "wb") as o:
+            try:
+                rc = subprocess.run(["cmd.exe", "/d", "/c", str(self.scripts / name)], stdin=i, stdout=o,
+                                    stderr=subprocess.STDOUT, env=env, cwd=self.t, timeout=timeout).returncode
+            except subprocess.TimeoutExpired:
+                rc = "timeout"
+        text = out.read_bytes().decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(name, rc, text, "")
 
     def log(self, name):
         p = self.out / name
@@ -127,9 +136,11 @@ class LaunchNightOnWindows(unittest.TestCase):
     def test_1_fresh_start_from_the_release_folder(self):
         # the program runs (launcher + server from the installed python), and an unrelated python too
         launcher = subprocess.Popen([str(self.pyw), str(self.inst / "program" / "launcher.py")], env=self.env,
-                                    cwd=self.inst / "program")
+                                    cwd=self.inst / "program",
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.assertTrue(wait_http("http://127.0.0.1:8000/api/health"), "program did not start")
-        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             r = self.run_bat("launch-fresh-start.bat", "YES\n")
             text = self.log("fresh-start.txt")
