@@ -108,6 +108,67 @@ def stock_check(db_path: Path) -> dict:
         db.close()
 
 
+def measure_snapshot(snap: Path, rec: dict, start, a, report) -> None:
+    """Stock check, the measurements, and with --indexes-sql the requests again with the proposed indexes."""
+    report.progress(f"{rec['label']}: stock check")
+    rec["stock_check"] = stock_check(snap / "pharmacy.db")
+    if not rec["stock_check"]["ok"]:
+        rec["error"] = f"stock check found differences: {rec['stock_check']['counts']}"
+    # a backup copies the database, compresses the copy and opens it again to check it (backup.create,
+    # quick_check): about 1.7 times the database in free disk on top of the database itself
+    size = (snap / "pharmacy.db").stat().st_size
+    room = ry.free_bytes(snap) >= 1.7 * size + 500_000_000
+    if not room:
+        rec["backup_skipped"] = (f"free disk {ry.free_bytes(snap) / 1e9:.1f} GB, a backup of this"
+                                 f" {size / 1e9:.1f} GB database needs about {1.7 * size / 1e9 + 0.5:.1f} GB")
+        report.note(f"{rec['label']}: backup not measured: {rec['backup_skipped']}")
+    ry.measure(snap, "owner", start, a.repeat, rec, report, backup=room)
+    if a.indexes_sql:
+        # the same snapshot again with proposed indexes (a migration file that is not in the program yet):
+        # what the owner would get after that migration. Requests only, no second backup.
+        rec2 = {k: rec[k] for k in ("profile", "days", "gen_s", "stats", "stock_check") if k in rec}
+        rec2.update(label=rec["label"] + " + indexes", indexes_sql=Path(a.indexes_sql).name)
+        report.data["snapshots"].append(rec2)
+        report.progress(f"{rec2['label']}: creating the indexes")
+        t = time.perf_counter()
+        c = sqlite3.connect(snap / "pharmacy.db")
+        c.executescript(Path(a.indexes_sql).read_text(encoding="utf-8"))
+        if a.analyze:
+            c.execute("ANALYZE")
+        c.close()
+        rec2["indexes_s"] = round(time.perf_counter() - t, 1)
+        ry.measure(snap, "owner", start, a.repeat, rec2, report, backup=False)
+
+
+def measure_existing(a, report) -> int:
+    """--snapshot: a data folder kept from an earlier run (--keep-last, or loadgen.py) is measured where it is."""
+    import loadgen
+    from datetime import datetime, timezone
+    snap = Path(a.snapshot).resolve()
+    c = sqlite3.connect(snap / "pharmacy.db")
+    loadgen.drop_gen_indexes(c)
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    first, last, n = c.execute("SELECT min(completed_at), max(completed_at), count(*) FROM sales WHERE status='completed'").fetchone()
+    c.close()
+    day = lambda t: datetime.strptime(t, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).astimezone().date()
+    start = day(first) - timedelta(days=1)
+    rec = {"label": a.label or snap.parent.name, "profile": a.profile or "custom", "days": (day(last) - start).days}
+    report.data["plan"] = {"snapshot": rec["label"], "machine": machine()}
+    report.data["snapshots"].append(rec)
+    try:
+        measure_snapshot(snap, rec, start, a, report)
+        report.data["status"] = "finished"
+    except BaseException as e:
+        rec["error"] = ry.safe_error(e)
+        report.data["status"] = "failed"
+        raise
+    finally:
+        report.data["summary"] = ry.summary(report.data["snapshots"])
+        report.progress("done")
+    print("\n".join(report.data["summary"]))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", default="large", help=f"one of {', '.join(ry.PROFILES)}; empty = the options below")
@@ -130,6 +191,9 @@ def main(argv=None):
     ap.add_argument("--indexes-sql", default="", help="a .sql file of CREATE INDEX statements (a proposed migration):"
                     " every snapshot is measured a second time with them (requests only)")
     ap.add_argument("--analyze", action="store_true", help="with --indexes-sql: also run ANALYZE before the second pass")
+    ap.add_argument("--snapshot", default="", help="measure this existing synthetic data folder instead of generating"
+                    " (kept with --keep-last or made by loadgen.py); it is measured in place and so changed")
+    ap.add_argument("--label", default="", help="with --snapshot: its name in the results")
     ap.add_argument("--keep-last", default="", help="move the last snapshot's data folder here instead of deleting it")
     a = ap.parse_args(argv)
     if a.profile:
@@ -142,6 +206,8 @@ def main(argv=None):
                   else {int(round(float(y) * 365)) for y in a.years.split(",") if y})
     labels = {d: f"{d} days" if a.days else f"{d / 365:g} year" + ("s" if d != 365 else "") for d in days}
     report = Report(Path(a.out_txt).resolve())
+    if a.snapshot:
+        return measure_existing(a, report)
     report.data["plan"] = {"size": pname, "per_day": a.per_day, "items": a.items, "customers": a.customers,
                            "suppliers": a.suppliers, "snapshot_days": days, "machine": machine()}
     work = Path(tempfile.mkdtemp(prefix="pharm-scale-", dir=a.work or None))
@@ -204,33 +270,7 @@ def main(argv=None):
             c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             c.close()
             try:
-                report.progress(f"{rec['label']}: stock check")
-                rec["stock_check"] = stock_check(snap / "pharmacy.db")
-                if not rec["stock_check"]["ok"]:
-                    rec["error"] = f"stock check found differences: {rec['stock_check']['counts']}"
-                # a backup copies the database, compresses the copy and opens it again to check it (backup.create,
-                # quick_check): about 1.7 times the database in free disk on top of the database itself
-                size = (snap / "pharmacy.db").stat().st_size
-                room = ry.free_bytes(snap) >= 1.7 * size + 500_000_000
-                if not room:
-                    rec["backup_skipped"] = (f"free disk {ry.free_bytes(snap) / 1e9:.1f} GB, a backup of this"
-                                             f" {size / 1e9:.1f} GB database needs about {1.7 * size / 1e9 + 0.5:.1f} GB")
-                    report.note(f"{rec['label']}: backup not measured: {rec['backup_skipped']}")
-                ry.measure(snap, "owner", gen.start, a.repeat, rec, report, backup=room)
-                if a.indexes_sql:
-                    # the same snapshot again with proposed indexes (a migration file that is not in the program
-                    # yet): what the owner would get after that migration. Requests only, no second backup.
-                    rec2 = {"label": rec["label"] + " + indexes", "profile": pname, "days": d, "gen_s": rec["gen_s"],
-                            "stats": rec["stats"], "stock_check": rec["stock_check"], "indexes_sql": Path(a.indexes_sql).name}
-                    report.data["snapshots"].append(rec2)
-                    report.progress(f"{rec2['label']}: creating the indexes")
-                    t = time.perf_counter()
-                    c = sqlite3.connect(snap / "pharmacy.db")
-                    c.executescript(Path(a.indexes_sql).read_text(encoding="utf-8"))
-                    c.execute("ANALYZE") if a.analyze else None
-                    c.close()
-                    rec2["indexes_s"] = round(time.perf_counter() - t, 1)
-                    ry.measure(snap, "owner", gen.start, a.repeat, rec2, report, backup=False)
+                measure_snapshot(snap, rec, gen.start, a, report)
             except Exception as e:                       # keep what was measured, go on with the next snapshot
                 rec["error"] = ry.safe_error(e)
             finally:

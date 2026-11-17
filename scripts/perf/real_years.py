@@ -177,6 +177,8 @@ def format_snapshot(s: dict) -> list[str]:
     return L
 
 
+REQUEST_TIMEOUT = 180                                             # seconds a report may take before it is given up
+LAST = {"unsold items (month)", "unsold items (all years)"}      # see measure()
 SLOWEST = 3          # how many of the slowest requests get the "cashier keeps scanning meanwhile" probe
 CASHIER_GETS = {"search name (4 letters)", "search barcode", "POS quick buttons"}
 
@@ -496,33 +498,47 @@ def measure(snap: Path, owner_username: str, start: date, repeat: int, rec: dict
             raise SystemExit(f"benchmark login refused (HTTP {code}, {why})")
         c.req("POST", "/api/cash/open", {"opening_cash": 10000})
         rec["requests"] = {}
-        scen = bench.scenarios(f) + long_scenarios(f, start)
-        for name, path in scen:
-            rec["requests"][name] = bench.timed(c, "GET", path, n=repeat)
-            report.write()
+        short, long = bench.scenarios(f), long_scenarios(f, start)
+        # A report that does not answer in time keeps a server thread busy after the client gave up, and whatever is
+        # measured next is measured under that load. So: the daily screens, the cashier and a purchase invoice first,
+        # then the long reports, then the blocking probes, and last the reports known to need minutes on a large
+        # catalog (LAST).
+        last = [x for x in long if x[0] in LAST]
+
+        def run(scen):
+            for name, path in scen:
+                rec["requests"][name] = bench.timed(c, "GET", path, n=repeat, timeout=REQUEST_TIMEOUT)
+                report.write()
+
+        run(short)
         if f["stocked"]:
             cf = bench.cashier_flow(c, f, n=repeat)
             if "errors" in cf:
                 cf["errors"] = len(cf["errors"])           # error texts can carry item names: count only
             rec["cashier"] = cf
             report.write()
+            report.progress(f"{rec['label']}: a purchase invoice")
+            rec["purchase"] = purchase_flow(c, f)
+            report.write()
+        report.progress(f"{rec['label']}: long reports")
+        run([x for x in long if x not in last])
+        if f["stocked"]:
+            report.progress(f"{rec['label']}: scanning while the server is busy")
             if backup:
                 rec["during_backup"] = bench.during_backup(c, f)
-            rec["during_report"] = during_report(c, f, dict(long_scenarios(f, start))["sales report (all years)"])
+            rec["during_report"] = during_report(c, f, dict(long)["sales report (all years)"])
             report.write()
             # nothing may block the cashier: scan again while each of the slowest requests runs (a second or more)
             slowest = sorted(((r["median_ms"], n) for n, r in rec["requests"].items()
                               if r.get("status") == 200 and r["median_ms"] >= 1000 and n != "sales report (all years)"),
                              reverse=True)[:SLOWEST]
-            rec["during_slow"] = {n: during_report(c, f, dict(scen)[n]) for _, n in slowest}
-            report.write()
-        if f["stocked"]:
-            report.progress(f"{rec['label']}: a purchase invoice")
-            rec["purchase"] = purchase_flow(c, f)
+            rec["during_slow"] = {n: during_report(c, f, dict(short + long)[n]) for _, n in slowest}
             report.write()
         # the owner's stock check «مطابقة الأرصدة» reads every stock movement: once, it is a button, not a screen
         rec["requests"]["stock check (run now)"] = bench.timed(c, "POST", "/api/reports/stock-check", n=1)
         report.write()
+        report.progress(f"{rec['label']}: the heaviest reports")
+        run(last)
     finally:
         srv.stop()
     srv = bench.Server(data, f["end_local"])

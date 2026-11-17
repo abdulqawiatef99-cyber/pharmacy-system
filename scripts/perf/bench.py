@@ -224,12 +224,12 @@ class Server:
             self.p.kill()
 
 
-def timed(client: Client, method: str, path: str, body=None, n: int = 5) -> dict:
+def timed(client: Client, method: str, path: str, body=None, n: int = 5, timeout: float = 600) -> dict:
     ms, size, code = [], 0, None
     for _ in range(n):
         t0 = time.perf_counter()
         try:
-            code, out, t, size = client.req(method, path, body)
+            code, out, t, size = client.req(method, path, body, timeout)
         except OSError as e:                       # no answer within the client's timeout: recorded, not fatal
             code, t = type(e).__name__, (time.perf_counter() - t0) * 1000
         ms.append(t)
