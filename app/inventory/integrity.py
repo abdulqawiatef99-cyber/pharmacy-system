@@ -116,8 +116,12 @@ def _fingerprint(result: dict) -> str:
 
 
 def last_state(db: Database, org_id: str) -> dict | None:
-    r = db.one("SELECT action, after_json, at FROM audit_log WHERE org_id=? AND action IN (?,?)"
-               " ORDER BY seq DESC LIMIT 1", (org_id, MISMATCH, CLEAN))
+    # Both outcomes are recorded on entity "system" (see _check), so ix_audit_org_entity finds them. Without the
+    # entity a pharmacy that never had a mismatch has no such row and the whole audit log was read each time:
+    # every owner screen asks once a minute (#253: 2.2 s on 2.1 M rows, on the event loop). "+seq": order the
+    # few rows found, do not walk the log backwards looking for them.
+    r = db.one("SELECT action, after_json, at FROM audit_log WHERE org_id=? AND entity_type='system'"
+               " AND entity_id IS NULL AND action IN (?,?) ORDER BY +seq DESC LIMIT 1", (org_id, MISMATCH, CLEAN))
     if not r:
         return None
     after = json.loads(r["after_json"]) if r["after_json"] else {}

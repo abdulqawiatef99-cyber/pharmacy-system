@@ -547,9 +547,12 @@ class Purchasing:
                 if batch_id and l["public_price"] is not None:
                     self.db.execute("UPDATE batches SET public_price=coalesce(public_price, ?)"
                                     " WHERE id=?", (l["public_price"], batch_id))
-                last = self.db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND"
-                                   " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY rowid DESC LIMIT 1",
-                                   (ctx.org_id, item["id"]))
+                # the branch is named so ix_moves_item(org_id, branch_id, item_id) answers from the item's own
+                # movements; without it every movement of the pharmacy was read for each line (#253: 4 s a
+                # line on 3.5 M movements, and the approval holds every screen while it runs)
+                last = self.db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND"
+                                   " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY +rowid DESC LIMIT 1",
+                                   (ctx.org_id, inv["branch_id"], item["id"]))
                 if last and Decimal(last["unit_cost"]) > 0 and unit_cost > Decimal(last["unit_cost"]) * Decimal("1.005"):
                     up_pct = (unit_cost / Decimal(last["unit_cost"]) - 1) * 100
                     pack_old = Decimal(last["unit_cost"]) * item["pack_size"]
