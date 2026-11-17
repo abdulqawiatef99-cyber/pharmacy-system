@@ -61,11 +61,13 @@ GEN_INDEX = "perf_loadgen_alloc_line"
 # item on every sale, which the program's own schema finds by reading a whole table (the defect PERFORMANCE.md
 # measures; docs/PERFORMANCE.md "indexes"). Without them a sale costs more with every sale before it and years of a
 # large pharmacy would take days to generate. They change how fast rows are found, never which rows.
+# sale_lines: an index on item_id alone is chosen by SQLite for "this item on this sale" (Sales.add_line) instead of
+# the sale's own lines, and then every scan reads all the lines the item ever had; with sale_id second it is exact.
 GEN_INDEXES = {
     GEN_INDEX: "sale_allocations(sale_line_id)",
     "perf_loadgen_sales_completed": "sales(org_id, branch_id, status, completed_at)",
     "perf_loadgen_sales_shift": "sales(shift_id)",
-    "perf_loadgen_sale_lines_item": "sale_lines(item_id)",
+    "perf_loadgen_sale_lines_item": "sale_lines(item_id, sale_id)",   # with sale_id: see add_line below
     "perf_loadgen_sales_customer": "sales(org_id, customer_id)",
     "perf_loadgen_pinv_lines_item": "purchase_invoice_lines(org_id, item_id)",
     "perf_loadgen_sale_returns_sale": "sale_returns(sale_id)",
