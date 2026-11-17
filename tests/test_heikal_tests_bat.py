@@ -25,6 +25,14 @@ class HeikalTestsBat(unittest.TestCase):
         self.assertLess(restore_at, clear_at)
         self.assertEqual(self.text.count("manage.py restore"), 1)
 
+    def test_scale_work_folder_is_created_before_use(self):
+        # scale.py calls tempfile.mkdtemp(dir=--work): the folder must exist (Codex P2 on #315)
+        lines = self.text.splitlines()
+        made = next(i for i, l in enumerate(lines) if l.strip() == 'if not exist "%WORK%" mkdir "%WORK%"')
+        used = [i for i, l in enumerate(lines) if '--work "%WORK%"' in l]
+        self.assertTrue(used)
+        self.assertLess(made, min(used))
+
     def test_referenced_scripts_and_profiles_exist(self):
         # read PROFILES from the source: importing real_years changes the process time zone
         src = (ROOT / "scripts" / "perf" / "real_years.py").read_text(encoding="utf-8")
