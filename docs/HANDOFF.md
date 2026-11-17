@@ -4,7 +4,11 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
-## 17/11 23:10 Cairo — manager chat (new, cashier PC), in progress (READ THIS FIRST)
+## 17/11 23:20 Cairo — manager chat, owner decisions (READ THIS FIRST)
+- Owner 23:14: USB drive / off-device copy (R6/R7) is optional and out of the percentage for now; G5 to L2 on the Windows restore drill: total **73.25%**. Remaining = owner acceptance (#20) after the final review. F47-a track-and-trace parked as future (no official decree for pharmacies yet; E-Stock does not do it).
+- Owner wants the program finished today or tomorrow; what is left is scheduled (final review worker tonight).
+
+## 17/11 23:10 Cairo — manager chat (new, cashier PC), in progress
 - Hardware sheet line 10 PASS 23:05 (shift close + report printed from Chrome on the cashier PC, test account tester; the login file IS valid: the earlier Chrome was on another PC, boot_id differed). G8 to L2: total **69.75%**. Temp user line10 created then deactivated.
 - Worker sessions: the owner approved the launch-night e2e session (#319 opened); the owner asked the manager to relay his approval to the tour (#247) and updater sessions (sent 22:58).
 - Backup interim: the program on the cashier PC is pre-launch data (replaced at launch), so no interim copy tonight; USB drive tomorrow → R6/R7 (G5). A network share needs a Windows sharing-security change on the Heikal PC: owner only.
