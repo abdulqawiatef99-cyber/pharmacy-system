@@ -160,7 +160,7 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
         (ctx.org_id, item_id, months[0]))}
     out["monthly"] = [{"month": m, "qty": int(sold.get(m, 0) or imported.get(m, 0) or 0),
                        "source": "sales" if m in sold else "import" if m in imported else None} for m in months]
-    if ctx.can("costs.read") or ctx.can("purchases.read"):
+    if ctx.can("costs.read"):     # owner 17/11: purchase price = margin; owner only unless he opens it per person
         sup = db.all(
             "SELECT s.name supplier, s.supplier_type, max(p.invoice_date) last_date, l.discount_bp, l.unit_net_price, l.public_price"
             " FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id JOIN suppliers s ON s.id=p.supplier_id"
