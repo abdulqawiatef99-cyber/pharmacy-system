@@ -110,6 +110,11 @@ class FreshStartBat(Common, unittest.TestCase):
         fail = self.lines.index(":fail")
         self.assertIn('ren "%HOMEDIR%\\%TRIAL%" data', self.lines[fail:])
         self.assertIn('if not "%RENAMED%"=="1" goto failstart', self.lines[fail:])
+        # the new folder may not exist (mkdir failed): the old one is put back anyway (Codex P2 on #317)
+        aside = self.lines.index('ren "%DATA%" "data-failed-%STAMP%"')
+        self.assertEqual(self.lines[aside - 1], 'if not exist "%DATA%" goto putback')
+        self.assertLess(aside, self.lines.index(":putback"))
+        self.assertLess(self.lines.index(":putback"), self.lines.index('ren "%HOMEDIR%\\%TRIAL%" data'))
 
     def test_same_program_version_kept_and_setup_screen_checked(self):
         L = self.lines

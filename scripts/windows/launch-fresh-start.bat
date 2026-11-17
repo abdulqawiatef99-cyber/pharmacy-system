@@ -140,8 +140,10 @@ set "PHARM_DATA_DIR="
 if not "%RENAMED%"=="1" goto failstart
 REM after the rename: put the old data folder back under its own name (the new folder is renamed, not deleted)
 call :stopprog
+if not exist "%DATA%" goto putback
 ren "%DATA%" "data-failed-%STAMP%"
 if errorlevel 1 (call :log FAIL "could not move the new data folder aside: old data stays in %HOMEDIR%\%TRIAL%" & goto failend)
+:putback
 ren "%HOMEDIR%\%TRIAL%" data
 if errorlevel 1 (call :log FAIL "could not rename %TRIAL% back to data: rename it by hand" & goto failend)
 call :log PASS "old data folder put back as %DATA%"
