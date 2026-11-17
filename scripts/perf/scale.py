@@ -93,7 +93,9 @@ class Turns:
             try:
                 os.close(os.open(self.lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
                 break
-            except FileExistsError:                   # another process measures: wait for the turn
+            except (FileExistsError, PermissionError):
+                # another process measures: wait for the turn. Windows answers "permission denied" instead of
+                # "exists" while the holder's delete of the lock is still pending (seen on the installer build).
                 time.sleep(2)
         self.holding = True
         while [p for p in self.dir.glob("day.*") if p != self.mine]:
