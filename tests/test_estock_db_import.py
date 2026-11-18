@@ -139,6 +139,7 @@ class Base(DBTestCase):
 
     def run_import(self, tables=None, folder=None, write_archive=True, **kw):
         folder = folder or self.export(tables)
+        self._last = folder
         return estock_db.run(self.db, self.ctx, export_dir=folder, out_dir=self.tmp / "reports",
                              archive_path=self.tmp / estock_archive.NAME, write_archive=write_archive, **kw)
 
@@ -926,11 +927,15 @@ class TestManagerSchemaReview(Base):
         self.assertFalse(res["plan"].stock_source["mirror_check"]["equal"])
         self.assertIn(("stock", "mirror"), {(d["table"], d["field"]) for d in res["plan"].dq})
 
-    def test_the_hospital_store_is_reported_for_the_owner(self):
+    def test_the_hospital_store_is_listed_in_full_and_never_in_the_pharmacy_stock(self):
         res = self.run_import()
         row = [d for d in res["plan"].dq if d["field"] == "store_id"][0]
         self.assertEqual((row["severity"], row["estock_id"], row["value_egp"]), ("review", "2", "560.00"))
-        self.assertIn("قرار المالك", row["action"])
+        self.assertIn("ملك المستشفى", row["action"])
+        text = Path(res["reports"]["hospital_stock"]).read_text(encoding="utf-8-sig")
+        self.assertIn("Testaclav 1g Tab", text)
+        self.assertIn("2027-01-01", text)
+        self.assertEqual(self.units("102"), 28)                  # the pharmacy's own 28; the hospital's 4 packs apart
 
     def test_stock_rows_keep_vendor_and_tax_in_the_import_row(self):
         import json
@@ -1010,13 +1015,32 @@ class TestOwnerReportLines(Base):
         t["Branches_sales_details"] += [
             {"branch_id": "3", "details_id": "8", "sales_id": "1", "product_id": "1", "total_sell": "55232.6600", "insert_date": SOLD},
             {"branch_id": "3", "details_id": "9", "sales_id": "2", "product_id": "1", "total_sell": "-55232.6600", "insert_date": SOLD}]
+        t["Purchase_header"].append({"purchase_id": "4", "vendor_id": "1", "total_bill": "404.1500",
+                                     "bill_date": "2026-07-11T00:00:00", "bill_number": "PK-1"})
+        t["Employee"] = [{"emp_id": "5", "emp_name": "موظف قديم", "pass": "x"}]
         res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
         self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
         self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
-        self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")
-        self.assertIn("250.50", rows[("Gedo_branches", "total")]["estock_value"])
+        self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
         self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
+        d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
+        self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_ledger WHERE kind='purchase'"))
+        # the other pharmacy: its own account with the last balance
+        b = self.db.one("SELECT id FROM suppliers WHERE name=?", (estock_db.BRANCH_ACCOUNT_NAME,))
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (b["id"],))["a"], 25050)
+        # staff: stopped users with their names
+        u = self.db.one("SELECT u.id, u.full_name, m.is_active FROM users u JOIN memberships m ON m.user_id=u.id"
+                        " WHERE u.username='estock-5'")
+        self.assertEqual((u["full_name"], u["is_active"]), ("موظف قديم", 0))
+        # the same export again changes nothing
+        n = (self.db.one("SELECT count(*) n FROM purchase_invoices")["n"], self.db.one("SELECT count(*) n FROM users")["n"])
+        res = self.run_import(folder=self._last)
+        self.assertEqual((self.db.one("SELECT count(*) n FROM purchase_invoices")["n"],
+                          self.db.one("SELECT count(*) n FROM users")["n"]), n)
 
 
 class TestCashDepots(Base):
@@ -1096,10 +1120,14 @@ class TestCashDepotsAsOnTheScreen(Base):
         self.assertEqual([d[i]["role"] for i in ("1", "2", "3", "6", "7", "8", "9", "10", "11")],
                          ["drawer", "treasury", "bank", "junk", "wallet", "wallet", "wallet", "wallet", "wallet"])
         self.assertEqual(d["1"]["last_close"], "2026-11-15T14:19:00.000")
+        # owner 19/11: 1 = the shift drawer (first shift opening), 6 = no account, 10 = a stopped account
+        self.assertEqual({k: d[k]["action"] for k in d},
+                         {"1": "first_shift_opening", "2": "account", "3": "account", "4": "account", "5": "account",
+                          "6": "no_account", "7": "account", "8": "account", "9": "account", "10": "account_stopped",
+                          "11": "account"})
         owner = {x["estock_id"] for x in res["plan"].dq if x["table"] == "Cash_depots" and x["action"].startswith("OWNER")}
-        self.assertEqual(owner, {"6", "10"})
-        moves = [x for x in res["plan"].dq if x["table"] == "Cash_depots" and "بيتنقل حساب لوحده" in x["action"]]
-        self.assertEqual(len(moves), 11)
+        self.assertEqual(owner, {"6"})                          # «0000» holds 60.00 here: one line with the figure
+        self.assertIn("60.00", [x for x in res["plan"].dq if x["table"] == "Cash_depots" and x["estock_id"] == "6"][0]["action"])
         self.assertTrue(any(x["field"] == "last_close" for x in res["plan"].dq))
 
 

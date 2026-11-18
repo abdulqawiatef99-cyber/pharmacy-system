@@ -285,6 +285,9 @@ class Plan:
     dq: list[dict] = field(default_factory=list)
     per_item: dict = field(default_factory=dict)      # product_id -> raw / listed / planned totals
     stock_source: dict = field(default_factory=dict)
+    parked: list = field(default_factory=list)
+    employees: list = field(default_factory=list)
+    hospital: list = field(default_factory=list)
     checks: dict = field(default_factory=dict)
     rules: dict = field(default_factory=dict)
 
@@ -501,13 +504,21 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
             o = others[ident(r.get("store_id"))]
             o[0] += 1
             o[1] += (dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)
+            p.hospital.append({"store_id": ident(r.get("store_id")), "pa_id": ident(r.get("pa_id")),
+                               "product_id": ident(r.get("product_id")), "amount": r.get("amount"),
+                               "expiry": iso_day(r.get("exp_date")), "buy_price": r.get("buy_price"),
+                               "sell_price": r.get("sell_price"),
+                               "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0))})
             continue
         by_item[ident(r.get("product_id"))].append(r)
     names = {s["id"]: s["name"] for s in allst}
     for sid, (n, v) in sorted(others.items()):
-        # OWNER: 24/10 "stays separate, not moved"; 18/11 "move everything": his answer decides
+        # owner 19/11: the hospital's own stock (the pharmacy takes half the margin on it). It moves, but never
+        # into the pharmacy's own stock or value: it needs a hospital-owned mark on its batches (a migration,
+        # its own PR, installer only) and the sale side keeping it for Hikma invoices. Until then: listed in full.
         p.issue(chosen["table"], sid, names.get(sid, ""), "store_id", f"{n} سطر",
-                f"مخزن «{names.get(sid, sid)}» ما اتنقلش: مستني قرار المالك (24/10 قال يفضل منفصل، 18/11 قال كله يتنقل)",
+                f"مخزن «{names.get(sid, sid)}» ملك المستشفى: مش داخل مخزون الصيدلية ولا قيمته؛ كل أصنافه وكمياتها"
+                " وصلاحيتها وقيمتها في hospital-stock.csv، وبيتنقل بعلامة «ملك المستشفى» في PR لوحده",
                 value_egp=v, kind="review")
     for pid, rows in sorted(by_item.items(), key=lambda kv: (dec(kv[0]) or 0)):
         it = items.get(pid)
@@ -906,6 +917,8 @@ def _balance_piastres(p: Plan, table, eid, code, fld, raw, d: Decimal | None) ->
     return rounded
 
 
+BRANCH_ACCOUNT_ID = "Gedo_branches"
+BRANCH_ACCOUNT_NAME = "الصيدلية التانية (حساب الفروع في إي ستوك)"
 INTERNAL_CUSTOMERS = ("الصيدلية",)       # the pharmacy's own consumption (tissues, alcohol, supplies; owner 19/11)
 INTERNAL_MARK = " (حساب داخلي)"
 # owner 19/11: supplier «جرد» is a real supplier account for occasional sources (another pharmacy, a customer,
@@ -1023,23 +1036,45 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
                     f"{len(missing)} رقم، {sum(missing.values())} سطر",
                     f"OWNER: التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
                     kind="review")
-    # a purchase invoice with no lines (left parked in E-Stock)
+    # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
+    sup_ids = {d["estock_id"] for d in p.suppliers}
     for r in ex.rows("Purchase_header"):
         if ident(r.get("purchase_id")) not in with_lines:
             v = dec(r.get("total_bill")) or 0
+            day = iso_day(r.get("bill_date")) or iso_day(r.get("insert_date"))
+            vid = ident(r.get("vendor_id"))
+            ok = vid in sup_ids and exact_piasters(v) is not None and v >= 0
+            p.parked.append({"estock_id": ident(r.get("purchase_id")), "vendor_id": vid, "day": day,
+                             "bill_number": (r.get("bill_number") or "").strip(), "total": piasters(v), "ok": ok})
             p.issue("Purchase_header", ident(r.get("purchase_id")), (r.get("bill_number") or "").strip(), "purchase",
-                    f"{(r.get('bill_date') or r.get('insert_date') or '')[:10]} {egp(v)}",
-                    "OWNER: فاتورة شراء من غير سطور (متعلقة في إي ستوك): ما اتنقلش منها رصيد ولا مخزون", value_egp=v,
-                    kind="review")
-    # the running balance with the other pharmacy (Gedo_branches), its last line
+                    f"{day or ''} {egp(v)}",
+                    "فاتورة شراء متعلقة في إي ستوك (من غير سطور): اتنقلت مسودة شراء، مابتأثرش على المخزون ولا الرصيد"
+                    if ok else "OWNER: فاتورة شراء متعلقة ومورّدها مش في قايمة الموردين: سطر في التقرير بس",
+                    value_egp=v, kind="info" if ok else "review")
+    # the running balance with the other pharmacy (Gedo_branches): its own account, last balance (owner 19/11)
     gb = ex.rows("Gedo_branches")
     if gb:
         last = max(gb, key=lambda r: (r.get("insert_date") or "", dec(next((v for k, v in r.items() if k.endswith("_id")), "0")) or 0))
         tot = dec(last.get("total"))
+        bal = _balance_piastres(p, "Gedo_branches", "last", "", "total", last.get("total"), tot)
+        p.suppliers.append(_party(p, "supplier", BRANCH_ACCOUNT_ID, "", BRANCH_ACCOUNT_NAME, bal, {},
+                                  phone=None, contacts=[f"Gedo_branches: {len(gb)} سطر، آخرها {(last.get('insert_date') or '')[:10]}"],
+                                  inactive=False))
         p.issue("Gedo_branches", "", "", "total", f"{(last.get('insert_date') or '')[:10]} {egp(tot) if tot is not None else '?'}",
-                f"OWNER: حساب الصيدلية التانية ({len(gb)} سطر): آخر رصيد، ما اتنقلش لحساب في البرنامج", value_egp=tot,
-                kind="review")
+                f"حساب الصيدلية التانية ({len(gb)} سطر): حساب مورد لوحده بآخر رصيد ({egp(Decimal(bal) / 100)}، + يعني"
+                " علينا ليهم زي باقي الموردين)؛ التاريخ في الأرشيف. لو الإشارة بالعكس يتصحح من تأكيد الأرصدة",
+                value_egp=tot, kind="review")
+    # E-Stock staff: they move as stopped users with their names (their link to old invoices), no passwords
+    emp = next((t for t in ex.tables.values() if t["name"].lower() in ("employee", "employees", "emp")), None)
+    if emp:
+        rows = ex.rows(emp["name"])
+        cols = list(rows[0]) if rows else []
+        idc = next((c for c in cols if c.endswith("_id") or c == "id"), cols[0] if cols else None)
+        namec = next((c for c in cols if "name" in c), None)
+        for r in rows:
+            if idc and namec and (r.get(namec) or "").strip():
+                p.employees.append({"estock_id": ident(r.get(idc)), "name": r[namec].strip()[:80]})
     # the biggest sales lines and lines that cancel each other (a big line and its reversal)
     vals = []
     for r in sales_lines(ex):
@@ -1240,22 +1275,38 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
             d = {"source": "Cash_depots", "estock_id": ident(r.get(idc)), "name": name, "role": role,
                  "class": (r.get(classc) or "").strip() if classc else "",
                  "balance": egp(bal) if bal is not None else None, "balance_column": balc,
-                 "exact_piastres": bal is not None and exact_piasters(bal) is not None}
+                 "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal}
             if role == "drawer":
                 d["last_close"] = closes.get(d["estock_id"]) or None
             depots.append(d)
-            # every depot moves as it is, one program account each (manager 22:28): nothing dropped
-            p.issue("Cash_depots", d["estock_id"], name, balc or "balance", r.get(balc) if balc else "?",
-                    f"«{name}» ({_ROLE_AR[role]}): بيتنقل حساب لوحده برصيده بخدمة F105 (لسه ما اتنقلش)",
+        # owner 19/11: what each depot becomes (F105 / #342 posts it; nothing here posts money)
+        used = [d for d in depots if d["role"] == "drawer" and d.get("last_close")]
+        for d in depots:
+            bal, name = d.pop("_bal"), d["name"]
+            if d["role"] == "junk":
+                d["action"] = "no_account"          # «0000»: almost nothing; its history stays in the archive
+                if bal:
+                    p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"],
+                            f"OWNER: «{name}» مالوش حساب في البرنامج (قرار المالك) وفيه رصيد {d['balance']}",
+                            value_egp=bal, kind="review")
+                else:
+                    p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "0",
+                            f"«{name}» مالوش حساب في البرنامج (قرار المالك)؛ رصيده صفر وتاريخه في الأرشيف", kind="info")
+                continue
+            if d["role"] == "drawer" and len(used) == 1 and d is used[0]:
+                d["action"] = "first_shift_opening"  # the shift drawer: not an account
+                p.issue("Cash_depots", d["estock_id"], name, "last_close", d.get("last_close") or "",
+                        f"«{name}» درج الشيفت: مش حساب؛ ليلة النقل يتقفل شيفت إي ستوك الأول ورصيده ({d['balance']})"
+                        " يبقى نقدية أول شيفت في البرنامج", value_egp=bal, kind="review")
+                continue
+            if d["role"] == "drawer" and len(used) != 1:
+                p.issue("Cash_depots", d["estock_id"], name, "last_close", ", ".join(x["estock_id"] for x in used) or "-",
+                        "OWNER: مش واضح أنهي درج هو درج الشيفت (اتقفل فيه شيفتات)", value_egp=bal, kind="review")
+            d["action"] = "account_stopped" if "موقوف" in name else "account"
+            p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
+                    f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
+                    + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
                     value_egp=bal, kind="review")
-            if role == "junk" or "موقوف" in name:
-                p.issue("Cash_depots", d["estock_id"], name, "name", name,
-                        "OWNER: " + ("الاسم شكله مش حقيقي" if role == "junk" else "متعلّم عليه موقوف")
-                        + ": بيتنقل زي ما هو، والمالك يقرر يتقفل ولا لأ", value_egp=bal, kind="review")
-            if role == "drawer" and d.get("last_close"):
-                p.issue("Cash_depots", d["estock_id"], name, "last_close", d["last_close"],
-                        "درج الكاشير: ليلة النقل اقفل شيفت إي ستوك الأول؛ رصيد الدرج يبقى نقدية أول شيفت في البرنامج",
-                        value_egp=bal, kind="review")
     out["cash_depots"] = depots
     p.checks["money_info"] = out
     for t in out["tables"]:
@@ -1352,7 +1403,10 @@ def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
         # the owner confirmed balances in the program (even with no difference, #339 review): the import is closed
         return "الأرصدة الافتتاحية اتأكدت من البرنامج: النقل من إي ستوك اتقفل. مفيش أي حاجة اتكتبت"
     for table in ("cash_movements", "purchase_invoices", "expenses"):
-        if db.one(f"SELECT 1 FROM {table} WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+        mine = (f" AND id NOT IN (SELECT target_id FROM import_rows WHERE target_id IS NOT NULL AND run_id IN {ours})"
+                if table == "purchase_invoices" else "")
+        if db.one(f"SELECT 1 FROM {table} WHERE org_id=?{mine} LIMIT 1",
+                  (ctx.org_id, ctx.org_id) if mine else (ctx.org_id,)):
             return f"قاعدة البيانات فيها حركات فلوس ({table}): النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
     for table in ("items", "customers", "suppliers"):
         if db.one(f"SELECT 1 FROM {table} t WHERE t.org_id=? AND t.id NOT IN (SELECT target_id FROM import_rows"
@@ -1478,6 +1532,44 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
     runs["customers"], r = _step(db, ctx, "customers", "customers", H("customers", ex.sha("Customer")), esha, label,
                                  do_parties("customer"))
     resumed += ["customers"] if r else []
+
+    # 3b) E-Stock staff as stopped users (no password is ever copied; a random one nobody knows)
+    if plan.employees:
+        def do_employees(run_id):
+            import secrets
+            from ..core import people
+            rows = []
+            for e in plan.employees:
+                uid = people.add_user(db, ctx, username=f"estock-{e['estock_id']}", full_name=e["name"],
+                                      password=secrets.token_urlsafe(24) + "aA1!", role_code="assistant")
+                people.set_active(db, ctx, uid, False)
+                rows.append(({"estock_id": e["estock_id"], "name": e["name"]}, uid))
+            return rows, {"employees": len(rows)}
+        runs["employees"], r = _step(db, ctx, "customers", "employees", H("employees", ex.sha(*(
+            [t["name"] for t in ex.tables.values() if t["name"].lower() in ("employee", "employees", "emp")]))), esha,
+            label, do_employees)
+        resumed += ["employees"] if r else []
+
+    # 3c) parked purchase invoices as drafts
+    if any(x["ok"] for x in plan.parked):
+        sup_map = _map(db, runs["suppliers"], "estock_id")
+
+        def do_parked(run_id):
+            from ..purchasing.service import Purchasing
+            pur, rows = Purchasing(db), []
+            for x in plan.parked:
+                if not x["ok"]:
+                    continue
+                iid = pur.create_manual(ctx, supplier_id=sup_map[x["vendor_id"]])
+                v = pur.get(ctx, iid)["invoice"]["version"]
+                pur.update_header(ctx, iid, {"invoice_no": x["bill_number"] or f"E-Stock {x['estock_id']}",
+                                             "invoice_date": x["day"], "declared_total": x["total"],
+                                             "notes": f"فاتورة متعلقة من إي ستوك رقم {x['estock_id']}"}, v)
+                rows.append(({"estock_id": x["estock_id"]}, iid))
+            return rows, {"drafts": len(rows)}
+        runs["parked"], r = _step(db, ctx, "suppliers", "parked_purchases", H("parked", ex.sha("Purchase_header")),
+                                  esha, label, do_parked)
+        resumed += ["parked"] if r else []
 
     # 4) opening stock
     src = plan.stock_source["decision"]["key"]
@@ -1645,15 +1737,15 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
 
 # E-Stock settings seen on its screens (manager's tour 18/11 22:45) and what the program has for each:
 # listed in the report, never applied by the move (returns and printing are the owner's rules).
-ESTOCK_SETTINGS = (
-    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14): المالك يقرر 7"),
-    ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية"),
-    ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده"),
-    ("شريط الصلاحية 6 شهور", "إعداد تشغيل بس (PHARM_SHORT_EXPIRY_DAYS=180)، مش من شاشة"),
-    ("مفيش إيصال تحت 20 جنيه", "مفيش إعداد"),
-    ("يسأل قبل كل طباعة", "مفيش إعداد"),
-    ("نص أول وآخر الإيصال", "فيه (إعداد الإيصال): يتنقل بإيد المالك من شاشة إي ستوك"),
-    ("شكل الليبل", "مفيش إعداد"),
+ESTOCK_SETTINGS = (       # (E-Stock's setting, what the program has, recommended value) - none applied
+    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 7 زي إي ستوك"),
+    ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية", "المقترح: زي ما هو"),
+    ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده", "المقترح: مش محتاج"),
+    ("شريط الصلاحية 6 شهور", "إعداد تشغيل (PHARM_SHORT_EXPIRY_DAYS=180)", "المقترح: 180 يوم زي ما هو"),
+    ("مفيش إيصال تحت 20 جنيه", "مفيش إعداد", "المقترح: 20 جنيه لما الإعداد يتعمل"),
+    ("يسأل قبل كل طباعة", "مفيش إعداد", "المقترح: لأ (الطباعة بزرار)"),
+    ("نص أول وآخر الإيصال", "فيه (إعداد الإيصال)", "المقترح: نفس نص إي ستوك، يتنقل من شاشته"),
+    ("شكل الليبل", "مفيش إعداد", "المقترح: نفس مقاس ليبل إي ستوك لما الإعداد يتعمل"),
 )
 
 
@@ -1662,7 +1754,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {"data_quality": out_dir / "data-quality.csv", "reconciliation": out_dir / "reconciliation.txt",
              "json": out_dir / "report.json", "openings": out_dir / "openings-to-confirm.xlsx",
-             "supplier_contacts": out_dir / "supplier-contacts.csv", "item_extras": out_dir / "item-extras.csv"}
+             "supplier_contacts": out_dir / "supplier-contacts.csv", "item_extras": out_dir / "item-extras.csv",
+             "hospital_stock": out_dir / "hospital-stock.csv"}
     order = {"block": 0, "review": 1, "fixed": 2, "info": 3}
     with open(paths["data_quality"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
@@ -1676,6 +1769,14 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
         for d in plan.suppliers:
             w.writerow([d["estock_id"], d["code"], d["name"], d.get("phone") or "", " | ".join(d.get("contacts") or [])])
     write_openings(plan, paths["openings"])
+    items_by_id = {it["product_id"]: it for it in plan.items}
+    with open(paths["hospital_stock"], "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)          # the hospital's own stock (store 2): never in the pharmacy's stock or value
+        w.writerow(["المخزن", "رقم إي ستوك", "الكود", "الصنف", "الكمية (علبة)", "الصلاحية", "سعر الشراء", "سعر البيع", "القيمة"])
+        for h in plan.hospital:
+            it = items_by_id.get(h["product_id"], {})
+            w.writerow([h["store_id"], h["pa_id"], it.get("code", h["product_id"]), it.get("name_en") or it.get("name_ar") or "",
+                        h["amount"], h["expiry"] or "", h["buy_price"], h["sell_price"], h["value"]])
     keys = sorted({k for it in plan.items for k in it.get("extras", {})})
     with open(paths["item_extras"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)          # what has no item column in the program yet (manager 22:15): kept, listed
@@ -1723,7 +1824,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
                                                                            if c not in ("id", "name")))
     for d in mi.get("cash_depots", []):
         lines.append(f"  Cash_depots {d['estock_id']} «{d['name']}» ({_ROLE_AR.get(d.get('role'), '')}, class {d['class']}):"
-                     f" {d['balance']} — مستني F105" + (f"، آخر قفل {d['last_close']}" if d.get("last_close") else ""))
+                     f" {d['balance']} — {d.get('action')}" + (f"، آخر قفل {d['last_close']}" if d.get("last_close") else ""))
     for c in mi.get("shift_transfers", []):
         lines.append(f"  تحويل قفل الشيفت للخزنة ({c['source']}) خزنة {c['fcs_id']} {c['name']}: {c['total']}")
     for c in mi.get("last_shift_close", []):
@@ -1734,7 +1835,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     lines.append("فواتير الشراء حسب class (كاش / آجل / تحت التصريف — مستني المالك يقول أنهي رقم إيه): "
                  + json.dumps(plan.checks.get("purchase_classes", {}), ensure_ascii=False))
     lines.append("إعدادات إي ستوك (من جولة الشاشات 18/11) وحالها في البرنامج:")
-    lines += [f"  {a}: {b}" for a, b in ESTOCK_SETTINGS]
+    lines += [f"  {a}: {b} — {c}" for a, b, c in ESTOCK_SETTINGS]
     for k, v in extra.items():
         lines.append(f"{k}: {v}")
     if rec["mismatches"]:
