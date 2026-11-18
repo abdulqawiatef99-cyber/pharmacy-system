@@ -205,17 +205,29 @@ def line_gross_as_sold(allocs: list[dict], bp: int, line_total: int | None) -> i
     return _rule_as_sold(allocs, bp, line_total)((a["qty_base"], a) for a in allocs)
 
 
-def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None = None) -> int:
+def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None = None,
+               price=_kept_gross) -> int:
     """Net value of the units of a line the customer still keeps (after discount), priced the way the
     line was sold. With the recorded total: the whole line is worth exactly that and never more, so
-    all the returns of a line add up to what was paid for it, not a piaster more or less."""
-    g = _rule_as_sold(allocs, bp, line_total)(((kept[a["id"]], a) for a in allocs), price=_kept_gross)
+    all the returns of a line add up to what was paid for it, not a piaster more or less.
+    `price=alloc_gross` is the rule before #324 M1, only to replay returns booked with it."""
+    g = _rule_as_sold(allocs, bp, line_total)(((kept[a["id"]], a) for a in allocs), price=price)
     value = g - discount_of(g, bp)
     if line_total is None:
         return value
     if all(kept[a["id"]] == a["qty_base"] for a in allocs):
         return line_total
     return min(value, line_total)
+
+
+def _take(allocs: list[dict], kept: dict, qty: int) -> None:
+    """Remove `qty` returned units from `kept` in the order a return takes them (allocs newest first)."""
+    for a in allocs:
+        t = min(kept[a["id"]], qty)
+        kept[a["id"]] -= t
+        qty -= t
+        if not qty:
+            break
 
 
 def unit_price(pack_price: int, pack_size: int) -> int:
@@ -942,6 +954,7 @@ class Sales:
                     raise Conflict("لم تُسوَّ فاتورة التوصيل بعد؛ سجّل تسليم مبلغ التوصيل أولًا ثم أجرِ المرتجع",
                                    code="delivery_not_settled")
             refund = 0
+            line_refunds: dict[str, int] = {}
             restricted: list[str] = []
             for line_id, qty in lines.items():
                 if not isinstance(qty, int) or qty <= 0:
@@ -967,6 +980,7 @@ class Sales:
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
                 before = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                booked = self._line_refunded(ctx, sid, line_id, allocs, l["discount_bp"], l["line_total"])
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -985,7 +999,15 @@ class Sales:
                         break
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
-                refund += before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                if l["line_total"] is not None:
+                    # reconciled with what this line already refunded (returns booked under the rule
+                    # before #324 M1 valued kept units differently): never more than the line in all,
+                    # never negative, and the return that empties the line settles it exactly
+                    rest = max(0, l["line_total"] - booked)
+                    r = rest if not any(kept.values()) else max(0, min(r, rest))
+                line_refunds[line_id] = r
+                refund += r
             if refund_method in ("cash", "card"):
                 # a refund to the card follows the same cap: money never received cannot go back to a card either
                 # #142 (owner's rule, 11/11): cash can be paid back only for money the shop actually received
@@ -1016,13 +1038,35 @@ class Sales:
             if refund_method == "cash":
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
             audit.record(self.db, ctx, "sale.return", "sale", sid,
-                         after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines})
+                         after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
+                                "line_refunds": line_refunds})
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
                         if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
+
+    def _line_refunded(self, ctx: Context, sid: str, line_id: str, allocs: list[dict], bp: int,
+                       line_total: int | None) -> int:
+        """What earlier returns refunded for one line, from their audit rows in order. A return booked
+        since #324 M1 stored its per-line refund; an older one is replayed with the rule it used."""
+        kept = {a["id"]: a["qty_base"] for a in allocs}
+        total = 0
+        for row in self.db.all("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale'"
+                               " AND entity_id=? AND action='sale.return' ORDER BY at, rowid", (ctx.org_id, sid)):
+            after = json.loads(row["after_json"] or "{}")
+            qty = int((after.get("lines") or {}).get(line_id) or 0)
+            if not qty:
+                continue
+            if line_id in (after.get("line_refunds") or {}):
+                total += int(after["line_refunds"][line_id])
+                _take(allocs, kept, qty)
+            else:
+                old = kept_value(allocs, kept, bp, line_total, price=alloc_gross)
+                _take(allocs, kept, qty)
+                total += old - kept_value(allocs, kept, bp, line_total, price=alloc_gross)
+        return total
 
     def return_receipt(self, ctx: Context, rid: str) -> dict:
         """One return with its items, for the printed return slip."""

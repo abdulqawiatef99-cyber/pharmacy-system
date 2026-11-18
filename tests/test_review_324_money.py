@@ -67,6 +67,54 @@ class TestM1LooseUnitsWorthMoreThanAPack(DBTestCase):
         self.assertEqual(drawer(), start - 1094)
 
 
+class TestM1ReturnsBookedBeforeTheFix(TestM1LooseUnitsWorthMoreThanAPack):
+    """Codex on #331: a line partly returned under the old rule (kept units at the rounded-up unit price,
+    no per-line refund in the audit row) and then returned again must still refund exactly what was paid."""
+
+    def _old_rule_return(self, sid, line, qty):
+        from unittest.mock import patch
+        from app.sales import service as svc
+        orig_audit = svc.audit.record
+
+        def old_kept(allocs, kept, bp, line_total=None, price=None):
+            # kept_value as it was before #324 M1: loose units at the (rounded) unit price
+            g = svc._rule_as_sold(allocs, bp, line_total)((kept[a["id"]], a) for a in allocs)
+            value = g - svc.discount_of(g, bp)
+            if line_total is None:
+                return value
+            if all(kept[a["id"]] == a["qty_base"] for a in allocs):
+                return line_total
+            return min(value, line_total)
+
+        def old_audit(db, ctx, action, et, eid, **kw):
+            (kw.get("after") or {}).pop("line_refunds", None)   # the old audit row had no per-line refunds
+            return orig_audit(db, ctx, action, et, eid, **kw)
+
+        with patch.object(svc, "kept_value", old_kept), patch.object(svc.Sales, "_line_refunded", lambda *a: 0, create=True), \
+                patch.object(svc.audit, "record", old_audit):
+            return self.s.return_items(self.ctx, sid, {line: qty}, refund_method="cash", reason="مرتجع قديم")
+
+    def test_codex_scenario_old_return_then_the_rest(self):
+        sale = _sell(self.s, self.ctx, self.item, 199)          # 1 pack 10.50 + 99 x 0.11 = 21.39
+        self.assertEqual(sale["total"], 2139)
+        line = sale["lines"][0]["id"]
+        self.assertEqual(self._old_rule_return(sale["id"], line, 1)["refund"], 11)
+        r = self.s.return_items(self.ctx, sale["id"], {line: 198}, refund_method="cash", reason="مرتجع تجربة")
+        self.assertEqual(r["refund"], 2128)                       # 2139 - 11: settles the line exactly
+        self.assertEqual(self.db.one("SELECT returned_total FROM sales WHERE id=?", (sale["id"],))[0], 2139)
+
+    def test_old_return_then_partial_returns_never_exceed_the_line(self):
+        sale = _sell(self.s, self.ctx, self.item, 199)
+        line = sale["lines"][0]["id"]
+        refunds = [self._old_rule_return(sale["id"], line, 1)["refund"]]
+        for qty in (98, 1, 99):                                   # 100 kept, 99, then 0
+            r = self.s.return_items(self.ctx, sale["id"], {line: qty}, refund_method="cash", reason="مرتجع تجربة")
+            self.assertGreaterEqual(r["refund"], 0)
+            refunds.append(r["refund"])
+            self.assertLessEqual(sum(refunds), 2139)
+        self.assertEqual(sum(refunds), 2139)
+
+
 class TestM2ReturnRetry(APICase):
     """M2 claims a return without an Idempotency-Key (or one over 100 chars) is not replay-safe. True of
     the raw API, but the shipped client sends a 36-char UUID key on every POST and reuses it on a retry
