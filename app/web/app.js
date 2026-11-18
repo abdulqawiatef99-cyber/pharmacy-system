@@ -3435,7 +3435,7 @@ async function viewShift() {
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
   if (!sh) {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
-      <form id="shOpen" class="row mt"><label class="f">النقدية في الدرج الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
+      <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
     $("#shOpen").addEventListener("submit", async (e) => {
@@ -3520,7 +3520,7 @@ const isOwnerMe = () => ME.role === "owner";
 function srcOptions(accs, sel, { drawer = true, outside = true, ownerOutside = false } = {}) {
   const o = [];
   if (sel === "treasury") sel = (accs.find((a) => a.kind === "treasury") || {}).id || (drawer ? "drawer" : sel);
-  if (drawer) o.push(`<option value="drawer" ${sel === "drawer" ? "selected" : ""}>درج الشيفت</option>`);
+  if (drawer) o.push(`<option value="drawer" ${sel === "drawer" ? "selected" : ""}>من خزينة الشيفت</option>`);
   for (const a of accs) {
     if (a.id === "drawer" || !a.is_active) continue;
     o.push(`<option value="${esc(a.id)}" ${sel === a.id ? "selected" : ""}>${esc(a.name)} — ${money(a.balance)} ج</option>`);
@@ -3810,12 +3810,11 @@ async function viewSupplier(id) {
   });
   $("#supPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const f = e.target;
+    const f = e.target, body = { source: f.src.value, method: f.chq.checked ? "cheque" : "", ref: f.r.value || null, note: f.n.value || null };
+    // percent: the amount typed is what is cleared from the supplier's balance; the program works out the discount
+    if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: Math.round(parseFloat(f.d.value || 0) * 100) });
+    else Object.assign(body, { amount: toPiasters(f.a.value), discount: f.dm.value === "amt" ? toPiasters(f.d.value) || 0 : 0 });
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
-      const body = { source: f.src.value, method: f.chq.checked ? "cheque" : "", ref: f.r.value || null, note: f.n.value || null };
-      // percent: the amount typed is what is cleared from the supplier's balance; the program works out the discount
-      if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: Math.round(parseFloat(f.d.value || 0) * 100) });
-      else Object.assign(body, { amount: toPiasters(f.a.value), discount: f.dm.value === "amt" ? toPiasters(f.d.value) || 0 : 0 });
       try { const r = await api(`/api/suppliers/${id}/pay`, { method: "POST", body });
         toast(r.discount ? `✓ اتدفع: ${money(r.paid)} ج · الخصم: ${money(r.discount)} ج` : "✓ تم تسجيل الدفعة"); viewSupplier(id); }
       catch (err) { toast(err.message, true); }
@@ -4123,7 +4122,7 @@ async function viewCustomer(id) {
   <div class="totals"><div class="${c.balance > 0 ? "t-err" : "t-ok"}">${c.balance > 0 ? "✕ عليه" : "✓ لا شيء عليه"}<b>${money(Math.max(0, c.balance))} ج</b><span>الحد المسموح ${money(c.credit_limit)} ج</span></div>
     <div class="${c.whatsapp_ok ? "t-ok" : ""}">${c.whatsapp_ok ? "✓ موافق على واتساب" : "لا يوافق على الرسائل"}<b>${esc(c.phone || "—")}</b></div></div>
   ${canM && c.balance > 0 ? `<form class="panel row" id="cPay"><h2 class="grow">تحصيل من الحساب</h2><label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
-    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الدرج</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
+    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
     <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
