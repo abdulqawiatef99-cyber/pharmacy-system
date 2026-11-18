@@ -62,8 +62,8 @@ class TestHistory(Base):
     def test_statements_shifts_shortages_and_periods(self):
         st = h.statement(self.db, self.ctx, "customer", self.cust)
         self.assertEqual([(s["for_me"], s["for_him"], s["total"], s["type"]) for s in st],
-                         [("150.00", "30.00", "120.00", "بيع آجل")])
-        self.assertEqual(h.statement(self.db, self.ctx, "supplier", self.sup)[0]["for_him"], "500.00")
+                         [("150.00", "-30.00", "120.00", "بيع آجل")])
+        self.assertEqual(h.statement(self.db, self.ctx, "supplier", self.sup)[0]["for_him"], "600.00")
         sh = h.shift_closes(self.db, self.ctx, date_from="2026-11-17", date_to="2026-11-17")
         self.assertEqual((sh[0]["system_cash"], sh[0]["counted_cash"]), ("1000.00", "999.50"))
         self.assertEqual([(s["item"], s["qty"]) for s in h.shortages(self.db, self.ctx, date_from="2026-11-16")],

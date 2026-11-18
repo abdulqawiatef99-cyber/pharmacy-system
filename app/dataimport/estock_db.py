@@ -752,28 +752,37 @@ def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: d
 
 
 def _balance_sign_check(ex: Export, p: Plan) -> None:
-    """Statement lines vs the balance: sum(for_me - for_him) should be the balance (+ = owes us for a
-    customer; for a supplier the sides are mirrored). Counted both ways; if the opposite sign wins, every
-    balance would be posted the wrong way round, so the run stops."""
+    """Statement lines vs the balance. E-Stock keeps a charge as + in one column and a payment as - in the
+    other (summary.txt ranges), so a party's statement is sum(for_him + for_me); its last running `total` is
+    compared too. Counted for the balance and for its negation: only when MOST parties match the negated
+    value would every balance be posted the wrong way round, and only then the run stops (manager 22:15)."""
     out = {}
-    for kind, table, idcol, parties, me, him in (
-            ("customers", "Gedo_customers", "customer_id", p.customers, "gc_for_me", "gc_for_him"),
-            ("suppliers", "Gedo_Vendors", "vendor_id", p.suppliers, "gv_for_him", "gv_for_me")):
+    for kind, table, idcol, parties, pfx in (("customers", "Gedo_customers", "customer_id", p.customers, "gc"),
+                                             ("suppliers", "Gedo_Vendors", "vendor_id", p.suppliers, "gv")):
         sums: dict[str, Decimal] = defaultdict(Decimal)
+        last: dict[str, tuple] = {}
         for r in ex.rows(table):
-            sums[ident(r.get(idcol))] += (dec(r.get(me)) or 0) - (dec(r.get(him)) or 0)
-        same = opposite = checked = 0
+            k = ident(r.get(idcol))
+            sums[k] += (dec(r.get(f"{pfx}_for_him")) or 0) + (dec(r.get(f"{pfx}_for_me")) or 0)
+            order = (r.get("insert_date") or "", dec(r.get(f"{pfx}_id")) or 0)
+            if dec(r.get("total")) is not None and (k not in last or order >= last[k][0]):
+                last[k] = (order, dec(r.get("total")))
+        same = opposite = by_total = checked = 0
         for d in parties:
             if not d["estock_balance"] or d["estock_id"] not in sums:
                 continue
             checked += 1
             s = piasters(sums[d["estock_id"]])
+            t = piasters(last[d["estock_id"]][1]) if d["estock_id"] in last else None
             same += s == d["estock_balance"]
-            opposite += s == -d["estock_balance"]
-        out[kind] = {"checked": checked, "statement_matches": same, "statement_matches_negated": opposite}
-        if opposite > same:
-            p.issue(table, "", "", "balance sign", f"{same} مطابق / {opposite} بالعكس",
-                    "كشف الحساب بيقول إن إشارة الرصيد بالعكس: محتاج مراجعة قبل النقل", block=True)
+            by_total += t == d["estock_balance"]
+            opposite += (s == -d["estock_balance"] or t == -d["estock_balance"]) and not (
+                s == d["estock_balance"] or t == d["estock_balance"])
+        out[kind] = {"checked": checked, "statement_matches": same, "last_total_matches": by_total,
+                     "statement_matches_negated": opposite, "rule": "sum(for_him + for_me); last total"}
+        if checked and opposite * 2 > checked:
+            p.issue(table, "", "", "balance sign", f"{opposite} من {checked} بالعكس",
+                    "أغلب كشوف الحساب بتقول إن إشارة الرصيد بالعكس: محتاج مراجعة قبل النقل", block=True)
     p.checks["balance_sign"] = out
 
 

@@ -85,8 +85,11 @@ def base_tables():
     t["Back_Sales_details"] = [{"back_sales_id": "1", "sales_id": "1", "product_id": "1", "back_amount": "1"}]
     t["Purchase_header"] = [{"purchase_id": "1", "vendor_id": "1", "total_bill": "500.0000", "bill_date": OLD}]
     t["Purchase_details"] = [{"details_id": "1", "purchase_id": "1", "product_id": "1", "amount": "20", "buy_price": "24.0000"}]
-    t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "30.0000", "gc_for_me": "150.0000"}]
-    t["Gedo_Vendors"] = [{"gv_id": "1", "vendor_id": "1", "gv_for_him": "500.0000", "gv_for_me": "0.0000"}]
+    # E-Stock's signs (summary.txt ranges): a charge is + in one column, a payment - in the other
+    t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "-30.0000", "gc_for_me": "150.0000",
+                            "total": "120.0000"}]
+    t["Gedo_Vendors"] = [{"gv_id": "1", "vendor_id": "1", "gv_for_him": "600.0000", "gv_for_me": "-100.0000",
+                          "total": "500.0000"}]
     t["Shortcoming"] = [{"id": "1", "product_id": "62212345678901234", "amount": "2", "store_id": "1"}]
     t["Cash_disk_close"] = [{"cdc_id": "1", "cdc_curr_cash": "1000.0000", "cdc_act_cash": "999.5000"}]
     t["Customer"] = [
@@ -396,7 +399,8 @@ class TestRefusalsAndDecisions(Base):
 
     def test_opposite_balance_sign_in_the_statements_blocks(self):
         t = base_tables()
-        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "150.0000", "gc_for_me": "30.0000"}]
+        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "30.0000", "gc_for_me": "-150.0000",
+                                "total": "-120.0000"}]
         res = self.run_import(tables=t)
         self.assertFalse(res["ok"])
         self.assertIn("balance sign", {b["field"] for b in res["plan"].blocking})
@@ -697,6 +701,34 @@ class TestOpeningBalancesInTheProgram(Base):
         self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000)
         with self.assertRaises(Conflict):
             self.run_import(folder=self.folder)
+
+
+class TestStatementSigns(Base):
+    """Manager 22:15 (summary.txt ranges): balance = sum(for_him + for_me), and the last running total."""
+
+    def test_realistic_signs_match_the_balance(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        sign = res["plan"].checks["balance_sign"]
+        self.assertEqual((sign["customers"]["statement_matches"], sign["suppliers"]["statement_matches"]), (1, 1))
+
+    def test_the_last_running_total_counts_when_the_lines_do_not_add_up(self):
+        t = base_tables()
+        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "0", "gc_for_me": "999.0000",
+                                "total": "120.0000", "insert_date": "2026-11-01T10:00:00"}]
+        res = self.run_import(tables=t)
+        self.assertEqual(res["plan"].checks["balance_sign"]["customers"]["last_total_matches"], 1)
+
+    def test_one_odd_party_does_not_block(self):
+        t = base_tables()
+        t["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "عميل رابع",
+                              "customer_current_money": "50.0000"})
+        t["Customer"].append({"customer_id": "5", "customer_code": "C5", "customer_name_ar": "عميل خامس",
+                              "customer_current_money": "70.0000"})
+        t["Gedo_customers"] += [{"gc_id": "2", "customer_id": "4", "gc_for_him": "0", "gc_for_me": "-50.0000"},
+                                {"gc_id": "3", "customer_id": "5", "gc_for_him": "0", "gc_for_me": "70.0000"}]
+        res = self.run_import(tables=t)                 # 2 of 3 match, 1 negated: not most of them
+        self.assertNotIn("balance sign", {b["field"] for b in res["plan"].blocking})
 
 
 class TestOwnerDecisions1118(Base):
