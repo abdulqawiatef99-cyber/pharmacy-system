@@ -117,6 +117,14 @@ def treasury_id(db: Database, ctx: Context) -> str:
         return aid
 
 
+def _writable(db: Database, ctx: Context, account: str) -> str:
+    """An account id for a write: the placeholder 'treasury' makes the treasury on its first write (the
+    balances list shows it before it exists); a key or 'estock:<id>' is resolved; anything else is an id."""
+    if account == "treasury":
+        return treasury_id(db, ctx)
+    return resolve(db, ctx, account)
+
+
 def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *, ref_type: str | None = None,
           ref_id: str | None = None, note: str | None = None, meta: dict | None = None, check: bool = True,
           active: bool = True) -> str:
@@ -192,8 +200,10 @@ def check_source(db: Database, ctx: Context, source: str | None) -> str:
                             details={"permission": "users.manage", "label": "الدفع من خارج حسابات البرنامج"})
         return OUTSIDE
     ctx.require("cash.manage")
-    _account(db, ctx, source)
-    return source
+    with db.transaction():
+        aid = _writable(db, ctx, source)
+        _account(db, ctx, aid)
+    return aid
 
 
 def pay_out(db: Database, ctx: Context, source: str | None, amount: int, kind: str, *, ref_type: str,
@@ -217,9 +227,9 @@ def pay_out(db: Database, ctx: Context, source: str | None, amount: int, kind: s
 def accounts(db: Database, ctx: Context, *, include_inactive: bool = False) -> list[dict]:
     """Every money place with its balance: the drawer first, then the treasury, then the owner's accounts."""
     ctx.require("cash.see_expected")
-    rows = db.all("SELECT a.*, coalesce((SELECT sum(m.amount) FROM money_movements m WHERE m.account_id=a.id),0)"
+    rows = db.all("SELECT a.*, coalesce((SELECT sum(m.amount) FROM money_movements m WHERE m.org_id=a.org_id AND m.account_id=a.id),0)"
                   " balance FROM money_accounts a WHERE a.org_id=?" + ("" if include_inactive else   # a stopped
-                  " AND (a.is_active=1 OR EXISTS(SELECT 1 FROM money_movements m WHERE m.account_id=a.id))")  # one with history stays
+                  " AND (a.is_active=1 OR EXISTS(SELECT 1 FROM money_movements m WHERE m.org_id=a.org_id AND m.account_id=a.id))")  # one with history stays
                   + " ORDER BY a.kind<>'treasury', a.is_active DESC, a.sort, a.name", (ctx.org_id,))
     d = drawer_balance(db, ctx)
     out = [{"id": DRAWER, "kind": "drawer", "name": DRAWER_NAME, "balance": d["balance"], "shift_open": d["open"],
@@ -349,7 +359,7 @@ def ensure_account(db: Database, ctx: Context, *, kind: str, name: str, code: st
         if not found and code:
             found = db.one("SELECT * FROM money_accounts WHERE org_id=? AND code=?", (ctx.org_id, code))
         if not found and kind == "treasury":
-            found = db.one("SELECT * FROM money_accounts WHERE id=?", (treasury_id(db, ctx),))
+            found = db.one("SELECT * FROM money_accounts WHERE id=? AND org_id=?", (treasury_id(db, ctx), ctx.org_id))
         if not found:
             found = db.one("SELECT * FROM money_accounts WHERE org_id=? AND name=?", (ctx.org_id, name))
         if found:
@@ -417,11 +427,12 @@ def post_opening(db: Database, ctx: Context, account: str, amount: int, *, sourc
         prev = _opening_of(db, ctx, account_id)                  # an opening of 0 has no movement
         if prev is not None:
             if source_ref and (prev.get("source"), prev.get("source_ref"), prev.get("amount")) == (source, source_ref, amount):
-                m = db.one("SELECT id FROM money_movements WHERE account_id=? AND kind='opening'", (account_id,))
+                m = db.one("SELECT id FROM money_movements WHERE org_id=? AND account_id=? AND kind='opening'",
+                           (ctx.org_id, account_id))
                 return {**get_account(db, ctx, account_id), "movement_id": m["id"] if m else None, "replayed": True}
             raise Conflict("الرصيد الافتتاحي للحساب ده متسجل قبل كده؛ أي فرق بعد كده يتسجل بالجرد",
                            code="opening_exists", details={"account_id": account_id, "opening": prev.get("amount")})
-        if db.one("SELECT 1 FROM money_movements WHERE account_id=? LIMIT 1", (account_id,)):
+        if db.one("SELECT 1 FROM money_movements WHERE org_id=? AND account_id=? LIMIT 1", (ctx.org_id, account_id)):
             raise Conflict(f"{a['name']} عليه حركات؛ الرصيد الافتتاحي لا يتسجل بعدها، سجّل الفرق بالجرد",
                            code="account_has_movements")
         if source == "count" and amount < 0 and not a["allow_negative"]:
@@ -469,7 +480,7 @@ def check_openings(db: Database, ctx: Context, figures: dict[str, int]) -> dict:
         expected = _amount(fig, allow_zero=True, signed=True)
         try:
             aid = resolve(db, ctx, key)
-            a = db.one("SELECT name FROM money_accounts WHERE id=?", (aid,))
+            a = db.one("SELECT name FROM money_accounts WHERE id=? AND org_id=?", (aid, ctx.org_id))
             bal, name = balance(db, ctx.org_id, aid), a["name"]
         except NotFound:
             aid, bal, name = None, None, None
@@ -495,7 +506,8 @@ def count(db: Database, ctx: Context, account_id: str, counted: int, reason: str
         # the first count after an opening taken from E-Stock measures the old program, not this month
         opening = _opening_of(db, ctx, account_id)
         old = bool(opening and opening.get("source") == "estock"
-                   and not db.one("SELECT 1 FROM money_counts WHERE account_id=? LIMIT 1", (account_id,)))
+                   and not db.one("SELECT 1 FROM money_counts WHERE org_id=? AND account_id=? LIMIT 1",
+                               (ctx.org_id, account_id)))
         mid = None
         if diff:
             mid = new_id()
@@ -533,10 +545,13 @@ def transfer(db: Database, ctx: Context, from_source: str, to_source: str, amoun
         raise ValidationFailed("استخدم مسحوبات أو إيداع المالك للفلوس اللي خارج الحسابات")
     tid = new_id()
     with db.transaction():
+        from_source, to_source = (x if x == DRAWER else _writable(db, ctx, x) for x in (from_source, to_source))
+        if from_source == to_source:
+            raise ValidationFailed("اختر حسابين مختلفين")
+        for x in (from_source, to_source):
+            if x != DRAWER:
+                _account(db, ctx, x)
         names = (source_label(db, ctx, from_source), source_label(db, ctx, to_source))
-        for s in (from_source, to_source):
-            if s != DRAWER:
-                _account(db, ctx, s)
         said = _note(note)
         text = f"تحويل من {names[0]} إلى {names[1]}" + (f" — {said}" if said else "")
         if from_source == DRAWER:
@@ -574,6 +589,7 @@ def owner_movement(db: Database, ctx: Context, source: str, amount: int, kind: s
         else:
             if source in (None, "", OUTSIDE):
                 raise ValidationFailed("اختر الحساب")
+            source = _writable(db, ctx, source)
             mid = _post(db, ctx, source, -amount if kind == "owner_withdrawal" else amount, kind,
                         ref_type="owner", ref_id=ref, note=text)
         audit.record(db, ctx, f"money.{kind}", "money_account", source,
@@ -635,7 +651,8 @@ def routes(db: Database, ctx: Context) -> list[dict]:
     ctx.require("cash.see_expected")
     return [dict(r) for r in db.all(
         "SELECT r.method, r.channel_id, coalesce(c.name,'') channel, r.account_id, a.name account FROM money_routes r"
-        " JOIN money_accounts a ON a.id=r.account_id LEFT JOIN payment_channels c ON c.id=r.channel_id"
+        " JOIN money_accounts a ON a.id=r.account_id AND a.org_id=r.org_id"
+        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
         " WHERE r.org_id=? ORDER BY r.method, r.channel_id", (ctx.org_id,))]
 
 
@@ -653,6 +670,7 @@ def set_route(db: Database, ctx: Context, method: str, channel_id: str | None, a
         before = db.one("SELECT account_id FROM money_routes WHERE org_id=? AND method=? AND channel_id=?",
                         (ctx.org_id, method, ch))
         if account_id:
+            account_id = _writable(db, ctx, account_id)
             _account(db, ctx, account_id)
             db.execute("INSERT INTO money_routes (org_id, method, channel_id, account_id, updated_by) VALUES (?,?,?,?,?)"
                        " ON CONFLICT (org_id, method, channel_id) DO UPDATE SET account_id=excluded.account_id,"
@@ -702,7 +720,7 @@ def movements(db: Database, ctx: Context, *, account_id: str | None = None, kind
     from ..sales.service import _local_date
     d1, d2, lo, hi = _bounds(date_from, date_to)
     q = ("SELECT m.*, a.name account, u.full_name by_name FROM money_movements m JOIN money_accounts a ON a.id=m.account_id"
-         " LEFT JOIN users u ON u.id=m.created_by WHERE m.org_id=? AND m.created_at>=? AND m.created_at<?")
+         " AND a.org_id=m.org_id LEFT JOIN users u ON u.id=m.created_by WHERE m.org_id=? AND m.created_at>=? AND m.created_at<?")
     p: list = [ctx.org_id, lo, hi]
     if account_id:
         if account_id == "treasury":
@@ -777,7 +795,7 @@ def summary(db: Database, ctx: Context, date_from: str | None = None, date_to: s
             x[side] += abs(amount)
 
     for r in db.all("SELECT m.amount, m.kind, m.meta, m.created_at, a.name FROM money_movements m JOIN money_accounts a"
-                    " ON a.id=m.account_id WHERE m.org_id=? AND m.created_at>=? AND m.created_at<?", (ctx.org_id, lo, hi)):
+                    " ON a.id=m.account_id AND a.org_id=m.org_id WHERE m.org_id=? AND m.created_at>=? AND m.created_at<?", (ctx.org_id, lo, hi)):
         kind = r["kind"]
         if kind == "count_difference" and r["meta"] and json.loads(r["meta"]).get("against") == "old_program":
             kind = "old_program_difference"

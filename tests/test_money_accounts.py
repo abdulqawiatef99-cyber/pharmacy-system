@@ -469,3 +469,37 @@ class TestReadsWriteNothing(MoneyCase):
             money.summary(self.db, om, today(), today())
         self.assertEqual([r["id"] for r in rows], [money.DRAWER, "treasury"])
         self.assertIsNone(money.find_treasury(self.db, octx.org_id))
+
+
+class TestCodexReview342(MoneyCase):
+    """#342 Codex: P1 every movement lookup is scoped by pharmacy; P2 the placeholder 'treasury' works for writes."""
+
+    def _foreign_row_on(self, account_id):
+        """A movement row of another pharmacy pointing at this pharmacy's account (a damaged or forged file)."""
+        org, _ = self.second_tenant()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO money_movements (id, org_id, account_id, amount, kind, created_by)"
+                            " VALUES ('forged', ?, ?, 99900, 'owner_deposit', 'x')", (org["org_id"], account_id))
+
+    def test_balances_and_openings_ignore_another_pharmacys_rows(self):
+        self._foreign_row_on(self.bank)
+        rows = {r["id"]: r for r in money.accounts(self.db, self.m)}
+        self.assertEqual(rows[self.bank]["balance"], 0)
+        r = money.post_opening(self.db, self.ctx, self.bank, 500, source_ref="run-1")   # no "has movements" refusal
+        self.assertEqual(r["balance"], 500)
+        self.assertEqual(money.check_openings(self.db, self.m, {self.bank: 500})["rows"][0]["balance"], 500)
+        self.assertEqual([m["id"] for m in money.movements(self.db, self.m, account_id=self.bank)["rows"]],
+                         [r["movement_id"]])
+
+    def test_placeholder_treasury_before_it_exists(self):
+        _, octx = self.second_tenant()
+        people.add_user(self.db, octx, username="omgr2", full_name="OM", password=PW, role_code="manager")
+        CashDrawer = type(self.cd)
+        CashDrawer(self.db).open(octx, 5000)
+        money.transfer(self.db, octx, money.DRAWER, "treasury", 3000)
+        money.owner_movement(self.db, octx, "treasury", 100, "owner_deposit")
+        t = money.find_treasury(self.db, octx.org_id)
+        self.assertEqual(money.balance(self.db, octx.org_id, t), 3100)
+        with self.db.transaction():
+            money.pay_out(self.db, octx, "treasury", 100, "tax", ref_type="tax", ref_id=None, note="ضريبة")
+        self.assertEqual(money.balance(self.db, octx.org_id, t), 3000)
