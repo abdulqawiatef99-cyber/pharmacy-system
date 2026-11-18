@@ -682,7 +682,10 @@ function addTourBtn() {
   if (!at) return;
   const html = `<button type="button" class="btn small secondary tourbtn noprint" data-tour-replay="${k}">❓ اشرح الشاشة دي</button>`;
   if (TOUR_ANCHOR[k]) at.insertAdjacentHTML("beforeend", " " + html); else at.insertAdjacentHTML("afterend", html);
-  $("#app [data-tour-replay]").addEventListener("click", (e) => { e.stopPropagation(); tourStart(k); });
+  const btn = $("#app [data-tour-replay]");
+  // sale screen: the button never keeps the focus, so the next scan (and its Enter) lands in the search box
+  btn.addEventListener("mousedown", (e) => { if (k === "pos") e.preventDefault(); });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); tourStart(k); if (k === "pos") $("#posQ")?.focus(); });
 }
 new MutationObserver(addTourBtn).observe(app, { childList: true });
 // ------------------------------------------------------------------ F36 guided tour — END
