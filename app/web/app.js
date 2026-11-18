@@ -2677,7 +2677,7 @@ async function viewSale(id) {
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
     ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${esc(fq(l.qty_base, l))}</td><td>${money(l.net)}</td>
       <td class="muted">${l.allocations.map((a) => `${esc(a.expiry_date ? a.expiry_date.slice(0, 7) : "—")}: ${a.qty}${a.returned_qty ? ` (المُرتجع ${a.returned_qty})` : ""}`).join("، ")}</td>
-      ${s.status === "completed" && can("sales.return") ? `<td>${returnable(l) ? `<input type="number" min="0" max="${returnable(l)}" step="1" value="0" data-ret="${l.id}" class="narrow">
+      ${s.status === "completed" && can("sales.return") ? `<td>${returnable(l) ? `<input type="number" min="0" max="${returnable(l)}" step="1" value="" placeholder="0" inputmode="numeric" data-ret="${l.id}" class="narrow">
         <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">إرجاع الكل</span>`}</td>` : ""}</tr>`).join("")}
     </tbody></table></div>
     ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
@@ -2687,6 +2687,8 @@ async function viewSale(id) {
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
       <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
   </section>`;
+  // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
+  app.querySelectorAll("[data-ret]").forEach((i) => i.addEventListener("focus", () => i.select()));
   $("#rGo")?.addEventListener("click", async (ev) => {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
