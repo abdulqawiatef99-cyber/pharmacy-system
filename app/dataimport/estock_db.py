@@ -229,6 +229,7 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
     _plan_stock(ex, p, stock_source, stores or [DEFAULT_STORE])
     _plan_parties(ex, p, confirm or {})
     _plan_history_checks(ex, p)
+    _plan_money_info(ex, p)
     return p
 
 
@@ -417,6 +418,14 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                 tot["listed_cost"] -= amt * (bp or 0)
             row = {"eid": eid, "product_id": pid, "exact": exact, "expiry": exp, "unit_cost": unit_cost,
                    "amount": amt, "bp": bp}
+            if not exp and amt > 0:      # owner 18/11: a drug without expiry is reviewed; a non-drug needs none
+                if it["is_drug"] == 0:
+                    p.issue(chosen["table"], eid, it["code"], "expiry", "(فاضي)", "صنف مش دواء: عادي من غير صلاحية",
+                            kind="info")
+                else:
+                    p.issue(chosen["table"], eid, it["code"], "expiry", "(فاضي)",
+                            "دواء من غير صلاحية: راجعه" if it["is_drug"] else "مش معروف دواء ولا لا ومن غير صلاحية: راجعه",
+                            value_egp=amt * (bp or 0), kind="review")
             (neg if amt < 0 else pos).append(row)
         for row in pos:
             whole = row["exact"].to_integral_value(ROUND_HALF_UP)
@@ -700,6 +709,51 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
     heads = {ident(r.get("sales_id")) for r in ex.rows("Sales_header")}
     orphan = sum(1 for r in ex.rows("Branches_sales_details") if ident(r.get("sales_id")) not in heads)
     p.checks["sales_lines_without_header"] = orphan
+
+
+MONEY_TABLES = re.compile(r"gedo_fin|financ|cash|khazn|treasur|safe|bank|network|wallet|visa|insta|vodaf|mahfaz", re.I)
+_NOT_MONEY_COL = re.compile(r"(^|_)(id|uid|code|no|num|number|flag|type|class|date|time|year|month|day)s?$", re.I)
+
+
+def _plan_money_info(ex: Export, p: Plan) -> None:
+    """Owner 18/11: E-Stock's treasury figure is not real cash (supplier and expense payments were not
+    recorded against it) and the wallets (InstaPay, Vodafone Cash) hold balances too. Nothing here creates a
+    cash balance: it is shown in the report, with its source table, for the money accounts (F105)."""
+    out = {"note": "information only: no cash or wallet balance is created from E-Stock", "tables": [],
+           "last_shift_close": [], "sales_by_network": []}
+    for t in sorted(ex.tables.values(), key=lambda t: t["name"].lower()):
+        if not MONEY_TABLES.search(t["name"]):
+            continue
+        rows = ex.rows(t["name"])
+        sums = {}
+        for col in (rows[0].keys() if rows else []):
+            if _NOT_MONEY_COL.search(col):
+                continue
+            vals = [r.get(col) for r in rows if (r.get(col) or "").strip()]
+            nums = [dec(v) for v in vals]
+            if vals and all(n is not None for n in nums) and any(n != n.to_integral_value() for n in nums) \
+                    or (vals and all(n is not None for n in nums) and any(k in col.lower() for k in
+                                                                          ("money", "cash", "total", "for_", "value", "balance"))):
+                sums[col] = egp(sum(nums))
+        out["tables"].append({"table": t["name"], "rows": len(rows), "sums": sums})
+    closes: dict[str, dict] = {}
+    for r in ex.rows("Cash_disk_close"):
+        k = ident(r.get("cdc_cash_id")) or "?"
+        if (r.get("insert_date") or "") >= closes.get(k, {}).get("insert_date", ""):
+            closes[k] = r
+    for k, r in sorted(closes.items()):
+        out["last_shift_close"].append({"source": "Cash_disk_close", "cash_id": k, "at": r.get("insert_date") or "",
+                                        "system_cash": egp(dec(r.get("cdc_curr_cash"))),
+                                        "counted_cash": egp(dec(r.get("cdc_act_cash")))})
+    for table, sign in (("Sales_header", 1), ("Back_sales_header", -1)):
+        tot: dict[str, Decimal] = defaultdict(Decimal)
+        for r in ex.rows(table):
+            v = dec(r.get("network_money"))
+            if v:
+                tot[ident(r.get("network_id")) or "?"] += sign * v
+        for k, v in sorted(tot.items()):
+            out["sales_by_network"].append({"source": f"{table}.network_money", "network_id": k, "total": egp(v)})
+    p.checks["money_info"] = out
 
 
 # ---------------------------------------------------------------- the owner's confirmation sheet
@@ -1067,12 +1121,12 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     paths = {"data_quality": out_dir / "data-quality.csv", "reconciliation": out_dir / "reconciliation.txt",
              "json": out_dir / "report.json", "openings": out_dir / "openings-to-confirm.xlsx",
              "supplier_contacts": out_dir / "supplier-contacts.csv"}
-    order = {"block": 0, "fixed": 1, "info": 2}
+    order = {"block": 0, "review": 1, "fixed": 2, "info": 3}
     with open(paths["data_quality"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["الخطورة", "الجدول", "رقم إي ستوك", "الكود", "الخانة", "قيمة إي ستوك", "اللي اتعمل", "القيمة ج"])
         for d in sorted(plan.dq, key=lambda d: (order[d["severity"]], -abs(Decimal(d["value_egp"] or 0)))):
-            w.writerow([{"block": "يوقف النقل", "fixed": "اتصلح", "info": "للعلم"}[d["severity"]], d["table"],
+            w.writerow([{"block": "يوقف النقل", "review": "للمراجعة", "fixed": "اتصلح", "info": "للعلم"}[d["severity"]], d["table"],
                         d["estock_id"], d["code"], d["field"], d["estock_value"], d["action"], d["value_egp"]])
     with open(paths["supplier_contacts"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
@@ -1094,6 +1148,19 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     lines.append("التاريخ (عدد الصفوف): " + "، ".join(f"{k}={v['csv']}" for k, v in rec.get("history", {}).items()))
     lines.append(f"جودة البيانات: {len(plan.dq)} سطر ({len(plan.blocking)} يوقف النقل) في {paths['data_quality'].name}")
     lines.append("إشارة الأرصدة من كشف الحساب: " + json.dumps(plan.checks.get("balance_sign", {}), ensure_ascii=False))
+    exp = [d for d in plan.dq if d["field"] == "expiry"]
+    lines.append(f"من غير صلاحية: دواء أو مش معروف {sum(d['severity'] == 'review' for d in exp)} (للمراجعة)، "
+                 f"مش دواء {sum(d['severity'] == 'info' for d in exp)} (عادي)")
+    mi = plan.checks.get("money_info") or {}
+    lines.append("خزنة إي ستوك والمحافظ — للعلم بس، مفيش رصيد خزنة ولا محفظة اتعمل من إي ستوك:")
+    for t in mi.get("tables", []):
+        lines.append(f"  {t['table']}: {t['rows']} سطر" + ("، " + "، ".join(f"{a}={b}" for a, b in t["sums"].items())
+                                                         if t["sums"] else ""))
+    for c in mi.get("last_shift_close", []):
+        lines.append(f"  آخر قفل خزنة ({c['source']}، خزنة {c['cash_id']}، {c['at']}): البرنامج {c['system_cash']}، "
+                     f"المعدود {c['counted_cash']}")
+    for n in mi.get("sales_by_network", []):
+        lines.append(f"  {n['source']} شبكة {n['network_id']}: {n['total']}")
     for k, v in extra.items():
         lines.append(f"{k}: {v}")
     if rec["mismatches"]:

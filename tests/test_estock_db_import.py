@@ -577,3 +577,142 @@ class TestCodexReview339(Base):
         with self.assertRaises(Conflict):
             self.run_import(folder=folder, confirm_file=conf)
         self.assertEqual(self.db.one("SELECT count(*) n FROM customer_ledger")["n"], n)
+
+
+class TestArchiveInBackup(Base):
+    """Owner 18/11: the E-Stock history is owner data and goes into every regular backup."""
+
+    def test_backup_carries_verifies_and_restores_the_archive(self):
+        import zipfile
+        from app.core import backup
+        self.assertTrue(self.run_import()["ok"])
+        arch = self.tmp / estock_archive.NAME
+        out = backup.create(self.db, self.tmp / "uploads", self.tmp / "bk")
+        with zipfile.ZipFile(out) as z:
+            self.assertIn(backup.ARCHIVE_MEMBER, z.namelist())
+        self.assertEqual(backup.verify_archive(out)["problems"], [])
+        self.assertEqual(backup.quick_check(out), [])
+        again = backup.create(self.db, self.tmp / "uploads", self.tmp / "bk")      # cached .xz, same content
+        self.assertEqual(backup.verify_archive(again)["problems"], [])
+        target = self.tmp / "restored"
+        backup.restore(out, target / "pharmacy.db", target / "uploads", self.tmp / "pre")
+        got = target / estock_archive.NAME
+        self.assertEqual(got.read_bytes(), arch.read_bytes())
+        self.assertFalse(os.stat(got).st_mode & stat.S_IWUSR)
+
+    def test_a_tampered_or_missing_archive_fails_verification(self):
+        import zipfile
+        from app.core import backup
+        self.assertTrue(self.run_import()["ok"])
+        out = backup.create(self.db, self.tmp / "uploads", self.tmp / "bk")
+        bad = self.tmp / "bad.zip"
+        with zipfile.ZipFile(out) as src, zipfile.ZipFile(bad, "w") as dst:
+            for i in src.infolist():
+                if i.filename != backup.ARCHIVE_MEMBER:
+                    dst.writestr(i, src.read(i.filename))
+        self.assertTrue(backup.verify_archive(bad)["problems"])
+        with self.assertRaises(RuntimeError):
+            backup.restore(bad, self.tmp / "r" / "pharmacy.db", self.tmp / "r" / "uploads", self.tmp / "pre")
+
+    def test_restoring_an_older_backup_keeps_the_live_archive_aside(self):
+        from app.core import backup
+        old = backup.create(self.db, self.tmp / "uploads", self.tmp / "bk")          # before the move
+        self.assertTrue(self.run_import()["ok"])
+        live = Path(self.db.path)
+        self.db.close()
+        backup.restore(old, live, self.tmp / "uploads", self.tmp / "pre")
+        self.assertFalse((self.tmp / estock_archive.NAME).exists())
+        self.assertEqual(len(list(self.tmp.glob("estock-archive-replaced-*.sqlite"))), 1)
+        from app.db import Database
+        self.db = Database(live)
+
+
+class TestOpeningBalancesInTheProgram(Base):
+    """Owner 18/11: the owner says each real balance; it is confirmed from the program, not a sheet."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.export()
+        self.assertTrue(self.run_import(folder=self.folder)["ok"])
+        from app.dataimport import opening_balances as ob
+        self.ob = ob
+        self.v1 = self.db.one("SELECT id FROM suppliers WHERE name='مورد تجربة'")["id"]
+        self.c1 = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+
+    def test_listing_and_confirm_post_an_opening_adjustment_only(self):
+        rows = self.ob.listing(self.db, self.ctx, "supplier")
+        self.assertEqual([(r["name"], r["estock_opening"], r["opening"]) for r in rows],
+                         [("مورد تجربة", 50000, 50000), ("مورد تجربه (V2)", -2000, -2000)])
+        self.assertEqual(rows[0]["estock_code"], "V1")
+        got = self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000, note="قال المالك")
+        self.assertEqual((got["estock_opening"], got["opening_adjustments"], got["opening"], got["balance_now"]),
+                         (50000, -5000, 45000, 45000))
+        led = self.db.all("SELECT amount, kind, note FROM supplier_ledger WHERE supplier_id=? ORDER BY amount", (self.v1,))
+        self.assertEqual([(r["amount"], r["kind"]) for r in led], [(-5000, "adjustment"), (50000, "opening")])
+        self.assertIn("تسوية افتتاحية", led[0]["note"])
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_ledger WHERE kind='payment'"))
+        self.assertTrue(self.db.one("SELECT 1 FROM audit_log WHERE action='estock.opening_confirm'"))
+        self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000)                  # same figure: nothing new
+        self.assertEqual(self.db.one("SELECT count(*) n FROM supplier_ledger WHERE supplier_id=?", (self.v1,))["n"], 2)
+
+    def test_later_activity_does_not_change_the_opening(self):
+        from app.sales.service import Sales
+        Sales(self.db).customer_payment(self.ctx, self.c1, 2000, method="card")
+        got = self.ob.confirm(self.db, self.ctx, "customer", self.c1, 11000)
+        self.assertEqual((got["opening"], got["opening_adjustments"], got["balance_now"]), (11000, -1000, 9000))
+
+    def test_owner_only_and_refusals(self):
+        from app.core import people
+        from app.core.errors import Forbidden, NotFound, ValidationFailed
+        people.add_user(self.db, self.ctx, username="mgr", full_name="M", password="Staff-Pass-2026", role_code="manager")
+        mgr = self.login("mgr", "Staff-Pass-2026")
+        for call in (lambda: self.ob.listing(self.db, mgr, "supplier"),
+                     lambda: self.ob.confirm(self.db, mgr, "supplier", self.v1, 1)):
+            with self.assertRaises(Forbidden):
+                call()
+        for bad in (True, 12.5, "100", 10 ** 12):
+            with self.assertRaises(ValidationFailed):
+                self.ob.confirm(self.db, self.ctx, "supplier", self.v1, bad)
+        with self.assertRaises(ValidationFailed):
+            self.ob.listing(self.db, self.ctx, "bank")
+        from app.catalog import service as cat
+        other = cat.create_supplier(self.db, self.ctx, name="مورد جديد")
+        with self.assertRaises(NotFound):
+            self.ob.confirm(self.db, self.ctx, "supplier", other, 100)
+
+    def test_no_import_step_runs_after_a_confirmation_in_the_program(self):
+        self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000)
+        with self.assertRaises(Conflict):
+            self.run_import(folder=self.folder)
+
+
+class TestOwnerDecisions1118(Base):
+    def test_no_expiry_is_split_into_drug_to_review_and_non_drug(self):
+        t = base_tables()
+        t["Products"].append(product(9, "107", "Testcream", product_drug="0"))
+        t["Product_Amount"] += [stock_row(40, 9, 1, "3", "5.0000", ""), stock_row(41, 2, 1, "2", "5.0000", "")]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        exp = {(d["code"], d["severity"]) for d in res["plan"].dq if d["field"] == "expiry"}
+        self.assertIn(("107", "info"), exp)
+        self.assertIn(("101", "review"), exp)
+        self.assertIn("للمراجعة", Path(res["reports"]["data_quality"]).read_text(encoding="utf-8-sig"))
+
+    def test_treasury_and_wallets_are_information_only(self):
+        t = base_tables()
+        t["Gedo_Financial"] = [{"gf_id": "1", "gf_for_me": "1500.5000", "gf_for_him": "200.0000", "total": "1300.5000"}]
+        t["Sales_header"][0]["network_id"] = "2"
+        t["Sales_header"][0]["network_money"] = "54.0000"
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        mi = res["plan"].checks["money_info"]
+        tables = {x["table"]: x for x in mi["tables"]}
+        self.assertEqual(tables["Gedo_Financial"]["sums"]["gf_for_me"], "1500.50")
+        self.assertIn("Cash_disk_close", tables)
+        self.assertEqual(mi["last_shift_close"][0]["counted_cash"], "999.50")
+        self.assertEqual(mi["sales_by_network"], [{"source": "Sales_header.network_money", "network_id": "2", "total": "54.00"}])
+        for table in ("cash_movements", "cash_shifts"):
+            self.assertFalse(self.db.one(f"SELECT 1 FROM {table}"), table)
+        rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
+        self.assertIn("مفيش رصيد خزنة ولا محفظة", rec)
+        self.assertIn("Gedo_Financial", rec)

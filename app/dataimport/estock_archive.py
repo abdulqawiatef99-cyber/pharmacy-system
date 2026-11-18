@@ -14,7 +14,7 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
-NAME = "estock-archive.sqlite"
+from ..core.backup import ESTOCK_ARCHIVE as NAME   # the backup carries it (one name for both)
 INDEX_COLS = ("product_id", "customer_id", "vendor_id", "sales_id", "back_sales_id", "purchase_id", "store_id")
 
 
