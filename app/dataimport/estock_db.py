@@ -157,7 +157,14 @@ def dec(v) -> Decimal | None:
 
 
 def piasters(d: Decimal) -> int:
+    """Rounded to the piaster: only for comparisons and for values listed in data-quality as rounded."""
     return int((d * 100).quantize(Decimal("1"), ROUND_HALF_UP))
+
+
+def exact_piasters(d: Decimal) -> int | None:
+    """Money that is posted must already be whole piasters: 120.005 is None (a person decides), never 12001."""
+    q = d * 100
+    return int(q) if q == q.to_integral_value() else None
 
 
 def iso_day(v) -> str | None:
@@ -269,6 +276,9 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             it["public_price"] = None
         else:
             it["public_price"] = piasters(price)
+            if exact_piasters(price) is None:
+                p.issue("Products", pid, code, "sell_price", r.get("sell_price"),
+                        f"كسر قرش في السعر: اتقرّب لـ {egp(Decimal(it['public_price']) / 100)}")
         for col in ("product_disc1", "product_disc2"):
             d = dec(r.get(col))
             if d is not None and not 0 <= d <= 100:
@@ -426,8 +436,15 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                     tot["listed_units"] -= diff
                     if row["unit_cost"] is not None:
                         tot["listed_cost"] -= diff * row["bp"] / pack
+        tol = max(Decimal("0.0006") * pack, DRIFT) if pack > 1 else Decimal("0.0006")
         for row in neg:
-            owe = int((-row["exact"]).to_integral_value(ROUND_HALF_UP))
+            whole = (-row["exact"]).to_integral_value(ROUND_HALF_UP)
+            if abs(-row["exact"] - whole) > tol:      # the same rule as a positive row: never round a deficit
+                p.issue(chosen["table"], row["eid"], it["code"], "amount", row["amount"],
+                        f"رصيد بالسالب مش عدد صحيح من الوحدات (العبوة {pack}): عدد الوحدات محتاج قرار (--packs)",
+                        value_egp=row["amount"] * (row["bp"] or 0), block=True)
+                continue
+            owe = int(whole)
             tot["listed_units"] -= row["exact"]
             if row["unit_cost"] is not None:
                 tot["listed_cost"] -= row["amount"] * row["bp"]
@@ -441,7 +458,8 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                     owe -= n
                     took.append(n)
                     tot["listed_units"] -= n
-                    tot["listed_cost"] -= n * (other["unit_cost"] or 0)
+                    if other["unit_cost"] is not None:     # at the unrounded source cost (#339 review)
+                        tot["listed_cost"] -= n * other["bp"] / pack
             what = "رصيد بالسالب: اتخصم من تشغيلات الصنف التانية (الأقرب صلاحية الأول)"
             if owe:
                 what = "رصيد الصنف كله بالسالب: الصنف بيبدأ بصفر (يتعدّ في الجرد)"
@@ -561,11 +579,18 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         bal_raw = dec(r.get("customer_current_money"))
         if r.get("customer_current_money") and bal_raw is None:
             p.issue("Customer", cid, code, "customer_current_money", r.get("customer_current_money"), "رصيد مش رقم", block=True)
-        bal = piasters(bal_raw) if bal_raw is not None else 0
+        bal = exact_piasters(bal_raw) if bal_raw is not None else 0
+        if bal is None:
+            p.issue("Customer", cid, code, "customer_current_money", r.get("customer_current_money"),
+                    "الرصيد فيه كسر قرش: محتاج قرار (اكتب الرصيد المؤكد)", block=True)
+            bal = piasters(bal_raw)
         lim_raw = dec(r.get("customer_max_money"))
         limit = 0
         if lim_raw is not None and 0 < lim_raw <= MAX_REAL_LIMIT:
             limit = piasters(lim_raw)
+            if exact_piasters(lim_raw) is None:
+                p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
+                        f"كسر قرش في حد الآجل: اتقرّب لـ {egp(Decimal(limit) / 100)}")
         elif lim_raw is not None and lim_raw != 0:
             p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
                     "حد آجل مش حقيقي: اتحط صفر (مفيش آجل) لحد ما يتكتب في عمود «حد الآجل المؤكد» أو في شاشة العميل")
@@ -597,8 +622,13 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         bal_raw = dec(r.get("vendor_current_money"))
         if r.get("vendor_current_money") and bal_raw is None:
             p.issue("Vendor", vid, code, "vendor_current_money", r.get("vendor_current_money"), "رصيد مش رقم", block=True)
+        vbal = exact_piasters(bal_raw) if bal_raw is not None else 0
+        if vbal is None:
+            p.issue("Vendor", vid, code, "vendor_current_money", r.get("vendor_current_money"),
+                    "الرصيد فيه كسر قرش: محتاج قرار (اكتب الرصيد المؤكد)", block=True)
+            vbal = piasters(bal_raw)
         c = crows.get(("supplier", vid), {})
-        p.suppliers.append(_party(p, "supplier", vid, code, name, piasters(bal_raw) if bal_raw is not None else 0, c,
+        p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
                                   inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
     _balance_sign_check(ex, p)
@@ -722,14 +752,14 @@ def read_confirm(path: Path) -> dict:
             if v in (None, ""):
                 continue
             d = dec(str(v).replace(",", ""))
-            if d is None or (key == "limit" and d < 0):
-                raise ValidationFailed(f"ملف التأكيد سطر {n}: قيمة مش صحيحة «{v}»")
-            got[key] = piasters(d)
+            if d is None or (key == "limit" and d < 0) or exact_piasters(d) is None:
+                raise ValidationFailed(f"ملف التأكيد سطر {n}: قيمة مش صحيحة «{v}» (جنيه وقروش بس)")
+            got[key] = exact_piasters(d)
         if got:      # the E-Stock balance the owner saw: a later change makes the confirmation stale
             d = dec(str(r[ie] if r[ie] is not None else "").replace(",", ""))
-            if d is None:
+            if d is None or exact_piasters(d) is None:
                 raise ValidationFailed(f"ملف التأكيد سطر {n}: خانة «رصيد إي ستوك» فاضية أو مش رقم")
-            got["seen"] = piasters(d)
+            got["seen"] = exact_piasters(d)
         if (kind, eid) in out:
             raise ValidationFailed(f"ملف التأكيد سطر {n}: {eid} مكرر")
         out[(kind, eid)] = got
@@ -745,6 +775,13 @@ def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
     if db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND NOT (coalesce(ref_type,'')='import_run' AND"
               f" ref_id IN {ours}) LIMIT 1", (ctx.org_id, ctx.org_id)):
         return "قاعدة البيانات فيها حركات مخزون: النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
+    for table, what in (("customer_ledger", "حركات في حسابات العملاء"), ("supplier_ledger", "حركات في حسابات الموردين")):
+        if db.one(f"SELECT 1 FROM {table} WHERE org_id=? AND coalesce(ref_id,'') NOT IN {ours} LIMIT 1",
+                  (ctx.org_id, ctx.org_id)):
+            return f"قاعدة البيانات فيها {what} مش من النقل ده: مفيش أي حاجة اتكتبت"
+    for table in ("cash_movements", "purchase_invoices", "expenses"):
+        if db.one(f"SELECT 1 FROM {table} WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+            return f"قاعدة البيانات فيها حركات فلوس ({table}): النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
     for table in ("items", "customers", "suppliers"):
         if db.one(f"SELECT 1 FROM {table} t WHERE t.org_id=? AND t.id NOT IN (SELECT target_id FROM import_rows"
                   f" WHERE target_id IS NOT NULL AND run_id IN {ours}) LIMIT 1", (ctx.org_id, ctx.org_id)):

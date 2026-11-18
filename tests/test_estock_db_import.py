@@ -507,3 +507,73 @@ class TestBat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCodexReview339(Base):
+    """Codex on #339 @3987571: one test per finding (each failed before the fix)."""
+
+    def test_p1_negative_fraction_needs_a_pack_decision_not_rounding(self):
+        t = base_tables()
+        t["Product_Amount"] += [stock_row(20, 2, 1, "10", "5.0000", "2027-01-01T00:00:00"),
+                                stock_row(21, 2, 1, "-0.5", "5.0000", "2027-02-01T00:00:00"),
+                                stock_row(22, 2, 1, "-0.5", "5.0000", "2027-03-01T00:00:00")]
+        res = self.run_import(tables=t)
+        self.assertFalse(res["ok"])
+        self.assertIn(("101", "amount"), {(b["code"], b["field"]) for b in res["plan"].blocking})
+        self.assertFalse(self.db.one("SELECT 1 FROM stock_movements"))
+
+    def test_p1_sub_piastre_balance_blocks(self):
+        t = base_tables()
+        t["Customer"][0]["customer_current_money"] = "120.0050"
+        t["Gedo_customers"] = []
+        res = self.run_import(tables=t)
+        self.assertFalse(res["ok"])
+        self.assertIn(("C1", "customer_current_money"), {(b["code"], b["field"]) for b in res["plan"].blocking})
+        self.assertFalse(self.db.one("SELECT 1 FROM customer_ledger"))
+
+    def test_p1_sub_piastre_price_is_listed_not_silent(self):
+        t = base_tables()
+        t["Products"][0]["sell_price"] = "30.0050"
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertIn(("100", "sell_price"), {(d["code"], d["field"]) for d in res["plan"].dq})
+
+    def test_p1_sub_piastre_confirmed_amount_is_refused(self):
+        from openpyxl import load_workbook
+        from app.core.errors import ValidationFailed
+        first = self.run_import(write_archive=False)
+        wb = load_workbook(first["reports"]["openings"])
+        for r in wb.active.iter_rows(min_row=2):
+            if r[1].value == "1" and r[0].value == "مورد":
+                r[5].value = "450.005"
+        conf = self.tmp / "c.xlsx"
+        wb.save(conf)
+        with self.assertRaises(ValidationFailed):
+            estock_db.read_confirm(conf)
+
+    def test_p2_cancelling_rows_reconcile(self):
+        t = base_tables()
+        t["Products"].append(product(8, "106", "Testcancel Tab", product_unit2="2", product_unit1_2="3"))
+        t["Product_Amount"] += [stock_row(30, 8, 1, "10000", "12.5000", "2027-01-01T00:00:00"),
+                                stock_row(31, 8, 1, "-10000", "12.5000", "2026-01-01T00:00:00")]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+
+    def test_p2_resume_refused_after_a_customer_payment(self):
+        from openpyxl import load_workbook
+        from app.sales.service import Sales
+        folder = self.export()
+        first = self.run_import(folder=folder)
+        self.assertTrue(first["ok"])
+        cid = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        Sales(self.db).customer_payment(self.ctx, cid, 2000, method="card")
+        wb = load_workbook(first["reports"]["openings"])
+        for r in wb.active.iter_rows(min_row=2):
+            if r[1].value == "1" and r[0].value == "عميل":
+                r[5].value = 110
+        conf = self.tmp / "c.xlsx"
+        wb.save(conf)
+        n = self.db.one("SELECT count(*) n FROM customer_ledger")["n"]
+        with self.assertRaises(Conflict):
+            self.run_import(folder=folder, confirm_file=conf)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM customer_ledger")["n"], n)
