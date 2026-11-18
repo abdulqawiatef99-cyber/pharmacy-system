@@ -367,5 +367,5 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
     for d in rows:
         for k in ("sales", "returns", "purchases"):
             if k in d:
-                d[k] = str(d[k].quantize(Decimal("0.01")))
+                d[k] = str(d[k].quantize(Decimal("0.01"), ROUND_HALF_UP))
     return rows
