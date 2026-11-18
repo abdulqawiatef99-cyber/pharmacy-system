@@ -1999,6 +1999,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
+{f"<tr><td>منها مرتجع على البطاقة</td><td>{m(r['card_refunds'])}</td></tr>" if r['card_refunds'] else ""}
+{f"<tr><td>منها مرتجع على حساب العميل</td><td>{m(r['credit_refunds'])}</td></tr>" if r['credit_refunds'] else ""}
 {f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
 <table>{cash_rows}<tr class="t"><td>المتوقع في الخزينة</td><td>{m(r['expected_cash'])}</td></tr></table>
 {f"<hr><table>{den_rows}</table>" if den_rows else ""}

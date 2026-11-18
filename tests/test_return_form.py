@@ -124,6 +124,8 @@ class TestReturnFormInBrowser(APICase):
             inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=30, batch_id=b, movement_type="purchase",
                               unit_cost=Decimal("5"))
         s = Sales(self.db)
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 0)  # every store sale needs an open shift (final review P2-2)
         cust = s.create_customer(self.ctx, name="عميل آجل", credit_limit=100000)
         sid = s.create(self.ctx, customer_id=cust)
         d = s.add_line(self.ctx, sid, it, units=3)
