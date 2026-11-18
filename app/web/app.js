@@ -2043,7 +2043,7 @@ async function viewCountSession(id) {
         <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد في البرنامج</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
         <tbody>${v.lines.map((l) => `<tr class="${l.difference ? "has-err" : ""}"><td>${esc(l.label)}</td><td>${l.system_qty}</td>
           <td>${l.counted}</td><td>${l.moves_after_count}</td><td>${l.difference}</td><td>${esc(l.value ?? "")}</td>
-          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : l.problem === "adjusted_since_count" ? "اتعدّل بعد العدّ: أعد عدّه" : "رصيد سالب"}</span>`
+          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : l.problem === "adjusted_since_count" ? "اتعدّل بعد العدّ: أعد عدّه" : l.problem === "moved_between_counts" ? "اتباع بين عدّتين: أعد عدّه" : "رصيد سالب"}</span>`
             : l.difference < 0 ? `<select data-why="${esc(l.item_id)}|${esc(l.batch_key || "")}" class="noprint"><option value="">السبب: مثل الافتراضي</option>${reasonOpts(R.adjust, null, false)}</select>` : l.difference > 0 ? "زيادة وُجدت" : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="row mt noprint"><label class="f">سبب العجز (الافتراضي لكل الأصناف) <select id="cntWhy">${reasonOpts(R.adjust, "lost", false)}</select></label>
           ${v.summary.uncounted_items ? `<label class="f">الأصناف التي لم تُجرد (${v.summary.uncounted_items}) <select id="cntZero"><option value="">اتركها كما هي</option>${reasonOpts(R.adjust, null, false).replace(/<option value="/g, '<option value="zero:')}</select></label>` : ""}
@@ -2059,7 +2059,8 @@ async function viewCountSession(id) {
         if (zero) { reason = prompt(`سيُصفَّر ${v.summary.uncounted_items} صنف لم يُجرد. اكتب ملاحظة (5 حروف على الأقل):`); if (!reason) return; }
         if (!confirm("اعتماد الجرد وتسجيل التسويات في المخزون؟")) return;
         try {
-          await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason, reasons, shortage_reason: $("#cntWhy").value, zero_reason: zero ? z.slice(5) : "lost" } });
+          await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason, reasons, shortage_reason: $("#cntWhy").value, zero_reason: zero ? z.slice(5) : "lost",
+            uncounted_item_ids: zero ? v.uncounted_with_stock.map((u) => u.item_id) : undefined } });
           toast("تم اعتماد الجرد"); location.hash = "#/counts";
         } catch (err) { toast(err.message, true); }
       });

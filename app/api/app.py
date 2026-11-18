@@ -328,10 +328,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 db.execute("DELETE FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=? AND status=0",
                            ident)
 
+        # every write is saved together with its audit row: a rule error raised AFTER one (a 403 while
+        # building the answer) must keep the key, or the retry posts a second time (#324 S6, as #331)
+        audit_mark = db.one("SELECT coalesce(max(rowid),0) n FROM audit_log")["n"]
         try:
             resp = await fn(req)
         except DomainError:
-            release()            # refused by a rule before any write: the same key may run again
+            if not _committed_since(audit_mark, ctx):
+                release()        # refused by a rule before any write: the same key may run again
             raise
         # Any other exception keeps the reservation: it may have come after a commit, so a retry
         # with this key is refused rather than risk a second posting (a new click uses a new key).
@@ -343,6 +347,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             release()            # only successful JSON answers are replayed, as before
         return resp
+
+    def _committed_since(mark: int, ctx) -> bool:
+        """Did this person save anything (an audit row) since `mark`? A concurrent write by the same
+        person also counts: the key is then kept, the safe side (the retry is refused, never re-run)."""
+        return db.one("SELECT 1 FROM audit_log WHERE rowid>? AND org_id=? AND user_id=? LIMIT 1",
+                      (mark, ctx.org_id, ctx.user_id)) is not None
 
     def handler(fn):
         async def wrapped(req: Request):
@@ -1630,9 +1640,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         reasons = b.get("reasons") if isinstance(b.get("reasons"), dict) else None
-        return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=bool(b.get("zero_uncounted")),
+        zero = b.get("zero_uncounted", False)
+        if not isinstance(zero, bool):       # the string "false" was truthy and zeroed every uncounted item (#324 X20)
+            raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
+        return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=zero,
                                   reason=b.get("reason"), reasons=reasons,
-                                  shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost"))
+                                  shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost",
+                                  uncounted_item_ids=b.get("uncounted_item_ids")))
 
     @handler
     async def counts_cancel(req):

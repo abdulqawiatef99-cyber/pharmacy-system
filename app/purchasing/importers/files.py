@@ -141,6 +141,9 @@ def _guess_delimiter(sample: str) -> str:
                                               d == ","))
 
 
+MAX_PDF_PAGES = 60     # far above a supplier invoice; a longer file is refused, never cut (#324 S23)
+
+
 def read_pdf(data: bytes) -> tuple[list[list], list[str], bool]:
     """Returns (grid, page_texts, has_text). has_text False => scanned PDF."""
     import pdfplumber
@@ -148,11 +151,16 @@ def read_pdf(data: bytes) -> tuple[list[list], list[str], bool]:
     texts: list[str] = []
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages[:20]:
+            if len(pdf.pages) > MAX_PDF_PAGES:
+                raise ValidationFailed(f"ملف PDF فيه {len(pdf.pages)} صفحة؛ الحد {MAX_PDF_PAGES}. قسّم الفاتورة",
+                                       code="pdf_too_long")
+            for page in pdf.pages:
                 t = page.extract_text() or ""
                 texts.extend(t.splitlines())
                 for table in page.extract_tables():
                     grid.extend(table)
+    except ValidationFailed:
+        raise
     except Exception as e:
         raise ValidationFailed("تعذر قراءة ملف PDF") from e
     has_text = sum(len(t.strip()) for t in texts) > 40
