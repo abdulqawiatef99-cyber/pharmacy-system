@@ -230,7 +230,7 @@ def encode(text: str | bytes, mask: int | None = None) -> list[list[bool]]:
         raise QRTooLong("نص الكود فارغ")
     version = next((v for v in range(1, MAX_VERSION + 1) if len(payload) <= capacity(v)), None)
     if version is None:
-        raise QRTooLong(f"نص الكود أطول من {capacity(MAX_VERSION)} حرف")
+        raise QRTooLong(f"نص الكود أطول من {capacity(MAX_VERSION)} حرفًا")
     cw = _codewords(payload, version)
     best = None
     for k in ([mask] if mask is not None else range(8)):

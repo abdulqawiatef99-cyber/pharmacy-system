@@ -71,7 +71,7 @@ def label_shift_ok(value) -> float:
     """#100: the vertical shift of the label print in mm (positive = lower), one decimal, within ±10 mm."""
     from .labels import SHIFT_MM
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) > SHIFT_MM:
-        raise ValidationFailed(f"تحريك الطباعة من -{SHIFT_MM} إلى {SHIFT_MM} مم (سالب = لفوق، موجب = لتحت)")
+        raise ValidationFailed(f"تحريك الطباعة من -{SHIFT_MM} إلى {SHIFT_MM} مم (سالب = لأعلى، موجب = لأسفل)")
     return round(float(value), 1) + 0.0
 
 
@@ -112,7 +112,7 @@ def label_price(piasters: int, cfg: dict) -> str:
 
 def label_rows_ok(value) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ValidationFailed("عدد الملصقات في الصفحة من 1 لـ 4")
+        raise ValidationFailed("عدد الملصقات في الصفحة من 1 إلى 4")
     return value
 
 
@@ -174,7 +174,7 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
             new[k] = check_target(data[k], example, allow_browser=k == "receipt_target")
     if new["label_lang"] == "driver" and new["label_target"] and not new["label_target"].startswith("win:"):
         # #100: the Windows driver prints only to a Windows printer (a network address has no driver here)
-        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز: win:اسم الطابعة")
+        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز تحتاج إلى طابعة ويندوز: win:اسم الطابعة")
     if "label_dpi" in data:
         if data["label_dpi"] not in (203, 300):
             raise ValidationFailed("دقة الطابعة 203 أو 300")

@@ -177,7 +177,7 @@ class TestDriverLabels(DriverCase):
         f = self.use(FakeWindows(caps=A4_600))
         with self.assertRaises(PrintFailed) as cm:
             print_labels(self.db, self.ctx, [(self.pan, 1)])
-        self.assertIn("مش مقاس ملصق", str(cm.exception))
+        self.assertIn("ليس مقاس ملصق", str(cm.exception))
         self.assertNotIn("StartDoc", f.names())
         self.assertEqual(f.names()[-1], "DeleteDC")
 

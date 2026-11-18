@@ -39,7 +39,7 @@ class Base(DBTestCase):
 class HomeAlerts(Base):
     def test_quiet_pharmacy_only_asks_for_a_shift(self):
         self.stock("FAR", 400)
-        self.assertEqual(self.texts(), [("warning", "لا توجد وردية مفتوحة — البيع النقدي متوقف")])
+        self.assertEqual(self.texts(), [("warning", "لا يوجد شيفت مفتوح — البيع النقدي متوقف")])
         CashDrawer(self.db).open(self.ctx, 0)
         self.assertEqual(self.texts(), [])
 

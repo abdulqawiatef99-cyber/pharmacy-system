@@ -188,7 +188,7 @@ def home(db: Database, ctx: Context) -> dict:
     sh = db.one("SELECT id, opened_at FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'", (ctx.org_id, ctx.branch_id))
     out["shift_open"] = bool(sh)
     if not sh:
-        out["alerts"].append({"level": "warning", "text": "لا توجد وردية مفتوحة — البيع النقدي متوقف", "link": "#/shift"})
+        out["alerts"].append({"level": "warning", "text": "لا يوجد شيفت مفتوح — البيع النقدي متوقف", "link": "#/shift"})
     if ctx.can("inventory.read"):
         soon = (today + timedelta(days=30)).isoformat()
         n = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=?"
