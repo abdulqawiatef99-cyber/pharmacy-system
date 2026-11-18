@@ -229,7 +229,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             req.state.session_token = token
         elif req.headers.get("x-approval"):
             ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
-                                  lambda who: approver_access(ctx.org_id, who))
+                                  lambda who: approver_access(ctx.org_id, who),
+                                  body=getattr(req.state, "approval_body", None))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
@@ -239,6 +240,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _length_guard(req: Request, limit: int, *, required: bool = False) -> None:
         """Refuse an oversized request from its Content-Length, before reading it (#140)."""
         cl = req.headers.get("content-length")
+        if required and req.headers.get("transfer-encoding"):
+            # the HTTP parser streams a chunked body whatever Content-Length says, so a declared size is only
+            # true without it; an upload is spooled before its real size is checked (#324 X18)
+            raise ValidationFailed("حجم الطلب غير معروف", code="length_required")
         if cl is None:
             if required:
                 raise ValidationFailed("حجم الطلب غير معروف", code="length_required")
@@ -308,9 +313,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                            (f"-{IDEMPOTENCY_TTL_DAYS} days",))
                 db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
                            " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
-                           (*ident, req.method, req.url.path, rhash))
+                           (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(ctx.permissions))))
         if hit:
-            if hit["request_hash"] != rhash:
+            stored, _, held = hit["request_hash"].partition("|")
+            if stored != rhash:
                 raise ValidationFailed("نفس مفتاح الطلب استُخدم لطلب مختلف", code="idempotency_mismatch")
             if hit["status"] == 0:
                 raise Conflict("هذه العملية أُرسلت من قبل ولم تتأكد نتيجتها بعد. راجعها (الفواتير/الخزينة/الحساب)"
@@ -319,6 +325,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 # rebuilt under the permissions held now, not the report stored at the close (#324 M4)
                 resp = J(CashDrawer(db).close_result(ctx, json.loads(hit["response"])["id"]), status_code=hit["status"])
             else:
+                # the stored answer was built under the permissions held then: after one of them was taken away
+                # it is not handed out again (a payroll answer after payroll.manage was revoked, #324 X7)
+                if held and not set(held.split(",")) <= set(ctx.permissions):
+                    raise Forbidden("صلاحياتك اتغيّرت بعد العملية دي؛ راجع نتيجتها من شاشتها",
+                                    code="permissions_changed")
                 resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
             resp.headers["Idempotent-Replay"] = "true"
             return resp
@@ -347,7 +358,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def handler(fn):
         async def wrapped(req: Request):
             try:
-                return await _idempotent(req, fn)
+                approval = req.headers.get("x-approval", "")[:128]
+                if approval and req.method not in ("GET", "HEAD"):
+                    # an approval is bound to the exact request it is first used on and spent once it succeeds:
+                    # one PIN = one action with one quantity (#324 X5)
+                    req.state.approval_body = hashlib.sha256(await _read_body(req)).hexdigest()
+                resp = await _idempotent(req, fn)
+                if approval and req.method not in ("GET", "HEAD") and 200 <= resp.status_code < 300:
+                    approvals.consume(approval)
+                return resp
             except DomainError as e:
                 status = 429 if e.code == "rate_limited" else e.status
                 return J({"error": {"code": e.code, "message": e.message, "details": e.details}},
@@ -506,6 +525,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # a backup of a real pharmacy is far above the normal upload limit: stream it to disk
         if "multipart/form-data" not in req.headers.get("content-type", ""):
             raise ValidationFailed("اختر ملف النسخة الاحتياطية")
+        # the form is spooled whole before the 4 GiB check below: refuse a bigger or unsized body first (#324 X18)
+        _length_guard(req, 4 * 1024 ** 3 + 1024 * 1024, required=True)
         form = await req.form(max_files=1, max_fields=2)
         up = form.get("file")
         if up is None or not hasattr(up, "read"):

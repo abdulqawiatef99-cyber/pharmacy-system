@@ -560,6 +560,8 @@ class Sales:
                     " ON b.id=a.batch_id WHERE a.sale_line_id=?", (l["id"],))]
                 for a in plan:
                     a["qty"] = a.pop("qty_base")
+                    if not ctx.can("costs.read"):
+                        a.pop("unit_cost", None)     # the average cost is not the cashier's to see (#324 X13)
             l["allocations"] = plan
             if any(a.get("unit_price") is None for a in plan):
                 l["problem"] = "no_price"

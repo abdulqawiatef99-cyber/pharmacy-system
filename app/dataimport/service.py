@@ -941,22 +941,25 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     """Data portability: full item list with barcodes and current stock as .xlsx."""
     ctx.require("items.read")
     from openpyxl import Workbook
+    # what this person may see elsewhere: hidden items only with items.hidden, stock only with
+    # inventory.read (#324 S8 / X12)
+    hidden_ok, stock_ok = ctx.can("items.hidden"), ctx.can("inventory.read")
     wb = Workbook()
     ws = wb.active
     ws.title = "items"
     ws.append(["id", "code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
-               "manufacturer", "pack_size", "public_price_egp", "barcodes", "stock_base_units",
-               "status"])
-    for it in db.all("SELECT * FROM items WHERE org_id=? ORDER BY coalesce(name_en,name_ar)",
-                     (ctx.org_id,)):
+               "manufacturer", "pack_size", "public_price_egp", "barcodes"] + (["stock_base_units"] if stock_ok else [])
+              + ["status"])
+    for it in db.all("SELECT * FROM items WHERE org_id=? AND (hidden=0 OR ?) ORDER BY coalesce(name_en,name_ar)",
+                     (ctx.org_id, int(hidden_ok))):
         bcs = ",".join(r["barcode"] for r in db.all(
             "SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, it["id"])))
         q = db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND item_id=?",
-                   (ctx.org_id, it["id"]))["q"]
+                   (ctx.org_id, it["id"]))["q"] if stock_ok else None
         ws.append([it["id"], it["code"], it["name_en"], it["name_ar"], it["active_ingredient"],
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
-                   bcs, q, it["status"]])
+                   bcs] + ([q] if stock_ok else []) + [it["status"]])
     from ..core.xlsx_safe import as_text
     as_text(wb)
     buf = io.BytesIO()
