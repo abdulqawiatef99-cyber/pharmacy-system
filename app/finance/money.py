@@ -118,12 +118,13 @@ def treasury_id(db: Database, ctx: Context) -> str:
 
 
 def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *, ref_type: str | None = None,
-          ref_id: str | None = None, note: str | None = None, meta: dict | None = None, check: bool = True) -> str:
+          ref_id: str | None = None, note: str | None = None, meta: dict | None = None, check: bool = True,
+          active: bool = True) -> str:
     """One movement on an account, inside the caller's transaction. Refuses a balance below zero unless
     the owner allowed it for this account."""
     if kind not in KINDS:
         raise ValueError(f"unknown money movement kind {kind}")
-    a = _account(db, ctx, account_id)
+    a = _account(db, ctx, account_id, active=active)     # active=False: only the opening of a stopped account
     if check and amount < 0 and not a["allow_negative"]:
         now = balance(db, ctx.org_id, account_id)
         if now + amount < 0:
@@ -217,7 +218,8 @@ def accounts(db: Database, ctx: Context, *, include_inactive: bool = False) -> l
     """Every money place with its balance: the drawer first, then the treasury, then the owner's accounts."""
     ctx.require("cash.see_expected")
     rows = db.all("SELECT a.*, coalesce((SELECT sum(m.amount) FROM money_movements m WHERE m.account_id=a.id),0)"
-                  " balance FROM money_accounts a WHERE a.org_id=?" + ("" if include_inactive else " AND a.is_active=1")
+                  " balance FROM money_accounts a WHERE a.org_id=?" + ("" if include_inactive else   # a stopped
+                  " AND (a.is_active=1 OR EXISTS(SELECT 1 FROM money_movements m WHERE m.account_id=a.id))")  # one with history stays
                   + " ORDER BY a.kind<>'treasury', a.is_active DESC, a.sort, a.name", (ctx.org_id,))
     d = drawer_balance(db, ctx)
     out = [{"id": DRAWER, "kind": "drawer", "name": DRAWER_NAME, "balance": d["balance"], "shift_open": d["open"],
@@ -324,10 +326,14 @@ def resolve(db: Database, ctx: Context, account: str) -> str:
 
 
 def ensure_account(db: Database, ctx: Context, *, kind: str, name: str, code: str | None = None,
-                   source_ref: str | None = None) -> str:
+                   source_ref: str | None = None, is_active: bool = True) -> str:
     """Find or make one account for the import (one per used E-Stock money place, source_ref 'estock:<id>').
     Matched by source_ref, then code, then (kind 'treasury') the main treasury, then the same name; a match
-    keeps its id and gains the missing code / source_ref. Owner only; audited. Returns the account id."""
+    keeps its id and gains the missing code / source_ref. Owner only; audited. Returns the account id.
+    is_active=False makes a new account stopped (an old money place moved as it is but not used: it keeps its
+    opening balance and takes no other movement until the owner restarts it); a matched account keeps
+    the owner's setting.
+    """
     ctx.require("settings.manage")
     if kind not in ACCOUNT_KINDS:
         raise ValidationFailed("نوع الحساب غير صحيح")
@@ -363,11 +369,12 @@ def ensure_account(db: Database, ctx: Context, *, kind: str, name: str, code: st
         if kind == "treasury":                     # unreachable: treasury_id() above always finds or makes it
             raise Conflict("الخزنة الرئيسية موجودة")
         aid = new_id()
-        db.execute("INSERT INTO money_accounts (id, org_id, kind, code, source_ref, name, sort, created_by)"
-                   " VALUES (?,?,?,?,?,?, (SELECT coalesce(max(sort),0)+1 FROM money_accounts WHERE org_id=?), ?)",
-                   (aid, ctx.org_id, kind, code, source_ref, name, ctx.org_id, ctx.user_id))
+        db.execute("INSERT INTO money_accounts (id, org_id, kind, code, source_ref, name, is_active, sort, created_by)"
+                   " VALUES (?,?,?,?,?,?,?, (SELECT coalesce(max(sort),0)+1 FROM money_accounts WHERE org_id=?), ?)",
+                   (aid, ctx.org_id, kind, code, source_ref, name, int(bool(is_active)), ctx.org_id, ctx.user_id))
         audit.record(db, ctx, "money.account_create", "money_account", aid,
-                     after={"kind": kind, "name": name, "code": code, "source_ref": source_ref})
+                     after={"kind": kind, "name": name, "code": code, "source_ref": source_ref,
+                            "is_active": bool(is_active)})
         return aid
 
 
@@ -406,7 +413,7 @@ def post_opening(db: Database, ctx: Context, account: str, amount: int, *, sourc
     amount = _amount(amount, allow_zero=True, signed=True)
     with db.transaction():
         account_id = account_for(db, ctx, account) if account in STANDARD_ACCOUNTS else resolve(db, ctx, account)
-        a = _account(db, ctx, account_id)
+        a = _account(db, ctx, account_id, active=False)       # a stopped old money place keeps its balance
         prev = _opening_of(db, ctx, account_id)                  # an opening of 0 has no movement
         if prev is not None:
             if source_ref and (prev.get("source"), prev.get("source_ref"), prev.get("amount")) == (source, source_ref, amount):
@@ -424,7 +431,7 @@ def post_opening(db: Database, ctx: Context, account: str, amount: int, *, sourc
         text = OPENING_SOURCES[source] + (f" — {said}" if said else "")
         meta = {"source": source, "source_ref": source_ref}
         mid = _post(db, ctx, account_id, amount, "opening", ref_type="opening", ref_id=source_ref, note=text,
-                    meta=meta, check=False) if amount else None
+                    meta=meta, check=False, active=False) if amount else None
         audit.record(db, ctx, "money.opening", "money_account", account_id,
                      after={"amount": amount, "source": source, "source_ref": source_ref, "note": said})
     return {**get_account(db, ctx, account_id), "movement_id": mid, "replayed": False}

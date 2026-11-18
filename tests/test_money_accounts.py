@@ -191,6 +191,23 @@ class TestImportAccounts(MoneyCase):
         self.assertTrue(by["treasury"]["ok"])
         self.assertEqual((by["estock:9"]["account_id"], by["estock:9"]["ok"]), (None, False))
 
+    def test_stopped_old_money_places_keep_their_balance_and_take_nothing_else(self):
+        """Owner 18/11 22:27: every Cash_depots row moves as it is; '0000' (6) and the stopped one (10) inactive."""
+        junk = money.ensure_account(self.db, self.ctx, kind="other", name="0000", source_ref="estock:6", is_active=False)
+        money.post_opening(self.db, self.ctx, "estock:6", 1500, source_ref="run-1")
+        self.assertEqual(money.get_account(self.db, self.m, junk)["is_active"], 0)
+        shown = {r["id"]: r for r in money.accounts(self.db, self.m)}
+        self.assertEqual((shown[junk]["balance"], shown[junk]["is_active"]), (1500, 0))   # still seen, still counted
+        with self.assertRaises(Conflict):
+            money.pay_out(self.db, self.ctx, junk, 100, "expense", ref_type="expense", ref_id=None, note="x")
+        with self.assertRaises(Conflict):
+            money.transfer(self.db, self.ctx, junk, self.t, 100)
+        self.assertTrue(money.check_openings(self.db, self.m, {"estock:6": 1500})["ok"])
+        empty = money.ensure_account(self.db, self.ctx, kind="other", name="فيزا قديمة", source_ref="estock:10",
+                                     is_active=False)
+        self.assertNotIn(empty, [r["id"] for r in money.accounts(self.db, self.m)])     # stopped and empty: hidden
+        self.assertIn(empty, [r["id"] for r in money.accounts(self.db, self.m, include_inactive=True)])
+
     def test_network_routes_to_the_imported_accounts(self):
         w = money.ensure_account(self.db, self.ctx, kind="wallet", name="فودافون كاش", source_ref="estock:5")
         with self.db.transaction():
