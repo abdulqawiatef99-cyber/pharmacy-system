@@ -232,7 +232,7 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
     lines: list[dict] = []
     # the program: completed sales of this contract, each line at what the customer kept (outstanding_value)
     sales = {r["id"]: dict(r) for r in db.all(
-        "SELECT s.id, s.sale_no, s.completed_at, s.ticket_name, s.ticket_ref, s.ticket_no, c.name customer"
+        "SELECT s.id, s.sale_no, s.completed_at, s.ticket_name, s.ticket_ref, s.ticket_no, c.id customer_id, c.name customer"
         " FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.org_id=? AND s.contract_id=?"
         " AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?",
         (ctx.org_id, contract_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))}
@@ -240,38 +240,42 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
     for l in db.all("SELECT l.id, l.sale_id, l.discount_bp, l.line_total, i.code, coalesce(i.name_en, i.name_ar) name"
                     " FROM sale_lines l JOIN items i ON i.id=l.item_id WHERE l.org_id=? AND l.sale_id IN"
                     f" ({','.join('?' * len(sales)) or 'NULL'}) ORDER BY l.sale_id, l.line_no", (ctx.org_id, *sales)):
-        allocs = [dict(a) for a in db.all(
+        allocs = [dict(a) for a in db.all(       # scoped through the parent line (allocations have no org_id)
             "SELECT a.id, a.rowid rid, a.qty_base, a.returned_qty, a.unit_price, a.unit_cost, a.pack_price, a.pack_size"
-            " FROM sale_allocations a WHERE a.sale_line_id=?", (l["id"],))]
+            " FROM sale_allocations a JOIN sale_lines pl ON pl.id=a.sale_line_id"
+            " WHERE a.sale_line_id=? AND pl.org_id=?", (l["id"], ctx.org_id))]
         kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
         if not sum(kept.values()):
             continue
         s = sales[l["sale_id"]]
         cost = sum((Decimal(a["unit_cost"]) * kept[a["id"]] for a in allocs if a["unit_cost"] is not None), Decimal(0))
+        sale = Decimal(outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
+                                         history.get(l["sale_id"], []))) / 100
         row = {"source": "program", "day": (s["completed_at"] or "")[:10], "invoice": str(s["sale_no"]),
-               "customer": s["customer"], "ticket_name": s["ticket_name"], "ticket_ref": s["ticket_ref"],
+               "customer_id": s["customer_id"], "customer": s["customer"], "ticket_name": s["ticket_name"], "ticket_ref": s["ticket_ref"],
                "ticket_no": s["ticket_no"], "store": "الصيدلية", "item_code": l["code"], "item": l["name"],
-               "qty": str(sum(kept.values())), "qty_unit": "base",
-               "sale": _egp(Decimal(outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
-                                                      history.get(l["sale_id"], []))) / 100)}
+               "qty": str(sum(kept.values())), "qty_unit": "base", "sale": _egp(sale), "_sale": sale}
         if show_cost:
-            row["cost"] = _egp(cost) if all(a["unit_cost"] is not None for a in allocs) else None
+            known = all(a["unit_cost"] is not None for a in allocs)
+            row["cost"], row["_cost"] = (_egp(cost), cost) if known else (None, None)
         lines.append(row)
     lines += _estock_claim_lines(db, ctx, contract_id, d1, d2, show_cost)
     lines.sort(key=lambda r: (r["day"], r["source"], r["invoice"]))
+    # per customer (by id: two customers may share a name) and store; exact values summed, rounded once
     totals: dict = {}
     for r in lines:
-        t = totals.setdefault(r["customer"], {}).setdefault(r["store"], {"lines": 0, "sale": Decimal(0),
-                                                                          "cost": Decimal(0), "cost_unknown": 0})
+        c = totals.setdefault(r["customer_id"], {"name": r["customer"], "stores": {}})
+        t = c["stores"].setdefault(r["store"], {"lines": 0, "sale": Decimal(0), "cost": Decimal(0), "cost_unknown": 0})
         t["lines"] += 1
-        t["sale"] += Decimal(r["sale"])
+        t["sale"] += r.pop("_sale")
+        cost = r.pop("_cost", None)
         if show_cost:
-            if r.get("cost") is None:
+            if cost is None:
                 t["cost_unknown"] += 1
             else:
-                t["cost"] += Decimal(r["cost"])
+                t["cost"] += cost
     for c in totals.values():
-        for t in c.values():
+        for t in c["stores"].values():
             t["sale"] = _egp(t["sale"])
             if show_cost:
                 t["cost"] = _egp(t["cost"])
@@ -340,11 +344,12 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
             sale = gross - back * (bpr if bpr is not None else (sp or 0))
             code, name = prods.get(r["pid"], (r["pid"], None))
             row = {"source": "estock", "day": (r["at"] or "")[:10], "invoice": r["bill"] or r["sid"],
-                   "customer": customers[ids[r["cust"]]], "ticket_name": r["tname"], "ticket_ref": r["tref"],
+                   "customer_id": ids[r["cust"]], "customer": customers[ids[r["cust"]]], "ticket_name": r["tname"], "ticket_ref": r["tref"],
                    "ticket_no": r["tno"], "store": _store_label(stores.get(r["store"], r["store"])), "item_code": code,
                    "item": name,
-                   "qty": str((amt - back).normalize()), "qty_unit": "estock", "sale": _egp(sale)}
+                   "qty": str((amt - back).normalize()), "qty_unit": "estock", "sale": _egp(sale), "_sale": sale}
             if show_cost:
-                row["cost"] = _egp((amt - back) * bp) if bp is not None else None
+                exact = (amt - back) * bp if bp is not None else None
+                row["cost"], row["_cost"] = (_egp(exact) if exact is not None else None), exact
             out.append(row)
     return out

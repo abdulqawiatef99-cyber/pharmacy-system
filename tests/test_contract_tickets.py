@@ -144,7 +144,7 @@ class TestOneClaimAcrossTheMove(ImportBase):
         self.assertEqual(prog[0][5], f"{tot / 100:.2f}")
         self.assertEqual(prog[0][6], "24.00")                            # 3 units x 8.00 (E-Stock cost per unit)
         self.assertEqual(c["sources"], ["estock", "program"])
-        shelf = c["totals"]["أحمد تجربة"]["الصيدلية"]                    # E-Stock's «الصيدليه» + the program: one store
+        shelf = c["totals"][cust]["stores"]["الصيدلية"]                    # E-Stock's «الصيدليه» + the program: one store
         self.assertEqual(shelf["lines"], 3)
         self.assertEqual(shelf["sale"], f"{60 + tot / 100:.2f}")
         self.assertEqual(shelf["cost"], "72.00")
@@ -159,3 +159,62 @@ class TestOneClaimAcrossTheMove(ImportBase):
         c = k.claim(self.db, self.login("mgr", PW), kid, "2026-11-01", "2026-11-30")
         self.assertFalse(c["show_cost"])
         self.assertTrue(all("cost" not in r for r in c["lines"]))
+
+
+class TestCodexReview340Claim(ImportBase):
+    """Codex on #340 @783e668 (each failed before the fix)."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertTrue(self.run_import()["ok"])
+        self.kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+
+    def sell(self, cust, item, units, cost):
+        from decimal import Decimal
+        from app.inventory import service as inv
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        s = Sales(self.db)
+        if not self.db.one("SELECT 1 FROM cash_shifts WHERE status='open'"):
+            CashDrawer(self.db).open(self.ctx, 0)
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, item, "C1", "2030-01-01")
+            inv.post_movement(self.db, self.ctx, item_id=item, qty_delta=units, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal(cost))
+        sid = s.create(self.ctx, cust)
+        s.add_line(self.ctx, sid, item, units=units)
+        tot = s.get(self.ctx, sid)["total"]
+        f = s.safety_check(self.ctx, sid)
+        s.complete(self.ctx, sid, paid_cash=tot, safety_decisions={i: "ok" for i in range(len(f))})
+
+    def test_p1_costs_are_summed_exactly_then_rounded_once(self):
+        from app.catalog import service as cat
+        cust = self.s_customer("عميل تكلفة")
+        item = cat.create_item(self.db, self.ctx, {"name_en": "Third Tab", "pack_size": 1, "public_price": 100})
+        self.sell(cust, item, 2, "0.333333")
+        self.sell(cust, item, 2, "0.333333")
+        c = k.claim(self.db, self.ctx, self.kid, "2026-01-01", "2099-12-31")
+        self.assertEqual(c["totals"][cust]["stores"]["الصيدلية"]["cost"], "1.33")      # 4 x 0.333333, rounded once
+
+    def test_p2_two_customers_with_one_name_stay_apart(self):
+        from app.catalog import service as cat
+        a, b = self.s_customer("محمد"), self.s_customer("محمد")
+        item = cat.create_item(self.db, self.ctx, {"name_en": "Name Tab", "pack_size": 1, "public_price": 100})
+        self.sell(a, item, 1, "1")
+        self.sell(b, item, 1, "1")
+        c = k.claim(self.db, self.ctx, self.kid, "2026-01-01", "2099-12-31")
+        self.assertEqual(set(c["totals"]), {a, b})
+        self.assertEqual(c["totals"][a]["name"], "محمد")
+        self.assertEqual({l["customer_id"] for l in c["lines"]}, {a, b})
+
+    def test_p1_the_allocation_read_is_scoped_by_organization(self):
+        import inspect
+        src = inspect.getsource(k.claim)
+        q = src[src.index("FROM sale_allocations a"):].split("history", 1)[0]
+        self.assertIn("pl.org_id=?", q)
+
+    def s_customer(self, name):
+        from app.sales.service import Sales
+        cid = Sales(self.db).create_customer(self.ctx, name=name)
+        k.link_customer(self.db, self.ctx, cid, self.kid)
+        return cid
