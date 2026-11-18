@@ -154,9 +154,13 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
         # cost summed in Decimal from the stored decimal cost (not SQLite REAL) and rounded once per category
         # by the sale's cost rule; retail priced per balance row by the sale's own pricing rule (exact integers)
         cats: dict[str, list] = {}
+        # the price of the lot when it has its own (an older pack bought before a price rise is still sold at
+        # its printed price): the item's current price for every pack overstated the stock against the sale
+        # screen and the expiry list above (#324 R4)
         for r in db.all("SELECT coalesce(c.name, 'بدون قسم') category, i.id item_id, sb.qty, ic.avg_cost,"
-                        " coalesce(i.public_price,0) price, i.pack_size"
+                        " coalesce(b.public_price, i.public_price, 0) price, i.pack_size"
                         " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
+                        " LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
                         " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
                         " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0", (ctx.org_id, ctx.branch_id)):
             g = cats.setdefault(r["category"], [Decimal(0), {}])

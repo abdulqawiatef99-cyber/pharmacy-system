@@ -78,7 +78,12 @@ class Procurement:
             hist_qty += p["qty_base"] * frac
             hist_days += overlap
             rates.append(p["qty_base"] / days)
-        days = max(hist_days, 1) if periods else window_days
+        # the days the figures cover: the imported periods, then the days after the last of them, which only our
+        # own sales cover. Dividing imported + local sales by the imported days alone tripled the daily use of
+        # an item with one imported month and two months sold here (#324 S37)
+        last = max((date.fromisoformat(p["period_end"]) for p in periods), default=None)
+        after = max((self.today - max(last, start)).days - 1, 0) if last else 0
+        days = max(hist_days + after, 1) if periods else window_days
         total = hist_qty + sold
         daily = total / days if (periods or sold) else 0.0
         cv = None
@@ -91,6 +96,15 @@ class Procurement:
     def _on_hand(self, ctx: Context, item_id: str) -> int:
         return int(self.db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND"
                                " branch_id=? AND item_id=?", (ctx.org_id, ctx.branch_id, item_id))["q"])
+
+    def _sellable(self, ctx: Context, item_id: str) -> tuple[int, int]:
+        """(units that can still be sold, units past their date). Expired stock is not cover: thirty expired
+        units and nothing else used to hide the item from the order list (#324 S38)."""
+        r = self.db.one("SELECT coalesce(sum(sb.qty),0) q, coalesce(sum(CASE WHEN b.expiry_date IS NOT NULL AND"
+                        " b.expiry_date<? THEN sb.qty ELSE 0 END),0) x FROM stock_balances sb LEFT JOIN batches b"
+                        " ON b.id=nullif(sb.batch_key,'') WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=?",
+                        (self.today.isoformat(), ctx.org_id, ctx.branch_id, item_id))
+        return int(r["q"]) - int(r["x"]), int(r["x"])
 
     def _on_order(self, ctx: Context, item_id: str) -> int:
         """Draft purchase invoices = goods arriving / being entered."""
@@ -108,7 +122,7 @@ class Procurement:
         out: list[Suggestion] = []
         for it in self.db.all("SELECT * FROM items WHERE org_id=? AND status='active'", (ctx.org_id,)):
             u = self._usage(ctx, it["id"], window_days)
-            on_hand, on_order = self._on_hand(ctx, it["id"]), self._on_order(ctx, it["id"])
+            (on_hand, expired), on_order = self._sellable(ctx, it["id"]), self._on_order(ctx, it["id"])
             daily = u["daily"]
             target = daily * (lead_days + cover_days + safety_days)
             need = max(target, it["min_stock"]) - on_hand - on_order
@@ -120,6 +134,8 @@ class Procurement:
                 reasons.append(f"الرصيد {on_hand} يكفي {cover:.0f} يوم" if cover is not None else "")
             else:
                 reasons.append("لا يوجد استهلاك مسجل في الفترة")
+            if expired > 0:
+                reasons.append(f"منتهي الصلاحية وغير محسوب في الرصيد: {expired} وحدة")
             if on_order:
                 reasons.append(f"في الطريق/مسودات شراء: {on_order} وحدة")
             if it["min_stock"] and on_hand < it["min_stock"]:
@@ -139,7 +155,7 @@ class Procurement:
             s = Suggestion(it["id"], it["name_en"] or it["name_ar"], on_hand, round(daily, 3),
                            round(cover, 1) if cover is not None else None, packs, packs * it["pack_size"],
                            conf, [r for r in reasons if r],
-                           {"on_order": on_order, "min_stock": it["min_stock"], "pack_size": it["pack_size"],
+                           {"on_order": on_order, "expired": expired, "min_stock": it["min_stock"], "pack_size": it["pack_size"],
                             "usage": {k: v for k, v in u.items() if k != "rates"},
                             "seasonality": "غير متاح (يحتاج 12 شهر بيانات)"})
             if packs or not only_needed:
@@ -165,6 +181,7 @@ class Procurement:
                 over.append({"item_id": it["id"], "label": label, "on_hand": on_hand,
                              "days_of_cover": round(on_hand / u["daily"]),
                              "reason": f"الرصيد يكفي أكثر من {overstock_days} يوم"})
+            spent = 0       # demand already given to an earlier lot: each day's sales empty one lot, not all of them
             for b in self.db.all(
                     "SELECT b.batch_no, b.expiry_date, sb.qty FROM stock_balances sb JOIN batches b"
                     " ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=?"
@@ -173,11 +190,14 @@ class Procurement:
                 days_left = (date.fromisoformat(b["expiry_date"]) - self.today).days
                 if days_left > expiry_days:
                     continue
-                sellable = int(u["daily"] * max(days_left, 0))
-                at_risk = max(0, b["qty"] - sellable)
+                # earliest expiry sells first; what the lots before this one will take is not counted again
+                # (two lots of ten expiring in ten days at one a day showed no risk at all, #324 S39)
+                sellable = min(max(int(u["daily"] * max(days_left, 0)) - spent, 0), b["qty"])
+                spent += sellable
+                at_risk = b["qty"] - sellable
                 expiring.append({"item_id": it["id"], "label": label, "batch_no": b["batch_no"],
                                  "expiry_date": b["expiry_date"], "days_left": days_left,
-                                 "qty": b["qty"], "expected_to_sell": min(sellable, b["qty"]),
+                                 "qty": b["qty"], "expected_to_sell": sellable,
                                  "units_at_risk": at_risk,
                                  "action": "مرتجع للموزع/تبديل/عرض" if at_risk else "متوقع يتباع قبل الانتهاء"})
         expiring.sort(key=lambda e: (e["days_left"], -e["units_at_risk"]))
@@ -224,7 +244,7 @@ class Procurement:
             raise ValidationFailed("بيانات العرض غير مكتملة (الكمية/الخصم/سعر الجمهور)")
         u = self._usage(ctx, item_id, 90)
         base = packs * it["pack_size"]
-        on_hand = self._on_hand(ctx, item_id)
+        on_hand = self._sellable(ctx, item_id)[0]
         gross = it["public_price"] * packs
         cost = gross - discount_of(gross, discount_bp)
         reasons, verdict = [], "ok"
@@ -305,7 +325,10 @@ def import_consumption(db: Database, ctx: Context, data: bytes, filename: str, *
     if not dry_run:
         with db.transaction():
             p = Procurement(db)
-            for item_id, base in matched:
+            totals: dict[str, int] = {}      # one figure per item and period: a second row of the same item used
+            for item_id, base in matched:   # to overwrite the first while the answer reported their sum (#324 S36)
+                totals[item_id] = totals.get(item_id, 0) + base
+            for item_id, base in totals.items():
                 p.record_consumption(ctx, item_id, period_start, period_end, base,
                                      source=f"import:{period_start}")
             audit.record(db, ctx, "procurement.consumption_import", "consumption", period_start,
