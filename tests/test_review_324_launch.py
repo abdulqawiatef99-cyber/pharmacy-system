@@ -219,6 +219,11 @@ class TestS41S42R14Scripts(unittest.TestCase):
         self.assertLess(health, t.index("ALL DONE"))
         self.assertIn("program did not answer", t[start:t.index("ALL DONE")])
 
+    def test_r13_a_settings_copy_that_fails_is_a_fail(self):
+        line = next(l for l in self.bat("launch-fresh-start.bat").splitlines() if "backup_settings.json" in l
+                    and l.startswith("for "))
+        self.assertTrue(line.endswith('|| (set "MSG=could not copy the settings file %%n" & goto fail)'), line)
+
     def test_stop_check_counts_any_listener_not_only_a_200(self):
         for name in ("launch-fresh-start.bat", "estock-import.bat"):
             stop = self.bat(name).split("\n:stopprog\n", 1)[1]

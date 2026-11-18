@@ -122,7 +122,8 @@ mkdir "%DATA%"
 if errorlevel 1 (set "MSG=could not create the new data folder" & goto fail)
 if exist "%HOMEDIR%\%TRIAL%\code-releases" robocopy "%HOMEDIR%\%TRIAL%\code-releases" "%DATA%\code-releases" /E /R:2 /W:1 /NFL /NDL /NP >> "%LOG%" 2>&1
 if errorlevel 8 (set "MSG=copy of the program version folder failed" & goto fail)
-for %%n in (installed_version.json network.json backup_settings.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul
+REM a settings file that cannot be copied is a FAIL: the program would start with the default backup folder (#324 R13)
+for %%n in (installed_version.json network.json backup_settings.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul || (set "MSG=could not copy the settings file %%n" & goto fail)
 "%PY%" -I -c "import sys,pathlib as p; sys.path.insert(0, sys.argv[1]); import release_bootstrap as r; print(r.current_root(p.Path(sys.argv[1]), p.Path(sys.argv[2])).name)" "%INST%\program" "%DATA%\code-releases" > "%TEMP%\pharm-code-after.txt" 2>> "%LOG%"
 if errorlevel 1 (set "MSG=the copied program version did not pass its check" & goto fail)
 fc "%TEMP%\pharm-code-before.txt" "%TEMP%\pharm-code-after.txt" >nul
