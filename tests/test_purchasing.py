@@ -96,7 +96,7 @@ AI_FIXTURE = {
     "model": "fixture", "stop_reason": "end_turn",
     "content": [{"type": "text", "text": json.dumps({
         "supplier_name": "Pharma Overseas", "invoice_no": "PO-55", "invoice_date": "21/10/2026",
-        "declared_total": 640, "header_confidence": {"invoice_no": 0.99, "declared_total": 0.95},
+        "declared_total": 640, "header_confidence": {"supplier_name": 0.97, "invoice_no": 0.99, "declared_total": 0.95},
         "lines": [
             {"raw_name": "PANADOL 500MG 24 TAB", "qty": 20, "bonus_qty": 0, "public_price": 40,
              "discount_pct": 20, "unit_net_price": 32, "line_total": 640, "batch_no": "X1",

@@ -161,9 +161,12 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
             continue
         raw_lines.append(vals)
 
-    discounts, converted = normalize_percent_column(
-        [parse_percent(v.get("discount_pct")) if not _is_fraction_text(v.get("discount_pct"))
-         else parse_decimal(v.get("discount_pct")) for v in raw_lines])
+    # a value written with "%" is a percent as it stands ("0.5%" is half a percent): a column holding one is
+    # never read as fractions (it became 50%, #324 S21)
+    signed = any("%" in str(v.get("discount_pct") or "") for v in raw_lines)
+    values = [parse_percent(v.get("discount_pct")) if not _is_fraction_text(v.get("discount_pct"))
+              else parse_decimal(v.get("discount_pct")) for v in raw_lines]
+    discounts, converted = (values, False) if signed else normalize_percent_column(values)
     if converted:
         inv.warnings.append("discount_fraction_converted")
 
@@ -178,6 +181,8 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
                     val = str(int(raw))
             elif f in ("qty", "bonus_qty"):
                 val = parse_int(raw)
+                if f == "bonus_qty" and not val and line.sources.get("bonus_qty") == "read":
+                    continue        # "10+2" already gave the bonus: an empty or 0 bonus cell must not erase it (#324 S20)
                 qb = parse_qty_bonus(raw) if f == "qty" and val is None else None
                 if qb and vals.get("bonus_qty") in (None, "", 0):
                     val = qb[0]
