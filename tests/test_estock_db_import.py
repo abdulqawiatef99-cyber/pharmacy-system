@@ -1093,3 +1093,50 @@ class TestCashDepotsAsOnTheScreen(Base):
         moves = [x for x in res["plan"].dq if x["table"] == "Cash_depots" and "بيتنقل حساب لوحده" in x["action"]]
         self.assertEqual(len(moves), 11)
         self.assertTrue(any(x["field"] == "last_close" for x in res["plan"].dq))
+
+
+class TestScreenTour2245(Base):
+    """Manager 22:45: internal accounts, purchase classes, junk masters, E-Stock settings."""
+
+    def test_internal_accounts_move_marked_and_apart_from_the_real_totals(self):
+        t = base_tables()
+        t["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "جرد", "vendor_current_money": "90000.0000"})
+        t["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "الصيدليه",
+                              "customer_current_money": "300.0000", "sell_price_buy": "1"})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertTrue(self.db.one("SELECT 1 FROM suppliers WHERE name='جرد (حساب داخلي)'"))
+        c = self.db.one("SELECT name, notes FROM customers WHERE name LIKE '%حساب داخلي%'")
+        self.assertIn("حساب داخلي في إي ستوك", c["notes"])
+        s = res["reconciliation"]["suppliers"]
+        self.assertEqual((s["internal_balance_total"], s["real_balance_total"]), ("90000.00", "480.00"))
+        rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
+        self.assertLess(rec.index("حسابات داخلية"), rec.index("الموردين:"))       # first, for the owner
+        owner = {(d["table"], d["field"]) for d in res["plan"].dq if d["action"].startswith("OWNER")}
+        self.assertIn(("Vendor", "internal"), owner)
+        self.assertIn(("Customer", "internal"), owner)
+
+    def test_purchase_classes_are_counted_for_the_owner(self):
+        t = base_tables()
+        t["Purchase_header"][0]["class"] = "1"
+        t["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "3", "total_bill": "700.0000"},
+                                 {"purchase_id": "3", "vendor_id": "2", "class": "3", "total_bill": "300.0000",
+                                  "total_after_back": "250.0000"}]
+        res = self.run_import(tables=t)
+        pc = res["plan"].checks["purchase_classes"]
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
+
+    def test_junk_master_names_are_listed_and_not_used(self):
+        t = base_tables()
+        t["Product_units"].append({"unit_id": "6", "unit_name_ar": "6"})
+        t["Products"][1].update({"product_unit1": "6"})
+        res = self.run_import(tables=t)
+        self.assertIn(("Product_units", "6"), {(d["table"], d["estock_id"]) for d in res["plan"].dq if d["field"] == "name"})
+        self.assertEqual(self.item("101")["pack_unit_name"], "pack")             # not "6"
+
+    def test_estock_settings_are_in_the_report(self):
+        res = self.run_import()
+        rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
+        self.assertIn("مرتجع البيع خلال 7 أيام", rec)
+        self.assertIn("مفيش إيصال تحت 20 جنيه", rec)

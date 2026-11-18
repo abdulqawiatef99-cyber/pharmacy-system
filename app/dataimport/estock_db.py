@@ -101,7 +101,7 @@ def read_summary(run: Path) -> dict:
 
 
 def resolve_runs(root: Path) -> tuple[list[Path], list[str]]:
-    """The newest full read under estock-db-read\ and the retry runs made for it (estock-db-read-one.bat),
+    """The newest full read under estock-db-read/ and the retry runs made for it (estock-db-read-one.bat),
     oldest first, and the tables still not read after them all."""
     runs = sorted((d for d in Path(root).iterdir() if d.is_dir() and (d / "summary.txt").is_file()),
                   key=lambda d: d.name)
@@ -131,7 +131,7 @@ class Export:
     """manifest.csv + one CSV per table (estock-db-read.ps1): UTF-8 with BOM, a header row, every cell
     text; NULL is empty, dates are SQL Server style 126, byte[] is b64:...
 
-    `folder` is one read (the folder with tables\manifest.csv), or estock-db-read\ itself: then the newest
+    `folder` is one read (the folder with tables/manifest.csv), or estock-db-read/ itself: then the newest
     full read is taken together with the retry runs made for it, a table read again replacing the first copy;
     tables still not read are in `missing` (and block the move)."""
 
@@ -398,9 +398,9 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
         u1, u2, u3 = (units.get(ident(r.get(f"product_unit{n}")), "") for n in (1, 2, 3))
         small = u3 if it["pack_size"] > 1 and dec(r.get("product_unit1_3")) == it["pack_size"] else \
             u2 if it["pack_size"] > 1 else u1
-        if u1:
+        if u1 and any(ch.isalpha() for ch in u1):       # a unit named "6" is not a name (listed with the masters)
             it["pack_unit_name"] = u1[:30]
-        if small:
+        if small and any(ch.isalpha() for ch in small):
             it["base_unit_name"] = small[:30]
         it["has_expire"] = flag(r.get("product_has_expire")) if (r.get("product_has_expire") or "").strip() else None
         it["extras"] = {k: v for k, v in {
@@ -900,9 +900,29 @@ def _balance_piastres(p: Plan, table, eid, code, fld, raw, d: Decimal | None) ->
     return rounded
 
 
+INTERNAL_SUPPLIERS = ("جرد",)            # E-Stock books stock-count adjustments against a supplier named so
+INTERNAL_CUSTOMERS = ("الصيدلية",)       # the pharmacy's own account (sell at cost)
+INTERNAL_MARK = " (حساب داخلي)"
+
+
+def _internal(kind: str, name: str) -> bool:
+    key = normalize_text(name or "").replace(" ", "")
+    return key in {normalize_text(n).replace(" ", "") for n in (INTERNAL_SUPPLIERS if kind == "supplier"
+                                                              else INTERNAL_CUSTOMERS)}
+
+
 def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: dict, **more) -> dict:
     d = {"kind": kind, "estock_id": eid, "code": code, "name": name, "estock_balance": bal,
-         "balance": bal, "adjustment": 0, **more}
+         "balance": bal, "adjustment": 0, "internal": _internal(kind, name), **more}
+    if d["internal"]:
+        # moved as it is, marked, its balance first in the report for the owner (manager 22:45)
+        d["name"] = name + INTERNAL_MARK
+        if kind == "customer":
+            d["notes"] = "حساب داخلي في إي ستوك؛ " + (d.get("notes") or "")
+        p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "internal", name,
+                "OWNER: حساب داخلي في إي ستوك (" + ("جرد المخزن" if kind == "supplier" else "حساب الصيدلية نفسها")
+                + "): اتنقل زي ما هو باسم عليه «حساب داخلي»، ورصيده محتاج قرار", value_egp=Decimal(bal) / 100,
+                kind="review")
     if conf and conf.get("seen") != bal:
         p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "confirmed balance",
                 f"وقت التأكيد {egp(Decimal(conf.get('seen') or 0) / 100)}، دلوقتي {egp(Decimal(bal) / 100)}",
@@ -1021,6 +1041,33 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
             p.issue("sales lines", sid, pid, "line value", egp(v),
                     "OWNER: سطر بيع كبير" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
                     kind="review")
+    # purchases paid cash / on account / on consignment (تحت التصريف): how Purchase_header.class splits them.
+    # Which value is consignment is E-Stock's code: every value is listed with its invoices and value, and
+    # consignment stock must not silently become owned stock or a normal payable (manager 22:45)
+    classes: dict[str, list] = defaultdict(lambda: [0, Decimal(0), Decimal(0), set()])
+    for r in ex.rows("Purchase_header"):
+        c = (r.get("class") or "").strip() or "(فاضي)"
+        x = classes[c]
+        x[0] += 1
+        x[1] += dec(r.get("total_bill")) or 0
+        x[2] += dec(r.get("total_after_back")) or dec(r.get("total_bill")) or 0
+        x[3].add(ident(r.get("vendor_id")))
+    p.checks["purchase_classes"] = {c: {"invoices": n, "total_bill": egp(t), "after_returns": egp(a), "vendors": len(v)}
+                                    for c, (n, t, a, v) in sorted(classes.items())}
+    for c, (n, t, a, v) in sorted(classes.items()):
+        p.issue("Purchase_header", "", "", "class", c,
+                f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
+                " التصريف؟ بضاعة تحت التصريف مابتتحسبش ملكنا ولا دين عادي من غير قرار", value_egp=a, kind="review")
+    # master rows whose name has no letter (units "6", "15", "16"; the money place "0000"): kept as they are
+    for table, idc, cols in (("Product_units", "unit_id", ("unit_name_ar", "unit_name_en")),
+                             ("Product_groups", "group_id", ("group_name_ar", "group_name_en")),
+                             ("Companys", "company_id", ("co_name_ar", "co_name_en")),
+                             ("Stores", "store_id", ("store_name_ar", "store_name_en"))):
+        for r in ex.rows(table):
+            name = next(((r.get(c) or "").strip() for c in cols if (r.get(c) or "").strip()), "")
+            if not any(ch.isalpha() for ch in name):
+                p.issue(table, ident(r.get(idc)), name, "name", name or "(فاضي)",
+                        "اسم مش حقيقي: اتحفظ زي ما هو في الأرشيف، مش مستخدم كاسم في البرنامج", kind="review")
     from .estock_archive import secret_columns
     for c in secret_columns(ex):
         p.issue("archive", "", "", c, "(كلمة سر بنص واضح)",
@@ -1551,7 +1598,13 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
                            "value": abs(Decimal(got - d["balance"]) / 100)})
         if n != len(parties):
             mm.append({"what": kind, "code": "", "name": "", "detail": f"العدد {n}، إي ستوك {len(parties)}", "value": Decimal(0)})
+        internal = [d for d in parties if d.get("internal")]
+        out[kind + "_internal"] = [{"name": d["name"], "estock_id": d["estock_id"],
+                                    "balance": egp(Decimal(d["balance"]) / 100)} for d in internal]
         out[kind] = {"estock": len(parties), "program": n,
+                     "internal_accounts": len(internal),
+                     "internal_balance_total": egp(Decimal(sum(d["balance"] for d in internal)) / 100),
+                     "real_balance_total": egp(Decimal(sum(d["balance"] for d in parties if not d.get("internal"))) / 100),
                      "estock_balance_total": egp(Decimal(sum(d["estock_balance"] for d in parties)) / 100),
                      "confirmed_balance_total": egp(Decimal(sum(d["balance"] for d in parties)) / 100),
                      "opening_adjustment_total": egp(Decimal(sum(d["adjustment"] for d in parties)) / 100),
@@ -1574,6 +1627,20 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
         x["value"] = egp(x["value"])
     out["ok"] = not mm
     return out
+
+
+# E-Stock settings seen on its screens (manager's tour 18/11 22:45) and what the program has for each:
+# listed in the report, never applied by the move (returns and printing are the owner's rules).
+ESTOCK_SETTINGS = (
+    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14): المالك يقرر 7"),
+    ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية"),
+    ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده"),
+    ("شريط الصلاحية 6 شهور", "إعداد تشغيل بس (PHARM_SHORT_EXPIRY_DAYS=180)، مش من شاشة"),
+    ("مفيش إيصال تحت 20 جنيه", "مفيش إعداد"),
+    ("يسأل قبل كل طباعة", "مفيش إعداد"),
+    ("نص أول وآخر الإيصال", "فيه (إعداد الإيصال): يتنقل بإيد المالك من شاشة إي ستوك"),
+    ("شكل الليبل", "مفيش إعداد"),
+)
 
 
 # ---------------------------------------------------------------- reports
@@ -1604,6 +1671,12 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
                 w.writerow([it["product_id"], it["code"], it["name_en"] or it["name_ar"],
                             *[it["extras"].get(k, "") for k in keys]])
     lines = ["مطابقة نقل إي ستوك — " + ("OK" if rec["ok"] else "FAILED"), ""]
+    internal = [d for d in plan.suppliers + plan.customers if d.get("internal")]
+    if internal:
+        lines.append("OWNER — حسابات داخلية في إي ستوك (اتنقلت زي ما هي، مش داخلة في إجمالي الموردين والعملاء الحقيقيين):")
+        lines += [f"  {'مورد' if d['kind'] == 'supplier' else 'عميل'} {d['estock_id']} «{d['name']}»: "
+                  f"{egp(Decimal(d['balance']) / 100)}" for d in internal]
+        lines.append("")
     sd = plan.stock_source.get("decision") or {}
     lines.append(f"جدول الرصيد الشغال: {sd.get('key', 'مش متحدد')} ({sd.get('why', '')})")
     for c in plan.stock_source.get("candidates", []):
@@ -1641,6 +1714,10 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
                      f"المعدود {c['counted_cash']}")
     for n in mi.get("sales_by_network", []):
         lines.append(f"  {n['source']} شبكة {n['network_id']} {n['name']}: {n['total']}")
+    lines.append("فواتير الشراء حسب class (كاش / آجل / تحت التصريف — مستني المالك يقول أنهي رقم إيه): "
+                 + json.dumps(plan.checks.get("purchase_classes", {}), ensure_ascii=False))
+    lines.append("إعدادات إي ستوك (من جولة الشاشات 18/11) وحالها في البرنامج:")
+    lines += [f"  {a}: {b}" for a, b in ESTOCK_SETTINGS]
     for k, v in extra.items():
         lines.append(f"{k}: {v}")
     if rec["mismatches"]:
