@@ -4,10 +4,12 @@
 
 -- Where money is kept besides the shift drawer: the main treasury (one per pharmacy) and the owner's own
 -- accounts (bank / InstaPay, Vodafone Cash, ...). The balance is the sum of the account's movements.
+-- Opening balances come from the E-Stock import (or a count); later differences go through a count.
 CREATE TABLE money_accounts (
     id             TEXT PRIMARY KEY,
     org_id         TEXT NOT NULL REFERENCES organizations(id),
     kind           TEXT NOT NULL CHECK (kind IN ('treasury','bank','wallet','other')),
+    code           TEXT,                  -- fixed key of a standard account ('treasury','instapay','vodafone_cash')
     name           TEXT NOT NULL,
     allow_negative INTEGER NOT NULL DEFAULT 0 CHECK (allow_negative IN (0,1)),
     is_active      INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
@@ -17,6 +19,7 @@ CREATE TABLE money_accounts (
     UNIQUE (org_id, name)
 );
 CREATE UNIQUE INDEX ux_one_treasury ON money_accounts(org_id) WHERE kind = 'treasury';
+CREATE UNIQUE INDEX ux_money_account_code ON money_accounts(org_id, code) WHERE code IS NOT NULL;
 
 -- Every piaster in or out of an account (+ in, - out). Append-only.
 CREATE TABLE money_movements (

@@ -78,26 +78,60 @@ class TestAccounts(MoneyCase):
 
 
 class TestOpening(MoneyCase):
-    def test_opening_from_real_count_once_with_old_figure_for_information(self):
-        r = money.set_opening(self.db, self.m, "treasury", 1234500, old_program_figure=70000000)
-        self.assertEqual(r["balance"], 1234500)
+    """Openings come from the E-Stock import (owner, 18/11 22:05): treasury, InstaPay, Vodafone Cash."""
+
+    def test_estock_openings_by_key_once_per_account_audited(self):
+        with self.db.transaction():                            # the import calls it inside its own step
+            t = money.set_opening(self.db, self.ctx, "treasury", 70000000, source="estock", ref_id="run-1")
+            i = money.set_opening(self.db, self.ctx, "instapay", 1250000, source="estock", ref_id="run-1")
+            v = money.set_opening(self.db, self.ctx, "vodafone_cash", 340000, source="estock", ref_id="run-1")
+        self.assertEqual((t["id"], t["balance"]), (self.t, 70000000))
+        self.assertEqual(i["id"], self.bank)                   # the owner's «إنستاباي» is adopted, not duplicated
+        self.assertEqual((v["kind"], v["code"], v["balance"]), ("wallet", "vodafone_cash", 340000))
         mv = money.movements(self.db, self.ctx, account_id=self.t)["rows"][0]
-        self.assertEqual((mv["kind"], mv["amount"], mv["meta"]), ("opening", 1234500, {"old_program_figure": 70000000}))
-        with self.assertRaises(Conflict):
-            money.set_opening(self.db, self.ctx, self.t, 1)
+        self.assertEqual((mv["kind"], mv["amount"], mv["meta"]), ("opening", 70000000, {"source": "estock"}))
+        a = self.db.one("SELECT after_json FROM audit_log WHERE action='money.opening' AND entity_id=?", (self.t,))
+        self.assertIn('"source": "estock"', a["after_json"])
+        with self.assertRaises(Conflict) as e:
+            money.set_opening(self.db, self.ctx, "treasury", 1, source="estock", ref_id="run-2")
+        self.assertEqual(e.exception.code, "opening_exists")
+
+    def test_a_resumed_import_gets_the_first_result_back(self):
+        first = money.set_opening(self.db, self.ctx, "treasury", 5000, ref_id="run-1")
+        again = money.set_opening(self.db, self.ctx, "treasury", 5000, ref_id="run-1")
+        self.assertTrue(again["replayed"])
+        self.assertEqual((again["movement_id"], self.bal(self.t)), (first["movement_id"], 5000))
+
+    def test_refused_once_the_account_has_movements(self):
+        money.owner_movement(self.db, self.ctx, self.bank, 100, "owner_deposit")
+        with self.assertRaises(Conflict) as e:
+            money.set_opening(self.db, self.ctx, "instapay", 9000, ref_id="run-1")
+        self.assertEqual(e.exception.code, "account_has_movements")
+        self.assertEqual(self.bal(self.bank), 100)
 
     def test_zero_opening_also_only_once(self):
         money.set_opening(self.db, self.ctx, self.bank, 0)
         with self.assertRaises(Conflict):
             money.set_opening(self.db, self.ctx, self.bank, 500)
 
-    def test_no_negative_opening_and_no_fractions(self):
-        with self.assertRaises(ValidationFailed):
-            money.set_opening(self.db, self.ctx, self.t, -100)
-        with self.assertRaises(ValidationFailed):
-            money.set_opening(self.db, self.ctx, self.t, 10.5)
+    def test_negative_only_where_allowed_and_no_fractions_or_unknown_keys(self):
+        with self.assertRaises(ValidationFailed) as e:
+            money.set_opening(self.db, self.ctx, "treasury", -100)
+        self.assertEqual(e.exception.code, "account_negative")
+        money.update_account(self.db, self.ctx, self.bank, {"allow_negative": True})
+        self.assertEqual(money.set_opening(self.db, self.ctx, "instapay", -100)["balance"], -100)
+        for bad in (dict(amount=10.5), dict(amount=1, source="eStock")):
+            with self.assertRaises(ValidationFailed):
+                money.set_opening(self.db, self.ctx, self.t, **{"amount": 1, **bad})
+        with self.assertRaises(NotFound):                    # not a standard key, not an account id
+            money.set_opening(self.db, self.ctx, "fawry", 1)
         with self.assertRaises(Forbidden):
             money.set_opening(self.db, self.ph, self.t, 100)
+
+    def test_a_later_count_records_the_difference_with_a_reason(self):
+        money.set_opening(self.db, self.ctx, "treasury", 70000000, ref_id="run-1")
+        r = money.count(self.db, self.ctx, "treasury", 69000000, "عدّ فعلي بعد الإطلاق")
+        self.assertEqual((r["difference"], r["balance"]), (-1000000, 69000000))
 
 
 class TestShiftClose(MoneyCase):
