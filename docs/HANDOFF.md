@@ -12,6 +12,20 @@
 - Next: new manager chat opened from the Claude desktop app on the cashier PC (computer use) → Codex environment + review parts 2-4 → merge #325 + in-app update → launch rehearsal (E-Stock import on a fresh DB mid-day, the real one after closing) → owner acceptance #20.
 - Owner ideas 18/11 recorded: `FUTURE_REQUIREMENTS.md` F66-F78 + REPO-1, order in `IDEAS_PLAN.md` section 18/11.
 
+## 18/11 15:45 Cairo — manager chat end report (READ THIS FIRST)
+Open reminders: Codex `@codex` on issues (environment); two E-Stock reports; GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts.
+1. Done, with evidence
+   - #325 merged (`4021c27`) and #327 merged (`69af65b`, wording leftovers; CI linux green, Codex clean on `633b8fa`, full suite 1339 OK).
+   - Cashier PC «تحديث» twice: `db74c3e` → `4021c27` → `69af65b` (backup `pharmacy-backup-20261118-150229.zip` before the first). Device check: home «السلام عليكم», «الشيفت مغلق — افتحه»; sale-return quantity field starts empty and typing 3 gives 3 (was 30).
+   - #324 part 1 (money): Codex cloud review run from the pane; M1–M12 posted on #324. Claude Code worker started 15:35 (claude.ai/code session «التحقق من P1 وإصلاحات», branch `claude/p1-verification-fixes-*`): failing test per finding, fixes verified P1s M1–M7 in one PR, no merge.
+2. Not done and why
+   - `@codex` on issues still answers "create an environment" (an environment exists; cause unknown). Parts 2–4 go through the Codex cloud page the same way.
+   - Rehearsal (E-Stock → program) not started: needs the owner to export the two E-Stock reports (E-Stock is the live cashier).
+   - Ideas F66–F78 not yet moved to `docs/FUTURE_REQUIREMENTS.md`.
+3. Decisions: the money P1s are fixed before the real move tonight; P2s wait for the owner.
+4. Next goal (new chat in the project, normal chat, Opus): merge the worker's P1 PR after CI + Codex → «تحديث»; Codex parts 2–4; rehearsal when the owner exports the two reports; ideas into the repo.
+5. المحادثة دي اتحفظت وممكن تتمسح
+
 ## 18/11 15:20 Cairo — manager chat (cashier PC, from the 14:45 handoff) (READ THIS FIRST)
 Open reminders: Codex environment for `@codex` mentions; two E-Stock reports; GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts.
 - #325 merged → `develop` @ `4021c27` (CI linux green + Codex clean on `45c9f22`). Cashier PC «تحديث» `db74c3e` → `4021c27` at ~15:03 (backup `pharmacy-backup-20261118-150229.zip` first); home shows «السلام عليكم» and «الشيفت».
