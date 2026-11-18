@@ -12,6 +12,13 @@
 - Next: new manager chat opened from the Claude desktop app on the cashier PC (computer use) → Codex environment + review parts 2-4 → merge #325 + in-app update → launch rehearsal (E-Stock import on a fresh DB mid-day, the real one after closing) → owner acceptance #20.
 - Owner ideas 18/11 recorded: `FUTURE_REQUIREMENTS.md` F66-F78 + REPO-1, order in `IDEAS_PLAN.md` section 18/11.
 
+## 18/11 15:20 Cairo — manager chat (cashier PC, from the 14:45 handoff) (READ THIS FIRST)
+Open reminders: Codex environment for `@codex` mentions; two E-Stock reports; GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts.
+- #325 merged → `develop` @ `4021c27` (CI linux green + Codex clean on `45c9f22`). Cashier PC «تحديث» `db74c3e` → `4021c27` at ~15:03 (backup `pharmacy-backup-20261118-150229.zip` first); home shows «السلام عليكم» and «الشيفت».
+- Leftovers found on the device: home card «الشيفت مغلق — افتحها / جارية» (feminine) and `app/sales/service.py` «افتح وردية قبل البيع» → PR `claude/shift-wording-leftovers`.
+- #324 money review: `@codex` on the issue still says "create an environment" although an environment `pharmacy-system` exists in the owner's Codex cloud. The review was run from the Codex cloud page in the cashier PC browser pane instead (effort Light). 7 P1 + 5 P2 claims posted on #324 (M1–M12), all unverified. Next: Claude Code worker verifies each with a failing test, fixes verified P1s before the real move; then parts 2–4 the same way.
+- Next in order: (1) PR above merged + «تحديث»; (2) worker for #324 M1–M7; (3) rehearsal (E-Stock two reports → fresh start → import); (4) ideas F66–F78 into the repo.
+
 ## 17/11 23:20 Cairo — manager chat, owner decisions (READ THIS FIRST)
 - Owner 23:14: USB drive / off-device copy (R6/R7) is optional and out of the percentage for now; G5 to L2 on the Windows restore drill: total **73.25%**. Remaining = owner acceptance (#20) after the final review. F47-a track-and-trace parked as future (no official decree for pharmacies yet; E-Stock does not do it).
 - Owner wants the program finished today or tomorrow; what is left is scheduled (final review worker tonight).
