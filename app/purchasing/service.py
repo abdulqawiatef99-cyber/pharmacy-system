@@ -545,12 +545,14 @@ class Purchasing:
                 raise Conflict("إجمالي الفاتورة بالسالب (الخصم الإضافي أكبر من إجمالي الأصناف)؛ لا يمكن اعتمادها",
                                code="negative_total", details={"lines_amount": gross, "total": net_total})
             moved = 0
-            items_of = {l["id"]: self.db.one("SELECT * FROM items WHERE id=? AND org_id=?",
-                                             (l["item_id"], ctx.org_id)) for l in lines}
-            units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * items_of[l["id"]]["pack_size"] for l in lines}
+            packs_of = {l["id"]: self.db.one("SELECT pack_size FROM items WHERE id=? AND org_id=?",
+                                             (l["item_id"], ctx.org_id))["pack_size"] for l in lines}
+            units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * packs_of[l["id"]] for l in lines}
             all_units = sum(units.values())
             for l, amount in zip(lines, amounts):
-                item = items_of[l["id"]]
+                # read again per line: an earlier line of the same item may have changed its public price
+                # (the preloaded row skipped the second change and logged a stale previous price, #336 review)
+                item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
                 # allocate invoice-level discount/tax proportionally to line value; lines worth nothing (all free)
                 # share it by units, or tax posted to the supplier reached no unit cost (#324 S27)
                 share = Decimal(amount) * Decimal(net_total) / Decimal(gross) if gross else \

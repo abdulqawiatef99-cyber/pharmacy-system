@@ -317,3 +317,56 @@ class TestS27InvoiceTaxInCost(_Purchase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- Codex on #336
+class TestReview336AuditMarkPerPharmacy(APICase):
+    """P1: the watermark that tells a saved write from a refused one reads this pharmacy's audit rows only
+    (AGENTS.md: every query on pharmacy data filters by org_id), and by rowid, not over the whole log."""
+
+    def setUp(self):
+        super().setUp()
+        self.sid = cat.create_supplier(self.db, self.ctx, name="مورد العلامة")
+
+    def test_every_audit_query_of_an_idempotent_write_filters_by_pharmacy(self):
+        seen, real = [], self.db.one
+
+        def spy(sql, params=()):
+            if "audit_log" in sql:
+                seen.append(sql)
+            return real(sql, params)
+        self.http_login()
+        self.db.one = spy
+        try:
+            r = self.c.post(f"/api/suppliers/{self.sid}/pay", json={"amount": 0, "method": "cash"},
+                            headers={**H, "Idempotency-Key": "mark-1"})
+        finally:
+            del self.db.one
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(len(seen), 2, seen)                    # the mark and the "saved since" check
+        for sql in seen:
+            self.assertIn("org_id=?", sql)
+            plan = " ".join(str(tuple(x)) for x in self.db.conn.execute("EXPLAIN QUERY PLAN " + sql,
+                                                                         (1, 1, 1)[:sql.count("?")]))
+            self.assertNotIn("ix_audit_org_entity", plan)       # never every audit row of the pharmacy
+
+
+class TestReview336PriceBetweenLines(_Purchase):
+    """P2: two lines of the same item on one invoice: each line's public price applies in order, and the
+    price history records the price the line replaced, not the one read before the first line."""
+
+    def test_the_last_line_price_wins_and_history_is_in_order(self):
+        iid = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        v = self.p.get(self.ctx, iid)["invoice"]["version"]
+        for batch, price in (("X1", 12000), ("X2", 10000)):
+            v = self.p.add_line(self.ctx, iid, {"item_id": self.item, "qty": 1, "public_price": price,
+                                                "unit_net_price": 9000, "batch_no": batch,
+                                                "expiry_date": "12/2029"}, v)["invoice"]["version"]
+        d = self.p.update_header(self.ctx, iid, {"invoice_no": "88", "invoice_date": local_today().isoformat(),
+                                                 "declared_total": 18000}, v)
+        self.p.approve(self.ctx, iid, d["invoice"]["version"])
+        self.assertEqual(cat.get_item(self.db, self.ctx, self.item)["public_price"], 10000)
+        hist = [(r["previous_price"], r["public_price"]) for r in self.db.all(
+            "SELECT previous_price, public_price FROM item_price_history WHERE item_id=? AND source='purchase_invoice'"
+            " ORDER BY rowid", (self.item,))]
+        self.assertEqual(hist, [(10000, 12000), (12000, 10000)])
