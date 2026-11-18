@@ -200,7 +200,21 @@ class CashDrawer:
                             "cash_shift", sid)
         from ..core import autobackup
         autobackup.trigger("shift_close")
-        return self.report(ctx, sid)
+        return self.close_result(ctx, sid)
+
+    def close_result(self, ctx: Context, shift_id: str) -> dict:
+        """What the closer is shown after the close, by his permissions now: the full report with
+        sales.read, else only his count against the drawer. Never a refusal after the close committed
+        (it released the retry key, and the retry closed the next shift, #324 M5); also the answer to a
+        replayed close, so a stored report never outlives a revoked permission (#324 M4)."""
+        ctx.require("cash.close")
+        if ctx.can("sales.read"):
+            return self.report(ctx, shift_id)
+        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by FROM cash_shifts"
+                        " WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
+        if not s or s["status"] != "closed" or s["closed_by"] != ctx.user_id:
+            raise NotFound("الشيفت غير موجود")
+        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference")}
 
     def report(self, ctx: Context, shift_id: str) -> dict:
         """Closing report. The person who closed sees the result (shortage / surplus) only after

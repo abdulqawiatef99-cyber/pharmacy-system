@@ -8,7 +8,8 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import cost_piasters, kept_value, local_day_bounds, local_today, retail_value
+from ..sales.service import (cost_piasters, local_day_bounds, local_today, outstanding_value, retail_value,
+                             returns_history)
 
 
 def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
@@ -68,12 +69,12 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
 def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[dict]:
     """Best-selling items: what the customers kept and what it brought in, priced the way each line was
     sold (#145). A line nothing was returned from is worth exactly its recorded total; a line with returns
-    is valued like the return screen values it (`kept_value`), so the items add up to the invoices."""
+    is valued like the return screen values it (`outstanding_value`), so the items add up to the invoices."""
     show_cost = ctx.can("costs.read")
     by_item: dict[str, dict] = {}
     partial: list[tuple[dict, dict]] = []
     for r in db.all(
-            "SELECT l.id, l.item_id, l.discount_bp, l.line_total, sum(a.qty_base - a.returned_qty) qty,"
+            "SELECT l.id, l.sale_id, l.item_id, l.discount_bp, l.line_total, sum(a.qty_base - a.returned_qty) qty,"
             " sum(a.returned_qty) returned, sum(a.unit_cost IS NULL) unknown"
             " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
             " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
@@ -87,7 +88,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             partial.append((d, dict(r)))
     if partial:              # one read for the sales with returns (same period and organization), not one per line
         want = {l["id"] for _, l in partial}
-        cols = "a.sale_line_id, a.id, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
+        cols = "a.sale_line_id, a.id, a.rowid rid, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
         allocs_of: dict[str, list[dict]] = {}
         for a in db.all(
                 f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
@@ -99,10 +100,12 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             allocs_of[lid] = [dict(a) for a in db.all(
                 f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
                 " WHERE a.sale_line_id=? AND l.org_id=?", (lid, ctx.org_id))]
+        history = returns_history(db, ctx.org_id, {l["sale_id"] for _, l in partial})
         for d, l in partial:
             allocs = allocs_of[l["id"]]
             kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-            d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+            d["revenue"] += outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
+                                              history.get(l["sale_id"], []))
     ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]
     names = {r["id"]: dict(r) for r in db.all(
         "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
