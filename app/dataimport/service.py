@@ -493,10 +493,12 @@ class DataImport:
                   "batch_no", "location"):
             d[k] = txt(k)
         bc = raw.get("barcode")
-        if isinstance(bc, float):
+        fraction = isinstance(bc, float) and not bc.is_integer()
+        if isinstance(bc, float) and not fraction:
             bc = str(int(bc))
         d["barcode"] = normalize_barcode(bc) if bc not in (None, "") else None
-        if bc not in (None, "") and (not d["barcode"] or len(d["barcode"]) < 6):
+        # 123456.7 is not a barcode: int() cut it to 123456 and matched (and renamed) another item (#324 S33)
+        if bc not in (None, "") and (fraction or not d["barcode"] or len(d["barcode"]) < 6):
             issues.append({"code": "invalid_barcode", "value": str(bc)})
             d["barcode"] = None
         d["dosage_form"] = normalize_form(txt("dosage_form")) if txt("dosage_form") else None
@@ -612,11 +614,14 @@ class DataImport:
         if (options or {}).get("qty_unit", "pack") == "pack":
             pack = self.db.one("SELECT pack_size FROM items WHERE id=?", (item_id,))["pack_size"]
             mue = Decimal(str((options or {}).get("max_unit_error", 0)))
-            if _whole_units(Decimal(d["qty"]), pack, mue) is None:
+            units = _whole_units(Decimal(d["qty"]), pack, mue)
+            if units is None:
                 return "error", item_id, [{"code": "fractional_qty_needs_pack_size",
                                            "qty": d["qty"], "pack_size": pack,
                                            "hint": "حدد عدد الوحدات (الشرايط) في العلبة لهذا الصنف أولًا"}]
             exact = Decimal(d["qty"]) * pack
+            if units == 0:       # an E-Stock residue (0.001 pack): nothing to post; a zero movement used to
+                return "skip", item_id, [{"code": "rounded_to_zero", "from": str(exact), "to": 0}]  # abort all (#324 S12)
             if abs(exact - exact.to_integral_value(ROUND_HALF_UP)) > Decimal("0.0006") * pack:
                 issues.append({"code": "rounded_units", "from": str(exact),
                                "to": int(exact.to_integral_value(ROUND_HALF_UP))})
@@ -805,6 +810,14 @@ class DataImport:
                              run_id))
             audit.record(self.db, ctx, "import.apply", "import_run", run_id, after=done)
         matching.invalidate(ctx.org_id)
+        if run["kind"] == "opening_stock":
+            # a recalled lot in the opening stock must raise its alert like a purchase does (#324 S2)
+            try:
+                from ..recalls.service import Recalls
+                Recalls(self.db).match_new_batches(ctx)
+            except Exception:   # alerting must never undo an applied import
+                import logging
+                logging.getLogger("pharm.recalls").exception("recall matching failed")
         return report
 
     def _stale_rows(self, ctx: Context, run, rows: list[dict]) -> list[int]:

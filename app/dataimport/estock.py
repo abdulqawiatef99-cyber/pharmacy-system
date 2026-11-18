@@ -100,15 +100,26 @@ def parse_catalog(rows: list[list]) -> list[list]:
     return out
 
 
+def store_key(name) -> str:
+    """Store names compared the way people write them: «الصيدلية» = «الصيدليه» = « الصــيدليّة »
+    (ta marbuta / ha, alef and ya forms, tatweel, diacritics, spaces; #324 S10)."""
+    return _n(name).replace(" ", "")
+
+
 def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[list], dict]:
     """Stock-by-expiry report → one row per batch. Returns (table, summary).
-    `stores`: store names to keep (None = all). Totals are verified per store
-    and for the whole file before filtering."""
+    `stores`: store names to keep (None = all), compared by `store_key`. Totals are verified per store
+    and for the whole file before filtering. A selection that keeps no row of a file that has stock, or
+    names a store the file does not have, is refused (it used to import zero stock and pass, #324 S10).
+    The same batch (code, expiry, cost) in two selected stores is one batch on our shelf: the rows are
+    added together (the second one was dropped as a duplicate, #324 S11)."""
     out = [STOCK_HEADER]
     summary: dict = {"stores": {}}
     store = None
     acc: dict[str, dict] = {}
     grand = None
+    wanted = {store_key(x) for x in stores} if stores is not None else None
+    merged: dict[tuple, int] = {}          # (code, expiry, cost) -> index in out, across stores only
     for r in rows:
         r = list(r) + [None] * 15
         if _n(r[1]) == _n("اسم المخزن"):
@@ -124,8 +135,15 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
             a["items"].add(code)
             a["cost"] += _dec(r[2])
             a["sale"] += _dec(r[1])
-            if stores is None or store in stores:
-                out.append([store, code, r[9], r[8], qty, cost, _expiry(r[6])])
+            if wanted is None or store_key(store) in wanted:
+                key = (code, _expiry(r[6]), _dec(cost) if _is_num(cost) else cost)
+                i = merged.get(key)
+                if i is not None and store not in out[i][0].split(" + "):
+                    out[i][0] += " + " + store
+                    out[i][4] = str(_dec(out[i][4]) + _dec(qty))
+                else:
+                    merged[key] = len(out)
+                    out.append([store, code, r[9], r[8], qty, cost, _expiry(r[6])])
         elif _n(r[1]) == _n("إجمالى البيع") and store:
             acc[store]["closed"] = True
             _check(f"بيع مخزن {store}", acc[store]["sale"], r[0])
@@ -144,6 +162,15 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
         raise ValidationFailed("سطر «إجمالى جميع المخازن» ناقص؛ الملف ناقص", code="estock_totals_mismatch")
     _check("بيع كل المخازن", sum((a["sale"] for a in acc.values()), Decimal(0)), grand[1])
     _check("تكلفة كل المخازن", sum((a["cost"] for a in acc.values()), Decimal(0)), grand[3])
+    if wanted is not None:
+        in_file = "، ".join(acc)
+        if len(out) == 1 and any(a["rows"] for a in acc.values()):
+            raise ValidationFailed(f"مفيش ولا تشغيلة في المخزن المختار؛ المخازن اللي في الملف: {in_file}",
+                                   code="estock_no_rows_for_store", details={"stores_in_file": list(acc)})
+        missing = [x for x in stores if store_key(x) not in {store_key(k) for k in acc}]
+        if missing:
+            raise ValidationFailed(f"المخزن «{missing[0]}» مش موجود في الملف؛ المخازن اللي في الملف: {in_file}",
+                                   code="estock_store_not_in_file", details={"stores_in_file": list(acc)})
     for s, a in acc.items():
         summary["stores"][s] = {"batches": a["rows"], "items": len(a["items"]),
                                 "cost": str(a["cost"].quantize(Decimal("0.01"), ROUND_HALF_UP)),

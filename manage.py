@@ -289,6 +289,46 @@ def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
     return None
 
 
+def fresh_start_refusal(db, answer: str | None) -> str | None:
+    """launch-fresh-start.bat archives the whole database. After launch that is the live data, and the
+    runbook used to send the operator back to it whenever the import refused (#324 R2). Refused once any
+    sale was made after an applied opening-stock import; otherwise the pharmacy's name must be typed
+    (not just YES). Spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter."""
+    from app.catalog.normalize import normalize_text
+    sold = db.one("SELECT count(*) n FROM sales s JOIN import_runs r ON r.org_id=s.org_id"
+                  " WHERE r.kind='opening_stock' AND r.status='applied' AND s.status IN ('completed','voided')"
+                  " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at)")["n"]
+    if sold:
+        return (f"البرنامج اتشغل فعلًا: فيه {sold} فاتورة بيع بعد استيراد الأرصدة من E-Stock. "
+                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت. كلمني قبل أي خطوة")
+    key = lambda v: normalize_text(v or "").replace(" ", "")
+    names = [r["name"] for r in db.all("SELECT name FROM organizations")]
+    if not answer or key(answer) not in {key(n) for n in names}:
+        return "اسم الصيدلية مش مطابق للي في البرنامج؛ مفيش أي حاجة اتغيرت"
+    return None
+
+
+def cmd_fresh_start_check(a, s):
+    """Asked by launch-fresh-start.bat before it stops anything. Python reads the answer (cmd's set /p
+    cannot read Arabic typing reliably). Exit 0 = go on, 1 = refused (reason printed)."""
+    db = _db(s)
+    names = [r["name"] for r in db.all("SELECT name FROM organizations")]
+    print("الصيدلية في البرنامج:", "، ".join(names))
+    answer = os.environ.get("PHARM_E2E_PHARMACY")   # automated check on synthetic data only (CI)
+    if answer is None:
+        why = fresh_start_refusal(db, "-")
+        if why and "اسم الصيدلية" not in why:   # refused whatever is typed: do not ask
+            sys.exit("FAIL: " + why)
+        try:
+            answer = input("اكتب اسم الصيدلية زي ما هو مكتوب فوق علشان تكمل: ")
+        except EOFError:
+            answer = ""
+    why = fresh_start_refusal(db, answer)
+    if why:
+        sys.exit("FAIL: " + why)
+    print("OK")
+
+
 def cmd_import_estock(a, s):
     """Dry run on a copy of the database by default; --apply writes, after a verified backup."""
     import json
@@ -338,7 +378,7 @@ def cmd_import_estock(a, s):
     print(f"عدد الوحدات: {rep['packs']['applied']} صنف")
     print(f"الأرصدة: {st['applied']['stock_rows']} تشغيلة اتنقلت — المطابقة: "
           f"{'OK' if st['reconciliation']['ok'] else 'FAILED'}")
-    for k, label in (("rounded", "اتقربت لأقرب وحدة"), ("posted_zero_cost", "دخلت بتكلفة صفر"),
+    for k, label in (("rounded", "اتقربت لأقرب وحدة"), ("rounded_to_zero", "اتسابت: أقل من نص وحدة"), ("posted_zero_cost", "دخلت بتكلفة صفر"),
                      ("skipped_unknown_pack", "اتسابت: عدد الوحدات مش معروف"),
                      ("skipped_zero_cost", "اتسابت: تكلفة صفر"), ("skipped_review", "اتسابت: محتاجة مراجعة"),
                      ("errors", "أخطاء")):
@@ -507,6 +547,7 @@ def main(argv=None):
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default=None)
+    sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
@@ -522,7 +563,7 @@ def main(argv=None):
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update,
+     "import-estock": cmd_import_estock, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
      "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
 
 
