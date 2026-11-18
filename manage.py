@@ -8,6 +8,7 @@
   (maintenance commands never create a database; only init and serve do — #80)
   python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
+  python manage.py import-estock-db --dir EXPORT [--confirm openings.xlsx] --username owner [--apply]
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
   python manage.py reset-owner-password [--username owner]   (forgotten owner password; on this PC only)
@@ -387,6 +388,78 @@ def cmd_import_estock(a, s):
     print("التقرير الكامل:", rpath)
 
 
+def cmd_import_estock_db(a, s):
+    """The whole E-Stock database (F91) from estock-db-read.bat's export. Dry run on a copy of the database
+    by default; --apply writes after its own verified backup. Prints RECONCILIATION: OK / FAILED."""
+    import shutil
+    import tempfile
+    from app.core import backup
+    from app.core.errors import DomainError
+    from app.dataimport import estock_archive, estock_db
+    db = _db(s)
+    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    tok = accounts.login(db, a.username, pw)["token"]
+    for f in [a.dir, *([a.confirm] if a.confirm else []), *([a.packs] if a.packs else [])]:
+        if not Path(f).exists():
+            sys.exit(f"الملف أو الفولدر مش موجود: {f}")
+    out_dir = Path(a.out) if a.out else s.data_dir / "reports" / \
+        f"estock-db-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}"
+    archive = s.data_dir / estock_archive.NAME
+    tmp, target = None, db
+    try:
+        why = estock_db.refusal(db, accounts.resolve_session(db, tok), estock_db.Export(Path(a.dir), a.database).source_sha())
+    except DomainError as e:
+        sys.exit(f"FAIL: {e.message}")
+    if why:
+        sys.exit(f"FAIL: {why}")
+    if not a.apply:
+        tmp = Path(tempfile.mkdtemp(prefix="estock-db-dry-"))
+        db.backup_to(tmp / "copy.db")
+        target = Database(tmp / "copy.db")
+        print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
+    else:
+        bk = backup.create(db, s.upload_dir, _backups(a.backup_dir, s), tag="pre-estock-db")
+        if backup.verify_archive(bk)["problems"]:
+            sys.exit("FAIL: النسخة الاحتياطية فشلت؛ مفيش نقل")
+        print("نسخة احتياطية قبل النقل:", bk)
+    try:
+        ctx = accounts.resolve_session(target, tok)
+        res = estock_db.run(target, ctx, export_dir=Path(a.dir), out_dir=out_dir, archive_path=archive,
+                            write_archive=a.apply, confirm_file=Path(a.confirm) if a.confirm else None,
+                            packs_file=Path(a.packs) if a.packs else None, stock_source=a.stock_source,
+                            stores=a.store, database=a.database)
+    except DomainError as e:
+        sys.exit(f"FAIL: {e.message}" + ("\nلو اتكتب جزء، كمّل بنفس الأمر ونفس التصدير، أو رجّع النسخة الاحتياطية"
+                                         if a.apply else ""))
+    finally:
+        if tmp:
+            target.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+    if a.apply and res["ok"]:
+        s.backup_path.mkdir(parents=True, exist_ok=True)
+        copy = s.backup_path / f"estock-archive-{datetime.now():%Y%m%d-%H%M%S}.sqlite"
+        shutil.copy2(archive, copy)
+        print("نسخة من أرشيف إي ستوك:", copy)
+    rec, plan = res["reconciliation"], res["plan"]
+    sd = plan.stock_source.get("decision") or {}
+    print(f"جدول الرصيد: {sd.get('key', 'مش متحدد')} — {sd.get('why', '')}")
+    for k, label in (("items", "الأصناف"), ("stock", "الرصيد"), ("suppliers", "الموردين"), ("customers", "العملاء")):
+        if k in rec:
+            print(f"{label}: " + "، ".join(f"{x}={y}" for x, y in rec[k].items()))
+    print(f"جودة البيانات: {len(plan.dq)} سطر، منها {len(plan.blocking)} محتاجة قرار")
+    for m in rec["mismatches"][:30]:
+        print(f"  [{m['what']}] {m['code']} {m['name']}: {m['detail']} ({m['value']} ج)")
+    if len(rec["mismatches"]) > 30:
+        print(f"  ... و{len(rec['mismatches']) - 30} كمان في التقرير")
+    for k, p in res["reports"].items():
+        print(f"{k}: {p}")
+    print("RECONCILIATION:", "OK" if res["ok"] else "FAILED")
+    if not res["ok"]:
+        if a.apply:
+            print("المطابقة فشلت بعد الكتابة: رجّع النسخة الاحتياطية اللي فوق قبل أي بيع", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_update(a, s):
     """Stage immutable code and atomically select it; never migrate the live DB here."""
     import subprocess
@@ -547,6 +620,18 @@ def main(argv=None):
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default=None)
+    ed = sub.add_parser("import-estock-db", help="move the whole E-Stock database from estock-db-read.bat's export")
+    ed.add_argument("--dir", required=True, help="export folder (the one with tables\\manifest.csv)")
+    ed.add_argument("--confirm", help="openings-to-confirm.xlsx after the owner filled the confirmed column")
+    ed.add_argument("--packs", help="pack sizes decided by a person (.xlsx or .json), for broken unit conversions")
+    ed.add_argument("--stock-source", help="live stock table when it is not clear, e.g. Product_Amount:3")
+    ed.add_argument("--store", action="append", help="E-Stock store name or id (repeat); default: الصيدلية")
+    ed.add_argument("--database", help="E-Stock database name when the export holds more than one (default stock)")
+    ed.add_argument("--out", help="reports folder (default data/reports/estock-db-<time>)")
+    ed.add_argument("--username", required=True)
+    ed.add_argument("--password", help="for automation only; prefer the prompt")
+    ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")
+    ed.add_argument("--backup-dir", default=None)
     sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
@@ -563,7 +648,7 @@ def main(argv=None):
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
+     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
      "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
 
 

@@ -86,7 +86,8 @@ class TestCounting(CountCase):
         sid = self.cnt.create(self.ctx, title="x", scope="items", item_ids=[self.c])
         with self.assertRaises(ValidationFailed):
             self.cnt.approve(self.ctx, sid, zero_uncounted=True)
-        self.cnt.approve(self.ctx, sid, zero_uncounted=True, reason="الصنف مش موجود على الرف نهائيًا")
+        self.cnt.approve(self.ctx, sid, zero_uncounted=True, reason="الصنف مش موجود على الرف نهائيًا",
+                         uncounted_item_ids=[u["item_id"] for u in self.cnt.variances(self.ctx, sid)["uncounted_with_stock"]])
         self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.c)["total_qty"], 0)
 
     def test_mixed_levels_blocks(self):

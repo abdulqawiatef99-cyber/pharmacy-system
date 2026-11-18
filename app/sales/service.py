@@ -382,11 +382,17 @@ class Sales:
 
     def _stock_rows(self, ctx: Context, branch_id: str, item_id: str) -> list[dict]:
         """Batches with stock, FEFO, each marked `expired` and `recalled` (a recall the pharmacy confirmed
-        for this batch: status 'confirmed'; 'pending', 'not_ours' and 'handled' do not hold the stock)."""
+        for this batch: status 'confirmed'; 'pending' and 'not_ours' do not hold the stock, and 'handled'
+        holds only units of the lot that came in after it was handled: the same recalled lot received again
+        by any way, a purchase, a return or a count, #324 S1). Compared at the ledger's millisecond precision,
+        a receipt in the same millisecond as the decision counts as after it (the safe side)."""
         rows = self.db.all(
             "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price,"
             " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.batch_id=sb.batch_key"
-            "         AND m.status='confirmed') recalled"
+            "         AND (m.status='confirmed' OR (m.status='handled' AND EXISTS ("
+            "              SELECT 1 FROM stock_movements sm WHERE sm.org_id=sb.org_id AND sm.branch_id=sb.branch_id"
+            "              AND sm.item_id=sb.item_id AND sm.batch_id=m.batch_id"
+            "              AND sm.qty_delta>0 AND sm.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', m.decided_at))))) recalled"
             " FROM stock_balances sb LEFT JOIN batches b ON b.id = nullif(sb.batch_key,'')"
             " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0"
             " ORDER BY b.expiry_date IS NULL, b.expiry_date", (ctx.org_id, branch_id, item_id))
