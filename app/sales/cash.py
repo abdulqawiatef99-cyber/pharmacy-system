@@ -31,7 +31,7 @@ def open_shift_id(db: Database, ctx: Context, branch_id: str | None = None) -> s
 def require_open_shift(db: Database, ctx: Context, branch_id: str | None = None) -> str:
     sid = open_shift_id(db, ctx, branch_id)
     if not sid:
-        raise Conflict("الخزينة مغلقة — افتح وردية قبل أي عملية نقدية", code="no_open_shift")
+        raise Conflict("الخزينة مغلقة — افتح شيفت قبل أي عملية نقدية", code="no_open_shift")
     return sid
 
 
@@ -115,10 +115,10 @@ class CashDrawer:
     def open(self, ctx: Context, opening_cash: int) -> str:
         ctx.require("sales.create")
         if not isinstance(opening_cash, int) or opening_cash < 0:
-            raise ValidationFailed("رصيد بداية الوردية غير صحيح")
+            raise ValidationFailed("رصيد بداية الشيفت غير صحيح")
         with self.db.transaction():
             if open_shift_id(self.db, ctx):
-                raise Conflict("توجد وردية مفتوحة بالفعل", code="shift_already_open")
+                raise Conflict("يوجد شيفت مفتوح بالفعل", code="shift_already_open")
             sid = new_id()
             self.db.execute("INSERT INTO cash_shifts (id, org_id, branch_id, opening_cash, opened_by, opened_at)"
                             " VALUES (?,?,?,?,?,?)", (sid, ctx.org_id, ctx.branch_id, opening_cash,
@@ -130,10 +130,10 @@ class CashDrawer:
         ctx.require("sales.read")
         shift_id = shift_id or open_shift_id(self.db, ctx)
         if not shift_id:
-            raise NotFound("لا توجد وردية مفتوحة")
+            raise NotFound("لا يوجد شيفت مفتوح")
         s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s:
-            raise NotFound("الوردية غير موجودة")
+            raise NotFound("الشيفت غير موجود")
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
         where, args = _sales_of(s)
@@ -196,7 +196,7 @@ class CashDrawer:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
                             f"{'عجز' if diff < 0 else 'زيادة'} في الخزينة {abs(diff) / 100:,.2f} ج",
-                            f"إغلاق الوردية: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
+                            f"إغلاق الشيفت: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
                             "cash_shift", sid)
         from ..core import autobackup
         autobackup.trigger("shift_close")
@@ -208,10 +208,10 @@ class CashDrawer:
         ctx.require("sales.read")
         s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s:
-            raise NotFound("الوردية غير موجودة")
+            raise NotFound("الشيفت غير موجود")
         own_closed = s["status"] == "closed" and s["closed_by"] == ctx.user_id
         if not (ctx.can("cash.see_expected") or own_closed):
-            raise Forbidden("تقرير الوردية للمدير والمالك", code="forbidden")
+            raise Forbidden("تقرير الشيفت للمدير والمالك", code="forbidden")
         full = {**dict(s)}
         k = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}

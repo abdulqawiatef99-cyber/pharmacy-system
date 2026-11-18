@@ -1,6 +1,6 @@
 """#114 on the invoice screen's return form: the refund method defaults to how the sale was paid (a credit
 sale goes back to the customer's account, not cash from the drawer), and a double click on «تسجيل المرتجع»
-records one return, not two."""
+records one return, not two. The quantity field starts empty and typing replaces (owner 18/11: 3 became 30)."""
 import json
 import re
 import shutil
@@ -94,7 +94,16 @@ const { chromium } = require('playwright');
   await p.goto(base + '/#/sales/' + sid);
   await p.waitForSelector('#rMethod');
   const out = { method: await p.locator('#rMethod').inputValue() };
-  await p.locator('[data-ret]').first().fill('1');
+  // owner 18/11: typing must replace, never append to a 0 (typing 3 gave 30)
+  out.startValue = await p.locator('[data-ret]').first().inputValue();
+  await p.locator('[data-ret]').first().click();
+  await p.keyboard.press('Home');
+  await p.keyboard.type('1');
+  out.typed = await p.locator('[data-ret]').first().inputValue();
+  await p.locator('#rReason').click();
+  await p.locator('[data-ret]').first().click();                     // coming back: typing replaces what is there
+  await p.keyboard.type('1');
+  out.retyped = await p.locator('[data-ret]').first().inputValue();
   await p.locator('#rReason').fill('العميل غيّر رأيه');
   await p.locator('#rGo').dblclick();
   await p.waitForTimeout(1500);
@@ -140,6 +149,7 @@ class TestReturnFormInBrowser(APICase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out["method"], "credit")
+        self.assertEqual((out["startValue"], out["typed"], out["retyped"]), ("", "1", "1"))
         self.assertEqual(out["posts"], 1)
         rets = self.db.all("SELECT refund_method, total FROM sale_returns WHERE sale_id=?", (sid,))
         self.assertEqual([(x["refund_method"], x["total"]) for x in rets], [("credit", 1000)])

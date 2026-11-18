@@ -58,7 +58,7 @@ def _modules():
         import win32print  # type: ignore
         from PIL import ImageWin
     except ImportError as e:
-        raise PrinterError("الطباعة عن طريق تعريف ويندوز تشتغل على كمبيوتر ويندوز بس") from e
+        raise PrinterError("الطباعة عن طريق تعريف ويندوز تعمل على كمبيوتر ويندوز فقط") from e
     return win32gui, win32print, ImageWin
 
 
@@ -66,7 +66,7 @@ def _open(win32gui, printer: str):
     try:
         return win32gui.CreateDC("WINSPOOL", printer, None)    # None: the printer's own "Printing preferences"
     except Exception as e:  # noqa: BLE001 — pywintypes.error
-        raise PrinterError(f"طابعة ويندوز «{printer}» مش موجودة أو مش متاحة: {e}") from e
+        raise PrinterError(f"طابعة ويندوز «{printer}» غير موجودة أو غير متاحة: {e}") from e
 
 
 def _page(win32print, hdc) -> Page:
@@ -75,15 +75,15 @@ def _page(win32print, hdc) -> Page:
     except Exception as e:  # noqa: BLE001 — pywintypes.error
         raise PrinterError(f"تعذر قراءة مقاس الورق من تعريف الطابعة في ويندوز: {e}") from e
     if min(pg) <= 0:
-        raise PrinterError("تعريف الطابعة في ويندوز مرجعش مقاس الورق")
+        raise PrinterError("لم يُرجع تعريف الطابعة في ويندوز مقاس الورق")
     return pg
 
 
 def check_label_page(pg: Page) -> None:
     """A label page, not a sheet: the owner sets the size in Windows, once, as for E-Stock."""
     if not (MIN_W_MM <= pg.w_mm <= MAX_MM and MIN_H_MM <= pg.h_mm <= MAX_MM):
-        raise PrinterError(f"مقاس الورق في تعريف الطابعة في ويندوز {pg.size_text().replace('x', ' × ')} مم، ده مش مقاس ملصق."
-                           " اضبط مقاس الملصق من «تفضيلات الطباعة» للطابعة في ويندوز (زي ما هو لإي ستوك)")
+        raise PrinterError(f"مقاس الورق في تعريف الطابعة في ويندوز {pg.size_text().replace('x', ' × ')} مم، وهذا ليس مقاس ملصق."
+                           " اضبط مقاس الملصق من «تفضيلات الطباعة» للطابعة في ويندوز (كما هو مضبوط لإي ستوك)")
 
 
 def page(printer: str) -> Page:

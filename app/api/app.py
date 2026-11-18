@@ -1992,9 +1992,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         drawer = (f"<hr><table><tr><td>أوامر فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
                   f"<tr><td>أوامر فتح الدرج يدويًا</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الوردية</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
-<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الوردية<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
+<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
 إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}

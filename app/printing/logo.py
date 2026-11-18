@@ -37,7 +37,7 @@ def clean(data_url: str) -> bytes:
     try:
         img = Image.open(io.BytesIO(blob))
         if img.format not in ("PNG", "JPEG", "WEBP", "GIF", "BMP"):
-            raise ValidationFailed("اللوجو لازم يكون صورة PNG أو JPG")
+            raise ValidationFailed("يجب أن يكون اللوجو صورة PNG أو JPG")
         if img.width * img.height > MAX_PIXELS:
             raise ValidationFailed("أبعاد صورة اللوجو كبيرة جدًا")
         img.load()
@@ -53,7 +53,7 @@ def clean(data_url: str) -> bytes:
     img = img.convert("L")
     box = ImageOps.invert(img).point(lambda p: 255 if p > 55 else 0).getbbox()   # trim the white margin
     if not box:
-        raise ValidationFailed("صورة اللوجو فاضية (كلها أبيض)")
+        raise ValidationFailed("صورة اللوجو فارغة (كلها بيضاء)")
     img = img.crop(box)
     img.thumbnail((STORE_W, STORE_H), Image.LANCZOS)
     out = io.BytesIO()

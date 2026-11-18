@@ -50,7 +50,7 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     when = rs.fmt_when(accounts.parse_iso(sale["completed_at"]).astimezone(), cfg["time_format"])
     dest = target or printer_target(db, ctx.org_id)
     if dest == "none":                      # browser printing chosen: not an error to show the cashier
-        raise PrintFailed("لم يتم اختيار طابعة الإيصال", code="no_printer")
+        raise PrintFailed("لم تُختر طابعة الإيصال (البرنامج ← طابعة الإيصال والدرج)", code="no_printer")
     rendered = False
     try:
         width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
@@ -170,7 +170,7 @@ def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = No
     error = None
     try:
         if dest == "none":
-            raise escpos.PrinterError("الطباعة من المتصفح لا تستطيع فتح الدرج — اختر طابعة الإيصال المباشرة في الإعدادات")
+            raise escpos.PrinterError("الطباعة من المتصفح لا تستطيع فتح الدرج — اختر طابعة إيصال مباشرة من «البرنامج ← طابعة الإيصال والدرج»")
         escpos.send(dest, escpos.INIT + escpos.DRAWER_KICK)
     except escpos.PrinterError as e:
         error = str(e)
@@ -321,7 +321,7 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
     from . import driver, labels as lb
     name = win_printer(cfg["label_target"])
     if not name:
-        raise escpos.PrinterError("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز (win:اسم الطابعة)")
+        raise escpos.PrinterError("الطباعة عن طريق تعريف ويندوز تحتاج إلى طابعة ويندوز (win:اسم الطابعة)")
 
     rows = int(cfg.get("label_rows") or 1)
 
@@ -339,7 +339,7 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
         gap = float(cfg.get("label_gap") or 0)
         row_mm = (pg.h_mm - gap * (rows - 1)) / rows
         if row_mm < 6:
-            raise escpos.PrinterError("الصفحة صغيرة على عدد الملصقات ده: قلل عدد الملصقات في الصفحة")
+            raise escpos.PrinterError("الصفحة أصغر من هذا العدد من الملصقات: قلّل عدد الملصقات في الصفحة")
         # composed at the labels' own (horizontal) resolution; the driver page stretches it to its pixels,
         # so a driver with different vertical dots per inch keeps the rows where they belong
         dots = lambda mm: round(mm * pg.dpi_x / 25.4)            # noqa: E731
@@ -450,7 +450,7 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
     if not cfg["label_target"]:
         raise ValidationFailed("اختر طابعة الملصقات (مكان الطابعة) أولًا", code="no_printer")
     if cfg["label_lang"] == "driver" and not win_printer(cfg["label_target"]):
-        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز محتاجة طابعة ويندوز: win:اسم الطابعة", code="driver_needs_windows_printer")
+        raise ValidationFailed("الطباعة عن طريق تعريف ويندوز تحتاج إلى طابعة ويندوز: win:اسم الطابعة", code="driver_needs_windows_printer")
     return cfg
 
 
@@ -500,7 +500,7 @@ def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> di
     cfg = _label_cfg(db, ctx, data)
     if cfg["label_lang"] == "driver":
         raise ValidationFailed("في الطباعة عن طريق تعريف ويندوز، المعايرة من «تفضيلات الطباعة» للطابعة في ويندوز"
-                               " (أو من زرار الطابعة نفسها)", code="calibrate_in_windows")
+                               " (أو من زر الطابعة نفسها)", code="calibrate_in_windows")
     if cfg["label_lang"] != "tspl":
         raise ValidationFailed("المعايرة من البرنامج لطابعات TSPL (Xprinter / TSC) فقط", code="calibrate_tspl_only")
     mode = data.get("mode", "sized")
@@ -508,7 +508,7 @@ def calibrate_labels(db: Database, ctx: Context, data: dict | None = None) -> di
         raise ValidationFailed("طريقة المعايرة: sized أو auto")
     w, h = label_size(cfg)
     if mode == "sized" and cfg["label_gap"] < 1:
-        raise ValidationFailed("المعايرة تحتاج مسافة بين الملصقات 1 مم على الأقل")
+        raise ValidationFailed("المعايرة تحتاج إلى مسافة بين الملصقات 1 مم على الأقل")
     try:
         escpos.send(cfg["label_target"], lb.calibrate_job(w, h, cfg["label_gap"], cfg["label_dpi"], mode))
     except escpos.PrinterError as e:
