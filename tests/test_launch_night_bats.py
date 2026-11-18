@@ -101,7 +101,7 @@ class FreshStartBat(Common, unittest.TestCase):
         dverify = first(L, '"%MANAGE%" verify "%DZIP%"')
         rename = first(L, 'ren "%DATA%" "%TRIAL%"')
         start = first(L, 'start "" /d')
-        self.assertLess(first(L, 'set /p "ANS=Type YES'), stop)
+        self.assertLess(first(L, '"%MANAGE%" fresh-start-check'), stop)        # #324 R2: name typed, not YES
         self.assertTrue(stop < backup < verify < preflight < dcopy < dverify < rename < start)
         for at in (backup, verify, preflight, dverify):
             self.assertIn("errorlevel 1", L[at + 1].lower())
@@ -129,7 +129,7 @@ class FreshStartBat(Common, unittest.TestCase):
         self.assertLess(first(L, 'pharm-code-before.txt'), rename)
         self.assertLess(rename, first(L, 'robocopy "%HOMEDIR%\\%TRIAL%\\code-releases" "%DATA%\\code-releases" /E'))
         self.assertLess(rename, first(L, 'fc "%TEMP%\\pharm-code-before.txt" "%TEMP%\\pharm-code-after.txt"'))
-        self.assertIn("http://127.0.0.1:8000/api/setup", self.text)
+        self.assertIn("http://127.0.0.1:%PORT%/api/setup", self.text)
         self.assertIn("$s.needed -ne $true", self.text)
         api = (ROOT / "app" / "api" / "app.py").read_text(encoding="utf-8")
         self.assertIn('Route("/api/setup", setup_status)', api)

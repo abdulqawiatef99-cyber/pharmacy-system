@@ -126,6 +126,14 @@ class LaunchNightOnWindows(unittest.TestCase):
         text = out.read_bytes().decode("utf-8", errors="replace")
         return subprocess.CompletedProcess(name, rc, text, "")
 
+    def pharmacy(self):
+        """The name fresh-start-check wants typed (#324 R2): the pharmacy in the current database."""
+        con = sqlite3.connect((self.data / "pharmacy.db").as_uri() + "?mode=ro", uri=True)
+        try:                                       # closed at once: an open file blocks the folder rename
+            return con.execute("SELECT name FROM organizations").fetchone()[0]
+        finally:
+            con.close()
+
     def log(self, name):
         p = self.out / name
         return p.read_text(encoding="utf-8", errors="replace") if p.exists() else "(no log)"
@@ -142,7 +150,7 @@ class LaunchNightOnWindows(unittest.TestCase):
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            r = self.run_bat("launch-fresh-start.bat", "YES\n", {"PHARM_E2E_ANSWER": "YES"})
+            r = self.run_bat("launch-fresh-start.bat", "", {"PHARM_E2E_PHARMACY": self.pharmacy()})
             text = self.log("fresh-start.txt")
             self.assertEqual(r.returncode, 0, text + r.stdout + r.stderr)
             self.assertIn("PASS - ALL DONE", text)
@@ -181,6 +189,24 @@ class LaunchNightOnWindows(unittest.TestCase):
     def test_3_fresh_start_failure_after_rename_puts_the_data_back(self):
         self.stop_own()
         items = count(self.data / "pharmacy.db", "SELECT count(*) FROM items")
+        launcher = self.inst / "program" / "launcher.py"
+        hidden = launcher.with_name("launcher.py.e2e-hidden")
+        launcher.rename(hidden)                                        # the program cannot start after the rename
+        try:
+            r = self.run_bat("launch-fresh-start.bat", "", {"PHARM_E2E_PHARMACY": self.pharmacy()})
+        finally:
+            hidden.rename(launcher)
+        text = self.log("fresh-start.txt").rsplit("==== fresh start", 1)[-1]
+        self.assertEqual(r.returncode, 1, text + r.stdout + r.stderr)
+        self.assertIn("FAIL - the program did not start", text)
+        self.assertIn("PASS - old data folder put back", text)
+        self.assertEqual(count(self.data / "pharmacy.db", "SELECT count(*) FROM items"), items)
+        self.assertEqual(len(self.trials("data-failed-")), 1)
+        self.assertEqual(len(self.trials("data-trial-")), 1)                 # only the one from test 1
+
+    def test_4_a_foreign_server_on_the_port_stops_fresh_start_before_any_change(self):
+        """#324 R14: a server answering 404 on the program's port used to pass the stop check."""
+        self.stop_own()
 
         class NotFound(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -190,20 +216,18 @@ class LaunchNightOnWindows(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
-        srv = http.server.HTTPServer(("127.0.0.1", 8000), NotFound)   # the program cannot start on its port
+        srv = http.server.HTTPServer(("127.0.0.1", 8000), NotFound)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            r = self.run_bat("launch-fresh-start.bat", "YES\n", {"PHARM_E2E_ANSWER": "YES"})
+            r = self.run_bat("launch-fresh-start.bat", "", {"PHARM_E2E_PHARMACY": self.pharmacy()})
         finally:
             srv.shutdown()
             srv.server_close()
         text = self.log("fresh-start.txt").rsplit("==== fresh start", 1)[-1]
         self.assertEqual(r.returncode, 1, text + r.stdout + r.stderr)
-        self.assertIn("FAIL - the program did not start", text)
-        self.assertIn("PASS - old data folder put back", text)
-        self.assertEqual(count(self.data / "pharmacy.db", "SELECT count(*) FROM items"), items)
-        self.assertEqual(len(self.trials("data-failed-")), 1)
-        self.assertEqual(len(self.trials("data-trial-")), 1)                 # only the one from test 1
+        self.assertIn("FAIL - the program could not be stopped", text)
+        self.assertNotIn("data folder renamed", text)
+        self.assertEqual(len(self.trials("data-failed-")), 1)                # still only the one from test 3
 
 
 if __name__ == "__main__":
