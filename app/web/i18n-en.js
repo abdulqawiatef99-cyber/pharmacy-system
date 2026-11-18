@@ -1,6 +1,14 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"آخر نسخة احتياطية": "Last backup",
+"آخر نسخة سليمة": "last good copy",
+"✕ آخر نسخة احتياطية تلقائية فشلت": "✕ The last automatic backup failed",
+"⚠ النسخة الاحتياطية التلقائية متأخرة": "⚠ The automatic backup is late",
+"افتح «البرنامج والنسخ الاحتياطي».": "Open «Program and backup».",
+"افتح «البرنامج والنسخ الاحتياطي»": "Open «Program and backup»",
+"لا توجد بعد": "none yet",
+"⚠ النسخة الاحتياطية متأخرة": "⚠ The backup is late",
 "% عن اليوم نفسه من الأسبوع الماضي": "% vs the same day last week",
 "% عن نفس اليوم الأسبوع اللي فات": "% vs the same day last week",
 "+ صنف جديد": "+ New item",
