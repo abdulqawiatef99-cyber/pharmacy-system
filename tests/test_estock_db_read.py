@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PS1 = ROOT / "scripts" / "windows" / "estock-db-read.ps1"
 BAT = ROOT / "scripts" / "windows" / "estock-db-read.bat"
+ONE = ROOT / "scripts" / "windows" / "estock-db-read-one.bat"
 
 
 class TestEstockDbRead(unittest.TestCase):
@@ -115,6 +116,73 @@ class TestEstockDbRead(unittest.TestCase):
         self.assertGreaterEqual(len(exits), 4)
         for i in exits:                                                # every exit has a Save right before it
             self.assertTrue(any("Save" in x for x in code[max(0, i - 3):i + 1]), code[i])
+
+    def test_dates_are_text_from_sql_server_in_stats_and_export(self):
+        """Cashier PC 19/11: dbo.Sales_details failed with "SqlDateTime overflow" in Fill (SQL Server 2008
+        RTM, no TRY_CONVERT). The client must never parse a date: SQL Server sends text (style 126)."""
+        text = PS1.read_text(encoding="utf-8-sig")
+        self.assertIn('"CONVERT(varchar(33), MIN($q), 126) AS [lo$i]"', text)
+        self.assertIn('"CONVERT(varchar(33), MAX($q), 126) AS [hi$i]"', text)
+        date_rule = next(l for l in text.splitlines() if l.strip().startswith("if ($c.d -in $dateTypes)"))
+        self.assertNotIn('"MIN($q)', date_rule)                          # no raw date MIN/MAX reaches the client
+        self.assertIn('if ($_.d -in $dateTypes) { "CONVERT(varchar(33), $q, 126) AS $q" } else { $q }', text)
+        self.assertIn('Q $conn "SELECT $sel FROM $full WITH (NOLOCK)"', text)
+        self.assertNotIn("SELECT * FROM", text)
+        self.assertNotIn("TRY_CONVERT", text)                          # not in SQL Server 2008
+        for t in ("date", "datetime", "datetime2", "smalldatetime", "datetimeoffset", "time"):
+            self.assertIn(f"'{t}'", text[text.index("$dateTypes ="):text.index("$dateTypes =") + 120])
+
+    def test_stats_failure_still_exports_the_table(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        stats, export = text.index("# 1) structure and counts"), text.index("# 2) full table to CSV")
+        between = text[stats:export]
+        handler = between[between.rindex("} catch {"):]
+        self.assertIn('$failed.Add("$srv / $dbn.$($t.sc).$($t.nm) (stats)")', handler)
+        self.assertNotIn("continue", handler)                           # a counts failure goes on to the export
+        self.assertEqual(text[export:].splitlines()[1].strip(), "try {")   # the export has its own try
+        self.assertIn("if ($null -ne $rows -and $got -ne $rows)", text)
+        self.assertLess(text.index('Say ("-- TABLE $dbn.$($t.sc).$($t.nm)")'), stats)   # the header is printed first
+
+    def test_only_and_retry_failed(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        code = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+        self.assertEqual(code[0].lstrip("\ufeff"), "param([string]$Only = '', [switch]$RetryFailed)")   # first statement
+        self.assertIn("if (-not (Wanted $dbn $t.sc $t.nm)) { continue }", text)
+        self.assertIn('($onlyList -contains "$db.$sc.$nm") -or ($onlyList -contains "$sc.$nm") -or ($onlyList -contains $nm)', text)
+        # the retry reads exactly what a run writes under RESULT: PARTIAL
+        self.assertIn('foreach ($x in $failed) { Say ("   " + $x) }', text)
+        self.assertIn("if ($l.StartsWith('RESULT: PARTIAL'))", text)
+        self.assertIn("if ($e.EndsWith(' (stats)'))", text)
+        raw = ONE.read_bytes()
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertIn('-File "%~dp0estock-db-read.ps1" -RetryFailed', raw.decode("ascii"))
+
+    def test_retry_parser_on_the_cashier_pc_summary(self):
+        """The same parsing rules, run in Python on a summary shaped like the 19/11 run (names synthetic)."""
+        summary = ["RESULT: PARTIAL - 107 tables, 445770 rows read; 4 not read:",
+                   "   (local) / ESTOCK.dbo.Sales_details", "   (local) / ESTOCK.dbo.Items (stats)",
+                   "   (local) / OLDDB (OFFLINE)", "   MSSQL$X (could not sign in)",
+                   "Nothing in E-Stock was changed."]
+        out, inside = [], False
+        for l in summary:
+            if l.startswith("RESULT: PARTIAL"):
+                inside = True
+                continue
+            if not inside:
+                continue
+            if not l.startswith("   "):
+                break
+            e = l.strip()
+            k = e.find(" / ")
+            if k < 0:
+                continue
+            e = e[k + 3:]
+            if e.endswith(" (stats)"):
+                e = e[:-8]
+            elif e.endswith(")"):
+                continue
+            out.append(e)
+        self.assertEqual(out, ["ESTOCK.dbo.Sales_details", "ESTOCK.dbo.Items"])
 
     def test_in_app_update_ships_the_ps1(self):
         import io

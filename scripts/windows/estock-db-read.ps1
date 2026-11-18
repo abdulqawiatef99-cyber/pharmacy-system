@@ -6,6 +6,11 @@
 #   min/max of dates and numbers, never any text value), so it can be read to compare features.
 # - Connection: Windows sign-in to every local SQL Server instance first. If that fails, connection
 #   strings found in E-Stock's own folder are tried locally; a password is never written anywhere.
+# - Dates and times are read as text made by SQL Server (CONVERT style 126): the client never parses them,
+#   so an out-of-range or odd value (seen 19/11 on the cashier PC: SqlDateTime overflow) cannot stop a table.
+# - Arguments: -Only <table[,table]> reads only these tables (schema.table, db.schema.table or table);
+#   -RetryFailed reads only the tables the last run listed as not read (estock-db-read-one.bat).
+param([string]$Only = '', [switch]$RetryFailed)
 $ErrorActionPreference = 'Stop'
 # CSV dates and numbers in one fixed format (not the PC's Arabic culture: AM/PM marks, decimal comma)
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
@@ -28,6 +33,34 @@ function Save {
 trap { Say ("RESULT: FAIL - " + $_.Exception.Message + " (nothing in E-Stock was changed)"); try { Save } catch { }; exit 3 }
 
 Say "E-Stock database read (read only) $stamp"
+
+# Tables to read (empty = all). -RetryFailed takes them from the newest earlier summary.txt.
+$onlyList = @($Only -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($RetryFailed) {
+    $prev = Get-ChildItem -Path (Split-Path $out) -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $stamp -and (Test-Path (Join-Path $_.FullName 'summary.txt')) } |
+        Sort-Object Name | Select-Object -Last 1
+    if (-not $prev) { Say 'RESULT: FAIL - no earlier run found to retry. Nothing was read or changed.'; Save; exit 2 }
+    $inList = $false
+    foreach ($l in [IO.File]::ReadAllLines((Join-Path $prev.FullName 'summary.txt'))) {
+        if ($l.StartsWith('RESULT: PARTIAL')) { $inList = $true; continue }
+        if (-not $inList) { continue }
+        if (-not $l.StartsWith('   ')) { break }
+        $e = $l.Trim(); $k = $e.IndexOf(' / ')
+        if ($k -lt 0) { continue }                                  # an instance that could not sign in
+        $e = $e.Substring($k + 3)
+        if ($e.EndsWith(' (stats)')) { $e = $e.Substring(0, $e.Length - 8) }
+        elseif ($e.EndsWith(')')) { continue }                      # a database, not a table
+        $onlyList += $e
+    }
+    Say ("retry of run " + $prev.Name + ": " + $onlyList.Count + " table(s)")
+    if ($onlyList.Count -eq 0) { Say 'RESULT: PASS - the last run left no table unread. Nothing was read or changed.'; Save; exit 0 }
+}
+if ($onlyList.Count) { Say ("only: " + ($onlyList -join ', ')) }
+function Wanted([string]$db, [string]$sc, [string]$nm) {
+    if (-not $onlyList.Count) { return $true }
+    return ($onlyList -contains "$db.$sc.$nm") -or ($onlyList -contains "$sc.$nm") -or ($onlyList -contains $nm)
+}
 Say "computer: $env:COMPUTERNAME  user: $env:USERNAME"
 
 # 1. Candidate servers: the default instance and every named instance found in the services.
@@ -166,23 +199,32 @@ foreach ($pair in $conns) {
         New-Item -ItemType Directory -Force -Path $dbDir | Out-Null
         foreach ($t in $tl.Rows) {
           $ti++
+          if (-not (Wanted $dbn $t.sc $t.nm)) { continue }
+          $full = (Qn $t.sc) + '.' + (Qn $t.nm)
+          $rows = $null; $cols = $null
+          Say ''
+          Say ("-- TABLE $dbn.$($t.sc).$($t.nm)")
           try {
-            $full = (Qn $t.sc) + '.' + (Qn $t.nm)
             $cols = Q $conn ("SELECT COLUMN_NAME c, DATA_TYPE d, CHARACTER_MAXIMUM_LENGTH l FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'" + $t.sc.Replace("'", "''") + "' AND TABLE_NAME = N'" + $t.nm.Replace("'", "''") + "' ORDER BY ORDINAL_POSITION")
+          } catch {
+            Say ("   ERROR reading the columns of " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message)
+            $failed.Add("$srv / $dbn.$($t.sc).$($t.nm)"); continue
+          }
+          # 1) structure and counts; a failure here is reported and the table is still exported
+          try {
             $parts = @('COUNT_BIG(*) AS [__rows]'); $i = 0
             foreach ($c in $cols.Rows) {
                 $q = Qn $c.c
                 if ($c.d -in 'text','ntext','image','xml','varbinary','binary','timestamp','geography','geometry','sql_variant','hierarchyid') { $i++; continue }
                 $parts += "COUNT_BIG($q) AS [n$i]"
                 if ($c.d -in $numTypes -and $c.d -ne 'bit' -and $c.c -notmatch $private) { $parts += "MIN($q) AS [lo$i]"; $parts += "MAX($q) AS [hi$i]" }
-                if ($c.d -in $dateTypes) { $parts += "MIN($q) AS [lo$i]"; $parts += "MAX($q) AS [hi$i]" }
+                if ($c.d -in $dateTypes) { $parts += "CONVERT(varchar(33), MIN($q), 126) AS [lo$i]"; $parts += "CONVERT(varchar(33), MAX($q), 126) AS [hi$i]" }
                 if ($c.d -eq 'bit') { $parts += "SUM(CAST($q AS int)) AS [hi$i]" }
                 $i++
             }
             $st = (Q $conn ("SELECT " + ($parts -join ', ') + " FROM $full WITH (NOLOCK)")).Rows[0]
             $rows = [int64]$st['__rows']
-            Say ''
-            Say ("-- TABLE $dbn.$($t.sc).$($t.nm)  rows=$rows  columns=" + $cols.Rows.Count)
+            Say ("   rows=$rows  columns=" + $cols.Rows.Count)
             $i = 0
             foreach ($c in $cols.Rows) {
                 $line = "   " + $c.c + " : " + $c.d + $(if ($c.l -isnot [DBNull] -and $c.l -gt 0) { "(" + $c.l + ")" } else { '' })
@@ -191,8 +233,17 @@ foreach ($pair in $conns) {
                 elseif ($st.Table.Columns.Contains("hi$i")) { $line += "  true=" + $st["hi$i"] }
                 Say $line; $i++
             }
-            # Full table to CSV, on this PC only.
-            $data = Q $conn "SELECT * FROM $full WITH (NOLOCK)"
+          } catch {
+            Say ("   ERROR in the counts of " + $t.sc + "." + $t.nm + " (the table is still exported): " + $_.Exception.Message)
+            $failed.Add("$srv / $dbn.$($t.sc).$($t.nm) (stats)")
+          }
+          # 2) full table to CSV, on this PC only; dates and times as SQL Server's own text (style 126)
+          try {
+            $sel = @($cols.Rows | ForEach-Object {
+                $q = Qn $_.c
+                if ($_.d -in $dateTypes) { "CONVERT(varchar(33), $q, 126) AS $q" } else { $q }
+            }) -join ', '
+            $data = Q $conn "SELECT $sel FROM $full WITH (NOLOCK)"
             $csv = Join-Path $dbDir (('{0:D3}_' -f $ti) + (Safe ($t.sc + '.' + $t.nm)))
             $names = [string[]]($data.Columns | ForEach-Object { $_.ColumnName })
             if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw "two columns differ only in letter case" }
@@ -207,7 +258,8 @@ foreach ($pair in $conns) {
                 } | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
             }
             $got = $data.Rows.Count
-            if ($got -ne $rows) { Say ("   note: $got rows exported (count was $rows; the cashier changed it meanwhile)") }
+            if ($null -ne $rows -and $got -ne $rows) { Say ("   note: $got rows exported (count was $rows; the cashier changed it meanwhile)") }
+            Say ("   exported: $got rows")
             $totalRows += $got; $totalTables++               # counted only once its CSV is written
             $manifest.Add([pscustomobject][ordered]@{ index = ('{0:D2}/{1:D2}/{2:D3}' -f $si, $di, $ti); instance = $srv
                 database = $dbn; schema = $t.sc; table = $t.nm; rows = $got; file = $csv.Substring($tables.Length + 1) + '.csv' })
