@@ -1086,6 +1086,27 @@ def _names_of(ex: Export, key: str) -> dict[str, str]:
     return best[1] if best else {}
 
 
+_ROLE_AR = {"drawer": "درج كاشير", "treasury": "خزنة", "bank": "بنك", "wallet": "محفظة/شبكة", "junk": "اسم غريب",
+            "other": "حساب فلوس"}
+
+
+def _depot_role(name: str) -> str:
+    """What a Cash_depots row is, from its name as E-Stock shows it («النقدية المتاحة»): only a label for the
+    report and the account mapping; every row moves either way."""
+    n = normalize_text(name or "")
+    if not n.strip() or not any(ch.isalpha() for ch in n):
+        return "junk"
+    if "نقطه بيع" in n or "نقطة بيع" in name:
+        return "drawer"
+    if "خزين" in n or "خزن" in n:
+        return "treasury"
+    if "بنك" in n:
+        return "bank"
+    if any(w in n for w in ("انستا", "فودافون", "اتصالات", "امان", "فيزا", "اورنج", "محفظ", "insta", "vodafone")):
+        return "wallet"
+    return "other"
+
+
 def _plan_money_info(ex: Export, p: Plan) -> None:
     """Owner 18/11 22:05: E-Stock's treasury balance becomes the opening of the program's main treasury and
     the InstaPay / Vodafone Cash balances the openings of their own accounts (F105 builds them). E-Stock's
@@ -1146,17 +1167,34 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
         pick = lambda *keys: next((c for c in cols if any(k in c.lower() for k in keys)), None)   # noqa: E731
         idc, namec, classc = cols[0], pick("name"), pick("class", "type")
         balc = pick("balance", "current", "money", "total")
+        closes = {}
+        for c in ex.rows("Cash_disk_close"):
+            k = ident(c.get("cdc_cash_id"))
+            if (c.get("insert_date") or "") >= closes.get(k, ""):
+                closes[k] = c.get("insert_date") or ""
         for r in rows:
             bal = dec(r.get(balc)) if balc else None
-            depots.append({"source": "Cash_depots", "estock_id": ident(r.get(idc)),
-                           "name": (r.get(namec) or "").strip() if namec else "",
-                           "class": (r.get(classc) or "").strip() if classc else "",
-                           "balance": egp(bal) if bal is not None else None, "balance_column": balc,
-                           "exact_piastres": bal is not None and exact_piasters(bal) is not None})
-            p.issue("Cash_depots", ident(r.get(idc)), (r.get(namec) or "").strip() if namec else "", balc or "balance",
-                    r.get(balc) if balc else "?",
-                    "رصيد خزنة/محفظة: بيتنقل كرصيد افتتاحي لحسابه في البرنامج بخدمة F105 (لسه ما اتنقلش)",
+            name = (r.get(namec) or "").strip() if namec else ""
+            role = _depot_role(name)
+            d = {"source": "Cash_depots", "estock_id": ident(r.get(idc)), "name": name, "role": role,
+                 "class": (r.get(classc) or "").strip() if classc else "",
+                 "balance": egp(bal) if bal is not None else None, "balance_column": balc,
+                 "exact_piastres": bal is not None and exact_piasters(bal) is not None}
+            if role == "drawer":
+                d["last_close"] = closes.get(d["estock_id"]) or None
+            depots.append(d)
+            # every depot moves as it is, one program account each (manager 22:28): nothing dropped
+            p.issue("Cash_depots", d["estock_id"], name, balc or "balance", r.get(balc) if balc else "?",
+                    f"«{name}» ({_ROLE_AR[role]}): بيتنقل حساب لوحده برصيده بخدمة F105 (لسه ما اتنقلش)",
                     value_egp=bal, kind="review")
+            if role == "junk" or "موقوف" in name:
+                p.issue("Cash_depots", d["estock_id"], name, "name", name,
+                        "OWNER: " + ("الاسم شكله مش حقيقي" if role == "junk" else "متعلّم عليه موقوف")
+                        + ": بيتنقل زي ما هو، والمالك يقرر يتقفل ولا لأ", value_egp=bal, kind="review")
+            if role == "drawer" and d.get("last_close"):
+                p.issue("Cash_depots", d["estock_id"], name, "last_close", d["last_close"],
+                        "درج الكاشير: ليلة النقل اقفل شيفت إي ستوك الأول؛ رصيد الدرج يبقى نقدية أول شيفت في البرنامج",
+                        value_egp=bal, kind="review")
     out["cash_depots"] = depots
     p.checks["money_info"] = out
     for t in out["tables"]:
@@ -1594,7 +1632,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
                 lines.append(f"    {k}={g['id']} {g['name']}: " + "، ".join(f"{c}={v}" for c, v in g.items()
                                                                            if c not in ("id", "name")))
     for d in mi.get("cash_depots", []):
-        lines.append(f"  Cash_depots {d['estock_id']} «{d['name']}» ({d['class']}): {d['balance']} — مستني F105")
+        lines.append(f"  Cash_depots {d['estock_id']} «{d['name']}» ({_ROLE_AR.get(d.get('role'), '')}, class {d['class']}):"
+                     f" {d['balance']} — مستني F105" + (f"، آخر قفل {d['last_close']}" if d.get("last_close") else ""))
     for c in mi.get("shift_transfers", []):
         lines.append(f"  تحويل قفل الشيفت للخزنة ({c['source']}) خزنة {c['fcs_id']} {c['name']}: {c['total']}")
     for c in mi.get("last_shift_close", []):

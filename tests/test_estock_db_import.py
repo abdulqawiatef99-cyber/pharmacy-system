@@ -1069,3 +1069,27 @@ class TestCreditLimits(Base):
         res = self.run_import(tables=t)
         self.assertIn(("C1", "customer_max_money", "review"),
                       {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
+
+
+class TestCashDepotsAsOnTheScreen(Base):
+    """Manager 22:28, from E-Stock's «النقدية المتاحة»: all 11 move as they are; 6 and 10 listed for the owner."""
+
+    def test_eleven_depots(self):
+        names = ["نقطة بيع 1", "خزينة 1", "حساب بنك مصر", "نقطة بيع 2", "نقطة بيع 3", "0000", "انستا باي",
+                 "فودافون كاش", "اتصالات كاش", "فيزا باى موب - موقوف", "امان"]
+        t = base_tables()
+        t["Cash_depots"] = [{"cd_id": str(i), "cd_name": n, "cd_class": "1", "cd_balance": f"{i * 10}.0000"}
+                            for i, n in enumerate(names, start=1)]
+        t["Cash_disk_close"][0].update({"cdc_cash_id": "1", "insert_date": "2026-11-15T14:19:00.000"})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        d = {x["estock_id"]: x for x in res["plan"].checks["money_info"]["cash_depots"]}
+        self.assertEqual(len(d), 11)
+        self.assertEqual([d[i]["role"] for i in ("1", "2", "3", "6", "7", "8", "9", "10", "11")],
+                         ["drawer", "treasury", "bank", "junk", "wallet", "wallet", "wallet", "wallet", "wallet"])
+        self.assertEqual(d["1"]["last_close"], "2026-11-15T14:19:00.000")
+        owner = {x["estock_id"] for x in res["plan"].dq if x["table"] == "Cash_depots" and x["action"].startswith("OWNER")}
+        self.assertEqual(owner, {"6", "10"})
+        moves = [x for x in res["plan"].dq if x["table"] == "Cash_depots" and "بيتنقل حساب لوحده" in x["action"]]
+        self.assertEqual(len(moves), 11)
+        self.assertTrue(any(x["field"] == "last_close" for x in res["plan"].dq))
