@@ -325,10 +325,10 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
-    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة"}
+    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة", "transfer": "محفظة إلكترونية"}
 
     def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
-                         method: str = "cash") -> int:
+                         method: str = "cash", channel_id: str | None = None) -> int:
         ctx.require("customers.manage")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
@@ -343,14 +343,25 @@ class Sales:
                 raise ValidationFailed(
                     "المبلغ أكبر من المستحق على العميل" if owed > 0 else "لا يوجد مبلغ مستحق على هذا العميل",
                     code="over_collection", details={"balance": owed, "amount": amount})
+            ch = None
+            if method != "cash" and channel_id:
+                ch = self.db.one("SELECT id, name FROM payment_channels WHERE id=? AND org_id=? AND kind=?",
+                                 (channel_id, ctx.org_id, method))
+                if not ch:
+                    raise ValidationFailed("وسيلة الدفع غير موجودة")
             if method == "cash":
                 cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
             # how it was paid stays with the row (no column for it): a card collection has no drawer movement
             said = (str(note).strip() if note else "")[:200]
-            how = self.COLLECTION_METHODS[method] + (f" — {said}" if said else "")
+            how = self.COLLECTION_METHODS[method] + (f" ({ch['name']})" if ch else "") + (f" — {said}" if said else "")
+            lid = new_id()
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
-                            (new_id(), ctx.org_id, customer_id, -amount, how, ctx.user_id))
+                            (lid, ctx.org_id, customer_id, -amount, how, ctx.user_id))
+            if method != "cash":                      # card / wallet money lands in its own account (F105)
+                from ..finance import money
+                money.receive(self.db, ctx, method, ch["id"] if ch else None, amount, "customer_payment",
+                              ref_type="customer_ledger", ref_id=lid, note=how)
             audit.record(self.db, ctx, "customer.payment", "customer", customer_id,
                          after={"amount": amount, "method": method})
         return self.balance(ctx, customer_id)
@@ -738,10 +749,14 @@ class Sales:
                 shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
                     or cash.require_open_shift(self.db, ctx, s["branch_id"])   # again inside the write lock
             self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
+            from ..finance import money
             for p in payments:
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount)"
                                 " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
                                                           p.get("channel_id"), p["amount"]))
+                if p["method"] in money.METHODS:            # card / wallet money lands in its own account (F105)
+                    money.receive(self.db, ctx, p["method"], p.get("channel_id"), p["amount"], "sale",
+                                  ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
                             " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
@@ -1091,6 +1106,14 @@ class Sales:
                                 (new_id(), ctx.org_id, s["customer_id"], -refund, rid, ctx.user_id))
             if refund_method == "cash":
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
+            if refund_method == "card" and refund:
+                # back through the card / wallet the sale was paid with (the first one, if it was split)
+                from ..finance import money
+                p = self.db.one("SELECT method, channel_id FROM sale_payments WHERE sale_id=? AND org_id=?"
+                                " AND method IN ('card','transfer') ORDER BY rowid LIMIT 1", (sid, ctx.org_id))
+                if p:
+                    money.receive(self.db, ctx, p["method"], p["channel_id"], -refund, "refund", ref_type="sale_return",
+                                  ref_id=rid, note=f"مرتجع فاتورة {s['sale_no']}")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1152,6 +1175,11 @@ class Sales:
                                 (sid, ctx.org_id))
             else:
                 cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
+            from ..finance import money
+            for p in self.db.all("SELECT method, channel_id, amount FROM sale_payments WHERE sale_id=? AND org_id=?"
+                                 " AND method IN ('card','transfer')", (sid, ctx.org_id)):
+                money.receive(self.db, ctx, p["method"], p["channel_id"], -p["amount"], "refund", ref_type="sale_void",
+                              ref_id=sid, note=f"إلغاء فاتورة {s['sale_no']}")
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",

@@ -168,6 +168,18 @@ def drawer_balance(db: Database, ctx: Context) -> dict:
     return {"shift_id": last["id"], "open": False, "balance": left}
 
 
+def drawer_check(db: Database, ctx: Context, amount: int) -> str:
+    """Refuse a drawer payout that would take the open shift's cash below zero (inside the caller's
+    transaction, before the payout row is written by its own service)."""
+    from ..sales import cash
+    sid = cash.require_open_shift(db, ctx)
+    now = _drawer_expected(db, ctx, sid)
+    if now - amount < 0:
+        raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
+                       details={"balance": now, "amount": amount})
+    return sid
+
+
 def _drawer_out(db: Database, ctx: Context, amount: int, ref_id: str | None, note: str) -> str:
     from ..sales import cash
     sid = cash.require_open_shift(db, ctx)
@@ -201,7 +213,10 @@ def check_source(db: Database, ctx: Context, source: str | None) -> str:
         return OUTSIDE
     ctx.require("cash.manage")
     with db.transaction():
-        aid = _writable(db, ctx, source)
+        try:
+            aid = _writable(db, ctx, source)
+        except NotFound:
+            raise ValidationFailed("اختر مصدر المبلغ المدفوع", code="unknown_source")
         _account(db, ctx, aid)
     return aid
 
@@ -597,7 +612,8 @@ def owner_movement(db: Database, ctx: Context, source: str, amount: int, kind: s
     return {"ref_id": ref, "movement_id": mid, "source": source, "amount": amount, "kind": kind}
 
 
-def shift_close_transfer(db: Database, ctx: Context, shift_id: str, float_left: int | None = None) -> dict:
+def shift_close_transfer(db: Database, ctx: Context, shift_id: str, float_left: int | None = None, *,
+                         to_account: str | None = None, received_by: str | None = None) -> dict:
     """At shift close: what was counted minus the float left for the next shift goes to the treasury, as one
     recorded movement. Called inside the close transaction, after the shift row is closed. A second call for
     the same shift changes nothing and returns the first result."""
@@ -626,11 +642,16 @@ def shift_close_transfer(db: Database, ctx: Context, shift_id: str, float_left: 
         db.execute("UPDATE cash_shifts SET float_left=? WHERE id=? AND org_id=? AND float_left IS NULL",
                    (left, shift_id, ctx.org_id))
         mid = None
+        target = None
         if moved:
-            mid = _post(db, ctx, treasury_id(db, ctx), moved, "shift_close", ref_type="cash_shift", ref_id=shift_id,
-                        note="تقفيل شيفت: النقدية اتنقلت للخزنة الرئيسية")
+            target = _writable(db, ctx, to_account or "treasury")
+            name = _account(db, ctx, target)["name"]
+            mid = _post(db, ctx, target, moved, "shift_close", ref_type="cash_shift", ref_id=shift_id,
+                        note=f"تقفيل شيفت: النقدية اتنقلت إلى {name}",
+                        meta={"received_by": received_by or ctx.user_id})
         audit.record(db, ctx, "money.shift_close", "cash_shift", shift_id,
-                     after={"counted": counted, "float_left": left, "to_treasury": moved})
+                     after={"counted": counted, "float_left": left, "to_treasury": moved, "to_account": target,
+                            "received_by": received_by or ctx.user_id})
     return {"shift_id": shift_id, "float_left": left, "to_treasury": moved, "movement_id": mid, "replayed": False}
 
 
@@ -684,7 +705,7 @@ def set_route(db: Database, ctx: Context, method: str, channel_id: str | None, a
 
 
 def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amount: int, kind: str, *,
-            ref_type: str, ref_id: str | None, note: str | None = None) -> str | None:
+            ref_type: str, ref_id: str | None, note: str | None = None, check: bool = False) -> str | None:
     """Card / transfer money of a sale or a customer collection (amount > 0), or a card refund (kind 'refund',
     amount < 0), on the routed account, inside the caller's transaction. No route = nothing posted (the
     reports list it as not routed). Cash never comes here: it is the drawer's."""
@@ -695,7 +716,9 @@ def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amo
     acc = route_for(db, ctx.org_id, method, channel_id)
     if not acc:
         return None
-    return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note)
+    # a refund back to the card / wallet is what really happened at the machine: it is recorded even if it
+    # takes the account below zero (never blocks a customer's return); the count then shows the truth
+    return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check)
 
 
 # -------------------------------------------------------------------------- reports
@@ -744,6 +767,35 @@ def movements(db: Database, ctx: Context, *, account_id: str | None = None, kind
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows,
             "total_in": sum(r["amount"] for r in rows if r["amount"] > 0),
             "total_out": -sum(r["amount"] for r in rows if r["amount"] < 0)}
+
+
+def statement(db: Database, ctx: Context, account: str, date_from: str | None = None,
+              date_to: str | None = None) -> dict:
+    """One account's statement: the balance before the period, every movement with the running balance, the
+    balance at the end (owner / manager)."""
+    ctx.require("cash.see_expected")
+    from ..sales.service import _local_date
+    d1, d2, lo, hi = _bounds(date_from, date_to)
+    aid = find_treasury(db, ctx.org_id) if account == "treasury" else resolve(db, ctx, account)
+    if not aid:
+        return {"account": {"id": "treasury", "name": TREASURY_NAME, "kind": "treasury"}, "from": d1.isoformat(),
+                "to": d2.isoformat(), "opening": 0, "closing": 0, "lines": [], "total_in": 0, "total_out": 0}
+    a = dict(_account(db, ctx, aid, active=False))
+    opening = db.one("SELECT coalesce(sum(amount),0) b FROM money_movements WHERE org_id=? AND account_id=?"
+                     " AND created_at<?", (ctx.org_id, aid, lo))["b"]
+    run, lines = opening, []
+    for r in db.all("SELECT m.*, u.full_name by_name FROM money_movements m LEFT JOIN users u ON u.id=m.created_by"
+                    " WHERE m.org_id=? AND m.account_id=? AND m.created_at>=? AND m.created_at<?"
+                    " ORDER BY m.created_at, m.rowid", (ctx.org_id, aid, lo, hi)):
+        run += r["amount"]
+        d = dict(r)
+        d.update(day=_local_date(d["created_at"]).isoformat(), kind_label=KINDS[d["kind"]], balance=run,
+                 meta=json.loads(d["meta"]) if d["meta"] else None)
+        lines.append(d)
+    return {"account": {k: a[k] for k in ("id", "name", "kind", "is_active", "allow_negative")},
+            "from": d1.isoformat(), "to": d2.isoformat(), "opening": opening, "closing": run, "lines": lines,
+            "total_in": sum(x["amount"] for x in lines if x["amount"] > 0),
+            "total_out": -sum(x["amount"] for x in lines if x["amount"] < 0)}
 
 
 def _drawer_kind(r) -> str:

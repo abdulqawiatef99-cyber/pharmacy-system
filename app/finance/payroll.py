@@ -131,21 +131,23 @@ def add_advance(db: Database, ctx: Context, uid: str, amount: int, month: str, n
     _month(month)
     if not isinstance(amount, int) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
-    if paid_from not in ("drawer", "outside"):
+    if not paid_from or not isinstance(paid_from, str):
         raise ValidationFailed("اختر مصدر المبلغ المدفوع")
-    from ..sales import cash
+    from . import money
+    src = money.check_source(db, ctx, paid_from)
     with db.transaction():
         # a month already paid cannot take a new advance: it would never be deducted or booked
         if db.one("SELECT 1 FROM payroll WHERE org_id=? AND user_id=? AND month=? AND status='paid'",
                   (ctx.org_id, uid, month)):
             raise Conflict("راتب هذا الشهر صُرف بالفعل؛ سجّل السلفة على الشهر التالي", code="payroll_paid")
         aid = new_id()
-        db.execute("INSERT INTO staff_advances (id, org_id, user_id, amount, month, note, created_by) VALUES (?,?,?,?,?,?,?)",
-                   (aid, ctx.org_id, uid, amount, month, (note or "").strip()[:200] or None, ctx.user_id))
-        if paid_from == "drawer":
-            name = db.one("SELECT full_name FROM users WHERE id=?", (uid,))["full_name"]
-            cash.record(db, ctx, -amount, "payout", aid, f"سلفة: {name}")
-        audit.record(db, ctx, "payroll.advance", "user", uid, after={"amount": amount, "month": month, "from": paid_from})
+        acc = None if src in (money.DRAWER, money.OUTSIDE) else src
+        db.execute("INSERT INTO staff_advances (id, org_id, user_id, amount, month, note, created_by, account_id)"
+                   " VALUES (?,?,?,?,?,?,?,?)",
+                   (aid, ctx.org_id, uid, amount, month, (note or "").strip()[:200] or None, ctx.user_id, acc))
+        name = db.one("SELECT full_name FROM users WHERE id=?", (uid,))["full_name"]
+        money.pay_out(db, ctx, src, amount, "payroll", ref_type="staff_advance", ref_id=aid, note=f"سلفة: {name}")
+        audit.record(db, ctx, "payroll.advance", "user", uid, after={"amount": amount, "month": month, "from": src})
 
 
 def fix_attendance(db: Database, ctx: Context, uid: str, day: str, check_in: str, check_out: str | None, note: str) -> None:
@@ -238,11 +240,11 @@ def _pay_tx(db: Database, ctx: Context, pr, name: str, cat_id: str, month: str, 
     spent = min(last, local_today()).isoformat()
     if pr["net"] > 0:
         eid = fin.record(db, ctx, category_id=cat_id, amount=pr["net"], paid_from=paid_from,
-                         note=f"مرتب {name} — {month}", spent_on=spent)["id"]
+                         note=f"مرتب {name} — {month}", spent_on=spent, kind="payroll")["id"]
     # advances were already paid out when given: book them as salary expense of that month too, also when
     # they took the whole salary and nothing is left to pay now
     if pr["advances"]:
         fin.record(db, ctx, category_id=cat_id, amount=pr["advances"], paid_from="outside",
-                   note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent)
+                   note=f"سلف {name} — {month} (صُرفت من قبل)", spent_on=spent, move_money=False)
     db.execute("UPDATE payroll SET status='paid', paid_at=?, expense_id=? WHERE id=?", (_now(), eid, pr["id"]))
     audit.record(db, ctx, "payroll.pay", "user", uid, after={"month": month, "net": pr["net"], "from": paid_from})

@@ -28,12 +28,11 @@ class MoneyCase(Base):
     def bal(self, aid):
         return money.balance(self.db, self.ctx.org_id, aid)
 
-    def close_shift(self, ctx=None, counted=None, float_left=None, note=None):
-        """The close as phase 2 wires it: cash.close then the transfer, one transaction."""
+    def close_shift(self, ctx=None, counted=None, float_left=None, note=None, **kw):
+        """The wired close (phase 2): cash.close moves counted minus the float in the same transaction."""
         ctx = ctx or self.ctx
-        with self.db.transaction():
-            sid = self.cd.close(ctx, counted, note=note)["id"]
-            return money.shift_close_transfer(self.db, ctx, sid, float_left)
+        sid = self.cd.close(ctx, counted, note=note, float_left=float_left, **kw)["id"]
+        return money.shift_close_transfer(self.db, ctx, sid)          # replay: reads what the close did
 
 
 class TestAccounts(MoneyCase):
@@ -225,7 +224,7 @@ class TestShiftClose(MoneyCase):
         self.assertEqual((r["float_left"], r["to_treasury"]), (5000, 23000))
         self.assertEqual(self.bal(self.t), 23000)
         again = money.shift_close_transfer(self.db, self.ctx, r["shift_id"], 1000)
-        self.assertTrue(again["replayed"])
+        self.assertTrue(again["replayed"] and r["replayed"])
         self.assertEqual((again["to_treasury"], self.bal(self.t)), (23000, 23000))
         self.assertTrue(self.db.one("SELECT 1 FROM audit_log WHERE action='money.shift_close' AND entity_id=?",
                                     (r["shift_id"],)))
@@ -311,12 +310,12 @@ class TestPayouts(MoneyCase):
             money.pay_out(self.db, self.ph, self.t, 100, "expense", ref_type="expense", ref_id=None, note="x")
 
     def test_unknown_stopped_or_other_pharmacys_account_is_refused(self):
-        with self.assertRaises(NotFound):
+        with self.assertRaises(ValidationFailed):
             money.pay_out(self.db, self.ctx, "nope", 100, "expense", ref_type="expense", ref_id=None, note="x")
         _, octx = self.second_tenant()
         with self.assertRaises(NotFound):
             money.get_account(self.db, octx, self.t)
-        with self.assertRaises(NotFound):
+        with self.assertRaises(ValidationFailed):          # another pharmacy's account is not a source here
             money.pay_out(self.db, octx, self.bank, 1, "expense", ref_type="expense", ref_id=None, note="x")
         money.update_account(self.db, self.ctx, self.bank, {"is_active": False})
         with self.assertRaises(Conflict):
@@ -503,3 +502,56 @@ class TestCodexReview342(MoneyCase):
         with self.db.transaction():
             money.pay_out(self.db, octx, "treasury", 100, "tax", ref_type="tax", ref_id=None, note="ضريبة")
         self.assertEqual(money.balance(self.db, octx.org_id, t), 3000)
+
+
+class TestShiftCloseHandover(MoneyCase):
+    """Night 19/11: like E-Stock, the cash leaves the drawer to a chosen account; a receiver who is not the
+    closer types his own PIN; the closer keeps it only when he may manage cash."""
+
+    def approved_by(self, ctx, approver):
+        import dataclasses
+        return dataclasses.replace(ctx, approver_id=approver.user_id, approver_permissions=approver.permissions)
+
+    def test_cashier_hands_the_cash_over_with_the_receivers_pin(self):
+        self.cd.open(self.ctx, 10000)
+        self.sell(units=2)                                     # 40.00
+        with self.assertRaises(Forbidden) as e:
+            self.cd.close(self.a, 14000, handover=True)
+        self.assertEqual(e.exception.code, "approval_required")
+        self.assertTrue(money.drawer_balance(self.db, self.ctx)["open"])          # nothing closed
+        with self.assertRaises(ValidationFailed):
+            self.cd.close(self.a, 14000, float_left=10000, handover=False)    # a cashier never keeps it
+        self.cd.close(self.approved_by(self.a, self.m), 14000, handover=True)
+        mv = money.movements(self.db, self.ctx, account_id=self.t)["rows"][0]
+        self.assertEqual((mv["kind"], mv["amount"], mv["meta"]["received_by"]), ("shift_close", 4000, self.m.user_id))
+
+    def test_owner_keeps_his_own_shift_without_a_pin_and_picks_the_account(self):
+        self.cd.open(self.ctx, 10000)
+        self.sell(units=2)
+        self.cd.close(self.ctx, 14000, float_left=2000, to_account=self.bank)
+        self.assertEqual((self.bal(self.bank), self.bal(self.t)), (12000, 0))
+        self.assertEqual(money.drawer_balance(self.db, self.ctx)["balance"], 2000)
+
+    def test_a_cashier_closing_alone_leaves_all_the_cash_for_the_next_shift(self):
+        self.cd.open(self.ctx, 10000)
+        self.sell(units=2)
+        r = self.cd.close(self.a, 14000)                       # nobody received it: nothing moves, no PIN
+        self.assertEqual((self.bal(self.t), money.drawer_balance(self.db, self.ctx)["balance"]), (0, 14000))
+
+    def test_nothing_moved_needs_no_pin_and_the_owner_can_turn_the_pin_off(self):
+        self.cd.open(self.ctx, 10000)
+        self.cd.close(self.a, 10000, handover=True)            # all of it stays as the float
+        self.cd.open(self.ctx, 10000)
+        self.sell(units=2)
+        with self.db.transaction():
+            self.db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'shift_handover_pin', '0')",
+                            (self.ctx.org_id,))
+        self.cd.close(self.a, 14000, handover=True)
+        self.assertEqual(self.bal(self.t), 4000)
+
+    def test_a_refused_target_account_closes_nothing(self):
+        self.cd.open(self.ctx, 10000)
+        self.sell(units=2)
+        with self.assertRaises(NotFound):
+            self.cd.close(self.ctx, 14000, to_account="nope")
+        self.assertTrue(money.drawer_balance(self.db, self.ctx)["open"])
