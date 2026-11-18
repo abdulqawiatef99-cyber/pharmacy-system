@@ -21,10 +21,17 @@ from pathlib import Path
 ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().parents[2])
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
-    os.environ.setdefault("TZ", "Africa/Cairo")
-if hasattr(time, "tzset"):
-    time.tzset()
+
+
+def use_cairo_time() -> None:
+    """The pharmacy's local time for this run. Called first thing in main(), never at import: the test suite
+    imports these scripts, and a time zone set at import moved every later test to Cairo time (failing the
+    local-day tests near midnight)."""
+    if os.name != "nt":                  # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+        os.environ.setdefault("TZ", "Africa/Cairo")
+    if hasattr(time, "tzset"):
+        time.tzset()
+
 
 
 class _RunningClock:
@@ -41,6 +48,7 @@ class _RunningClock:
 
 
 def main():
+    use_cairo_time()
     ap = argparse.ArgumentParser()
     ap.add_argument("--at", default="", help="local start time, e.g. 2022-11-12T20:00 (empty = real clock)")
     ap.add_argument("--port", type=int, default=8765)

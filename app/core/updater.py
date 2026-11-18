@@ -1,14 +1,16 @@
-"""Code update from the private GitHub repository, without touching pharmacy data.
+"""Code update from the GitHub repository, without touching pharmacy data.
 
-Flow (manage.py update): read-only token -> latest commit of the branch ->
+Flow (manage.py update): optional read-only token -> latest commit of the branch ->
 verified database backup -> snapshot of the current code (for rollback) ->
 download + check the archive -> copy the new files over the program folder,
 never into data/, backups/ or the virtual environment -> record the installed
 commit. Installing packages and migrating the database happen afterwards in a
 fresh process (the new code), see manage.py.
 
-The token is a GitHub *fine-grained, read-only* token stored on the pharmacy PC
-outside the program folder (never in the repository, never in backups).
+The repository is public, so no token is needed: without one the GitHub API is called
+anonymously (60 requests an hour per address). When present, the token is a GitHub
+*fine-grained, read-only* token stored on the PC outside the program folder (never in the
+repository, never in backups); it is still used, e.g. if the repository becomes private again.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import os
 import shutil
 import stat
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -41,23 +44,36 @@ def token_path() -> Path:
                                Path.home() / ".pharmacy" / "github_token.txt"))
 
 
-def read_token() -> str:
-    t = os.environ.get("PHARM_GITHUB_TOKEN")
+def read_token() -> str | None:
+    """The optional read-only key; None (anonymous access, the repository is public) when there is none."""
+    t = os.environ.get("PHARM_GITHUB_TOKEN", "").strip()
     if t:
-        return t.strip()
+        return t
     p = token_path()
-    if not p.exists():
-        raise UpdateError(f"مفتاح GitHub غير موجود. احفظه في الملف: {p}")
-    return p.read_text(encoding="utf-8").strip()
+    if not p.is_file():
+        return None
+    return p.read_text(encoding="utf-8").strip() or None
 
 
-def _get(url: str, token: str, accept: str) -> bytes:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": accept,
-                                               "User-Agent": "pharmacy-updater"})
+def _rate_limited(e: urllib.error.HTTPError) -> bool:
+    return e.code == 429 or (e.code == 403 and (e.headers or {}).get("X-RateLimit-Remaining") == "0")
+
+
+def _get(url: str, token: str | None, accept: str) -> bytes:
+    headers = {"Accept": accept, "User-Agent": "pharmacy-updater"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.read()
     except urllib.error.HTTPError as e:
+        if _rate_limited(e) or (not token and e.code == 403):
+            raise UpdateError("GitHub وصل لحد الطلبات المسموح بيه مؤقتًا. انتظر ساعة ثم اضغط «تحديث» مرة أخرى") from e
+        if not token and e.code in (401, 404):
+            raise UpdateError("مستودع البرنامج غير متاح للتحميل بدون مفتاح (قد يكون أصبح خاصًا). "
+                              f"اطلب ملف مفتاح التحديث من الدعم واحفظه في: {token_path()} "
+                              "أو حدّث البرنامج بملف تثبيت جديد") from e
         if e.code in (401, 403, 404):
             raise UpdateError("GitHub رُفض الطلب: المفتاح خاطئ أو منتهٍ أو ليس له صلاحية على المستودع") from e
         raise UpdateError(f"خطأ من GitHub: {e.code}") from e
@@ -65,14 +81,14 @@ def _get(url: str, token: str, accept: str) -> bytes:
         raise UpdateError(f"لا يوجد اتصال بـ GitHub: {e}") from e
 
 
-def latest_sha(repo: str, ref: str, token: str) -> str:
+def latest_sha(repo: str, ref: str, token: str | None) -> str:
     sha = _get(f"{API}/repos/{repo}/commits/{ref}", token, "application/vnd.github.sha").decode().strip()
     if len(sha) != 40:
         raise UpdateError("رد غير متوقع من GitHub")
     return sha
 
 
-def download(repo: str, sha: str, token: str) -> bytes:
+def download(repo: str, sha: str, token: str | None) -> bytes:
     return _get(f"{API}/repos/{repo}/zipball/{sha}", token, "application/vnd.github+json")
 
 

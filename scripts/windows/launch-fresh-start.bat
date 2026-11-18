@@ -5,7 +5,8 @@ REM      (E-Stock and every other program are never touched);
 REM   2) take a backup of the current data and verify it (also copied to D:\PharmacyPlatform-backups when D: exists);
 REM   3) RENAME (never delete) %LOCALAPPDATA%\PharmacyPlatform\data to data-trial-DATE-TIME;
 REM      the program code chosen by the update button (data\code-releases) and the small settings files are
-REM      copied into the new empty data folder, so the same program version keeps running;
+REM      copied into the new empty data folder (installed_version, network, backup_settings: the backup
+REM      folder and schedule chosen by the owner), so the same program version keeps running;
 REM   4) start the program again: it shows the first-run setup screen.
 REM Every step is logged PASS/FAIL to %USERPROFILE%\Documents\launch-night\fresh-start.txt.
 REM The first FAIL stops the script; nothing after it runs. A FAIL before step 3 leaves the data folder untouched;
@@ -117,7 +118,7 @@ mkdir "%DATA%"
 if errorlevel 1 (set "MSG=could not create the new data folder" & goto fail)
 if exist "%HOMEDIR%\%TRIAL%\code-releases" robocopy "%HOMEDIR%\%TRIAL%\code-releases" "%DATA%\code-releases" /E /R:2 /W:1 /NFL /NDL /NP >> "%LOG%" 2>&1
 if errorlevel 8 (set "MSG=copy of the program version folder failed" & goto fail)
-for %%n in (installed_version.json network.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul
+for %%n in (installed_version.json network.json backup_settings.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul
 "%PY%" -I -c "import sys,pathlib as p; sys.path.insert(0, sys.argv[1]); import release_bootstrap as r; print(r.current_root(p.Path(sys.argv[1]), p.Path(sys.argv[2])).name)" "%INST%\program" "%DATA%\code-releases" > "%TEMP%\pharm-code-after.txt" 2>> "%LOG%"
 if errorlevel 1 (set "MSG=the copied program version did not pass its check" & goto fail)
 fc "%TEMP%\pharm-code-before.txt" "%TEMP%\pharm-code-after.txt" >nul

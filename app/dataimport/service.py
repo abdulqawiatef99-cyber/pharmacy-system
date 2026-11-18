@@ -956,10 +956,15 @@ def _whole_units(qty: Decimal, pack: int, max_unit_error: Decimal | None = None)
     so a rounding error up to 0.0006 pack per unit of pack size is accepted.
     E-Stock also accumulates drift on split items (0.336 for 1/3); the caller
     may allow a larger error in base units (options['max_unit_error']) — each
-    such row is reported as 'rounded_units'. Anything else returns None."""
+    such row is reported as 'rounded_units'. Anything else returns None.
+    The larger error is for split items only (pack > 1): with pack 1 (the default when the pack size is
+    not known) 2.1 or 2.9 packs is a real fraction of a pack, not drift, and rounding it would post a
+    guessed quantity; it stays None (listed as unknown pack size)."""
     base = qty * pack
     whole = base.to_integral_value(ROUND_HALF_UP)
-    tol = max(Decimal("0.0006") * pack, max_unit_error or Decimal(0))
+    tol = Decimal("0.0006") * pack
+    if pack > 1:
+        tol = max(tol, max_unit_error or Decimal(0))
     return int(whole) if abs(base - whole) <= tol else None
 
 

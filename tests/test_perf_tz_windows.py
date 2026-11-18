@@ -16,19 +16,27 @@ class TestNoTzOnWindows(unittest.TestCase):
             lines = (PERF / name).read_text(encoding="utf-8").splitlines()
             hits = [i for i, l in enumerate(lines) if 'setdefault("TZ"' in l]
             self.assertEqual(len(hits), 1, name)
-            self.assertTrue(lines[hits[0] - 1].startswith('if os.name != "nt":'), name)
+            self.assertTrue(lines[hits[0] - 1].strip().startswith('if os.name != "nt":'), name)
+            # inside use_cairo_time(), called from main(): never at import (final review P2-7)
+            self.assertTrue(lines[hits[0]].startswith("        "), name)
 
     def test_on_windows_the_block_leaves_tz_alone(self):
-        # run each script's own TZ block with a fake os whose name is "nt" (Windows) and then "posix"
+        # run each script's own use_cairo_time() with a fake os whose name is "nt" (Windows) and then "posix"
+        import importlib
+        import sys
         import types
-        for name in SCRIPTS:
-            lines = (PERF / name).read_text(encoding="utf-8").splitlines()
-            i = next(k for k, l in enumerate(lines) if l.startswith('if os.name != "nt":'))
-            block = "\n".join(lines[i:i + 2])
-            for osname, expected in (("nt", None), ("posix", "Africa/Cairo")):
-                fake = types.SimpleNamespace(name=osname, environ={})
-                exec(block, {"os": fake})
-                self.assertEqual(fake.environ.get("TZ"), expected, (name, osname))
+        from unittest import mock
+        sys.path.insert(0, str(PERF))
+        try:
+            for name in SCRIPTS:
+                mod = importlib.import_module(name[:-3])
+                for osname, expected in (("nt", None), ("posix", "Africa/Cairo")):
+                    fake = types.SimpleNamespace(name=osname, environ={})
+                    with mock.patch.object(mod, "os", fake), mock.patch.object(mod, "time", types.SimpleNamespace()):
+                        mod.use_cairo_time()
+                    self.assertEqual(fake.environ.get("TZ"), expected, (name, osname))
+        finally:
+            sys.path.remove(str(PERF))
 
 
 if __name__ == "__main__":
