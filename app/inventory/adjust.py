@@ -133,10 +133,11 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
         " LEFT JOIN suppliers sp ON sp.id=r.supplier_id"
         " WHERE m.org_id=? AND m.movement_type IN ('adjustment','damage','supplier_return') AND m.created_at>=? AND m.created_at<?"
         " ORDER BY m.created_at", (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))
-    out, by = [], {}
+    out, by, exact = [], {}, {}
     for r in rows:
         d = dict(r)
-        d["value"] = int((Decimal(r["unit_cost"]) * r["qty_delta"] * 100).to_integral_value(ROUND_HALF_UP)) if r["unit_cost"] else None
+        cost = Decimal(r["unit_cost"]) * r["qty_delta"] * 100 if r["unit_cost"] else None
+        d["value"] = int(cost.to_integral_value(ROUND_HALF_UP)) if cost is not None else None
         key = "supplier_return" if r["movement_type"] == "supplier_return" else (r["reason"] or "count")
         d["reason_label"] = "مرتجع للمورد" if key == "supplier_return" else ("تسوية جرد" if key == "count" else label(key))
         g = by.setdefault(key, {"reason": key, "label": d["reason_label"], "qty_out": 0, "qty_in": 0, "value": 0, "unknown_cost": 0})
@@ -144,11 +145,15 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
             g["qty_out"] += -r["qty_delta"]
         else:
             g["qty_in"] += r["qty_delta"]
-        if d["value"] is None:
+        if cost is None:
             g["unknown_cost"] += 1
         else:
-            g["value"] += d["value"]
+            exact[key] = exact.get(key, Decimal(0)) + cost
         out.append(d)
+    # each reason is added up exactly and rounded once: one loss of three units at a third of a pound each is
+    # 1.00, as its adjustment recorded, not three movements rounded to 0.33 each (#324 S32)
+    for key, v in exact.items():
+        by[key]["value"] = int(v.to_integral_value(ROUND_HALF_UP))
     groups = sorted(by.values(), key=lambda g: g["value"])
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": out, "groups": groups,
             "total": sum(g["value"] for g in groups if g["reason"] != "supplier_return"),
