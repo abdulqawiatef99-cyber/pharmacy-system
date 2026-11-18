@@ -218,3 +218,20 @@ class TestCodexReview340Claim(ImportBase):
         cid = Sales(self.db).create_customer(self.ctx, name=name)
         k.link_customer(self.db, self.ctx, cid, self.kid)
         return cid
+
+
+class TestCodexReview340c(ImportBase):
+    def test_p2_a_negative_archived_buy_price_is_an_unknown_cost(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Branches_sales_details"][0].update({"buy_price": "-24.0000", "total_sell": "30.0000"})
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        k.link_customer(self.db, self.ctx, cust, kid)
+        c = k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")
+        line = [r for r in c["lines"] if r["item_code"] == "100"][0]
+        self.assertIsNone(line["cost"])
+        shelf = c["totals"][cust]["stores"]["الصيدلية"]
+        self.assertGreaterEqual(shelf["cost_unknown"], 1)
+        self.assertFalse(shelf["cost"].startswith("-"))

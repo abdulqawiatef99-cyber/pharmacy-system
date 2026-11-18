@@ -349,7 +349,8 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
                    "item": name,
                    "qty": str((amt - back).normalize()), "qty_unit": "estock", "sale": _egp(sale), "_sale": sale}
             if show_cost:
-                exact = (amt - back) * bp if bp is not None else None
+                # a negative E-Stock buy price is invalid (the import leaves it unknown): an unknown cost here too
+                exact = (amt - back) * bp if bp is not None and bp >= 0 else None
                 row["cost"], row["_cost"] = (_egp(exact) if exact is not None else None), exact
             out.append(row)
     return out
