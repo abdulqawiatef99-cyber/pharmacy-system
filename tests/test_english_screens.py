@@ -18,6 +18,10 @@ const { chromium } = require('playwright');
   const [base, user, pw] = process.argv.slice(1);
 """ + LOGIN + r"""
   await p.setViewportSize({ width: 1366, height: 768 });
+  // the program page asks GitHub for updates; on CI that can hit GitHub's rate limit. The test reads the page's
+  // own text, so the update check answers a fixed "up to date" instead of depending on the network.
+  await p.route('**/api/system/update', (r) => r.request().method() === 'GET'
+    ? r.fulfill({ json: { version: '1.0', installed: null, latest: null, channel: 'develop', available: false } }) : r.continue());
   await p.evaluate(async () => fetch('/api/me/prefs', { method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ lang: 'en' }) }));
   await p.goto(base + '/#/home'); await p.waitForSelector('#topbar:not([hidden])');

@@ -2740,4 +2740,5 @@ window.I18N_EN = {
 ". لا يوجد مالك أو مدير لديه رقم سري للموافقة — يضبط المالك رقمه من صفحة \"حسابي\"": ". No owner or manager has an approval PIN — the owner sets it from \"My account\"",
 "السلام عليكم يا": "Hello,",
 "السلام عليكم": "Hello",
+"GitHub وصل لحد الطلبات المسموح بيه مؤقتًا. انتظر ساعة ثم اضغط «تحديث» مرة أخرى": "GitHub's request limit was reached for now. Wait an hour, then click «Update» again",
 };
