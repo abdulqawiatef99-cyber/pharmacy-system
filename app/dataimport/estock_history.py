@@ -35,13 +35,21 @@ def available(db: Database) -> bool:
     return archive_path(db) is not None
 
 
-def _con(db: Database) -> sqlite3.Connection:
+def _con(db: Database, ctx: Context) -> sqlite3.Connection:
     p = archive_path(db)
     if not p:
         raise NotFound("مفيش تاريخ إي ستوك في البرنامج ده (النقل ماتعملش)", code="no_estock_history")
-    con = estock_archive.open_ro(p)
+    con = estock_archive.open_for(p, ctx.org_id)           # this pharmacy's archive only (#345 review)
     con.row_factory = sqlite3.Row
     return con
+
+
+def _dec(v) -> Decimal | None:
+    try:
+        d = Decimal(str(v).strip()) if v not in (None, "") else None
+    except InvalidOperation:
+        return None
+    return d if d is not None and d.is_finite() else None
 
 
 def _egp(v) -> str | None:
@@ -82,6 +90,20 @@ class _Arch:
         cols = self._cols.setdefault(t, {r[1].lower(): r[1] for r in self.con.execute(f'PRAGMA table_info("e_{t}")')}
                                      if self.has(t) else {})
         return f'{alias + "." if alias else ""}"{cols[c]}"' if c in cols else "NULL"
+
+    def lines(self) -> tuple[str, str, tuple]:
+        """The local sales lines: Sales_details when it was read, else the Branches_ mirror of co_inf.branch_id
+        only (the mirror also holds the other pharmacy's rows, with overlapping ids; #345 review).
+        Returns (table, extra WHERE on alias l, params)."""
+        if self.has("Sales_details") and self.rows('SELECT 1 FROM "e_Sales_details" LIMIT 1'):
+            return "Sales_details", "", ()
+        b = None
+        if self.has("co_inf"):
+            r = self.rows(f'SELECT {self.col("co_inf", "branch_id")} b FROM "e_co_inf" LIMIT 1')
+            b = str(r[0]["b"]).split(".")[0] if r and r[0]["b"] not in (None, "") else None
+        if b is None:
+            return "Branches_sales_details", "", ()
+        return "Branches_sales_details", f' AND CAST({self.col("Branches_sales_details", "branch_id", "l")} AS INTEGER)=?', (int(b),)
 
     def map(self, kind: str) -> dict[str, str]:
         if f"map_{kind}" not in self.tables:
@@ -142,7 +164,7 @@ def invoices(db: Database, ctx: Context, kind: str = "sale", *, q: str | None = 
         raise ValidationFailed("نوع الفاتورة غير معروف")
     head, idc, _, partyc, pmap, perm, totc = _KINDS[kind]
     ctx.require(perm)
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         if not a.has(head):
             return []
@@ -182,15 +204,19 @@ def invoice(db: Database, ctx: Context, kind: str, estock_id: str) -> dict:
     if not found:
         raise NotFound("الفاتورة دي مش في تاريخ إي ستوك")
     show_cost = ctx.can("costs.read")
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         items = a.map("items")
-        rows = a.rows(f'SELECT {a.col(lines_t, "product_id")} pid, {a.col(lines_t, "amount")} amount,'
-                      f' {a.col(lines_t, "back_amount")} back, {a.col(lines_t, "bouns")} bonus,'
-                      f' {a.col(lines_t, "sell_price")} sp, {a.col(lines_t, "back_price")} bp, {a.col(lines_t, "buy_price")} cost,'
-                      f' {a.col(lines_t, "total_sell")} total, {a.col(lines_t, "disc_money")} disc,'
-                      f' {a.col(lines_t, "exp_date")} exp FROM "e_{lines_t}" WHERE {a.col(lines_t, idc)}=?',
-                      (str(estock_id),)) if a.has(lines_t) else []
+        extra, xp = "", ()
+        if kind == "sale":
+            lines_t, extra, xp = a.lines()
+        rows = a.rows(f'SELECT {a.col(lines_t, "product_id", "l")} pid, {a.col(lines_t, "amount", "l")} amount,'
+                      f' {a.col(lines_t, "back_amount", "l")} back, {a.col(lines_t, "bouns", "l")} bonus,'
+                      f' {a.col(lines_t, "sell_price", "l")} sp, {a.col(lines_t, "back_price", "l")} bp,'
+                      f' {a.col(lines_t, "buy_price", "l")} cost, {a.col(lines_t, "total_sell", "l")} total,'
+                      f' {a.col(lines_t, "disc_money", "l")} disc, {a.col(lines_t, "exp_date", "l")} exp'
+                      f' FROM "e_{lines_t}" l WHERE {a.col(lines_t, idc, "l")}=?{extra}',
+                      (str(estock_id), *xp)) if a.has(lines_t) else []
     names = _names(db, ctx, "items", [items.get(r["pid"]) for r in rows])
     out = dict(found[0])
     out["lines"] = [{"source": SOURCE, "item_id": items.get(r["pid"]), "item": names.get(items.get(r["pid"])),
@@ -208,20 +234,20 @@ def customer_items(db: Database, ctx: Context, customer_id: str) -> list[dict]:
     ctx.require("sales.read")
     if not db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (customer_id, ctx.org_id)):
         raise NotFound("العميل غير موجود")
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         ids = _program_to_estock(a, "customers", customer_id)
-        if not ids or not (a.has("Sales_header") and a.has("Branches_sales_details")):
+        lt, extra, xp = a.lines()
+        if not ids or not (a.has("Sales_header") and a.has(lt)):
             return []
-        rows = a.rows(f'SELECT {a.col("Branches_sales_details", "product_id", "l")} pid,'
-                      f' sum(coalesce({a.col("Branches_sales_details", "amount", "l")}, 0)'
-                      f'   - coalesce({a.col("Branches_sales_details", "back_amount", "l")}, 0)) qty,'
+        rows = a.rows(f'SELECT {a.col(lt, "product_id", "l")} pid,'
+                      f' sum(coalesce({a.col(lt, "amount", "l")}, 0) - coalesce({a.col(lt, "back_amount", "l")}, 0)) qty,'
                       f' count(DISTINCT {a.col("Sales_header", "sales_id", "h")}) n,'
                       f' min({a.col("Sales_header", "insert_date", "h")}) first, max({a.col("Sales_header", "insert_date", "h")}) last'
-                      f' FROM "e_Sales_header" h JOIN "e_Branches_sales_details" l'
-                      f' ON {a.col("Branches_sales_details", "sales_id", "l")}={a.col("Sales_header", "sales_id", "h")}'
-                      f' WHERE {a.col("Sales_header", "customer_id", "h")} IN ({",".join("?" * len(ids))})'
-                      f' GROUP BY pid ORDER BY qty DESC', tuple(ids))
+                      f' FROM "e_Sales_header" h JOIN "e_{lt}" l'
+                      f' ON {a.col(lt, "sales_id", "l")}={a.col("Sales_header", "sales_id", "h")}'
+                      f' WHERE {a.col("Sales_header", "customer_id", "h")} IN ({",".join("?" * len(ids))}){extra}'
+                      f' GROUP BY pid ORDER BY qty DESC', (*ids, *xp))
         items = a.map("items")
     names = _names(db, ctx, "items", [items.get(r["pid"]) for r in rows])
     return [{"source": SOURCE, "item_id": items.get(r["pid"]), "item": names.get(items.get(r["pid"])),
@@ -237,14 +263,15 @@ def item_history(db: Database, ctx: Context, item_id: str, *, limit: int = 500) 
         raise NotFound("الصنف غير موجود")
     show_cost = ctx.can("costs.read")
     out: list[dict] = []
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         pids = _program_to_estock(a, "items", item_id)
         if not pids:
             return []
         ph = ",".join("?" * len(pids))
+        lt, sale_extra, sale_xp = a.lines()
         for kind, head, idc, lines, qty, price, party, pmap in (
-                ("sale", "Sales_header", "sales_id", "Branches_sales_details", "amount", "sell_price", "customer_id", "customers"),
+                ("sale", "Sales_header", "sales_id", lt, "amount", "sell_price", "customer_id", "customers"),
                 ("sale_return", "Back_sales_header", "back_sales_id", "Back_Sales_details", "back_amount", "back_price",
                  "customer_id", "customers"),
                 ("purchase", "Purchase_header", "purchase_id", "Purchase_details", "amount", "buy_price", "vendor_id",
@@ -259,7 +286,8 @@ def item_history(db: Database, ctx: Context, item_id: str, *, limit: int = 500) 
                             f' {a.col(lines, qty, "l")} qty, {a.col(lines, price, "l")} price, {a.col(lines, "buy_price", "l")} cost,'
                             f' {a.col(lines, "exp_date", "l")} exp'
                             f' FROM "e_{head}" h JOIN "e_{lines}" l ON {a.col(lines, idc, "l")}={a.col(head, idc, "h")}'
-                            f' WHERE {a.col(lines, "product_id", "l")} IN ({ph})', tuple(pids)):
+                            f' WHERE {a.col(lines, "product_id", "l")} IN ({ph}){sale_extra if kind == "sale" else ""}',
+                            (*pids, *(sale_xp if kind == "sale" else ()))):
                 row = {"source": SOURCE, "kind": kind, "estock_id": r["id"], "bill_number": r["bill"], "day": _day(r["at"]),
                        "at": r["at"], "party_id": m.get(r["party"]), "qty": r["qty"], "price": _egp(r["price"]),
                        "expiry": _day(r["exp"]) or None}
@@ -290,7 +318,7 @@ def statement(db: Database, ctx: Context, kind: str, party_id: str) -> list[dict
         raise ValidationFailed("النوع لازم يكون customer أو supplier")
     if not db.one(f"SELECT 1 FROM {ptable} WHERE id=? AND org_id=?", (party_id, ctx.org_id)):
         raise NotFound("غير موجود")
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         ids = _program_to_estock(a, pmap, party_id)
         if not ids or not a.has(table):
@@ -308,7 +336,7 @@ def statement(db: Database, ctx: Context, kind: str, party_id: str) -> list[dict
 def shift_closes(db: Database, ctx: Context, *, date_from: str | None = None, date_to: str | None = None,
                  limit: int = 500) -> list[dict]:
     ctx.require("sales.totals")
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         if not a.has("Cash_disk_close"):
             return []
@@ -329,7 +357,7 @@ def shift_closes(db: Database, ctx: Context, *, date_from: str | None = None, da
 def shortages(db: Database, ctx: Context, *, date_from: str | None = None, date_to: str | None = None,
               limit: int = 500) -> list[dict]:
     ctx.require("items.read")
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         if not a.has("Shortcoming"):
             return []
@@ -355,7 +383,7 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
         raise ValidationFailed("التجميع لازم يكون day أو month")
     n = 10 if by == "day" else 7
     out: dict[str, dict] = {}
-    with closing(_con(db)) as con:
+    with closing(_con(db, ctx)) as con:
         a = _Arch(con)
         for key, head, tot, perm in (("sales", "Sales_header", "total_bill_net", "sales.totals"),
                                      ("returns", "Back_sales_header", "total_bill_net", "sales.totals"),
@@ -368,7 +396,7 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
                             f' FROM "e_{head}" WHERE {" AND ".join(where)}', tuple(params)):
                 d = out.setdefault(r["p"], {"source": SOURCE, "period": r["p"]})
                 d[key + "_count"] = d.get(key + "_count", 0) + 1
-                d[key] = d.get(key, Decimal(0)) + (Decimal(_egp(r["v"]) or 0))
+                d[key] = d.get(key, Decimal(0)) + (_dec(r["v"]) or 0)        # exact; rounded once below
     rows = [out[k] for k in sorted(out)]
     for d in rows:
         for k in ("sales", "returns", "purchases"):

@@ -47,7 +47,25 @@ def open_ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
 
 
-def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True) -> dict[str, int]:
+def owner_org(path: Path) -> str | None:
+    """The organization the archive was imported for (meta org_id)."""
+    if not Path(path).exists():
+        return None
+    with closing(open_ro(path)) as con:
+        r = con.execute("SELECT value FROM meta WHERE key='org_id'").fetchone()
+        return r[0] if r else None
+
+
+def open_for(path: Path, org_id: str) -> sqlite3.Connection:
+    """The archive, read only, for its own organization only (#345 review): another pharmacy in the same
+    database reads nothing from it."""
+    from ..core.errors import NotFound
+    if not Path(path).exists() or owner_org(path) != org_id:
+        raise NotFound("مفيش تاريخ إي ستوك للصيدلية دي", code="no_estock_history")
+    return open_ro(path)
+
+
+def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True, org_id: str | None = None) -> dict[str, int]:
     """Writes the archive at `path` (or checks the one there). Returns rows per table as stored."""
     sha = ex.source_sha()
     if path.exists():
@@ -102,6 +120,7 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True)
                 con.executemany("INSERT OR IGNORE INTO employees VALUES (?,?)",
                                 [(r[idi], r[nmi]) for r in rows if len(r) > max(idi, nmi)])
         con.executemany("INSERT INTO meta VALUES (?,?)", [
+            ("org_id", org_id or ""),
             ("left_out_columns", ", ".join(secret_columns(ex))),
             ("source_sha", sha), ("instance", ex.instance), ("database", ex.database),
             ("built_at", datetime.now().isoformat(timespec="seconds")), ("format", "1")])

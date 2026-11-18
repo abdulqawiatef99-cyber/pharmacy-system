@@ -1748,7 +1748,8 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")
-    if write_archive and archive_path.exists() and estock_archive.source_sha(archive_path) != ex.source_sha():
+    if write_archive and archive_path.exists() and (estock_archive.source_sha(archive_path) != ex.source_sha()
+                                                    or estock_archive.owner_org(archive_path) != ctx.org_id):
         raise Conflict(f"فيه أرشيف إي ستوك من تصدير تاني: {archive_path}. مفيش أي حاجة اتكتبت", code="estock_db_refused")
     extra = {"export": f"{ex.instance}/{ex.database}", "export_sha": ex.source_sha()[:16],
              "confirm_file": str(confirm_file or ""), "packs_file": str(packs_file or "")}
@@ -1769,11 +1770,11 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
             "customers": _map(db, res["runs"]["customers"], "estock_id"),
             "suppliers": _map(db, res["runs"]["suppliers"], "estock_id")}
     if write_archive:
-        counts = estock_archive.build(ex, archive_path, maps)
+        counts = estock_archive.build(ex, archive_path, maps, org_id=ctx.org_id)
         extra["archive"] = str(archive_path)
     else:
         with tempfile.TemporaryDirectory() as tmp:
-            counts = estock_archive.build(ex, Path(tmp) / estock_archive.NAME, maps, keep=False)
+            counts = estock_archive.build(ex, Path(tmp) / estock_archive.NAME, maps, keep=False, org_id=ctx.org_id)
         extra["archive"] = "(تجربة: اتبنى واتعد ومش محفوظ)"
     if res["resumed"]:
         extra["resumed_steps"] = ", ".join(res["resumed"])

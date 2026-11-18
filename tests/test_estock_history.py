@@ -97,3 +97,38 @@ class TestHistory(Base):
         self.assertFalse(h.available(self.db))
         with self.assertRaises(NotFound):
             h.invoices(self.db, self.ctx)
+
+
+class TestCodexReview345(TestHistory):
+    """Codex on #345 @72210df (each failed before the fix)."""
+
+    def test_p1_another_organization_reads_nothing_from_the_archive(self):
+        _, other = self.second_tenant()
+        for call in (lambda: h.invoices(self.db, other, "sale"), lambda: h.shift_closes(self.db, other),
+                     lambda: h.period_report(self.db, other, "2026-01-01", "2026-12-31")):
+            with self.assertRaises(NotFound):
+                call()
+
+    def test_p2_history_uses_this_branchs_lines_only(self):
+        self.db.close()
+        Base.setUp(self)
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "3"}]
+        t["Branches_sales_details"].append({"branch_id": "2", "details_id": "9", "sales_id": "1", "product_id": "1",
+                                            "amount": "99", "insert_date": "2026-11-18T11:00:00.000"})
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        inv = h.invoice(self.db, self.ctx, "sale", "1")
+        self.assertNotIn("99", [l["qty"] for l in inv["lines"]])
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        self.assertNotIn("100", [r["qty"] for r in h.customer_items(self.db, self.ctx, cust)])
+        self.assertTrue(all(r["qty"] != "99" for r in h.item_history(self.db, self.ctx, self.item("100")["id"])))
+
+    def test_p1_period_totals_add_exact_values_then_round_once(self):
+        self.db.close()
+        Base.setUp(self)
+        t = base_tables()
+        t["Sales_header"] = [{"sales_id": "1", "customer_id": "1", "total_bill_net": "0.004", "insert_date": "2026-11-01T10:00:00"},
+                             {"sales_id": "2", "customer_id": "1", "total_bill_net": "0.004", "insert_date": "2026-11-02T10:00:00"}]
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        nov = h.period_report(self.db, self.ctx, "2026-11-01", "2026-11-30")[0]
+        self.assertEqual(nov["sales"], "0.01")                   # 0.008 rounded once, not 0.00 + 0.00
