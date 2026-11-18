@@ -932,3 +932,39 @@ class TestManagerSchemaReview(Base):
         raw = [json.loads(r["raw"]) for r in self.db.all(
             "SELECT r.raw FROM import_rows r JOIN import_runs u ON u.id=r.run_id WHERE u.kind='opening_stock'")]
         self.assertTrue(all("vendor_id" in x and "tax_price" in x and "counter_id" in x for x in raw))
+
+
+class TestItemExtras(Base):
+    def test_unit_names_and_everything_else_is_kept_and_listed(self):
+        import json
+        t = base_tables()
+        t["Products"][0].update({"product_unit1": "1", "notes": "ممنوع للحوامل", "product_fast_code": "TM5",
+                                 "group_id": "4", "product_max_disc": "10", "unit2_sell_price": "10.0000"})
+        t["Product_groups"] = [{"group_id": "4", "group_name_ar": "مسكنات"}]
+        t["Products"].append(product(10, "108", "Testnoexp Gel", product_has_expire="0"))
+        t["Product_Amount"].append(stock_row(50, 10, 1, "2", "5.0000", ""))
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        it = self.item("100")
+        self.assertEqual((it["pack_unit_name"], it["base_unit_name"]), ("علبة", "شريط"))
+        raw = json.loads(self.db.one("SELECT r.raw FROM import_rows r WHERE r.target_id=?", (it["id"],))["raw"])
+        self.assertEqual((raw["extras"]["notes"], raw["extras"]["group"], raw["extras"]["fast_code"]),
+                         ("ممنوع للحوامل", "مسكنات", "TM5"))
+        csv_text = Path(res["reports"]["item_extras"]).read_text(encoding="utf-8-sig")
+        self.assertIn("ممنوع للحوامل", csv_text)
+        self.assertIn("max_disc", csv_text)
+        exp = {d["code"]: d["severity"] for d in res["plan"].dq if d["field"] == "expiry"}
+        self.assertEqual(exp["108"], "info")                         # E-Stock says: no expiry for this item
+
+
+class TestPartyExtras(Base):
+    def test_customer_extras_in_notes_and_sell_price_buy_reported(self):
+        t = base_tables()
+        t["Customer"][0].update({"customer_pay_type": "2", "sales_man": "7", "sell_price_buy": "1"})
+        t["Vendor"][0]["vendor_max_money"] = "50000.0000"
+        res = self.run_import(tables=t)
+        notes = self.db.one("SELECT notes FROM customers WHERE name='أحمد تجربة'")["notes"]
+        for word in ("طريقة الدفع في إي ستوك: 2", "المندوب: 7", "البيع بسعر الشراء: 1"):
+            self.assertIn(word, notes)
+        self.assertIn(("C1", "sell_price_buy", "review"), {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertIn("vendor_max_money: 50000.0000", Path(res["reports"]["supplier_contacts"]).read_text(encoding="utf-8-sig"))

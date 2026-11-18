@@ -321,6 +321,10 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
     companies = {ident(r.get("company_id")): (r.get("co_name_ar") or r.get("co_name_en") or "").strip()
                  for r in ex.rows("Companys")}
     prods = sorted(ex.rows("Products"), key=lambda r: (dec(r.get("product_id")) or 0))
+    units = {ident(r.get("unit_id")): (r.get("unit_name_ar") or r.get("unit_name_en") or "").strip()
+             for r in ex.rows("Product_units")}
+    groups = {ident(r.get("group_id")): (r.get("group_name_ar") or r.get("group_name_en") or "").strip()
+              for r in ex.rows("Product_groups")}
     real_codes = defaultdict(list)
     for r in prods:
         c = (r.get("product_code") or "").strip()
@@ -390,6 +394,32 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             it["barcodes"].append(bc)
         first = len(p.dq)
         it["pack_size"], it["pack_unknown"] = _pack_of(r, p, pid, code)
+        # what the program has a column for, and the rest kept per item (item-extras.csv + the import row)
+        u1, u2, u3 = (units.get(ident(r.get(f"product_unit{n}")), "") for n in (1, 2, 3))
+        small = u3 if it["pack_size"] > 1 and dec(r.get("product_unit1_3")) == it["pack_size"] else \
+            u2 if it["pack_size"] > 1 else u1
+        if u1:
+            it["pack_unit_name"] = u1[:30]
+        if small:
+            it["base_unit_name"] = small[:30]
+        it["has_expire"] = flag(r.get("product_has_expire")) if (r.get("product_has_expire") or "").strip() else None
+        it["extras"] = {k: v for k, v in {
+            "notes": (r.get("notes") or "").strip(), "has_expire": r.get("product_has_expire"),
+            "fast_code": (r.get("product_fast_code") or "").strip(),
+            "group": groups.get(ident(r.get("group_id")), ident(r.get("group_id"))),
+            "buy_number": r.get("product_buy_number"), "big_number": r.get("product_big_number"),
+            "small_number": r.get("product_small_number"),
+            "units": " / ".join(f"{n}={x}" for n, x in (("1", u1), ("2", u2), ("3", u3)) if x),
+            "unit1_2": r.get("product_unit1_2"), "unit1_3": r.get("product_unit1_3"),
+            "sale_unit": r.get("product_sale_unit"), "unit1_sale": r.get("product_unit1_sale"),
+            "unit2_sell_price": r.get("unit2_sell_price"), "unit3_sell_price": r.get("unit3_sell_price"),
+            "sell_clause": r.get("sell_clause"), "unit2_sell_price_clause": r.get("unit2_sell_price_clause"),
+            "unit3_sell_price_clause": r.get("unit3_sell_price_clause"),
+            "allow_disc": r.get("product_allow_disc"), "max_disc": r.get("product_max_disc"),
+            "disc1": r.get("product_disc1"), "disc2": r.get("product_disc2"), "minus": r.get("product_minus"),
+            "made": r.get("product_made"), "site_id": r.get("site_id"), "pd_id": r.get("pd_id"),
+            "print_barcode": r.get("product_print_barcode"), "no_print_name": r.get("no_print_name"),
+            "amount_zero": r.get("amount_zero")}.items() if v not in (None, "", "0", "0.0000")}
         if code in packs:
             for d in p.dq[first:]:          # the person's decision settles the broken conversion
                 if d["severity"] == "block":
@@ -529,7 +559,10 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                 p.issue(chosen["table"], eid, it["code"], "sell_price", r.get("sell_price"),
                         f"كسر قرش في سعر التشغيلة: اتقرّب لـ {egp(Decimal(row['batch_price']) / 100)}")
             if not exp and amt > 0:      # owner 18/11: a drug without expiry is reviewed; a non-drug needs none
-                if it["is_drug"] == 0:
+                if it.get("has_expire") is False:
+                    p.issue(chosen["table"], eid, it["code"], "expiry", "(فاضي)",
+                            "الصنف في إي ستوك من غير صلاحية (product_has_expire): عادي", kind="info")
+                elif it["is_drug"] == 0:
                     p.issue(chosen["table"], eid, it["code"], "expiry", "(فاضي)", "صنف مش دواء: عادي من غير صلاحية",
                             kind="info")
                 else:
@@ -768,10 +801,19 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         for ph in phones:
             used_phones[ph] = cid
         for col, label in (("job_id", "الوظيفة"), ("customer_house_no", "رقم البيت"),
-                           ("customer_insurance_code", "كود التأمين"), ("contract_id", "تعاقد إي ستوك")):
+                           ("customer_insurance_code", "كود التأمين"), ("contract_id", "تعاقد إي ستوك"),
+                           ("customer_pay_type", "طريقة الدفع في إي ستوك"), ("sales_man", "المندوب"),
+                           ("sell_price_buy", "البيع بسعر الشراء"), ("customer_disc_local", "خصم محلي"),
+                           ("customer_disc_import", "خصم مستورد"), ("customer_class_id", "الفئة"),
+                           ("sale_class_id", "فئة البيع"), ("area_id", "المنطقة"), ("customer_major", "رئيسي"),
+                           ("customer_start_money", "رصيد أول المدة في إي ستوك"), ("start_work_date", "بداية التعامل")):
             v = (r.get(col) or "").strip()
             if v and v != "0":
                 notes.append(f"{label}: {v}")
+        if flag(r.get("sell_price_buy")):
+            p.issue("Customer", cid, code, "sell_price_buy", r.get("sell_price_buy"),
+                    "العميل ده بيشتري بسعر الشراء في إي ستوك: اتكتب في الملاحظات، البرنامج مابيطبقهوش لوحده",
+                    kind="review")
         bal_raw = dec(r.get("customer_current_money"))
         if r.get("customer_current_money") and bal_raw is None:
             p.issue("Customer", cid, code, "customer_current_money", r.get("customer_current_money"), "رصيد مش رقم", block=True)
@@ -809,7 +851,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
             v, det = (r.get(col) or "").strip(), (r.get(col + "_details") or "").strip()
             if v or det:
                 contacts.append(f"{col}: {v} {det}".strip())
-        for col in ("address", "company_code", "ven_notes", "ven_return"):
+        for col in ("address", "company_code", "ven_notes", "ven_return", "vendor_max_money", "vendor_start_money"):
             if (r.get(col) or "").strip():
                 contacts.append(f"{col}: {r[col].strip()}")
         bal_raw = dec(r.get("vendor_current_money"))
@@ -1186,7 +1228,8 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
         rows = []
         for it in plan.items:
             f = {k: it[k] for k in ("code", "name_en", "name_ar", "active_ingredient", "manufacturer", "is_drug",
-                                     "pack_size", "public_price") if it.get(k) is not None}
+                                     "pack_size", "public_price", "pack_unit_name", "base_unit_name")
+                 if it.get(k) is not None}
             if it["inactive"]:
                 f["status"] = "inactive"
             try:
@@ -1197,7 +1240,7 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                 iid = catalog.create_item(db, ctx, f, force=True, source="import", dedupe_suffix=it["code"])
             for bc in it["barcodes"]:
                 catalog.add_barcode(db, ctx, iid, bc)
-            rows.append(({"product_id": it["product_id"], "code": it["code"]}, iid))
+            rows.append(({"product_id": it["product_id"], "code": it["code"], "extras": it.get("extras", {})}, iid))
         return rows, {"items": len(rows), "barcodes": sum(len(i["barcodes"]) for i in plan.items)}
     runs["items"], r = _step(db, ctx, "items", "items", items_sha, esha, label, do_items)
     resumed += ["items"] if r else []
@@ -1403,7 +1446,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {"data_quality": out_dir / "data-quality.csv", "reconciliation": out_dir / "reconciliation.txt",
              "json": out_dir / "report.json", "openings": out_dir / "openings-to-confirm.xlsx",
-             "supplier_contacts": out_dir / "supplier-contacts.csv"}
+             "supplier_contacts": out_dir / "supplier-contacts.csv", "item_extras": out_dir / "item-extras.csv"}
     order = {"block": 0, "review": 1, "fixed": 2, "info": 3}
     with open(paths["data_quality"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
@@ -1417,6 +1460,14 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
         for d in plan.suppliers:
             w.writerow([d["estock_id"], d["code"], d["name"], d.get("phone") or "", " | ".join(d.get("contacts") or [])])
     write_openings(plan, paths["openings"])
+    keys = sorted({k for it in plan.items for k in it.get("extras", {})})
+    with open(paths["item_extras"], "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)          # what has no item column in the program yet (manager 22:15): kept, listed
+        w.writerow(["رقم إي ستوك", "الكود", "الصنف", *keys])
+        for it in plan.items:
+            if it.get("extras"):
+                w.writerow([it["product_id"], it["code"], it["name_en"] or it["name_ar"],
+                            *[it["extras"].get(k, "") for k in keys]])
     lines = ["مطابقة نقل إي ستوك — " + ("OK" if rec["ok"] else "FAILED"), ""]
     sd = plan.stock_source.get("decision") or {}
     lines.append(f"جدول الرصيد الشغال: {sd.get('key', 'مش متحدد')} ({sd.get('why', '')})")
