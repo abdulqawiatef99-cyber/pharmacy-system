@@ -4,6 +4,14 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 18/11 14:45 Cairo — manager chat (READ THIS FIRST)
+- Merged into `develop` today: #318 (docs), #320 (update works without a GitHub key), #321, #322 (launch review fixes P1-1..P1-5, P2-5, P2-7), #323 (launch review money P2-1..P2-3). `develop` @ `db74c3e`.
+- Cashier PC updated in-app `de9a79c` → `db74c3e` at 14:30 (backup first).
+- Open: #325 (return quantity field, F63 «شيفت», MSA proofreading, English keys, greeting «السلام عليكم»); owns `app/web/*`, `app/sales/*`, `app/printing/*`, `docs/DAY19*`.
+- #324 Codex full review part 1 (money) is blocked: Codex answered "create an environment for this repo"; parts 2-4 not opened yet.
+- Next: new manager chat opened from the Claude desktop app on the cashier PC (computer use) → Codex environment + review parts 2-4 → merge #325 + in-app update → launch rehearsal (E-Stock import on a fresh DB mid-day, the real one after closing) → owner acceptance #20.
+- Owner ideas 18/11 recorded: `FUTURE_REQUIREMENTS.md` F66-F78 + REPO-1, order in `IDEAS_PLAN.md` section 18/11.
+
 ## 17/11 23:20 Cairo — manager chat, owner decisions (READ THIS FIRST)
 - Owner 23:14: USB drive / off-device copy (R6/R7) is optional and out of the percentage for now; G5 to L2 on the Windows restore drill: total **73.25%**. Remaining = owner acceptance (#20) after the final review. F47-a track-and-trace parked as future (no official decree for pharmacies yet; E-Stock does not do it).
 - Owner wants the program finished today or tomorrow; what is left is scheduled (final review worker tonight).
