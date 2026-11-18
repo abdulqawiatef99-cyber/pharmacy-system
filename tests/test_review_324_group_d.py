@@ -302,6 +302,20 @@ class TestS30ReturnPriceOfThisSupplier(_Base):
         self.assertEqual(r["total"], 2400)                   # was 3600: B's later price
         self.assertEqual(self.owed(self.a), 5 * 1200 - 2400)
 
+    def test_the_screens_blind_proposal_sent_back_is_saved_at_this_suppliers_price(self):
+        """The screen asks for the proposal before it knows the supplier and posts it back as the value
+        (Codex on #347): untouched, it means "at the purchase price", and that is this supplier's own."""
+        blind = returns.suggest_value(self.db, self.ctx, self.it, self.lot_id)
+        for supplier, paid in ((self.a, 1200), (self.b, 1800)):
+            r = returns.create(self.db, self.ctx, supplier, [{"item_id": self.it, "batch_id": self.lot_id, "qty_base": 2,
+                                                              "reason": "expired", "unit_value": blind}])
+            self.assertEqual(r["total"], 2 * paid)
+
+    def test_a_value_that_is_neither_proposal_is_kept_as_typed(self):
+        r = returns.create(self.db, self.ctx, self.b, [{"item_id": self.it, "batch_id": self.lot_id, "qty_base": 2,
+                                                        "reason": "expired", "unit_value": 1500}])
+        self.assertEqual(r["total"], 3000)
+
     def test_a_supplier_who_never_supplied_the_lot_gets_the_lots_lowest_price(self):
         c = self.supplier("ج")
         self.assertEqual(returns.suggest_value(self.db, self.ctx, self.it, self.lot_id, c), 1200)
@@ -391,6 +405,29 @@ class TestS32LossReportRoundsOnce(_Base):
         self.assertEqual(rep["total"], v)
         self.assertEqual(rep["groups"][0]["value"], v)
         self.assertEqual(rep["total"], sum(g["value"] for g in rep["groups"] if g["reason"] != "supplier_return"))
+
+    def test_separate_adjustments_keep_the_value_each_one_recorded(self):
+        """Codex on #347: three one-unit losses at a third of a pound are 33 + 33 + 33 = 99, as their three
+        audit records say; rounding the whole reason together turned them into 100."""
+        it = self.item("Third")
+        _batch(self.db, self.ctx, it, 3, batch="X0", cost=str(Decimal(1) / 3))
+        day = local_today().isoformat()
+        values = [adjust.adjust(self.db, self.ctx, it, qty_delta=-1, reason="damaged", note="كسر")["value"] for _ in range(3)]
+        self.assertEqual(values, [-33, -33, -33])
+        rep = adjust.loss_report(self.db, self.ctx, day, day)
+        self.assertEqual((rep["total"], rep["groups"][0]["value"]), (-99, -99))
+
+    def test_a_count_shortage_over_two_lots_is_one_loss(self):
+        from app.inventory.counting import Counting
+        it = self.item("Counted")
+        for i in range(3):
+            _batch(self.db, self.ctx, it, 1, batch=f"C{i}", cost=str(Decimal(1) / 3), days=100 + i)
+        c = Counting(self.db)
+        sid = c.create(self.ctx, title="جرد", scope="items", item_ids=[it])
+        c.record(self.ctx, sid, item_id=it, qty=0)
+        c.approve(self.ctx, sid)
+        day = local_today().isoformat()
+        self.assertEqual(adjust.loss_report(self.db, self.ctx, day, day)["total"], -100)
 
     def test_whole_piaster_costs_are_unchanged(self):
         it = self.item("Whole")

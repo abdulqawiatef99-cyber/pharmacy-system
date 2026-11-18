@@ -12,7 +12,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.permissions import Context
-from ..db import Database
+from ..db import Database, new_id
 from . import service as inv
 
 REASONS = {
@@ -57,6 +57,7 @@ def take(db: Database, ctx: Context, item_id: str, qty: int, *, batch_id: str | 
     branch_id = branch_id or ctx.branch_id
     cost = avg_cost(db, ctx.org_id, branch_id, item_id)
     mtype = "damage" if reason in DESTROY else "adjustment"
+    event = new_id()      # one removal, however many lots it takes: the loss report values it as one (ref_line_id)
     if batch_id:
         plan = [(batch_id, qty)]
     else:
@@ -73,7 +74,8 @@ def take(db: Database, ctx: Context, item_id: str, qty: int, *, batch_id: str | 
             raise Conflict("الكمية أكبر من الرصيد المسجل", code="insufficient_stock")
     for b, n in plan:
         inv.post_movement(db, ctx, item_id=item_id, qty_delta=-n, batch_id=b, movement_type=mtype, unit_cost=cost,
-                          ref_type=ref_type, ref_id=ref_id, note=note or label(reason), reason=reason, branch_id=branch_id)
+                          ref_type=ref_type, ref_id=ref_id, ref_line_id=event, note=note or label(reason), reason=reason,
+                          branch_id=branch_id)
     return int((cost * qty * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else 0
 
 
@@ -126,7 +128,7 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
     except (TypeError, ValueError):
         raise ValidationFailed("اختر الفترة")
     rows = db.all(
-        "SELECT m.created_at, m.movement_type, m.reason, m.qty_delta, m.unit_cost, m.note, m.ref_type, m.ref_id,"
+        "SELECT m.id, m.ref_line_id, m.created_at, m.movement_type, m.reason, m.qty_delta, m.unit_cost, m.note, m.ref_type, m.ref_id,"
         " i.id item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, b.batch_no, b.expiry_date, u.full_name by_name,"
         " sp.name supplier FROM stock_movements m JOIN items i ON i.id=m.item_id LEFT JOIN batches b ON b.id=m.batch_id"
         " LEFT JOIN users u ON u.id=m.created_by LEFT JOIN supplier_returns r ON r.id=m.ref_id AND m.movement_type='supplier_return'"
@@ -136,6 +138,8 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
     out, by, exact = [], {}, {}
     for r in rows:
         d = dict(r)
+        event = d.pop("ref_line_id") or d["id"]      # the removal this movement belongs to (take()), or itself
+        del d["id"]
         cost = Decimal(r["unit_cost"]) * r["qty_delta"] * 100 if r["unit_cost"] else None
         d["value"] = int(cost.to_integral_value(ROUND_HALF_UP)) if cost is not None else None
         key = "supplier_return" if r["movement_type"] == "supplier_return" else (r["reason"] or "count")
@@ -148,12 +152,13 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
         if cost is None:
             g["unknown_cost"] += 1
         else:
-            exact[key] = exact.get(key, Decimal(0)) + cost
+            exact[(key, event)] = exact.get((key, event), Decimal(0)) + cost
         out.append(d)
-    # each reason is added up exactly and rounded once: one loss of three units at a third of a pound each is
-    # 1.00, as its adjustment recorded, not three movements rounded to 0.33 each (#324 S32)
-    for key, v in exact.items():
-        by[key]["value"] = int(v.to_integral_value(ROUND_HALF_UP))
+    # one removal is valued once, as its adjustment recorded it: three units taken from three lots at a third
+    # of a pound each are 1.00, not three movements rounded to 0.33 (#324 S32). Separate removals keep their
+    # own rounding and are then added as whole piasters, so the report equals the sum of their audit records
+    for (key, _), v in exact.items():
+        by[key]["value"] += int(v.to_integral_value(ROUND_HALF_UP))
     groups = sorted(by.values(), key=lambda g: g["value"])
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": out, "groups": groups,
             "total": sum(g["value"] for g in groups if g["reason"] != "supplier_return"),
