@@ -2544,6 +2544,7 @@ window.I18N_EN = {
 "تم": "Done",
 "تعذر فتح الكاميرا (تحتاج إلى HTTPS أو تصريح الكاميرا)": "Could not open the camera (needs HTTPS or camera permission)",
 "اتعدّل بعد العدّ: أعد عدّه": "Changed after the count: count it again",
+"اتباع بين عدّتين: أعد عدّه": "Sold between two counts: count it again",
 "الرصيد في البرنامج": "Stock in the program",
 "صنف لم يُجرد. اكتب ملاحظة (5 حروف على الأقل)": "items not counted. Write a note (at least 5 letters)",
 "develop (تجربة)": "develop (trial)",

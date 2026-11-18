@@ -7,12 +7,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 from app.core import backup
 from app.db import Database, MigrationError
 from tests.helpers import DBTestCase
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def child_env() -> dict:
+    """This environment without any PHARM_ setting: a child manage.py gets only the ones the test gives it."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PHARM_")}
 
 
 def make_newer(db: Database, version: str = "9999_from_the_future") -> None:
@@ -65,11 +71,25 @@ class TestNewerSchema(DBTestCase):
         self.assertFalse(target.exists())
 
     def test_cli_stops_with_a_clear_message(self):
-        data = self.tmp / "cli"
-        env = {**os.environ, "PHARM_DATA_DIR": str(data), "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1"}
+        self._cli_flow(self.tmp / "cli")
+
+    def test_cli_flow_ignores_the_runners_own_pharm_paths(self):
+        """#307: scripts/validate_local_release.py runs the suite with PHARM_DB_PATH / PHARM_UPLOAD_DIR /
+        PHARM_BACKUP_DIR set to its own synthetic data; the child manage.py inherited them, so `init` went to
+        that database and not to this test's folder (CI windows red since #288)."""
+        other = self.tmp / "runner"
+        with mock.patch.dict(os.environ, {"PHARM_DB_PATH": str(other / "synthetic.db"),
+                                          "PHARM_UPLOAD_DIR": str(other / "uploads"),
+                                          "PHARM_BACKUP_DIR": str(other / "backups")}):
+            self._cli_flow(self.tmp / "cli2")
+        self.assertFalse((other / "synthetic.db").exists())
+
+    def _cli_flow(self, data: Path) -> None:
+        env = {**child_env(), "PHARM_DATA_DIR": str(data), "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1"}
         run = lambda *a: subprocess.run([sys.executable, "manage.py", *a], cwd=ROOT, env=env,  # noqa: E731
                                         capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026").returncode, 0)
+        r = run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         db = Database(data / "pharmacy.db")
         make_newer(db)
         db.close()

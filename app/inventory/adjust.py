@@ -86,18 +86,19 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
         raise NotFound("الصنف غير موجود")
     if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
         raise NotFound("التشغيلة لا تخص هذا الصنف")
-    current = inv.batch_qty(db, ctx.org_id, ctx.branch_id, item_id, batch_id) if batch_id else \
-        db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND branch_id=? AND item_id=?",
-               (ctx.org_id, ctx.branch_id, item_id))["q"]
-    if set_to is not None:
-        if not isinstance(set_to, int) or set_to < 0:
-            raise ValidationFailed("الرصيد الجديد غير صحيح")
-        qty_delta = set_to - current
-    if not isinstance(qty_delta, int) or qty_delta == 0:
-        raise ValidationFailed("لا يوجد تغيير في الرصيد")
-    note = check_reason(reason, note, qty_delta > 0)
+    if set_to is not None and (not isinstance(set_to, int) or isinstance(set_to, bool) or set_to < 0):
+        raise ValidationFailed("الرصيد الجديد غير صحيح")
     name = item["name_en"] or item["name_ar"]
     with db.transaction():
+        # read under the write lock: two "set to 12" read before it both added 2 and ended at 14 (#324 S16)
+        current = inv.batch_qty(db, ctx.org_id, ctx.branch_id, item_id, batch_id) if batch_id else \
+            db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND branch_id=? AND item_id=?",
+                   (ctx.org_id, ctx.branch_id, item_id))["q"]
+        if set_to is not None:
+            qty_delta = set_to - current
+        if not isinstance(qty_delta, int) or qty_delta == 0:
+            raise ValidationFailed("لا يوجد تغيير في الرصيد")
+        note = check_reason(reason, note, qty_delta > 0)
         if qty_delta > 0:
             cost = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
             inv.post_movement(db, ctx, item_id=item_id, qty_delta=qty_delta, batch_id=batch_id, movement_type="adjustment",

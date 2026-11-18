@@ -110,6 +110,9 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
                      after={"supplier": supplier_id, "no": no, "total": total, "lines": len(clean)})
         notify.emit(db, ctx, "supplier_return", "info", f"مرتجع رقم {no} إلى {sup['name']} — {total / 100:,.2f} ج",
                     f"{len(clean)} صنف", "supplier_return", rid)
+    if not ctx.can("purchases.read"):
+        # saved: answer without the slip this person may not read, never a 403 after the commit (#324 S6)
+        return {"ok": True, "id": rid, "return_no": no}
     return get(db, ctx, rid)
 
 

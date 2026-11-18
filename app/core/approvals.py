@@ -60,17 +60,17 @@ def issue(ctx: Context, session_token: str, approver_id: str, action: str, perm:
             del _grants[k]
         key = _digest(previous) if previous else None
         old = _grants.get(key) if key else None
-        body = None
         if old and (old.org_id, old.user_id, old.session, old.approver_id, old.action) == \
                 (ctx.org_id, ctx.user_id, session, approver_id, action) and old.until > now and not old.used:
             perms |= old.perms
-            body = old.body              # the second approval is for the same request as the first
             del _grants[key]
+        # a new PIN approval is never bound to the request the old token was tried on: that request may have
+        # been refused and then corrected (#337 review). It binds again on its first use, as any token does.
         if len(_grants) >= MAX_GRANTS:
             del _grants[min(_grants, key=lambda k: _grants[k].until)]
         token = secrets.token_urlsafe(32)
         _grants[_digest(token)] = Grant(ctx.org_id, ctx.user_id, session, approver_id, action, frozenset(perms),
-                                        now + TTL_SECONDS, body)
+                                        now + TTL_SECONDS)
     return token, TTL_SECONDS
 
 

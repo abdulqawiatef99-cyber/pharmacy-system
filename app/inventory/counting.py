@@ -111,6 +111,11 @@ class Counting:
             new_qty = qty
             if live:
                 if mode == "add" and live["counted_by"] == ctx.user_id:
+                    # a sale or receipt since the first scan: the running total mixes units counted before and
+                    # after it (a sold unit came back on approval, #324 S14). Count this one again from zero.
+                    if self._moved_between(ctx, s["branch_id"], item_id, key, live["ledger_seq"], None):
+                        raise Conflict("الصنف ده اتباع أو اتحرك بعد ما بدأت تعدّه؛ عدّه من الأول (عدّ جديد مش إضافة)",
+                                       code="moved_since_first_scan")
                     new_qty = live["qty"] + qty
                 elif live["counted_by"] != ctx.user_id and not recount:
                     raise Conflict("هذا الصنف جُرد من قبل في المكان نفسه", code="already_counted",
@@ -141,6 +146,19 @@ class Counting:
             params.append(batch_key)
         return int(self.db.one(q, tuple(params))["q"])
 
+    def _moved_between(self, ctx: Context, branch_id: str, item_id: str, batch_key: str | None,
+                       after_seq: int, upto_seq: int | None) -> bool:
+        """Any stock movement of the item (batch) after one ledger position and up to another (None: now)."""
+        q = ("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND rowid > ?")
+        params: list = [ctx.org_id, branch_id, item_id, after_seq]
+        if upto_seq is not None:
+            q += " AND rowid <= ?"
+            params.append(upto_seq)
+        if batch_key:
+            q += " AND coalesce(batch_id,'')=?"
+            params.append(batch_key)
+        return self.db.one(q + " LIMIT 1", tuple(params)) is not None
+
     def _adjusted_after(self, ctx: Context, sid: str, branch_id: str, item_id: str,
                         batch_key: str | None, after_seq: int) -> bool:
         """A book correction posted after the entry was counted: a manual adjustment or another
@@ -163,10 +181,11 @@ class Counting:
         for e in entries:
             k = (e["item_id"], e["batch_key"])
             r = rows.setdefault(k, {"item_id": e["item_id"], "batch_key": e["batch_key"],
-                                    "counted": 0, "seq": e["ledger_seq"],
+                                    "counted": 0, "seq": e["ledger_seq"], "last_seq": e["ledger_seq"],
                                     "level": "batch" if e["batch_key"] else "item"})
             r["counted"] += e["qty"]
             r["seq"] = min(r["seq"], e["ledger_seq"])
+            r["last_seq"] = max(r["last_seq"], e["ledger_seq"])
         # an item counted both by batch and at item level is ambiguous
         items_level = {k[0] for k in rows if k[1] == ""}
         items_batch = {k[0] for k in rows if k[1] != ""}
@@ -193,10 +212,17 @@ class Counting:
                                      (item_id,))["n"]
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
+            if r["last_seq"] > r["seq"] and self._moved_between(ctx, s["branch_id"], item_id, bk or None,
+                                                                 r["seq"], r["last_seq"]):
+                # counted in two places with a sale or receipt in between: which place it touched is unknown,
+                # so "counted + moves after the first count" may deduct it twice (#324 S13)
+                r["problem"] = "moved_between_counts"
+                r["problem_message"] = (f"«{r['label']}»: اتباع أو اتحرك بين عدّه في مكانين؛ أعد عدّه قبل الاعتماد")
             if self._adjusted_after(ctx, sid, s["branch_id"], item_id, bk or None, r["seq"]):
                 r["problem"] = "adjusted_since_count"
                 r["problem_message"] = (f"«{r['label']}»: تم تعديل رصيده (تسوية يدوية أو جرد آخر) بعد عدّه"
                                         " في هذا الجرد؛ أعد عدّه قبل الاعتماد")
+            r.pop("last_seq")
             out.append(r)
         counted_items = {r["item_id"] for r in out}
         uncounted = []
@@ -217,13 +243,20 @@ class Counting:
 
     def approve(self, ctx: Context, sid: str, *, zero_uncounted: bool = False,
                 reason: str | None = None, reasons: dict | None = None,
-                shortage_reason: str = "lost", zero_reason: str = "lost") -> dict:
+                shortage_reason: str = "lost", zero_reason: str = "lost",
+                uncounted_item_ids: list[str] | None = None) -> dict:
         """reasons: {"item_id|batch_key": reason code} for single lines; others take
-        shortage_reason (less than the system) or "found" (more than the system)."""
+        shortage_reason (less than the system) or "found" (more than the system).
+        zero_uncounted zeroes exactly the uncounted items the approver was shown (uncounted_item_ids):
+        an item received after the preview is refused, never zeroed unseen (#324 S15)."""
         from . import adjust
         ctx.require("inventory.adjust")
+        if zero_uncounted is not True and zero_uncounted is not False:
+            raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
         if zero_uncounted and len((reason or "").strip()) < 5:
             raise ValidationFailed("تصفير الأصناف غير المجرودة يحتاج إلى سبب مكتوب")
+        if zero_uncounted and not isinstance(uncounted_item_ids, list):
+            raise ValidationFailed("قائمة الأصناف غير المجرودة المعروضة مطلوبة للتصفير", code="uncounted_list_required")
         reasons = reasons or {}
         for code in [shortage_reason, zero_reason, *reasons.values()]:
             if code not in adjust.REASONS:
@@ -250,6 +283,9 @@ class Counting:
                 self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid, why)
                 posted += 1
             if zero_uncounted:
+                if {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}:
+                    raise Conflict("الأصناف اللي لم تُجرد اتغيّرت بعد ما عرضت التقرير (صنف اتورد أو اتباع)؛"
+                                   " اعرض الفروق تاني قبل التصفير", code="uncounted_changed")
                 for u in v["uncounted_with_stock"]:
                     self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid, zero_reason)
                     posted += 1
