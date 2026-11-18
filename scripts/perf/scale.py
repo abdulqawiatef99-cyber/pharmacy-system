@@ -31,7 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import real_years as ry  # noqa: E402  (sets the program path and the time zone)
+import real_years as ry  # noqa: E402  (sets the program path; main() sets the time zone)
 
 
 class Report(ry.Report):
@@ -191,6 +191,7 @@ def measure_existing(a, report) -> int:
 
 
 def main(argv=None):
+    ry.use_cairo_time()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", default="large", help=f"one of {', '.join(ry.PROFILES)}; empty = the options below")
     ap.add_argument("--out-txt", required=True, help="results text file; a .json is written next to it")
