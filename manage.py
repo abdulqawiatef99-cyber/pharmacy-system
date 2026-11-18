@@ -271,6 +271,24 @@ def cmd_selftest(a, s):
     sys.exit(0 if ok else 1)
 
 
+def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
+    """The E-Stock migration goes only into a new, empty database (launch night): opening stock on top of
+    real stock movements, or a second catalog on top of items, would double the shelf. The one exception is
+    the documented re-run after a failed stock step: the items of this same catalog file are already in
+    (an applied import run of it) and there is still no stock movement."""
+    import hashlib
+    if db.one("SELECT 1 FROM stock_movements WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+        return ("قاعدة البيانات فيها حركات مخزون بالفعل؛ الاستيراد من E-Stock يكون على قاعدة جديدة فاضية بس "
+                "(launch-fresh-start.bat). مفيش أي حاجة اتكتبت")
+    if db.one("SELECT 1 FROM items WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+        sha = hashlib.sha256(catalog_file.read_bytes()).hexdigest()
+        if not db.one("SELECT 1 FROM import_runs WHERE org_id=? AND kind='items' AND file_sha256=?"
+                      " AND status='applied'", (ctx.org_id, sha)):
+            return ("قاعدة البيانات فيها أصناف بالفعل؛ الاستيراد من E-Stock يكون على قاعدة جديدة فاضية بس "
+                    "(launch-fresh-start.bat). مفيش أي حاجة اتكتبت")
+    return None
+
+
 def cmd_import_estock(a, s):
     """Dry run on a copy of the database by default; --apply writes, after a verified backup."""
     import json
@@ -286,6 +304,9 @@ def cmd_import_estock(a, s):
     for f in [*files.values(), *([packs] if packs else [])]:
         if not f.exists():
             sys.exit(f"الملف مش موجود: {f}")
+    why = _estock_import_refused(db, accounts.resolve_session(db, tok), files["catalog"])
+    if why:
+        sys.exit(why)
     tmp = None
     target = db
     if not a.apply:

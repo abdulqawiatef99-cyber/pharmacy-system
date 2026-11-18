@@ -36,10 +36,17 @@ from pathlib import Path
 # PHARM_PROGRAM_DIR: run these scripts from a folder outside the installed program (real_years.py on the PC)
 ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().parents[2])
 sys.path.insert(0, str(ROOT))
-if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
-    os.environ.setdefault("TZ", "Africa/Cairo")
-if hasattr(time, "tzset"):
-    time.tzset()
+
+
+def use_cairo_time() -> None:
+    """The pharmacy's local time for this run. Called first thing in main(), never at import: the test suite
+    imports these scripts, and a time zone set at import moved every later test to Cairo time (failing the
+    local-day tests near midnight)."""
+    if os.name != "nt":                  # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+        os.environ.setdefault("TZ", "Africa/Cairo")
+    if hasattr(time, "tzset"):
+        time.tzset()
+
 
 OWNER_PW = "Perf-Owner-2026"         # the synthetic owner made by loadgen.py
 H = {"X-Requested-With": "pharm", "Content-Type": "application/json"}
@@ -445,6 +452,7 @@ def explain(data: Path, f: dict, slow_ms: float) -> list[dict]:
 
 # ------------------------------------------------------------------------------------------ main
 def main(argv=None):
+    use_cairo_time()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, help="a loadgen snapshot data folder (copied, never changed)")
     ap.add_argument("--label", default="")
