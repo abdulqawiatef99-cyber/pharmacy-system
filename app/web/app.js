@@ -62,6 +62,13 @@ function trString(s) {
   const lead = s.match(/^\s*/)[0], trail = s.match(/\s*$/)[0];
   return lead + out + trail;
 }
+const I18N_BEFORE = { "ملف": "File", "سطر": "Line", "العبوة": "Pack", "ربح": "profit", "كود": "Code", "حركة": "Movements", "اليوم": "Today",
+  "رقم": "No.", "فواتير": "Invoices", "طُبع": "Printed", "صرف": "Pay", "شهر": "Month", "إلى": "to", "العميل": "Customer", "رصيده": "Balance",
+  "عجز": "Shortage", "زيادة": "Surplus", "لم يُجرد": "Not counted", "سيُصفَّر": "Will be set to zero:", "الإجمالي": "Total",
+  "(المُرتجع": "(returned", "(الفرق": "(difference", "(المتوقع": "(expected", "معروض أول": "Showing the first", "يظهر أول": "Showing the first",
+  "أُرسل": "Sent", "حد الآجل": "credit limit" };
+const I18N_AFTER = { "صورة": "pictures", "اختلاف": "differences", "تعديل": "edits", "جنيه": "EGP", "عجز": "short", "ملصق": "labels",
+  "يومًا": "days", "فقط": "only", "والتكلفة": "and the cost" };
 // words that come next to numbers ("3 فاتورة", "76.45 ج", "5 يوم") and a few fixed bits
 const NUM = "(\\d[\\d.,]*)";
 const I18N_PATTERNS = [
@@ -80,6 +87,12 @@ const I18N_PATTERNS = [
   [/(?<![\u0600-\u06FF])من (\S+) إلى (\S+)/g, "from $1 to $2"], [/(?<![\u0600-\u06FF])يوم (\d+)/g, "day $1"],
   [/(?<![\u0600-\u06FF])بعد (\d+ days)/g, "in $1"],
   [/(?<![\u0600-\u06FF])فاتورة (\d+)/g, "Invoice $1"],
+  [/(Good (?:morning|evening)) يا /g, "$1, "],
+  [/(\d{1,2}(?::\d\d)?)\s*ص(?![\u0600-\u06FF])/g, "$1 AM"], [/(\d{1,2}(?::\d\d)?)\s*م(?![\u0600-\u06FF])/g, "$1 PM"],
+  [/(?<![\u0600-\u06FF])(\d[\d.,]*) من (\d[\d.,]*)/g, "$1 of $2"], [/(?<![\u0600-\u06FF])من (?=\d)/g, "from "],
+  // a short word right before or after a number ("ملف 2", "3 صورة"): one table each, so a name is never touched
+  [new RegExp(`(?<![\\u0600-\\u06FF])(${Object.keys(I18N_BEFORE).map((k) => k.replace(/[()]/g, "\\$&")).join("|")})(?=\\s*\\d)`, "g"), (m) => I18N_BEFORE[m]],
+  [new RegExp(`(\\d[\\d.,]*\\s*)(${Object.keys(I18N_AFTER).join("|")})(?![\\u0600-\\u06FF])`, "g"), (m, n, w) => n + I18N_AFTER[w]],
 ];
 const SKIP = new Set(["SCRIPT", "STYLE", "TEXTAREA", "INPUT"]);
 function trNode(root) {
