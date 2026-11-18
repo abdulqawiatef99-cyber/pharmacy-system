@@ -39,6 +39,21 @@ class TestEstockDbRead(unittest.TestCase):
         self.assertIn('"estock-db-read\\$stamp"', text)
         self.assertIn("InvariantCulture", text)                       # CSV dates/numbers not in the PC's culture
 
+    def test_codex_333_partial_fallback_and_folder_per_instance(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        # (1) a failed table is listed, the run is PARTIAL with a nonzero exit, and a table counts only after its CSV
+        self.assertIn("RESULT: PARTIAL", text)
+        self.assertIn("if ($failed.Count -gt 0) { exit 4 }", text)
+        csv, counted = text.index("Export-Csv -Path"), text.index("$totalTables++")
+        self.assertLess(csv, counted)
+        self.assertEqual(text.count("$totalTables++"), 1)
+        # (2) a Windows sign-in that opens no user database does not stop the fallback
+        self.assertIn("if ($u -gt 0)", text)
+        self.assertIn("(Usable $c) -gt 0", text)
+        self.assertLess(text.index("function Usable"), text.index("$u = Usable $c"))   # defined before use
+        # (3) tables\<instance>\<db>\
+        self.assertIn("Join-Path (Join-Path $tables ($srv -replace", text)
+
     def test_in_app_update_ships_the_ps1(self):
         import io
         import zipfile

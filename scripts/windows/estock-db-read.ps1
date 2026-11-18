@@ -28,6 +28,22 @@ foreach ($svc in Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.N
 }
 if ($servers.Count -eq 0) { $servers.Add('(local)'); $servers.Add('.\SQLEXPRESS') }
 
+function Q($conn, [string]$sql) {
+    $cmd = $conn.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = 600
+    $t = New-Object System.Data.DataTable
+    (New-Object System.Data.SqlClient.SqlDataAdapter $cmd).Fill($t) | Out-Null
+    return ,$t
+}
+function Qn([string]$n) { '[' + $n.Replace(']', ']]') + ']' }
+# How many user databases this connection can really open (a sign-in may connect and still see none).
+function Usable($c) {
+    $n = 0
+    try { $d = Q $c "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE'" } catch { return 0 }
+    foreach ($r in $d.Rows) { try { $c.ChangeDatabase($r.name); $n++ } catch { } }
+    try { $c.ChangeDatabase('master') } catch { }
+    return $n
+}
+
 function Try-Open([string]$cs) {
     try {
         $c = New-Object System.Data.SqlClient.SqlConnection $cs
@@ -38,10 +54,14 @@ function Try-Open([string]$cs) {
 $conns = @()
 foreach ($s in $servers) {
     $c = Try-Open "Server=$s;Integrated Security=True;Connect Timeout=8;Application Name=estock-db-read"
-    if ($c) { Say "connected (Windows sign-in): $s"; $conns += ,@($s, $c) } else { Say "no Windows sign-in to: $s" }
+    if (-not $c) { Say "no Windows sign-in to: $s"; continue }
+    $u = Usable $c
+    if ($u -gt 0) { Say "connected (Windows sign-in): $s, $u user database(s) open"; $conns += ,@($s, $c) }
+    else { Say "connected (Windows sign-in): $s, but no user database opens with it"; $c.Close() }
 }
 
-# 2. Fallback: connection strings in E-Stock's own folder (used here only, never printed).
+# 2. Fallback (no Windows sign-in, or one that opens no user database): connection strings in E-Stock's
+#    own folder (used here only, never printed).
 if ($conns.Count -eq 0) {
     $roots = @('D:\Modern Soft for Programming', 'C:\Program Files (x86)\Modern Soft for Programming', 'C:\Program Files\Modern Soft for Programming')
     foreach ($r in $roots) {
@@ -52,7 +72,8 @@ if ($conns.Count -eq 0) {
             foreach ($m in [regex]::Matches($text, '(?i)(Data Source|Server)\s*=[^"<>\r\n]+')) {
                 $cs = $m.Value -replace '(?i)Provider\s*=[^;]*;?', ''
                 $c = Try-Open $cs
-                if ($c) { Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); break }
+                if ($c -and (Usable $c) -gt 0) { Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); break }
+                if ($c) { $c.Close() }
             }
             if ($conns.Count -gt 0) { break }
         }
@@ -60,22 +81,16 @@ if ($conns.Count -eq 0) {
     }
 }
 if ($conns.Count -eq 0) {
-    Say 'RESULT: FAIL - could not open any local SQL Server. Nothing was read or changed.'
+    Say 'RESULT: FAIL - could not open any database on a local SQL Server. Nothing was read or changed.'
     Save; exit 2
 }
 
-function Q($conn, [string]$sql) {
-    $cmd = $conn.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = 600
-    $t = New-Object System.Data.DataTable
-    (New-Object System.Data.SqlClient.SqlDataAdapter $cmd).Fill($t) | Out-Null
-    return ,$t
-}
-function Qn([string]$n) { '[' + $n.Replace(']', ']]') + ']' }
 
 $numTypes = 'int','bigint','smallint','tinyint','decimal','numeric','money','smallmoney','float','real','bit'
 $private = '(?i)phone|tel|mob|hatef|card|visa|nat|ssn|pass|pwd|هاتف|تليفون|موبايل|بطاق|رقم.?قومي|كلمة'
 $dateTypes = 'date','datetime','datetime2','smalldatetime','datetimeoffset','time'
 $totalRows = 0; $totalTables = 0
+$failed = New-Object System.Collections.Generic.List[string]
 try {
 
 foreach ($pair in $conns) {
@@ -86,7 +101,7 @@ foreach ($pair in $conns) {
     foreach ($db in $dbs.Rows) {
         if ($db.state_desc -ne 'ONLINE') { Say ("database " + $db.name + " : " + $db.state_desc + " (skipped)"); continue }
         $dbn = $db.name
-        try { $conn.ChangeDatabase($dbn) } catch { Say ("database $dbn : no access (" + $_.Exception.Message + ")"); continue }
+        try { $conn.ChangeDatabase($dbn) } catch { Say ("database $dbn : no access (" + $_.Exception.Message + ")"); $failed.Add("$srv / $dbn (no access)"); continue }
         $size = Q $conn "SELECT CAST(SUM(size) * 8.0 / 1024 AS decimal(12,2)) mb FROM sys.database_files"
         $bk = $null
         try { $bk = Q $conn "SELECT MAX(backup_finish_date) d FROM msdb.dbo.backupset WHERE database_name = DB_NAME()" } catch { }
@@ -99,7 +114,8 @@ foreach ($pair in $conns) {
         $procs = Q $conn "SELECT name FROM sys.procedures ORDER BY name"
         if ($procs.Rows.Count) { Say ("  procedures: " + (($procs.Rows | ForEach-Object { $_.name }) -join ', ')) }
         $tl = Q $conn "SELECT TABLE_SCHEMA sc, TABLE_NAME nm FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY 1, 2"
-        $dbDir = Join-Path $tables ($dbn -replace '[\\/:*?"<>|]', '_')
+        # one folder per instance, then per database: two instances never overwrite each other
+        $dbDir = Join-Path (Join-Path $tables ($srv -replace '[\\/:*?"<>|()]', '_')) ($dbn -replace '[\\/:*?"<>|]', '_')
         New-Item -ItemType Directory -Force -Path $dbDir | Out-Null
         foreach ($t in $tl.Rows) {
           try {
@@ -116,7 +132,7 @@ foreach ($pair in $conns) {
                 $i++
             }
             $st = (Q $conn ("SELECT " + ($parts -join ', ') + " FROM $full WITH (NOLOCK)")).Rows[0]
-            $rows = [int64]$st['__rows']; $totalRows += $rows; $totalTables++
+            $rows = [int64]$st['__rows']
             Say ''
             Say ("-- TABLE $dbn.$($t.sc).$($t.nm)  rows=$rows  columns=" + $cols.Rows.Count)
             $i = 0
@@ -132,15 +148,26 @@ foreach ($pair in $conns) {
             $csv = Join-Path $dbDir (($t.sc + '.' + $t.nm) -replace '[\\/:*?"<>|]', '_')
             $names = [string[]]($data.Columns | ForEach-Object { $_.ColumnName })
             $data.Rows | Select-Object -Property $names | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
-          } catch { Say ("   ERROR reading " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message) }
+            $totalRows += $rows; $totalTables++              # counted only once its CSV is written
+          } catch {
+            Say ("   ERROR reading " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message)
+            $failed.Add("$srv / $dbn.$($t.sc).$($t.nm)")
+          }
         }
     }
     $conn.Close()
 }
 } catch { Say ("RESULT: FAIL - " + $_.Exception.Message + " (nothing in E-Stock was changed)"); Save; exit 3 }
 Say ''
-Say "RESULT: PASS - $totalTables tables, $totalRows rows read. Nothing in E-Stock was changed."
+if ($failed.Count -gt 0) {
+    Say ("RESULT: PARTIAL - $totalTables tables, $totalRows rows read; " + $failed.Count + " not read:")
+    foreach ($x in $failed) { Say ("   " + $x) }
+    Say "Nothing in E-Stock was changed."
+} else {
+    Say "RESULT: PASS - $totalTables tables, $totalRows rows read. Nothing in E-Stock was changed."
+}
 Say "full tables (stay on this PC): $tables"
 Save
 Start-Process notepad.exe -ArgumentList "`"$summary`""
+if ($failed.Count -gt 0) { exit 4 }
 exit 0
