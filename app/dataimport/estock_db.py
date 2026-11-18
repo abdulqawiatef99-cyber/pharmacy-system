@@ -50,6 +50,7 @@ DRIFT = Decimal("0.15")          # E-Stock rounding drift on split items, in bas
 NOISE = Decimal("0.000001")      # float noise of the export (G17), in base units
 HALF_PIASTER = Decimal("0.005")
 MAX_REAL_LIMIT = Decimal("1000000")       # a credit limit above 1,000,000 EGP is not a real limit
+NO_LIMIT = 999999999999900                # E-Stock's own "no limit" figure (9,999,999,999,999 EGP) in piastres
 BARCODE_COLS = ("product_int_code", "product_int_code1", "product_int_code2", "product_int_code3",
                 "product_int_code4")
 STOCK_TABLES = ("Product_Amount", "Branches_Product_Amount")
@@ -298,7 +299,7 @@ class Plan:
 
 
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
-               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = False) -> Plan:
+               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True) -> Plan:
     p = Plan(rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
@@ -839,11 +840,12 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         elif lim_raw is not None and lim_raw < 0:
             p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
                     "حد آجل بالسالب: اتحط صفر (مفيش آجل) لحد ما يتكتب في «حد الآجل المؤكد» أو شاشة العميل")
-        if limit == 0 and (bal_raw or 0) > 0:
-            # 0 in E-Stock did not stop this customer owing us; in the program 0 refuses credit: the owner says
+        if limit == 0 and (bal_raw or 0) > 0 and not (lim_raw is not None and lim_raw < 0):
+            # 0 in E-Stock did not stop this customer buying on credit: keep that behaviour = no limit (owner 19/11)
+            limit = NO_LIMIT
             p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money") or "(فاضي)",
-                    "OWNER: حد الآجل صفر في إي ستوك وعليه فلوس؛ في البرنامج الصفر يمنع البيع الآجل: اكتب حده",
-                    value_egp=bal_raw, kind="review")
+                    "حد الآجل صفر في إي ستوك وكان بيشتري آجل: اتنقل «من غير حد» زي إي ستوك", value_egp=bal_raw,
+                    kind="info")
         c = crows.get(("customer", cid), {})
         p.customers.append(_party(p, "customer", cid, code, name, bal, c, limit=limit, alt=alt or None,
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
@@ -881,9 +883,9 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
 
 
 def _balance_piastres(p: Plan, table, eid, code, fld, raw, d: Decimal | None) -> int:
-    """A balance with a fraction of a piaster (e.g. 675,493.171): the rounding rule is the owner's (manager
-    22:15). Until he answers it blocks, one line per value with the difference; --round-piastres rounds half
-    up, still one listed line per value. Never rounded silently."""
+    """A balance with a fraction of a piaster (e.g. 675,493.171). Owner 19/11: rounded half up to the piaster,
+    one data-quality line per value with its difference, the totals in the reconciliation;
+    --no-round-piastres blocks instead. Never rounded silently."""
     if d is None:
         return 0
     exact = exact_piasters(d)
@@ -892,37 +894,50 @@ def _balance_piastres(p: Plan, table, eid, code, fld, raw, d: Decimal | None) ->
     rounded = piasters(d)
     diff = Decimal(rounded) / 100 - d
     if p.rules.get("round_piastres"):
+        # owner 19/11: half up to the piaster, one line per value, the totals in the reconciliation
         p.issue(table, eid, code, fld, raw, f"كسر قرش: اتقرّب لـ {egp(Decimal(rounded) / 100)} (الفرق {diff})",
                 value_egp=diff)
+        r = p.checks.setdefault("rounding", {}).setdefault(table, {"values": 0, "difference": Decimal(0)})
+        r["values"] += 1
+        r["difference"] += diff
     else:
         p.issue(table, eid, code, fld, raw, f"كسر قرش (الفرق لو اتقرّب {diff}): قرار المالك في التقريب، أو"
                 " --round-piastres، أو الرصيد المؤكد", value_egp=diff, block=True)
     return rounded
 
 
-INTERNAL_SUPPLIERS = ("جرد",)            # E-Stock books stock-count adjustments against a supplier named so
-INTERNAL_CUSTOMERS = ("الصيدلية",)       # the pharmacy's own account (sell at cost)
+INTERNAL_CUSTOMERS = ("الصيدلية",)       # the pharmacy's own consumption (tissues, alcohol, supplies; owner 19/11)
 INTERNAL_MARK = " (حساب داخلي)"
+# owner 19/11: supplier «جرد» is a real supplier account for occasional sources (another pharmacy, a customer,
+# a one-time warehouse), not stocktaking; shown so nobody reads it as a stock count
+RENAMED_SUPPLIERS = {"جرد": "مصادر متفرقة (جرد)"}
+
+
+def _key(name: str) -> str:
+    return normalize_text(name or "").replace(" ", "")
 
 
 def _internal(kind: str, name: str) -> bool:
-    key = normalize_text(name or "").replace(" ", "")
-    return key in {normalize_text(n).replace(" ", "") for n in (INTERNAL_SUPPLIERS if kind == "supplier"
-                                                              else INTERNAL_CUSTOMERS)}
+    return kind == "customer" and _key(name) in {_key(n) for n in INTERNAL_CUSTOMERS}
 
 
 def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: dict, **more) -> dict:
     d = {"kind": kind, "estock_id": eid, "code": code, "name": name, "estock_balance": bal,
          "balance": bal, "adjustment": 0, "internal": _internal(kind, name), **more}
     if d["internal"]:
-        # moved as it is, marked, its balance first in the report for the owner (manager 22:45)
+        # the pharmacy's own consumption: moved as it is, marked, out of the real customer totals (owner 19/11)
         d["name"] = name + INTERNAL_MARK
-        if kind == "customer":
-            d["notes"] = "حساب داخلي في إي ستوك؛ " + (d.get("notes") or "")
-        p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "internal", name,
-                "OWNER: حساب داخلي في إي ستوك (" + ("جرد المخزن" if kind == "supplier" else "حساب الصيدلية نفسها")
-                + "): اتنقل زي ما هو باسم عليه «حساب داخلي»، ورصيده محتاج قرار", value_egp=Decimal(bal) / 100,
-                kind="review")
+        d["notes"] = "استهلاك الصيدلية الداخلي (حساب داخلي في إي ستوك)؛ " + (d.get("notes") or "")
+        p.issue("Customer", eid, code, "internal", name,
+                "استهلاك الصيدلية الداخلي: اتنقل زي ما هو برصيده وتاريخه، متعلّم «حساب داخلي» وبره إجمالي العملاء",
+                value_egp=Decimal(bal) / 100, kind="info")
+    renamed = RENAMED_SUPPLIERS.get(next((k for k in RENAMED_SUPPLIERS if _key(k) == _key(name)), None)) \
+        if kind == "supplier" else None
+    if renamed:
+        d["name"] = renamed
+        p.issue("Vendor", eid, code, "vendor_name", name,
+                f"مورد حقيقي لمصادر متفرقة: اتنقل عادي برصيده وتاريخه باسم «{renamed}» (الاسم القديم في الأرشيف)",
+                value_egp=Decimal(bal) / 100, kind="info")
     if conf and conf.get("seen") != bal:
         p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "confirmed balance",
                 f"وقت التأكيد {egp(Decimal(conf.get('seen') or 0) / 100)}، دلوقتي {egp(Decimal(bal) / 100)}",
@@ -1070,8 +1085,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
                         "اسم مش حقيقي: اتحفظ زي ما هو في الأرشيف، مش مستخدم كاسم في البرنامج", kind="review")
     from .estock_archive import secret_columns
     for c in secret_columns(ex):
-        p.issue("archive", "", "", c, "(كلمة سر بنص واضح)",
-                "ما اتنسختش في الأرشيف (أمان): قرار المالك لو عايزها", kind="review")
+        p.issue("archive", "", "", c, "(كلمة سر)", "مش محتاجينها في البرنامج: ما اتنسختش", kind="info")
     # tickets and bill numbers counted after trimming (E-Stock stores them as padded char fields)
     tk = bills = 0
     for r in ex.rows("Sales_header"):
@@ -1673,9 +1687,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     lines = ["مطابقة نقل إي ستوك — " + ("OK" if rec["ok"] else "FAILED"), ""]
     internal = [d for d in plan.suppliers + plan.customers if d.get("internal")]
     if internal:
-        lines.append("OWNER — حسابات داخلية في إي ستوك (اتنقلت زي ما هي، مش داخلة في إجمالي الموردين والعملاء الحقيقيين):")
-        lines += [f"  {'مورد' if d['kind'] == 'supplier' else 'عميل'} {d['estock_id']} «{d['name']}»: "
-                  f"{egp(Decimal(d['balance']) / 100)}" for d in internal]
+        lines.append("حسابات داخلية (استهلاك الصيدلية؛ اتنقلت زي ما هي، بره إجمالي العملاء الحقيقيين):")
+        lines += [f"  عميل {d['estock_id']} «{d['name']}»: {egp(Decimal(d['balance']) / 100)}" for d in internal]
         lines.append("")
     sd = plan.stock_source.get("decision") or {}
     lines.append(f"جدول الرصيد الشغال: {sd.get('key', 'مش متحدد')} ({sd.get('why', '')})")
@@ -1689,6 +1702,10 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
             lines.append(f"{label}: " + "، ".join(f"{a}={b}" for a, b in rec[k].items()))
     lines.append("التاريخ (عدد الصفوف): " + "، ".join(f"{k}={v['csv']}" for k, v in rec.get("history", {}).items()))
     lines.append(f"جودة البيانات: {len(plan.dq)} سطر ({len(plan.blocking)} يوقف النقل) في {paths['data_quality'].name}")
+    rnd = plan.checks.get("rounding") or {}
+    if rnd:
+        lines.append("تقريب كسور القرش (نص لفوق، سطر لكل قيمة في جودة البيانات): " + "، ".join(
+            f"{t}: {v['values']} قيمة، الفرق {v['difference']}" for t, v in sorted(rnd.items())))
     lines.append("التذاكر بعد شيل المسافات: " + json.dumps(plan.checks.get("tickets", {}), ensure_ascii=False))
     lines.append("إشارة الأرصدة من كشف الحساب: " + json.dumps(plan.checks.get("balance_sign", {}), ensure_ascii=False))
     exp = [d for d in plan.dq if d["field"] == "expiry"]
@@ -1734,7 +1751,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
 # ---------------------------------------------------------------- one run
 def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_path: Path, write_archive: bool,
         confirm_file: Path | None = None, packs_file: Path | None = None, stock_source: str | None = None,
-        stores: list[str] | None = None, database: str | None = None, round_piastres: bool = False) -> dict:
+        stores: list[str] | None = None, database: str | None = None, round_piastres: bool = True) -> dict:
     """Plan, apply into `db` (the copy on a dry run), build the archive, reconcile, write the reports.
     `write_archive` False = the archive is built in a temp file only to count it (dry run)."""
     import tempfile

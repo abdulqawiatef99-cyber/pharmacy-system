@@ -542,23 +542,28 @@ class TestCodexReview339(Base):
         t = base_tables()
         t["Customer"][0]["customer_current_money"] = "120.0050"
         t["Gedo_customers"] = []
-        res = self.run_import(tables=t)
+        res = self.run_import(tables=t, round_piastres=False)          # --no-round-piastres
         self.assertFalse(res["ok"])
         self.assertIn(("C1", "customer_current_money"), {(b["code"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM customer_ledger"))
 
-    def test_sub_piastre_balance_rounds_only_with_the_owners_switch(self):
+    def test_sub_piastre_balance_rounds_half_up_by_default_listed_with_totals(self):
+        """Owner 19/11: half up to the piaster, one line per value with its difference, totals reported."""
         t = base_tables()
         t["Vendor"][0]["vendor_current_money"] = "675493.1710"
         t["Gedo_Vendors"] = []
         res = self.run_import(tables=t)
-        b = [d for d in res["plan"].blocking if d["field"] == "vendor_current_money"]
-        self.assertEqual(len(b), 1)
-        self.assertIn("0.001", b[0]["action"])                           # the difference is shown
-        res = self.run_import(tables=t, round_piastres=True)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
-        self.assertIn("vendor_current_money", {d["field"] for d in res["plan"].dq if d["severity"] == "fixed"})
+        row = [d for d in res["plan"].dq if d["field"] == "vendor_current_money"][0]
+        self.assertEqual(row["severity"], "fixed")
+        self.assertIn("-0.001", row["action"])
         self.assertEqual(self.db.one("SELECT amount FROM supplier_ledger WHERE amount>0")["amount"], 67549317)
+        self.assertEqual(res["plan"].checks["rounding"]["Vendor"]["values"], 1)
+        self.assertIn("تقريب كسور القرش", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t, round_piastres=False)
+        self.assertIn("vendor_current_money", {d["field"] for d in res["plan"].blocking})
 
     def test_p1_sub_piastre_price_is_listed_not_silent(self):
         t = base_tables()
@@ -988,7 +993,7 @@ class TestArchiveSecretsAndTickets(Base):
             self.assertTrue(con.execute("SELECT 1 FROM sqlite_master WHERE name='ix_e_Sales_header_ticket_num'").fetchone())
         finally:
             con.close()
-        self.assertIn(("Employee.pass", "review"), {(d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertIn(("Employee.pass", "info"), {(d["field"], d["severity"]) for d in res["plan"].dq})   # owner: not needed
         self.assertEqual(res["plan"].checks["tickets"]["with_ticket_after_trim"], 1)
         from app.dataimport import estock_history as h
         self.assertEqual([r["ticket_no"] for r in h.invoices(self.db, self.ctx, "sale") if r["estock_id"] == "2"], ["T-123"])
@@ -1062,13 +1067,16 @@ class TestCreditLimits(Base):
         with self.assertRaises(C) as e:                          # 30 EGP on top of -15.50 is over a 0 limit
             self.sell_on_credit("منى تجربة", amount_units=3)
         self.assertEqual(e.exception.code, "credit_limit")
-        # she owes nothing to us (-15.5) but E-Stock had her on 0: listed for the owner, not changed
+        # owner 19/11: 0 in E-Stock while buying on credit = no limit, as E-Stock behaved
         t["Customer"][0]["customer_max_money"] = "0"                    # Ahmed: 0 in E-Stock and owes 120
         self.db.close()
         Base.setUp(self)
         res = self.run_import(tables=t)
-        self.assertIn(("C1", "customer_max_money", "review"),
+        self.assertIn(("C1", "customer_max_money", "info"),
                       {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertEqual(self.db.one("SELECT credit_limit FROM customers WHERE name='أحمد تجربة'")["credit_limit"],
+                         estock_db.NO_LIMIT)
+        self.sell_on_credit("أحمد تجربة")
 
 
 class TestCashDepotsAsOnTheScreen(Base):
@@ -1098,23 +1106,29 @@ class TestCashDepotsAsOnTheScreen(Base):
 class TestScreenTour2245(Base):
     """Manager 22:45: internal accounts, purchase classes, junk masters, E-Stock settings."""
 
-    def test_internal_accounts_move_marked_and_apart_from_the_real_totals(self):
+    def test_misc_sources_supplier_and_internal_consumption_customer(self):
+        """Owner 19/11: «جرد» is a real supplier (occasional sources); «الصيدلية» is internal consumption."""
         t = base_tables()
-        t["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "جرد", "vendor_current_money": "90000.0000"})
+        t["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "جرد", "vendor_current_money": "900.0000"})
         t["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "الصيدليه",
                               "customer_current_money": "300.0000", "sell_price_buy": "1"})
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
-        self.assertTrue(self.db.one("SELECT 1 FROM suppliers WHERE name='جرد (حساب داخلي)'"))
+        v = self.db.one("SELECT id FROM suppliers WHERE name='مصادر متفرقة (جرد)'")
+        self.assertTrue(v)
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (v["id"],))["a"], 90000)
+        con = estock_archive.open_ro(self.tmp / estock_archive.NAME)
+        try:                                           # the E-Stock id still maps to it; the old name stays there
+            self.assertEqual(con.execute("SELECT program_id FROM map_suppliers WHERE estock_id='3'").fetchone()[0], v["id"])
+            self.assertEqual(con.execute('SELECT vendor_name_ar FROM "e_Vendor" WHERE vendor_id=\'3\'').fetchone()[0], "جرد")
+        finally:
+            con.close()
         c = self.db.one("SELECT name, notes FROM customers WHERE name LIKE '%حساب داخلي%'")
-        self.assertIn("حساب داخلي في إي ستوك", c["notes"])
-        s = res["reconciliation"]["suppliers"]
-        self.assertEqual((s["internal_balance_total"], s["real_balance_total"]), ("90000.00", "480.00"))
-        rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
-        self.assertLess(rec.index("حسابات داخلية"), rec.index("الموردين:"))       # first, for the owner
-        owner = {(d["table"], d["field"]) for d in res["plan"].dq if d["action"].startswith("OWNER")}
-        self.assertIn(("Vendor", "internal"), owner)
-        self.assertIn(("Customer", "internal"), owner)
+        self.assertIn("استهلاك الصيدلية الداخلي", c["notes"])
+        s, cu = res["reconciliation"]["suppliers"], res["reconciliation"]["customers"]
+        self.assertEqual((s["internal_accounts"], s["real_balance_total"]), (0, "1380.00"))
+        self.assertEqual((cu["internal_balance_total"], cu["real_balance_total"]), ("300.00", "104.50"))
+        self.assertNotIn("internal", {d["field"] for d in res["plan"].dq if d["table"] == "Vendor"})
 
     def test_purchase_classes_are_counted_for_the_owner(self):
         t = base_tables()

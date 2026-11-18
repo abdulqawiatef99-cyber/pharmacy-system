@@ -444,7 +444,7 @@ def cmd_import_estock_db(a, s):
         res = estock_db.run(target, ctx, export_dir=Path(a.dir), out_dir=out_dir, archive_path=archive,
                             write_archive=a.apply, confirm_file=Path(a.confirm) if a.confirm else None,
                             packs_file=Path(a.packs) if a.packs else None, stock_source=a.stock_source,
-                            stores=a.store, database=a.database, round_piastres=getattr(a, "round_piastres", False))
+                            stores=a.store, database=a.database, round_piastres=not getattr(a, "no_round_piastres", False))
     except DomainError as e:
         sys.exit(f"FAIL: {e.message}" + ("\nلو اتكتب جزء، كمّل بنفس الأمر ونفس التصدير، أو رجّع النسخة الاحتياطية"
                                          if a.apply else ""))
@@ -647,8 +647,8 @@ def main(argv=None):
     ed.add_argument("--store", action="append", help="E-Stock store name or id (repeat); default: الصيدلية")
     ed.add_argument("--database", help="E-Stock database name when the export holds more than one (default stock)")
     ed.add_argument("--out", help="reports folder (default data/reports/estock-db-<time>)")
-    ed.add_argument("--round-piastres", action="store_true",
-                    help="owner's rule: round balances with a fraction of a piaster half up (each listed); default blocks")
+    ed.add_argument("--no-round-piastres", action="store_true",
+                    help="block balances with a fraction of a piaster instead of the owner's rule (half up, each listed)")
     ed.add_argument("--username")
     ed.add_argument("--password", help="for automation only; prefer the prompt")
     ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")

@@ -18,8 +18,8 @@ from pathlib import Path
 from ..core.backup import ESTOCK_ARCHIVE as NAME   # the backup carries it (one name for both)
 INDEX_COLS = ("product_id", "customer_id", "vendor_id", "sales_id", "back_sales_id", "purchase_id", "store_id",
               "gf_id", "counter_id", "insert_date", "ticket_num", "bill_number")
-# E-Stock keeps sign-in passwords as plain text (Employee.pass, Branches_employee_edit.pass): never copied
-# here until the owner decides (manager 22:15); the report says which columns were left out.
+# E-Stock's sign-in passwords (Employee.pass, Branches_employee_edit.pass) are not needed in the program
+# (owner 19/11): never copied; the report lists the columns left out.
 SECRET_COL = re.compile(r"^(pass|password|passwd|pwd|user_pass|emp_pass)$", re.I)
 
 
