@@ -991,3 +991,40 @@ class TestArchiveSecretsAndTickets(Base):
         self.assertEqual(res["plan"].checks["tickets"]["with_ticket_after_trim"], 1)
         from app.dataimport import estock_history as h
         self.assertEqual([r["ticket_no"] for r in h.invoices(self.db, self.ctx, "sale") if r["estock_id"] == "2"], ["T-123"])
+
+
+class TestOwnerReportLines(Base):
+    def test_one_line_each_for_the_owner(self):
+        t = base_tables()
+        t["Sales_header"].append({"sales_id": "3", "customer_id": "77", "total_bill_net": "5", "insert_date": SOLD})
+        t["Purchase_header"].append({"purchase_id": "2", "vendor_id": "9", "total_bill": "404.1500",
+                                     "bill_date": "2026-07-11T00:00:00", "bill_number": "PK"})
+        t["Gedo_branches"] = [{"gb_id": "1", "total": "100.0000", "insert_date": "2026-05-29T10:00:00"},
+                              {"gb_id": "2", "total": "250.5000", "insert_date": "2026-05-30T10:00:00"}]
+        t["Branches_sales_details"] += [
+            {"branch_id": "3", "details_id": "8", "sales_id": "1", "product_id": "1", "total_sell": "55232.6600", "insert_date": SOLD},
+            {"branch_id": "3", "details_id": "9", "sales_id": "2", "product_id": "1", "total_sell": "-55232.6600", "insert_date": SOLD}]
+        res = self.run_import(tables=t)
+        rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
+        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")
+        self.assertIn("250.50", rows[("Gedo_branches", "total")]["estock_value"])
+        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+
+
+class TestCashDepots(Base):
+    def test_every_depot_is_in_the_plan_and_the_report_not_posted(self):
+        t = base_tables()
+        t["Cash_depots"] = [{"cd_id": "1", "cd_name": "الخزنة الرئيسية", "cd_class": "1", "cd_balance": "12500.2500"},
+                            {"cd_id": "2", "cd_name": "إنستاباي", "cd_class": "3", "cd_balance": "830.0000"},
+                            {"cd_id": "3", "cd_name": "فودافون كاش", "cd_class": "3", "cd_balance": "-15.0000"}]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        d = res["plan"].checks["money_info"]["cash_depots"]
+        self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
+                         [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
+                          ("3", "فودافون كاش", "3", "-15.00")])
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
+        self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))

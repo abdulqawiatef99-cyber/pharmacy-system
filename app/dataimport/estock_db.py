@@ -957,6 +957,55 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if v is not None and v < 0:
             p.issue("Sales_header", ident(r.get("sales_id")), "", "total_bill_net", r.get("total_bill_net"),
                     "فاتورة صافيها بالسالب: اتحفظت في الأرشيف زي ما هي", value_egp=v, kind="info")
+    # ids the history points to that E-Stock's own lists do not have (manager 22:15: 9 customers, 2 vendors)
+    for kind, master, key, users in (("customer", "Customer", "customer_id",
+                                      ("Sales_header", "Back_sales_header", "Gedo_customers")),
+                                     ("vendor", "Vendor", "vendor_id", ("Purchase_header", "Gedo_Vendors"))):
+        known = {ident(r.get(key)) for r in ex.rows(master)}
+        missing: dict[str, int] = defaultdict(int)
+        for t in users:
+            for r in ex.rows(t):
+                k = ident(r.get(key))
+                if k and k != "0" and k not in known:
+                    missing[k] += 1
+        if missing:
+            p.issue(master, ", ".join(sorted(missing, key=lambda x: dec(x) or 0)), "", key,
+                    f"{len(missing)} رقم، {sum(missing.values())} سطر",
+                    f"OWNER: التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
+                    kind="review")
+    # a purchase invoice with no lines (left parked in E-Stock)
+    with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
+    for r in ex.rows("Purchase_header"):
+        if ident(r.get("purchase_id")) not in with_lines:
+            v = dec(r.get("total_bill")) or 0
+            p.issue("Purchase_header", ident(r.get("purchase_id")), (r.get("bill_number") or "").strip(), "purchase",
+                    f"{(r.get('bill_date') or r.get('insert_date') or '')[:10]} {egp(v)}",
+                    "OWNER: فاتورة شراء من غير سطور (متعلقة في إي ستوك): ما اتنقلش منها رصيد ولا مخزون", value_egp=v,
+                    kind="review")
+    # the running balance with the other pharmacy (Gedo_branches), its last line
+    gb = ex.rows("Gedo_branches")
+    if gb:
+        last = max(gb, key=lambda r: (r.get("insert_date") or "", dec(next((v for k, v in r.items() if k.endswith("_id")), "0")) or 0))
+        tot = dec(last.get("total"))
+        p.issue("Gedo_branches", "", "", "total", f"{(last.get('insert_date') or '')[:10]} {egp(tot) if tot is not None else '?'}",
+                f"OWNER: حساب الصيدلية التانية ({len(gb)} سطر): آخر رصيد، ما اتنقلش لحساب في البرنامج", value_egp=tot,
+                kind="review")
+    # the biggest sales lines and lines that cancel each other (a big line and its reversal)
+    vals = []
+    for r in sales_lines(ex):
+        v = dec(r.get("total_sell"))
+        if v is None:
+            v = (dec(r.get("amount")) or 0) * (dec(r.get("sell_price")) or 0)
+        vals.append((v, ident(r.get("sales_id")), ident(r.get("product_id"))))
+    by_value = defaultdict(list)
+    for v, sid, pid in vals:
+        by_value[v].append((sid, pid))
+    for v, sid, pid in sorted(vals, key=lambda x: -abs(x[0]))[:3]:
+        if abs(v) >= 10000:
+            rev = by_value.get(-v)
+            p.issue("sales lines", sid, pid, "line value", egp(v),
+                    "OWNER: سطر بيع كبير" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
+                    kind="review")
     from .estock_archive import secret_columns
     for c in secret_columns(ex):
         p.issue("archive", "", "", c, "(كلمة سر بنص واضح)",
@@ -1074,8 +1123,30 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
     for k, v in sorted(tot.items()):
         out["sales_by_network"].append({"source": "Sales_header.network_money - Back_sales_header.network_money",
                                         "network_id": k, "name": nets.get(k, ""), "total": egp(v)})
+    # E-Stock's money places (treasuries, wallets, banks): Cash_depots, one row each (manager 22:15)
+    depots = []
+    rows = ex.rows("Cash_depots")
+    if rows:
+        cols = list(rows[0])
+        pick = lambda *keys: next((c for c in cols if any(k in c.lower() for k in keys)), None)   # noqa: E731
+        idc, namec, classc = cols[0], pick("name"), pick("class", "type")
+        balc = pick("balance", "current", "money", "total")
+        for r in rows:
+            bal = dec(r.get(balc)) if balc else None
+            depots.append({"source": "Cash_depots", "estock_id": ident(r.get(idc)),
+                           "name": (r.get(namec) or "").strip() if namec else "",
+                           "class": (r.get(classc) or "").strip() if classc else "",
+                           "balance": egp(bal) if bal is not None else None, "balance_column": balc,
+                           "exact_piastres": bal is not None and exact_piasters(bal) is not None})
+            p.issue("Cash_depots", ident(r.get(idc)), (r.get(namec) or "").strip() if namec else "", balc or "balance",
+                    r.get(balc) if balc else "?",
+                    "رصيد خزنة/محفظة: بيتنقل كرصيد افتتاحي لحسابه في البرنامج بخدمة F105 (لسه ما اتنقلش)",
+                    value_egp=bal, kind="review")
+    out["cash_depots"] = depots
     p.checks["money_info"] = out
     for t in out["tables"]:
+        if t["table"].lower() == "cash_depots":      # one line per depot below, not its column total
+            continue
         for col, v in t["sums"].items():
             if Decimal(v):
                 p.issue(t["table"], "", "", col, v, "رصيد فلوس محتمل (خزنة أو محفظة): لسه ما اتنقلش، مستني خدمة"
@@ -1507,6 +1578,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
             for g in groups:
                 lines.append(f"    {k}={g['id']} {g['name']}: " + "، ".join(f"{c}={v}" for c, v in g.items()
                                                                            if c not in ("id", "name")))
+    for d in mi.get("cash_depots", []):
+        lines.append(f"  Cash_depots {d['estock_id']} «{d['name']}» ({d['class']}): {d['balance']} — مستني F105")
     for c in mi.get("shift_transfers", []):
         lines.append(f"  تحويل قفل الشيفت للخزنة ({c['source']}) خزنة {c['fcs_id']} {c['name']}: {c['total']}")
     for c in mi.get("last_shift_close", []):
