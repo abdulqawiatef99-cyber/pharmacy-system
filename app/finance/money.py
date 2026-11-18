@@ -7,8 +7,9 @@ ledger; a payout from the drawer is a cash_movements row as before.
 
 Rules:
 - An account never goes below zero unless the owner allowed it for that account.
-- Opening balances come from the E-Stock import (treasury, InstaPay, Vodafone Cash) through set_opening;
-  a later count records any difference with a reason.
+- Opening balances come from the E-Stock import through post_opening (the old program's figure as it is);
+  the first count after it records the real difference as "difference from the old program", and the owner
+  may correct an opening without counting (adjust_opening). Neither is money in or out of the month.
 - Shift close moves the counted cash minus the float left for the next shift to the treasury, once per shift.
 - A payout names its source: the drawer, an account, or (owner only) "outside the program's accounts".
 - Card / transfer money goes to the account the owner routed that payment channel to.
@@ -49,6 +50,7 @@ KINDS = {
     "customer_payment": "تحصيل من عميل",
     "refund": "مرتجع لعميل",
     "count_difference": "فرق جرد الحساب",
+    "opening_adjustment": "تسوية الرصيد الافتتاحي",
 }
 PAYOUT_KINDS = ("supplier_payment", "expense", "payroll", "schedule", "tax", "owner_withdrawal")
 INCOME_KINDS = ("sale", "customer_payment", "refund")
@@ -116,13 +118,13 @@ def treasury_id(db: Database, ctx: Context) -> str:
 
 
 def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *, ref_type: str | None = None,
-          ref_id: str | None = None, note: str | None = None, meta: dict | None = None) -> str:
+          ref_id: str | None = None, note: str | None = None, meta: dict | None = None, check: bool = True) -> str:
     """One movement on an account, inside the caller's transaction. Refuses a balance below zero unless
     the owner allowed it for this account."""
     if kind not in KINDS:
         raise ValueError(f"unknown money movement kind {kind}")
     a = _account(db, ctx, account_id)
-    if amount < 0 and not a["allow_negative"]:
+    if check and amount < 0 and not a["allow_negative"]:
         now = balance(db, ctx.org_id, account_id)
         if now + amount < 0:
             raise Conflict(f"رصيد {a['name']} لا يكفي ({now / 100:,.2f} ج)", code="account_negative",
@@ -293,15 +295,84 @@ def update_account(db: Database, ctx: Context, account_id: str, data: dict) -> d
     return get_account(db, ctx, account_id)
 
 
-# Standard accounts the E-Stock import fills: key -> (kind, name). Found by key, made on first use.
+# Standard accounts: key -> (kind, name). Found by key, made on first use.
 STANDARD_ACCOUNTS = {"treasury": ("treasury", TREASURY_NAME), "instapay": ("bank", "إنستاباي"),
                      "vodafone_cash": ("wallet", "فودافون كاش")}
 OPENING_SOURCES = {"estock": "رصيد افتتاحي من إي ستوك", "count": "رصيد افتتاحي من العدّ الفعلي"}
 
 
+def listing(db: Database, ctx: Context) -> list[dict]:
+    """The accounts (not the drawer) with their keys, for the E-Stock import to match its money places."""
+    ctx.require("cash.see_expected")
+    return [dict(r) for r in db.all(
+        "SELECT id, code, source_ref, name, kind, is_active, allow_negative FROM money_accounts WHERE org_id=?"
+        " ORDER BY kind<>'treasury', sort, name", (ctx.org_id,))]
+
+
+def resolve(db: Database, ctx: Context, account: str) -> str:
+    """An account id from an id, a key ('treasury', 'instapay', 'vodafone_cash', or any code set by
+    ensure_account) or a source reference ('estock:2'). Never creates."""
+    if account == "treasury":
+        t = find_treasury(db, ctx.org_id)
+        if t:
+            return t
+    r = db.one("SELECT id FROM money_accounts WHERE org_id=? AND (id=? OR code=? OR source_ref=?)"
+               " ORDER BY id=? DESC LIMIT 1", (ctx.org_id, account, account, account, account))
+    if not r:
+        raise NotFound("الحساب غير موجود")
+    return r["id"]
+
+
+def ensure_account(db: Database, ctx: Context, *, kind: str, name: str, code: str | None = None,
+                   source_ref: str | None = None) -> str:
+    """Find or make one account for the import (one per used E-Stock money place, source_ref 'estock:<id>').
+    Matched by source_ref, then code, then (kind 'treasury') the main treasury, then the same name; a match
+    keeps its id and gains the missing code / source_ref. Owner only; audited. Returns the account id."""
+    ctx.require("settings.manage")
+    if kind not in ACCOUNT_KINDS:
+        raise ValidationFailed("نوع الحساب غير صحيح")
+    name = (name or "").strip()[:60]
+    if len(name) < 2:
+        raise ValidationFailed("اكتب اسم الحساب")
+    code = (code or "").strip()[:40] or None
+    source_ref = (source_ref or "").strip()[:60] or None
+    with db.transaction():
+        found = None
+        if source_ref:
+            found = db.one("SELECT * FROM money_accounts WHERE org_id=? AND source_ref=?", (ctx.org_id, source_ref))
+        if not found and code:
+            found = db.one("SELECT * FROM money_accounts WHERE org_id=? AND code=?", (ctx.org_id, code))
+        if not found and kind == "treasury":
+            found = db.one("SELECT * FROM money_accounts WHERE id=?", (treasury_id(db, ctx),))
+        if not found:
+            found = db.one("SELECT * FROM money_accounts WHERE org_id=? AND name=?", (ctx.org_id, name))
+        if found:
+            changes = {}
+            for col, v in (("code", code), ("source_ref", source_ref)):
+                if v and found[col] != v:
+                    if found[col]:
+                        raise Conflict(f"الحساب {found['name']} مربوط بمفتاح تاني", code="account_key_taken",
+                                       details={"account_id": found["id"], col: found[col]})
+                    changes[col] = v
+            if changes:
+                db.execute(f"UPDATE money_accounts SET {', '.join(f'{k}=?' for k in changes)} WHERE id=? AND org_id=?",
+                           (*changes.values(), found["id"], ctx.org_id))
+                audit.record(db, ctx, "money.account_update", "money_account", found["id"],
+                             before={k: found[k] for k in changes}, after=changes)
+            return found["id"]
+        if kind == "treasury":                     # unreachable: treasury_id() above always finds or makes it
+            raise Conflict("الخزنة الرئيسية موجودة")
+        aid = new_id()
+        db.execute("INSERT INTO money_accounts (id, org_id, kind, code, source_ref, name, sort, created_by)"
+                   " VALUES (?,?,?,?,?,?, (SELECT coalesce(max(sort),0)+1 FROM money_accounts WHERE org_id=?), ?)",
+                   (aid, ctx.org_id, kind, code, source_ref, name, ctx.org_id, ctx.user_id))
+        audit.record(db, ctx, "money.account_create", "money_account", aid,
+                     after={"kind": kind, "name": name, "code": code, "source_ref": source_ref})
+        return aid
+
+
 def account_for(db: Database, ctx: Context, key: str) -> str:
-    """The id of a standard account by its key, made (and audited) the first time. An account the owner
-    already made with the same name is adopted under the key, never duplicated."""
+    """The id of a standard account by its key, made (and audited) the first time."""
     if key not in STANDARD_ACCOUNTS:
         raise ValidationFailed("الحساب غير معروف")
     if key == "treasury":
@@ -309,64 +380,95 @@ def account_for(db: Database, ctx: Context, key: str) -> str:
     r = db.one("SELECT id FROM money_accounts WHERE org_id=? AND code=?", (ctx.org_id, key))
     if r:
         return r["id"]
-    ctx.require("settings.manage")
     kind, name = STANDARD_ACCOUNTS[key]
-    with db.transaction():
-        r = db.one("SELECT id, code FROM money_accounts WHERE org_id=? AND (code=? OR name=?)", (ctx.org_id, key, name))
-        if r and r["code"] == key:
-            return r["id"]
-        if r:
-            if r["code"]:
-                raise Conflict(f"اسم {name} مستخدم لحساب تاني", code="account_name_taken")
-            db.execute("UPDATE money_accounts SET code=? WHERE id=? AND org_id=?", (key, r["id"], ctx.org_id))
-            audit.record(db, ctx, "money.account_update", "money_account", r["id"], before={"code": None},
-                         after={"code": key})
-            return r["id"]
-        aid = new_id()
-        db.execute("INSERT INTO money_accounts (id, org_id, kind, code, name, sort, created_by) VALUES (?,?,?,?,?,"
-                   " (SELECT coalesce(max(sort),0)+1 FROM money_accounts WHERE org_id=?), ?)",
-                   (aid, ctx.org_id, kind, key, name, ctx.org_id, ctx.user_id))
-        audit.record(db, ctx, "money.account_create", "money_account", aid, after={"kind": kind, "name": name, "code": key})
-        return aid
+    return ensure_account(db, ctx, kind=kind, name=name, code=key)
 
 
-def set_opening(db: Database, ctx: Context, account: str, amount: int, *, source: str = "estock",
-                ref_id: str | None = None, note: str | None = None) -> dict:
-    """An account's opening balance at launch. The E-Stock import calls it with source 'estock' for the
-    treasury, InstaPay and Vodafone Cash (account = a STANDARD_ACCOUNTS key or an account id); source
-    'count' is a real count typed by the owner. Once per account, audited, and refused once the account has
-    any movement: after that a difference goes through count(). Callable inside the caller's transaction.
-    A resumed import (same source, ref_id and amount) gets the first result back, not a second posting."""
-    ctx.require("cash.manage")
-    ctx.require("cash.see_expected")
+def _opening_of(db: Database, ctx: Context, account_id: str) -> dict | None:
+    r = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='money_account' AND entity_id=?"
+               " AND action='money.opening' ORDER BY seq DESC LIMIT 1", (ctx.org_id, account_id))
+    return json.loads(r["after_json"] or "{}") if r else None
+
+
+def post_opening(db: Database, ctx: Context, account: str, amount: int, *, source: str = "estock",
+                 source_ref: str | None = None, note: str | None = None) -> dict:
+    """An account's opening balance at launch (owner only). The E-Stock import posts the old program's figure
+    with source 'estock' (account = id, standard key or 'estock:<id>'); source 'count' is a real count. The
+    E-Stock figure is taken as it is: a negative one is posted even where the account does not allow
+    negative, and a later count records the real difference with a reason ("difference from the old
+    program"). Once per account, audited, refused once the account has any movement; inside the caller's
+    transaction. The same source, source_ref and amount again returns the first result (replayed)."""
+    if not is_owner(ctx):
+        raise Forbidden("الرصيد الافتتاحي للمالك وحده", code="approval_required",
+                        details={"permission": "users.manage", "label": "الرصيد الافتتاحي للحسابات"})
     if source not in OPENING_SOURCES:
         raise ValidationFailed("مصدر الرصيد الافتتاحي غير صحيح")
     amount = _amount(amount, allow_zero=True, signed=True)
     with db.transaction():
-        account_id = account_for(db, ctx, account) if account in STANDARD_ACCOUNTS else account
+        account_id = account_for(db, ctx, account) if account in STANDARD_ACCOUNTS else resolve(db, ctx, account)
         a = _account(db, ctx, account_id)
-        prev = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='money_account' AND entity_id=?"
-                      " AND action='money.opening' ORDER BY seq DESC LIMIT 1", (ctx.org_id, account_id))
-        if prev:                                                   # an opening of 0 has no movement
-            p = json.loads(prev["after_json"] or "{}")
-            if ref_id and (p.get("source"), p.get("ref_id"), p.get("amount")) == (source, ref_id, amount):
+        prev = _opening_of(db, ctx, account_id)                  # an opening of 0 has no movement
+        if prev is not None:
+            if source_ref and (prev.get("source"), prev.get("source_ref"), prev.get("amount")) == (source, source_ref, amount):
                 m = db.one("SELECT id FROM money_movements WHERE account_id=? AND kind='opening'", (account_id,))
                 return {**get_account(db, ctx, account_id), "movement_id": m["id"] if m else None, "replayed": True}
             raise Conflict("الرصيد الافتتاحي للحساب ده متسجل قبل كده؛ أي فرق بعد كده يتسجل بالجرد",
-                           code="opening_exists")
+                           code="opening_exists", details={"account_id": account_id, "opening": prev.get("amount")})
         if db.one("SELECT 1 FROM money_movements WHERE account_id=? LIMIT 1", (account_id,)):
             raise Conflict(f"{a['name']} عليه حركات؛ الرصيد الافتتاحي لا يتسجل بعدها، سجّل الفرق بالجرد",
                            code="account_has_movements")
-        if amount < 0 and not a["allow_negative"]:
+        if source == "count" and amount < 0 and not a["allow_negative"]:
             raise ValidationFailed(f"الرصيد الافتتاحي لـ{a['name']} بالسالب والحساب لا يسمح بالسالب",
                                    code="account_negative", details={"account_id": account_id, "amount": amount})
         said = _note(note)
         text = OPENING_SOURCES[source] + (f" — {said}" if said else "")
-        mid = _post(db, ctx, account_id, amount, "opening", ref_type="opening", ref_id=ref_id, note=text,
-                    meta={"source": source}) if amount else None
+        meta = {"source": source, "source_ref": source_ref}
+        mid = _post(db, ctx, account_id, amount, "opening", ref_type="opening", ref_id=source_ref, note=text,
+                    meta=meta, check=False) if amount else None
         audit.record(db, ctx, "money.opening", "money_account", account_id,
-                     after={"amount": amount, "source": source, "ref_id": ref_id, "note": said})
+                     after={"amount": amount, "source": source, "source_ref": source_ref, "note": said})
     return {**get_account(db, ctx, account_id), "movement_id": mid, "replayed": False}
+
+
+def adjust_opening(db: Database, ctx: Context, account: str, correct_balance: int, reason: str) -> dict:
+    """The owner corrects an account's balance without counting it (e.g. the old program's figure was
+    wrong): the difference is an opening adjustment, apart from count differences, with a required reason.
+    Owner only; audited. Kept out of the month's money in / out."""
+    if not is_owner(ctx):
+        raise Forbidden("تسوية الرصيد الافتتاحي للمالك وحده", code="approval_required",
+                        details={"permission": "users.manage", "label": "تسوية الرصيد الافتتاحي"})
+    target = _amount(correct_balance, allow_zero=True, signed=True)
+    why = _note(reason, required=True, what="اكتب سبب التسوية")
+    with db.transaction():
+        account_id = account_for(db, ctx, account) if account in STANDARD_ACCOUNTS else resolve(db, ctx, account)
+        a = _account(db, ctx, account_id)
+        if target < 0 and not a["allow_negative"]:
+            raise ValidationFailed("الرصيد الصحيح لا يكون بالسالب في الحساب ده", code="account_negative")
+        before = balance(db, ctx.org_id, account_id)
+        diff = target - before
+        mid = _post(db, ctx, account_id, diff, "opening_adjustment", ref_type="opening_adjustment", note=why,
+                    check=False) if diff else None
+        audit.record(db, ctx, "money.opening_adjustment", "money_account", account_id,
+                     after={"before": before, "correct": target, "difference": diff, "reason": why})
+    return {**get_account(db, ctx, account_id), "difference": diff, "movement_id": mid}
+
+
+def check_openings(db: Database, ctx: Context, figures: dict[str, int]) -> dict:
+    """For the import report, right after the move: each account's balance in the program against the old
+    program's figure (rounded to whole piasters by the import). Read only."""
+    ctx.require("cash.see_expected")
+    rows = []
+    for key, fig in figures.items():
+        expected = _amount(fig, allow_zero=True, signed=True)
+        try:
+            aid = resolve(db, ctx, key)
+            a = db.one("SELECT name FROM money_accounts WHERE id=?", (aid,))
+            bal, name = balance(db, ctx.org_id, aid), a["name"]
+        except NotFound:
+            aid, bal, name = None, None, None
+        rows.append({"account": key, "account_id": aid, "name": name, "expected": expected, "balance": bal,
+                     "difference": None if bal is None else bal - expected, "ok": bal == expected})
+    return {"rows": rows, "ok": all(r["ok"] for r in rows)}
 
 
 def count(db: Database, ctx: Context, account_id: str, counted: int, reason: str | None = None) -> dict:
@@ -376,33 +478,39 @@ def count(db: Database, ctx: Context, account_id: str, counted: int, reason: str
     ctx.require("cash.see_expected")
     counted = _amount(counted, allow_zero=True, signed=True)
     with db.transaction():
-        if account_id == "treasury":
-            account_id = treasury_id(db, ctx)
+        account_id = treasury_id(db, ctx) if account_id == "treasury" else resolve(db, ctx, account_id)
         a = _account(db, ctx, account_id)
         if counted < 0 and not a["allow_negative"]:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         expected = balance(db, ctx.org_id, account_id)
         diff = counted - expected
         why = _note(reason, required=bool(diff), what="يوجد فرق في الحساب؛ اكتب سببه")
+        # the first count after an opening taken from E-Stock measures the old program, not this month
+        opening = _opening_of(db, ctx, account_id)
+        old = bool(opening and opening.get("source") == "estock"
+                   and not db.one("SELECT 1 FROM money_counts WHERE account_id=? LIMIT 1", (account_id,)))
         mid = None
         if diff:
             mid = new_id()
-            db.execute("INSERT INTO money_movements (id, org_id, account_id, amount, kind, ref_type, note, created_by)"
-                       " VALUES (?,?,?,?, 'count_difference', 'money_count', ?, ?)",
-                       (mid, ctx.org_id, account_id, diff, why, ctx.user_id))
+            db.execute("INSERT INTO money_movements (id, org_id, account_id, amount, kind, ref_type, note, meta, created_by)"
+                       " VALUES (?,?,?,?, 'count_difference', 'money_count', ?, ?, ?)",
+                       (mid, ctx.org_id, account_id, diff, why,
+                        json.dumps({"against": "old_program"}) if old else None, ctx.user_id))
         cid = new_id()
         db.execute("INSERT INTO money_counts (id, org_id, account_id, expected, counted, difference, reason,"
                    " movement_id, created_by) VALUES (?,?,?,?,?,?,?,?,?)",
                    (cid, ctx.org_id, account_id, expected, counted, diff, why, mid, ctx.user_id))
         audit.record(db, ctx, "money.count", "money_account", account_id,
-                     after={"expected": expected, "counted": counted, "difference": diff, "reason": why})
+                     after={"expected": expected, "counted": counted, "difference": diff, "reason": why,
+                            "against_old_program": old})
         if diff:
             from ..core import notify
-            notify.emit(db, ctx, "money_count_difference", "error" if diff < 0 else "warning",
-                        f"{'عجز' if diff < 0 else 'زيادة'} في {a['name']} {abs(diff) / 100:,.2f} ج", why or "",
-                        "money_account", account_id)
+            title = (f"فرق عن البرنامج القديم في {a['name']} {abs(diff) / 100:,.2f} ج" if old else
+                     f"{'عجز' if diff < 0 else 'زيادة'} في {a['name']} {abs(diff) / 100:,.2f} ج")
+            notify.emit(db, ctx, "money_count_difference", "warning" if old or diff > 0 else "error", title,
+                        why or "", "money_account", account_id)
     return {"count_id": cid, "account_id": account_id, "expected": expected, "counted": counted,
-            "difference": diff, "balance": balance(db, ctx.org_id, account_id)}
+            "difference": diff, "against_old_program": old, "balance": balance(db, ctx.org_id, account_id)}
 
 
 # -------------------------------------------------------------------------- moving money
@@ -631,9 +739,11 @@ def _drawer_kind(r) -> str:
     return "drawer_payout" if r["amount"] < 0 else "drawer_deposit"
 
 
-SUMMARY_EXTRA = {"drawer_payout": "صرف من الدرج", "drawer_deposit": "إيداع في الدرج", "void": "إلغاء فاتورة"}
-# moves between the pharmacy's own places, and opening balances: shown, but not money in or out
-NOT_A_FLOW = ("transfer", "shift_close", "opening")
+SUMMARY_EXTRA = {"drawer_payout": "صرف من الدرج", "drawer_deposit": "إيداع في الدرج", "void": "إلغاء فاتورة",
+                 "old_program_difference": "فرق عن البرنامج القديم"}
+# moves between the pharmacy's own places, opening balances and their corrections (the old program's
+# figure against the real money): shown, but not money in or out of the period
+NOT_A_FLOW = ("transfer", "shift_close", "opening", "opening_adjustment", "old_program_difference")
 
 
 def summary(db: Database, ctx: Context, date_from: str | None = None, date_to: str | None = None,
@@ -659,9 +769,12 @@ def summary(db: Database, ctx: Context, date_from: str | None = None, date_to: s
         for x in ((k, pl) if kind in NOT_A_FLOW else (p, k, pl)):
             x[side] += abs(amount)
 
-    for r in db.all("SELECT m.amount, m.kind, m.created_at, a.name FROM money_movements m JOIN money_accounts a"
+    for r in db.all("SELECT m.amount, m.kind, m.meta, m.created_at, a.name FROM money_movements m JOIN money_accounts a"
                     " ON a.id=m.account_id WHERE m.org_id=? AND m.created_at>=? AND m.created_at<?", (ctx.org_id, lo, hi)):
-        add(_local_date(r["created_at"]), r["name"], r["kind"], r["amount"])
+        kind = r["kind"]
+        if kind == "count_difference" and r["meta"] and json.loads(r["meta"]).get("against") == "old_program":
+            kind = "old_program_difference"
+        add(_local_date(r["created_at"]), r["name"], kind, r["amount"])
     # the drawer's sales cash by hour (a day can hold thousands of sales), its payouts one by one (few)
     for r in db.all("SELECT m.kind, substr(m.created_at,1,13) h, sum(m.amount) amount FROM cash_movements m"
                     " JOIN cash_shifts s ON s.id=m.shift_id WHERE m.org_id=? AND s.branch_id=?"

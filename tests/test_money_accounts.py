@@ -64,74 +64,140 @@ class TestAccounts(MoneyCase):
             money.create_account(self.db, self.ctx, "إنستاباي", "wallet")
 
     def test_account_with_money_cannot_be_stopped(self):
-        money.set_opening(self.db, self.ctx, self.bank, 1000)
+        money.post_opening(self.db, self.ctx, self.bank, 1000)
         with self.assertRaises(Conflict):
             money.update_account(self.db, self.ctx, self.bank, {"is_active": False})
         with self.assertRaises(Conflict):
             money.update_account(self.db, self.ctx, self.t, {"is_active": False})
 
     def test_movements_are_append_only(self):
-        money.set_opening(self.db, self.ctx, self.t, 5000)
+        money.post_opening(self.db, self.ctx, self.t, 5000)
         for sql in ("UPDATE money_movements SET amount=1", "DELETE FROM money_movements"):
             with self.assertRaises(sqlite3.DatabaseError), self.db.transaction():
                 self.db.execute(sql)
 
 
 class TestOpening(MoneyCase):
-    """Openings come from the E-Stock import (owner, 18/11 22:05): treasury, InstaPay, Vodafone Cash."""
+    """Openings come from the E-Stock import (owner 18/11 22:05; manager 22:16): the old program's figure as it
+    is, then a real count records the difference as "difference from the old program"."""
 
     def test_estock_openings_by_key_once_per_account_audited(self):
         with self.db.transaction():                            # the import calls it inside its own step
-            t = money.set_opening(self.db, self.ctx, "treasury", 70000000, source="estock", ref_id="run-1")
-            i = money.set_opening(self.db, self.ctx, "instapay", 1250000, source="estock", ref_id="run-1")
-            v = money.set_opening(self.db, self.ctx, "vodafone_cash", 340000, source="estock", ref_id="run-1")
+            t = money.post_opening(self.db, self.ctx, "treasury", 70000000, source="estock", source_ref="run-1")
+            i = money.post_opening(self.db, self.ctx, "instapay", 1250000, source="estock", source_ref="run-1")
+            v = money.post_opening(self.db, self.ctx, "vodafone_cash", 340000, source="estock", source_ref="run-1")
         self.assertEqual((t["id"], t["balance"]), (self.t, 70000000))
         self.assertEqual(i["id"], self.bank)                   # the owner's «إنستاباي» is adopted, not duplicated
         self.assertEqual((v["kind"], v["code"], v["balance"]), ("wallet", "vodafone_cash", 340000))
         mv = money.movements(self.db, self.ctx, account_id=self.t)["rows"][0]
-        self.assertEqual((mv["kind"], mv["amount"], mv["meta"]), ("opening", 70000000, {"source": "estock"}))
+        self.assertEqual((mv["kind"], mv["amount"], mv["meta"]), ("opening", 70000000,
+                                                                  {"source": "estock", "source_ref": "run-1"}))
         a = self.db.one("SELECT after_json FROM audit_log WHERE action='money.opening' AND entity_id=?", (self.t,))
         self.assertIn('"source": "estock"', a["after_json"])
         with self.assertRaises(Conflict) as e:
-            money.set_opening(self.db, self.ctx, "treasury", 1, source="estock", ref_id="run-2")
+            money.post_opening(self.db, self.ctx, "treasury", 1, source="estock", source_ref="run-2")
         self.assertEqual(e.exception.code, "opening_exists")
 
     def test_a_resumed_import_gets_the_first_result_back(self):
-        first = money.set_opening(self.db, self.ctx, "treasury", 5000, ref_id="run-1")
-        again = money.set_opening(self.db, self.ctx, "treasury", 5000, ref_id="run-1")
+        first = money.post_opening(self.db, self.ctx, "treasury", 5000, source_ref="run-1")
+        again = money.post_opening(self.db, self.ctx, "treasury", 5000, source_ref="run-1")
         self.assertTrue(again["replayed"])
         self.assertEqual((again["movement_id"], self.bal(self.t)), (first["movement_id"], 5000))
+        with self.assertRaises(Conflict):                      # same run, other amount: never a second opening
+            money.post_opening(self.db, self.ctx, "treasury", 5001, source_ref="run-1")
 
     def test_refused_once_the_account_has_movements(self):
         money.owner_movement(self.db, self.ctx, self.bank, 100, "owner_deposit")
         with self.assertRaises(Conflict) as e:
-            money.set_opening(self.db, self.ctx, "instapay", 9000, ref_id="run-1")
+            money.post_opening(self.db, self.ctx, "instapay", 9000, source_ref="run-1")
         self.assertEqual(e.exception.code, "account_has_movements")
         self.assertEqual(self.bal(self.bank), 100)
 
     def test_zero_opening_also_only_once(self):
-        money.set_opening(self.db, self.ctx, self.bank, 0)
+        money.post_opening(self.db, self.ctx, self.bank, 0)
         with self.assertRaises(Conflict):
-            money.set_opening(self.db, self.ctx, self.bank, 500)
+            money.post_opening(self.db, self.ctx, self.bank, 500)
 
-    def test_negative_only_where_allowed_and_no_fractions_or_unknown_keys(self):
+    def test_estock_figure_taken_as_it_is_even_negative_but_a_count_opening_is_not(self):
+        self.assertEqual(money.post_opening(self.db, self.ctx, "treasury", -12345, source_ref="run-1")["balance"], -12345)
         with self.assertRaises(ValidationFailed) as e:
-            money.set_opening(self.db, self.ctx, "treasury", -100)
+            money.post_opening(self.db, self.ctx, self.bank, -100, source="count")
         self.assertEqual(e.exception.code, "account_negative")
-        money.update_account(self.db, self.ctx, self.bank, {"allow_negative": True})
-        self.assertEqual(money.set_opening(self.db, self.ctx, "instapay", -100)["balance"], -100)
+
+    def test_owner_only_whole_piasters_known_source_and_account(self):
         for bad in (dict(amount=10.5), dict(amount=1, source="eStock")):
             with self.assertRaises(ValidationFailed):
-                money.set_opening(self.db, self.ctx, self.t, **{"amount": 1, **bad})
-        with self.assertRaises(NotFound):                    # not a standard key, not an account id
-            money.set_opening(self.db, self.ctx, "fawry", 1)
-        with self.assertRaises(Forbidden):
-            money.set_opening(self.db, self.ph, self.t, 100)
+                money.post_opening(self.db, self.ctx, self.t, **{"amount": 1, **bad})
+        with self.assertRaises(NotFound):                    # not a key, a code, a source reference or an id
+            money.post_opening(self.db, self.ctx, "fawry", 1)
+        for c in (self.m, self.ph):
+            with self.assertRaises(Forbidden):
+                money.post_opening(self.db, c, self.t, 100)
 
-    def test_a_later_count_records_the_difference_with_a_reason(self):
-        money.set_opening(self.db, self.ctx, "treasury", 70000000, ref_id="run-1")
-        r = money.count(self.db, self.ctx, "treasury", 69000000, "عدّ فعلي بعد الإطلاق")
+    def test_huge_estock_opening_then_a_large_negative_count_is_the_old_programs_difference(self):
+        money.post_opening(self.db, self.ctx, "treasury", 167789758, source_ref="run-1")    # 1,677,897.58
+        r = money.count(self.db, self.m, "treasury", 2500000, "عدّ فعلي بعد الإطلاق")
+        self.assertEqual((r["difference"], r["balance"], r["against_old_program"]), (-165289758, 2500000, True))
+        p = money.summary(self.db, self.m, today(), today())["periods"][0]
+        kinds = {k["kind"]: k for k in p["by_kind"]}
+        self.assertEqual((kinds["old_program_difference"]["out"], kinds["old_program_difference"]["flow"]),
+                         (165289758, False))
+        self.assertEqual((p["in"], p["out"]), (0, 0))          # not a loss of the month
+        second = money.count(self.db, self.m, "treasury", 2400000, "ورقة ناقصة")
+        self.assertFalse(second["against_old_program"])        # later counts are ordinary differences
+        p = money.summary(self.db, self.m, today(), today())["periods"][0]
+        self.assertEqual(p["out"], 100000)
+
+    def test_owner_corrects_an_opening_without_counting(self):
+        money.post_opening(self.db, self.ctx, "treasury", 70000000, source_ref="run-1")
+        with self.assertRaises(ValidationFailed):
+            money.adjust_opening(self.db, self.ctx, "treasury", 69000000, "")
+        with self.assertRaises(Forbidden):
+            money.adjust_opening(self.db, self.m, "treasury", 69000000, "تصحيح")
+        r = money.adjust_opening(self.db, self.ctx, "treasury", 69000000, "رقم إي ستوك كان غلط")
         self.assertEqual((r["difference"], r["balance"]), (-1000000, 69000000))
+        mv = money.movements(self.db, self.ctx, kind="opening_adjustment")["rows"]
+        self.assertEqual([(m["amount"], m["note"]) for m in mv], [(-1000000, "رقم إي ستوك كان غلط")])
+        p = money.summary(self.db, self.m, today(), today())["periods"][0]
+        self.assertEqual((p["in"], p["out"]), (0, 0))
+
+
+class TestImportAccounts(MoneyCase):
+    """The import makes one account per used E-Stock money place (Cash_depots) and checks the move."""
+
+    def test_accounts_from_cash_depots_matched_once(self):
+        t = money.ensure_account(self.db, self.ctx, kind="treasury", name="الخزينة", source_ref="estock:2")
+        self.assertEqual(t, self.t)                            # the main treasury, never a second one
+        w = money.ensure_account(self.db, self.ctx, kind="wallet", name="فودافون كاش", source_ref="estock:5")
+        self.assertEqual(money.ensure_account(self.db, self.ctx, kind="wallet", name="اسم تاني", source_ref="estock:5"), w)
+        b = money.ensure_account(self.db, self.ctx, kind="bank", name="إنستاباي", source_ref="estock:7")
+        self.assertEqual(b, self.bank)                         # adopted by name, gains its source reference
+        keys = {r["source_ref"]: r["id"] for r in money.listing(self.db, self.m)}
+        self.assertEqual((keys["estock:2"], keys["estock:5"], keys["estock:7"]), (self.t, w, self.bank))
+        self.assertEqual(money.resolve(self.db, self.ctx, "estock:5"), w)
+        with self.assertRaises(Conflict):                      # one account, one old money place
+            money.ensure_account(self.db, self.ctx, kind="bank", name="إنستاباي", source_ref="estock:8")
+        with self.assertRaises(Forbidden):
+            money.ensure_account(self.db, self.m, kind="wallet", name="محفظة", source_ref="estock:9")
+
+    def test_opening_by_source_reference_and_the_check_for_the_import_report(self):
+        w = money.ensure_account(self.db, self.ctx, kind="wallet", name="فودافون كاش", source_ref="estock:5")
+        money.post_opening(self.db, self.ctx, "estock:5", 340058, source_ref="run-1")       # 3,400.577 rounded
+        money.post_opening(self.db, self.ctx, "treasury", 167789758, source_ref="run-1")
+        c = money.check_openings(self.db, self.m, {"estock:5": 340058, "treasury": 167789758, "estock:9": 100})
+        self.assertFalse(c["ok"])
+        by = {r["account"]: r for r in c["rows"]}
+        self.assertEqual((by["estock:5"]["account_id"], by["estock:5"]["ok"]), (w, True))
+        self.assertTrue(by["treasury"]["ok"])
+        self.assertEqual((by["estock:9"]["account_id"], by["estock:9"]["ok"]), (None, False))
+
+    def test_network_routes_to_the_imported_accounts(self):
+        w = money.ensure_account(self.db, self.ctx, kind="wallet", name="فودافون كاش", source_ref="estock:5")
+        with self.db.transaction():
+            self.db.execute("INSERT INTO payment_channels (id, org_id, kind, name) VALUES ('net-5', ?, 'transfer', 'فودافون')",
+                            (self.ctx.org_id,))
+        money.set_route(self.db, self.ctx, "transfer", "net-5", w)
+        self.assertEqual(money.route_for(self.db, self.ctx.org_id, "transfer", "net-5"), w)
 
 
 class TestShiftClose(MoneyCase):
@@ -184,7 +250,7 @@ class TestShiftClose(MoneyCase):
 
 class TestPayouts(MoneyCase):
     def test_payout_lowers_the_account_and_is_refused_below_zero(self):
-        money.set_opening(self.db, self.ctx, self.t, 10000)
+        money.post_opening(self.db, self.ctx, self.t, 10000)
         with self.db.transaction():
             r = money.pay_out(self.db, self.m, self.t, 4000, "supplier_payment", ref_type="supplier_ledger",
                               ref_id="L1", note="دفع للمورد")
@@ -223,7 +289,7 @@ class TestPayouts(MoneyCase):
         self.assertEqual(money.source_label(self.db, self.ctx, money.OUTSIDE), money.OUTSIDE_LABEL)
 
     def test_paying_from_an_account_needs_owner_or_manager(self):
-        money.set_opening(self.db, self.ctx, self.t, 10000)
+        money.post_opening(self.db, self.ctx, self.t, 10000)
         with self.assertRaises(Forbidden):
             money.pay_out(self.db, self.ph, self.t, 100, "expense", ref_type="expense", ref_id=None, note="x")
 
@@ -297,7 +363,7 @@ class TestRouting(MoneyCase):
 
 class TestCount(MoneyCase):
     def test_difference_needs_a_reason_and_is_recorded(self):
-        money.set_opening(self.db, self.ctx, self.t, 10000)
+        money.post_opening(self.db, self.ctx, self.t, 10000)
         with self.assertRaises(ValidationFailed):
             money.count(self.db, self.m, self.t, 9500)
         r = money.count(self.db, self.m, self.t, 9500, "ورقة ناقصة")
@@ -332,8 +398,8 @@ class TestReports(MoneyCase):
             money.summary(self.db, self.ph, today(), today())
 
     def test_movements_filters(self):
-        money.set_opening(self.db, self.ctx, self.t, 10000)
-        money.set_opening(self.db, self.ctx, self.bank, 2000)
+        money.post_opening(self.db, self.ctx, self.t, 10000)
+        money.post_opening(self.db, self.ctx, self.bank, 2000)
         money.transfer(self.db, self.m, self.t, self.bank, 1000)
         self.assertEqual(len(money.movements(self.db, self.m, account_id=self.bank)["rows"]), 2)
         self.assertEqual(len(money.movements(self.db, self.m, kind="transfer")["rows"]), 2)

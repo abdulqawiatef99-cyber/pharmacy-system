@@ -4,12 +4,14 @@
 
 -- Where money is kept besides the shift drawer: the main treasury (one per pharmacy) and the owner's own
 -- accounts (bank / InstaPay, Vodafone Cash, ...). The balance is the sum of the account's movements.
--- Opening balances come from the E-Stock import (or a count); later differences go through a count.
+-- Opening balances come from the E-Stock import (the old program's figure); a later count or the owner's
+-- opening adjustment records the real difference.
 CREATE TABLE money_accounts (
     id             TEXT PRIMARY KEY,
     org_id         TEXT NOT NULL REFERENCES organizations(id),
     kind           TEXT NOT NULL CHECK (kind IN ('treasury','bank','wallet','other')),
     code           TEXT,                  -- fixed key of a standard account ('treasury','instapay','vodafone_cash')
+    source_ref     TEXT,                  -- the old program's money place it came from ('estock:<id>')
     name           TEXT NOT NULL,
     allow_negative INTEGER NOT NULL DEFAULT 0 CHECK (allow_negative IN (0,1)),
     is_active      INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
@@ -20,6 +22,7 @@ CREATE TABLE money_accounts (
 );
 CREATE UNIQUE INDEX ux_one_treasury ON money_accounts(org_id) WHERE kind = 'treasury';
 CREATE UNIQUE INDEX ux_money_account_code ON money_accounts(org_id, code) WHERE code IS NOT NULL;
+CREATE UNIQUE INDEX ux_money_account_source ON money_accounts(org_id, source_ref) WHERE source_ref IS NOT NULL;
 
 -- Every piaster in or out of an account (+ in, - out). Append-only.
 CREATE TABLE money_movements (
@@ -29,7 +32,8 @@ CREATE TABLE money_movements (
     amount     INTEGER NOT NULL CHECK (amount <> 0),
     kind       TEXT NOT NULL CHECK (kind IN ('opening','shift_close','transfer','supplier_payment','expense',
                                              'payroll','schedule','tax','owner_withdrawal','owner_deposit',
-                                             'sale','customer_payment','refund','count_difference')),
+                                             'sale','customer_payment','refund','count_difference',
+                                             'opening_adjustment')),
     ref_type   TEXT,
     ref_id     TEXT,
     note       TEXT,
