@@ -238,7 +238,12 @@ class TestRunnerInBrowser(APICase):
         env.start()
         self.addCleanup(env.stop)
 
+    def open_shift(self):
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 0)
+
     def test_pre_post_flows_and_print(self):
+        self.open_shift()  # every store sale needs an open shift (final review P2-2)
         from app.sales.service import Sales
         cust = Sales(self.db).create_customer(self.ctx, name="عميل حقيقي", credit_limit=1000)
         before_customers = self.db.one("SELECT count(*) c FROM customers")["c"]
@@ -289,6 +294,7 @@ class TestRunnerInBrowser(APICase):
     def test_return_flow_never_touches_the_invoice_already_on_screen(self):
         """Codex P1 on #141: the previous invoice stays in the DOM while the TEST one loads; a slow load
         must not make the runner fill and click the real invoice's return form."""
+        self.open_shift()  # every store sale needs an open shift (final review P2-2)
         from app.sales.service import Sales
         from app.inventory import service as inv
         from decimal import Decimal
@@ -314,6 +320,7 @@ class TestRunnerInBrowser(APICase):
     def test_a_slow_device_stays_inside_the_phase_budget(self):
         """Codex P2 on #141: nested requests share the phase budget, so a hung upload cannot push a call
         past ~25 s (the coordinator's limit is ~40 s) and the result still comes back."""
+        self.open_shift()  # every store sale needs an open shift (final review P2-2)
         out = self.run_plan([{"slow": {"glob": "**/api/imports", "method": "POST", "ms": 60000}},
                              {"fn": "flows", "args": [{"ui": False}]}])
         self.assertLess(out["flows"]["ms"], 26500)

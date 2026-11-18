@@ -258,6 +258,9 @@ class LongRun(DBTestCase):
         errors: list[BaseException] = []
         lock = threading.Lock()
         items = self.multi[:3]                      # the same few items: real contention on the same batches
+        from app.sales import cash
+        if not cash.open_shift_id(w.db, w.ctx):  # every store sale needs an open shift (final review P2-2)
+            cash.CashDrawer(w.db).open(w.ctx, 0)
 
         def work(ctx, seed):
             rng = random.Random(seed)
