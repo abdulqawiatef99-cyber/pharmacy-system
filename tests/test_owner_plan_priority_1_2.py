@@ -318,6 +318,7 @@ class TestPriority2(PlanCase):
     def test_transfer_sale_keeps_its_image_and_warns_on_a_duplicate_upload(self):
         """P2 line 4 (acceptance 17): InstaPay sale + screenshot; the same screenshot on another invoice warns."""
         ch = self.channel("transfer")
+        self.call("POST", "/api/cash/open", 201, json={"opening_cash": 0})  # every store sale needs an open shift (final review P2-2)
         s1 = self.sell(self.pan, [{"method": "transfer", "amount": 4000, "channel_id": ch}], packs=1)
         s2 = self.sell(self.pan, [{"method": "transfer", "amount": 4000, "channel_id": ch}], packs=1)
         self.assertEqual((s1["paid_transfer"], s1["paid_cash"]), (4000, 0))

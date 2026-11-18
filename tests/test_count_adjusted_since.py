@@ -83,6 +83,8 @@ class TestAdjustedSinceCount(DBTestCase):
         sid = self.cnt.create(self.ctx, title="c", scope="items", item_ids=[self.item])
         self.cnt.record(self.ctx, sid, item_id=self.item, qty=6)
         sales = Sales(self.db)
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 0)  # every store sale needs an open shift (final review P2-2)
         sale = sales.create(self.ctx)
         d = sales.add_line(self.ctx, sale, self.item, units=2)
         sales.complete(self.ctx, sale, paid_card=d["total"])

@@ -384,11 +384,13 @@ class Sales:
                 raise self._short(sellable, expired, recalled)
             # the same item again (scanned twice, quick button tapped twice) goes on its line, so whole
             # packs are priced as packs and not as loose units on separate lines
-            same = self.db.one("SELECT id, qty_base, client_ref FROM sale_lines WHERE sale_id=? AND item_id=? AND discount_bp=?"
-                               " ORDER BY line_no DESC LIMIT 1", (sid, item_id, discount_bp)) if not discount_bp else None
-            if not same and not discount_bp:
-                same = self.db.one("SELECT id, qty_base, client_ref FROM sale_lines WHERE sale_id=? AND item_id=? ORDER BY line_no DESC LIMIT 1",
-                                   (sid, item_id))
+            # only into a line with the same discount (final review P2-3): units scanned without a discount never
+            # take a discount someone typed (or approved) for the line before. A contract line takes them: the
+            # contract's discount is the customer's on every unit and is set again below.
+            same = self.db.one("SELECT id, qty_base, client_ref FROM sale_lines WHERE sale_id=? AND item_id=?"
+                               " AND ((discount_bp=? AND coalesce(discount_source, '')<>'contract')"
+                               "      OR (?=0 AND discount_source='contract'))"
+                               " ORDER BY line_no DESC LIMIT 1", (sid, item_id, discount_bp, discount_bp))
             if same:
                 total = same["qty_base"] + qty
                 refs = ",".join(filter(None, [*(same["client_ref"] or "").split(",")[-19:], client_ref])) or None
@@ -586,8 +588,10 @@ class Sales:
         if bad:
             raise Conflict("توجد أصناف غير متاحة أو بدون سعر", code="line_problems",
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
-        if paid_cash and not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزينة مغلقة — افتح وردية قبل البيع النقدي", code="no_open_shift")
+        # every store sale belongs to a shift, card, transfer or credit too: a sale with no shift appears in no
+        # shift report, so its card and credit amounts escaped the close (final review P2-2)
+        if not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
+            raise Conflict("الخزينة مغلقة — افتح وردية قبل البيع", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
         if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
@@ -657,7 +661,7 @@ class Sales:
                                 (paid_cash, _now(), sid))
             else:
                 shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
-                    or cash.open_shift_id(self.db, ctx, s["branch_id"])
+                    or cash.require_open_shift(self.db, ctx, s["branch_id"])   # again inside the write lock
             self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
             for p in payments:
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount)"
@@ -822,6 +826,15 @@ class Sales:
             if qty_base is not None:
                 if not isinstance(qty_base, int) or qty_base <= 0:
                     raise ValidationFailed("الكمية غير صحيحة")
+                # more units at a typed discount is a bigger discount: the person changing the quantity must be
+                # allowed that rate (or bring an approver), as when it was typed (final review P2-3)
+                if qty_base > l["qty_base"] and discount_bp is None and l["discount_bp"] \
+                        and l["discount_source"] != "contract":
+                    if l["discount_bp"] > ctx.discount_limit_bp:
+                        raise discount_denied(ctx, l["discount_bp"])
+                    if l["discount_bp"] > ctx.max_discount_bp:
+                        self.db.execute("UPDATE sale_lines SET discount_approved_by=? WHERE id=?",
+                                        (ctx.approver_id, line_id))
                 others = self.db.one("SELECT coalesce(sum(qty_base),0) q FROM sale_lines WHERE sale_id=? AND"
                                      " item_id=? AND id<>?", (sid, l["item_id"], line_id))["q"]
                 svc = self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"]

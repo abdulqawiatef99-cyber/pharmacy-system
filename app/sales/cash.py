@@ -46,6 +46,30 @@ def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | Non
     return shift
 
 
+def _sales_of(s) -> tuple[str, tuple]:
+    """WHERE part (alias x) for the sales a shift report counts. A closed shift keeps the sales it had at its
+    close: a same-day void after the close (it takes the cash out in the shift open at that moment) does not
+    rewrite the closed report (final review P2-1)."""
+    if s["status"] == "closed":
+        return ("x.shift_id=? AND (x.status='completed' OR (x.status='voided' AND x.sale_no IS NOT NULL"
+                " AND x.voided_at>=?))", (s["id"], s["closed_at"]))
+    return "x.shift_id=? AND x.status='completed'", (s["id"],)
+
+
+def _returns_of(db: Database, s) -> dict:
+    """Returns made while the shift was open, by refund method: cash ones left this drawer; card and credit
+    ones lower the card and credit totals of the day (final review P2-1). A cash refund needs the open shift,
+    so it always falls inside one shift's open-close window."""
+    rows = db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r"
+                  " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
+                  " AND (? IS NULL OR r.created_at<?) AND x.org_id=? AND x.branch_id=? GROUP BY 1",
+                  (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"]))
+    by = {m: {"count": 0, "total": 0} for m in ("cash", "card", "credit")}
+    for r in rows:
+        by[r["m"]] = {"count": r["n"], "total": r["t"]}
+    return by
+
+
 # Egyptian notes and coins, in piasters
 DENOMINATIONS = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25]
 
@@ -73,7 +97,7 @@ def redact_summary(ctx: Context, summary: dict) -> dict:
         return summary
     out = dict(summary)
     for key in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
-                "by_channel"):
+                "by_channel", "card_refunds", "credit_refunds"):
         out.pop(key, None)
     out["blind"] = True
     return out
@@ -107,13 +131,14 @@ class CashDrawer:
             raise NotFound("الوردية غير موجودة")
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
+        where, args = _sales_of(s)
         card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t,"
-                           " coalesce(sum(on_credit),0) cr, count(*) n"
-                           " FROM sales WHERE shift_id=? AND status='completed'", (shift_id,))
+                           f" coalesce(sum(on_credit),0) cr, count(*) n FROM sales x WHERE {where}", args)
         by_channel = [dict(r) for r in self.db.all(
             "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
-            " JOIN sales s ON s.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            " WHERE s.shift_id=? AND s.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
+            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
+            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
+        rets = _returns_of(self.db, s)
         # from the deliveries still with a courier (few), not from every sale of the branch (#113)
         with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d CROSS JOIN sales s"
                                    " ON s.id=d.sale_id WHERE d.org_id=? AND d.status IN ('out','delivered')"
@@ -121,7 +146,8 @@ class CashDrawer:
         expected = s["opening_cash"] + sum(by_kind.values())
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
                else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
-               "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier}
+               "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier,
+               "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"]}
         return redact_summary(ctx, out)
 
     def _expected(self, shift_id: str) -> int:
@@ -184,18 +210,18 @@ class CashDrawer:
         full = {**dict(s)}
         k = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
+        where, args = _sales_of(s)
         sales = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_card),0) card,"
                             " coalesce(sum(paid_transfer),0) transfer, coalesce(sum(on_credit),0) credit,"
-                            " coalesce(sum(discount_total),0) discount FROM sales WHERE shift_id=? AND status='completed'",
-                            (shift_id,))
-        voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL",
-                             (shift_id,))["n"]
-        returns = self.db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN cash_movements m"
-                              " ON m.ref_id=r.id WHERE m.shift_id=?", (shift_id,))
+                            f" coalesce(sum(discount_total),0) discount FROM sales x WHERE {where}", args)
+        # voided while this shift was open (a void after the close belongs to the shift open at that time)
+        voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL"
+                             " AND (? IS NULL OR voided_at<?)", (shift_id, s["closed_at"], s["closed_at"]))["n"]
+        rets = _returns_of(self.db, s)
         by_channel = [dict(r) for r in self.db.all(
             "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
             " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            " WHERE x.shift_id=? AND x.status='completed' AND p.method IN ('card','transfer') GROUP BY 1,2", (shift_id,))]
+            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
         names = {u["id"]: u["full_name"] for u in self.db.all(
             "SELECT id, full_name FROM users WHERE id IN (?,?)", (s["opened_by"], s["closed_by"] or ""))}
         # drawer-open commands (#81): manual ones with their reason, apart from the automatic checkout pulses.
@@ -212,7 +238,9 @@ class CashDrawer:
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
                     transfer_total=sales["transfer"], credit_total=sales["credit"], discount_total=sales["discount"],
-                    voided_count=voided, returns_count=returns["n"], returns_total=returns["t"], by_channel=by_channel,
+                    voided_count=voided, returns_count=sum(r["count"] for r in rets.values()),
+                    returns_total=sum(r["total"] for r in rets.values()), returns_by_method=rets,
+                    card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"], by_channel=by_channel,
                     expected_cash=expected, opened_by_name=names.get(s["opened_by"]),
                     closed_by_name=names.get(s["closed_by"]),
                     counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None,
