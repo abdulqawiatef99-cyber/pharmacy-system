@@ -16,7 +16,16 @@ New-Item -ItemType Directory -Force -Path $tables | Out-Null
 $summary = Join-Path $out 'summary.txt'
 $log = New-Object System.Collections.Generic.List[string]
 function Say([string]$s) { $log.Add($s); Write-Host $s }
-function Save { [IO.File]::WriteAllLines($summary, $log, (New-Object Text.UTF8Encoding $true)) }
+# manifest.csv: one row per table written, with the exact original names; the file and folder names carry a
+# running index first (01_, 001_), so two names that sanitize alike can never overwrite each other.
+$manifest = New-Object System.Collections.Generic.List[object]
+function Safe([string]$n) { $x = $n -replace '[\\/:*?"<>|()]', '_'; if ($x.Length -gt 60) { $x = $x.Substring(0, 60) }; $x }
+function Save {
+    [IO.File]::WriteAllLines($summary, $log, (New-Object Text.UTF8Encoding $true))
+    if ($manifest.Count) { $manifest | Export-Csv -Path (Join-Path $tables 'manifest.csv') -NoTypeInformation -Encoding UTF8 }
+}
+# any error not handled below still leaves summary.txt (and the manifest so far) behind
+trap { Say ("RESULT: FAIL - " + $_.Exception.Message + " (nothing in E-Stock was changed)"); try { Save } catch { }; exit 3 }
 
 Say "E-Stock database read (read only) $stamp"
 Say "computer: $env:COMPUTERNAME  user: $env:USERNAME"
@@ -128,15 +137,17 @@ $dateTypes = 'date','datetime','datetime2','smalldatetime','datetimeoffset','tim
 $totalRows = 0; $totalTables = 0
 try {
 
+$si = 0
 foreach ($pair in $conns) {
-    $srv = $pair[0]; $conn = $pair[1]
+    $srv = $pair[0]; $conn = $pair[1]; $si++; $di = 0
+    $srvDir = Join-Path $tables (('{0:D2}_' -f $si) + (Safe $srv))
   try {
     $v = Q $conn "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) v, CAST(SERVERPROPERTY('Edition') AS nvarchar(100)) e"
     Say ("server $srv  version " + $v.Rows[0].v + "  " + $v.Rows[0].e)
     $dbs = Q $conn "SELECT name, state_desc FROM sys.databases WHERE database_id > 4 ORDER BY name"
     foreach ($db in $dbs.Rows) {
         if ($db.state_desc -ne 'ONLINE') { Say ("database " + $db.name + " : " + $db.state_desc + " (not read)"); $failed.Add("$srv / " + $db.name + " (" + $db.state_desc + ")"); continue }
-        $dbn = $db.name
+        $dbn = $db.name; $di++; $ti = 0
         try { $conn.ChangeDatabase($dbn) } catch { Say ("database $dbn : no access (" + $_.Exception.Message + ")"); $failed.Add("$srv / $dbn (no access)"); continue }
         $size = Q $conn "SELECT CAST(SUM(size) * 8.0 / 1024 AS decimal(12,2)) mb FROM sys.database_files"
         $bk = $null
@@ -151,9 +162,10 @@ foreach ($pair in $conns) {
         if ($procs.Rows.Count) { Say ("  procedures: " + (($procs.Rows | ForEach-Object { $_.name }) -join ', ')) }
         $tl = Q $conn "SELECT TABLE_SCHEMA sc, TABLE_NAME nm FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY 1, 2"
         # one folder per instance, then per database: two instances never overwrite each other
-        $dbDir = Join-Path (Join-Path $tables ($srv -replace '[\\/:*?"<>|()]', '_')) ($dbn -replace '[\\/:*?"<>|]', '_')
+        $dbDir = Join-Path $srvDir (('{0:D2}_' -f $di) + (Safe $dbn))
         New-Item -ItemType Directory -Force -Path $dbDir | Out-Null
         foreach ($t in $tl.Rows) {
+          $ti++
           try {
             $full = (Qn $t.sc) + '.' + (Qn $t.nm)
             $cols = Q $conn ("SELECT COLUMN_NAME c, DATA_TYPE d, CHARACTER_MAXIMUM_LENGTH l FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = N'" + $t.sc.Replace("'", "''") + "' AND TABLE_NAME = N'" + $t.nm.Replace("'", "''") + "' ORDER BY ORDINAL_POSITION")
@@ -181,7 +193,7 @@ foreach ($pair in $conns) {
             }
             # Full table to CSV, on this PC only.
             $data = Q $conn "SELECT * FROM $full WITH (NOLOCK)"
-            $csv = Join-Path $dbDir (($t.sc + '.' + $t.nm) -replace '[\\/:*?"<>|]', '_')
+            $csv = Join-Path $dbDir (('{0:D3}_' -f $ti) + (Safe ($t.sc + '.' + $t.nm)))
             $names = [string[]]($data.Columns | ForEach-Object { $_.ColumnName })
             if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw "two columns differ only in letter case" }
             if ($data.Rows.Count -eq 0) {                   # an empty table still gets its file and header
@@ -197,6 +209,8 @@ foreach ($pair in $conns) {
             $got = $data.Rows.Count
             if ($got -ne $rows) { Say ("   note: $got rows exported (count was $rows; the cashier changed it meanwhile)") }
             $totalRows += $got; $totalTables++               # counted only once its CSV is written
+            $manifest.Add([pscustomobject][ordered]@{ index = ('{0:D2}/{1:D2}/{2:D3}' -f $si, $di, $ti); instance = $srv
+                database = $dbn; schema = $t.sc; table = $t.nm; rows = $got; file = $csv.Substring($tables.Length + 1) + '.csv' })
           } catch {
             Say ("   ERROR reading " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message)
             $failed.Add("$srv / $dbn.$($t.sc).$($t.nm)")
@@ -215,7 +229,7 @@ if ($failed.Count -gt 0) {
 } else {
     Say "RESULT: PASS - $totalTables tables, $totalRows rows read. Nothing in E-Stock was changed."
 }
-Say "full tables (stay on this PC): $tables"
+Say "full tables (stay on this PC): $tables  (exact names: manifest.csv)"
 Say "note: read WITH (NOLOCK) while the cashier works; a row changed during the read can be missing or twice."
 Save
 Start-Process notepad.exe -ArgumentList "`"$summary`""

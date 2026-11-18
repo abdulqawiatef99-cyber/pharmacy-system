@@ -45,19 +45,19 @@ class TestEstockDbRead(unittest.TestCase):
         # (1) a failed table is listed, the run is PARTIAL with a nonzero exit, and a table counts only after its CSV
         self.assertIn("RESULT: PARTIAL", text)
         self.assertIn("if ($failed.Count -gt 0) { exit 4 }", text)
-        csv, counted = text.index("Export-Csv -Path"), text.index("$totalTables++")
+        csv, counted = text.index("Export-Csv -Path ($csv"), text.index("$totalTables++")
         self.assertLess(csv, counted)
         self.assertEqual(text.count("$totalTables++"), 1)
         # (2) a Windows sign-in that opens no user database does not stop the fallback
         self.assertIn("if ($u -gt 0)", text)
         self.assertIn("(Usable $c) -gt 0", text)
         self.assertLess(text.index("function Usable"), text.index("$u = Usable $c"))   # defined before use
-        # (3) tables\<instance>\<db>\
-        self.assertIn("Join-Path (Join-Path $tables ($srv -replace", text)
+        # (3) one folder per instance: see test_paths_collision_free_by_construction
+        self.assertIn("$srvDir = Join-Path $tables", text)
 
     def test_one_cell_formatter_for_every_table(self):
         text = PS1.read_text(encoding="utf-8-sig")
-        self.assertEqual(text.count("Export-Csv -Path"), 1)             # one export path, every table
+        self.assertEqual(text.count("Export-Csv -Path ($csv"), 1)       # one export path, every table
         self.assertIn("$o[$n] = Cell $_[$n]", text)
         self.assertNotIn("Select-Object -Property $names", text)
         body = text[text.index("function Cell($v)"):text.index("function Try-Open")]
@@ -88,6 +88,33 @@ class TestEstockDbRead(unittest.TestCase):
         self.assertIn("$totalRows += $got; $totalTables++", text)
         self.assertIn("if ($data.Rows.Count -eq 0)", text)
         self.assertIn("Sort-Object -Unique", text)
+
+    def test_paths_collision_free_by_construction(self):
+        """Codex on 4589236: [dbo].[Sales/Archive] and [dbo].[Sales_Archive] (or [a.b].[c] and [a].[b.c])
+        sanitized to the same file. Every level now starts with its running index; manifest.csv keeps the
+        exact names."""
+        text = PS1.read_text(encoding="utf-8-sig")
+        self.assertIn("$srvDir = Join-Path $tables (('{0:D2}_' -f $si) + (Safe $srv))", text)
+        self.assertIn("$dbDir = Join-Path $srvDir (('{0:D2}_' -f $di) + (Safe $dbn))", text)
+        self.assertIn("$csv = Join-Path $dbDir (('{0:D3}_' -f $ti) + (Safe ($t.sc + '.' + $t.nm)))", text)
+        loop = text[text.index("foreach ($t in $tl.Rows) {"):].splitlines()
+        self.assertEqual(loop[1].strip(), "$ti++")                    # the index advances for every table
+        self.assertIn("$dbn = $db.name; $di++; $ti = 0", text)
+        self.assertIn("$si++; $di = 0", text)
+        for col in ("index =", "instance = $srv", "database = $dbn", "schema = $t.sc", "table = $t.nm",
+                    "rows = $got", "file = "):
+            self.assertIn(col, text)
+        self.assertIn("Join-Path $tables 'manifest.csv'", text)
+
+    def test_summary_written_on_every_exit(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        self.assertIn("try { Save } catch { }; exit 3 }", text)          # trap: any unhandled error
+        self.assertLess(text.index("trap {"), text.index("Say \"E-Stock database read"))
+        code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+        exits = [i for i, l in enumerate(code) if re.search(r"\bexit [0-9]", l)]
+        self.assertGreaterEqual(len(exits), 4)
+        for i in exits:                                                # every exit has a Save right before it
+            self.assertTrue(any("Save" in x for x in code[max(0, i - 3):i + 1]), code[i])
 
     def test_in_app_update_ships_the_ps1(self):
         import io
