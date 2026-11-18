@@ -797,7 +797,11 @@ class Sales:
                     self.db.execute("INSERT OR IGNORE INTO sale_deliveries (sale_id, org_id) VALUES (?,?)",
                                     (sid, ctx.org_id))
                 else:
+                    # back to a store sale: its delivery draft goes with it, so nothing later (void, the courier
+                    # lists) can mistake this sale for a delivery whose cash never reached the drawer
                     self.db.execute("UPDATE sales SET delivery_fee=0 WHERE id=?", (sid,))
+                    self.db.execute("DELETE FROM sale_deliveries WHERE sale_id=? AND org_id=? AND status='draft'",
+                                    (sid, ctx.org_id))
             d = data.get("delivery")
             if isinstance(d, dict):
                 kind = self.db.one("SELECT kind FROM sales WHERE id=?", (sid,))["kind"]
@@ -914,6 +918,13 @@ class Sales:
                 ctx.require("sales.return_late")
             if refund_method == "credit" and not s["customer_id"]:
                 raise ValidationFailed("الاسترداد على الحساب يحتاج عميل")
+            if s["kind"] == "delivery":
+                # the courier may still hold the money (or bring the goods back): a return before the settlement
+                # would refund, restock or reduce a debt for a sale whose outcome is not known yet
+                d = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=? AND org_id=?", (sid, ctx.org_id))
+                if not d or d["status"] != "settled":
+                    raise Conflict("لم تُسوَّ فاتورة التوصيل بعد؛ سجّل تسليم مبلغ التوصيل أولًا ثم أجرِ المرتجع",
+                                   code="delivery_not_settled")
             refund = 0
             restricted: list[str] = []
             for line_id, qty in lines.items():
@@ -965,12 +976,8 @@ class Sales:
                 # on this sale (cash, card or transfer; a courier's cash only once it was handed in), minus what
                 # was already paid back in cash or to the card. The part sold on the customer's account goes
                 # back to the account, so a debt can never turn into cash out of the drawer.
+                # (a delivery sale reaches here only once settled, so its courier cash is in the drawer)
                 received = (s["paid_cash"] or 0) + (s["paid_card"] or 0) + (s["paid_transfer"] or 0)
-                if s["kind"] == "delivery":
-                    d = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=? AND org_id=?",
-                                    (sid, ctx.org_id))
-                    if not d or d["status"] != "settled":
-                        received -= s["paid_cash"] or 0
                 refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns WHERE sale_id=? AND org_id=?"
                                        " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
@@ -1043,9 +1050,13 @@ class Sales:
                 inventory.post_movement(self.db, ctx, item_id=a["item_id"], qty_delta=a["qty_base"],
                                         batch_id=a["batch_id"], movement_type="sale_return",
                                         ref_type="sale_void", ref_id=sid, branch_id=s["branch_id"], note=reason)
-            dl = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=?", (sid,))
-            if dl and dl["status"] != "settled":
-                self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=?", (sid,))
+            # the courier branch only for a delivery sale: a store sale may still carry a delivery draft row
+            # (made delivery, then back to store), and its cash IS in the drawer and must leave it on void
+            dl = self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=? AND org_id=?",
+                             (sid, ctx.org_id)) if s["kind"] == "delivery" else None
+            if dl and dl["status"] != "settled":     # the courier still holds the cash: nothing leaves the drawer
+                self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=? AND org_id=?",
+                                (sid, ctx.org_id))
             else:
                 cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
             if s["on_credit"]:

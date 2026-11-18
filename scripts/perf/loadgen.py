@@ -34,10 +34,17 @@ ROOT = Path(os.environ.get("PHARM_PROGRAM_DIR") or Path(__file__).resolve().pare
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-if os.name != "nt":                      # Windows C runtime misreads an IANA name in TZ; it already runs on local time
-    os.environ.setdefault("TZ", "Africa/Cairo")
-if hasattr(time, "tzset"):
-    time.tzset()
+
+
+def use_cairo_time() -> None:
+    """The pharmacy's local time for this run. Called first thing in main(), never at import: the test suite
+    imports these scripts, and a time zone set at import moved every later test to Cairo time (failing the
+    local-day tests near midnight)."""
+    if os.name != "nt":                  # Windows C runtime misreads an IANA name in TZ; it already runs on local time
+        os.environ.setdefault("TZ", "Africa/Cairo")
+    if hasattr(time, "tzset"):
+        time.tzset()
+
 
 from simclock import SimClock, install_python, install_sql  # noqa: E402
 
@@ -519,6 +526,7 @@ class Generator:
 
 
 def main(argv=None):
+    use_cairo_time()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, help="new folder (must not exist)")
     ap.add_argument("--years", type=float, default=1.0)

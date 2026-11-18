@@ -160,3 +160,50 @@ class Installed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoKey(unittest.TestCase):
+    """The repository is public: a PC with no key file still updates (anonymous GitHub API)."""
+
+    def _no_key_env(self, d):
+        env = mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": str(Path(d) / "missing.txt")})
+        return env
+
+    def test_missing_or_empty_key_means_anonymous(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self._no_key_env(d) as env:
+                env.pop("PHARM_GITHUB_TOKEN", None)
+                self.assertIsNone(updater.read_token())
+                (Path(d) / "missing.txt").write_text(" \n", encoding="utf-8")
+                self.assertIsNone(updater.read_token())
+
+    def test_anonymous_request_sends_no_authorization(self):
+        seen = []
+
+        def fake(req, timeout):
+            seen.append(req.get_header("Authorization"))
+            return _Resp(b"c" * 40)
+        with mock.patch("urllib.request.urlopen", side_effect=fake):
+            self.assertEqual(updater.latest_sha("o/r", "main", None), "c" * 40)
+            self.assertEqual(updater.download("o/r", "c" * 40, None), b"c" * 40)
+        self.assertEqual(seen, [None, None])
+
+    def test_anonymous_private_repo_says_what_to_do(self):
+        for code in (401, 404):
+            with self.subTest(code=code), mock.patch(
+                    "urllib.request.urlopen", side_effect=urllib.error.HTTPError("u", code, "x", {}, None)):
+                with self.assertRaisesRegex(updater.UpdateError, "بدون مفتاح.*github_token.txt"):
+                    updater.latest_sha("o/r", "main", None)
+
+    def test_anonymous_rate_limit_says_wait(self):
+        for code in (403, 429):
+            with self.subTest(code=code), mock.patch(
+                    "urllib.request.urlopen", side_effect=urllib.error.HTTPError("u", code, "x", {}, None)):
+                with self.assertRaisesRegex(updater.UpdateError, "انتظر"):
+                    updater.download("o/r", "d" * 40, None)
+
+    def test_keyed_rate_limit_is_not_called_a_bad_key(self):
+        hdrs = {"X-RateLimit-Remaining": "0"}
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError("u", 403, "x", hdrs, None)):
+            with self.assertRaisesRegex(updater.UpdateError, "انتظر"):
+                updater.latest_sha("o/r", "main", "k")

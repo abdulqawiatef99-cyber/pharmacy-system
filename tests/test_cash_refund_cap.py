@@ -101,7 +101,7 @@ class TestDeliveryCashRefund(Base):
         before = left()
         with self.assertRaises(Conflict) as e:                                 # courier still holds the cash
             self.s.return_items(self.ctx, sid, {line: 1}, refund_method="cash", reason="مرتجع تجربة")
-        self.assertEqual(e.exception.details["max_cash"], 0)
+        self.assertEqual(e.exception.code, "delivery_not_settled")             # final review P1-2: settle first
         self.assertEqual((self.cd.summary(self.ctx)["expected_cash"], left()), (10000, before))   # nothing moved
         self.s.delivery_status(self.ctx, sid, "settled")                         # 40.00 enters the drawer
         out = self.s.return_items(self.ctx, sid, {line: 1}, refund_method="cash", reason="مرتجع تجربة")

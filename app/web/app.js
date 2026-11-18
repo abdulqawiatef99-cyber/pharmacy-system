@@ -399,7 +399,7 @@ async function route() {
   $("#navMore")?.classList.toggle("active", !!$("#navMore .menu a.active"));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
-    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
+    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } setTimeout(tourAuto, 400); return; }
   }
   location.hash = "#/home";
 }
@@ -483,7 +483,9 @@ function showHelp() {
     ${line ? `<p>${esc(line)}</p>` : ""}${tips.length ? `<ul>${tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
     <h3>الاختصارات</h3><ul class="plain">${sc.map(([n, s]) => `<li><kbd>Alt+${n}</kbd> ${esc(SCREENS[s][0])}</li>`).join("")}<li><kbd>Alt+0</kbd> هذه المساعدة</li></ul>
     <label class="chk mt"><input type="checkbox" id="helpLineTgl" ${PREFS.help === "off" ? "" : "checked"}> إظهار سطر المساعدة أعلى كل شاشة</label>
-    <div class="row mt">${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/customize">تخصيص الواجهة</a>` : ""}<button class="btn">إغلاق</button></div></form>`;
+    <div class="row mt"><button type="button" class="btn secondary" data-tour-dlg="main">جولة في القوائم</button>${tourScreen() ? `<button type="button" class="btn secondary" data-tour-dlg="${tourScreen()}">اشرح الشاشة دي</button>` : ""}
+      ${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/customize">تخصيص الواجهة</a>` : ""}<button class="btn">إغلاق</button></div></form>`;
+  dlg.querySelectorAll("[data-tour-dlg]").forEach((b) => b.addEventListener("click", () => { dlg.close(); tourStart(b.dataset.tourDlg); }));
   dlg.querySelector("#helpLineTgl").addEventListener("change", async (e) => {
     try { await savePrefs({ help: e.target.checked ? "on" : "off" }); $("#app .helpline")?.remove(); addHelpLine(); } catch (er) { toast(er.message, true); }
   });
@@ -498,6 +500,195 @@ document.addEventListener("keydown", (e) => {
   const s = ME.ui?.shortcuts?.[n];
   if (s && canScreen(s)) { e.preventDefault(); location.hash = `#/${s}`; }
 });
+// ------------------------------------------------------------------ F36 guided tour (#247) — BEGIN
+// First sign-in of every user (after first-run setup too): a bubble with an arrow walks through the top bar,
+// then each main screen explains itself the first time it opens. «اشرح الشاشة دي» replays a screen.
+// Never blocks a sale: no backdrop, the ring ignores the mouse, and on the sale screen the focus stays in the
+// search box (a scan still lands there). Esc closes. "Seen" is kept per pharmacy + user in this browser
+// (the server's per-user prefs accept only known keys, and a migration is not worth it for this).
+// A step is [selectors, title, text, permission?]; "a|b" means: a if it is on screen, else b.
+const TOUR_MORE = "#navMore > summary";
+const TOUR = {
+  main: [
+    [".brand", "الصفحة الرئيسية", "من هنا ترجع للصفحة الرئيسية: ملخص اليوم والتنبيهات اللي محتاجة تتشاف."],
+    ["a[data-nav=pos]|" + TOUR_MORE, "شاشة البيع", "هنا بتبيع للعميل: تمسح الباركود أو تكتب اسم الصنف، تختار طريقة الدفع وتقفل الفاتورة.", "sales.create"],
+    ["a[data-nav=sales]|" + TOUR_MORE, "فواتير البيع", "كل الفواتير اللي اتباعت: تدور على فاتورة، تطبعها تاني، أو تعمل منها مرتجع.", "sales.read"],
+    ["a[data-nav=purchases]|" + TOUR_MORE, "الشراء", "لما بضاعة توصل من المورد: ترفع فاتورته أو تدخلها بإيدك، تراجعها وتعتمدها. المخزون يزيد بعد الاعتماد بس.", "purchases.read"],
+    ["a[data-nav=items]|" + TOUR_MORE, "الأصناف", "كل الأصناف: تدور على صنف، تشوف رصيده وصلاحيته، وتعدّل سعره.", "items.read"],
+    ["a[data-nav=counts]|" + TOUR_MORE, "الجرد", "لما تعد البضاعة اللي على الرف وتقارنها برصيد البرنامج.", "inventory.count"],
+    ["a[data-nav=shift]|" + TOUR_MORE, "الوردية والخزينة", "أول اليوم تفتح الوردية بالفلوس اللي في الدرج، وآخره تقفلها وتعد الفلوس فئة فئة.", "sales.create"],
+    ["a[data-nav=reports]|" + TOUR_MORE, "التقارير", "مبيعات اليوم والشهر، والصلاحية، والخسائر. كل تقرير له زرار Excel وزرار طباعة."],
+    ["a[data-nav=system]|" + TOUR_MORE, "البرنامج والنسخ الاحتياطي", "النسخة الاحتياطية بتحفظ بياناتك لو الجهاز باظ، ومن هنا كمان زرار تحديث البرنامج.", "settings.manage"],
+    [TOUR_MORE, "المزيد", "باقي الشاشات هنا: العملاء والآجل، والمصروفات، والموردين، والطلبية، وغيرهم."],
+    ["#helpBtn", "المساعدة", "لو تهت في أي شاشة دوس هنا (أو Alt+0) تلاقي شرحها واختصاراتها، وتقدر تعيد الجولة دي."],
+    ["#fbBtn", "ملاحظة", "لقيت مشكلة أو عندك اقتراح للبرنامج؟ اكتبه من هنا."],
+    ["#logout", "خروج", "لما تسيب الجهاز اعمل خروج، عشان محدش يشتغل باسمك."],
+  ],
+  pos: [
+    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة."],
+    ["#posRes [data-add]|#posQ", "علبة ولا شريط؟", "تحت البحث بيظهر زرار «علبة» وزرار الوحدة (شريط أو قرص). Shift+Enter يضيف وحدة بدل العلبة."],
+    ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
+    ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
+    ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
+    ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
+  ],
+  purchases: [
+    ["#upForm", "قراءة فاتورة المورد", "ارفع ملف الفاتورة (Excel أو PDF أو صورة) والبرنامج يقراها، وانت تراجعها قبل الاعتماد."],
+    ["#manForm", "فاتورة بإيدك", "مفيش ملف؟ اختار المورد واكتب رقم الفاتورة، وابدأ تدخل الأصناف بإيدك."],
+    ["#puRep", "الفواتير", "كل فواتير الشراء. المسودة لسه ماغيّرتش المخزون؛ المعتمدة بس هي اللي زوّدته."],
+  ],
+  items: [
+    ["#q", "البحث", "دوّر بالاسم العربي أو الإنجليزي أو الكود أو الباركود."],
+    ["a[href='#/items/new']", "صنف جديد", "لو صنف مش موجود، ضيفه من هنا بسعره وعدد الوحدات في العلبة.", "items.write"],
+    ["#app table|#itemsHint", "بطاقة الصنف", "اضغط على أي صنف تفتح بطاقته: الرصيد والتشغيلات والسعر والحركة."],
+  ],
+  shift: [
+    ["#shOpen", "فتح الوردية", "اكتب الفلوس اللي في الدرج دلوقتي وافتح الوردية. من غيرها البيع النقدي واقف."],
+    ["#shPay", "مصروف من الخزينة", "لو طلّعت فلوس من الدرج لمصروف، سجّلها هنا بالسبب عشان الحساب يطابق."],
+    ["#shClose", "قفل الوردية", "آخر الوردية عد الفلوس فئة فئة واكتب العدد. أي فرق محتاج سبب مكتوب."],
+    ["#shHist", "آخر الورديات", "الورديات اللي فاتت: المفروض والمعدود والفرق، وتقرير كل وردية."],
+  ],
+  reports: [
+    ["#rRange", "الفترة", "اختار النهارده أو الأسبوع أو الشهر، أو حدد من تاريخ لتاريخ."],
+    ["#rSales", "المبيعات", "إجمالي المبيعات والمرتجع والخصومات، يوم بيوم وحسب الموظف."],
+    ["#app [data-xl]", "Excel والطباعة", "كل تقرير ليه زرار يطلّعه ملف Excel وزرار يطبعه أو يحفظه PDF."],
+    ["#app a[href='#/owner-reports']", "تقارير المالك", "تقارير أعمق: الموظفين، والعملاء، والخزينة، والمرتجعات، والأسعار.", "sales.totals"],
+  ],
+  system: [
+    ["#bkBox", "النسخة الاحتياطية", "البرنامج بيعمل نسخة لوحده. تقدر تعمل نسخة دلوقتي، وخلّي نسخة على فلاشة برّه الجهاز."],
+    ["#rcBox", "شكل الإيصال", "اسم الصيدلية وتليفونها على الإيصال، ومقاس الورق، والملصقات."],
+    ["#chBox", "البطاقات والتحويل", "أجهزة الفيزا والمحافظ اللي بتستلم عليها، عشان تظهر في شاشة البيع."],
+    ["#sysBox", "تحديث البرنامج", "زرار التحديث بياخد نسخة احتياطية الأول، وبعدين يحدّث من غير ما يلمس بياناتك."],
+  ],
+};
+const TOUR_ANCHOR = { pos: "#app p.keys" };              // screens without a heading: where the replay button goes
+const tourScreen = () => { const h = location.hash || "#/home"; const m = h.match(/^#\/([\w-]+)$/); return m && TOUR[m[1]] && m[1] !== "main" ? m[1] : null; };
+const TOUR_MEM = {};                                      // when the browser storage is blocked: seen for this tab only
+const tourStoreKey = () => `tour:${ME?.organization?.id || ""}:${ME?.user?.id || ""}`;
+function tourSeen() {
+  let s = TOUR_MEM[tourStoreKey()] || {};
+  try { s = { ...JSON.parse(localStorage.getItem(tourStoreKey()) || "{}"), ...s }; } catch { /* storage blocked */ }
+  return s;
+}
+function tourMark(part) {
+  const s = { ...tourSeen(), [part]: 1 };
+  TOUR_MEM[tourStoreKey()] = s;
+  try { localStorage.setItem(tourStoreKey(), JSON.stringify(s)); } catch { /* storage blocked: kept for this tab */ }
+}
+const tourVisible = (el) => !!el && el.getClientRects().length > 0 && !el.closest("[hidden]");
+function tourTarget(step) {
+  for (const sel of step[0].split("|")) { const el = [...document.querySelectorAll(sel)].find(tourVisible); if (el) return el; }
+  return null;
+}
+const tourAllowed = (step) => !step[3] || !!ME?.permissions?.includes(step[3]);
+let TOUR_RUN = null;   // { part, steps, i, then }
+function tourStart(part, then = null) {
+  tourClose(false);
+  const steps = (TOUR[part] || []).filter(tourAllowed);
+  if (!ME || !steps.some((s) => tourTarget(s))) return false;
+  TOUR_RUN = { part, steps, i: -1, then };
+  tourGo(1);
+  return true;
+}
+function tourGo(d) {
+  const r = TOUR_RUN;
+  if (!r) return;
+  let i = r.i + d;
+  while (i >= 0 && i < r.steps.length && !tourTarget(r.steps[i])) i += d;   // a control not on screen: skip it
+  if (i >= r.steps.length) { const then = r.then; tourClose(true); if (then) tourStart(then); return; }
+  if (i < 0) return;
+  r.i = i;
+  tourDraw();
+}
+function tourClose(markSeen = true) {
+  const r = TOUR_RUN;
+  TOUR_RUN = null;
+  $("#tourBub")?.remove(); $("#tourRing")?.remove();
+  if (r && markSeen) tourMark(r.part);
+}
+function tourSkip() {            // «تخطّي»: no more automatic parts for this person; the buttons still replay them
+  if (!TOUR_RUN) return;
+  tourClose(true); tourMark("all");
+  toast("تقدر تشوف الشرح تاني من زرار «اشرح الشاشة دي» أو من «؟»");
+}
+function tourDraw() {
+  const r = TOUR_RUN, step = r.steps[r.i], el = tourTarget(step);
+  if (!el) { tourGo(1); return; }
+  let bub = $("#tourBub"), ring = $("#tourRing");
+  if (!bub) {
+    ring = document.createElement("div"); ring.id = "tourRing"; ring.className = "tour-ring noprint";
+    bub = document.createElement("div"); bub.id = "tourBub"; bub.className = "tour-bub noprint";
+    bub.setAttribute("role", "dialog"); bub.setAttribute("aria-modal", "false"); bub.setAttribute("aria-labelledby", "tourT");
+    // sale screen: pressing a tour button never takes the focus from the search box (the next scan lands there)
+    bub.addEventListener("mousedown", (e) => { if (location.hash.startsWith("#/pos")) e.preventDefault(); });
+    bub.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-tour-go]");
+      if (!b) return;
+      if (b.dataset.tourGo === "skip") tourSkip(); else tourGo(+b.dataset.tourGo);
+    });
+    document.body.append(ring, bub);
+  }
+  const n = r.steps.filter((s) => tourTarget(s)).length, at = r.steps.slice(0, r.i + 1).filter((s) => tourTarget(s)).length;
+  const last = !r.steps.slice(r.i + 1).some((s) => tourTarget(s));
+  const more = el.matches(TOUR_MORE) && step[0] !== TOUR_MORE ? "موجودة تحت «المزيد». " : "";
+  bub.innerHTML = `<span class="tour-arrow" aria-hidden="true"></span>
+    <p class="tour-n muted small">${at} من ${n}</p><h3 id="tourT">${esc(step[1])}</h3><p>${esc(more + step[2])}</p>
+    <div class="row tour-btns"><button type="button" class="btn small" data-tour-go="1">${last ? (r.then ? "التالي" : "تمام، فهمت") : "التالي"}</button>
+      <button type="button" class="btn small secondary" data-tour-go="-1" ${at > 1 ? "" : "disabled"}>السابق</button>
+      <button type="button" class="link" data-tour-go="skip">تخطّي</button></div>`;
+  el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  tourPlace();
+  // keyboard: on the sale screen the focus stays where it is (the scanner types into the search box)
+  if (!location.hash.startsWith("#/pos")) bub.querySelector("[data-tour-go='1']").focus({ preventScroll: true });
+}
+function tourPlace() {
+  const r = TOUR_RUN, bub = $("#tourBub"), ring = $("#tourRing");
+  if (!r || !bub) return;
+  const el = tourTarget(r.steps[r.i]);
+  if (!el) { tourGo(1); return; }
+  const t = el.getBoundingClientRect(), W = innerWidth, H = innerHeight, gap = 12;
+  Object.assign(ring.style, { top: `${t.top - 4}px`, left: `${t.left - 4}px`, width: `${t.width + 8}px`, height: `${t.height + 8}px` });
+  const bw = bub.offsetWidth, bh = bub.offsetHeight;
+  let top, side;
+  if (t.bottom + gap + bh <= H - 8) { top = t.bottom + gap; side = "up"; }               // under the control, arrow up
+  else if (t.top - gap - bh >= 8) { top = t.top - gap - bh; side = "down"; }             // over it, arrow down
+  else { top = Math.max(8, H - bh - 8); side = "none"; }                                   // a tall control: bottom of the window
+  const left = Math.min(Math.max(8, t.left + t.width / 2 - bw / 2), Math.max(8, W - bw - 8));
+  Object.assign(bub.style, { top: `${top}px`, left: `${left}px` });
+  bub.dataset.side = side;
+  bub.style.setProperty("--ax", `${Math.min(Math.max(16, t.left + t.width / 2 - left), bw - 16)}px`);
+}
+addEventListener("resize", () => tourPlace());
+addEventListener("scroll", () => tourPlace(), true);
+addEventListener("hashchange", () => tourClose(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && TOUR_RUN && !$("dialog[open]")) { e.preventDefault(); tourClose(true); }
+}, true);
+// after a screen opens: the top-bar part on a person's first sign-in, then each screen's part once
+function tourAuto() {
+  if (!ME || TOUR_RUN || $("dialog[open]")) return;
+  const seen = tourSeen(), k = tourScreen();
+  if (seen.all) return;
+  const pending = k && !seen[k] && !(k === "pos" && SALE?.lines?.length) ? k : null;   // never over a sale in progress
+  if (!seen.main) tourStart("main", pending);
+  else if (pending) tourStart(pending);
+}
+function addTourBtn() {
+  const k = tourScreen();
+  if (!ME || !k || $("#app [data-tour-replay]")) return;
+  const at = $(TOUR_ANCHOR[k] || "#app h1");
+  if (!at) return;
+  const html = `<button type="button" class="btn small secondary tourbtn noprint" data-tour-replay="${k}">❓ اشرح الشاشة دي</button>`;
+  if (TOUR_ANCHOR[k]) at.insertAdjacentHTML("beforeend", " " + html); else at.insertAdjacentHTML("afterend", html);
+  const btn = $("#app [data-tour-replay]");
+  // sale screen: the button never keeps the focus, so the next scan (and its Enter) lands in the search box
+  btn.addEventListener("mousedown", (e) => { if (k === "pos") e.preventDefault(); });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); tourStart(k); if (k === "pos") $("#posQ")?.focus(); });
+}
+new MutationObserver(addTourBtn).observe(app, { childList: true });
+// ------------------------------------------------------------------ F36 guided tour — END
 // top bar: the pharmacy's chosen screens first, in its order; the rest stay under "المزيد"
 let NAV_ORDER = null;
 function applyNav() {
