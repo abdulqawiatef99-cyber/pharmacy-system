@@ -191,7 +191,8 @@ class TestFullMove(Base):
         self.assertEqual(c["أحمد تجربة"]["phone2"], "0223456789")
         self.assertIsNone(c["منى تجربة"]["phone"])                # same number as Ahmed: kept in the notes
         self.assertIn("01012345678", c["منى تجربة"]["notes"])
-        self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (0, 50000))
+        # E-Stock's 9,999,999,999,999 = no limit there: kept as-is, never 0 (0 = no credit at all here)
+        self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (999999999999900, 50000))
         self.assertEqual(c["عميل C3"]["is_active"], 0)
         bal = {r["customer_id"]: (r["amount"], r["kind"]) for r in self.db.all("SELECT * FROM customer_ledger")}
         self.assertEqual(bal, {c["أحمد تجربة"]["id"]: (12000, "adjustment"), c["منى تجربة"]["id"]: (-1550, "adjustment")})
@@ -1028,3 +1029,43 @@ class TestCashDepots(Base):
         self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
         self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
         self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
+
+
+class TestCreditLimits(Base):
+    """Manager 22:35: a limit above 1,000,000 means "no limit" in E-Stock; 0 in the program means no credit."""
+
+    def sell_on_credit(self, cust_name, amount_units=1):
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        s = Sales(self.db)
+        cid = self.db.one("SELECT id FROM customers WHERE name=?", (cust_name,))["id"]
+        if not self.db.one("SELECT 1 FROM cash_shifts WHERE status='open'"):
+            CashDrawer(self.db).open(self.ctx, 0)
+        sid = s.create(self.ctx, cid)
+        s.add_line(self.ctx, sid, self.item("100")["id"], units=amount_units)
+        tot = s.get(self.ctx, sid)["total"]
+        f = s.safety_check(self.ctx, sid)
+        return s.complete(self.ctx, sid, on_credit=tot, safety_decisions={i: "ok" for i in range(len(f))})
+
+    def test_no_limit_in_estock_keeps_credit_sales_working(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.sell_on_credit("أحمد تجربة")                                # would be refused with a 0 limit
+        row = [d for d in res["plan"].dq if d["code"] == "C1" and d["field"] == "customer_max_money"][0]
+        self.assertIn("من غير حد", row["action"])
+
+    def test_zero_limit_means_no_credit_in_the_program(self):
+        from app.core.errors import Conflict as C
+        t = base_tables()
+        t["Customer"][1]["customer_max_money"] = "0"
+        res = self.run_import(tables=t)
+        with self.assertRaises(C) as e:                          # 30 EGP on top of -15.50 is over a 0 limit
+            self.sell_on_credit("منى تجربة", amount_units=3)
+        self.assertEqual(e.exception.code, "credit_limit")
+        # she owes nothing to us (-15.5) but E-Stock had her on 0: listed for the owner, not changed
+        t["Customer"][0]["customer_max_money"] = "0"                    # Ahmed: 0 in E-Stock and owes 120
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t)
+        self.assertIn(("C1", "customer_max_money", "review"),
+                      {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})

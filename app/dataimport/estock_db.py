@@ -5,7 +5,7 @@ import_runs row): items -> suppliers -> customers -> opening stock -> owner-conf
 adjustments; the history goes to a separate read-only archive (estock_archive.py).
 
 Nothing is decided silently. Every value E-Stock holds that cannot be true (negative cost, broken unit
-conversions, a 9,999,999,999,999 credit limit, ...) is a data-quality row: E-Stock value and what was
+conversions, a fraction of a piaster in a balance, ...) is a data-quality row: E-Stock value and what was
 done with it. A value that cannot be moved without a person's decision is a *blocking* row, and the
 reconciliation fails while any is left.
 
@@ -821,14 +821,29 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
                                 bal_raw)
         lim_raw = dec(r.get("customer_max_money"))
         limit = 0
-        if lim_raw is not None and 0 < lim_raw <= MAX_REAL_LIMIT:
+        if lim_raw is not None and lim_raw > 0:
+            # as E-Stock has it (manager 22:35): above 1,000,000 E-Stock means "no limit"; the program has no
+            # "no limit" (credit_limit is a number, 0 = no credit at all), so the same figure keeps the same
+            # meaning; never 0, which would refuse every credit sale from day 1
             limit = piasters(lim_raw)
+            if lim_raw > MAX_REAL_LIMIT:
+                p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
+                        "من غير حد في إي ستوك: اتنقل زي ما هو (نفس المعنى في البرنامج)", kind="info")
             if exact_piasters(lim_raw) is None:
                 p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
                         f"كسر قرش في حد الآجل: اتقرّب لـ {egp(Decimal(limit) / 100)} (الفرق {Decimal(limit) / 100 - lim_raw})")
-        elif lim_raw is not None and lim_raw != 0:
+            if limit > 2 ** 62:
+                p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
+                        "حد آجل أكبر من اللي البرنامج يشيله: محتاج قرار", block=True)
+                limit = 0
+        elif lim_raw is not None and lim_raw < 0:
             p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
-                    "حد آجل مش حقيقي: اتحط صفر (مفيش آجل) لحد ما يتكتب في عمود «حد الآجل المؤكد» أو في شاشة العميل")
+                    "حد آجل بالسالب: اتحط صفر (مفيش آجل) لحد ما يتكتب في «حد الآجل المؤكد» أو شاشة العميل")
+        if limit == 0 and (bal_raw or 0) > 0:
+            # 0 in E-Stock did not stop this customer owing us; in the program 0 refuses credit: the owner says
+            p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money") or "(فاضي)",
+                    "OWNER: حد الآجل صفر في إي ستوك وعليه فلوس؛ في البرنامج الصفر يمنع البيع الآجل: اكتب حده",
+                    value_egp=bal_raw, kind="review")
         c = crows.get(("customer", cid), {})
         p.customers.append(_party(p, "customer", cid, code, name, bal, c, limit=limit, alt=alt or None,
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
