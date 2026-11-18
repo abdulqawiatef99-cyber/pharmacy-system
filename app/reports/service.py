@@ -108,7 +108,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
                                               history.get(l["sale_id"], []))
     ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]
     names = {r["id"]: dict(r) for r in db.all(
-        "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
+        "SELECT id, name_en, name_ar, pack_size, base_unit_name, hidden FROM items WHERE org_id=? AND id IN (%s)"
         % ",".join("?" * len(ranked)), (ctx.org_id, *[d["item_id"] for d in ranked]))} if ranked else {}
     cost: dict[str, Decimal] = {}
     if show_cost and ranked:     # exact: the stored decimal unit costs, one row per item and cost, never SQLite REAL
@@ -122,6 +122,8 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
     top = []
     for d in ranked:
         i = names.get(d["item_id"], {})
+        if i.get("hidden") and not ctx.can("items.hidden"):
+            i = {**i, "name_en": "—", "name_ar": None}       # masked as in Invoices (#324 R7)
         out = {"item_id": d["item_id"], "name_en": i.get("name_en"), "name_ar": i.get("name_ar"),
                "pack_size": i.get("pack_size"), "base_unit_name": i.get("base_unit_name"),
                "qty": d["qty"], "revenue": d["revenue"]}
