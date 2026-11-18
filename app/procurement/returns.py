@@ -97,10 +97,14 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValidationFailed("قيمة الوحدة غير صحيحة")
         cost = _unit_cost(db, ctx, item_id, batch_id, supplier_id)
-        if value is None or (cost is not None and value == _half_up(cost)):
-            # at the purchase price (nothing typed, or the screen sent the proposal back): the quantity is
-            # multiplied by the exact cost and rounded once. Rounding the unit first credited 99 piasters
-            # for a whole three-unit pack bought for 100 (#324 S31)
+        # the proposal the screen was shown and sent back untouched. The screen may have asked before the
+        # supplier was chosen (it then got the lot's lowest price): both proposals mean "at the purchase
+        # price", and that price is this supplier's own. Keeping the blind figure credited supplier B with
+        # supplier A's lower price (Codex on #347)
+        proposed = {_unit_value(db, ctx, item_id, batch_id, supplier_id), _unit_value(db, ctx, item_id, batch_id)}
+        if value is None or (cost is not None and value in proposed):
+            # at the purchase price: the quantity is multiplied by the exact cost and rounded once. Rounding
+            # the unit first credited 99 piasters for a whole three-unit pack bought for 100 (#324 S31)
             pieces = _pieces(qty, _half_up(cost * qty) if cost is not None else 0)
         else:
             pieces = [(qty, value)]
