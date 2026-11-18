@@ -370,3 +370,25 @@ class TestReview336PriceBetweenLines(_Purchase):
             "SELECT previous_price, public_price FROM item_price_history WHERE item_id=? AND source='purchase_invoice'"
             " ORDER BY rowid", (self.item,))]
         self.assertEqual(hist, [(10000, 12000), (12000, 10000)])
+
+
+class TestReview336AckQueryPerPharmacy(_Purchase):
+    """P1 (#336 review @ceaa15f): the lines read to find the difference being acknowledged are this
+    pharmacy's only (AGENTS.md: every query on pharmacy data filters by org_id)."""
+
+    def test_the_acknowledgement_reads_lines_by_pharmacy(self):
+        iid, d = self.manual({"qty": 1, "unit_net_price": 10000}, declared_total=10200)
+        seen, real = [], self.db.all
+
+        def spy(sql, params=()):
+            if "purchase_invoice_lines" in sql:
+                seen.append(sql)
+            return real(sql, params)
+        self.db.all = spy
+        try:
+            self.p.acknowledge(self.ctx, iid, "total_mismatch", "تقريب المورد", None, d["invoice"]["version"])
+        finally:
+            del self.db.all
+        self.assertTrue(seen)
+        for sql in seen:
+            self.assertIn("org_id=?", sql, sql)

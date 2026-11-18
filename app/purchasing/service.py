@@ -199,9 +199,10 @@ class Purchasing:
                         f" ({', '.join('?' * len(row))})", tuple(row.values()))
 
     def _refresh_totals(self, ctx: Context, inv_id: str) -> None:
-        inv = dict(self.db.one("SELECT * FROM purchase_invoices WHERE id=?", (inv_id,)))
+        inv = dict(self.db.one("SELECT * FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id)))
         lines = [dict(r) for r in self.db.all(
-            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
+            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+            (inv_id, ctx.org_id))]
         comp = validation.computed_total(inv, lines)
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
@@ -257,7 +258,8 @@ class Purchasing:
                 cands = matching.fuzzy_candidates(self.db, ctx.org_id, l["raw_name"], 5)
                 l["candidates"] = [c.__dict__ for c in cands]
         raw_lines = [dict(x) for x in self.db.all(
-            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
+            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+            (inv_id, ctx.org_id))]
         issues = self.issues(ctx, inv, raw_lines)
         inv["acknowledged_issues"] = json.loads(inv["acknowledged_issues"])
         inv.pop("raw_extraction", None)
@@ -505,7 +507,8 @@ class Purchasing:
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
             lines = [dict(r) for r in self.db.all(
-                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
+                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+                (inv_id, ctx.org_id))]
             now = next((i for i in self.issues(ctx, dict(inv), lines)
                         if i.code == code and (i.line_id or None) == (line_id or None)), None)
             if now is None:
@@ -527,8 +530,8 @@ class Purchasing:
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
             lines = [dict(r) for r in self.db.all(
-                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no",
-                (inv_id,))]
+                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+                (inv_id, ctx.org_id))]
             blocking = validation.blocking(self.issues(ctx, inv, lines))
             if blocking:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
