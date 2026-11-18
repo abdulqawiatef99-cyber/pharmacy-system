@@ -698,24 +698,34 @@ class TestOwnerDecisions1118(Base):
         self.assertIn(("101", "review"), exp)
         self.assertIn("للمراجعة", Path(res["reports"]["data_quality"]).read_text(encoding="utf-8-sig"))
 
-    def test_treasury_and_wallets_are_information_only(self):
+    def test_treasury_and_wallets_are_found_with_their_source_and_kept_pending(self):
+        """Owner 22:05: they move (F105 posts them); until then every figure is in the report, none dropped."""
         t = base_tables()
-        t["Gedo_Financial"] = [{"gf_id": "1", "gf_for_me": "1500.5000", "gf_for_him": "200.0000", "total": "1300.5000"}]
+        t["Gedo_Financial"] = [{"gf_id": "1", "fcs_id": "1", "gf_for_me": "1500.5000", "gf_for_him": "200.0000"},
+                               {"gf_id": "2", "fcs_id": "2", "gf_for_me": "300.0000", "gf_for_him": "0.0000"}]
+        t["Financial_cash_safe"] = [{"fcs_id": "1", "fcs_name": "الخزنة الرئيسية"}, {"fcs_id": "2", "fcs_name": "فودافون كاش"}]
+        t["Networks"] = [{"network_id": "2", "network_name": "إنستاباي"}]
+        t["Cash_disk_close"][0].update({"cdc_fcs_id": "1", "cdc_trans_value": "900.0000"})
         t["Sales_header"][0]["network_id"] = "2"
         t["Sales_header"][0]["network_money"] = "54.0000"
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         mi = res["plan"].checks["money_info"]
-        tables = {x["table"]: x for x in mi["tables"]}
-        self.assertEqual(tables["Gedo_Financial"]["sums"]["gf_for_me"], "1500.50")
-        self.assertIn("Cash_disk_close", tables)
+        gf = {x["table"]: x for x in mi["tables"]}["Gedo_Financial"]
+        self.assertEqual(gf["sums"]["gf_for_me"], "1800.50")
+        self.assertEqual([(g["id"], g["name"], g["gf_for_me"]) for g in gf["by"]["fcs_id"]],
+                         [("1", "الخزنة الرئيسية", "1500.50"), ("2", "فودافون كاش", "300.00")])
+        self.assertEqual(mi["shift_transfers"][0]["total"], "900.00")
         self.assertEqual(mi["last_shift_close"][0]["counted_cash"], "999.50")
-        self.assertEqual(mi["sales_by_network"], [{"source": "Sales_header.network_money", "network_id": "2", "total": "54.00"}])
-        for table in ("cash_movements", "cash_shifts"):
+        self.assertEqual([(n["network_id"], n["name"], n["total"]) for n in mi["sales_by_network"]], [("2", "إنستاباي", "54.00")])
+        review = {(d["table"], d["field"]) for d in res["plan"].dq if d["severity"] == "review"}
+        self.assertIn(("Gedo_Financial", "gf_for_me"), review)
+        self.assertIn(("Cash_disk_close", "cdc_trans_value"), review)
+        for table in ("cash_movements", "cash_shifts"):          # posted only by F105's service, once
             self.assertFalse(self.db.one(f"SELECT 1 FROM {table}"), table)
         rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
-        self.assertIn("مفيش رصيد خزنة ولا محفظة", rec)
-        self.assertIn("Gedo_Financial", rec)
+        self.assertIn("MONEY OPENING: PENDING", rec)
+        self.assertIn("الخزنة الرئيسية", rec)
 
 
 class TestPartialReadIsCompletedFirst(Base):

@@ -794,49 +794,117 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
     p.checks["sales_lines_without_header"] = orphan
 
 
-MONEY_TABLES = re.compile(r"gedo_fin|financ|cash|khazn|treasur|safe|bank|network|wallet|visa|insta|vodaf|mahfaz", re.I)
+MONEY_TABLES = re.compile(r"gedo_fin|financ|fcs|cash|khazn|treasur|safe|bank|network|wallet|visa|insta|vodaf|mahfaz", re.I)
 _NOT_MONEY_COL = re.compile(r"(^|_)(id|uid|code|no|num|number|flag|type|class|date|time|year|month|day)s?$", re.I)
+_MONEY_HINT = ("money", "cash", "total", "for_", "value", "balance", "trans", "amount", "price")
+_NAME_COL = re.compile(r"name", re.I)
+
+
+def _money_cols(rows: list[dict]) -> list[str]:
+    out = []
+    for col in (rows[0].keys() if rows else []):
+        if _NOT_MONEY_COL.search(col):
+            continue
+        vals = [r.get(col) for r in rows if (r.get(col) or "").strip()]
+        nums = [dec(v) for v in vals]
+        if vals and all(n is not None for n in nums) and (
+                any(n != n.to_integral_value() for n in nums) or any(k in col.lower() for k in _MONEY_HINT)):
+            out.append(col)
+    return out
+
+
+def _id_cols(rows: list[dict]) -> list[str]:
+    """Columns that look like an account key (a treasury, a cash box, a network): *_id with few values."""
+    out = []
+    cols = list(rows[0].keys()) if rows else []
+    for col in cols[1:]:                      # the first column is the row's own key (gf_id, cdc_id, ...)
+        if not col.lower().endswith("_id") or col.lower().endswith("uid"):
+            continue
+        vals = {(r.get(col) or "").strip() for r in rows} - {""}
+        if 1 <= len(vals) <= 30:
+            out.append(col)
+    return out
+
+
+def _names_of(ex: Export, key: str) -> dict[str, str]:
+    """Names for an id column (fcs_id, network_id, ...) from any table that has that column and a name column."""
+    best = None
+    for t in ex.tables.values():
+        rows = ex.rows(t["name"])
+        if not rows or key not in rows[0] or len(rows) > 500:
+            continue
+        ids = [ident(r.get(key)) for r in rows]
+        name = next((c for c in rows[0] if _NAME_COL.search(c)), None)
+        if not name or len(set(ids)) != len(ids):         # a lookup table: one row per id
+            continue
+        rank = (list(rows[0]).index(key) != 0, len(rows))
+        if best is None or rank < best[0]:
+            best = (rank, {i: (r.get(name) or "").strip() for i, r in zip(ids, rows)})
+    return best[1] if best else {}
 
 
 def _plan_money_info(ex: Export, p: Plan) -> None:
-    """Owner 18/11: E-Stock's treasury figure is not real cash (supplier and expense payments were not
-    recorded against it) and the wallets (InstaPay, Vodafone Cash) hold balances too. Nothing here creates a
-    cash balance: it is shown in the report, with its source table, for the money accounts (F105)."""
-    out = {"note": "information only: no cash or wallet balance is created from E-Stock", "tables": [],
-           "last_shift_close": [], "sales_by_network": []}
+    """Owner 18/11 22:05: E-Stock's treasury balance becomes the opening of the program's main treasury and
+    the InstaPay / Vodafone Cash balances the openings of their own accounts (F105 builds them). E-Stock's
+    schema for them is not known in advance, so every table that can hold them is shown with its source
+    table and column, summed in total and per account key (a *_id column with few values), plus how shift
+    closes transfer into a treasury (Cash_disk_close.cdc_trans_value by cdc_fcs_id) and the sales paid by
+    network / wallet (Sales_header.network_money by network_id, returns subtracted). Nothing is posted until
+    F105's service exists, and nothing is dropped: each non-zero figure is a 'review' row in data quality."""
+    out = {"note": "pending: posted once by F105's opening service (source estock); nothing dropped",
+           "tables": [], "shift_transfers": [], "last_shift_close": [], "sales_by_network": []}
     for t in sorted(ex.tables.values(), key=lambda t: t["name"].lower()):
         if not MONEY_TABLES.search(t["name"]):
             continue
         rows = ex.rows(t["name"])
-        sums = {}
-        for col in (rows[0].keys() if rows else []):
-            if _NOT_MONEY_COL.search(col):
-                continue
-            vals = [r.get(col) for r in rows if (r.get(col) or "").strip()]
-            nums = [dec(v) for v in vals]
-            if vals and all(n is not None for n in nums) and any(n != n.to_integral_value() for n in nums) \
-                    or (vals and all(n is not None for n in nums) and any(k in col.lower() for k in
-                                                                          ("money", "cash", "total", "for_", "value", "balance"))):
-                sums[col] = egp(sum(nums))
-        out["tables"].append({"table": t["name"], "rows": len(rows), "sums": sums})
+        money, keys = _money_cols(rows), _id_cols(rows)
+        entry = {"table": t["name"], "rows": len(rows), "columns": list(rows[0].keys()) if rows else [],
+                 "sums": {c: egp(sum(dec(r.get(c)) or 0 for r in rows)) for c in money}, "by": {}}
+        for k in keys:
+            names = _names_of(ex, k)
+            groups: dict[str, dict] = {}
+            for r in rows:
+                g = groups.setdefault(ident(r.get(k)) or "?", {c: Decimal(0) for c in money})
+                for c in money:
+                    g[c] += dec(r.get(c)) or 0
+            entry["by"][k] = [{"id": gid, "name": names.get(gid, ""), **{c: egp(v) for c, v in g.items()}}
+                              for gid, g in sorted(groups.items())]
+        out["tables"].append(entry)
+    trans: dict[str, Decimal] = defaultdict(Decimal)
     closes: dict[str, dict] = {}
     for r in ex.rows("Cash_disk_close"):
+        trans[ident(r.get("cdc_fcs_id")) or "?"] += dec(r.get("cdc_trans_value")) or 0
         k = ident(r.get("cdc_cash_id")) or "?"
         if (r.get("insert_date") or "") >= closes.get(k, {}).get("insert_date", ""):
             closes[k] = r
+    fcs = _names_of(ex, "fcs_id") or _names_of(ex, "cdc_fcs_id")
+    for k, v in sorted(trans.items()):
+        out["shift_transfers"].append({"source": "Cash_disk_close.cdc_trans_value by cdc_fcs_id", "fcs_id": k,
+                                       "name": fcs.get(k, ""), "total": egp(v)})
     for k, r in sorted(closes.items()):
         out["last_shift_close"].append({"source": "Cash_disk_close", "cash_id": k, "at": r.get("insert_date") or "",
                                         "system_cash": egp(dec(r.get("cdc_curr_cash"))),
                                         "counted_cash": egp(dec(r.get("cdc_act_cash")))})
+    nets = _names_of(ex, "network_id")
+    tot: dict[str, Decimal] = defaultdict(Decimal)
     for table, sign in (("Sales_header", 1), ("Back_sales_header", -1)):
-        tot: dict[str, Decimal] = defaultdict(Decimal)
         for r in ex.rows(table):
             v = dec(r.get("network_money"))
             if v:
                 tot[ident(r.get("network_id")) or "?"] += sign * v
-        for k, v in sorted(tot.items()):
-            out["sales_by_network"].append({"source": f"{table}.network_money", "network_id": k, "total": egp(v)})
+    for k, v in sorted(tot.items()):
+        out["sales_by_network"].append({"source": "Sales_header.network_money - Back_sales_header.network_money",
+                                        "network_id": k, "name": nets.get(k, ""), "total": egp(v)})
     p.checks["money_info"] = out
+    for t in out["tables"]:
+        for col, v in t["sums"].items():
+            if Decimal(v):
+                p.issue(t["table"], "", "", col, v, "رصيد فلوس محتمل (خزنة أو محفظة): لسه ما اتنقلش، مستني خدمة"
+                        " حسابات الفلوس (F105) والمالك يأكد أنهي رقم", value_egp=Decimal(v), kind="review")
+    for n in out["sales_by_network"]:
+        p.issue("Sales_header", n["network_id"], n["name"], "network_money", n["total"],
+                "مبيعات على شبكة/محفظة (للمطابقة مع رصيد المحفظة): مستني F105", value_egp=Decimal(n["total"]),
+                kind="info")
 
 
 # ---------------------------------------------------------------- the owner's confirmation sheet
@@ -1235,15 +1303,22 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     lines.append(f"من غير صلاحية: دواء أو مش معروف {sum(d['severity'] == 'review' for d in exp)} (للمراجعة)، "
                  f"مش دواء {sum(d['severity'] == 'info' for d in exp)} (عادي)")
     mi = plan.checks.get("money_info") or {}
-    lines.append("خزنة إي ستوك والمحافظ — للعلم بس، مفيش رصيد خزنة ولا محفظة اتعمل من إي ستوك:")
+    lines.append("MONEY OPENING: PENDING — خزنة إي ستوك والمحافظ بتتنقل كأرصدة افتتاحية لما خدمة F105 تخلص؛"
+                 " لحد دلوقتي مكتوبة هنا بمصدرها ومفيش حاجة اتسابت:")
     for t in mi.get("tables", []):
         lines.append(f"  {t['table']}: {t['rows']} سطر" + ("، " + "، ".join(f"{a}={b}" for a, b in t["sums"].items())
-                                                         if t["sums"] else ""))
+                                                         if t["sums"] else "") + f" (الأعمدة: {', '.join(t['columns'])})")
+        for k, groups in t.get("by", {}).items():
+            for g in groups:
+                lines.append(f"    {k}={g['id']} {g['name']}: " + "، ".join(f"{c}={v}" for c, v in g.items()
+                                                                           if c not in ("id", "name")))
+    for c in mi.get("shift_transfers", []):
+        lines.append(f"  تحويل قفل الشيفت للخزنة ({c['source']}) خزنة {c['fcs_id']} {c['name']}: {c['total']}")
     for c in mi.get("last_shift_close", []):
         lines.append(f"  آخر قفل خزنة ({c['source']}، خزنة {c['cash_id']}، {c['at']}): البرنامج {c['system_cash']}، "
                      f"المعدود {c['counted_cash']}")
     for n in mi.get("sales_by_network", []):
-        lines.append(f"  {n['source']} شبكة {n['network_id']}: {n['total']}")
+        lines.append(f"  {n['source']} شبكة {n['network_id']} {n['name']}: {n['total']}")
     for k, v in extra.items():
         lines.append(f"{k}: {v}")
     if rec["mismatches"]:
