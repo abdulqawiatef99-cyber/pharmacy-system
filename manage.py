@@ -417,7 +417,7 @@ def cmd_import_estock_db(a, s):
             sys.exit(f"الملف أو الفولدر مش موجود: {f}")
     out_dir = Path(a.out) if a.out else s.data_dir / "reports" / \
         f"estock-db-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}"
-    archive = s.data_dir / estock_archive.NAME
+    archive = Path(db.path).parent / estock_archive.NAME     # beside the database, where backup and restore look
     tmp, target = None, db
     try:
         why = estock_db.refusal(db, accounts.resolve_session(db, tok), estock_db.Export(Path(a.dir), a.database).source_sha())

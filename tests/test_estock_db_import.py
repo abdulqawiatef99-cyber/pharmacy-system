@@ -445,7 +445,13 @@ class TestCommand(Base):
         self.assertIn("RECONCILIATION: OK", out)
         self.assertTrue(list(s.backup_path.glob("pharmacy-backup-*-pre-estock-db.zip")))
         self.assertTrue(list(s.backup_path.glob("estock-archive-*.sqlite")))
-        self.assertTrue((s.data_dir / estock_archive.NAME).exists())
+        # beside the database the backup reads (here outside the data folder, as with PHARM_DB_PATH; #339 review)
+        self.assertTrue((Path(self.db.path).parent / estock_archive.NAME).exists())
+        self.assertFalse((s.data_dir / estock_archive.NAME).exists())
+        from app.core import backup
+        import zipfile
+        with zipfile.ZipFile(backup.create(self.db, s.upload_dir, self.tmp / "bk2")) as z:
+            self.assertIn(backup.ARCHIVE_MEMBER, z.namelist())
         self.assertEqual(self.db.one("SELECT count(*) n FROM items")["n"], 5)
 
     def test_failed_reconciliation_exits_non_zero(self):
@@ -679,6 +685,13 @@ class TestOpeningBalancesInTheProgram(Base):
         other = cat.create_supplier(self.db, self.ctx, name="مورد جديد")
         with self.assertRaises(NotFound):
             self.ob.confirm(self.db, self.ctx, "supplier", other, 100)
+
+    def test_a_confirmation_without_a_difference_also_closes_the_import(self):
+        """#339 review: confirming the same figure posts no ledger row, but no import step may run after it."""
+        self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 50000)                # = E-Stock: no row
+        self.assertEqual(self.db.one("SELECT count(*) n FROM supplier_ledger WHERE supplier_id=?", (self.v1,))["n"], 1)
+        with self.assertRaises(Conflict):
+            self.run_import(folder=self.folder)
 
     def test_no_import_step_runs_after_a_confirmation_in_the_program(self):
         self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000)

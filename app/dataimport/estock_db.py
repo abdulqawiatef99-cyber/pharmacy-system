@@ -984,6 +984,9 @@ def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
         if db.one(f"SELECT 1 FROM {table} WHERE org_id=? AND coalesce(ref_id,'') NOT IN {ours} LIMIT 1",
                   (ctx.org_id, ctx.org_id)):
             return f"قاعدة البيانات فيها {what} مش من النقل ده: مفيش أي حاجة اتكتبت"
+    if db.one("SELECT 1 FROM audit_log WHERE org_id=? AND action='estock.opening_confirm' LIMIT 1", (ctx.org_id,)):
+        # the owner confirmed balances in the program (even with no difference, #339 review): the import is closed
+        return "الأرصدة الافتتاحية اتأكدت من البرنامج: النقل من إي ستوك اتقفل. مفيش أي حاجة اتكتبت"
     for table in ("cash_movements", "purchase_invoices", "expenses"):
         if db.one(f"SELECT 1 FROM {table} WHERE org_id=? LIMIT 1", (ctx.org_id,)):
             return f"قاعدة البيانات فيها حركات فلوس ({table}): النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
