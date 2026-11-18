@@ -315,7 +315,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if hit["status"] == 0:
                 raise Conflict("هذه العملية أُرسلت من قبل ولم تتأكد نتيجتها بعد. راجعها (الفواتير/الخزينة/الحساب)"
                                " قبل إعادتها", code="idempotency_unconfirmed")
-            resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
+            if req.url.path == "/api/cash/close":
+                # rebuilt under the permissions held now, not the report stored at the close (#324 M4)
+                resp = J(CashDrawer(db).close_result(ctx, json.loads(hit["response"])["id"]), status_code=hit["status"])
+            else:
+                resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
             resp.headers["Idempotent-Replay"] = "true"
             return resp
 

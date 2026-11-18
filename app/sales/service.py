@@ -156,7 +156,18 @@ def alloc_gross(qty: int, a: dict) -> int:
     return (qty // ps) * pp + (qty % ps) * a["unit_price"]
 
 
-def line_gross(parts) -> int:
+def _kept_gross(qty: int, a: dict) -> int:
+    """`alloc_gross` for valuing kept units on a return: the loose units of a pack are never worth more
+    than the whole pack. A unit price rounded up (a pack of 100 at 10.50 -> 0.11) made 99 loose units
+    (10.89) worth more than a pack, so the return that broke the pack booked a negative refund (#324 M1).
+    Unchanged wherever (pack_size - 1) loose units cost no more than a pack."""
+    ps, pp = a.get("pack_size") or 1, a.get("pack_price")
+    if pp is None or ps <= 1:
+        return a["unit_price"] * qty
+    return (qty // ps) * pp + min((qty % ps) * a["unit_price"], pp)
+
+
+def line_gross(parts, price=alloc_gross) -> int:
     """Price of a line from its (qty, allocation) parts. Allocations with the same price (a pack
     split over two batches by FEFO) are priced as one quantity, so a whole pack is still exactly
     the pack price; parts at different batch prices are priced each at its own."""
@@ -164,7 +175,7 @@ def line_gross(parts) -> int:
     for qty, a in parts:
         g = groups.setdefault((a["unit_price"], a.get("pack_price"), a.get("pack_size") or 1), [0, a])
         g[0] += qty
-    return sum(alloc_gross(q, a) for q, a in groups.values())
+    return sum(price(q, a) for q, a in groups.values())
 
 
 def discount_of(gross: int, bp: int) -> int:
@@ -172,10 +183,10 @@ def discount_of(gross: int, bp: int) -> int:
     return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
 
 
-def _per_batch_gross(parts) -> int:
+def _per_batch_gross(parts, price=alloc_gross) -> int:
     """How the release before 0.4 priced a line: each batch on its own (a pack split over two batches
     by FEFO came to 2 x 33.33 + 33.33 = 99.99). Only for reading sales it recorded (#72)."""
-    return sum(alloc_gross(q, a) for q, a in parts)
+    return sum(price(q, a) for q, a in parts)
 
 
 def _rule_as_sold(allocs: list[dict], bp: int, line_total: int | None):
@@ -198,7 +209,7 @@ def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None =
     """Net value of the units of a line the customer still keeps (after discount), priced the way the
     line was sold. With the recorded total: the whole line is worth exactly that and never more, so
     all the returns of a line add up to what was paid for it, not a piaster more or less."""
-    g = _rule_as_sold(allocs, bp, line_total)((kept[a["id"]], a) for a in allocs)
+    g = _rule_as_sold(allocs, bp, line_total)(((kept[a["id"]], a) for a in allocs), price=_kept_gross)
     value = g - discount_of(g, bp)
     if line_total is None:
         return value
@@ -883,7 +894,12 @@ class Sales:
                 self.db.execute("UPDATE sale_deliveries SET status='delivered', delivered_at=? WHERE sale_id=?",
                                 (_now(), sid))
             audit.record(self.db, ctx, f"delivery.{status}", "sale", sid, after={"cash": d["cash_due"]})
-        return self.get(ctx, sid)
+        # committed: a cashier who may settle but not open another cashier's invoice still gets a success,
+        # else the 403 released the retry key and the retry answered delivery_state (#324 M3)
+        try:
+            return self.get(ctx, sid)
+        except Forbidden:
+            return {"id": sid, "sale_no": d["sale_no"], "delivery": {"status": status}}
 
     def open_deliveries(self, ctx: Context) -> list[dict]:
         ctx.require("sales.create")
