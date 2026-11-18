@@ -135,6 +135,10 @@ def cmd_serve(a, s):
         print("تنبيه: البرنامج مفتوح على شبكة الصيدلية (واي فاي) من غير HTTPS — استخدمه على شبكة الصيدلية المقفولة بباسورد بس.",
               file=sys.stderr)
     os.environ["PHARM_HOST"] = a.host
+    if os.environ.get("PHARM_LAUNCHER") == "1":
+        # the installed program: the owner's scripts of the code running now go to one fixed folder (+ Desktop)
+        from app.core import tools_folder
+        tools_folder.refresh(Path(__file__).resolve().parent, s.data_dir.parent)
     from app.core.accesslog import uvicorn_log_config
     uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
                 server_header=False, log_config=uvicorn_log_config())
