@@ -6,6 +6,7 @@ A backup is ONE zip file containing:
                 (safe while the program runs — never copy the .db file by hand:
                 recent changes may still sit in the -wal file)
   uploads/...   the original invoice files (needed for audits)
+  estock-archive.sqlite.xz  the read-only E-Stock history next to the database, when there is one (F91)
   manifest.json counts + sha256 of the snapshot, for verification
 
 Restore refuses a backup that fails verification, always keeps the current
@@ -55,6 +56,64 @@ def _counts(db: Database) -> dict:
 
 
 XZ_PRESET = 1          # measured on a real pharmacy: 102 MB -> ~14 MB in ~4 s
+ESTOCK_ARCHIVE = "estock-archive.sqlite"     # owner data next to the database: it goes into every backup
+ARCHIVE_MEMBER = ESTOCK_ARCHIVE + ".xz"
+
+
+def _estock_archive_of(db_path) -> Path | None:
+    if str(db_path) == ":memory:":
+        return None
+    p = Path(db_path).parent / ESTOCK_ARCHIVE
+    return p if p.is_file() else None
+
+
+def _archive_xz(archive: Path, tmp: str) -> tuple[Path, str, int]:
+    """The compressed archive for a backup. It never changes after the move, so the .xz is made once and
+    kept next to it (checked by the archive's sha256 each time), not recompressed every hour."""
+    sha = _sha256(archive)
+    cache, mark = archive.with_name(ARCHIVE_MEMBER), archive.with_name(ARCHIVE_MEMBER + ".sha256")
+    try:
+        if cache.is_file() and mark.is_file() and mark.read_text(encoding="ascii").strip() == sha:
+            return cache, sha, archive.stat().st_size
+    except OSError:
+        pass
+    out = Path(tmp) / ARCHIVE_MEMBER
+    with open(archive, "rb") as src, lzma.open(out, "wb", preset=XZ_PRESET) as dst:
+        shutil.copyfileobj(src, dst, 1 << 20)
+    try:                                   # the cache is only a speed-up: a read-only folder does not stop a backup
+        shutil.copy2(out, cache.with_suffix(".part"))
+        cache.with_suffix(".part").replace(cache)
+        mark.write_text(sha, encoding="ascii")
+    except OSError:
+        pass
+    return out, sha, archive.stat().st_size
+
+
+def _extract_archive(z: zipfile.ZipFile, tmp: str) -> Path:
+    target = Path(tmp) / ESTOCK_ARCHIVE
+    with z.open(ARCHIVE_MEMBER) as member, lzma.open(member) as src, open(target, "wb") as out:
+        n = 0
+        while chunk := src.read(1 << 20):
+            n += len(chunk)
+            if n > MAX_DB_BYTES:
+                raise RuntimeError("E-Stock archive larger than the limit; not extracted")
+            out.write(chunk)
+    return target
+
+
+def _archive_problems(z: zipfile.ZipFile, manifest: dict, tmp: str) -> list[str]:
+    want = manifest.get("estock_archive")
+    if not want:
+        return []
+    if ARCHIVE_MEMBER not in z.namelist():
+        return ["the E-Stock archive is missing from the backup"]
+    try:
+        got = _extract_archive(z, tmp)
+    except (lzma.LZMAError, RuntimeError) as e:
+        return [f"E-Stock archive unreadable: {e}"]
+    if _sha256(got) != want.get("sha256"):
+        return ["E-Stock archive checksum does not match the manifest"]
+    return []
 
 
 def _sha256(path: Path) -> str:
@@ -186,6 +245,11 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
             raise RuntimeError("the live database failed verification; backup NOT written: " + "; ".join(problems))
         manifest = {"created_at": datetime.now().isoformat(timespec="seconds"), "counts": counts,
                     "db_sha256": _sha256(snap), "db_bytes": snap.stat().st_size, "format": 2}
+        arch = _estock_archive_of(db.path)
+        arch_xz = None
+        if arch:
+            arch_xz, arch_sha, arch_bytes = _archive_xz(arch, tmp)
+            manifest["estock_archive"] = {"sha256": arch_sha, "bytes": arch_bytes}
         xz = Path(tmp) / "pharmacy.db.xz"
         with open(snap, "rb") as src, lzma.open(xz, "wb", preset=XZ_PRESET) as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
@@ -193,6 +257,8 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
         try:
             with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(xz, "pharmacy.db.xz", compress_type=zipfile.ZIP_STORED)
+                if arch_xz:
+                    z.write(arch_xz, ARCHIVE_MEMBER, compress_type=zipfile.ZIP_STORED)
                 if upload_dir.exists():
                     for f in sorted(upload_dir.rglob("*")):
                         if f.is_file() and not f.name.endswith(".part"):
@@ -237,6 +303,7 @@ def _verify_archive(archive: Path) -> dict:
         problems = []
         if _sha256(snap) != manifest.get("db_sha256"):
             problems.append("database checksum does not match the manifest")
+        problems += _archive_problems(z, manifest, tmp)
         try:
             db = Database(snap)
             try:
@@ -368,6 +435,26 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
         except BaseException:
             staged.unlink(missing_ok=True)
             raise
+        # the E-Stock history goes back with its database; one that the backup does not have is kept aside,
+        # renamed, never deleted (it is in the pre-restore backup too)
+        live_arch = db_path.parent / ESTOCK_ARCHIVE
+        try:
+            arch_new = _extract_archive(z, tmp) if info.get("estock_archive") else None
+            if arch_new and live_arch.exists() and _sha256(live_arch) == _sha256(arch_new):
+                arch_new = None                         # the same history: nothing to move
+            elif live_arch.exists():
+                live_arch.chmod(0o644)
+                aside = live_arch.with_name(f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+                live_arch.replace(aside)
+            for f in (live_arch.with_name(ARCHIVE_MEMBER), live_arch.with_name(ARCHIVE_MEMBER + ".sha256")):
+                f.unlink(missing_ok=True)
+            if arch_new:
+                shutil.copy2(arch_new, live_arch.with_suffix(".part"))
+                live_arch.with_suffix(".part").replace(live_arch)
+                live_arch.chmod(0o444)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
         # 3) only now the database itself
         for suffix in ("-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
@@ -393,6 +480,9 @@ def _quick_check(archive: Path) -> list[str]:
         snap = _extract_db(z, tmp)
         if _sha256(snap) != manifest.get("db_sha256"):
             return ["database checksum does not match the manifest"]
+        arch = _archive_problems(z, manifest, tmp)
+        if arch:
+            return arch
         db = Database(snap)
         try:
             return _attachment_problems(db, z)
