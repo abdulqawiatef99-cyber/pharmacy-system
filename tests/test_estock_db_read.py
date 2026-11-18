@@ -55,11 +55,39 @@ class TestEstockDbRead(unittest.TestCase):
         # (3) tables\<instance>\<db>\
         self.assertIn("Join-Path (Join-Path $tables ($srv -replace", text)
 
-    def test_binary_cells_are_base64_not_type_names(self):
+    def test_one_cell_formatter_for_every_table(self):
         text = PS1.read_text(encoding="utf-8-sig")
-        self.assertIn("$_.DataType -eq [byte[]]", text)
-        self.assertIn("if ($v -is [byte[]]) { $v = 'b64:' + [Convert]::ToBase64String($v) }", text)
-        self.assertLess(text.index("ToBase64String"), text.rindex("Export-Csv -Path"))
+        self.assertEqual(text.count("Export-Csv -Path"), 1)             # one export path, every table
+        self.assertIn("$o[$n] = Cell $_[$n]", text)
+        self.assertNotIn("Select-Object -Property $names", text)
+        body = text[text.index("function Cell($v)"):text.index("function Try-Open")]
+        for rule in ("$v -is [DBNull]) { return '' }",
+                     "[byte[]]) { return 'b64:' + [Convert]::ToBase64String($v) }",
+                     "[DateTime]) { return $v.ToString('o', $inv) }",
+                     "[DateTimeOffset]) { return $v.ToString('o', $inv) }",
+                     "[TimeSpan]) { return $v.ToString('c', $inv) }",
+                     "[double]) { return $v.ToString('G17', $inv) }",
+                     "[single]) { return $v.ToString('G9', $inv) }",
+                     "[decimal]) { return $v.ToString($inv) }",
+                     "if ($v) { return '1' } else { return '0' }",
+                     "[Guid]) { return $v.ToString() }",
+                     "[IFormattable]) { return $v.ToString($null, $inv) }"):
+            self.assertIn(rule, body)
+        self.assertLess(body.index("[DateTime]"), body.index("[IFormattable]"))    # specific types first
+        self.assertLess(text.index("function Cell"), text.index("Cell $_[$n]"))
+
+    def test_no_silent_loss_and_no_wrong_pass(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        # an instance running but not reached (E-Stock's own, when another instance accepted Windows sign-in)
+        self.assertIn("if ($conns.Count -eq 0 -or (& $missing) -gt 0)", text)
+        self.assertIn('$failed.Add($want[$k] + " (could not sign in)")', text)
+        # a database not ONLINE and a server whose read stopped are failures, not skips
+        self.assertIn('$failed.Add("$srv / " + $db.name + " (" + $db.state_desc + ")")', text)
+        self.assertIn('$failed.Add("$srv (server read stopped)")', text)
+        # totals are the rows actually exported; empty tables keep a header; case-twin columns refuse
+        self.assertIn("$totalRows += $got; $totalTables++", text)
+        self.assertIn("if ($data.Rows.Count -eq 0)", text)
+        self.assertIn("Sort-Object -Unique", text)
 
     def test_in_app_update_ships_the_ps1(self):
         import io

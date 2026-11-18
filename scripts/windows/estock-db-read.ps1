@@ -23,9 +23,13 @@ Say "computer: $env:COMPUTERNAME  user: $env:USERNAME"
 
 # 1. Candidate servers: the default instance and every named instance found in the services.
 $servers = New-Object System.Collections.Generic.List[string]
+$failed = New-Object System.Collections.Generic.List[string]
+$want = @{}      # running instances that must be read: machine\instance (upper case) -> label
 foreach ($svc in Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'MSSQLSERVER' -or $_.Name -like 'MSSQL$*' }) {
     Say ("service " + $svc.Name + " : " + $svc.Status)
-    if ($svc.Name -eq 'MSSQLSERVER') { $servers.Add('(local)') } else { $servers.Add('.\' + $svc.Name.Substring(6)) }
+    if ($svc.Name -eq 'MSSQLSERVER') { $servers.Add('(local)'); $id = $env:COMPUTERNAME }
+    else { $servers.Add('.\' + $svc.Name.Substring(6)); $id = $env:COMPUTERNAME + '\' + $svc.Name.Substring(6) }
+    if ($svc.Status -eq 'Running') { $want[$id.ToUpper()] = $svc.Name }
 }
 if ($servers.Count -eq 0) { $servers.Add('(local)'); $servers.Add('.\SQLEXPRESS') }
 
@@ -45,6 +49,30 @@ function Usable($c) {
     return $n
 }
 
+# Which instance a connection reached, the same way for every connection string: MACHINE or MACHINE\INSTANCE.
+function Who($c) {
+    $r = Q $c "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) + ISNULL(N'\' + CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128)), N'') n"
+    return ([string]$r.Rows[0].n).ToUpper()
+}
+
+# One text form per value type, so the CSV keeps every value exactly (dates to the 100 ns tick, numbers
+# round trip), whatever the PC's regional settings.
+$inv = [Globalization.CultureInfo]::InvariantCulture
+function Cell($v) {
+    if ($null -eq $v -or $v -is [DBNull]) { return '' }
+    if ($v -is [byte[]]) { return 'b64:' + [Convert]::ToBase64String($v) }
+    if ($v -is [DateTime]) { return $v.ToString('o', $inv) }
+    if ($v -is [DateTimeOffset]) { return $v.ToString('o', $inv) }
+    if ($v -is [TimeSpan]) { return $v.ToString('c', $inv) }
+    if ($v -is [double]) { return $v.ToString('G17', $inv) }
+    if ($v -is [single]) { return $v.ToString('G9', $inv) }
+    if ($v -is [decimal]) { return $v.ToString($inv) }
+    if ($v -is [bool]) { if ($v) { return '1' } else { return '0' } }
+    if ($v -is [Guid]) { return $v.ToString() }
+    if ($v -is [IFormattable]) { return $v.ToString($null, $inv) }
+    return [string]$v
+}
+
 function Try-Open([string]$cs) {
     try {
         $c = New-Object System.Data.SqlClient.SqlConnection $cs
@@ -53,17 +81,19 @@ function Try-Open([string]$cs) {
 }
 
 $conns = @()
+$have = @{}      # instances already connected (by Who)
 foreach ($s in $servers) {
     $c = Try-Open "Server=$s;Integrated Security=True;Connect Timeout=8;Application Name=estock-db-read"
     if (-not $c) { Say "no Windows sign-in to: $s"; continue }
     $u = Usable $c
-    if ($u -gt 0) { Say "connected (Windows sign-in): $s, $u user database(s) open"; $conns += ,@($s, $c) }
+    if ($u -gt 0) { Say "connected (Windows sign-in): $s, $u user database(s) open"; $conns += ,@($s, $c); try { $have[(Who $c)] = 1 } catch { } }
     else { Say "connected (Windows sign-in): $s, but no user database opens with it"; $c.Close() }
 }
 
-# 2. Fallback (no Windows sign-in, or one that opens no user database): connection strings in E-Stock's
-#    own folder (used here only, never printed).
-if ($conns.Count -eq 0) {
+# 2. Fallback for every running instance not reached yet (no Windows sign-in, or one that opens no user
+#    database): connection strings in E-Stock's own folder (used here only, never printed).
+$missing = { @($want.Keys | Where-Object { -not $have.ContainsKey($_) }).Count }
+if ($conns.Count -eq 0 -or (& $missing) -gt 0) {
     $roots = @('D:\Modern Soft for Programming', 'C:\Program Files (x86)\Modern Soft for Programming', 'C:\Program Files\Modern Soft for Programming')
     foreach ($r in $roots) {
         if (-not (Test-Path $r)) { continue }
@@ -72,15 +102,20 @@ if ($conns.Count -eq 0) {
             try { $text = [IO.File]::ReadAllText($f.FullName) } catch { continue }
             foreach ($m in [regex]::Matches($text, '(?i)(Data Source|Server)\s*=[^"<>\r\n]+')) {
                 $cs = $m.Value -replace '(?i)Provider\s*=[^;]*;?', ''
+                if ($cs -notmatch '(?i)(Connect|Connection)\s*Timeout') { $cs = $cs.TrimEnd(';') + ';Connect Timeout=8' }
                 $c = Try-Open $cs
-                if ($c -and (Usable $c) -gt 0) { Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); break }
-                if ($c) { $c.Close() }
+                if (-not $c) { continue }
+                $id = $null; try { $id = Who $c } catch { }
+                if ($id -and -not $have.ContainsKey($id) -and (Usable $c) -gt 0) {
+                    Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); $have[$id] = 1
+                } else { $c.Close() }
             }
-            if ($conns.Count -gt 0) { break }
+            if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
         }
-        if ($conns.Count -gt 0) { break }
+        if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
     }
 }
+foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
 if ($conns.Count -eq 0) {
     Say 'RESULT: FAIL - could not open any database on a local SQL Server. Nothing was read or changed.'
     Save; exit 2
@@ -91,16 +126,16 @@ $numTypes = 'int','bigint','smallint','tinyint','decimal','numeric','money','sma
 $private = '(?i)phone|tel|mob|hatef|card|visa|nat|ssn|pass|pwd|هاتف|تليفون|موبايل|بطاق|رقم.?قومي|كلمة'
 $dateTypes = 'date','datetime','datetime2','smalldatetime','datetimeoffset','time'
 $totalRows = 0; $totalTables = 0
-$failed = New-Object System.Collections.Generic.List[string]
 try {
 
 foreach ($pair in $conns) {
     $srv = $pair[0]; $conn = $pair[1]
+  try {
     $v = Q $conn "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) v, CAST(SERVERPROPERTY('Edition') AS nvarchar(100)) e"
     Say ("server $srv  version " + $v.Rows[0].v + "  " + $v.Rows[0].e)
     $dbs = Q $conn "SELECT name, state_desc FROM sys.databases WHERE database_id > 4 ORDER BY name"
     foreach ($db in $dbs.Rows) {
-        if ($db.state_desc -ne 'ONLINE') { Say ("database " + $db.name + " : " + $db.state_desc + " (skipped)"); continue }
+        if ($db.state_desc -ne 'ONLINE') { Say ("database " + $db.name + " : " + $db.state_desc + " (not read)"); $failed.Add("$srv / " + $db.name + " (" + $db.state_desc + ")"); continue }
         $dbn = $db.name
         try { $conn.ChangeDatabase($dbn) } catch { Say ("database $dbn : no access (" + $_.Exception.Message + ")"); $failed.Add("$srv / $dbn (no access)"); continue }
         $size = Q $conn "SELECT CAST(SUM(size) * 8.0 / 1024 AS decimal(12,2)) mb FROM sys.database_files"
@@ -148,28 +183,27 @@ foreach ($pair in $conns) {
             $data = Q $conn "SELECT * FROM $full WITH (NOLOCK)"
             $csv = Join-Path $dbDir (($t.sc + '.' + $t.nm) -replace '[\\/:*?"<>|]', '_')
             $names = [string[]]($data.Columns | ForEach-Object { $_.ColumnName })
-            $bin = @($data.Columns | Where-Object { $_.DataType -eq [byte[]] })
-            if ($bin.Count -eq 0) {
-                $data.Rows | Select-Object -Property $names | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
+            if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw "two columns differ only in letter case" }
+            if ($data.Rows.Count -eq 0) {                   # an empty table still gets its file and header
+                $head = ($names | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }) -join ','
+                [IO.File]::WriteAllLines($csv + '.csv', [string[]]@($head), (New-Object Text.UTF8Encoding $true))
             } else {
-                # binary cells (varbinary, binary, image, timestamp) as Base64 with a b64: prefix, not "System.Byte[]"
                 $data.Rows | ForEach-Object {
                     $o = [ordered]@{}
-                    foreach ($n in $names) {
-                        $v = $_[$n]
-                        if ($v -is [byte[]]) { $v = 'b64:' + [Convert]::ToBase64String($v) }
-                        $o[$n] = $v
-                    }
+                    foreach ($n in $names) { $o[$n] = Cell $_[$n] }
                     [pscustomobject]$o
                 } | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
             }
-            $totalRows += $rows; $totalTables++              # counted only once its CSV is written
+            $got = $data.Rows.Count
+            if ($got -ne $rows) { Say ("   note: $got rows exported (count was $rows; the cashier changed it meanwhile)") }
+            $totalRows += $got; $totalTables++               # counted only once its CSV is written
           } catch {
             Say ("   ERROR reading " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message)
             $failed.Add("$srv / $dbn.$($t.sc).$($t.nm)")
           }
         }
     }
+  } catch { Say ("server $srv : ERROR " + $_.Exception.Message); $failed.Add("$srv (server read stopped)") }
     $conn.Close()
 }
 } catch { Say ("RESULT: FAIL - " + $_.Exception.Message + " (nothing in E-Stock was changed)"); Save; exit 3 }
@@ -182,6 +216,7 @@ if ($failed.Count -gt 0) {
     Say "RESULT: PASS - $totalTables tables, $totalRows rows read. Nothing in E-Stock was changed."
 }
 Say "full tables (stay on this PC): $tables"
+Say "note: read WITH (NOLOCK) while the cashier works; a row changed during the read can be missing or twice."
 Save
 Start-Process notepad.exe -ArgumentList "`"$summary`""
 if ($failed.Count -gt 0) { exit 4 }
