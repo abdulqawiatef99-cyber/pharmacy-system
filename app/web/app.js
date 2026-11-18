@@ -341,6 +341,9 @@ const routes = [
   [/^#\/categories$/, viewCategories],
   [/^#\/groups$/, viewGroups],
   [/^#\/shift$/, viewShift],
+  [/^#\/money$/, viewMoney],
+  [/^#\/money\/([\w-]+)$/, viewMoneyAccount],
+  [/^#\/reconcile$/, viewReconcile],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
   [/^#\/shortages$/, viewShortages],
@@ -440,7 +443,8 @@ const SCREENS = {
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
-  customize: ["تخصيص الواجهة", "settings.manage"],
+  customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
+  reconcile: ["مطابقة الأرصدة", "cash.see_expected"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
@@ -2339,17 +2343,22 @@ async function renderReceiptCfg(c) {
     catch (err) { toast(err.message, true); }
   });
 }
-function renderChannels(list) {
+const CH_GROUP = { card: "فيزا", transfer: "محفظة إلكترونية" };
+async function renderChannels(list) {
   CHANNELS = null;
-  $("#chBox").innerHTML = `<p class="muted">ما يُضاف هنا يظهر في شاشة البيع عند اختيار بطاقة أو تحويل، ويُجمَع تلقائيًا عند إغلاق الشيفت.</p>
-    <table><thead><tr><th>النوع</th><th>الاسم</th><th>مفعّل</th><th></th></tr></thead><tbody>
-    ${list.map((c) => `<tr data-id="${esc(c.id)}"><td>${c.kind === "card" ? "جهاز بطاقات" : "تحويل / محفظة"}</td><td><input name="name" value="${esc(c.name)}"></td>
+  const accs = await moneyAccounts(true), seeAcc = ME.permissions.includes("cash.see_expected");
+  $("#chBox").innerHTML = `<p class="muted">الكاشير بيختار المجموعة (فيزا أو محفظة إلكترونية) وبعدين الطريقة. كل طريقة فلوسها بتنزل في حسابها، وبيتراجع كل حساب لوحده.</p>
+    <table><thead><tr><th>المجموعة</th><th>الاسم</th>${seeAcc ? "<th>الفلوس بتنزل في</th>" : ""}<th>مفعّل</th><th></th></tr></thead><tbody>
+    ${list.map((c) => `<tr data-id="${esc(c.id)}"><td><select name="kind">${Object.entries(CH_GROUP).map(([k, t]) => `<option value="${k}" ${c.kind === k ? "selected" : ""}>${t}</option>`).join("")}</select></td><td><input name="name" value="${esc(c.name)}"></td>
+      ${seeAcc ? `<td><select name="acc"><option value="">— مش محدد —</option>${srcOptions(accs, c.account_id, { drawer: false, outside: false })}</select></td>` : ""}
       <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""}></td><td><button class="btn small secondary" data-chsave>احفظ</button></td></tr>`).join("")}</tbody></table>
-    <form class="row mt" id="chNew"><label class="f">النوع <select name="kind"><option value="card">جهاز بطاقات</option><option value="transfer">تحويل / محفظة</option></select></label>
+    <form class="row mt" id="chNew"><label class="f">المجموعة <select name="kind"><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
       <label class="f">الاسم <input name="name" required placeholder="مثال: جهاز البنك الأهلي"></label><button class="btn small">أضف</button></form>`;
   document.querySelectorAll("[data-chsave]").forEach((b) => b.addEventListener("click", async () => {
     const tr = b.closest("tr");
-    try { renderChannels((await api(`/api/payment-channels/${tr.dataset.id}`, { method: "PATCH", body: { name: tr.querySelector("[name=name]").value, is_active: tr.querySelector("[name=is_active]").checked } })).channels); toast("تم الحفظ"); }
+    const body = { name: tr.querySelector("[name=name]").value, is_active: tr.querySelector("[name=is_active]").checked, kind: tr.querySelector("[name=kind]").value };
+    if (tr.querySelector("[name=acc]")) body.account_id = tr.querySelector("[name=acc]").value || null;
+    try { renderChannels((await api(`/api/payment-channels/${tr.dataset.id}`, { method: "PATCH", body })).channels); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   }));
   $("#chNew").addEventListener("submit", async (e) => {
@@ -2887,7 +2896,8 @@ function receiptWanted(sale, cfg, override) {
 }
 let RCFG = null;                      // receipt settings, read once per POS visit
 const lastSale = () => { try { return JSON.parse(sessionStorage.getItem("posLast") || "null"); } catch { return null; } };
-const METHODS = [["cash", "نقدي"], ["card", "بطاقة"], ["transfer", "تحويل"], ["credit", "آجل"]];
+// owner's design 19/11: the kind first («فيزا», «محفظة إلكترونية»), then which one; each one lands in its own account
+const METHODS = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "محفظة إلكترونية"], ["credit", "آجل"]];
 // screenshot of the transfer, saved with the invoice for the owner to check (optional)
 const proofInput = (s) => `<label class="f mt proof">📎 صورة التحويل ${(s.attachments || []).length ? `<span class="badge b-ok">✓ ${(s.attachments || []).length} صورة</span>` : `<span class="muted">(اختياري — للمراجعة)</span>`}
   <input type="file" id="posProof" accept="image/*,application/pdf"></label>`;
@@ -3160,11 +3170,11 @@ function renderSide() {
         <p class="badge ${remaining === 0 ? "b-ok" : "b-warn"} mt">${remaining === 0 ? "✓ الدفع كامل" : `⚠ المتبقي ${money(remaining)}`}</p>
         <p><a href="#" id="splitOff">رجوع لطريقة دفع واحدة</a></p>`
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
-        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "الجهاز" : "المحفظة / طريقة التحويل"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
+        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
-        <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء ببطاقة أو تحويل)</a></p>`}
+        <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : "اطبع إيصال لهذا البيع (F4)"}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>F4</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
@@ -3415,16 +3425,17 @@ const denomLabel = (d) => (d >= 100 ? `${d / 100} جنيه` : d === 50 ? "نصف
 async function viewShift() {
   let sh = null;
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
-  const seeAll = ME.permissions.includes("cash.see_expected");
+  const seeAll = ME.permissions.includes("cash.see_expected"), keeps = ME.permissions.includes("cash.manage");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
+  const accs = await moneyAccounts(true), lastFloat = (accs.find((a) => a.id === "drawer") || {}).balance;
   const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
   if (!sh) {
-    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
-      <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="0" class="big"></label>
+    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
+      <form id="shOpen" class="row mt"><label class="f">النقدية في الدرج الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
     $("#shOpen").addEventListener("submit", async (e) => {
@@ -3435,7 +3446,8 @@ async function viewShift() {
     return;
   }
   const k = sh.cash_by_kind || {};
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
+  const moneyLink = seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : "";
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>${moneyLink}
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
@@ -3450,6 +3462,11 @@ async function viewShift() {
     ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
     <tfoot><tr><th>الإجمالي المعدود</th><th></th><th class="num big" id="dTotal">0.00</th></tr></tfoot></table>
     <label class="f mt">ملاحظة (اختياري) <input name="note"></label>
+    <fieldset class="mt"><legend>الفلوس بعد التقفيل</legend>
+      <label class="chk"><input type="checkbox" name="ho" ${keeps ? "" : "checked"}> ${keeps ? "هسلّم الفلوس لحد تاني (هيكتب الرقم السري بتاعه)" : "سلّم النقدية لمدير أو للمالك (هيكتب الرقم السري بتاعه)"}</label>
+      <div class="row" id="shMove" ${keeps ? "" : ""}><label class="f">الفكة اللي هتفضل في الدرج للشيفت الجاي (ج) <input name="fl" type="number" step="0.25" min="0" value="${money(sh.opening_cash)}"></label>
+      ${accs.length ? `<label class="f">الباقي يتحول إلى <select name="to">${srcOptions(accs, "treasury", { drawer: false, outside: false })}</select></label>` : ""}</div>
+      <p class="muted small">${keeps ? "لو مش هتسلّم لحد، الفلوس بتتحول باسمك." : "لو محدش استلم، الفلوس كلها بتفضل في الدرج للشيفت الجاي."}</p></fieldset>
     <button class="btn big">إغلاق الشيفت وطباعة التقرير</button></form>` : ""}
   ${hist}`;
   const recalc = () => {
@@ -3474,11 +3491,14 @@ async function viewShift() {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
     try {
-      const r = await api("/api/cash/close", { method: "POST", body: { denominations: den, note: e.target.note.value || null } });
-      const d = r.difference;
+      const f = e.target, body = { denominations: den, note: f.note.value || null };
+      if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
+      const r = await api("/api/cash/close", { method: "POST", body });
+      const d = r.difference, moved = r.float_left != null ? r.counted_cash - r.float_left : null;
       app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1>
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
-        <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
+        <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div>
+          ${moved != null ? `<div>اتحوّل من الدرج<b>${money(moved)}</b></div><div>الفكة للشيفت الجاي<b>${money(r.float_left)}</b></div>` : ""}</div>
         <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح شيفت جديدًا</a></div></section>`;
       printInFrame(`/shift-report/${r.id}`);
     } catch (err) {
@@ -3488,9 +3508,218 @@ async function viewShift() {
   });
 }
 
+// ------------------------------------------------------------------ money accounts (F105): where the money is
+let MONEY = null;                                   // {accounts, kinds, movement_kinds}, read once per screen
+async function moneyAccounts(force = false) {
+  if (!ME.permissions.includes("cash.see_expected")) return [];
+  if (!MONEY || force) MONEY = await api("/api/money/accounts");
+  return MONEY.accounts;
+}
+const isOwnerMe = () => ME.role === "owner";
+// a payout source: the drawer, a money account (with its balance), or outside the program's accounts
+function srcOptions(accs, sel, { drawer = true, outside = true, ownerOutside = false } = {}) {
+  const o = [];
+  if (sel === "treasury") sel = (accs.find((a) => a.kind === "treasury") || {}).id || (drawer ? "drawer" : sel);
+  if (drawer) o.push(`<option value="drawer" ${sel === "drawer" ? "selected" : ""}>درج الشيفت</option>`);
+  for (const a of accs) {
+    if (a.id === "drawer" || !a.is_active) continue;
+    o.push(`<option value="${esc(a.id)}" ${sel === a.id ? "selected" : ""}>${esc(a.name)} — ${money(a.balance)} ج</option>`);
+  }
+  if (outside && (!ownerOutside || isOwnerMe())) {
+    o.push(`<option value="outside" ${sel === "outside" ? "selected" : ""}>${isOwnerMe() ? "من خارج حسابات البرنامج (من جيبي)" : "من جيبي (ينتظر موافقة المالك)"}</option>`);
+  }
+  return o.join("");
+}
+const srcName = (e) => e.account || (e.paid_from === "drawer" ? "درج الشيفت" : "من خارج الحسابات");
+const MV_SIGN = (a) => (a < 0 ? `<span class="err">− ${money(-a)}</span>` : `<span class="ok">+ ${money(a)}</span>`);
+
+async function viewMoney() {
+  const accs = await moneyAccounts(true), owner = isOwnerMe(), canM = ME.permissions.includes("cash.manage");
+  const total = accs.reduce((x, a) => x + (a.balance || 0), 0);
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الخزنة والحسابات</h1><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a></div>
+    <div class="totals"><div>كل الفلوس في البرنامج<b>${money(total)} ج</b><span>عدد الأماكن: ${accs.length}</span></div></div>
+    <table><thead><tr><th>المكان</th><th>النوع</th><th>الرصيد</th><th></th></tr></thead><tbody>
+    ${accs.map((a) => `<tr><td><b>${esc(a.name)}</b>${a.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}${a.allow_negative ? ` <span class="chip">مسموح بالسالب</span>` : ""}</td>
+      <td>${a.id === "drawer" ? (a.shift_open ? "الشيفت مفتوح" : "الفكة من آخر شيفت") : esc(a.kind_label || "")}</td>
+      <td class="num"><b>${money(a.balance)}</b></td>
+      <td class="row">${a.id === "drawer" ? `<a href="#/shift">الشيفت</a>` : `<a class="btn small secondary" href="#/money/${esc(a.id)}">كشف الحساب</a>
+        ${canM && a.is_active ? `<button class="btn small secondary" data-count="${esc(a.id)}" data-name="${esc(a.name)}" data-bal="${a.balance}">جرد الحساب</button>` : ""}`}</td></tr>`).join("")}</tbody></table>
+    <div id="mCount"></div></section>
+  ${canM ? `<div class="grid2"><form class="panel" id="mTr"><h2>تحويل بين الحسابات</h2>
+      <label class="f">من <select name="from">${srcOptions(accs, "drawer", { outside: false })}</select></label>
+      <label class="f">إلى <select name="to">${srcOptions(accs, "treasury", { outside: false })}</select></label>
+      <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+      <label class="f">ملاحظة <input name="n" placeholder="مثال: توريد من الدرج للخزنة"></label><button class="btn mt">حوّل</button></form>
+    <form class="panel" id="mOwn"><h2>مسحوبات وإيداع المالك</h2>
+      <div class="seg2 small"><button type="button" class="on" data-ok="owner_withdrawal">✓ مسحوبات</button><button type="button" data-ok="owner_deposit">إيداع</button></div>
+      <label class="f mt">الحساب <select name="acc">${srcOptions(accs, "treasury", { outside: false })}</select></label>
+      <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+      <label class="f">ملاحظة <input name="n"></label><button class="btn mt">سجّل</button>
+      <p class="muted">المسحوبات والإيداع ليست مصروفات: لا تدخل في حساب الربح.</p></form></div>` : ""}
+  ${owner ? `<form class="panel row" id="mNew"><h2 class="grow">حساب جديد</h2>
+      <label class="f">الاسم <input name="name" required placeholder="مثال: اتصالات كاش"></label>
+      <label class="f">النوع <select name="kind">${Object.entries(MONEY.kinds).filter(([k]) => k !== "treasury").map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></label>
+      <button class="btn small">أضف</button></form>` : ""}
+  <section class="panel" id="mSum"><div class="row between"><h2>الفلوس راحت فين</h2>${reportTools("msum")}</div>
+    <div class="row noprint">${rangeBar("mRange", "month")}<div class="seg2 small" id="mBy"><button type="button" class="on" data-by="day">✓ يومي</button><button type="button" data-by="month">شهري</button></div></div>
+    <div id="mSumBox"></div></section>`;
+  let ok = "owner_withdrawal", by = "day", sum = null, range = null;
+  document.querySelectorAll("[data-ok]").forEach((b) => b.addEventListener("click", () => {
+    ok = b.dataset.ok;
+    document.querySelectorAll("[data-ok]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + (x.dataset.ok === "owner_withdrawal" ? "مسحوبات" : "إيداع"); });
+  }));
+  document.querySelectorAll("[data-count]").forEach((b) => b.addEventListener("click", () => {
+    $("#mCount").innerHTML = `<form class="panel mt" id="mCountF"><h2>جرد: ${esc(b.dataset.name)}</h2>
+      <p class="muted">اكتب المبلغ الحقيقي (المعدود في الخزنة، أو رصيد البنك أو المحفظة). — رصيد البرنامج: ${money(+b.dataset.bal)} ج</p>
+      <div class="row"><label class="f">المبلغ الحقيقي (ج) <input name="c" type="number" step="0.01" required></label>
+      <label class="f grow">سبب الفرق (لازم لو فيه فرق) <input name="r"></label><button class="btn">سجّل الجرد</button></div></form>`;
+    $("#mCountF").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await withBusy(e.target.querySelector("button"), async () => {
+        try {
+          const r = await api(`/api/money/accounts/${b.dataset.count}/count`, { method: "POST", body: { counted: toPiasters(e.target.c.value), reason: e.target.r.value || null } });
+          toast(!r.difference ? "✓ الحساب مطابق" : r.against_old_program ? `✓ فرق عن البرنامج القديم: ${money(r.difference)} ج` : `✓ تم تسجيل الفرق: ${money(r.difference)} ج`);
+          viewMoney();
+        } catch (err) { toast(err.message, true); if (err.code === "reason_required") e.target.r.focus(); }
+      });
+    });
+  }));
+  $("#mTr")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await withBusy(f.querySelector("button"), async () => {
+      try { await api("/api/money/transfer", { method: "POST", body: { from: f.from.value, to: f.to.value, amount: toPiasters(f.a.value), note: f.n.value || null } }); toast("✓ تم التحويل"); viewMoney(); }
+      catch (err) { toast(err.message, true); }
+    });
+  });
+  $("#mOwn")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api("/api/money/owner", { method: "POST", body: { account: f.acc.value, kind: ok, amount: toPiasters(f.a.value), note: f.n.value || null } }); toast("✓ تم التسجيل"); viewMoney(); }
+      catch (err) { toast(err.message, true); }
+    });
+  });
+  $("#mNew")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/money/accounts", { method: "POST", body: { name: e.target.name.value, kind: e.target.kind.value } }); toast("✓ تمت الإضافة"); viewMoney(); }
+    catch (err) { toast(err.message, true); }
+  });
+  const load = async () => {
+    sum = await api(`/api/money/summary?from=${range[0]}&to=${range[1]}&by=${by}`);
+    $("#mSumBox").innerHTML = `<p><b>${esc(rangeText(sum.from, sum.to))}</b> — الدخل: ${money(sum.total_in)} ج · الخرج: ${money(sum.total_out)} ج</p>
+      ${sum.periods.map((p) => `<div class="panel sub"><div class="row between"><h3>${esc(p.period)}</h3><span>الدخل: <b class="ok">${money(p.in)}</b> · الخرج: <b>${money(p.out)}</b> · الصافي: <b>${money(p.net)}</b></span></div>
+        <table><thead><tr><th>البيان</th><th>دخل</th><th>خرج</th></tr></thead><tbody>
+        ${p.by_kind.map((k) => `<tr class="${k.flow ? "" : "muted"}"><td>${esc(k.label)}${k.flow ? "" : " <small>(بين أماكن الصيدلية أو رصيد قديم، مش دخل ولا مصروف)</small>"}</td><td class="num">${k.in ? money(k.in) : ""}</td><td class="num">${k.out ? money(k.out) : ""}</td></tr>`).join("")}</tbody></table>
+        <p class="muted small">${p.by_place.map((x) => `${esc(x.place)}: +${money(x.in)} / −${money(x.out)}`).join(" · ")}</p></div>`).join("") || `<p class="muted">لا توجد حركة في هذه الفترة</p>`}`;
+  };
+  const get = wireRange("mRange", (f, t) => { range = [f, t]; load().catch((e) => toast(e.message, true)); });
+  range = get();
+  document.querySelectorAll("[data-by]").forEach((b) => b.addEventListener("click", () => {
+    by = b.dataset.by;
+    document.querySelectorAll("[data-by]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + (x.dataset.by === "day" ? "يومي" : "شهري"); });
+    load().catch((e) => toast(e.message, true));
+  }));
+  wireTools("msum", () => ({ title: "الفلوس راحت فين", subtitle: rangeText(sum.from, sum.to), el: $("#mSum"), sheets: [
+    { name: "الملخص", columns: [Tx("الفترة"), Tx("البيان"), M("دخل"), M("خرج")],
+      rows: sum.periods.flatMap((p) => p.by_kind.map((k) => [p.period, k.label, k.in, k.out])) }] }));
+}
+
+async function viewMoneyAccount(id) {
+  const owner = isOwnerMe();
+  app.innerHTML = `<section class="panel"><a href="#/money">← الخزنة والحسابات</a><div id="maHead"></div></section>
+    <section class="panel" id="maRep"><div class="row between"><h2>كشف الحساب</h2>${reportTools("mast")}</div>${rangeBar("maRange", "month")}<div id="maBox"></div></section>`;
+  let st = null;
+  const head = (a) => {
+    $("#maHead").innerHTML = `<div class="row between"><h1>${esc(a.name)}</h1><span>${a.is_active ? "" : `<span class="badge b-plain">موقوف</span>`}</span></div>
+      ${owner && a.id !== "treasury" ? `<form class="row" id="maEdit"><label class="f">الاسم <input name="name" value="${esc(a.name)}"></label>
+        <label class="chk"><input type="checkbox" name="neg" ${a.allow_negative ? "checked" : ""}> مسموح بالسالب</label>
+        ${a.kind !== "treasury" ? `<label class="chk"><input type="checkbox" name="act" ${a.is_active ? "checked" : ""}> مفعّل</label>` : ""}
+        <button class="btn small secondary">احفظ</button></form>` : ""}
+      ${owner ? `<form class="row mt" id="maAdj"><label class="f">الرصيد الصحيح (ج) <input name="v" type="number" step="0.01" required></label>
+        <label class="f grow">السبب <input name="r" required placeholder="مثال: رقم البرنامج القديم كان غلط"></label>
+        <button class="btn small secondary">تسوية الرصيد بدون جرد</button></form>` : ""}`;
+    $("#maEdit")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = e.target, body = { name: f.name.value, allow_negative: f.neg.checked };
+      if (f.act) body.is_active = f.act.checked;
+      try { await api(`/api/money/accounts/${id}`, { method: "PATCH", body }); toast("تم الحفظ"); viewMoneyAccount(id); } catch (err) { toast(err.message, true); }
+    });
+    $("#maAdj")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!confirmInline(e.target.querySelector("button"))) return;
+      try { const r = await api(`/api/money/accounts/${id}/adjust`, { method: "POST", body: { correct_balance: toPiasters(e.target.v.value), reason: e.target.r.value } });
+        toast(`✓ الفرق: ${money(r.difference)} ج`); viewMoneyAccount(id); } catch (err) { toast(err.message, true); }
+    });
+  };
+  wireRange("maRange", async (f, t) => {
+    try {
+      st = await api(`/api/money/accounts/${id}/statement?from=${f}&to=${t}`);
+      head(st.account);
+      $("#maBox").innerHTML = `<div class="totals"><div>الرصيد أول الفترة<b>${money(st.opening)}</b></div><div class="t-ok">دخل<b>${money(st.total_in)}</b></div>
+        <div>خرج<b>${money(st.total_out)}</b></div><div>الرصيد آخر الفترة<b>${money(st.closing)}</b></div></div>
+        <div class="tablewrap mt"><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th><th>الرصيد</th><th>بواسطة</th></tr></thead><tbody>
+        ${st.lines.map((l) => `<tr><td>${esc(stamp(l.created_at))}</td><td>${esc(l.kind_label)}${l.note ? ` <small class="muted">${esc(l.note)}</small>` : ""}</td>
+          <td class="num">${MV_SIGN(l.amount)}</td><td class="num">${money(l.balance)}</td><td>${esc(l.by_name || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا توجد حركة في هذه الفترة</td></tr>`}</tbody></table></div>`;
+    } catch (err) { toast(err.message, true); }
+  });
+  wireTools("mast", () => ({ title: `كشف حساب ${st.account.name}`, subtitle: rangeText(st.from, st.to), el: $("#maRep"), sheets: [
+    { name: "كشف الحساب", columns: [Tx("التاريخ"), Tx("البيان"), Tx("ملاحظة"), M("المبلغ"), M("الرصيد")],
+      rows: [["", "الرصيد أول الفترة", "", null, st.opening], ...st.lines.map((l) => [stamp(l.created_at), l.kind_label, l.note || "", l.amount, l.balance])] }] }));
+}
+
+// ------------------------------------------------------------------ balance reconciliation (F108)
+const PARTY_T = { supplier: "مورد", customer: "عميل" };
+async function viewReconcile() {
+  app.innerHTML = `<section class="panel"><h1>مطابقة الأرصدة</h1>
+    <p class="muted">اكتب الرصيد اللي في كشف حساب المورد أو العميل. البرنامج يبيّن الفرق، وتسجّله بنوعه. الصفحة دي برضه بتتكتب فيها أرصدة أول المدة وقت التشغيل.</p>
+    <form class="row" id="rcF"><div class="seg2 small" id="rcP"><button type="button" class="on" data-p="">✓ الكل</button><button type="button" data-p="supplier">الموردين</button><button type="button" data-p="customer">العملاء</button></div>
+      <input name="q" class="grow" placeholder="ابحث بالاسم"><button class="btn small secondary">ابحث</button></form>
+    <div id="rcBox" class="mt"></div></section>`;
+  let party = "", types = {};
+  const load = async () => {
+    const r = await api(`/api/reconcile/parties?party=${party}&q=${encodeURIComponent($("#rcF").q.value)}`);
+    types = r.types;
+    $("#rcBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>الاسم</th><th>رصيد البرنامج</th><th>رصيد الكشف (ج)</th><th>الفرق</th><th>نوع الفرق</th><th>ملاحظة</th><th></th><th>آخر مطابقة</th></tr></thead><tbody>
+      ${r.parties.map((p) => `<tr data-party="${p.party}" data-id="${esc(p.id)}" data-bal="${p.balance}"><td><b>${esc(p.name)}</b> <span class="chip">${PARTY_T[p.party]}</span></td>
+        <td class="num">${money(p.balance)}</td><td><input class="narrow" type="number" step="0.01" data-st></td><td class="num" data-diff></td>
+        <td><select data-type><option value="">—</option>${Object.entries(types).filter(([k]) => !(k === "early_discount" && p.party !== "supplier") && !(k === "claim_discount" && p.party !== "customer")).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></td>
+        <td><input data-note></td><td><button class="btn small" data-save>احفظ</button></td>
+        <td class="muted small">${p.last ? `${esc(dayOf(p.last.at))}${p.last.difference ? ` · الفرق: ${money(p.last.difference)}` : " · مطابق"}` : ""}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></div>`;
+    $("#rcBox").querySelectorAll("[data-st]").forEach((inp) => inp.addEventListener("input", () => {
+      const tr = inp.closest("tr"), v = toPiasters(inp.value);
+      tr.querySelector("[data-diff]").textContent = v == null ? "" : money(v - +tr.dataset.bal);
+    }));
+    $("#rcBox").querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+      const tr = b.closest("tr"), st = toPiasters(tr.querySelector("[data-st]").value);
+      if (st == null) { tr.querySelector("[data-st]").focus(); toast("اكتب رصيد الكشف", true); return; }
+      await withBusy(b, async () => {
+        try {
+          const r2 = await api("/api/reconcile", { method: "POST", body: { party: tr.dataset.party, party_id: tr.dataset.id, statement_balance: st,
+            program_balance: +tr.dataset.bal, adj_type: tr.querySelector("[data-type]").value || null, note: tr.querySelector("[data-note]").value || null } });
+          toast(r2.difference ? `✓ اتسجل الفرق: ${money(r2.difference)} ج` : "✓ مطابق");
+          tr.dataset.bal = r2.balance; tr.children[1].textContent = money(r2.balance); tr.querySelector("[data-diff]").textContent = "";
+        } catch (err) {
+          toast(err.message, true);
+          if (err.code === "type_required") tr.querySelector("[data-type]").focus();
+          if (err.code === "reason_required") tr.querySelector("[data-note]").focus();
+          if (err.code === "balance_changed") load();
+        }
+      });
+    }));
+  };
+  document.querySelectorAll("#rcP [data-p]").forEach((b) => b.addEventListener("click", () => {
+    party = b.dataset.p;
+    document.querySelectorAll("#rcP [data-p]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + { "": "الكل", supplier: "الموردين", customer: "العملاء" }[x.dataset.p]; });
+    load().catch((e) => toast(e.message, true));
+  }));
+  $("#rcF").addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
+  await load();
+}
+
 // ------------------------------------------------------------------ suppliers and their accounts
 const PAY_M = { drawer: "نقدًا من الخزينة", cash: "نقدًا من خارج الخزينة", bank: "تحويل بنكي", cheque: "شيك", wallet: "إنستاباي / محفظة" };
-const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتورة شراء", payment: "دفعة", return: "مرتجع", adjustment: "تسوية / إلغاء" };
+const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتورة شراء", payment: "دفعة", return: "مرتجع", adjustment: "تسوية / إلغاء", discount: "خصم" };
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
@@ -3501,7 +3730,8 @@ async function viewSuppliers() {
       <td>${SUP_TYPE[x.supplier_type] ? `<span class="chip">${SUP_TYPE[x.supplier_type]}</span>` : `<span class="badge b-warn">⚠ حدد النوع</span>`}</td>
       <td>${esc(x.last_invoice || "—")}</td>${showBal ? `<td class="num">${x.balance > 0 ? `<b>${money(x.balance)}</b>` : x.balance < 0 ? `<span class="ok">مستحق لنا عنده ${money(-x.balance)}</span>` : "—"}</td>` : ""}</tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد موردون</td></tr>`}</tbody></table>
-    <p class="muted">نوع المورد (شركة أو مخزن) يؤثر في الضرائب، ويُحفظ مع كل فاتورة شراء.</p></section>
+    <p class="muted">نوع المورد (شركة أو مخزن) يؤثر في الضرائب، ويُحفظ مع كل فاتورة شراء.</p>
+    ${ME.permissions.includes("cash.see_expected") ? `<p><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a></p>` : ""}</section>
   ${showBal ? `<section class="panel" id="stRep"><div class="row between"><h2>مطالبات الموردين (تقفيل الحسابات)</h2>${reportTools("stall")}</div>
     <div class="row noprint">${rangeBar("stRange", "last")}<label class="f">النوع <select id="stType"><option value="">الكل</option>${Object.entries(SUP_TYPE).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>
     <div id="stBox"></div></section>` : ""}`;
@@ -3534,7 +3764,7 @@ async function viewSuppliers() {
 }
 
 async function viewSupplier(id) {
-  const a = await api(`/api/suppliers/${id}`), canW = ME.permissions.includes("suppliers.write"), canPay = ME.permissions.includes("suppliers.pay");
+  const [a, accs] = await Promise.all([api(`/api/suppliers/${id}`), moneyAccounts(true)]), canW = ME.permissions.includes("suppliers.write"), canPay = ME.permissions.includes("suppliers.pay");
   app.innerHTML = `<section class="panel"><a href="#/suppliers">← الموردون</a>
     <div class="row between"><h1>${esc(a.name)}</h1>
       <span class="seg2 small" id="supType">${Object.entries(SUP_TYPE).map(([v, t]) => `<button type="button" class="${a.supplier_type === v ? "on" : ""}" data-st="${v}" ${canW ? "" : "disabled"}>${a.supplier_type === v ? "✓ " : ""}${t}</button>`).join("")}</span></div>
@@ -3542,11 +3772,15 @@ async function viewSupplier(id) {
       <label class="f grow">شروط الدفع <input id="supTerms" value="${esc(a.payment_terms || "")}" placeholder="مثال: آجل 30 يومًا" ${canW ? "" : "disabled"}></label>
       ${canW ? `<button class="btn small secondary" id="supSave">احفظ</button>` : ""}</div></section>
   ${a.balance != null ? `<div class="totals"><div class="${a.balance > 0 ? "t-warn" : "t-ok"}">${a.balance > 0 ? "مستحق له علينا" : a.balance < 0 ? "مستحق لنا عنده" : "✓ لا يوجد حساب"}<b>${money(Math.abs(a.balance))} ج</b></div></div>` : ""}
-  ${canPay ? `<form class="panel row" id="supPay"><h2 class="grow">تسجيل دفعة للمورد</h2>
-    <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
-    <label class="f">طريقة الدفع <select name="m">${Object.entries(PAY_M).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label>
+  ${canPay ? `<form class="panel" id="supPay"><h2>تسجيل دفعة للمورد</h2><div class="formgrid">
+    <label class="f">اتدفع من <select name="src">${srcOptions(accs, "treasury", { ownerOutside: true })}</select></label>
+    <label class="f">المبلغ المدفوع (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+    <label class="f">خصم تعجيل الدفع <select name="dm"><option value="">مفيش</option><option value="amt">مبلغ</option><option value="pct">نسبة من المبلغ المسدد</option></select></label>
+    <label class="f" id="supDisc" hidden><span id="supDiscL">الخصم (ج)</span> <input name="d" type="number" step="0.01" min="0"></label>
+    <label class="chk"><input type="checkbox" name="chq"> بشيك</label>
     <label class="f">رقم الشيك / التحويل <input name="r" placeholder="مطلوب للشيك"></label>
-    <label class="f grow">ملاحظة <input name="n"></label><button class="btn">سجّل الدفعة</button></form>` : ""}
+    <label class="f grow">ملاحظة <input name="n"></label></div>
+    <p class="muted" id="supPayHint"></p><button class="btn">سجّل الدفعة</button></form>` : ""}
   ${a.balance != null ? `<section class="panel" id="ssRep"><div class="row between"><h2>كشف حساب لفترة (للتقفيل مع المورد)</h2>${reportTools("sst")}</div>${rangeBar("ssRange", "last")}<div id="ssBox"></div></section>` : ""}
   <div class="grid2">
     <section class="panel"><h2>الفواتير</h2><table><thead><tr><th>الرقم</th><th>التاريخ</th><th>الحالة</th><th>الإجمالي</th></tr></thead><tbody>
@@ -3557,6 +3791,17 @@ async function viewSupplier(id) {
         <td class="num ${l.amount < 0 ? "ok" : ""}">${l.amount < 0 ? "− " : "+ "}${money(Math.abs(l.amount))}</td><td>${esc(l.by_name || "")}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لا توجد حركات</td></tr>`}</tbody></table></section>` : ""}
   </div>`;
   document.querySelectorAll("[data-inv]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/purchases/${tr.dataset.inv}`; }));
+  const sp = $("#supPay");
+  const hint = () => {
+    const pct = sp.dm.value === "pct", a = toPiasters(sp.a.value) || 0, d = sp.d.value;
+    $("#supDisc").hidden = !sp.dm.value;
+    $("#supDiscL").textContent = pct ? "النسبة %" : "الخصم (ج)";
+    if (!sp.dm.value || !a || !d) { $("#supPayHint").textContent = ""; return; }
+    const disc = pct ? Math.round(a * parseFloat(d) / 100) : toPiasters(d);
+    const [paid, off] = pct ? [a - disc, a] : [a, a + disc];
+    $("#supPayHint").textContent = `المدفوع: ${money(paid)} ج · الخصم: ${money(disc)} ج · يقل من حساب المورد: ${money(off)} ج`;
+  };
+  sp?.querySelectorAll("input, select").forEach((x) => x.addEventListener("input", hint));
   document.querySelectorAll("[data-st]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/suppliers/${id}`, { method: "PATCH", body: { supplier_type: b.dataset.st } }); viewSupplier(id); } catch (err) { toast(err.message, true); }
   }));
@@ -3567,7 +3812,12 @@ async function viewSupplier(id) {
     e.preventDefault();
     const f = e.target;
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
-      try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, ref: f.r.value || null, note: f.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
+      const body = { source: f.src.value, method: f.chq.checked ? "cheque" : "", ref: f.r.value || null, note: f.n.value || null };
+      // percent: the amount typed is what is cleared from the supplier's balance; the program works out the discount
+      if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: Math.round(parseFloat(f.d.value || 0) * 100) });
+      else Object.assign(body, { amount: toPiasters(f.a.value), discount: f.dm.value === "amt" ? toPiasters(f.d.value) || 0 : 0 });
+      try { const r = await api(`/api/suppliers/${id}/pay`, { method: "POST", body });
+        toast(r.discount ? `✓ اتدفع: ${money(r.paid)} ج · الخصم: ${money(r.discount)} ج` : "✓ تم تسجيل الدفعة"); viewSupplier(id); }
       catch (err) { toast(err.message, true); }
     });
   });
@@ -3763,7 +4013,7 @@ async function viewShortages() {
 }
 
 // ------------------------------------------------------------------ customers
-const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية" };
+const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية", discount: "خصم مطالبة" };
 async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
   app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
@@ -3853,6 +4103,7 @@ async function renderContracts(edit = null) {
 
 async function viewCustomer(id) {
   const c = await api(`/api/customers/${id}`), canM = ME.permissions.includes("customers.manage");
+  const chans = canM && c.balance > 0 ? (await api("/api/payment-channels")).channels.filter((x) => x.is_active) : [];
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><div class="row between"><h1>${esc(c.name)}</h1>
       ${ME.permissions.includes("sales.create") ? `<button class="btn" id="cuSale">فاتورة له</button>` : ""}</div>
@@ -3872,7 +4123,8 @@ async function viewCustomer(id) {
   <div class="totals"><div class="${c.balance > 0 ? "t-err" : "t-ok"}">${c.balance > 0 ? "✕ عليه" : "✓ لا شيء عليه"}<b>${money(Math.max(0, c.balance))} ج</b><span>الحد المسموح ${money(c.credit_limit)} ج</span></div>
     <div class="${c.whatsapp_ok ? "t-ok" : ""}">${c.whatsapp_ok ? "✓ موافق على واتساب" : "لا يوافق على الرسائل"}<b>${esc(c.phone || "—")}</b></div></div>
   ${canM && c.balance > 0 ? `<form class="panel row" id="cPay"><h2 class="grow">تحصيل من الحساب</h2><label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
-    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">بطاقة</option></select></label><button class="btn">سجّل</button></form>` : ""}
+    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الدرج</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
+    <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
       ${c.reminded_at ? `<p class="muted small">آخر تذكير أُرسل: ${esc(dayOf(c.reminded_at))}</p>` : ""}
@@ -3896,11 +4148,17 @@ async function viewCustomer(id) {
     try { await api(`/api/customers/${id}`, { method: "PATCH", body: { name: $("#cName").value, name_alt: $("#cName2").value || null, phone: $("#cPhone").value || null, phone2: $("#cPhone2").value || null, phone3: $("#cPhone3").value || null, address1: $("#cAddr1").value || null, address2: $("#cAddr2").value || null, notes: $("#cNotes").value || null, credit_limit: toPiasters($("#cLim").value) || 0, whatsapp_ok: $("#cWa").checked } }); toast("تم الحفظ"); viewCustomer(id); }
     catch (err) { toast(err.message, true); }
   });
+  const cp = $("#cPay");
+  cp?.m.addEventListener("change", () => {
+    const list = chans.filter((x) => x.kind === cp.m.value);
+    $("#cPayCh").hidden = cp.m.value === "cash" || !list.length;
+    cp.ch.innerHTML = list.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("");
+  });
   $("#cPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
-      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
+      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, channel_id: f.ch?.value || null } }); toast("✓ تم التسجيل"); viewCustomer(id); }
       catch (err) { toast(err.message, true); }
     });
   });
@@ -3951,12 +4209,12 @@ async function viewCustomer(id) {
 const EX_ST = { pending: ["b-warn", "⚠ بانتظار الموافقة"], approved: ["b-ok", "✓ معتمد"], rejected: ["b-err", "✕ مرفوض"] };
 async function viewExpenses(period) {
   const pr = periodPresets().month, [pf, pt] = period || [isoDay(pr[1]), isoDay(pr[2])];
-  const r = await api(`/api/expenses?from=${pf}&to=${pt}`), canA = ME.permissions.includes("expenses.approve");
+  const [r, accs] = await Promise.all([api(`/api/expenses?from=${pf}&to=${pt}`), moneyAccounts(true)]), canA = ME.permissions.includes("expenses.approve");
   const pending = r.expenses.filter((e) => e.status === "pending");
   app.innerHTML = `<form class="panel" id="exNew"><h1>تسجيل مصروف</h1>
     <div class="formgrid"><label class="f">البند <select name="cat">${r.categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
       <label class="f">المبلغ (ج) <input name="a" type="number" step="0.25" min="0" required></label>
-      <label class="f">مصدر المبلغ <select name="from"><option value="drawer">من خزينة الشيفت</option><option value="outside">من خارج الخزينة</option></select></label>
+      <label class="f">اتدفع من <select name="from">${srcOptions(accs, "drawer")}</select></label>
       <label class="f">التاريخ <input name="d" type="date" value="${isoDay(new Date())}"></label>
       <label class="f">ملاحظة <input name="n" placeholder="مثال: أكياس + بكرة إيصالات"></label></div>
     <button class="btn mt">سجّل</button>
@@ -3968,7 +4226,7 @@ async function viewExpenses(period) {
     ${exTable(r.expenses, false)}
     <p><b>الإجمالي المعتمد: ${money(r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
     ${canA ? `<form class="row mt" id="exCat"><input name="n" placeholder="بند جديد" required><button class="btn small secondary">أضف بند</button></form>` : ""}</section>`;
-  if (canA) renderSchedules(r.categories);
+  if (canA) renderSchedules(r.categories, null, accs);
   $("#exRangeBox").innerHTML = rangeBar("exRange");
   $("#exRange [data-rf]").value = pf; $("#exRange [data-rt]").value = pt;
   $("#exRange").querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", false));
@@ -3976,7 +4234,7 @@ async function viewExpenses(period) {
   wireRange("exRange", (f, t) => { if (first) { first = false; return; } viewExpenses([f, t]); });
   wireTools("exp", () => ({ title: "المصروفات", subtitle: rangeText(pf, pt), el: $("#exRep"), sheets: [
     { name: "المصروفات", columns: [Dt("التاريخ"), Tx("البند"), Tx("ملاحظة"), M("المبلغ"), Tx("المصدر"), Tx("سجّله"), Tx("الحالة")],
-      rows: r.expenses.map((e) => [e.spent_on, e.category, e.note || "", e.amount, e.paid_from === "drawer" ? "الخزينة" : "خارجها", e.by_name || "", EX_ST[e.status][1]]) }] }));
+      rows: r.expenses.map((e) => [e.spent_on, e.category, e.note || "", e.amount, srcName(e), e.by_name || "", EX_ST[e.status][1]]) }] }));
   $("#exNew").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -3997,7 +4255,8 @@ async function viewExpenses(period) {
 }
 const EVERY_T = { 1: "كل شهر", 2: "كل شهرين", 3: "كل 3 أشهر", 6: "كل 6 أشهر", 12: "كل سنة" };
 const SC_ST = { late: ["b-err", "✕ فات موعده"], soon: ["b-warn", "⚠ اقترب"], later: ["b-ok", "✓"] };
-async function renderSchedules(cats, edit = null) {
+async function renderSchedules(cats, edit = null, accs = null) {
+  accs = accs || await moneyAccounts();
   const list = (await api("/api/expense-schedules")).schedules, box = $("#scBox");
   if (!box) return;
   const e = edit ? list.find((x) => x.id === edit) : null, v = (k, d = "") => esc(e ? e[k] ?? d : d);
@@ -4017,7 +4276,7 @@ async function renderSchedules(cats, edit = null) {
       <label class="f">يوم الاستحقاق في الشهر <input name="day" type="number" min="1" max="31" required value="${v("day_of_month", 1)}"></label>
       <label class="f">يتكرر <select name="every">${Object.entries(EVERY_T).map(([k, t]) => `<option value="${k}" ${e && e.every_months === +k ? "selected" : ""}>${t}</option>`).join("")}</select></label>
       <label class="f">ذكّرني قبله بكم يوم <input name="rd" type="number" min="0" max="60" required value="${v("remind_days", 3)}"></label>
-      <label class="f">يُدفع من <select name="from"><option value="outside">من خارج الخزينة</option><option value="drawer" ${e && e.paid_from === "drawer" ? "selected" : ""}>من الخزينة</option></select></label>
+      <label class="f">يتدفع من <select name="from">${srcOptions(accs, e ? e.account_id || e.paid_from : "treasury")}</select></label>
       <label class="f">أول شهر <input name="start" type="month" value="${v("start_month", isoDay(new Date()).slice(0, 7))}"></label>
       <label class="f">ملاحظة <input name="note" value="${v("note")}"></label></div>
       ${e ? `<label class="chk"><input type="checkbox" name="active" ${e.is_active ? "checked" : ""}> مفعّل</label>` : ""}
@@ -4027,11 +4286,11 @@ async function renderSchedules(cats, edit = null) {
     const f = ev.target, body = { name: f.name.value, category_id: f.cat.value, amount: f.a.value ? toPiasters(f.a.value) : null, day_of_month: +f.day.value,
       every_months: +f.every.value, remind_days: +f.rd.value, paid_from: f.from.value, start_month: f.start.value, note: f.note.value || null };
     if (e) body.is_active = f.active.checked;
-    try { await api(`/api/expense-schedules${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("تم الحفظ"); renderSchedules(cats); }
+    try { await api(`/api/expense-schedules${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("تم الحفظ"); renderSchedules(cats, null, accs); }
     catch (err) { toast(err.message, true); }
   });
-  $("#scCancel")?.addEventListener("click", () => renderSchedules(cats));
-  box.querySelectorAll("[data-scedit]").forEach((b) => b.addEventListener("click", () => { renderSchedules(cats, b.dataset.scedit).then(() => $("#scForm").scrollIntoView()); }));
+  $("#scCancel")?.addEventListener("click", () => renderSchedules(cats, null, accs));
+  box.querySelectorAll("[data-scedit]").forEach((b) => b.addEventListener("click", () => { renderSchedules(cats, b.dataset.scedit, accs).then(() => $("#scForm").scrollIntoView()); }));
   box.querySelectorAll("[data-scpay]").forEach((b) => b.addEventListener("click", async () => {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
@@ -4043,14 +4302,14 @@ async function renderSchedules(cats, edit = null) {
   }));
   box.querySelectorAll("[data-scskip]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmInline(b)) return;
-    try { await api(`/api/expense-schedules/${b.dataset.scskip}`, { method: "POST", body: { action: "skip", period: b.dataset.p } }); renderSchedules(cats); }
+    try { await api(`/api/expense-schedules/${b.dataset.scskip}`, { method: "POST", body: { action: "skip", period: b.dataset.p } }); renderSchedules(cats, null, accs); }
     catch (err) { toast(err.message, true); }
   }));
 }
 function exTable(list, actions) {
   return `<table><thead><tr><th>التاريخ</th><th>البند</th><th>المبلغ</th><th>المصدر</th><th>سجّله</th><th>الحالة</th>${actions ? "<th></th>" : ""}</tr></thead><tbody>
     ${list.map((e) => `<tr><td>${esc(e.spent_on)}</td><td>${esc(e.category)}${e.note ? `<div class="muted">${esc(e.note)}</div>` : ""}</td><td class="num">${money(e.amount)}</td>
-      <td>${e.paid_from === "drawer" ? "الخزينة" : "خارجها"}</td><td>${esc(e.by_name || "")}</td>
+      <td>${esc(srcName(e))}</td><td>${esc(e.by_name || "")}</td>
       <td><span class="badge ${EX_ST[e.status][0]}">${EX_ST[e.status][1]}</span>${e.reject_reason ? `<div class="muted">${esc(e.reject_reason)}</div>` : ""}</td>
       ${actions ? `<td><button class="btn small" data-exok="${esc(e.id)}">اعتمد</button> <button class="btn small secondary" data-exno="${esc(e.id)}">ارفض</button></td>` : ""}</tr>`).join("")
       || `<tr><td colspan="7" class="muted">لا توجد مصروفات</td></tr>`}</tbody></table>`;
@@ -4063,10 +4322,11 @@ async function viewProfit() {
     try {
       const r = await api(`/api/reports/profit?from=${f}&to=${t}`), sub = rangeText(f, t);
       $("#prBox").innerHTML = `<section class="panel" id="prRep"><div class="row between"><h2>${esc(sub)}</h2>${reportTools("profit")}</div><div class="totals">
-        <div>المبيعات (بعد المرتجع)<b>${money(r.revenue)}</b><span>${r.invoices} فاتورة · خصومات ${money(r.discount)}</span></div>
+        <div>المبيعات (بعد المرتجع)<b>${money(r.revenue)}</b><span>${r.invoices} فاتورة · خصومات ${money(r.discount)}${r.claim_discounts ? ` · خصم المطالبات: ${money(r.claim_discounts)}` : ""}</span></div>
         <div>تكلفة البضاعة المباعة<b>${money(r.cost)}</b></div>
         <div class="${r.gross_profit >= 0 ? "t-ok" : "t-err"}">مجمل الربح<b>${money(r.gross_profit)}</b>${r.gross_margin_pct != null ? `<span>${r.gross_margin_pct}%</span>` : ""}</div>
         <div>المصروفات المعتمدة<b>${money(r.expenses_total)}</b></div>
+        ${r.supplier_discounts ? `<div class="t-ok">خصومات مكتسبة من الموردين<b>${money(r.supplier_discounts)}</b></div>` : ""}
         <div class="${r.net_profit >= 0 ? "t-ok" : "t-err"}">${r.net_profit >= 0 ? "✓ صافي الربح" : "✕ صافي خسارة"}<b>${money(Math.abs(r.net_profit))}</b></div></div>
         ${r.pending_expenses.n ? `<p class="badge b-warn mt">⚠ يوجد ${r.pending_expenses.n} مصروف (${money(r.pending_expenses.a)} ج) بانتظار الموافقة وغير محتسب — <a href="#/expenses">راجعها</a></p>` : ""}
         ${r.unknown_cost_lines ? `<p class="badge b-warn mt">⚠ ${r.unknown_cost_lines} سطر بيع بدون تكلفة مسجلة — قد يكون الربح الحقيقي أقل</p>` : ""}
@@ -4075,7 +4335,8 @@ async function viewProfit() {
         <p class="muted">الرواتب المصروفة من شاشة الرواتب تُسجَّل هنا مصروفًا "رواتب وأجور".</p></section>`;
       wireTools("profit", () => ({ title: "تقرير الربح", subtitle: sub, el: $("#prRep"), sheets: [
         { name: "الملخص", columns: [Tx("البيان"), M("المبلغ")], rows: [["المبيعات بعد المرتجع", r.revenue], ["الخصومات", r.discount], ["تكلفة البضاعة", r.cost],
-          ["مجمل الربح", r.gross_profit], ["المصروفات المعتمدة", r.expenses_total], ["صافي الربح", r.net_profit], ["رسوم التوصيل", r.delivery_fees || 0]] },
+          ["مجمل الربح", r.gross_profit], ["المصروفات المعتمدة", r.expenses_total], ["خصومات مكتسبة من الموردين", r.supplier_discounts || 0],
+          ["خصم المطالبات", r.claim_discounts || 0], ["صافي الربح", r.net_profit], ["رسوم التوصيل", r.delivery_fees || 0]] },
         { name: "المصروفات", columns: [Tx("البند"), M("المبلغ")], rows: r.expenses.map((e) => [e.category, e.amount]), total: ["الإجمالي", r.expenses_total] }] }));
     } catch (err) { $("#prBox").innerHTML = `<p class="badge b-err">✕ ${esc(err.message)}</p>`; }
   });
@@ -4512,7 +4773,7 @@ async function viewAttendance() {
 }
 async function viewStaff(month) {
   month = month || isoDay(new Date()).slice(0, 7);
-  const r = await api(`/api/staff?month=${month}`);
+  const [r, accs] = await Promise.all([api(`/api/staff?month=${month}`), moneyAccounts(true)]);
   const post = (body, btn) => withBusy(btn, async () => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } });
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
     <p class="muted">الراتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
@@ -4527,9 +4788,9 @@ async function viewStaff(month) {
     ${pr?.status === "paid" ? "" : `<div class="row mt"><label class="f">مكافأة (ج) <input class="narrow" data-f="bonus" type="number" min="0" value="${pr ? money(pr.bonus) : ""}"></label>
       <label class="f">خصم (ج) <input class="narrow" data-f="ded" type="number" min="0" value="${pr ? money(pr.deduction) : ""}"></label>
       <label class="f grow">ملاحظة <input data-f="note" value="${esc(pr?.note || "")}"></label><button class="btn small" data-a="approve">اعتمد الراتب</button>
-      ${pr ? `<select data-f="from"><option value="outside">من خارج الخزينة</option><option value="drawer">من خزينة الشيفت</option></select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
+      ${pr ? `<select data-f="from">${srcOptions(accs, "treasury", { ownerOutside: true })}</select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
     <details class="mt"><summary>سلفة / تعديل حضور / تفاصيل الأيام (${p.attendance.length})</summary>
-      <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom"><option value="drawer">من الخزينة</option><option value="outside">من الخارج</option></select>
+      <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom">${srcOptions(accs, "drawer", { ownerOutside: true })}</select>
         <button class="btn small secondary" data-a="advance">سجّل السلفة</button></div>
       <div class="row mt"><label class="f">اليوم <input type="date" data-f="day"></label><label class="f">حضور <input type="time" data-f="in" value="10:00"></label>
         <label class="f">انصراف <input type="time" data-f="out" value="18:00"></label><label class="f grow">السبب <input data-f="why" placeholder="مثال: نسي التسجيل"></label><button class="btn small secondary" data-a="fix">سجّل اليوم</button></div>

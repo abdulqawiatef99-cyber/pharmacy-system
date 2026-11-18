@@ -254,11 +254,11 @@ class CashDrawer:
         ctx.require("cash.close")
         if ctx.can("sales.read"):
             return self.report(ctx, shift_id)
-        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by FROM cash_shifts"
+        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by, float_left FROM cash_shifts"
                         " WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s or s["status"] != "closed" or s["closed_by"] != ctx.user_id:
             raise NotFound("الشيفت غير موجود")
-        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference")}
+        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference", "float_left")}
 
     def report(self, ctx: Context, shift_id: str) -> dict:
         """Closing report. The person who closed sees the result (shortage / surplus) only after
