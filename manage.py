@@ -8,8 +8,10 @@
   (maintenance commands never create a database; only init and serve do — #80)
   python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
+  python manage.py import-estock-db --dir EXPORT [--confirm openings.xlsx] --username owner [--apply]
   python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
+  python manage.py reset-owner-password [--username owner]   (forgotten owner password; on this PC only)
 """
 from __future__ import annotations
 
@@ -40,8 +42,18 @@ def _db(s: config.Settings, create: bool = False) -> Database:
                  "حدد مكان البيانات: set PHARM_DATA_DIR=%LOCALAPPDATA%\\PharmacyPlatform\\data ثم أعد الأمر. "
                  "(no database here; nothing was created)")
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    existed = s.db_path.exists()
     db = Database(s.db_path)
-    applied = db.migrate()
+    from app.db import MigrationError
+    try:
+        if existed:
+            _backup_before_migration(db, s)
+        applied = db.migrate()
+    except MigrationError as e:
+        db.close()
+        sys.exit("البرنامج لم يفتح البيانات: " + ("البيانات دي مكتوبة بنسخة أحدث من البرنامج؛ ثبّت آخر مثبّت. "
+                                                   if "newer version" in str(e) else "")
+                 + f"البيانات كما هي لم تتغير. أرسل هذه الرسالة للمطوّر.\n({e})")
     if applied:
         print("migrations applied:", ", ".join(applied))
     accounts.sync_system_roles(db)
@@ -54,6 +66,52 @@ def _db(s: config.Settings, create: bool = False) -> Database:
     _ch(db)
     _ex(db)
     return db
+
+
+def _backup_before_migration(db: Database, s: config.Settings) -> None:
+    """A new installer brings new migrations and the first start applies them to the live data: take a
+    verified backup first, and stop without migrating when it cannot be made. Only when the database
+    holds a pharmacy and something is pending, so new, empty and up-to-date databases start as fast as before."""
+    pending = db.pending_migrations()
+    if not pending or db.unknown_migrations():      # data from a newer program: migrate() refuses it unchanged
+        return
+    if not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizations'") or \
+            not db.one("SELECT count(*) n FROM organizations")["n"]:
+        return
+    if os.environ.get("PHARM_MIGRATE_WITHOUT_BACKUP") == "1":      # developer's decision, after a copy by hand
+        print("WARNING: migrating WITHOUT a backup (PHARM_MIGRATE_WITHOUT_BACKUP=1)", file=sys.stderr)
+        return
+    from app.core import backup
+    try:
+        out = backup.create(db, s.upload_dir, s.backup_path, tag="pre-migrate")
+        hard, soft = backup.split_problems(backup.quick_check(out))
+        if hard:
+            out.unlink(missing_ok=True)
+            raise RuntimeError("; ".join(hard))
+    except Exception as e:  # noqa: BLE001 - a live database that fails its own check must still get its upgrade:
+        # keep a plain copy of the file instead (SQLite's online copy); only when that fails too does the start stop
+        from datetime import datetime
+        try:
+            s.backup_path.mkdir(parents=True, exist_ok=True)
+            stamp, n = datetime.now().strftime('%Y%m%d-%H%M%S'), 1
+            raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}.db"
+            while raw.exists():                      # a retry in the same second never overwrites the first copy
+                n += 1
+                raw = s.backup_path / f"pre-migrate-UNVERIFIED-{stamp}-{n}.db"
+            db.backup_to(raw)
+        except Exception as e2:  # noqa: BLE001
+            db.close()
+            sys.exit("لم يتم تحديث قاعدة البيانات: تعذّر عمل نسخة احتياطية قبل التحديث، فالبرنامج توقف والبيانات كما هي"
+                     " لم تتغير. أرسل هذه الرسالة للمطوّر.\n"
+                     f"(pre-migration backup failed, nothing was migrated; pending: {', '.join(pending)})\n"
+                     f"السبب / reason: {e}; plain copy: {e2}")
+        print(f"WARNING: the verified backup before the database update failed ({e}); a plain copy was kept: {raw}",
+              file=sys.stderr)
+        return
+    print(f"backup before database update: {out}")
+    if soft:
+        print(f"WARNING: {len(soft)} attachment file(s) are missing or changed; the backup holds the data without them:",
+              "; ".join(soft), file=sys.stderr)
 
 
 def _backups(chosen: str | None, s: config.Settings, sub: str = "") -> Path:
@@ -78,8 +136,9 @@ def cmd_serve(a, s):
         print("تنبيه: البرنامج مفتوح على شبكة الصيدلية (واي فاي) من غير HTTPS — استخدمه على شبكة الصيدلية المقفولة بباسورد بس.",
               file=sys.stderr)
     os.environ["PHARM_HOST"] = a.host
+    from app.core.accesslog import uvicorn_log_config
     uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
-                server_header=False)
+                server_header=False, log_config=uvicorn_log_config())
 
 
 def cmd_backup(a, s):
@@ -122,9 +181,26 @@ def cmd_restore(a, s):
     if not a.yes:
         print("أوقف البرنامج أولًا (أغلق نافذة serve)، ثم أعد الأمر مع --yes")
         sys.exit(2)
-    r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
-                       _backups(a.pre_dir, s, "pre-restore"))
-    print("restored and verified. previous data saved in:", r["pre_restore_backup"])
+    try:
+        r = backup.restore(Path(a.archive), Path(s.db_path), s.upload_dir,
+                           _backups(a.pre_dir, s, "pre-restore"),
+                           allow_missing_attachments=a.allow_missing_attachments)
+    except RuntimeError as e:
+        print("RESTORE REFUSED:", e)
+        if not a.allow_missing_attachments and "attachment" in str(e):
+            print("If only invoice/transfer files are missing and you accept losing them, repeat with"
+                  " --allow-missing-attachments: the database is restored and the missing files are listed.")
+        sys.exit(1)
+    for m in r["missing_attachments"]:
+        print(f"MISSING FILE (not restored): {m['filename']} — {m['problem']}")
+    if r["missing_attachments"]:
+        print(f"WARNING: {len(r['missing_attachments'])} attachment file(s) were not in the backup; the data itself is restored.")
+    if r["pre_restore_kind"] == "raw_copy":
+        print("WARNING: the previous database could not be backed up normally (" + str(r["pre_restore_error"])[:300] + ").")
+        print("A RAW copy of its file(s) was kept instead (not a verified backup) in:", r["pre_restore_backup"])
+        print("restored and verified.")
+    else:
+        print("restored and verified. previous data saved in:", r["pre_restore_backup"])
 
 
 def cmd_selftest(a, s):
@@ -196,6 +272,64 @@ def cmd_selftest(a, s):
     sys.exit(0 if ok else 1)
 
 
+def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
+    """The E-Stock migration goes only into a new, empty database (launch night): opening stock on top of
+    real stock movements, or a second catalog on top of items, would double the shelf. The one exception is
+    the documented re-run after a failed stock step: the items of this same catalog file are already in
+    (an applied import run of it) and there is still no stock movement."""
+    import hashlib
+    if db.one("SELECT 1 FROM stock_movements WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+        return ("قاعدة البيانات فيها حركات مخزون بالفعل؛ الاستيراد من E-Stock يكون على قاعدة جديدة فاضية بس "
+                "(launch-fresh-start.bat). مفيش أي حاجة اتكتبت")
+    if db.one("SELECT 1 FROM items WHERE org_id=? LIMIT 1", (ctx.org_id,)):
+        sha = hashlib.sha256(catalog_file.read_bytes()).hexdigest()
+        if not db.one("SELECT 1 FROM import_runs WHERE org_id=? AND kind='items' AND file_sha256=?"
+                      " AND status='applied'", (ctx.org_id, sha)):
+            return ("قاعدة البيانات فيها أصناف بالفعل؛ الاستيراد من E-Stock يكون على قاعدة جديدة فاضية بس "
+                    "(launch-fresh-start.bat). مفيش أي حاجة اتكتبت")
+    return None
+
+
+def fresh_start_refusal(db, answer: str | None) -> str | None:
+    """launch-fresh-start.bat archives the whole database. After launch that is the live data, and the
+    runbook used to send the operator back to it whenever the import refused (#324 R2). Refused once any
+    sale was made after an applied opening-stock import; otherwise the pharmacy's name must be typed
+    (not just YES). Spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter."""
+    from app.catalog.normalize import normalize_text
+    sold = db.one("SELECT count(*) n FROM sales s JOIN import_runs r ON r.org_id=s.org_id"
+                  " WHERE r.kind='opening_stock' AND r.status='applied' AND s.status IN ('completed','voided')"
+                  " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at)")["n"]
+    if sold:
+        return (f"البرنامج اتشغل فعلًا: فيه {sold} فاتورة بيع بعد استيراد الأرصدة من E-Stock. "
+                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت. كلمني قبل أي خطوة")
+    key = lambda v: normalize_text(v or "").replace(" ", "")
+    names = [r["name"] for r in db.all("SELECT name FROM organizations")]
+    if not answer or key(answer) not in {key(n) for n in names}:
+        return "اسم الصيدلية مش مطابق للي في البرنامج؛ مفيش أي حاجة اتغيرت"
+    return None
+
+
+def cmd_fresh_start_check(a, s):
+    """Asked by launch-fresh-start.bat before it stops anything. Python reads the answer (cmd's set /p
+    cannot read Arabic typing reliably). Exit 0 = go on, 1 = refused (reason printed)."""
+    db = _db(s)
+    names = [r["name"] for r in db.all("SELECT name FROM organizations")]
+    print("الصيدلية في البرنامج:", "، ".join(names))
+    answer = os.environ.get("PHARM_E2E_PHARMACY")   # automated check on synthetic data only (CI)
+    if answer is None:
+        why = fresh_start_refusal(db, "-")
+        if why and "اسم الصيدلية" not in why:   # refused whatever is typed: do not ask
+            sys.exit("FAIL: " + why)
+        try:
+            answer = input("اكتب اسم الصيدلية زي ما هو مكتوب فوق علشان تكمل: ")
+        except EOFError:
+            answer = ""
+    why = fresh_start_refusal(db, answer)
+    if why:
+        sys.exit("FAIL: " + why)
+    print("OK")
+
+
 def cmd_import_estock(a, s):
     """Dry run on a copy of the database by default; --apply writes, after a verified backup."""
     import json
@@ -211,6 +345,9 @@ def cmd_import_estock(a, s):
     for f in [*files.values(), *([packs] if packs else [])]:
         if not f.exists():
             sys.exit(f"الملف مش موجود: {f}")
+    why = _estock_import_refused(db, accounts.resolve_session(db, tok), files["catalog"])
+    if why:
+        sys.exit(why)
     tmp = None
     target = db
     if not a.apply:
@@ -242,13 +379,85 @@ def cmd_import_estock(a, s):
     print(f"عدد الوحدات: {rep['packs']['applied']} صنف")
     print(f"الأرصدة: {st['applied']['stock_rows']} تشغيلة اتنقلت — المطابقة: "
           f"{'OK' if st['reconciliation']['ok'] else 'FAILED'}")
-    for k, label in (("rounded", "اتقربت لأقرب وحدة"), ("posted_zero_cost", "دخلت بتكلفة صفر"),
+    for k, label in (("rounded", "اتقربت لأقرب وحدة"), ("rounded_to_zero", "اتسابت: أقل من نص وحدة"), ("posted_zero_cost", "دخلت بتكلفة صفر"),
                      ("skipped_unknown_pack", "اتسابت: عدد الوحدات مش معروف"),
                      ("skipped_zero_cost", "اتسابت: تكلفة صفر"), ("skipped_review", "اتسابت: محتاجة مراجعة"),
                      ("errors", "أخطاء")):
         if st.get(k):
             print(f"  {label}: {len(st[k])}")
     print("التقرير الكامل:", rpath)
+
+
+def cmd_import_estock_db(a, s):
+    """The whole E-Stock database (F91) from estock-db-read.bat's export. Dry run on a copy of the database
+    by default; --apply writes after its own verified backup. Prints RECONCILIATION: OK / FAILED."""
+    import shutil
+    import tempfile
+    from app.core import backup
+    from app.core.errors import DomainError
+    from app.dataimport import estock_archive, estock_db
+    db = _db(s)
+    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    tok = accounts.login(db, a.username, pw)["token"]
+    for f in [a.dir, *([a.confirm] if a.confirm else []), *([a.packs] if a.packs else [])]:
+        if not Path(f).exists():
+            sys.exit(f"الملف أو الفولدر مش موجود: {f}")
+    out_dir = Path(a.out) if a.out else s.data_dir / "reports" / \
+        f"estock-db-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}"
+    archive = s.data_dir / estock_archive.NAME
+    tmp, target = None, db
+    try:
+        why = estock_db.refusal(db, accounts.resolve_session(db, tok), estock_db.Export(Path(a.dir), a.database).source_sha())
+    except DomainError as e:
+        sys.exit(f"FAIL: {e.message}")
+    if why:
+        sys.exit(f"FAIL: {why}")
+    if not a.apply:
+        tmp = Path(tempfile.mkdtemp(prefix="estock-db-dry-"))
+        db.backup_to(tmp / "copy.db")
+        target = Database(tmp / "copy.db")
+        print("== تجربة على نسخة من قاعدة البيانات (مفيش أي حاجة اتكتبت في الأصلية) ==")
+    else:
+        bk = backup.create(db, s.upload_dir, _backups(a.backup_dir, s), tag="pre-estock-db")
+        if backup.verify_archive(bk)["problems"]:
+            sys.exit("FAIL: النسخة الاحتياطية فشلت؛ مفيش نقل")
+        print("نسخة احتياطية قبل النقل:", bk)
+    try:
+        ctx = accounts.resolve_session(target, tok)
+        res = estock_db.run(target, ctx, export_dir=Path(a.dir), out_dir=out_dir, archive_path=archive,
+                            write_archive=a.apply, confirm_file=Path(a.confirm) if a.confirm else None,
+                            packs_file=Path(a.packs) if a.packs else None, stock_source=a.stock_source,
+                            stores=a.store, database=a.database)
+    except DomainError as e:
+        sys.exit(f"FAIL: {e.message}" + ("\nلو اتكتب جزء، كمّل بنفس الأمر ونفس التصدير، أو رجّع النسخة الاحتياطية"
+                                         if a.apply else ""))
+    finally:
+        if tmp:
+            target.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+    if a.apply and res["ok"]:
+        s.backup_path.mkdir(parents=True, exist_ok=True)
+        copy = s.backup_path / f"estock-archive-{datetime.now():%Y%m%d-%H%M%S}.sqlite"
+        shutil.copy2(archive, copy)
+        print("نسخة من أرشيف إي ستوك:", copy)
+    rec, plan = res["reconciliation"], res["plan"]
+    sd = plan.stock_source.get("decision") or {}
+    print(f"جدول الرصيد: {sd.get('key', 'مش متحدد')} — {sd.get('why', '')}")
+    for k, label in (("items", "الأصناف"), ("stock", "الرصيد"), ("suppliers", "الموردين"), ("customers", "العملاء")):
+        if k in rec:
+            print(f"{label}: " + "، ".join(f"{x}={y}" for x, y in rec[k].items()))
+    print(f"جودة البيانات: {len(plan.dq)} سطر، منها {len(plan.blocking)} محتاجة قرار")
+    for m in rec["mismatches"][:30]:
+        print(f"  [{m['what']}] {m['code']} {m['name']}: {m['detail']} ({m['value']} ج)")
+    if len(rec["mismatches"]) > 30:
+        print(f"  ... و{len(rec['mismatches']) - 30} كمان في التقرير")
+    for k, p in res["reports"].items():
+        print(f"{k}: {p}")
+    print("RECONCILIATION:", "OK" if res["ok"] else "FAILED")
+    if not res["ok"]:
+        if a.apply:
+            print("المطابقة فشلت بعد الكتابة: رجّع النسخة الاحتياطية اللي فوق قبل أي بيع", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_update(a, s):
@@ -319,6 +528,40 @@ def cmd_update(a, s):
         sys.exit(f"التحديث فشل: {exc}")
 
 
+def cmd_reset_owner_password(a, s):
+    """#151: the owner forgot the password. Only someone at this PC, with the data folder, can set a new one:
+    there is no network route and no default password. The new password follows the usual policy, every
+    session of that owner is signed out (failed logins and lock-out cleared), and the audit log records it."""
+    db = _db(s)
+    from app.core import audit, security
+    from app.core.permissions import Context
+    rows = db.all("SELECT u.id, u.username, u.full_name, m.org_id FROM memberships m JOIN roles r ON r.id=m.role_id"
+                  " JOIN users u ON u.id=m.user_id WHERE r.code='owner'" + (" AND u.username=?" if a.username else "")
+                  + " ORDER BY u.username", ((a.username,) if a.username else ()))
+    if not rows:
+        sys.exit("مفيش حساب مالك بالاسم ده. (no owner account found)" if a.username else
+                 "مفيش حساب مالك في قاعدة البيانات دي. (no owner account found)")
+    if len({r["id"] for r in rows}) > 1:
+        sys.exit("فيه أكتر من مالك: اكتب الاسم بـ --username: " + "، ".join(sorted({r["username"] for r in rows})))
+    owner = rows[0]
+    print(f"تغيير كلمة سر المالك: {owner['username']} ({owner['full_name'] or ''})")
+    pw = getpass.getpass("كلمة السر الجديدة (10 حروف على الأقل): ")
+    if getpass.getpass("اكتبها تاني للتأكيد: ") != pw:
+        sys.exit("الكلمتين مش زي بعض؛ متغيّرش حاجة. (passwords differ; nothing changed)")
+    problems = security.check_password_policy(pw)
+    if problems:
+        sys.exit("؛ ".join(problems) + " (nothing changed)")
+    now = accounts.iso(accounts.utcnow())
+    with db.transaction():
+        db.execute("UPDATE users SET password_hash=?, password_changed_at=?, failed_logins=0, locked_until=NULL"
+                   " WHERE id=?", (security.hash_password(pw), now, owner["id"]))
+        db.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now, owner["id"]))
+        for org_id in sorted({r["org_id"] for r in rows}):
+            audit.record(db, Context(user_id="system", org_id=org_id, branch_id=None), "user.password_reset",
+                         "user", owner["id"], after={"via": "local_cli", "reason": "forgotten owner password"})
+    print("تم. ادخل البرنامج بكلمة السر الجديدة. (done; all sessions of this owner were signed out)")
+
+
 def cmd_feature(a, s):
     db = _db(s)
     limits = {"monthly": a.monthly} if a.monthly else {}
@@ -359,6 +602,8 @@ def main(argv=None):
     rs.add_argument("archive")
     rs.add_argument("--yes", action="store_true")
     rs.add_argument("--pre-dir", default=None)
+    rs.add_argument("--allow-missing-attachments", action="store_true",
+                    help="restore the database even when invoice/transfer files are missing from the backup")
     f = sub.add_parser("feature")
     f.add_argument("org_id")
     f.add_argument("feature")
@@ -375,6 +620,19 @@ def main(argv=None):
     ie.add_argument("--password", help="for automation only; prefer the prompt")
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default=None)
+    ed = sub.add_parser("import-estock-db", help="move the whole E-Stock database from estock-db-read.bat's export")
+    ed.add_argument("--dir", required=True, help="export folder (the one with tables\\manifest.csv)")
+    ed.add_argument("--confirm", help="openings-to-confirm.xlsx after the owner filled the confirmed column")
+    ed.add_argument("--packs", help="pack sizes decided by a person (.xlsx or .json), for broken unit conversions")
+    ed.add_argument("--stock-source", help="live stock table when it is not clear, e.g. Product_Amount:3")
+    ed.add_argument("--store", action="append", help="E-Stock store name or id (repeat); default: الصيدلية")
+    ed.add_argument("--database", help="E-Stock database name when the export holds more than one (default stock)")
+    ed.add_argument("--out", help="reports folder (default data/reports/estock-db-<time>)")
+    ed.add_argument("--username", required=True)
+    ed.add_argument("--password", help="for automation only; prefer the prompt")
+    ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")
+    ed.add_argument("--backup-dir", default=None)
+    sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
@@ -383,12 +641,15 @@ def main(argv=None):
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
+    rp = sub.add_parser("reset-owner-password", help="forgotten owner password: set a new one on this PC (#151)")
+    rp.add_argument("--username", help="needed only when there is more than one owner")
     a = p.parse_args(argv)
     s = config.load()
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "update": cmd_update}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
+     "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
 
 
 if __name__ == "__main__":

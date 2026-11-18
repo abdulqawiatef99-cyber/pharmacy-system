@@ -101,6 +101,8 @@ def xlsx(spec: dict) -> bytes:
         for j, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(j)].width = w
         ws.freeze_panes = ws.cell(r0 + 1, 1)
+    from ..core.xlsx_safe import as_text
+    as_text(wb)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

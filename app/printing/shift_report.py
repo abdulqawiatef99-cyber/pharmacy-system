@@ -47,20 +47,27 @@ def denomination_rows(detail: dict | None) -> list[tuple[int, str, int, int]]:
     return out
 
 
-def _when(iso: str | None) -> str:
-    return accounts.parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M") if iso else "—"
+def _when(iso: str | None, time_format: str = "12") -> str:
+    """The receipt's time format setting, 12-hour with ص/م or 24-hour (#206)."""
+    from .settings import fmt_when
+    return fmt_when(accounts.parse_iso(iso).astimezone(), time_format) if iso else "—"
 
 
-def lines(org: str, r: dict) -> list[tuple]:
+def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
     k = r["cash_by_kind"]
-    out: list[tuple] = [("title", org), ("text", "تقرير إغلاق الوردية"),
-                        ("small", f"من {_when(r['opened_at'])} ({r['opened_by_name'] or ''})"),
-                        ("small", f"إلى {_when(r['closed_at'])} ({r['closed_by_name'] or ''})"), ("rule",),
+    _when_tf = lambda iso: _when(iso, time_format)  # noqa: E731
+    out: list[tuple] = [("title", org), ("text", "تقرير إغلاق الشيفت"),
+                        ("small", f"من {_when_tf(r['opened_at'])} ({r['opened_by_name'] or ''})"),
+                        ("small", f"إلى {_when_tf(r['closed_at'])} ({r['closed_by_name'] or ''})"), ("rule",),
                         ("row", "عدد الفواتير", str(r["sales_count"])), ("row", "إجمالي المبيعات", egp(r["sales_total"]))]
     if r["discount_total"]:
         out.append(("row", "الخصومات", egp(r["discount_total"])))
     if r["returns_count"]:
         out.append(("row", f"مرتجعات ({r['returns_count']})", egp(r["returns_total"])))
+    if r.get("card_refunds"):
+        out.append(("row", "منها مرتجع على البطاقة", egp(r["card_refunds"])))
+    if r.get("credit_refunds"):
+        out.append(("row", "منها مرتجع على حساب العميل", egp(r["credit_refunds"])))
     if r["voided_count"]:
         out.append(("row", "فواتير ملغاة", str(r["voided_count"])))
     out.append(("rule",))
@@ -93,13 +100,13 @@ def lines(org: str, r: dict) -> list[tuple]:
     for d in r["drawer_manual"]:
         note = (" : " + d["note"]) if d.get("note") else ""
         failed = " (فشل)" if d.get("outcome") == "failed" else ""
-        out.append(("small", f"{_when(d['at'])} {d.get('by') or ''} — {d.get('reason') or ''}{note}{failed}"))
+        out.append(("small", f"{_when_tf(d['at'])} {d.get('by') or ''} — {d.get('reason') or ''}{note}{failed}"))
     out.append(("text", "توقيع المستلم: .................."))
     return out
 
 
 # ---------------------------------------------------------------- browser page (fallback)
-def page(org: str, r: dict, paper: int, css: str) -> str:
+def page(org: str, r: dict, paper: int, css: str, time_format: str = "12") -> str:
     """css: the <link> tags for receipt.css (and receipt-58.css for 58 mm paper)."""
     e = _html.escape
     body: list[str] = []
@@ -114,7 +121,7 @@ def page(org: str, r: dict, paper: int, css: str) -> str:
             body.append('<table class="den"><thead><tr><th>الفئة</th><th>العدد</th><th>المبلغ</th></tr></thead>'
                         f"<tbody>{''.join(den)}</tbody></table>")
             den.clear()
-    for ln in lines(org, r):
+    for ln in lines(org, r, time_format):
         kind = ln[0]
         if kind in ("row", "total"):
             if den:
@@ -139,12 +146,13 @@ def page(org: str, r: dict, paper: int, css: str) -> str:
             body.append("<hr>")
     flush()
     return (f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الوردية</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
 {css}</head><body class="w{paper}"><div class="r">{''.join(body)}</div><script src="/static/print.js"></script></body></html>""")
 
 
 # ---------------------------------------------------------------- receipt printer (ESC/POS image)
-def render(org: str, r: dict, width: int = escpos.DOTS_80MM, font_path: str | None = None):
+def render(org: str, r: dict, width: int = escpos.DOTS_80MM, font_path: str | None = None,
+           time_format: str = "12"):
     """The report as one image: text parts through `escpos.render_receipt`, the denomination table drawn
     here in three columns (الفئة on the right, العدد in the middle, المبلغ on the left)."""
     from PIL import Image, ImageDraw, ImageFont
@@ -179,7 +187,7 @@ def render(org: str, r: dict, width: int = escpos.DOTS_80MM, font_path: str | No
         parts.append(img)
         table.clear()
 
-    for ln in lines(org, r):
+    for ln in lines(org, r, time_format):
         kind = ln[0]
         if kind == "den_head":
             flush_text()
@@ -211,7 +219,8 @@ def print_report(db: Database, ctx: Context, shift_id: str, target: str | None =
     if dest == "none":
         raise PrintFailed("لم يتم اختيار طابعة الإيصال", code="no_printer")
     try:
-        img = render(org, r, escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM)
+        img = render(org, r, escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM,
+                     time_format=cfg["time_format"])
         escpos.send(dest, escpos.receipt_job(img))
     except escpos.PrinterError as e:
         with db.transaction():

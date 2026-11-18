@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import NotFound, ValidationFailed
@@ -58,7 +60,7 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
         margin = None
         if r["id"] in cost and price:
             pack_cost = cost[r["id"]] * r["pack_size"] * 100
-            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value())
+            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value(ROUND_HALF_UP))
         is_soon = bool(e and q > 0 and e <= soon)
         r["next_expiry"], r["expiry_soon"] = e, is_soon
         if show_stock:
@@ -227,6 +229,45 @@ def delete_group(db: Database, ctx: Context, gid: str) -> list[dict]:
 
 
 # ------------------------------------------------------------------ quick sale
+# The best-seller count reads every sale line of the last 30 days (0.4 s on a large pharmacy, #253) each time a
+# sale screen opens. The ranking is kept for a few minutes; the items themselves (active, hidden, names) are
+# read fresh every time, so a stopped or hidden item never stays on a button.
+_TOP_TTL = 600.0
+_top_cache: dict[tuple, tuple[float, list[str]]] = {}
+_top_lock = threading.Lock()
+
+
+def _best_sellers(db: Database, ctx: Context, start: str) -> list[dict]:
+    key = (ctx.org_id, ctx.branch_id, start)
+    now = time.monotonic()
+    with _top_lock:
+        hit = _top_cache.get(key)
+    if hit and now - hit[0] < _TOP_TTL:
+        ids = hit[1]
+    else:
+        ids = [r["item_id"] for r in db.all(
+            "SELECT l.item_id, count(DISTINCT s.id) n FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+            " JOIN items i ON i.id=l.item_id"
+            " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
+            " GROUP BY l.item_id ORDER BY n DESC, coalesce(i.name_en, i.name_ar) LIMIT ?",
+            (ctx.org_id, ctx.branch_id, start, QUICK_LIMIT * 2))]
+        with _top_lock:
+            if len(_top_cache) > 200:
+                _top_cache.clear()
+            _top_cache[key] = (now, ids)
+    if not ids:
+        return []
+    rows = {r["id"]: dict(r) for r in db.all(
+        f"SELECT {_COLS} FROM items WHERE org_id=? AND status='active' AND id IN ({','.join('?' * len(ids))})",
+        (ctx.org_id, *ids))}
+    return [rows[i] for i in ids if i in rows]
+
+
+def forget_best_sellers() -> None:
+    with _top_lock:
+        _top_cache.clear()
+
+
 def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
     """Buttons for the cashier: items the owner pinned, then the best sellers of the last 30 days
     (by number of sales), up to QUICK_LIMIT."""
@@ -238,12 +279,7 @@ def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
     start = local_day_bounds(today - timedelta(days=QUICK_DAYS - 1))[0]
     seen = {p["id"] for p in pinned}
     top = []
-    for r in db.all(f"SELECT {', '.join('i.' + c.strip() for c in _COLS.split(','))}, count(DISTINCT s.id) n FROM sale_lines l"
-                    " JOIN sales s ON s.id=l.sale_id JOIN items i ON i.id=l.item_id"
-                    " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
-                    " GROUP BY i.id ORDER BY n DESC, coalesce(i.name_en, i.name_ar) LIMIT ?",
-                    (ctx.org_id, ctx.branch_id, start, QUICK_LIMIT * 2)):
-        d = dict(r)
+    for d in _best_sellers(db, ctx, start):
         if d["id"] in seen or (d["hidden"] and not ctx.can("items.hidden")):
             continue
         top.append(d)

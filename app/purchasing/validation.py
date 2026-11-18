@@ -2,7 +2,9 @@
 
 Two jobs:
   derive_line()   fill values that follow arithmetically from others
-                  (net = public x (1 - discount), total = net x qty + tax),
+                  (net = public x (1 - discount), total = net x qty + tax;
+                  integers only, rounded half up; with an inferred net the total
+                  is qty x public x (1 - discount) rounded once),
                   tagging them source='inferred'. Never invents a quantity,
                   batch or expiry.
   validate()      list issues. level 'error' blocks approval; 'warning' is
@@ -43,6 +45,9 @@ MESSAGES = {
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
     "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
+    "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
+    "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
+    "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
 }
 
 
@@ -66,6 +71,11 @@ def _j(v) -> dict:
     return json.loads(v or "{}")
 
 
+def half_up_div(n: int, d: int) -> int:
+    """n / d as an integer, rounded half up, with integers only (float round() is half to even)."""
+    return (2 * n + d) // (2 * d)
+
+
 def derive_line(line: dict) -> dict:
     """Mutates and returns line (DB-shaped dict). Only arithmetic consequences."""
     src, conf = _j(line.get("field_sources")), _j(line.get("field_confidence"))
@@ -78,12 +88,16 @@ def derive_line(line: dict) -> dict:
         conf[k] = 1.0
 
     if net is None and pub is not None and disc is not None:
-        put("unit_net_price", round(pub * (10000 - disc) / 10000))
+        put("unit_net_price", half_up_div(pub * (10000 - disc), 10000))
     elif disc is None and pub and net is not None and net <= pub:
-        put("discount_bp", round((pub - net) * 10000 / pub))
+        put("discount_bp", half_up_div((pub - net) * 10000, pub))
     net = line.get("unit_net_price")
     if total is None and net is not None and qty:
-        put("line_total", net * qty + (tax or 0))
+        if src.get("unit_net_price") == "inferred" and pub is not None and disc is not None:
+            # the net is itself a rounded value: round the line once, from the exact figures
+            put("line_total", half_up_div(qty * pub * (10000 - disc), 10000) + (tax or 0))
+        else:
+            put("line_total", net * qty + (tax or 0))
     line["field_sources"], line["field_confidence"] = src, conf
     return line
 
@@ -100,8 +114,10 @@ def effective_amount(line: dict) -> int | None:
         return None if net is None or not qty else net * qty + tax
     if net is not None and qty and tax:
         pre = net * qty
-        if abs(total - pre) <= line_tolerance(pre, qty) < abs(total - (pre + tax)):
-            return total + tax        # printed total excludes tax
+        # printed total excludes tax: it is within tolerance of the pre-tax amount and closer to it than to the
+        # taxed one (a small tax inside the tolerance of both was dropped from the invoice, #324 S26)
+        if abs(total - pre) <= line_tolerance(pre, qty) and abs(total - pre) < abs(total - (pre + tax)):
+            return total + tax
     return total
 
 
@@ -155,13 +171,19 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         if (l.get("bonus_qty") or 0) < 0:
             add("error", "bonus_invalid", lid, "bonus_qty")
         pub, disc, net = l.get("public_price"), l.get("discount_bp"), l.get("unit_net_price")
+        # a file can carry what the screen refuses: a negative price gave a negative unit and average cost
+        for f in ("public_price", "unit_net_price", "tax_amount", "line_total"):
+            if (l.get(f) or 0) < 0:
+                add("error", "negative_amount", lid, f)
+        if disc is not None and not 0 <= disc <= 10000:
+            add("error", "negative_amount", lid, "discount_bp")
         if net is None:
             add("error", "price_missing", lid, "unit_net_price")
         if pub is not None and net is not None:
             if net > pub:
                 add("warning", "net_above_public", lid, "unit_net_price")
             if disc is not None and _j(l.get("field_sources")).get("unit_net_price") != "inferred":
-                exp = round(pub * (10000 - disc) / 10000)
+                exp = half_up_div(pub * (10000 - disc), 10000)
                 if abs(exp - net) > max(2, round(pub * 0.005)):
                     add("warning", "net_price_mismatch", lid, "unit_net_price",
                         expected=exp, actual=net)
@@ -192,7 +214,17 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("warning", "duplicate_line", lid, None, other_line=seen[key])
         seen[key] = lid
 
+    for f in ("extra_discount", "extra_tax", "declared_total"):
+        if (invoice.get(f) or 0) < 0:
+            add("error", "negative_amount", None, f)
     comp = computed_total(invoice, lines)
+    if comp is not None:      # a negative total would give a negative supplier balance and unit cost
+        lines_amount = sum(effective_amount(l) for l in lines)
+        if (invoice.get("extra_discount") or 0) > lines_amount:
+            add("error", "extra_discount_too_large", None, "extra_discount",
+                extra_discount=invoice.get("extra_discount"), lines_amount=lines_amount)
+        elif comp < 0:
+            add("error", "negative_total", None, None, computed=comp)
     declared = invoice.get("declared_total")
     if declared is None:
         add("warning", "total_missing")
@@ -202,10 +234,11 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "total_mismatch", None, "declared_total", declared=declared,
                 computed=comp, difference=declared - comp)
 
-    acks = {a["code"] + "|" + (a.get("line_id") or "") for a in
+    # an acceptance covers the figures it accepted: a changed difference needs a new one (#324 S25)
+    acks = {(a["code"], a.get("line_id") or "", json.dumps(a.get("details"), sort_keys=True)) for a in
             json.loads(invoice.get("acknowledged_issues") or "[]")}
     for i in issues:
-        if i.code in ACKNOWLEDGEABLE and f"{i.code}|{i.line_id or ''}" in acks:
+        if i.code in ACKNOWLEDGEABLE and (i.code, i.line_id or "", json.dumps(i.details, sort_keys=True)) in acks:
             i.acknowledged = True
     return issues
 

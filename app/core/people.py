@@ -9,6 +9,7 @@ from datetime import timedelta
 from ..db import Database, new_id
 from . import accounts, audit, security
 from .errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
+from .numbers import whole_number
 from .permissions import (APPROVER_ROLES, DEFAULT_ROLES, GROUPS, PERMISSIONS, ROLE_ORDER, Context)
 
 MAX_PIN_FAILS = 5
@@ -38,7 +39,8 @@ def set_pin(db: Database, ctx: Context, user_id: str, pin: str) -> None:
         ctx.require("users.manage")
     pin = str(pin or "").strip()
     _check_pin_format(pin)
-    _member(db, ctx, user_id)
+    if _member(db, ctx, user_id)["role_code"] == "owner" and user_id != ctx.user_id:
+        raise Forbidden("الرقم السري للمالك يغيّره هو فقط", code="owner_locked")   # #131
     with db.transaction():
         db.execute("UPDATE users SET pin_hash=?, pin_failed=0, pin_locked_until=NULL WHERE id=?",
                    (security.hash_password(pin), user_id))
@@ -200,7 +202,7 @@ def _bp(v) -> int | None:
     if v is None or v == "":
         return None
     try:
-        v = int(v)
+        v = whole_number(v)               # 12.5 or true is refused, never truncated to 12 or 1
     except (TypeError, ValueError):
         raise ValidationFailed("نسبة الخصم غير صحيحة")
     if not 0 <= v <= 10000:

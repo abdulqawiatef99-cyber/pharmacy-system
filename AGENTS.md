@@ -4,7 +4,7 @@ This file is the permanent memory of the project's working rules. Chat history i
 If something here conflicts with an older document, this file wins.
 
 ## 1. Start of every session (in this order, nothing else first)
-1. `git fetch origin` and read `docs/LAUNCH_PLAN.md` (priorities, roles, freeze), then `docs/STATUS.md` (release gates, progress)
+1. `git fetch origin` and read `docs/OWNER_RULES.md` (standing rules agreed with the owner), `docs/LAUNCH_PLAN.md` (priorities, roles, freeze), then `docs/STATUS.md` (release gates, progress)
    and `docs/HANDOFF.md` (current work).
 2. List open PRs and open Issues labelled `launch-critical`. Do not trust counts or SHAs in old reports.
 3. Pick the highest-priority open Issue whose dependencies are done and that nobody is assigned to.
@@ -28,7 +28,8 @@ If something here conflicts with an older document, this file wins.
 
 ## 2a. Review loop (Claude Code implements, Codex reviews)
 1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)
-   and comments `@codex review` on it.
+   and comments `@codex review` on it. GitHub CI runs only once the PR has the label `ci`: add it when the
+   head is final and the full suite passed locally (OWNER_RULES §4, GitHub minutes).
 2. Codex reviews on GitHub. Its findings are the record; nothing is passed through chat.
 3. The implementing agent fixes every P0/P1 finding, or replies on the thread with the reason it does
    not apply, then pushes. CI must be green on the final head.

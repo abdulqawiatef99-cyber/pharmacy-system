@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 
@@ -50,7 +51,8 @@ def check_phones(db: Database, org_id: str, phones: list[str], exclude: str | No
 
 
 def _bal_sql() -> str:
-    return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.customer_id=c.id),0)"
+    # org_id too: the ledger index is (org_id, customer_id); without it every balance read the whole ledger (#113)
+    return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.org_id=c.org_id AND l.customer_id=c.id),0)"
 
 
 def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
@@ -90,8 +92,11 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
     if any(k.startswith("phone") for k in ch):
         check_phones(db, ctx.org_id, [p for p in phones if p], exclude=cid)
     if "credit_limit" in data:
-        v = data["credit_limit"]
-        if not isinstance(v, int) or v < 0:
+        try:                                   # as on create: true is not 1 piaster, and no number SQLite cannot hold
+            v = whole_number(data["credit_limit"])
+        except (TypeError, ValueError):
+            raise ValidationFailed("حد الآجل غير صحيح")
+        if v < 0:
             raise ValidationFailed("حد الآجل غير صحيح")
         ch["credit_limit"] = v
     if "whatsapp_ok" in data:

@@ -17,7 +17,10 @@ from PIL import Image, ImageDraw, ImageFont
 from . import barcode as bc
 from .escpos import PrinterError, find_font, shaping_available
 
-LANGS = ("browser", "a4", "tspl", "zpl")      # a4 = browser printing on an A4 label sheet (grid)
+# a4 = browser printing on an A4 label sheet (grid); driver = through the printer's Windows driver, like
+# E-Stock (#100, driver.py): the size and the media handling come from Windows, not from these settings
+LANGS = ("browser", "a4", "tspl", "zpl", "driver")
+DIRECT = ("tspl", "zpl", "driver")             # printed by the server, no browser dialog
 DPIS = (203, 300)
 MAX_LABELS = 500
 SHIFT_MM = 10           # #100: the vertical shift the settings accept, either way (mm)
@@ -77,8 +80,7 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     if on["digits"] and on["code"]:
         on["digits"] = False            # one code at the bottom left: the internal code wins, as in E-Stock
     H = dots(h_mm, dpi)
-    line = max(12, min(dots(h_mm, dpi) // 7, dots(3.2, dpi)))
-    row = int(line * 1.2)
+    line, row = text_metrics(h_mm, dpi)
     pad = max(3, dots(PAD_MM, dpi))
     dropped = []
 
@@ -98,6 +100,23 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     return on, dropped
 
 
+def text_metrics(h_mm: float, dpi: int) -> tuple[int, int]:
+    """Text height and row height in dots. Owner, 12/11: E-Stock's labels read clearer; the type is a sixth
+    of the label (was a seventh) with tight rows, so a 38x11.5 mm label keeps a 4 mm barcode."""
+    line = max(12, min(dots(h_mm, dpi) // 6, dots(3.2, dpi)))
+    return line, int(line * 1.08)
+
+
+def bold_font(path: str) -> str:
+    """The bold face next to a regular font file when there is one (tahoma -> tahomabd, arial -> arialbd...)."""
+    from pathlib import Path
+    p = Path(path)
+    names = {"tahoma.ttf": "tahomabd.ttf", "arial.ttf": "arialbd.ttf", "segoeui.ttf": "segoeuib.ttf",
+             "DejaVuSans.ttf": "DejaVuSans-Bold.ttf", "NotoNaskhArabic-Regular.ttf": "NotoNaskhArabic-Bold.ttf"}
+    alt = p.with_name(names.get(p.name, p.name))
+    return str(alt) if alt.exists() else path
+
+
 def bar_bits(value: str) -> str:
     try:
         return bc.ean13_modules(value)
@@ -115,7 +134,7 @@ def bar_module(value: str, w_mm: float, dpi: int) -> int:
 
 
 def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: dict | None = None,
-                 font_path: str | None = None) -> tuple[Image.Image, list[str]]:
+                 font_path: str | None = None, edge_mm: float | None = None) -> tuple[Image.Image, list[str]]:
     """One label as a 1-bit image, E-Stock layout (#84): phone · pharmacy name / barcode / item name /
     code · expiry · price. data: name, value (barcode), price, code, expiry, pharmacy, phone (all text).
     Returns the image and the fields dropped for lack of room."""
@@ -127,10 +146,10 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     W, H = dots(w_mm, dpi), dots(h_mm, dpi)
     img = Image.new("L", (W, H), 255)
     d = ImageDraw.Draw(img)
-    fp = font_path or find_font()
-    line = max(12, min(H // 7, dots(3.2, dpi)))
-    row = int(line * 1.2)
+    fp = bold_font(font_path or find_font())          # bold reads like E-Stock's labels (owner, 12/11)
+    line, row = text_metrics(h_mm, dpi)
     pad = max(3, dots(PAD_MM, dpi))
+    edge = max(pad, dots(edge_mm, dpi)) if edge_mm else pad   # side margin: a driver page may run past the label
     font = ImageFont.truetype(fp, line)
     small = ImageFont.truetype(fp, max(11, int(line * 0.9)))
     y = pad
@@ -138,12 +157,17 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
     def text(x_align: str, s: str, f, yy: int, width: int, rtl: bool = False):
         # numbers (price "40.00 ج", phone) stay left to right: with raqm the base direction must be said
         kw = {"direction": "rtl"} if rtl and _rtl(s) else {"direction": "ltr"} if _rtl(s) and shaping_available() else {}
+        # shrink the type (down to 70%) before cutting the text with "…" (owner, 12/11: names were cut)
+        size, smallest = f.size, max(10, int(f.size * 0.7))
+        while d.textlength(s, font=f, **kw) > width and size > smallest:
+            size -= 1
+            f = ImageFont.truetype(f.path, size)
         s = _fit(d, s, f, width, **kw)
         tw = d.textlength(s, font=f, **kw)
-        x = {"left": pad, "right": W - pad - tw, "center": (W - tw) / 2}[x_align]
+        x = {"left": edge, "right": W - edge - tw, "center": (W - tw) / 2}[x_align]
         d.text((x, yy), s, font=f, fill=0, **kw)
     if on["phone"] or on["pharmacy"]:
-        half = (W - 2 * pad) // (2 if on["phone"] and on["pharmacy"] else 1)
+        half = (W - 2 * edge) // (2 if on["phone"] and on["pharmacy"] else 1)
         if on["phone"]:
             text("left", data["phone"], small, y, half)
         if on["pharmacy"]:
@@ -159,9 +183,9 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
             if b == "1":
                 d.rectangle([x0 + i * module, y, x0 + (i + 1) * module - 1, name_y - 2], fill=0)
     if on["name"]:
-        text("center", data["name"], font, name_y, W - 2 * pad, rtl=True)
+        text("center", data["name"], font, name_y, W - 2 * edge, rtl=True)
     if bottom_y < H - pad:
-        third = (W - 2 * pad) // 3
+        third = (W - 2 * edge) // 3
         left = data["code"] if on["code"] else data.get("value") if on["digits"] else ""
         if left:
             text("left", str(left), small, bottom_y, third if on["expiry"] else 2 * third)
@@ -195,13 +219,76 @@ def _rows(img: Image.Image, black_bit: int) -> tuple[int, int, bytes]:
     return wb, h, bytes(out)
 
 
-def tspl_job(img: Image.Image, copies: int, w_mm: float, h_mm: float, gap_mm: int = 2, shift: int = 0) -> bytes:
+# #100 job variants for the TSPL path. The XP-235B printed low and skipped labels with every SHIFT value, so the
+# coordinator tries these one after another with the test button and saves the one that prints right.
+# "current" is the job sent before #100's follow-up, byte for byte, and stays the default.
+#   tear      : reset the printer's stored feed setup before printing: SET PEEL OFF, SET TEAR ON, OFFSET 0 mm,
+#               and SHIFT always sent (0 included), so a value left in the printer's memory cannot move the print
+#   home      : HOME once before the first label: the printer feeds to the next label's top edge by its sensor
+#   per_label : one CLS / BITMAP / PRINT 1 per copy instead of one PRINT 1,n
+#   clamp     : the image never ends past the label: its height is cut to label - max(shift, 0) - 0.5 mm, so
+#               a downward shift cannot spill onto the next label (which would make the printer skip it)
+VARIANTS = {
+    "current": frozenset(),
+    "tear": frozenset({"tear"}),
+    "clamp": frozenset({"clamp"}),
+    "tear_clamp": frozenset({"tear", "clamp"}),
+    "per_label": frozenset({"per_label"}),
+    "tear_clamp_per_label": frozenset({"tear", "clamp", "per_label"}),
+    "home": frozenset({"home"}),
+    "all": frozenset({"tear", "home", "clamp", "per_label"}),
+}
+CLAMP_MARGIN_MM = 0.5         # within the label's bottom padding (PAD_MM), so no text is cut at shift 0
+CALIBRATE_MODES = ("sized", "auto")
+
+
+def variant_flags(name: str) -> frozenset:
+    if name not in VARIANTS:
+        raise PrinterError("طريقة إرسال الملصق غير معروفة: " + " / ".join(VARIANTS))
+    return VARIANTS[name]
+
+
+def clamp_rows(h_mm: float, dpi: int, shift: int) -> int:
+    """The tallest image (dots) that ends at least CLAMP_MARGIN_MM before the label's bottom edge after SHIFT."""
+    return max(1, dots(h_mm, dpi) - max(0, shift) - dots(CLAMP_MARGIN_MM, dpi))
+
+
+def tspl_job(img: Image.Image, copies: int, w_mm: float, h_mm: float, gap_mm: int = 2, shift: int = 0,
+             flags: frozenset = frozenset(), first: bool = True, dpi: int = 203) -> bytes:
     """TSPL: BITMAP data uses 0 for a printed (black) dot. shift (dots, #100): TSPL `SHIFT`, which moves the
-    whole print along the paper; positive = lower on the label, negative = higher. Sent only when not 0."""
+    whole print along the paper; positive = lower on the label, negative = higher. Sent only when not 0
+    (always with the "tear" flag). flags: see VARIANTS; the printer setup lines (tear, home) go only in the
+    first item's job of a print run. No flags = the job sent before the variants, byte for byte."""
+    if "clamp" in flags:
+        rows = clamp_rows(h_mm, dpi, shift)
+        if img.size[1] > rows:
+            img = img.crop((0, 0, img.size[0], rows))
     wb, h, data = _rows(img, black_bit=0)
-    head = (f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\n" + (f"SHIFT {shift}\r\n" if shift else "")
-            + f"DIRECTION 1\r\nREFERENCE 0,0\r\nCLS\r\nBITMAP 0,0,{wb},{h},0,").encode("ascii")
-    return head + data + f"\r\nPRINT 1,{copies}\r\n".encode("ascii")
+    tear = "tear" in flags
+    head = f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\n"
+    if tear and first:
+        head += "SET PEEL OFF\r\nSET TEAR ON\r\nOFFSET 0 mm\r\n"
+    head += (f"SHIFT {shift}\r\n" if shift or tear else "") + "DIRECTION 1\r\nREFERENCE 0,0\r\n"
+    if "home" in flags and first:
+        head += "HOME\r\n"
+    one = f"CLS\r\nBITMAP 0,0,{wb},{h},0,".encode("ascii") + data
+    if "per_label" in flags:
+        return head.encode("ascii") + b"".join(one + b"\r\nPRINT 1\r\n" for _ in range(copies))
+    return head.encode("ascii") + one + f"\r\nPRINT 1,{copies}\r\n".encode("ascii")
+
+
+def calibrate_job(w_mm: float, h_mm: float, gap_mm: int, dpi: int, mode: str = "sized") -> bytes:
+    """#100: TSPL gap sensor calibration for the roll. "sized": SIZE and GAP of the roll, then GAPDETECT with
+    the label length and the gap in dots (the printer feeds a few labels and learns the sensor levels for them);
+    "auto": GAPDETECT alone, the printer measures label and gap itself. Nothing is printed."""
+    if mode not in CALIBRATE_MODES:
+        raise PrinterError("طريقة المعايرة غير صحيحة")
+    if mode == "auto":
+        return b"GAPDETECT\r\n"
+    if gap_mm < 1:
+        raise PrinterError("المعايرة تحتاج إلى مسافة بين الملصقات 1 مم على الأقل")
+    return (f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\n"
+            f"GAPDETECT {dots(h_mm, dpi)},{dots(gap_mm, dpi)}\r\n").encode("ascii")
 
 
 def zpl_job(img: Image.Image, copies: int, shift: int = 0) -> bytes:
@@ -221,9 +308,12 @@ def shift_dots(shift_mm: float, dpi: int) -> int:
 
 
 def job(lang: str, labels: list[tuple[Image.Image, int]], w_mm: float, h_mm: float, gap_mm: int = 2,
-        shift: int = 0) -> bytes:
+        shift: int = 0, variant: str = "current", dpi: int = 203) -> bytes:
+    """variant: TSPL only (#100); the ZPL job is the same for every variant."""
+    flags = variant_flags(variant)
     if lang == "tspl":
-        return b"".join(tspl_job(img, n, w_mm, h_mm, gap_mm, shift) for img, n in labels)
+        return b"".join(tspl_job(img, n, w_mm, h_mm, gap_mm, shift, flags, i == 0, dpi)
+                        for i, (img, n) in enumerate(labels))
     if lang == "zpl":
         return b"".join(zpl_job(img, n, shift) for img, n in labels)
     raise PrinterError("اختر نوع طابعة الملصقات (TSPL أو ZPL)")

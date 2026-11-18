@@ -21,6 +21,7 @@ from ..catalog import matching, service as catalog
 from ..catalog.normalize import normalize_text
 from ..core import accounts, audit, notify
 from ..core.errors import Conflict, DomainError, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
@@ -130,9 +131,13 @@ class Purchasing:
                                 file_id: str | None, supplier_id: str | None) -> str:
         if not ctx.branch_id:
             raise ValidationFailed("لا يوجد فرع محدد للمستخدم")
-        supplier_id = supplier_id or catalog.find_supplier_by_name(self.db, ctx.org_id,
-                                                                    ex.supplier_name)
-        if not supplier_id:      # no "supplier:" label — try the letterhead text
+        # a supplier name read with low confidence is never linked by itself: the invoice's liability would go
+        # to whoever it guessed; the person picks the supplier (supplier_missing blocks approval, #324 S24)
+        guessed = (ex.header_confidence or {}).get("supplier_name")
+        unsure = guessed is not None and guessed < validation.LOW_CONFIDENCE
+        supplier_id = supplier_id or (None if unsure else catalog.find_supplier_by_name(self.db, ctx.org_id,
+                                                                                        ex.supplier_name))
+        if not supplier_id and not unsure:      # no "supplier:" label — try the letterhead text
             for t in ex.header_texts:
                 supplier_id = catalog.find_supplier_by_name(self.db, ctx.org_id, t)
                 if supplier_id:
@@ -194,9 +199,10 @@ class Purchasing:
                         f" ({', '.join('?' * len(row))})", tuple(row.values()))
 
     def _refresh_totals(self, ctx: Context, inv_id: str) -> None:
-        inv = dict(self.db.one("SELECT * FROM purchase_invoices WHERE id=?", (inv_id,)))
+        inv = dict(self.db.one("SELECT * FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id)))
         lines = [dict(r) for r in self.db.all(
-            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
+            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+            (inv_id, ctx.org_id))]
         comp = validation.computed_total(inv, lines)
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
@@ -252,7 +258,8 @@ class Purchasing:
                 cands = matching.fuzzy_candidates(self.db, ctx.org_id, l["raw_name"], 5)
                 l["candidates"] = [c.__dict__ for c in cands]
         raw_lines = [dict(x) for x in self.db.all(
-            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no", (inv_id,))]
+            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+            (inv_id, ctx.org_id))]
         issues = self.issues(ctx, inv, raw_lines)
         inv["acknowledged_issues"] = json.loads(inv["acknowledged_issues"])
         inv.pop("raw_extraction", None)
@@ -317,7 +324,10 @@ class Purchasing:
                 if k == "supplier_id" and v:
                     catalog.get_supplier(self.db, ctx, v)
                 if k in ("declared_total", "extra_discount", "extra_tax") and v is not None:
-                    v = int(v)
+                    try:
+                        v = whole_number(v)          # piasters: 100.5 or true is refused, never cut
+                    except (TypeError, ValueError):
+                        raise ValidationFailed(f"قيمة غير صحيحة: {k}")
                     if v < 0:
                         raise ValidationFailed("القيمة لا تكون بالسالب")
                 if k in ("extra_discount", "extra_tax") and v is None:
@@ -376,7 +386,7 @@ class Purchasing:
                            "tax_amount", "line_total"):
                     if v is not None:
                         try:
-                            v = int(v)
+                            v = whole_number(v)      # 2.5 boxes or 12.5 piasters is refused, never cut
                         except (TypeError, ValueError):
                             raise ValidationFailed(f"قيمة غير صحيحة: {k}")
                         if v < 0 or (k == "discount_bp" and v > 10000):
@@ -496,8 +506,16 @@ class Purchasing:
             raise ValidationFailed("اكتب سبب واضح لقبول الفرق")
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
+            lines = [dict(r) for r in self.db.all(
+                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+                (inv_id, ctx.org_id))]
+            now = next((i for i in self.issues(ctx, dict(inv), lines)
+                        if i.code == code and (i.line_id or None) == (line_id or None)), None)
+            if now is None:
+                raise ValidationFailed("هذا الفرق غير موجود الآن في الفاتورة", code="issue_not_found")
             acks = json.loads(inv["acknowledged_issues"])
-            acks.append({"code": code, "line_id": line_id, "reason": reason.strip(),
+            # the figures accepted are kept with the reason: the acceptance covers this difference only (#324 S25)
+            acks.append({"code": code, "line_id": line_id, "reason": reason.strip(), "details": now.details,
                          "by": ctx.user_id, "at": accounts.iso(accounts.utcnow())})
             self.db.execute("UPDATE purchase_invoices SET acknowledged_issues=? WHERE id=?",
                             (json.dumps(acks, ensure_ascii=False), inv_id))
@@ -512,8 +530,8 @@ class Purchasing:
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
             lines = [dict(r) for r in self.db.all(
-                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? ORDER BY line_no",
-                (inv_id,))]
+                "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
+                (inv_id, ctx.org_id))]
             blocking = validation.blocking(self.issues(ctx, inv, lines))
             if blocking:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
@@ -521,25 +539,40 @@ class Purchasing:
             amounts = [validation.effective_amount(l) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []
+            if any(a < 0 for a in amounts) or inv["extra_discount"] < 0 or inv["extra_tax"] < 0:
+                # second line of defence, as for the total below: never a negative unit cost
+                raise Conflict("في الفاتورة قيمة بالسالب؛ لا يمكن اعتمادها", code="negative_amount")
             gross = sum(amounts)
             net_total = gross - inv["extra_discount"] + inv["extra_tax"]
+            if net_total < 0:     # never a negative supplier balance or unit cost, whatever validation said
+                raise Conflict("إجمالي الفاتورة بالسالب (الخصم الإضافي أكبر من إجمالي الأصناف)؛ لا يمكن اعتمادها",
+                               code="negative_total", details={"lines_amount": gross, "total": net_total})
             moved = 0
+            packs_of = {l["id"]: self.db.one("SELECT pack_size FROM items WHERE id=? AND org_id=?",
+                                             (l["item_id"], ctx.org_id))["pack_size"] for l in lines}
+            units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * packs_of[l["id"]] for l in lines}
+            all_units = sum(units.values())
             for l, amount in zip(lines, amounts):
-                item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?",
-                                   (l["item_id"], ctx.org_id))
-                # allocate invoice-level discount/tax proportionally to line value
-                share = Decimal(amount) * Decimal(net_total) / Decimal(gross) if gross else Decimal(0)
-                packs = l["qty"] + (l["bonus_qty"] or 0)        # bonus is free stock
-                base_qty = packs * item["pack_size"]
+                # read again per line: an earlier line of the same item may have changed its public price
+                # (the preloaded row skipped the second change and logged a stale previous price, #336 review)
+                item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
+                # allocate invoice-level discount/tax proportionally to line value; lines worth nothing (all free)
+                # share it by units, or tax posted to the supplier reached no unit cost (#324 S27)
+                share = Decimal(amount) * Decimal(net_total) / Decimal(gross) if gross else \
+                    Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
+                base_qty = units[l["id"]]                       # bonus is free stock
                 unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
                 batch_id = inventory.get_or_create_batch(self.db, ctx, item["id"], l["batch_no"],
                                                          l["expiry_date"], l["expiry_precision"])
                 if batch_id and l["public_price"] is not None:
                     self.db.execute("UPDATE batches SET public_price=coalesce(public_price, ?)"
                                     " WHERE id=?", (l["public_price"], batch_id))
-                last = self.db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND"
-                                   " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY rowid DESC LIMIT 1",
-                                   (ctx.org_id, item["id"]))
+                # the branch is named so ix_moves_item(org_id, branch_id, item_id) answers from the item's own
+                # movements; without it every movement of the pharmacy was read for each line (#253: 4 s a
+                # line on 3.5 M movements, and the approval holds every screen while it runs)
+                last = self.db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND"
+                                   " movement_type='purchase' AND unit_cost IS NOT NULL ORDER BY +rowid DESC LIMIT 1",
+                                   (ctx.org_id, inv["branch_id"], item["id"]))
                 if last and Decimal(last["unit_cost"]) > 0 and unit_cost > Decimal(last["unit_cost"]) * Decimal("1.005"):
                     up_pct = (unit_cost / Decimal(last["unit_cost"]) - 1) * 100
                     pack_old = Decimal(last["unit_cost"]) * item["pack_size"]

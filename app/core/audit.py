@@ -95,8 +95,8 @@ def list_for_entity(db: Database, ctx: Context, entity_type: str, entity_id: str
 
 ACTION_LABELS = {
     "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري خاطئ",
-    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الخزينة", "cash.shift_close": "إغلاق وردية",
-    "cash.shift_open": "فتح وردية", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
+    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_auto": "فتح الدرج مع البيع", "cash.drawer_open": "فتح الدرج بدون بيع", "cash.shift_close": "إغلاق شيفت",
+    "cash.shift_open": "فتح شيفت", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
     "count.create": "بدء جرد", "customer.create": "عميل جديد", "customer.payment": "تحصيل من عميل",
     "customer.refill_remove": "إزالة من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
     "customer.whatsapp_reminder": "تذكير واتساب", "customer.contract": "ربط عميل بتعاقد",
@@ -121,10 +121,10 @@ ACTION_LABELS = {
     "therapeutic_group.delete": "حذف مجموعة بدائل",
     "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الهاتف على الشبكة",
     "system.update": "تحديث البرنامج", "user.active": "إيقاف/تشغيل مستخدم", "user.create": "مستخدم جديد",
-    "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة السر", "user.password_reset": "إعادة كلمة السر",
+    "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة المرور", "user.password_reset": "إعادة تعيين كلمة المرور",
     "user.permission": "صلاحية شخص", "user.pin_set": "رقم سري", "user.reset_permissions": "رجوع الصلاحيات للافتراضي", "user.role": "تغيير النوع",
 }
-GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الوردية والخزينة", "user": "المستخدمين", "settings": "الإعدادات",
+GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الشيفت والخزينة", "user": "المستخدمون", "settings": "الإعدادات",
           "item": "الأصناف", "expense": "المصروفات", "supplier": "الموردون", "customer": "العملاء", "count": "الجرد",
           "payroll": "الرواتب", "auth": "الدخول", "stock": "تسويات المخزون"}
 

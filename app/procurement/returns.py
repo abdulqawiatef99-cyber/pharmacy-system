@@ -3,6 +3,7 @@ the agreed value, and a numbered slip is printed for the supplier's representati
 from __future__ import annotations
 
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -17,16 +18,25 @@ MAX_LINES = 200
 
 
 def suggest_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
+    """The value the return screen proposes. It is a purchase cost, so it is shown only to who may
+    record a return and see its values (the same rights create() asks for a typed value)."""
+    ctx.require("purchases.approve")
+    if not (ctx.can("costs.read") or ctx.can("suppliers.pay")):
+        ctx.require("suppliers.pay")
+    return _unit_value(db, ctx, item_id, batch_id)
+
+
+def _unit_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
     """Piasters per base unit: the net price paid for that batch on its purchase invoice,
-    else the item's average cost."""
+    else the item's average cost. No permission check: create() values a return with it for a
+    user who never sees the figure."""
     if batch_id:
         r = db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND batch_id=? AND movement_type IN"
                    " ('purchase','opening') AND unit_cost IS NOT NULL ORDER BY created_at DESC LIMIT 1", (ctx.org_id, item_id, batch_id))
         if r:
-            from decimal import Decimal
-            return int((Decimal(r["unit_cost"]) * 100).to_integral_value())
+            return int((Decimal(r["unit_cost"]) * 100).to_integral_value(ROUND_HALF_UP))
     c = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
-    return int((c * 100).to_integral_value()) if c is not None else 0
+    return int((c * 100).to_integral_value(ROUND_HALF_UP)) if c is not None else 0
 
 
 def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note: str | None = None) -> dict:
@@ -44,14 +54,17 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
             raise NotFound("صنف غير موجود")
         if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
             raise NotFound("التشغيلة لا تخص الصنف")
-        if not isinstance(qty, int) or qty <= 0:
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:     # true is not 1 unit
             raise ValidationFailed("الكمية غير صحيحة")
         if reason not in REASONS:
             raise ValidationFailed("اختر سبب المرتجع لكل صنف")
         value = ln.get("unit_value")
         if value is None:
-            value = suggest_value(db, ctx, item_id, batch_id)
-        if not isinstance(value, int) or value < 0:
+            value = _unit_value(db, ctx, item_id, batch_id)
+        elif not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
+            # a typed value credits the supplier's account with that amount: only who may see the values
+            ctx.require("suppliers.pay")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValidationFailed("قيمة الوحدة غير صحيحة")
         clean.append((item_id, batch_id, qty, value, reason))
     total = sum(q * v for _, _, q, v, _ in clean)
@@ -97,6 +110,9 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
                      after={"supplier": supplier_id, "no": no, "total": total, "lines": len(clean)})
         notify.emit(db, ctx, "supplier_return", "info", f"مرتجع رقم {no} إلى {sup['name']} — {total / 100:,.2f} ج",
                     f"{len(clean)} صنف", "supplier_return", rid)
+    if not ctx.can("purchases.read"):
+        # saved: answer without the slip this person may not read, never a 403 after the commit (#324 S6)
+        return {"ok": True, "id": rid, "return_no": no}
     return get(db, ctx, rid)
 
 

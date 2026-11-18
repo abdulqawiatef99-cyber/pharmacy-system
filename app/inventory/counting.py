@@ -9,13 +9,16 @@
 * Sales during the count are handled: each entry remembers the ledger
   position when it was counted; expected quantity now = counted + movements
   posted after that position.
+* A manual adjustment or another count's adjustment after that position is a
+  book correction, not a physical move: the line is marked
+  'adjusted_since_count' and must be recounted before approval.
 * Approval (inventory.adjust) posts 'adjustment' movements for the variances.
   Uncounted items are NOT zeroed unless the approver explicitly says so.
 """
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -108,6 +111,11 @@ class Counting:
             new_qty = qty
             if live:
                 if mode == "add" and live["counted_by"] == ctx.user_id:
+                    # a sale or receipt since the first scan: the running total mixes units counted before and
+                    # after it (a sold unit came back on approval, #324 S14). Count this one again from zero.
+                    if self._moved_between(ctx, s["branch_id"], item_id, key, live["ledger_seq"], None):
+                        raise Conflict("الصنف ده اتباع أو اتحرك بعد ما بدأت تعدّه؛ عدّه من الأول (عدّ جديد مش إضافة)",
+                                       code="moved_since_first_scan")
                     new_qty = live["qty"] + qty
                 elif live["counted_by"] != ctx.user_id and not recount:
                     raise Conflict("هذا الصنف جُرد من قبل في المكان نفسه", code="already_counted",
@@ -138,6 +146,32 @@ class Counting:
             params.append(batch_key)
         return int(self.db.one(q, tuple(params))["q"])
 
+    def _moved_between(self, ctx: Context, branch_id: str, item_id: str, batch_key: str | None,
+                       after_seq: int, upto_seq: int | None) -> bool:
+        """Any stock movement of the item (batch) after one ledger position and up to another (None: now)."""
+        q = ("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND rowid > ?")
+        params: list = [ctx.org_id, branch_id, item_id, after_seq]
+        if upto_seq is not None:
+            q += " AND rowid <= ?"
+            params.append(upto_seq)
+        if batch_key:
+            q += " AND coalesce(batch_id,'')=?"
+            params.append(batch_key)
+        return self.db.one(q + " LIMIT 1", tuple(params)) is not None
+
+    def _adjusted_after(self, ctx: Context, sid: str, branch_id: str, item_id: str,
+                        batch_key: str | None, after_seq: int) -> bool:
+        """A book correction posted after the entry was counted: a manual adjustment or another
+        count's adjustment. It is not a physical move, so "counted + movements after" would apply
+        the same difference a second time; the line must be counted again."""
+        q = ("SELECT 1 FROM stock_movements WHERE org_id=? AND branch_id=? AND item_id=? AND rowid > ?"
+             " AND (ref_type='manual_adjust' OR (ref_type='count_session' AND coalesce(ref_id,'')<>?))")
+        params: list = [ctx.org_id, branch_id, item_id, after_seq, sid]
+        if batch_key is not None:
+            q += " AND coalesce(batch_id,'')=?"
+            params.append(batch_key)
+        return self.db.one(q + " LIMIT 1", tuple(params)) is not None
+
     def variances(self, ctx: Context, sid: str) -> dict:
         ctx.require("inventory.adjust")
         s = self._session(ctx, sid)
@@ -147,10 +181,11 @@ class Counting:
         for e in entries:
             k = (e["item_id"], e["batch_key"])
             r = rows.setdefault(k, {"item_id": e["item_id"], "batch_key": e["batch_key"],
-                                    "counted": 0, "seq": e["ledger_seq"],
+                                    "counted": 0, "seq": e["ledger_seq"], "last_seq": e["ledger_seq"],
                                     "level": "batch" if e["batch_key"] else "item"})
             r["counted"] += e["qty"]
             r["seq"] = min(r["seq"], e["ledger_seq"])
+            r["last_seq"] = max(r["last_seq"], e["ledger_seq"])
         # an item counted both by batch and at item level is ambiguous
         items_level = {k[0] for k in rows if k[1] == ""}
         items_batch = {k[0] for k in rows if k[1] != ""}
@@ -171,12 +206,23 @@ class Counting:
                      difference=expected_now - system)
             c = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
                             (ctx.org_id, s["branch_id"], item_id))
-            r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"))) \
+            r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"), ROUND_HALF_UP)) \
                 if c and ctx.can("costs.read") else None
             r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
                                      (item_id,))["n"]
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
+            if r["last_seq"] > r["seq"] and self._moved_between(ctx, s["branch_id"], item_id, bk or None,
+                                                                 r["seq"], r["last_seq"]):
+                # counted in two places with a sale or receipt in between: which place it touched is unknown,
+                # so "counted + moves after the first count" may deduct it twice (#324 S13)
+                r["problem"] = "moved_between_counts"
+                r["problem_message"] = (f"«{r['label']}»: اتباع أو اتحرك بين عدّه في مكانين؛ أعد عدّه قبل الاعتماد")
+            if self._adjusted_after(ctx, sid, s["branch_id"], item_id, bk or None, r["seq"]):
+                r["problem"] = "adjusted_since_count"
+                r["problem_message"] = (f"«{r['label']}»: تم تعديل رصيده (تسوية يدوية أو جرد آخر) بعد عدّه"
+                                        " في هذا الجرد؛ أعد عدّه قبل الاعتماد")
+            r.pop("last_seq")
             out.append(r)
         counted_items = {r["item_id"] for r in out}
         uncounted = []
@@ -197,13 +243,20 @@ class Counting:
 
     def approve(self, ctx: Context, sid: str, *, zero_uncounted: bool = False,
                 reason: str | None = None, reasons: dict | None = None,
-                shortage_reason: str = "lost", zero_reason: str = "lost") -> dict:
+                shortage_reason: str = "lost", zero_reason: str = "lost",
+                uncounted_item_ids: list[str] | None = None) -> dict:
         """reasons: {"item_id|batch_key": reason code} for single lines; others take
-        shortage_reason (less than the system) or "found" (more than the system)."""
+        shortage_reason (less than the system) or "found" (more than the system).
+        zero_uncounted zeroes exactly the uncounted items the approver was shown (uncounted_item_ids):
+        an item received after the preview is refused, never zeroed unseen (#324 S15)."""
         from . import adjust
         ctx.require("inventory.adjust")
+        if zero_uncounted is not True and zero_uncounted is not False:
+            raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
         if zero_uncounted and len((reason or "").strip()) < 5:
             raise ValidationFailed("تصفير الأصناف غير المجرودة يحتاج إلى سبب مكتوب")
+        if zero_uncounted and not isinstance(uncounted_item_ids, list):
+            raise ValidationFailed("قائمة الأصناف غير المجرودة المعروضة مطلوبة للتصفير", code="uncounted_list_required")
         reasons = reasons or {}
         for code in [shortage_reason, zero_reason, *reasons.values()]:
             if code not in adjust.REASONS:
@@ -213,7 +266,12 @@ class Counting:
             v = self.variances(ctx, sid)
             bad = [r for r in v["lines"] if r.get("problem")]
             if bad:
-                raise Conflict("توجد أصناف تحتاج إلى مراجعة قبل الاعتماد", code="count_problems",
+                stale = [r["problem_message"] for r in bad if r["problem"] == "adjusted_since_count"]
+                msg = "توجد أصناف تحتاج إلى مراجعة قبل الاعتماد"
+                if stale:
+                    msg = "لا يمكن اعتماد الجرد: " + stale[0] + (
+                        f" (و{len(stale) - 1} صنف آخر بالحالة نفسها)" if len(stale) > 1 else "")
+                raise Conflict(msg, code="count_problems",
                                details={"lines": bad})
             posted = 0
             for r in v["lines"]:
@@ -225,6 +283,9 @@ class Counting:
                 self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid, why)
                 posted += 1
             if zero_uncounted:
+                if {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}:
+                    raise Conflict("الأصناف اللي لم تُجرد اتغيّرت بعد ما عرضت التقرير (صنف اتورد أو اتباع)؛"
+                                   " اعرض الفروق تاني قبل التصفير", code="uncounted_changed")
                 for u in v["uncounted_with_stock"]:
                     self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid, zero_reason)
                     posted += 1

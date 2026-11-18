@@ -54,7 +54,7 @@ while no approved interaction data exists.
 
 **Procurement** — `GET /api/procurement/suggestions?cover_days&lead_days&safety_days&window_days` (+ `.xlsx`) ·
 `GET /api/procurement/health` · `GET /api/procurement/suppliers/{item_id}` ·
-`POST /api/procurement/offer {item_id, packs, discount_pct, expiry_date?, cash_available?}` ·
+`POST /api/procurement/offer {item_id, packs, discount_pct, expiry_date?, cash_available?}` (whole packs; percent and pounds with at most two decimals; answers `cost` in piasters) ·
 `POST /api/procurement/consumption` (multipart, `period_start`, `period_end`, `apply=1` to save)
 
 **Recalls** — `POST /api/recalls/extract {text}` → proposed batch numbers · `POST /api/recalls {title, items:[{product_name, batch_numbers}], notice_no?, notice_date?}` ·

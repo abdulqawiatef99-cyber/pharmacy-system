@@ -203,7 +203,7 @@ def receipt_job(img: Image.Image, open_drawer: bool = False, timing: str = "afte
 # ---------------------------------------------------------------- transports
 def send(target: str, data: bytes, timeout: float = 5.0) -> None:
     if not target or target == "none":
-        raise PrinterError("لم يتم اختيار طابعة الإيصال (الإعدادات ← الإيصال)")
+        raise PrinterError("لم تُختر طابعة الإيصال (البرنامج ← طابعة الإيصال والدرج)")
     kind, _, rest = target.partition(":")
     try:
         if kind == "tcp":
@@ -251,7 +251,7 @@ def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clo
     try:
         import win32print  # type: ignore
     except ImportError as e:
-        raise PrinterError("الطباعة على Windows تحتاج تثبيت pywin32 (pip install pywin32)") from e
+        raise PrinterError("الطباعة على Windows تحتاج إلى تثبيت pywin32 (pip install pywin32)") from e
     wait = SPOOL_WAIT if wait is None else wait
     h = win32print.OpenPrinter(printer_name)
     try:
@@ -262,24 +262,30 @@ def _send_windows(printer_name: str, data: bytes, wait: float | None = None, clo
             win32print.EndPagePrinter(h)
         finally:
             win32print.EndDocPrinter(h)
-        end = clock() + wait
-        while True:
-            status = _job_status(win32print, h, job)
-            if status is None or (status & (_JOB_PRINTING | _JOB_DONE) and not status & _JOB_STUCK):
-                return
-            if clock() >= end:
-                break
-            sleep(SPOOL_POLL)
-        try:
-            win32print.SetJob(h, job, 0, None, win32print.JOB_CONTROL_DELETE)
-            cancelled = True
-        except Exception:  # noqa: BLE001 — pywintypes.error; reported below
-            cancelled = False
-        if cancelled:
-            raise PrinterError("الطابعة لا تستجيب (مقفولة أو مفصولة أو الورق خلص) — اتلغى أمر الطباعة فمش هيطلع لوحده بعدين")
-        raise PrinterError("الطابعة لا تستجيب، وتعذر إلغاء أمر الطباعة من ويندوز: امسحه من قائمة الطباعة قبل تشغيل الطابعة")
+        await_job(win32print, h, job, wait, clock, sleep)
     finally:
         win32print.ClosePrinter(h)
+
+
+def await_job(win32print, h, job: int, wait: float, clock=time.monotonic, sleep=time.sleep) -> None:
+    """#98: the job has left the queue, or is printing (or printed) with no error, within `wait` seconds;
+    otherwise it is cancelled and PrinterError raised. Shared by the RAW queue and the driver labels (#100)."""
+    end = clock() + wait
+    while True:
+        status = _job_status(win32print, h, job)
+        if status is None or (status & (_JOB_PRINTING | _JOB_DONE) and not status & _JOB_STUCK):
+            return
+        if clock() >= end:
+            break
+        sleep(SPOOL_POLL)
+    try:
+        win32print.SetJob(h, job, 0, None, win32print.JOB_CONTROL_DELETE)
+        cancelled = True
+    except Exception:  # noqa: BLE001 — pywintypes.error; reported below
+        cancelled = False
+    if cancelled:
+        raise PrinterError("الطابعة لا تستجيب (مطفأة أو غير موصلة أو نفد الورق) — أُلغي أمر الطباعة، فلن يُطبع لاحقًا من تلقاء نفسه")
+    raise PrinterError("الطابعة لا تستجيب، وتعذر إلغاء أمر الطباعة من ويندوز: امسحه من قائمة الطباعة قبل تشغيل الطابعة")
 
 
 def _job_status(win32print, h, job: int) -> int | None:

@@ -1,0 +1,59 @@
+name: Windows print smoke
+
+# #100: labels through the Windows printer driver (app/printing/driver.py) call pywin32 and Pillow's
+# Windows-only parts, which the Linux CI can only fake. This job prints two sample labels through a real
+# Windows driver into a file. It runs only when the driver path changes, to keep Windows minutes low.
+
+on:
+  pull_request:
+    paths:
+      - "app/printing/driver.py"
+      - "app/printing/escpos.py"
+      - "app/printing/labels.py"
+      - "scripts/ci/driver_print_smoke.py"
+      - ".github/workflows/windows-print-smoke.yml"
+      - "requirements.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-print-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  driver-labels:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Shipped printing libraries
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $pins = Select-String -Path requirements.txt -Pattern '^(pywin32|Pillow|pillow)==' | ForEach-Object { $_.Line }
+          python -m pip install --only-binary=:all: $pins
+          python -c "import win32gui, win32print; from PIL import ImageWin; print('imports ok')"
+
+      - name: Printers on this machine
+        shell: pwsh
+        run: |
+          Get-Service Spooler | Format-Table Name, Status
+          Get-Printer | Format-Table Name, DriverName, PortName -AutoSize
+
+      - name: Print two labels through a real driver
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          python scripts/ci/driver_print_smoke.py

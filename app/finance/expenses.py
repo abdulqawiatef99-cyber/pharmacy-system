@@ -7,7 +7,7 @@ is recorded — that is what physically happened — and a rejected one is flagg
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit, notify
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
@@ -143,9 +143,13 @@ def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | No
     if not approve and len((reason or "").strip()) < 3:
         raise ValidationFailed("اكتب سبب الرفض")
     with db.transaction():
-        db.execute("UPDATE expenses SET status=?, decided_by=?, decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
-                   " reject_reason=? WHERE id=?", ("approved" if approve else "rejected", ctx.approver_id or ctx.user_id,
-                                                  None if approve else reason.strip(), eid))
+        # only while still pending: an approval and a rejection at the same moment cannot both stand
+        n = db.execute("UPDATE expenses SET status=?, decided_by=?, decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                       " reject_reason=? WHERE id=? AND org_id=? AND status='pending'",
+                       ("approved" if approve else "rejected", ctx.approver_id or ctx.user_id,
+                        None if approve else reason.strip(), eid, ctx.org_id)).rowcount
+        if not n:
+            raise Conflict("سبق اتخاذ قرار في هذا المصروف")
         audit.record(db, ctx, "expense.approve" if approve else "expense.reject", "expense", eid,
                      after={"amount": e["amount"], "reason": reason})
         if not approve and e["paid_from"] == "drawer":
@@ -180,7 +184,7 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
             unknown += 1
         else:
             cost += Decimal(a["unit_cost"]) * a["q"] * 100
-    cost_p = int(cost.to_integral_value())
+    cost_p = int(cost.to_integral_value(ROUND_HALF_UP))
     revenue = s["sales"] - s["returns"]
     exp = [dict(r) for r in db.all(
         "SELECT c.name category, sum(e.amount) amount FROM expenses e JOIN expense_categories c ON c.id=e.category_id"

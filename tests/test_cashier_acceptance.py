@@ -43,7 +43,11 @@ class TestShift(Base):
             self.sell()
         self.assertEqual(e.exception.code, "no_open_shift")
         self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.pan)["total_qty"], 20)   # nothing moved
-        self.sell(cash=0, card=4000)            # card-only sale needs no drawer
+        with self.assertRaises(Conflict) as e:  # a card-only store sale needs the shift too (final review P2-2)
+            self.sell(cash=0, card=4000)
+        self.assertEqual(e.exception.code, "no_open_shift")
+        self.cd.open(self.ctx, 0)
+        self.sell(cash=0, card=4000)
 
     def test_drawer_totals_match_every_operation(self):
         self.cd.open(self.ctx, 10000)                               # 100 EGP float

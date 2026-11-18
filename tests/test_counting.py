@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from app.catalog import service as cat
 from app.core import accounts
-from app.core.errors import Conflict, Forbidden, ValidationFailed
+from app.core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from app.inventory import service as inv
 from app.inventory.counting import Counting
 from tests.helpers import DBTestCase
@@ -86,7 +86,8 @@ class TestCounting(CountCase):
         sid = self.cnt.create(self.ctx, title="x", scope="items", item_ids=[self.c])
         with self.assertRaises(ValidationFailed):
             self.cnt.approve(self.ctx, sid, zero_uncounted=True)
-        self.cnt.approve(self.ctx, sid, zero_uncounted=True, reason="الصنف مش موجود على الرف نهائيًا")
+        self.cnt.approve(self.ctx, sid, zero_uncounted=True, reason="الصنف مش موجود على الرف نهائيًا",
+                         uncounted_item_ids=[u["item_id"] for u in self.cnt.variances(self.ctx, sid)["uncounted_with_stock"]])
         self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.c)["total_qty"], 0)
 
     def test_mixed_levels_blocks(self):
@@ -103,3 +104,61 @@ class TestCounting(CountCase):
         sid = self.cnt.create(self.ctx, title="x")
         with self.assertRaises(Forbidden):
             self.cnt.approve(self.actx, sid)
+
+
+class TestCountingEdges(CountCase):
+    def test_a_cancelled_count_takes_no_entries_and_moves_no_stock(self):
+        sid = self.cnt.create(self.ctx, title="x")
+        self.cnt.record(self.actx, sid, item_id=self.b, qty=1)
+        self.cnt.cancel(self.ctx, sid)
+        with self.assertRaises(Conflict):
+            self.cnt.record(self.actx, sid, item_id=self.b, qty=2)
+        with self.assertRaises(Conflict):
+            self.cnt.approve(self.ctx, sid)
+        with self.assertRaises(Conflict):
+            self.cnt.cancel(self.ctx, sid)
+        self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.b)["total_qty"], 5)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE action='count.cancel'")["n"], 1)
+        with self.assertRaises(Forbidden):
+            self.cnt.cancel(self.actx, self.cnt.create(self.ctx, title="y"))
+
+    def test_an_open_count_shows_the_system_quantity_to_who_may_see_stock(self):
+        sid = self.cnt.create(self.ctx, title="x", blind=False)
+        r = self.cnt.record(self.actx, sid, item_id=self.b, qty=4)
+        self.assertEqual(r["system_qty"], 5)
+
+    def test_a_count_is_refused_when_it_cannot_be_right(self):
+        with self.assertRaises(ValidationFailed):
+            self.cnt.create(self.ctx, title="x", scope="shelf")
+        with self.assertRaises(ValidationFailed):
+            self.cnt.create(self.ctx, title="x", scope="location", locations=[])
+        with self.assertRaises(ValidationFailed):
+            self.cnt.create(self.ctx, title="x", scope="items", item_ids=[])
+        with self.assertRaises(NotFound):
+            self.cnt.create(self.ctx, title="x", scope="items", item_ids=["missing"])
+        self.cnt.create(self.ctx, title="full")
+        with self.assertRaises(Conflict):
+            self.cnt.create(self.ctx, title="another full")                  # one full count at a time
+        self.cnt.create(self.ctx, title="a shelf meanwhile", scope="location", locations=["A1"])
+
+    def test_bad_entries_are_refused_and_record_nothing(self):
+        sid = self.cnt.create(self.ctx, title="x")
+        for kw, exc in (({"qty": -1}, ValidationFailed), ({"qty": 1.5}, ValidationFailed), ({"qty": "3"}, ValidationFailed),
+                        ({"qty": 1, "mode": "replace"}, ValidationFailed), ({"qty": 1, "item_id": "missing"}, NotFound),
+                        ({"qty": 1, "batch_id": self.ba1}, NotFound)):                # a batch of another item
+            with self.subTest(kw=kw):
+                with self.assertRaises(exc):
+                    self.cnt.record(self.actx, sid, **{"item_id": self.b, **kw})
+        self.assertEqual(self.db.one("SELECT count(*) n FROM count_entries WHERE session_id=?", (sid,))["n"], 0)
+
+    def test_selling_more_after_the_count_than_was_counted_blocks_the_approval(self):
+        sid = self.cnt.create(self.ctx, title="x")
+        self.cnt.record(self.actx, sid, item_id=self.b, qty=1)               # 1 counted, 5 in the system
+        with self.db.transaction():                                          # then 3 sold
+            inv.post_movement(self.db, self.ctx, item_id=self.b, qty_delta=-3, movement_type="sale")
+        v = self.cnt.variances(self.ctx, sid)
+        self.assertEqual(v["lines"][0]["problem"], "negative_after_sales")
+        with self.assertRaises(Conflict) as e:
+            self.cnt.approve(self.ctx, sid)
+        self.assertEqual(e.exception.code, "count_problems")
+        self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.b)["total_qty"], 2)    # untouched

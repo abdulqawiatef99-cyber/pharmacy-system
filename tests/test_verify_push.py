@@ -104,6 +104,14 @@ class TestGuardWiring(unittest.TestCase):
         self.assertIn("continue-on-error: true", upload)                     # #122: a full quota blocks no delivery
         self.assertLess(wf.index("actions/upload-artifact@v4"), wf.index('Publish as release "installer-latest"'))
 
+    def test_program_files_have_the_line_ends_github_serves(self):
+        """#18 B13: the runner's git writes CRLF (core.autocrlf); the in-app update downloads LF from GitHub."""
+        wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
+        archives = [line.strip() for line in wf.splitlines() if " archive " in line and line.strip().startswith("git")]
+        self.assertEqual(len(archives), 2)                                   # the program and the update candidate
+        for line in archives:
+            self.assertIn("-c core.autocrlf=false", line)
+
     def test_manual_review_build_is_delivered_as_a_prerelease(self):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
         step = wf.split('- name: Publish review build as pre-release "installer-review"', 1)[1].split("- name:", 1)[0]

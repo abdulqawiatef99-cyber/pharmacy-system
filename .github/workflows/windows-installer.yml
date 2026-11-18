@@ -22,7 +22,7 @@ jobs:
   # "CI / linux" passed (free substitute for branch protection; see branch-guard.yml).
   gate:
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -45,7 +45,7 @@ jobs:
   build:
     needs: gate
     if: ${{ !cancelled() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
 
@@ -112,7 +112,9 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory build/program | Out-Null
-          git archive --format=zip HEAD -o program.zip
+          # LF line ends, byte for byte what GitHub's update archive holds: the runner's git turns LF into
+          # CRLF (core.autocrlf), and the update check then saw every update as a dependency change (B13)
+          git -c core.autocrlf=false -c core.eol=lf archive --format=zip HEAD -o program.zip
           Expand-Archive program.zip -DestinationPath build/program
           # what this installer contains: the launcher adopts it once over an older in-app update (#45),
           # and the update badge compares it with main
@@ -136,10 +138,19 @@ jobs:
           build/python/python.exe build/program/manage.py verify
           # R8 on Windows with the shipped runtime: stage and select a candidate from a local zip (same
           # requirements/migrations), then roll back; the data still verifies. The owner repeats it on the PC.
-          git archive --format=zip --prefix=candidate/ HEAD -o "$env:RUNNER_TEMP\candidate.zip"
+          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --prefix=candidate/ HEAD -o "$env:RUNNER_TEMP\candidate.zip"
           build/python/python.exe build/program/manage.py update --from-zip "$env:RUNNER_TEMP\candidate.zip" --backup-dir "$env:RUNNER_TEMP\upd-backups"
           build/python/python.exe build/program/manage.py update --rollback
           build/python/python.exe build/program/manage.py verify
+
+      # #100: labels through the Windows printer driver, printed for real (into a file) with the shipped runtime
+      - name: Driver label smoke test
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          build/python/python.exe build/program/scripts/ci/driver_print_smoke.py
 
       - name: Build installer (Inno Setup)
         shell: pwsh

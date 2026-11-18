@@ -32,10 +32,8 @@ def clean(db: Database) -> dict:
             "DELETE FROM sessions WHERE (expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?) OR"
             " (revoked_at IS NOT NULL AND revoked_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?)))",
             (f"-{SESSION_DAYS} days", f"-{SESSION_DAYS} days")).rowcount
-    try:
-        db.conn.execute("PRAGMA optimize")          # statistics for the query planner; changes no data
-    except Exception:   # noqa: BLE001 - only a hint to SQLite
-        pass
+    # No PRAGMA optimize / ANALYZE: statistics gathered on a small database go stale after a bulk load
+    # and made the planner scan whole tables (#249); the queries are built for SQLite's default plans.
     return out
 
 
