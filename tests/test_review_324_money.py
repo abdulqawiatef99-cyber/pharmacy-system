@@ -90,7 +90,7 @@ class TestM1ReturnsBookedBeforeTheFix(TestM1LooseUnitsWorthMoreThanAPack):
             (kw.get("after") or {}).pop("line_refunds", None)   # the old audit row had no per-line refunds
             return orig_audit(db, ctx, action, et, eid, **kw)
 
-        with patch.object(svc, "kept_value", old_kept), patch.object(svc.Sales, "_line_refunded", lambda *a: 0, create=True), \
+        with patch.object(svc, "kept_value", old_kept), \
                 patch.object(svc.audit, "record", old_audit):
             return self.s.return_items(self.ctx, sid, {line: qty}, refund_method="cash", reason="مرتجع قديم")
 
@@ -113,6 +113,44 @@ class TestM1ReturnsBookedBeforeTheFix(TestM1LooseUnitsWorthMoreThanAPack):
             refunds.append(r["refund"])
             self.assertLessEqual(sum(refunds), 2139)
         self.assertEqual(sum(refunds), 2139)
+
+
+class TestReportsMatchReturns(TestM1ReturnsBookedBeforeTheFix):
+    """Codex on #331 (512d7f5): the item revenue and the invoice profit valued what the customer kept with
+    kept_value alone (2100) after a return booked under the old rule; a return of the rest refunds 2128.
+    Both reports must use the same outstanding value as returns."""
+
+    def _reports(self, sale_id):
+        from app.reports import invoices
+        from app.reports.service import sales_report
+        top = sales_report(self.db, self.ctx, today(), today())["top_items"]
+        rev = next(t["revenue"] for t in top if t["item_id"] == self.item)
+        inv = invoices.report(self.db, self.ctx, date_from=today(), date_to=today())
+        row = next(r for r in inv["rows"] if r["id"] == sale_id)
+        return rev, row
+
+    def test_old_return_then_both_reports_show_what_a_return_would_refund(self):
+        sale = _sell(self.s, self.ctx, self.item, 199)          # 21.39, cost 199 x 0.05 = 9.95
+        line = sale["lines"][0]["id"]
+        self._old_rule_return(sale["id"], line, 1)                # refunded 11 under the old rule
+        rev, row = self._reports(sale["id"])
+        self.assertEqual(rev, 2128)                               # 2139 - 11, not kept_value's 2100
+        self.assertEqual(row["profit"], 2128 - 198 * 5)
+        self.assertEqual(row["net"], 2128)                        # the invoice net agrees with its lines
+        r = self.s.return_items(self.ctx, sale["id"], {line: 198}, refund_method="cash", reason="مرتجع تجربة")
+        self.assertEqual(r["refund"], rev)                        # the report figure is what the return paid
+        rev, row = self._reports(sale["id"])
+        self.assertEqual((rev, row["profit"], row["net"]), (0, 0, 0))
+
+    def test_new_returns_reports_equal_the_line_left(self):
+        sale = _sell(self.s, self.ctx, self.item, 104)          # 10.94
+        line = sale["lines"][0]["id"]
+        paid = 1094
+        for qty in (4, 1):
+            paid -= self.s.return_items(self.ctx, sale["id"], {line: qty}, refund_method="cash",
+                                        reason="مرتجع تجربة")["refund"]
+            rev, row = self._reports(sale["id"])
+            self.assertEqual((rev, row["net"]), (paid, paid))
 
 
 class TestM2ReturnRetry(APICase):

@@ -221,13 +221,57 @@ def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None =
 
 
 def _take(allocs: list[dict], kept: dict, qty: int) -> None:
-    """Remove `qty` returned units from `kept` in the order a return takes them (allocs newest first)."""
+    """Remove `qty` returned units from `kept` in the order a return takes them: newest allocation first
+    (by `rid`, the allocation's rowid, when the caller read it; else in the order given)."""
+    if all("rid" in a for a in allocs):
+        allocs = sorted(allocs, key=lambda a: a["rid"], reverse=True)
     for a in allocs:
         t = min(kept[a["id"]], qty)
         kept[a["id"]] -= t
         qty -= t
         if not qty:
             break
+
+
+def returns_history(db: Database, org_id: str, sale_ids) -> dict[str, list[dict]]:
+    """The `sale.return` audit rows of these sales, oldest first, as {sale_id: [after, ...]}: what each return
+    took from which line (and, since #324 M1, what it refunded per line). Few queries, on the audit index."""
+    ids, out = sorted(set(sale_ids)), {}
+    for k in range(0, len(ids), 500):
+        part = ids[k:k + 500]
+        for r in db.all("SELECT entity_id, after_json FROM audit_log WHERE org_id=? AND entity_type='sale'"
+                        f" AND entity_id IN ({','.join('?' * len(part))}) AND action='sale.return'"
+                        " ORDER BY entity_id, at, rowid", (org_id, *part)):
+            out.setdefault(r["entity_id"], []).append(json.loads(r["after_json"] or "{}"))
+    return out
+
+
+def outstanding_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None, line_id: str,
+                      history: list[dict]) -> int:
+    """What is still paid for the kept units of a line: its recorded total minus the refunds already booked
+    for it. The one reference for returns and reports, so they never disagree (#331): a return booked under
+    the rule before #324 M1 valued kept units differently, and `kept_value` alone no longer matches it.
+    Without a recorded total, or a history that does not explain the units returned: `kept_value`."""
+    if line_total is None:
+        return kept_value(allocs, kept, bp, None)
+    if all(kept[a["id"]] == a["qty_base"] for a in allocs):
+        return line_total
+    replay = {a["id"]: a["qty_base"] for a in allocs}
+    refunded = 0
+    for after in history:
+        qty = int((after.get("lines") or {}).get(line_id) or 0)
+        if not qty:
+            continue
+        if line_id in (after.get("line_refunds") or {}):
+            refunded += int(after["line_refunds"][line_id])
+            _take(allocs, replay, qty)
+        else:                                   # booked before per-line refunds were stored: replay its rule
+            old = kept_value(allocs, replay, bp, line_total, price=alloc_gross)
+            _take(allocs, replay, qty)
+            refunded += old - kept_value(allocs, replay, bp, line_total, price=alloc_gross)
+    if replay != {a["id"]: kept[a["id"]] for a in allocs}:
+        return kept_value(allocs, kept, bp, line_total)
+    return max(0, line_total - refunded)
 
 
 def unit_price(pack_price: int, pack_size: int) -> int:
@@ -955,6 +999,7 @@ class Sales:
                                    code="delivery_not_settled")
             refund = 0
             line_refunds: dict[str, int] = {}
+            history: list[dict] | None = None
             restricted: list[str] = []
             for line_id, qty in lines.items():
                 if not isinstance(qty, int) or qty <= 0:
@@ -972,7 +1017,7 @@ class Sales:
                                         details={"permission": "sales.return_restricted",
                                                  "label": f"مرتجع صنف من قسم «{nr['name']}»"})
                 allocs = [dict(a) for a in self.db.all(
-                    "SELECT * FROM sale_allocations WHERE sale_line_id=? ORDER BY rowid DESC", (line_id,))]
+                    "SELECT *, rowid rid FROM sale_allocations WHERE sale_line_id=? ORDER BY rowid DESC", (line_id,))]
                 is_service = bool(self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"])
                 remaining_returnable = sum(a["qty_base"] - a["returned_qty"] for a in allocs)
                 if qty > remaining_returnable:
@@ -980,7 +1025,9 @@ class Sales:
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
                 before = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
-                booked = self._line_refunded(ctx, sid, line_id, allocs, l["discount_bp"], l["line_total"])
+                if history is None:
+                    history = returns_history(self.db, ctx.org_id, [sid]).get(sid, [])
+                rest = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], line_id, history)
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -1001,10 +1048,9 @@ class Sales:
                 # line add up to exactly what was paid for it, never a piaster more or less
                 r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
                 if l["line_total"] is not None:
-                    # reconciled with what this line already refunded (returns booked under the rule
-                    # before #324 M1 valued kept units differently): never more than the line in all,
-                    # never negative, and the return that empties the line settles it exactly
-                    rest = max(0, l["line_total"] - booked)
+                    # reconciled with what this line still holds (outstanding_value, the reports' figure too):
+                    # never more than the line in all, never negative, and the return that empties the line
+                    # settles it exactly
                     r = rest if not any(kept.values()) else max(0, min(r, rest))
                 line_refunds[line_id] = r
                 refund += r
@@ -1046,27 +1092,6 @@ class Sales:
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
-
-    def _line_refunded(self, ctx: Context, sid: str, line_id: str, allocs: list[dict], bp: int,
-                       line_total: int | None) -> int:
-        """What earlier returns refunded for one line, from their audit rows in order. A return booked
-        since #324 M1 stored its per-line refund; an older one is replayed with the rule it used."""
-        kept = {a["id"]: a["qty_base"] for a in allocs}
-        total = 0
-        for row in self.db.all("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale'"
-                               " AND entity_id=? AND action='sale.return' ORDER BY at, rowid", (ctx.org_id, sid)):
-            after = json.loads(row["after_json"] or "{}")
-            qty = int((after.get("lines") or {}).get(line_id) or 0)
-            if not qty:
-                continue
-            if line_id in (after.get("line_refunds") or {}):
-                total += int(after["line_refunds"][line_id])
-                _take(allocs, kept, qty)
-            else:
-                old = kept_value(allocs, kept, bp, line_total, price=alloc_gross)
-                _take(allocs, kept, qty)
-                total += old - kept_value(allocs, kept, bp, line_total, price=alloc_gross)
-        return total
 
     def return_receipt(self, ctx: Context, rid: str) -> dict:
         """One return with its items, for the printed return slip."""

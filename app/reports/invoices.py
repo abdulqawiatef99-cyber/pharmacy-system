@@ -12,7 +12,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import kept_value, line_gross_as_sold
+from ..sales.service import line_gross_as_sold, outstanding_value, returns_history
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -51,7 +51,7 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
             line_ids.append(l["id"])
     for k in range(0, len(line_ids), _CHUNK):
         part = line_ids[k:k + _CHUNK]
-        for a in db.all("SELECT sale_line_id, id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
+        for a in db.all("SELECT sale_line_id, id, rowid rid, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
                         f" FROM sale_allocations WHERE sale_line_id IN ({','.join('?' * len(part))}) ORDER BY rowid", tuple(part)):
             a = dict(a)
             allocs_of.setdefault(a.pop("sale_line_id"), []).append(a)
@@ -115,6 +115,9 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     show_cost = ctx.can("costs.read")
     hidden_ok = ctx.can("items.hidden")
     lines_of, allocs_of = _lines_and_allocations(db, [r["id"] for r in rows])
+    # the returns of the invoices that have any: their profit uses what each line still holds, as a return does
+    history = returns_history(db, ctx.org_id, [sid for sid, ls in lines_of.items() if any(
+        a["returned_qty"] for l in ls for a in allocs_of.get(l["id"], []))]) if show_cost else {}
     for r in rows:
         r["item_discount"] = r["customer_discount"] = 0
         r["profit"] = 0 if show_cost else None
@@ -132,7 +135,8 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
             returned = sum(a["returned_qty"] for a in allocs)
             if show_cost and r["status"] == "completed":
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                value = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
+                                          history.get(r["id"], []))
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
                 cost = sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
