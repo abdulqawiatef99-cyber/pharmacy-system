@@ -82,6 +82,14 @@ const { chromium } = require('playwright');
   out.posSeen = await p.evaluate(() => Object.values(localStorage).some((v) => v.includes('"pos":1')));
   await p.locator('[data-tour-replay="pos"]').click();
   out.replay = await title();
+  out.replayFocus = await p.evaluate(() => document.activeElement.id);
+  await p.keyboard.type(code, { delay: 5 }); await p.keyboard.press('Enter');     // a scan right after the replay
+  await p.waitForFunction(() => /^2\b/.test(document.querySelector('table.cart tbody tr .qty b')?.innerText ?? ''), null, { timeout: 10000 });
+  out.replayScanQty = await p.locator('table.cart tbody tr .qty b').first().innerText();
+  // keyboard users: Tab to the replay button and press Enter; the focus still goes back to the search box
+  await p.keyboard.press('Escape');
+  await p.locator('[data-tour-replay="pos"]').focus(); await p.keyboard.press('Enter');
+  out.kbdReplayFocus = await p.evaluate(() => document.activeElement.id);
 
   // dark mode + a narrow window: the bubble uses the theme and stays inside the window
   await p.keyboard.press('Escape');
@@ -147,6 +155,9 @@ class TourInBrowser(APICase):
         self.assertTrue(out["escClosed"])
         self.assertTrue(out["posSeen"])
         self.assertEqual(out["replay"], "البحث")
+        self.assertEqual(out["replayFocus"], "posQ")
+        self.assertRegex(out["replayScanQty"], r"^2\b")       # the scan after the replay added the item again
+        self.assertEqual(out["kbdReplayFocus"], "posQ")
         self.assertEqual(out["purFirst"], "قراءة فاتورة المورد")
         self.assertEqual(out["darkBg"], "rgb(36, 40, 44)")                               # --panel in dark mode
         left, right, width, scroll = out["box"]
