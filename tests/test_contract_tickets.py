@@ -10,7 +10,7 @@ from tests.test_estock_db_import import Base as ImportBase
 PW = "Staff-Pass-2026"
 
 
-class TestTicket(Base):
+class _TicketBase(Base):
     def setUp(self):
         super().setUp()
         self.kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة", "discount_local_bp": 1000})[0]["id"]
@@ -29,6 +29,9 @@ class TestTicket(Base):
         d = self.s.get(self.a, sid)
         f = self.s.safety_check(self.a, sid)
         self.s.complete(self.a, sid, paid_cash=d["total"], safety_decisions={i: "ok" for i in range(len(f))})
+
+
+class TestTicket(_TicketBase):
 
     def test_ticket_on_a_contract_sale_shows_in_the_report(self):
         sid = self.sale(self.cust)
@@ -83,3 +86,76 @@ class TestEstockTickets(ImportBase):
         self.assertEqual(r["estock"][1]["ticket_name"], "مستشفى تجربة")
         self.assertEqual(r["totals"]["total"], 0)                 # E-Stock history is never in the program's totals
         self.assertEqual(k.report(self.db, self.ctx, kid, "2026-11-19", "2026-11-30")["estock"], [])
+
+
+class TestCodexReview340(_TicketBase):
+    """Codex on #340 @a94f419 (each failed before the fix)."""
+
+    def test_p1_a_cashier_cannot_change_another_cashiers_draft_ticket(self):
+        people.add_user(self.db, self.ctx, username="asst2", full_name="B", password=PW, role_code="assistant")
+        b = self.login("asst2", PW)
+        sid = self.sale(self.cust)                        # asst's draft
+        with self.assertRaises(Forbidden):
+            k.set_ticket(self.db, b, sid, {"number": "T-X"})
+        self.assertIsNone(self.db.one("SELECT ticket_no FROM sales WHERE id=?", (sid,))["ticket_no"])
+        k.set_ticket(self.db, self.ctx, sid, {"number": "T-OK"})      # the owner may (sales.totals)
+
+    def test_p1_the_ticket_update_filters_by_organization(self):
+        import inspect
+        src = inspect.getsource(k.set_ticket)
+        upd = src[src.index("UPDATE sales SET ticket_name"):].split(")", 2)[0]
+        self.assertIn("org_id=?", upd)
+
+
+class TestOneClaimAcrossTheMove(ImportBase):
+    """Owner 18/11: the November Hikma claim spans E-Stock (1/11 to launch) and the program (launch to 30/11)."""
+
+    def test_claim_lines_from_the_archive_and_the_program_with_tickets(self):
+        from tests.test_estock_db_import import base_tables
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        t = base_tables()
+        d = t["Branches_sales_details"]
+        d[0].update({"buy_price": "24.0000", "total_sell": "30.0000"})
+        d[1].update({"buy_price": "140.0000", "total_sell": "35.0000", "back_amount": "0.5", "back_price": "70.0000"})
+        d.append({"branch_id": "3", "details_id": "3", "sales_id": "2", "product_id": "1", "amount": "2",
+                  "sell_price": "30.0000", "buy_price": "24.0000", "total_sell": "60.0000", "back_amount": "1",
+                  "back_price": "30.0000", "insert_date": "2026-11-18T11:00:00.000"})
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        k.link_customer(self.db, self.ctx, cust, kid)
+        s = Sales(self.db)
+        CashDrawer(self.db).open(self.ctx, 0)
+        sid = s.create(self.ctx, cust)
+        s.add_line(self.ctx, sid, self.item("100")["id"], units=3)
+        k.set_ticket(self.db, self.ctx, sid, {"name": "مستشفى تجربة", "number": "P-9"})
+        tot = s.get(self.ctx, sid)["total"]
+        f = s.safety_check(self.ctx, sid)
+        s.complete(self.ctx, sid, paid_cash=tot, safety_decisions={i: "ok" for i in range(len(f))})
+        c = k.claim(self.db, self.ctx, kid, "2026-11-01", "2099-12-31")
+        got = [(r["source"], r["invoice"], r["ticket_no"], r["item_code"], r["qty"], r["sale"], r["cost"]) for r in c["lines"]]
+        self.assertIn(("estock", "1", None, "100", "1", "30.00", "24.00"), got)
+        self.assertIn(("estock", "2", "T-123", "100", "1", "30.00", "24.00"), got)
+        self.assertNotIn("102", [g[3] for g in got])                     # fully returned in E-Stock
+        prog = [g for g in got if g[0] == "program"]
+        self.assertEqual(len(prog), 1)
+        self.assertEqual((prog[0][2], prog[0][3], prog[0][4]), ("P-9", "100", "3"))
+        self.assertEqual(prog[0][5], f"{tot / 100:.2f}")
+        self.assertEqual(prog[0][6], "24.00")                            # 3 units x 8.00 (E-Stock cost per unit)
+        self.assertEqual(c["sources"], ["estock", "program"])
+        shelf = c["totals"]["أحمد تجربة"]["الصيدلية"]                    # E-Stock's «الصيدليه» + the program: one store
+        self.assertEqual(shelf["lines"], 3)
+        self.assertEqual(shelf["sale"], f"{60 + tot / 100:.2f}")
+        self.assertEqual(shelf["cost"], "72.00")
+
+    def test_cost_needs_costs_read(self):
+        from app.core import people
+        self.assertTrue(self.run_import()["ok"])
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        people.add_user(self.db, self.ctx, username="mgr", full_name="M", password=PW, role_code="manager")
+        people.set_exception(self.db, self.ctx, self.db.one("SELECT id FROM users WHERE username='mgr'")["id"],
+                             "costs.read", "deny")
+        c = k.claim(self.db, self.login("mgr", PW), kid, "2026-11-01", "2026-11-30")
+        self.assertFalse(c["show_cost"])
+        self.assertTrue(all("cost" not in r for r in c["lines"]))
