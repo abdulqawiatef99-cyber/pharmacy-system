@@ -298,8 +298,8 @@ class Plan:
 
 
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
-               stores: list[str] | None = None, confirm: dict | None = None) -> Plan:
-    p = Plan(rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source,
+               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = False) -> Plan:
+    p = Plan(rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
@@ -362,7 +362,8 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             it["public_price"] = piasters(price)
             if exact_piasters(price) is None:
                 p.issue("Products", pid, code, "sell_price", r.get("sell_price"),
-                        f"كسر قرش في السعر: اتقرّب لـ {egp(Decimal(it['public_price']) / 100)}")
+                        f"كسر قرش في السعر: اتقرّب لـ {egp(Decimal(it['public_price']) / 100)}"
+                        f" (الفرق {Decimal(it['public_price']) / 100 - price})", value_egp=Decimal(it['public_price']) / 100 - price)
         for col in ("product_disc1", "product_disc2"):
             d = dec(r.get(col))
             if d is not None and not 0 <= d <= 100:
@@ -671,18 +672,15 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         bal_raw = dec(r.get("customer_current_money"))
         if r.get("customer_current_money") and bal_raw is None:
             p.issue("Customer", cid, code, "customer_current_money", r.get("customer_current_money"), "رصيد مش رقم", block=True)
-        bal = exact_piasters(bal_raw) if bal_raw is not None else 0
-        if bal is None:
-            p.issue("Customer", cid, code, "customer_current_money", r.get("customer_current_money"),
-                    "الرصيد فيه كسر قرش: محتاج قرار (اكتب الرصيد المؤكد)", block=True)
-            bal = piasters(bal_raw)
+        bal = _balance_piastres(p, "Customer", cid, code, "customer_current_money", r.get("customer_current_money"),
+                                bal_raw)
         lim_raw = dec(r.get("customer_max_money"))
         limit = 0
         if lim_raw is not None and 0 < lim_raw <= MAX_REAL_LIMIT:
             limit = piasters(lim_raw)
             if exact_piasters(lim_raw) is None:
                 p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
-                        f"كسر قرش في حد الآجل: اتقرّب لـ {egp(Decimal(limit) / 100)}")
+                        f"كسر قرش في حد الآجل: اتقرّب لـ {egp(Decimal(limit) / 100)} (الفرق {Decimal(limit) / 100 - lim_raw})")
         elif lim_raw is not None and lim_raw != 0:
             p.issue("Customer", cid, code, "customer_max_money", r.get("customer_max_money"),
                     "حد آجل مش حقيقي: اتحط صفر (مفيش آجل) لحد ما يتكتب في عمود «حد الآجل المؤكد» أو في شاشة العميل")
@@ -714,16 +712,32 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         bal_raw = dec(r.get("vendor_current_money"))
         if r.get("vendor_current_money") and bal_raw is None:
             p.issue("Vendor", vid, code, "vendor_current_money", r.get("vendor_current_money"), "رصيد مش رقم", block=True)
-        vbal = exact_piasters(bal_raw) if bal_raw is not None else 0
-        if vbal is None:
-            p.issue("Vendor", vid, code, "vendor_current_money", r.get("vendor_current_money"),
-                    "الرصيد فيه كسر قرش: محتاج قرار (اكتب الرصيد المؤكد)", block=True)
-            vbal = piasters(bal_raw)
+        vbal = _balance_piastres(p, "Vendor", vid, code, "vendor_current_money", r.get("vendor_current_money"), bal_raw)
         c = crows.get(("supplier", vid), {})
         p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
                                   inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
     _balance_sign_check(ex, p)
+
+
+def _balance_piastres(p: Plan, table, eid, code, fld, raw, d: Decimal | None) -> int:
+    """A balance with a fraction of a piaster (e.g. 675,493.171): the rounding rule is the owner's (manager
+    22:15). Until he answers it blocks, one line per value with the difference; --round-piastres rounds half
+    up, still one listed line per value. Never rounded silently."""
+    if d is None:
+        return 0
+    exact = exact_piasters(d)
+    if exact is not None:
+        return exact
+    rounded = piasters(d)
+    diff = Decimal(rounded) / 100 - d
+    if p.rules.get("round_piastres"):
+        p.issue(table, eid, code, fld, raw, f"كسر قرش: اتقرّب لـ {egp(Decimal(rounded) / 100)} (الفرق {diff})",
+                value_egp=diff)
+    else:
+        p.issue(table, eid, code, fld, raw, f"كسر قرش (الفرق لو اتقرّب {diff}): قرار المالك في التقريب، أو"
+                " --round-piastres، أو الرصيد المؤكد", value_egp=diff, block=True)
+    return rounded
 
 
 def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: dict, **more) -> dict:
@@ -1347,7 +1361,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
 # ---------------------------------------------------------------- one run
 def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_path: Path, write_archive: bool,
         confirm_file: Path | None = None, packs_file: Path | None = None, stock_source: str | None = None,
-        stores: list[str] | None = None, database: str | None = None) -> dict:
+        stores: list[str] | None = None, database: str | None = None, round_piastres: bool = False) -> dict:
     """Plan, apply into `db` (the copy on a dry run), build the archive, reconcile, write the reports.
     `write_archive` False = the archive is built in a temp file only to count it (dry run)."""
     import tempfile
@@ -1356,7 +1370,8 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     ex = Export(export_dir, database)
     packs = read_packs(Path(packs_file)) if packs_file else {}
     confirm = read_confirm(Path(confirm_file)) if confirm_file else {}
-    plan = build_plan(ex, packs=packs, stock_source=stock_source, stores=stores, confirm=confirm)
+    plan = build_plan(ex, packs=packs, stock_source=stock_source, stores=stores, confirm=confirm,
+                      round_piastres=round_piastres)
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")

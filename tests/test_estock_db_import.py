@@ -541,6 +541,19 @@ class TestCodexReview339(Base):
         self.assertIn(("C1", "customer_current_money"), {(b["code"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM customer_ledger"))
 
+    def test_sub_piastre_balance_rounds_only_with_the_owners_switch(self):
+        t = base_tables()
+        t["Vendor"][0]["vendor_current_money"] = "675493.1710"
+        t["Gedo_Vendors"] = []
+        res = self.run_import(tables=t)
+        b = [d for d in res["plan"].blocking if d["field"] == "vendor_current_money"]
+        self.assertEqual(len(b), 1)
+        self.assertIn("0.001", b[0]["action"])                           # the difference is shown
+        res = self.run_import(tables=t, round_piastres=True)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertIn("vendor_current_money", {d["field"] for d in res["plan"].dq if d["severity"] == "fixed"})
+        self.assertEqual(self.db.one("SELECT amount FROM supplier_ledger WHERE amount>0")["amount"], 67549317)
+
     def test_p1_sub_piastre_price_is_listed_not_silent(self):
         t = base_tables()
         t["Products"][0]["sell_price"] = "30.0050"
