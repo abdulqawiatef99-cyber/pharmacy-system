@@ -3,6 +3,7 @@ placeholder/title on home, sale, invoices, purchases, items, counts, shift, repo
 customers, expenses, suppliers, users, the program page (receipt / label / QR settings) and «me» is English.
 Synthetic data with English names only, so whatever Arabic is left is the program's own text."""
 from datetime import date, timedelta
+from pathlib import Path
 from decimal import Decimal
 
 from app.catalog import service as cat
@@ -21,6 +22,8 @@ const { chromium } = require('playwright');
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ lang: 'en' }) }));
   await p.goto(base + '/#/home'); await p.waitForSelector('#topbar:not([hidden])');
   const left = {};
+  await p.goto(base + '/#/home'); await p.waitForSelector('#app h1');
+  const greetEn = (await p.locator('#app h1').innerText()).trim();
   const screens = ['home', 'pos', 'sales', 'purchases', 'items', 'counts', 'shift', 'reports', 'stock-check', 'customers',
                    'expenses', 'suppliers', 'users', 'system', 'me'];
   for (const s of screens) {
@@ -44,7 +47,7 @@ const { chromium } = require('playwright');
       return [...out];
     });
   }
-  console.log(JSON.stringify(left));
+  console.log(JSON.stringify({ left, greetEn }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -67,6 +70,15 @@ class EnglishScreens(APICase):
             self.db.execute("UPDATE users SET full_name='Test Owner' WHERE id=?", (self.ctx.user_id,))
             self.db.execute("UPDATE suppliers SET name='Test Supplier' WHERE org_id=?", (self.ctx.org_id,))
         out = run_node(self, SCRIPT, "owner", OWNER_PW)
-        left = {s: [t for t in v if t not in ALLOWED] for s, v in out.items()}
+        self.assertEqual(out["greetEn"], "Hello, Test Owner")          # owner 18/11: «السلام عليكم يا …» at any hour
+        left = {s: [t for t in v if t not in ALLOWED] for s, v in out["left"].items()}
         self.maxDiff = None
         self.assertEqual({s: v for s, v in left.items() if v}, {})
+
+
+class Greeting(__import__("unittest").TestCase):
+    def test_home_greets_with_salam_at_any_hour(self):
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("<h1>السلام عليكم يا ${esc(ME.user.full_name)}</h1>", js)
+        self.assertNotIn("صباح الخير", js)
+        self.assertNotIn("مساء الخير", js)

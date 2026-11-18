@@ -15,7 +15,7 @@ KNOWN = {
     "⛔ هذا البيع أقل من التكلفة (بخسارة):n0nnهل أنت متأكد أنك تريد المتابعة؟",   # confirm()
     "مثال: panadol أو بنادول أو asp%cid أو 622...",              # the example is an Arabic item name
     "ملاحظات-البرنامج-0.json",                                  # a download file name
-    "و", "علبة0", "0 · 0 0 في العلبة · 0رصيد:", "0 يا 0",       # extractor joins: translated at run time
+    "و", "علبة0", "0 · 0 0 في العلبة · 0رصيد:",                # extractor joins: translated at run time
 }
 
 

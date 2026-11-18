@@ -87,7 +87,7 @@ const I18N_PATTERNS = [
   [/(?<![\u0600-\u06FF])من (\S+) إلى (\S+)/g, "from $1 to $2"], [/(?<![\u0600-\u06FF])يوم (\d+)/g, "day $1"],
   [/(?<![\u0600-\u06FF])بعد (\d+ days)/g, "in $1"],
   [/(?<![\u0600-\u06FF])فاتورة (\d+)/g, "Invoice $1"],
-  [/(Good (?:morning|evening)) يا /g, "$1, "],
+  [/(?<![\u0600-\u06FF])Hello يا /g, "Hello, "],
   [/(\d{1,2}(?::\d\d)?)\s*ص(?![\u0600-\u06FF])/g, "$1 AM"], [/(\d{1,2}(?::\d\d)?)\s*م(?![\u0600-\u06FF])/g, "$1 PM"],
   [/(?<![\u0600-\u06FF])(\d[\d.,]*) من (\d[\d.,]*)/g, "$1 of $2"], [/(?<![\u0600-\u06FF])من (?=\d)/g, "from "],
   // a short word right before or after a number ("ملف 2", "3 صورة"): one table each, so a name is never touched
@@ -4083,7 +4083,6 @@ async function viewProfit() {
 // ------------------------------------------------------------------ home
 async function viewHome() {
   const [h, att] = await Promise.all([api("/api/home"), api("/api/attendance")]);
-  const hour = new Date().getHours(), greet = hour < 12 ? "صباح الخير" : "مساء الخير";
   const lvl = { error: ["b-err", "✕"], warning: ["b-warn", "⚠"], info: ["b-info", "ℹ"] };
   setTimeout(() => $("#attBtn")?.addEventListener("click", async () => {
     try { await api("/api/attendance", { method: "POST", body: { action: att.open ? "out" : "in" } }); toast(att.open ? "✓ تم تسجيل الانصراف" : "✓ تم تسجيل الحضور"); viewHome(); }
@@ -4091,7 +4090,7 @@ async function viewHome() {
   }), 0);
   const can = (p) => ME.permissions.includes(p);
   const diff = h.sales && h.sales_week_ago ? Math.round((h.sales.total - h.sales_week_ago) / h.sales_week_ago * 100) : null;
-  app.innerHTML = `<section class="panel"><h1>${greet} يا ${esc(ME.user.full_name)}</h1>
+  app.innerHTML = `<section class="panel"><h1>السلام عليكم يا ${esc(ME.user.full_name)}</h1>
     <div class="quick">
       ${(ME.ui?.home || []).filter(canScreen).map((k, i) => `<a class="btn ${i === 0 ? "big" : "secondary"}" href="#/${k}">${esc(SCREENS[k][0])}</a>`).join("")}
       ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
