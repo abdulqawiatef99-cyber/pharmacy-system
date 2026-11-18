@@ -313,6 +313,7 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
     _plan_parties(ex, p, confirm or {})
     _plan_history_checks(ex, p)
     _plan_money_info(ex, p)
+    _plan_snapshot(ex, p)
     return p
 
 
@@ -443,6 +444,10 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
         if len(hits) != 1:
             raise ExportError(f"--stock-source {source} مش واحد من: " + ", ".join(groups))
         chosen, why = hits[0], "من --stock-source"
+    elif len([g for g in groups.values() if g["table"].lower() == "product_amount"]) == 1:
+        # the local stock table is preferred (manager 22:15); the branch mirror must say the same
+        chosen = next(g for g in groups.values() if g["table"].lower() == "product_amount")
+        why = "Product_Amount: جدول رصيد الصيدلية نفسها" + _mirror_check(ex, p, chosen, groups)
     else:
         ranked = sorted(groups.values(), key=lambda g: (g["fresh_hits"], g["last_change"]), reverse=True)
         best = ranked[0] if ranked else None
@@ -459,10 +464,20 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
     p.stock_source["decision"] = {"key": chosen["key"], "why": why}
     items = {it["product_id"]: it for it in p.items}
     by_item: dict[str, list[dict]] = defaultdict(list)
+    others: dict[str, list] = defaultdict(lambda: [0, Decimal(0)])
     for r in chosen["rows"]:
         if ident(r.get("store_id")) not in store_ids:
+            o = others[ident(r.get("store_id"))]
+            o[0] += 1
+            o[1] += (dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)
             continue
         by_item[ident(r.get("product_id"))].append(r)
+    names = {s["id"]: s["name"] for s in allst}
+    for sid, (n, v) in sorted(others.items()):
+        # OWNER: 24/10 "stays separate, not moved"; 18/11 "move everything": his answer decides
+        p.issue(chosen["table"], sid, names.get(sid, ""), "store_id", f"{n} سطر",
+                f"مخزن «{names.get(sid, sid)}» ما اتنقلش: مستني قرار المالك (24/10 قال يفضل منفصل، 18/11 قال كله يتنقل)",
+                value_egp=v, kind="review")
     for pid, rows in sorted(by_item.items(), key=lambda kv: (dec(kv[0]) or 0)):
         it = items.get(pid)
         tot = {"raw_units": Decimal(0), "raw_cost": Decimal(0), "listed_units": Decimal(0),
@@ -500,8 +515,19 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                 p.issue(chosen["table"], eid, it["code"], "buy_price", r.get("buy_price") or "(فاضي)",
                         "تكلفة بالسالب أو فاضية: اتنقل من غير تكلفة", value_egp=amt * (bp or 0))
                 tot["listed_cost"] -= amt * (bp or 0)
+            sp = dec(r.get("sell_price"))
             row = {"eid": eid, "product_id": pid, "exact": exact, "expiry": exp, "unit_cost": unit_cost,
-                   "amount": amt, "bp": bp}
+                   "amount": amt, "bp": bp,
+                   # one program batch per E-Stock batch: its store-counter key (manager 22:15)
+                   "batch_no": (f"{ident(r.get('store_id'))}-{ident(r.get('counter_id'))}"
+                                if ident(r.get("counter_id")) else None),
+                   "batch_price": piasters(sp) if sp is not None and sp > 0 else None,
+                   "raw": {"vendor_id": ident(r.get("vendor_id")) or None, "tax_price": r.get("tax_price") or None,
+                           "counter_id": ident(r.get("counter_id")) or None, "store_id": ident(r.get("store_id")),
+                           "sell_price": r.get("sell_price") or None, "buy_price": r.get("buy_price") or None}}
+            if sp is not None and sp > 0 and exact_piasters(sp) is None:
+                p.issue(chosen["table"], eid, it["code"], "sell_price", r.get("sell_price"),
+                        f"كسر قرش في سعر التشغيلة: اتقرّب لـ {egp(Decimal(row['batch_price']) / 100)}")
             if not exp and amt > 0:      # owner 18/11: a drug without expiry is reviewed; a non-drug needs none
                 if it["is_drug"] == 0:
                     p.issue(chosen["table"], eid, it["code"], "expiry", "(فاضي)", "صنف مش دواء: عادي من غير صلاحية",
@@ -566,10 +592,87 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
     _unit_evidence(ex, p)
 
 
+def local_branch(ex: Export) -> str | None:
+    """This pharmacy's branch in E-Stock (co_inf.branch_id). The Branches_* tables also hold the other
+    pharmacy's rows, with ids that overlap the local ones (manager 22:15)."""
+    for r in ex.rows("co_inf"):
+        b = ident(r.get("branch_id"))
+        if b:
+            return b
+    return None
+
+
+def sales_lines(ex: Export) -> list[dict]:
+    """The local sales lines: Sales_details when it was read, else the Branches_ mirror of this branch only."""
+    if ex.has("Sales_details") and ex.rows("Sales_details"):
+        return ex.rows("Sales_details")
+    b = local_branch(ex)
+    return [r for r in ex.rows("Branches_sales_details") if b is None or ident(r.get("branch_id")) == b]
+
+
+def _plan_snapshot(ex: Export, p: Plan) -> None:
+    """A read taken while E-Stock sells is not one moment (19:15 read: Sales_header to 19:40, the money
+    journal to 19:13; one stock row read twice would double a batch). Duplicate keys stop the move; tables
+    that end at different times are listed; the real move reads with E-Stock closed (manager 22:15)."""
+    for table, key in (("Product_Amount", "pa_id"), ("Sales_header", "sales_id"), ("Gedo_Financial", "gf_id"),
+                       ("Gedo_customers", "gc_id"), ("Gedo_Vendors", "gv_id"), ("Products", "product_id"),
+                       ("Customer", "customer_id"), ("Vendor", "vendor_id"), ("Sales_details", "details_id")):
+        rows = ex.rows(table)
+        if not rows or key not in rows[0]:
+            continue
+        seen, dup = set(), []
+        for r in rows:
+            k = ident(r.get(key))
+            if k in seen:
+                dup.append(k)
+            seen.add(k)
+        if dup:
+            p.issue(table, ", ".join(dup[:10]), "", key, f"{len(dup)} مكرر",
+                    "نفس السطر اتقرا مرتين (القراية كانت وإي ستوك شغال): اقفل إي ستوك واقرا تاني", block=True)
+    ends = {}
+    for table in ("Sales_header", "Sales_details", "Branches_sales_details", "Gedo_Financial", "Gedo_customers",
+                  "Gedo_Vendors", "Purchase_header"):
+        dates = [r.get("insert_date") or "" for r in ex.rows(table) if r.get("insert_date")]
+        if dates:
+            ends[table] = max(dates)[:16]
+    p.checks["snapshot_ends"] = ends
+    if len(set(ends.values())) > 1:
+        p.issue("export", "", "", "insert_date", "، ".join(f"{t} {v}" for t, v in sorted(ends.items())),
+                "الجداول بتخلص في أوقات مختلفة (القراية كانت وإي ستوك شغال): النقل الحقيقي يتقرا وإي ستوك مقفول",
+                kind="review")
+    gf_head = [dec(r.get("gf_id")) for r in ex.rows("Sales_header") if dec(r.get("gf_id"))]
+    gf_led = [dec(r.get("gf_id")) for r in ex.rows("Gedo_Financial") if dec(r.get("gf_id"))]
+    if gf_head and gf_led and max(gf_head) > max(gf_led):
+        p.issue("Sales_header", "", "", "gf_id", f"{max(gf_head)} > {max(gf_led)}",
+                "فواتير أحدث من دفتر الفلوس في نفس القراية: النقل الحقيقي يتقرا وإي ستوك مقفول", kind="review")
+
+
+def _mirror_check(ex: Export, p: Plan, chosen: dict, groups: dict) -> str:
+    """Product_Amount against this branch's Branches_Product_Amount rows: same items, expiries and amounts?"""
+    b = local_branch(ex)
+    mirror = next((g for g in groups.values() if g["table"].lower() == "branches_product_amount"
+                   and g["branch_id"] == b), None)
+    if not mirror:
+        p.stock_source["mirror_check"] = {"branch": b, "result": "no mirror rows for this branch"}
+        return f" (مفيش نسخة للفرع {b} في Branches_Product_Amount للمقارنة)"
+    key = lambda r: (ident(r.get("product_id")), ident(r.get("store_id")), iso_day(r.get("exp_date")),   # noqa: E731
+                     str(dec(r.get("amount")) or 0), str(dec(r.get("buy_price")) or 0))
+    a, m = sorted(map(key, chosen["rows"])), sorted(map(key, mirror["rows"]))
+    same = a == m
+    p.stock_source["mirror_check"] = {"branch": b, "mirror": mirror["key"], "rows": len(a), "mirror_rows": len(m),
+                                      "equal": same}
+    if not same:
+        diff = len(set(a) ^ set(m))
+        p.issue("stock", "", "", "mirror", f"{len(a)} / {len(m)} سطر، {diff} مختلف",
+                "Product_Amount مش زي نسخة الفرع في Branches_Product_Amount: اتنقل Product_Amount، راجع الفرق",
+                kind="review")
+    return f"؛ مطابق لنسخة الفرع {b}" if same else f"؛ مختلف عن نسخة الفرع {b} (في التقرير)"
+
+
 def _stock_groups(ex: Export) -> dict[str, dict]:
     """Each (table, branch) holding stock, with how fresh it is: of the items in the latest sales lines,
     how many have a stock row this group changed at or after that sale."""
-    sales = sorted((r for r in ex.rows("Branches_sales_details") if r.get("insert_date")),
+    sales = sorted((r for r in sales_lines(ex) if r.get("insert_date")),
                    key=lambda r: r["insert_date"], reverse=True)[:300]
     last_sold: dict[str, str] = {}
     for r in sales:
@@ -605,7 +708,7 @@ def _unit_evidence(ex: Export, p: Plan) -> None:
     divide the pack size disagrees with the rule: listed for a look, it does not stop the move."""
     items = {it["product_id"]: it for it in p.items}
     seen = set()
-    for r in ex.rows("Branches_sales_details"):
+    for r in sales_lines(ex):
         pid, f = ident(r.get("product_id")), dec(r.get("sale_unit_change"))
         it = items.get(pid)
         if not it or f is None or f <= 1 or f != f.to_integral_value() or (pid, f) in seen:
@@ -1145,12 +1248,15 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
         rows, units = [], 0
         for s in plan.stock:
             iid = item_map[s["product_id"]]
-            bid = inventory.get_or_create_batch(db, ctx, iid, None, s["expiry"], "day" if s["expiry"] else None)
+            bid = inventory.get_or_create_batch(db, ctx, iid, s.get("batch_no"), s["expiry"], "day" if s["expiry"] else None)
+            if bid and s.get("batch_price") is not None:     # the legal price printed on this batch
+                db.execute("UPDATE batches SET public_price=? WHERE id=? AND org_id=? AND public_price IS NULL",
+                           (s["batch_price"], bid, ctx.org_id))
             inventory.post_movement(db, ctx, item_id=iid, qty_delta=s["units"], movement_type="opening", batch_id=bid,
                                     unit_cost=s["unit_cost"], ref_type="import_run", ref_id=run_id,
                                     ref_line_id=s["eid"], note="رصيد افتتاحي من إي ستوك")
             units += s["units"]
-            rows.append(({"pa_id": s["eid"], "product_id": s["product_id"]}, iid))
+            rows.append(({"pa_id": s["eid"], "product_id": s["product_id"], **s.get("raw", {})}, iid))
         return rows, {"stock_rows": len(rows), "units": units, "source": src}
     runs["stock"], r = _step(db, ctx, "opening_stock", "stock", stock_sha, esha, label, do_stock)
     resumed += ["stock"] if r else []

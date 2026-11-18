@@ -175,7 +175,11 @@ class TestFullMove(Base):
         exp = {r["expiry_date"] for r in self.db.all("SELECT expiry_date FROM batches WHERE item_id=?",
                                                      (self.item("100")["id"],))}
         self.assertEqual(exp, {"2027-05-01", "2026-12-01"})
-        self.assertIsNone(self.db.one("SELECT batch_id FROM stock_movements WHERE item_id=?", (self.item("E4")["id"],))["batch_id"])
+        b = self.db.one("SELECT b.batch_no, b.expiry_date, b.public_price FROM stock_movements m JOIN batches b"
+                        " ON b.id=m.batch_id WHERE m.item_id=?", (self.item("E4")["id"],))
+        self.assertEqual((b["batch_no"], b["expiry_date"]), ("1-1", None))   # E-Stock's batch key, no expiry
+        self.assertEqual(self.db.one("SELECT public_price FROM batches WHERE batch_no='1-1' AND item_id=?",
+                                     (self.item("100")["id"],))["public_price"], 3000)
         self.assertEqual(res["plan"].stock_source["decision"]["key"], "Product_Amount:3")
         st = res["reconciliation"]["stock"]
         self.assertEqual((st["planned_units"], st["program_units"]), (66, 66))
@@ -364,16 +368,17 @@ class TestRefusalsAndDecisions(Base):
             self.run_import(tables=t)
 
     def test_unclear_live_stock_table_stops_and_explicit_choice_works(self):
-        t = base_tables()
-        t["Branches_Product_Amount"] = [stock_row(9, 1, 1, "50", "24.0000", "2027-05-01T00:00:00", branch="1"),
-                                        stock_row(10, 3, 1, "1", "140.0000", "2027-05-01T00:00:00", branch="1")]
+        t = base_tables()                                   # no Product_Amount: two fresh branch groups
+        t["Branches_Product_Amount"] = [dict(r, branch_id="3") for r in t.pop("Product_Amount")] + \
+            [stock_row(9, 1, 1, "50", "24.0000", "2027-05-01T00:00:00", branch="1"),
+             stock_row(10, 3, 1, "1", "140.0000", "2027-05-01T00:00:00", branch="1")]
         folder = self.export(t)
         res = self.run_import(folder=folder)
         self.assertFalse(res["ok"])
         self.assertFalse(res["applied"])
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
         self.assertIn("stock_source", {b["field"] for b in res["plan"].blocking})
-        res = self.run_import(folder=folder, stock_source="Product_Amount:3")
+        res = self.run_import(folder=folder, stock_source="Branches_Product_Amount:3")
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
 
     def test_broken_unit_conversion_needs_a_pack_decision(self):
@@ -869,3 +874,61 @@ class TestPartialReadIsCompletedFirst(Base):
         sub = lines[lines.index(":reread"):]
         self.assertIn('-File "%~dp0estock-db-read.ps1" -RetryFailed <nul', sub[2])
         self.assertTrue(all('--dir "%READS%"' in l for l in lines if '"%MANAGE%" import-estock-db' in l))
+
+
+class TestManagerSchemaReview(Base):
+    """Manager 22:15, from E-Stock's real summary.txt."""
+
+    def test_a_row_read_twice_blocks(self):
+        t = base_tables()
+        t["Product_Amount"].append(dict(t["Product_Amount"][0]))           # pa_id 1 twice
+        res = self.run_import(tables=t)
+        self.assertIn(("Product_Amount", "pa_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
+        self.assertFalse(self.db.one("SELECT 1 FROM items"))
+
+    def test_tables_that_end_at_different_times_are_listed(self):
+        t = base_tables()
+        t["Gedo_Financial"] = [{"gf_id": "5", "insert_date": "2026-11-18T10:13:00.000"}]
+        t["Sales_header"][0]["gf_id"] = "7"
+        res = self.run_import(tables=t)
+        got = {(d["field"], d["severity"]) for d in res["plan"].dq}
+        self.assertIn(("insert_date", "review"), got)
+        self.assertIn(("gf_id", "review"), got)
+
+    def test_branch_mirror_rows_of_the_other_pharmacy_are_left_out(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "3", "co_name": "x"}]
+        t["Branches_sales_details"].append({"branch_id": "2", "details_id": "1", "sales_id": "1", "product_id": "3",
+                                            "amount": "9", "sale_unit_change": "5", "insert_date": SOLD})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertNotIn(("102", "sale_unit_change"), {(d["code"], d["field"]) for d in res["plan"].dq})
+        from app.dataimport import estock_db as e
+        self.assertEqual(len(e.sales_lines(e.Export(self.export(t)))), 2)
+
+    def test_product_amount_is_compared_with_the_branch_mirror(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "1"}]
+        t["Branches_Product_Amount"] = [dict(r, branch_id="1") for r in t["Product_Amount"]]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["plan"].stock_source["mirror_check"]["equal"])
+        self.assertEqual(res["plan"].stock_source["decision"]["key"], "Product_Amount:3")
+        t["Branches_Product_Amount"][0]["amount"] = "11"
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t)
+        self.assertFalse(res["plan"].stock_source["mirror_check"]["equal"])
+        self.assertIn(("stock", "mirror"), {(d["table"], d["field"]) for d in res["plan"].dq})
+
+    def test_the_hospital_store_is_reported_for_the_owner(self):
+        res = self.run_import()
+        row = [d for d in res["plan"].dq if d["field"] == "store_id"][0]
+        self.assertEqual((row["severity"], row["estock_id"], row["value_egp"]), ("review", "2", "560.00"))
+        self.assertIn("قرار المالك", row["action"])
+
+    def test_stock_rows_keep_vendor_and_tax_in_the_import_row(self):
+        import json
+        self.run_import()
+        raw = [json.loads(r["raw"]) for r in self.db.all(
+            "SELECT r.raw FROM import_rows r JOIN import_runs u ON u.id=r.run_id WHERE u.kind='opening_stock'")]
+        self.assertTrue(all("vendor_id" in x and "tax_price" in x and "counter_id" in x for x in raw))
