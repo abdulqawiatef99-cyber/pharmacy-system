@@ -1057,8 +1057,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def backup_health_view(req):
-        ctx = ctx_of(req)
-        return J(backup_health() if ctx.can("settings.manage") else {})
+        ctx_of(req).require("settings.manage")
+        return J(backup_health())
 
     @handler
     async def home_view(req):

@@ -45,7 +45,7 @@ class BackupHealth(APICase):
         people.add_user(self.db, self.ctx, username="cashier1", full_name="C", password="Staff-Pass-2026", role_code="assistant")
         self.state(last_ok=False)
         self.http_login("cashier1", "Staff-Pass-2026")
-        self.assertEqual(self.c.get("/api/backup/health", headers=H).json(), {})
+        self.assertEqual(self.c.get("/api/backup/health", headers=H).status_code, 403)
 
 
 SCRIPT = r"""
