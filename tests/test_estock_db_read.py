@@ -32,11 +32,12 @@ class TestEstockDbRead(unittest.TestCase):
         self.assertEqual(text.count("FROM $full WITH (NOLOCK)"), 2)    # the stats and the full read
         self.assertIn("SELECT", sql)
 
-    def test_password_never_printed_and_csv_stays_under_documents(self):
+    def test_password_never_printed_and_csv_stays_off_the_cloud(self):
         text = PS1.read_text(encoding="utf-8-sig")
         self.assertNotRegex(text, r"Say[^\n]*\$cs\b")                  # a connection string is never logged
-        self.assertIn("GetFolderPath('MyDocuments')", text)
-        self.assertIn('"estock-db-read\\$stamp"', text)
+        self.assertIn('Join-Path $env:LOCALAPPDATA "PharmacyPlatform\\estock-db-read\\$stamp"', text)
+        self.assertNotIn("MyDocuments", text)                         # Documents can be synced by OneDrive
+        self.assertNotIn("Documents", BAT.read_text())
         self.assertIn("InvariantCulture", text)                       # CSV dates/numbers not in the PC's culture
 
     def test_codex_333_partial_fallback_and_folder_per_instance(self):
@@ -53,6 +54,12 @@ class TestEstockDbRead(unittest.TestCase):
         self.assertLess(text.index("function Usable"), text.index("$u = Usable $c"))   # defined before use
         # (3) tables\<instance>\<db>\
         self.assertIn("Join-Path (Join-Path $tables ($srv -replace", text)
+
+    def test_binary_cells_are_base64_not_type_names(self):
+        text = PS1.read_text(encoding="utf-8-sig")
+        self.assertIn("$_.DataType -eq [byte[]]", text)
+        self.assertIn("if ($v -is [byte[]]) { $v = 'b64:' + [Convert]::ToBase64String($v) }", text)
+        self.assertLess(text.index("ToBase64String"), text.rindex("Export-Csv -Path"))
 
     def test_in_app_update_ships_the_ps1(self):
         import io

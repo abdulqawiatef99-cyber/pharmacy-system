@@ -1,6 +1,7 @@
 ﻿# Read the whole E-Stock database on this PC, READ ONLY (owner request 18/11/2026, F91 / F98).
 # - Never writes to E-Stock: SELECT only, WITH (NOLOCK) so the live cashier is never blocked.
-# - Real data stays on this PC: full tables go to Documents\estock-db-read\<stamp>\tables\*.csv.
+# - Real data stays on this PC: full tables go to %LOCALAPPDATA%\PharmacyPlatform\estock-db-read\<stamp>\tables\
+#   (LOCALAPPDATA is never synced by OneDrive, unlike Documents).
 # - summary.txt has the structure only (tables, columns, types, row counts, filled counts,
 #   min/max of dates and numbers, never any text value), so it can be read to compare features.
 # - Connection: Windows sign-in to every local SQL Server instance first. If that fails, connection
@@ -9,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 # CSV dates and numbers in one fixed format (not the PC's Arabic culture: AM/PM marks, decimal comma)
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$out = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "estock-db-read\$stamp"
+$out = Join-Path $env:LOCALAPPDATA "PharmacyPlatform\estock-db-read\$stamp"
 $tables = Join-Path $out 'tables'
 New-Item -ItemType Directory -Force -Path $tables | Out-Null
 $summary = Join-Path $out 'summary.txt'
@@ -147,7 +148,21 @@ foreach ($pair in $conns) {
             $data = Q $conn "SELECT * FROM $full WITH (NOLOCK)"
             $csv = Join-Path $dbDir (($t.sc + '.' + $t.nm) -replace '[\\/:*?"<>|]', '_')
             $names = [string[]]($data.Columns | ForEach-Object { $_.ColumnName })
-            $data.Rows | Select-Object -Property $names | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
+            $bin = @($data.Columns | Where-Object { $_.DataType -eq [byte[]] })
+            if ($bin.Count -eq 0) {
+                $data.Rows | Select-Object -Property $names | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
+            } else {
+                # binary cells (varbinary, binary, image, timestamp) as Base64 with a b64: prefix, not "System.Byte[]"
+                $data.Rows | ForEach-Object {
+                    $o = [ordered]@{}
+                    foreach ($n in $names) {
+                        $v = $_[$n]
+                        if ($v -is [byte[]]) { $v = 'b64:' + [Convert]::ToBase64String($v) }
+                        $o[$n] = $v
+                    }
+                    [pscustomobject]$o
+                } | Export-Csv -Path ($csv + '.csv') -NoTypeInformation -Encoding UTF8
+            }
             $totalRows += $rows; $totalTables++              # counted only once its CSV is written
           } catch {
             Say ("   ERROR reading " + $t.sc + "." + $t.nm + ": " + $_.Exception.Message)
