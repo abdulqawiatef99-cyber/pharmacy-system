@@ -44,6 +44,24 @@ class TestShiftReportCountsEveryRefund(Base):
         self.assertEqual((sm["card_refunds"], sm["credit_refunds"]), (2000, 2000))
         self.assertEqual(sm["expected_cash"], 10000 + 4000 - 2000)                # the drawer only sees cash
 
+    def test_refund_times_use_the_shift_format_and_cash_follows_its_drawer_movement(self):
+        """Codex P2 on #323: return times had milliseconds and shift times microseconds, so a return in the
+        same millisecond as the close compared as later and fell out of the closed report."""
+        sh = self.cd.open(self.ctx, 10000)
+        a, b = self.sale(), self.sale(card=4000)
+        ra = self.s.return_items(self.ctx, a["id"], {a["lines"][0]["id"]: 1}, refund_method="cash", reason="مرتجع")
+        rb = self.s.return_items(self.ctx, b["id"], {b["lines"][0]["id"]: 1}, refund_method="card", reason="مرتجع")
+        at = self.db.one("SELECT created_at FROM sale_returns WHERE id=?", (rb["return_id"],))["created_at"]
+        self.assertRegex(at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$")
+        self.cd.close(self.ctx, 10000 + 4000 - 2000)
+        with self.db.transaction():           # a row written by the old default, same millisecond as the close
+            closed = self.db.one("SELECT closed_at FROM cash_shifts WHERE id=?", (sh,))["closed_at"]
+            self.db.execute("UPDATE sale_returns SET created_at=? WHERE id=?", (closed[:23] + "Z", ra["return_id"]))
+            self.db.execute("UPDATE sale_returns SET created_at=? WHERE id=?", (closed, rb["return_id"]))
+        r = self.cd.report(self.ctx, sh)
+        self.assertEqual(r["returns_by_method"]["cash"], {"count": 1, "total": 2000})   # by its drawer movement
+        self.assertEqual(r["returns_by_method"]["card"], {"count": 1, "total": 2000})   # at the close instant
+
     def test_a_return_in_the_next_shift_stays_out_of_the_closed_one(self):
         sh = self.cd.open(self.ctx, 10000)
         a = self.sale(card=4000)

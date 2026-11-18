@@ -57,16 +57,21 @@ def _sales_of(s) -> tuple[str, tuple]:
 
 
 def _returns_of(db: Database, s) -> dict:
-    """Returns made while the shift was open, by refund method: cash ones left this drawer; card and credit
-    ones lower the card and credit totals of the day (final review P2-1). A cash refund needs the open shift,
-    so it always falls inside one shift's open-close window."""
-    rows = db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r"
-                  " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
-                  " AND (? IS NULL OR r.created_at<?) AND x.org_id=? AND x.branch_id=? GROUP BY 1",
-                  (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"]))
+    """Returns made while the shift was open, by refund method (final review P2-1). Cash refunds are found
+    through their drawer movement in this shift, so the report always reconciles with the drawer. Card and
+    credit refunds (and a cash refund of 0, which moves no cash) by the shift's open-close window: return
+    times are written by the same clock and format as the shift's (Codex P2 on #323)."""
     by = {m: {"count": 0, "total": 0} for m in ("cash", "card", "credit")}
-    for r in rows:
-        by[r["m"]] = {"count": r["n"], "total": r["t"]}
+    c = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN cash_movements m"
+               " ON m.ref_id=r.id AND m.kind='refund' WHERE m.shift_id=? AND m.org_id=?", (s["id"], s["org_id"]))
+    by["cash"] = {"count": c["n"], "total": c["t"]}
+    for r in db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r"
+                    " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
+                    " AND (? IS NULL OR r.created_at<=?) AND x.org_id=? AND x.branch_id=?"
+                    " AND (r.refund_method IN ('card','credit') OR r.total=0) GROUP BY 1",
+                    (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"])):
+        cur = by[r["m"]]
+        by[r["m"]] = {"count": cur["count"] + r["n"], "total": cur["total"] + r["t"]}
     return by
 
 

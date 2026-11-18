@@ -980,9 +980,11 @@ class Sales:
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
             rid = new_id()
+            # created_at by the same clock and format as the shift times: the shift report places card and
+            # credit refunds by them (Codex P2 on #323; the table default has milliseconds only)
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
-                            " created_by) VALUES (?,?,?,?,?,?,?)",
-                            (rid, ctx.org_id, sid, refund, refund_method, reason.strip(), ctx.user_id))
+                            " created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (rid, ctx.org_id, sid, refund, refund_method, reason.strip(), ctx.user_id, _now()))
             self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund, sid))
             if refund_method == "credit":
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
