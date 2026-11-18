@@ -396,6 +396,19 @@ def cmd_import_estock_db(a, s):
     from app.core import backup
     from app.core.errors import DomainError
     from app.dataimport import estock_archive, estock_db
+    if a.status:      # estock-db-import.bat: is the latest E-Stock read complete? Reads files only, writes nothing
+        try:
+            ex = estock_db.Export(Path(a.dir), a.database)
+        except DomainError as e:
+            sys.exit(f"FAIL: {e.message}")
+        print("E-Stock read:", " + ".join(ex.runs), f"({len(ex.tables)} tables, {ex.instance}/{ex.database})")
+        if ex.missing:
+            print("NOT READ:", ", ".join(ex.missing))
+            sys.exit(3)
+        print("READ: COMPLETE")
+        return
+    if not a.username:
+        sys.exit("FAIL: --username is required")
     db = _db(s)
     pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
     tok = accounts.login(db, a.username, pw)["token"]
@@ -621,14 +634,16 @@ def main(argv=None):
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default=None)
     ed = sub.add_parser("import-estock-db", help="move the whole E-Stock database from estock-db-read.bat's export")
-    ed.add_argument("--dir", required=True, help="export folder (the one with tables\\manifest.csv)")
+    ed.add_argument("--dir", required=True,
+                    help="one read (the folder with tables\\manifest.csv) or estock-db-read\\ (newest read + its retries)")
+    ed.add_argument("--status", action="store_true", help="only say whether the read is complete (exit 3: tables missing)")
     ed.add_argument("--confirm", help="openings-to-confirm.xlsx after the owner filled the confirmed column")
     ed.add_argument("--packs", help="pack sizes decided by a person (.xlsx or .json), for broken unit conversions")
     ed.add_argument("--stock-source", help="live stock table when it is not clear, e.g. Product_Amount:3")
     ed.add_argument("--store", action="append", help="E-Stock store name or id (repeat); default: الصيدلية")
     ed.add_argument("--database", help="E-Stock database name when the export holds more than one (default stock)")
     ed.add_argument("--out", help="reports folder (default data/reports/estock-db-<time>)")
-    ed.add_argument("--username", required=True)
+    ed.add_argument("--username")
     ed.add_argument("--password", help="for automation only; prefer the prompt")
     ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")
     ed.add_argument("--backup-dir", default=None)

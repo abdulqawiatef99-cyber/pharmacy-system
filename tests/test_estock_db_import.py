@@ -420,7 +420,7 @@ class TestCommand(Base):
         s = SimpleNamespace(data_dir=self.tmp / "data", upload_dir=self.tmp / "data" / "uploads",
                             backup_path=self.tmp / "backups")
         s.data_dir.mkdir(exist_ok=True)
-        a = SimpleNamespace(username="owner", password=OWNER_PW, dir=str(folder), confirm=None, packs=None,
+        a = SimpleNamespace(username="owner", password=OWNER_PW, dir=str(folder), confirm=None, packs=None, status=False,
                             stock_source=None, store=None, database=None, out=str(self.tmp / ("o" + str(apply))),
                             apply=apply, backup_dir=None, **kw)
         buf = io.StringIO()
@@ -471,7 +471,7 @@ class TestBat(unittest.TestCase):
 
     def test_dry_run_confirm_apply_verify_in_order(self):
         L = self.lines
-        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l]
+        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
         self.assertEqual(len(runs), 2)
         dry, apply = runs
         self.assertNotIn("--apply", L[dry])
@@ -716,3 +716,88 @@ class TestOwnerDecisions1118(Base):
         rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
         self.assertIn("مفيش رصيد خزنة ولا محفظة", rec)
         self.assertIn("Gedo_Financial", rec)
+
+
+class TestPartialReadIsCompletedFirst(Base):
+    """Manager 18/11: a PARTIAL read is completed by reading only the failed tables again, then merged."""
+
+    def runs(self, with_retry=True):
+        root = Path(tempfile.mkdtemp(dir=self.tmp, prefix="estock-db-read"))
+        t = base_tables()
+        vendor = t.pop("Vendor")
+        write_export(root / "20261118-100000", t)
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "E-Stock database read (read only) 20261118-100000\nRESULT: PARTIAL - 25 tables read; 2 not read:\n"
+            "   PC / stock.dbo.Vendor\n   PC / stock.dbo.Products (stats)\nfull tables: ...\n", encoding="utf-8-sig")
+        if with_retry:
+            write_export(root / "20261118-110000", {"Vendor": vendor})
+            (root / "20261118-110000" / "summary.txt").write_text(
+                "E-Stock database read (read only) 20261118-110000\nretry of run 20261118-100000: 1 table(s)\n"
+                "only: stock.dbo.Vendor\nRESULT: PASS - 1 tables, 2 rows read.\n", encoding="utf-8-sig")
+        return root
+
+    def test_a_partial_read_blocks_and_status_says_so(self):
+        root = self.runs(with_retry=False)
+        ex = estock_db.Export(root)
+        self.assertEqual(ex.missing, ["stock.dbo.vendor"])               # the (stats) one was exported
+        from app.core.errors import ValidationFailed
+        with self.assertRaises(ValidationFailed):                         # Vendor is required
+            self.run_import(folder=root)
+        code, out = self.status(root)
+        self.assertEqual(code, 3)
+        self.assertIn("NOT READ: stock.dbo.vendor", out)
+
+    def test_the_retry_completes_the_read_and_the_move_passes(self):
+        root = self.runs()
+        ex = estock_db.Export(root)
+        self.assertEqual((ex.missing, ex.runs), ([], ["20261118-100000", "20261118-110000"]))
+        self.assertTrue(ex.has("Vendor") and ex.has("Products"))
+        res = self.run_import(folder=root)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual(self.db.one("SELECT count(*) n FROM suppliers")["n"], 2)
+        code, out = self.status(root)
+        self.assertEqual(code, 0)
+        self.assertIn("READ: COMPLETE", out)
+
+    def test_a_newer_read_of_a_table_replaces_the_first(self):
+        root = self.runs()
+        t = base_tables()
+        t["Customer"][0]["customer_current_money"] = "130.0000"
+        t["Gedo_customers"] = []
+        write_export(root / "20261118-120000", {"Customer": t["Customer"]})
+        (root / "20261118-120000" / "summary.txt").write_text(
+            "retry of run 20261118-110000: 1 table(s)\nonly: Customer\nRESULT: PASS - 1 tables\n", encoding="utf-8-sig")
+        ex = estock_db.Export(root)
+        self.assertEqual(ex.rows("Customer")[0]["customer_current_money"], "130.0000")
+
+    def test_no_full_read(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        (root / "x").mkdir()
+        (root / "x" / "summary.txt").write_text("only: Customer\nRESULT: PASS\n", encoding="utf-8")
+        with self.assertRaises(estock_db.ExportError):
+            estock_db.Export(root)
+
+    def status(self, root):
+        import manage
+        a = SimpleNamespace(status=True, dir=str(root), database=None)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            try:
+                manage.cmd_import_estock_db(a, SimpleNamespace())
+                return 0, buf.getvalue()
+            except SystemExit as e:
+                return e.code, buf.getvalue()
+
+    def test_bat_checks_the_read_and_rereads_once_before_anything(self):
+        L = TestBat()
+        L.setUp()
+        lines = L.lines
+        status = [i for i, l in enumerate(lines) if "--status" in l and '"%MANAGE%" import-estock-db' in l]
+        self.assertEqual(len(status), 2)
+        reread = next(i for i, l in enumerate(lines) if l == 'if "%RC%"=="3" call :reread')
+        stop = next(i for i, l in enumerate(lines) if l == "call :stopprog")
+        self.assertTrue(status[0] < reread < status[1] < stop)
+        self.assertTrue(lines[status[1] + 1].startswith("if errorlevel 1 (set"))
+        sub = lines[lines.index(":reread"):]
+        self.assertIn('-File "%~dp0estock-db-read.ps1" -RetryFailed <nul', sub[2])
+        self.assertTrue(all('--dir "%READS%"' in l for l in lines if '"%MANAGE%" import-estock-db' in l))

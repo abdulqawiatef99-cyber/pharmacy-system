@@ -67,19 +67,95 @@ class ExportError(ValidationFailed):
 csv.field_size_limit(min(sys.maxsize, 2 ** 31 - 1))
 
 
+def read_summary(run: Path) -> dict:
+    """What estock-db-read.ps1 says about one run (summary.txt): its result, whether it was a retry of
+    another run or a partial read (-Only), and the tables it could not read ("db.schema.table", lower
+    case; a table whose counts alone failed is still exported and is not listed)."""
+    out = {"name": run.name, "result": None, "retry_of": None, "only": False, "failed": []}
+    f = run / "summary.txt"
+    if not f.is_file():
+        return out
+    in_list = False
+    for line in f.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if line.startswith("retry of run "):
+            out["retry_of"] = line[len("retry of run "):].split(":", 1)[0].strip()
+        elif line.startswith("only: "):
+            out["only"] = True
+        if line.startswith("RESULT: "):
+            out["result"] = line[8:].split(" ", 1)[0]
+            in_list = line.startswith("RESULT: PARTIAL")
+            continue
+        if not in_list:
+            continue
+        if not line.startswith("   "):
+            in_list = False
+            continue
+        e = line.strip()
+        if " / " not in e:
+            continue                              # an instance that could not sign in
+        e = e.split(" / ", 1)[1]
+        if e.endswith(" (stats)"):
+            continue
+        out["failed"].append(e.lower())           # "db.schema.table", or "db (why)" for a whole database
+    return out
+
+
+def resolve_runs(root: Path) -> tuple[list[Path], list[str]]:
+    """The newest full read under estock-db-read\ and the retry runs made for it (estock-db-read-one.bat),
+    oldest first, and the tables still not read after them all."""
+    runs = sorted((d for d in Path(root).iterdir() if d.is_dir() and (d / "summary.txt").is_file()),
+                  key=lambda d: d.name)
+    info = {d.name: read_summary(d) for d in runs}
+    full = [d for d in runs if not info[d.name]["retry_of"] and not info[d.name]["only"]
+            and (d / "tables" / "manifest.csv").is_file()]
+    if not full:
+        raise ExportError(f"مفيش قراية كاملة لإي ستوك في {root}: شغّل estock-db-read.bat الأول")
+    base = full[-1]
+    chain, names = [base], {base.name}
+    for d in runs:
+        if d.name > base.name and info[d.name]["retry_of"] in names:
+            chain.append(d)
+            names.add(d.name)
+    missing = set(info[base.name]["failed"])
+    for d in chain[1:]:
+        man = d / "tables" / "manifest.csv"
+        if man.is_file():
+            with open(man, encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    r = {k.strip().lower(): (v or "").strip() for k, v in r.items()}
+                    missing.discard(f"{r.get('database', '')}.{r.get('schema', '')}.{r.get('table', '')}".lower())
+    return [d if (d / "manifest.csv").is_file() else d / "tables" for d in chain], sorted(missing)
+
+
 class Export:
     """manifest.csv + one CSV per table (estock-db-read.ps1): UTF-8 with BOM, a header row, every cell
-    text; NULL is empty, dates are SQL Server style 126, byte[] is b64:..."""
+    text; NULL is empty, dates are SQL Server style 126, byte[] is b64:...
+
+    `folder` is one read (the folder with tables\manifest.csv), or estock-db-read\ itself: then the newest
+    full read is taken together with the retry runs made for it, a table read again replacing the first copy;
+    tables still not read are in `missing` (and block the move)."""
 
     def __init__(self, folder: Path, database: str | None = None):
         folder = Path(folder)
         cands = [folder / "manifest.csv", folder / "tables" / "manifest.csv"]
         man = next((p for p in cands if p.is_file()), None)
-        if not man:
+        if man:
+            dirs = [man.parent]
+            run = man.parent.parent if man.parent.name == "tables" else man.parent
+            missing = read_summary(run)["failed"]
+        elif folder.is_dir() and any((d / "summary.txt").is_file() for d in folder.iterdir() if d.is_dir()):
+            dirs, missing = resolve_runs(folder)
+        else:
             raise ExportError(f"manifest.csv مش موجود في {folder} (ولا في tables جواه)")
-        self.tables_dir = man.parent
-        with open(man, encoding="utf-8-sig", newline="") as f:
-            rows = [{k.strip().lower(): (v or "").strip() for k, v in r.items()} for r in csv.DictReader(f)]
+        self.runs = [(d.parent.name if d.name == "tables" else d.name) for d in dirs]
+        self.tables_dir = dirs[0]
+        rows = []
+        for n, d in enumerate(dirs):
+            with open(d / "manifest.csv", encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    r = {k.strip().lower(): (v or "").strip() for k, v in r.items()}
+                    r["_dir"], r["_n"] = d, n
+                    rows.append(r)
         groups: dict[tuple, list] = defaultdict(list)
         for r in rows:
             groups[(r.get("instance", ""), r.get("database", ""))].append(r)
@@ -92,13 +168,16 @@ class Export:
                               + ", ".join(f"{i}/{d}" for i, d in groups) + " (استخدم --database)")
         self.instance, self.database = pick[0]
         self.tables: dict[str, dict] = {}
-        for r in sorted(groups[pick[0]], key=lambda r: r.get("schema", "").lower() != "dbo"):
+        # the dbo copy first; among runs, the latest read of a table wins (a retry replaces the first try)
+        for r in sorted(groups[pick[0]], key=lambda r: (r.get("schema", "").lower() != "dbo", -r["_n"])):
             key = r["table"].lower()
             if key in self.tables:
                 continue
             self.tables[key] = {"name": r["table"], "schema": r.get("schema", ""),
                                 "rows": int(r["rows"]) if r.get("rows", "").isdigit() else None,
-                                "path": self.tables_dir / r["file"].replace("\\", "/")}
+                                "path": r["_dir"] / r["file"].replace("\\", "/")}
+        db = self.database.lower()
+        self.missing = [m for m in missing if m.split(".", 1)[0].split(" (", 1)[0] == db]
         self._cache: dict[str, list[dict]] = {}
         self._raw: dict[str, tuple[list[str], list[list[str]]]] = {}
 
@@ -225,6 +304,10 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
             raise ExportError(f"الجدول {t} مش في التصدير؛ شغّل estock-db-read.bat تاني")
+    for m in ex.missing:        # a table E-Stock did not give: the move would not be complete
+        p.issue("export", "", "", "table not read", m,
+                "الجدول ماتقراش من إي ستوك: estock-db-import.bat بيعيد قرايته لوحده (أو estock-db-read-one.bat)",
+                block=True)
     _plan_items(ex, p, packs or {})
     _plan_stock(ex, p, stock_source, stores or [DEFAULT_STORE])
     _plan_parties(ex, p, confirm or {})

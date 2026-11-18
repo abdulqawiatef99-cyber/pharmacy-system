@@ -1,7 +1,8 @@
 @echo off
 REM Launch night: move the whole E-Stock database into the program (F91), one double-click.
 REM First run estock-db-read.bat (it exports every E-Stock table to %LOCALAPPDATA%\PharmacyPlatform\estock-db-read\<time>).
-REM This script takes the NEWEST export there. Everything it writes stays in %LOCALAPPDATA%\PharmacyPlatform\launch-night
+REM This script takes the NEWEST full read there; if that read missed tables (PARTIAL), it reads only those again
+REM first (what estock-db-read-one.bat does), so one double-click is enough. Everything it writes stays in %LOCALAPPDATA%\PharmacyPlatform\launch-night
 REM (real customer and supplier names: never in Documents, which OneDrive may upload).
 REM Optional files in that folder, used when present:
 REM   openings-confirmed.xlsx  the owner's filled copy of openings-to-confirm.xlsx (confirmed balances / credit limits)
@@ -43,13 +44,15 @@ if not exist "%MANAGE%" (set "MSG=program not found: %MANAGE%" & goto fail)
 if not exist "%DATA%\pharmacy.db" (set "MSG=no database yet: open the program and finish the setup screen first" & goto fail)
 call :log PASS "program and data found"
 
-REM the newest E-Stock export that has its manifest
-set "EXPORT="
-for /f "usebackq delims=" %%e in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=Get-ChildItem -Directory -LiteralPath '%READS%' -ErrorAction SilentlyContinue ^| Where-Object { Test-Path (Join-Path $_.FullName 'tables\manifest.csv') } ^| Sort-Object Name -Descending ^| Select-Object -First 1; if($d){ $d.FullName }" ^<nul`) do set "EXPORT=%%e"
-if "%EXPORT%"=="" (set "MSG=no E-Stock export in %READS%: run estock-db-read.bat first" & goto fail)
-findstr /c:"RESULT: PASS" "%EXPORT%\summary.txt" >nul 2>&1
-if errorlevel 1 (call :log NOTE "the export is not a full PASS (see %EXPORT%\summary.txt); the import checks the tables it needs") else (call :log PASS "export read in full")
-call :log PASS "E-Stock export: %EXPORT%"
+REM the newest full E-Stock read (+ the retries made for it); exit 3 = some tables were not read
+if not exist "%READS%\" (set "MSG=no E-Stock read in %READS%: run estock-db-read.bat first" & goto fail)
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" --status >> "%LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" if not "%RC%"=="3" (set "MSG=no usable E-Stock read in %READS%: run estock-db-read.bat first (see the log)" & goto fail)
+if "%RC%"=="3" call :reread
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" --status >> "%LOG%" 2>&1
+if errorlevel 1 (set "MSG=some E-Stock tables still could not be read (see the log): nothing was moved" & goto fail)
+call :log PASS "E-Stock read complete: %READS% (newest full read + its retries)"
 
 set "EXTRA="
 if exist "%OUT%\openings-confirmed.xlsx" set "EXTRA=%EXTRA% --confirm "%OUT%\openings-confirmed.xlsx""
@@ -78,7 +81,7 @@ call :log PASS "program stopped (only its own python processes)"
 set "PHARM_DATA_DIR=%DATA%"
 
 REM dry run: on a copy of the database, nothing is written to the real one
-"%PY%" "%MANAGE%" import-estock-db --dir "%EXPORT%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%DRY%"
 type "%DRY%" >> "%LOG%"
@@ -97,7 +100,7 @@ if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was moved" & goto fail
 call :log PASS "apply confirmed by the user"
 
 REM the real move: import-estock-db --apply takes its own verified backup first
-"%PY%" "%MANAGE%" import-estock-db --dir "%EXPORT%" %EXTRA% --out "%REP%" --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%" --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%APPLIED%"
 type "%APPLIED%" >> "%LOG%"
@@ -136,6 +139,12 @@ exit /b 1
 REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
 >> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
+exit /b 0
+
+:reread
+REM the last read missed tables: read only those again (read only, E-Stock keeps selling), once
+call :log NOTE "the last E-Stock read missed some tables: reading only those again now"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0estock-db-read.ps1" -RetryFailed <nul >> "%LOG%" 2>&1
 exit /b 0
 
 :stopprog
