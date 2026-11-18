@@ -1182,3 +1182,42 @@ class TestScreenTour2245(Base):
         rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
         self.assertIn("مرتجع البيع خلال 7 أيام", rec)
         self.assertIn("مفيش إيصال تحت 20 جنيه", rec)
+
+
+class TestCodexReview345b(Base):
+    """Codex on #345 @5eb8cd6 (each failed before the fix)."""
+
+    def test_p1_the_branch_account_honours_its_confirmed_balance(self):
+        from openpyxl import load_workbook
+        t = base_tables()
+        t["Gedo_branches"] = [{"gb_id": "1", "total": "100.0000", "insert_date": "2026-05-30T10:00:00"}]
+        first = self.run_import(tables=t, write_archive=False)
+        wb = load_workbook(first["reports"]["openings"])
+        for r in wb.active.iter_rows(min_row=2):
+            if r[1].value == estock_db.BRANCH_ACCOUNT_ID:
+                r[5].value = -100
+        conf = self.tmp / "c.xlsx"
+        wb.save(conf)
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t, confirm_file=conf)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        b = self.db.one("SELECT id FROM suppliers WHERE name=?", (estock_db.BRANCH_ACCOUNT_NAME,))["id"]
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (b,))["a"], -10000)
+
+    def test_p2_a_retry_that_exported_nothing_does_not_break_the_read(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        t = base_tables()
+        vendor = t.pop("Vendor")
+        write_export(root / "20261118-100000", t)
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "RESULT: PARTIAL - x; 1 not read:\\n   PC / stock.dbo.Vendor\\n", encoding="utf-8-sig")
+        (root / "20261118-110000" / "tables").mkdir(parents=True)          # a retry that failed: no manifest
+        (root / "20261118-110000" / "summary.txt").write_text(
+            "retry of run 20261118-100000: 1 table(s)\\nRESULT: PARTIAL - 0 tables; 1 not read:\\n   PC / stock.dbo.Vendor\\n",
+            encoding="utf-8-sig")
+        write_export(root / "20261118-120000", {"Vendor": vendor})
+        (root / "20261118-120000" / "summary.txt").write_text(
+            "retry of run 20261118-110000: 1 table(s)\\nRESULT: PASS - 1 tables\\n", encoding="utf-8-sig")
+        ex = estock_db.Export(root)
+        self.assertEqual((ex.missing, ex.runs), ([], ["20261118-100000", "20261118-120000"]))

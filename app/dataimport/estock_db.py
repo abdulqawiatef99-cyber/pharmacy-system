@@ -125,7 +125,9 @@ def resolve_runs(root: Path) -> tuple[list[Path], list[str]]:
                 for r in csv.DictReader(f):
                     r = {k.strip().lower(): (v or "").strip() for k, v in r.items()}
                     missing.discard(f"{r.get('database', '')}.{r.get('schema', '')}.{r.get('table', '')}".lower())
-    return [d if (d / "manifest.csv").is_file() else d / "tables" for d in chain], sorted(missing)
+    # a retry that exported nothing has a summary and no manifest: kept for the ancestry, not as an input (#345)
+    dirs = [d if (d / "manifest.csv").is_file() else d / "tables" for d in chain]
+    return [d for d in dirs if (d / "manifest.csv").is_file()], sorted(missing)
 
 
 class Export:
@@ -286,6 +288,7 @@ class Plan:
     per_item: dict = field(default_factory=dict)      # product_id -> raw / listed / planned totals
     stock_source: dict = field(default_factory=dict)
     parked: list = field(default_factory=list)
+    confirm_rows: dict = field(default_factory=dict)
     employees: list = field(default_factory=list)
     hospital: list = field(default_factory=list)
     checks: dict = field(default_factory=dict)
@@ -303,7 +306,7 @@ class Plan:
 
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
                stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True) -> Plan:
-    p = Plan(rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
+    p = Plan(confirm_rows=(confirm or {}).get("rows", {}), rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
@@ -1058,7 +1061,8 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         last = max(gb, key=lambda r: (r.get("insert_date") or "", dec(next((v for k, v in r.items() if k.endswith("_id")), "0")) or 0))
         tot = dec(last.get("total"))
         bal = _balance_piastres(p, "Gedo_branches", "last", "", "total", last.get("total"), tot)
-        p.suppliers.append(_party(p, "supplier", BRANCH_ACCOUNT_ID, "", BRANCH_ACCOUNT_NAME, bal, {},
+        p.suppliers.append(_party(p, "supplier", BRANCH_ACCOUNT_ID, "", BRANCH_ACCOUNT_NAME, bal,
+                                  p.confirm_rows.get(("supplier", BRANCH_ACCOUNT_ID), {}),
                                   phone=None, contacts=[f"Gedo_branches: {len(gb)} سطر، آخرها {(last.get('insert_date') or '')[:10]}"],
                                   inactive=False))
         p.issue("Gedo_branches", "", "", "total", f"{(last.get('insert_date') or '')[:10]} {egp(tot) if tot is not None else '?'}",
