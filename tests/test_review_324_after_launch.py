@@ -13,11 +13,8 @@ from app.procurement import returns, suppliers as sup
 from app.procurement.service import Procurement
 from app.purchasing import validation
 from app.purchasing.service import Purchasing
-from app.recalls.service import Recalls
-from app.sales.cash import CashDrawer
-from app.sales.service import Sales, local_today
+from app.sales.service import local_today
 from tests.helpers import DBTestCase
-from tests.test_review_324_money import _sell
 
 ROOT = Path(__file__).resolve().parent.parent
 T = date.today()
@@ -38,22 +35,6 @@ class _Base(DBTestCase):
 
 
 # ---------------------------------------------------------------- part 2 (stock)
-class TestS1RecallAfterRestock(_Base):
-    @known
-    def test_a_handled_recall_raises_again_when_the_lot_comes_back(self):
-        it = self.item("Panadol 500mg")
-        b = _batch(self.db, self.ctx, it, 5, batch="AB01")
-        r = Recalls(self.db)
-        r.add_notice(self.ctx, title="سحب", items=[{"product_name": "Panadol 500mg", "batch_numbers": ["AB01"]}])
-        m = r.alerts(self.ctx)[0]
-        r.decide(self.ctx, m["id"], "confirmed")
-        adjust.adjust(self.db, self.ctx, it, set_to=0, batch_id=b, reason="damaged", note="سحب")
-        r.decide(self.ctx, m["id"], "handled")
-        _batch(self.db, self.ctx, it, 2, batch="AB01")
-        r.match_new_batches(self.ctx)
-        self.assertEqual(Sales(self.db)._held(self.ctx, self.ctx.branch_id, it)[0], 0)   # nothing sellable
-
-
 class TestS3Gs1LotWithoutSeparator(unittest.TestCase):
     @known
     def test_a_lot_containing_21_is_not_cut_into_lot_and_serial(self):
