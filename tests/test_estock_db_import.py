@@ -968,3 +968,26 @@ class TestPartyExtras(Base):
             self.assertIn(word, notes)
         self.assertIn(("C1", "sell_price_buy", "review"), {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
         self.assertIn("vendor_max_money: 50000.0000", Path(res["reports"]["supplier_contacts"]).read_text(encoding="utf-8-sig"))
+
+
+class TestArchiveSecretsAndTickets(Base):
+    def test_plain_text_passwords_are_not_copied_and_tickets_are_counted_trimmed(self):
+        t = base_tables()
+        t["Employee"] = [{"emp_id": "1", "emp_name": "موظف تجربة", "pass": "secret-1"}]
+        t["Sales_header"][0].update({"ticket_name": "   ", "ticket_id": "", "ticket_num": "  ", "bill_number": "  "})
+        t["Sales_header"][1]["ticket_num"] = "T-123      "
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        con = estock_archive.open_ro(self.tmp / estock_archive.NAME)
+        try:
+            cols = [r[1] for r in con.execute('PRAGMA table_info("e_Employee")')]
+            self.assertNotIn("pass", cols)
+            self.assertEqual(con.execute("SELECT name FROM employees WHERE estock_id='1'").fetchone()[0], "موظف تجربة")
+            self.assertIn("Employee.pass", con.execute("SELECT value FROM meta WHERE key='left_out_columns'").fetchone()[0])
+            self.assertTrue(con.execute("SELECT 1 FROM sqlite_master WHERE name='ix_e_Sales_header_ticket_num'").fetchone())
+        finally:
+            con.close()
+        self.assertIn(("Employee.pass", "review"), {(d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertEqual(res["plan"].checks["tickets"]["with_ticket_after_trim"], 1)
+        from app.dataimport import estock_history as h
+        self.assertEqual([r["ticket_no"] for r in h.invoices(self.db, self.ctx, "sale") if r["estock_id"] == "2"], ["T-123"])

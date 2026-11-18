@@ -52,6 +52,11 @@ def _egp(v) -> str | None:
     return str(d.quantize(Decimal("0.01"), ROUND_HALF_UP)) if d is not None and d.is_finite() else None
 
 
+def _txt(v) -> str | None:
+    """E-Stock's char fields are padded with spaces: trimmed, and blank is None."""
+    return (str(v).strip() or None) if v is not None else None
+
+
 def _day(v) -> str:
     return str(v or "")[:10]
 
@@ -143,7 +148,7 @@ def invoices(db: Database, ctx: Context, kind: str = "sale", *, q: str | None = 
             return []
         where, params = ["1=1"], []
         if q:
-            where.append(f"({a.col(head, idc)}=? OR {a.col(head, 'bill_number')}=?)")
+            where.append(f"({a.col(head, idc)}=? OR trim({a.col(head, 'bill_number')})=?)")
             params += [str(q).strip(), str(q).strip()]
         _period(where, params, a.col(head, "insert_date"), date_from, date_to)
         if party_id:
@@ -160,10 +165,11 @@ def invoices(db: Database, ctx: Context, kind: str = "sale", *, q: str | None = 
                       (*params, _limit(limit)))
         m = a.map(pmap)
     names = _names(db, ctx, pmap, [m.get(r["party"]) for r in rows])
-    return [{"source": SOURCE, "kind": kind, "estock_id": r["id"], "bill_number": r["bill"], "day": _day(r["at"]),
+    return [{"source": SOURCE, "kind": kind, "estock_id": r["id"], "bill_number": _txt(r["bill"]), "day": _day(r["at"]),
              "at": r["at"], "party_id": m.get(r["party"]), "party": names.get(m.get(r["party"])),
              "estock_party_id": r["party"], "total": _egp(r["total"]), "cash": _egp(r["cash"]),
-             "network": _egp(r["network"]), "ticket_name": r["tname"], "ticket_ref": r["tref"], "ticket_no": r["tno"],
+             "network": _egp(r["network"]), "ticket_name": _txt(r["tname"]), "ticket_ref": _txt(r["tref"]),
+             "ticket_no": _txt(r["tno"]),
              **({"sale_id": r["sale"]} if kind == "sale_return" else {})} for r in rows]
 
 

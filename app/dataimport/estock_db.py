@@ -957,6 +957,17 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if v is not None and v < 0:
             p.issue("Sales_header", ident(r.get("sales_id")), "", "total_bill_net", r.get("total_bill_net"),
                     "فاتورة صافيها بالسالب: اتحفظت في الأرشيف زي ما هي", value_egp=v, kind="info")
+    from .estock_archive import secret_columns
+    for c in secret_columns(ex):
+        p.issue("archive", "", "", c, "(كلمة سر بنص واضح)",
+                "ما اتنسختش في الأرشيف (أمان): قرار المالك لو عايزها", kind="review")
+    # tickets and bill numbers counted after trimming (E-Stock stores them as padded char fields)
+    tk = bills = 0
+    for r in ex.rows("Sales_header"):
+        tk += any((r.get(c) or "").strip() for c in ("ticket_name", "ticket_id", "ticket_num"))
+        bills += bool((r.get("bill_number") or "").strip())
+    p.checks["tickets"] = {"invoices": len(ex.rows("Sales_header")), "with_ticket_after_trim": tk,
+                           "with_bill_number_after_trim": bills}
     heads = {ident(r.get("sales_id")) for r in ex.rows("Sales_header")}
     orphan = sum(1 for r in ex.rows("Branches_sales_details") if ident(r.get("sales_id")) not in heads)
     p.checks["sales_lines_without_header"] = orphan
@@ -1481,6 +1492,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
             lines.append(f"{label}: " + "، ".join(f"{a}={b}" for a, b in rec[k].items()))
     lines.append("التاريخ (عدد الصفوف): " + "، ".join(f"{k}={v['csv']}" for k, v in rec.get("history", {}).items()))
     lines.append(f"جودة البيانات: {len(plan.dq)} سطر ({len(plan.blocking)} يوقف النقل) في {paths['data_quality'].name}")
+    lines.append("التذاكر بعد شيل المسافات: " + json.dumps(plan.checks.get("tickets", {}), ensure_ascii=False))
     lines.append("إشارة الأرصدة من كشف الحساب: " + json.dumps(plan.checks.get("balance_sign", {}), ensure_ascii=False))
     exp = [d for d in plan.dq if d["field"] == "expiry"]
     lines.append(f"من غير صلاحية: دواء أو مش معروف {sum(d['severity'] == 'review' for d in exp)} (للمراجعة)، "
