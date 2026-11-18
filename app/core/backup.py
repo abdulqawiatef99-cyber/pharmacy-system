@@ -65,16 +65,36 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+MAX_DB_BYTES = 8 * 1024 ** 3     # far above one pharmacy's database; a bigger expansion is refused (#324 X18)
+
+
 def _extract_db(z: zipfile.ZipFile, tmp: str) -> Path:
-    """Write the database of a backup (either format) to tmp/pharmacy.db."""
+    """Write the database of a backup (either format) to tmp/pharmacy.db, never more than MAX_DB_BYTES
+    (a small archive could otherwise expand until the disk is full)."""
     names = set(z.namelist())
     target = Path(tmp) / "pharmacy.db"
-    if "pharmacy.db.xz" in names:
-        with z.open("pharmacy.db.xz") as src, lzma.open(src) as xz, open(target, "wb") as out:
-            shutil.copyfileobj(xz, out, 1 << 20)
-    else:
-        z.extract("pharmacy.db", tmp)
+    with (z.open("pharmacy.db.xz") if "pharmacy.db.xz" in names else z.open("pharmacy.db")) as member, \
+            (lzma.open(member) if "pharmacy.db.xz" in names else member) as src, open(target, "wb") as out:
+        n = 0
+        while chunk := src.read(1 << 20):
+            n += len(chunk)
+            if n > MAX_DB_BYTES:
+                raise RuntimeError("backup database larger than the limit; not extracted")
+            out.write(chunk)
     return target
+
+
+def _member_of(row: dict) -> str | None:
+    """The archive member of a registered original (the layout _attachment_checks accepts), or None."""
+    org = str(row["org_id"])
+    stored = PurePosixPath(str(row["storage_path"]).replace("\\", "/"))
+    if not org or org in (".", "..") or "/" in org or "\\" in org or stored.name in ("", ".", ".."):
+        return None
+    if stored.parent.name == org:
+        return f"uploads/{org}/{stored.name}"
+    if stored.parent.name == "transfers" and stored.parent.parent.name == org:
+        return f"uploads/{org}/transfers/{stored.name}"
+    return None
 
 
 def _attachment_checks(db: Database, z: zipfile.ZipFile) -> list[tuple[dict, str | None]]:
@@ -138,6 +158,9 @@ def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
     names = z.namelist()
     if len(names) != len(set(names)):
         return ["duplicate members in backup archive"]
+    if len(names) != len({n.casefold() for n in names}):
+        # on Windows both names are one file: the checked copy could be overwritten by the other (#324 X15)
+        return ["duplicate members (differing only in letter case) in backup archive"]
     return [p for _, p in _attachment_checks(db, z) if p]
 
 
@@ -287,41 +310,68 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
             shutil.rmtree(raw, ignore_errors=True)      # the verified backup replaces it
         except (RuntimeError, sqlite3.Error) as e:      # damaged live data must not block its own repair
             pre, pre_kind, pre_error = raw, "raw_copy", str(e)
+    bad = {attachment_source(p) for p in soft}
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
-        for name in z.namelist():
-            if name.startswith("uploads/") and ".." not in name.split("/"):
-                z.extract(name, tmp)
+        # 1) the database is staged next to the live one and checked there; the live one is untouched so far
         src = Database(_extract_db(z, tmp))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        for suffix in ("-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-        tmp_target = db_path.with_suffix(".restoring")
-        tmp_target.unlink(missing_ok=True)
         try:
-            src.backup_to(tmp_target)
+            skip = {_member_of(dict(r)) for r in src.all("SELECT id, org_id, storage_path FROM source_files")
+                    if r["id"] in bad}
         finally:
             src.close()
-        tmp_target.replace(db_path)
-        up_src = Path(tmp) / "uploads"
-        if up_src.exists():
-            for f in up_src.rglob("*"):
-                if f.is_file():
-                    target = upload_dir / f.relative_to(up_src)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, target)
-    restored = Database(db_path)
-    try:
-        problems = integrity_problems(restored)
-        missing = []
-        for p in soft:
-            row = restored.one("SELECT filename FROM source_files WHERE id=?", (attachment_source(p),))
-            missing.append({"source_id": attachment_source(p), "filename": row["filename"] if row else None,
-                            "problem": p})
-    finally:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = db_path.with_suffix(".restoring")
+        staged.unlink(missing_ok=True)
+        src = Database(Path(tmp) / "pharmacy.db")
+        try:
+            src.backup_to(staged)
+        finally:
+            src.close()
+        restored = Database(staged)
+        try:
+            problems = integrity_problems(restored)
+            if problems:
+                raise RuntimeError("restored database failed verification: " + "; ".join(problems)
+                                   + f" — nothing replaced; previous data kept in {pre}")
+            # sessions saved in the backup (taken before a logout or a password change) would sign in
+            # again: everyone signs in anew after a restore (#324 X17)
+            with restored.transaction():
+                restored.execute("UPDATE sessions SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+                                 " WHERE revoked_at IS NULL")
+            restored.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")    # into the file that is moved below
+            missing = []
+            for p in soft:
+                row = restored.one("SELECT filename FROM source_files WHERE id=?", (attachment_source(p),))
+                missing.append({"source_id": attachment_source(p), "filename": row["filename"] if row else None,
+                                "problem": p})
+        except BaseException:
+            restored.close()
+            staged.unlink(missing_ok=True)
+            raise
         restored.close()
-    if problems:
-        raise RuntimeError("restored database failed verification: " + "; ".join(problems)
-                           + f" — previous data kept in {pre}")
+        for suffix in ("-wal", "-shm"):
+            Path(str(staged) + suffix).unlink(missing_ok=True)
+        # 2) attachments before the database: a copy that fails (locked file, full disk) leaves the live
+        # database as it was, never a restored database without its files (#324 X16). A file that failed
+        # its checksum is never installed, even when missing ones are allowed (#324 X15).
+        try:
+            for name in z.namelist():
+                if name.startswith("uploads/") and ".." not in name.split("/") and name not in skip:
+                    z.extract(name, tmp)
+            up_src = Path(tmp) / "uploads"
+            if up_src.exists():
+                for f in up_src.rglob("*"):
+                    if f.is_file():
+                        target = upload_dir / f.relative_to(up_src)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(f, target)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+        # 3) only now the database itself
+        for suffix in ("-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+        staged.replace(db_path)
     return {"pre_restore_backup": str(pre) if pre else None, "pre_restore_kind": pre_kind,
             "pre_restore_error": pre_error, "missing_attachments": missing, "manifest": info}
 
