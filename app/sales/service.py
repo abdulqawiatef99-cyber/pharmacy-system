@@ -602,7 +602,7 @@ class Sales:
         # every store sale belongs to a shift, card, transfer or credit too: a sale with no shift appears in no
         # shift report, so its card and credit amounts escaped the close (final review P2-2)
         if not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزينة مغلقة — افتح وردية قبل البيع", code="no_open_shift")
+            raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
         if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:

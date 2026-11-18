@@ -155,3 +155,17 @@ manager chat" (§9) inside the limits below.
   are refused automatically; read the test login file with computer use (Notepad, open by path), sign in
   in the browser pane, close Notepad, release the screen.
 
+## 11. Continuous improvement audits (owner, 18/11 15:56: a standing rule)
+Goal: the program keeps getting better, simpler, faster and stronger, and stays up to date. After the launch
+(#20) every part of the program is audited on a fixed rhythm, with the strongest model that fits each kind of
+work. The model that built a part never grades it alone (Codex or a different model reviews).
+| Rhythm | What | Tool and model |
+|---|---|---|
+| Every merge (already) | the PR itself | Codex on GitHub + full test suite |
+| Weekly (cheap, mostly automatic) | full suite, speed run (`scripts/perf/scale.py`), dependency security scan, new owner findings | Claude Code, mid model (Sonnet); speed run on the Heikal PC |
+| Every 2 weeks | Arabic/English text proofreading of what changed, screen-by-screen test plan pass | normal chat or Claude Code, Opus |
+| Monthly (first week, with the 3/12 cycle and F70) | full audit of everything: code structure, money and stock paths, security, speed, weight (dead code, heavy queries, big files), texts, dependencies to latest safe versions, competitors | money + security: strongest model (Fable) + Codex as independent reviewer; structure, speed, dependencies: Claude Code Opus; texts: Opus |
+| Every 3 months | deep security review (attacker view: sign-in, permissions, backup, updates, network) | strongest model + Codex, separately, then compared |
+Every audit: findings as an issue (file:line, scenario, severity), each verified with a failing test before
+any fix, fixes in small PRs, and a 5-line Arabic summary to the owner. Paid tools or a new service need the owner first.
+

@@ -281,6 +281,7 @@ window.I18N_EN = {
 "افتح شيفت جديد": "Open a new shift",
 "افتحها": "Open it",
 "افتحه": "Open it",
+"شغّال": "Running",
 "افصل بينها بمسافة أو فاصلة": "Separate them with a space or comma",
 "اقتراح أو شكوى عن البرنامج": "Suggestion or complaint about the program",
 "اقتراح أو شكوى على البرنامج": "Suggestion or complaint about the program",
