@@ -127,8 +127,9 @@ def _quarantine_guard(con, sales_id: str) -> None:
         for v, b in con.execute(f'SELECT {sel} FROM "q_{t}"'):
             if mirror and _ident(b) != branch:
                 bd = _dec(b)
-                if bd is not None and bd == bd.to_integral_value():
-                    continue                           # a readable other branch: not ours
+                # a readable other branch is not ours; an impossible id (the importer's rule, #383 review) keeps the hold
+                if bd is not None and bd == bd.to_integral_value() and -1 <= bd <= 2 ** 53:
+                    continue
             d = _dec(v)
             if d is None or d != d.to_integral_value() or not (0 < d < 2 ** 53):
                 unknown = True

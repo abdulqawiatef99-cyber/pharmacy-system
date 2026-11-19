@@ -164,3 +164,24 @@ class TestCodexReview381Branch(Base):
         from app.sales import estock_returns as er
         self.assertTrue(self.run_import(tables=self._tables("-7.4e18"))["ok"])
         self.assertTrue(er.invoice_lines(self.db, self.ctx, "1"))
+
+
+class TestCodexReview383(Base):
+    """Codex on #383 @9c6ef8d: an impossible branch id is not 'another branch' (failed before the fix)."""
+
+    def test_p2_an_impossible_branch_id_keeps_the_hold(self):
+        from app.core.errors import Conflict
+        from app.sales import estock_returns as er
+        for bad in ("-7.4e18", "9007199254740993"):
+            with self.subTest(bad=bad):
+                t = base_tables()
+                t["co_inf"] = [{"branch_id": "3", "co_name": "x"}]
+                t["Back_Sales_details"], t["Back_sales_header"] = [], []
+                t["Branches_sales_details"].append({"branch_id": bad, "details_id": "77", "sales_id": "1",
+                                                    "product_id": "1", "amount": "1"})
+                self.db.close()
+                from tests.helpers import DBTestCase
+                DBTestCase.setUp(self)
+                self.assertTrue(self.run_import(tables=t)["ok"])
+                with self.assertRaises(Conflict):
+                    er.invoice_lines(self.db, self.ctx, "1")
