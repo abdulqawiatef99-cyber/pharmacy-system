@@ -172,7 +172,9 @@ class CashDrawer:
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
     def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
-              denominations: dict | None = None) -> dict:
+              denominations: dict | None = None, shift_id: str | None = None) -> dict:
+        """shift_id: the shift the count screen showed. A count made for a shift another till has closed
+        since never closes the next one (#324 M2-06)."""
         ctx.require("cash.close")
         detail = None
         if denominations is not None:
@@ -181,6 +183,9 @@ class CashDrawer:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         with self.db.transaction():
             sid = require_open_shift(self.db, ctx)
+            if shift_id is not None and shift_id != sid:
+                raise Conflict("أُغلق هذا الشيفت وفُتح شيفت جديد بعده. حدّث الشاشة وعُدّ الخزينة من جديد",
+                               code="shift_changed")
             expected = self._expected(sid)
             diff = counted_cash - expected
             if diff and ctx.can("cash.see_expected") and len((note or "").strip()) < 3:

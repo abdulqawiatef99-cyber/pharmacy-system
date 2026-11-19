@@ -1,6 +1,9 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع": "The amount the customer paid is less than the cash due. Correct the amount or split the payment",
+"⚠ رقم واحد مسجل لأكثر من عميل": "⚠ One number saved for more than one customer",
+"الرقم نفسه مكتوب بصيغتين مختلفتين. راجع العملاء واترك الرقم لعميل واحد حتى لا يكون للمشتري الواحد حسابان آجلان.": "The same number is written in two different forms. Review the customers and keep the number on one customer, so one buyer never has two credit accounts.",
 "تاريخ إي ستوك": "E-Stock history",
 "مرتجعات": "Returns",
 "مشتريات": "Purchases",
