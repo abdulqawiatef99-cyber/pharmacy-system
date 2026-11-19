@@ -761,6 +761,9 @@ def sales_lines(ex: Export) -> list[dict]:
     return [r for r in ex.rows("Branches_sales_details") if b is None or ident(r.get("branch_id")) == b]
 
 
+RETURN_GUARDED = {"sales_header", "sales_details", "branches_sales_details", "back_sales_header", "back_sales_details"}
+
+
 def _plan_quarantine(ex: Export, p: Plan) -> None:
     for t in SANITY_TABLES:
         if not ex.has(t):
@@ -771,7 +774,9 @@ def _plan_quarantine(ex: Export, p: Plan) -> None:
                                        for w in v.split("؛ ")})[:5])
             p.issue(ex.tables[t.lower()]["name"], "", "", "impossible values", f"{len(q)} سطر؛ مثلًا {sample}",
                     "OWNER: سطور بقيم مستحيلة (غالبًا القراية كانت وإي ستوك شغال): اتحفظت لوحدها في الأرشيف"
-                    f" (q_{ex.tables[t.lower()]['name']}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير", kind="review")
+                    f" (q_{ex.tables[t.lower()]['name']}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير"
+                    + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
+                    kind="review")
 
 
 def _plan_snapshot(ex: Export, p: Plan) -> None:

@@ -65,6 +65,9 @@ def open_for(path: Path, org_id: str) -> sqlite3.Connection:
     return open_ro(path)
 
 
+FORMAT = "2"            # 2: rows with impossible values are kept apart in q_<table> (#380)
+
+
 def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True, org_id: str | None = None) -> dict[str, int]:
     """Writes the archive at `path` (or checks the one there). Returns rows per table as stored."""
     sha = ex.source_sha()
@@ -73,7 +76,13 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
         if old != sha:
             raise RuntimeError(f"فيه أرشيف إي ستوك من تصدير تاني: {path}. مفيش أي حاجة اتكتبت")
         with closing(open_ro(path)) as con:
-            return {r[0]: r[1] for r in con.execute("SELECT name, rows FROM tables")}
+            r = con.execute("SELECT value FROM meta WHERE key='format'").fetchone()
+            if r and r[0] == FORMAT:
+                return {r[0]: r[1] for r in con.execute("SELECT name, rows FROM tables")}
+        # the same export, archived by an older version without the quarantine (Codex on #380): rebuilt from
+        # the export (it holds nothing else), never reused with impossible rows in its e_ tables
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        path.unlink()
     tmp = path.with_name(path.name + ".part")
     tmp.unlink(missing_ok=True)
     con = sqlite3.connect(tmp)
@@ -131,7 +140,7 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
             ("org_id", org_id or ""),
             ("left_out_columns", ", ".join(secret_columns(ex))),
             ("source_sha", sha), ("instance", ex.instance), ("database", ex.database),
-            ("built_at", datetime.now().isoformat(timespec="seconds")), ("format", "1")])
+            ("built_at", datetime.now().isoformat(timespec="seconds")), ("format", FORMAT)])
         con.commit()
         if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("archive integrity check failed")

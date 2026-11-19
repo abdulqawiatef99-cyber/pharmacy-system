@@ -97,9 +97,37 @@ def _map(con, kind: str) -> dict[str, str]:
     return {r[0]: r[1] for r in con.execute(f'SELECT estock_id, program_id FROM "map_{kind}"')}
 
 
+QUARANTINE_TABLES = ("Sales_header", "Sales_details", "Branches_sales_details", "Back_sales_header", "Back_Sales_details")
+
+
+def _quarantine_guard(con, sales_id: str) -> None:
+    """A row of this invoice (its lines or a return of it) was quarantined at the move (impossible values, #380):
+    what was sold or already returned is not known, so no refund is made (Codex on #380). A quarantined row
+    whose invoice id itself is unreadable could be any invoice: then no old invoice is refunded."""
+    unknown, ids = False, set()
+    for t in QUARANTINE_TABLES:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name=?", (f"q_{t}",)).fetchone():
+            continue
+        cols = {r[1].lower(): r[1] for r in con.execute(f'PRAGMA table_info("q_{t}")')}
+        if "sales_id" not in cols:
+            unknown = True
+            continue
+        for (v,) in con.execute(f'SELECT "{cols["sales_id"]}" FROM "q_{t}"'):
+            d = _dec(v)
+            if d is None or d != d.to_integral_value() or not (0 < d < 2 ** 53):
+                unknown = True
+            else:
+                ids.add(str(int(d)))
+    if unknown or sales_id in ids:
+        raise Conflict("فاتورة إي ستوك دي (أو مرتجعها) فيها سطر اتعزل في النقل بقيم مستحيلة: المرتجع عليها موقوف لحد ما"
+                       " المالك يراجعها", code="estock_history_quarantined",
+                       details={"invoice": sales_id, "all_invoices": unknown})
+
+
 def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
     """Everything a return needs, read from the archive (no write)."""
     with closing(_archive(db, ctx)) as con:
+        _quarantine_guard(con, sales_id)
         heads = _rows(con, "Sales_header", {"sales_id": sales_id})
         if not heads:
             raise NotFound("الفاتورة دي مش في تاريخ إي ستوك")
