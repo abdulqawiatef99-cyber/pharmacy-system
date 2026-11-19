@@ -52,6 +52,18 @@ STALE_INTERVALS = 2              # stale = no good backup or check for this many
 STALE_NOTIFY_HOURS = 24          # one notification a day while it stays stale
 STUCK_SECONDS = 45 * 60          # a single run longer than this is reported as stuck
 MIN_FREE_BYTES = 1024 ** 3       # warn below 1 GiB free, or below twice (database + last backup)
+# reasons that are a warning (the data is still being backed up); every other reason is an error
+WARNINGS = ("low_disk", "offsite_stale", "incomplete")
+# one short line per reason for the screen (F114), worst first; the same wording as the notifications
+LINES = {"failed": "آخر نسخة احتياطية تلقائية فشلت",
+         "never": "لم تُعمل أي نسخة احتياطية منذ تشغيل البرنامج",
+         "scheduler_dead": "النسخ الاحتياطي التلقائي متوقف",
+         "scheduler_stuck": "نسخة احتياطية بدأت ولم تنتهِ",
+         "file_missing": "ملف آخر نسخة احتياطية غير موجود على الجهاز",
+         "stale": "النسخة الاحتياطية التلقائية متأخرة",
+         "low_disk": "مساحة القرص قليلة للنسخ الاحتياطي",
+         "offsite_stale": "النسخة الموجودة خارج الجهاز قديمة",
+         "incomplete": "النسخة الاحتياطية ناقصها ملفات فواتير"}
 
 _instance: "AutoBackup | None" = None
 
@@ -258,7 +270,10 @@ class AutoBackup:
         st = self.state()
         fp = self._fingerprint()
         self._own = {"a": 0, "n": 0}
-        if not force and st.get("last_ok") and st.get("fingerprint") == fp:
+        # nothing changed since the last good backup, and that backup is still on the disk: only then is there
+        # nothing to do. A newest file deleted by hand or lost with its disk is made again now (F114); before,
+        # an unchanged database was never backed up again.
+        if not force and st.get("last_ok") and st.get("fingerprint") == fp and not self._newest_missing(st):
             st["last_check_at"] = datetime.now().isoformat(timespec="seconds")
             # the disk is measured here too: the warning must clear when space is freed, and appear when it
             # runs low, without waiting for the next change to the data (Codex P2 on #350)
@@ -429,10 +444,23 @@ class AutoBackup:
             return None
         return t if t <= datetime.now() else None
 
+    def _newest_missing(self, st: dict) -> bool:
+        """The backup file the state names as the newest is not on the disk, or is not the size it was written
+        with: the summary would say "fine" about a backup nobody can restore."""
+        name = st.get("last_file")
+        if not name:
+            return False
+        try:
+            size = (self.backup_dir / str(name)).stat().st_size
+        except OSError:
+            return True
+        want = st.get("last_bytes")
+        return isinstance(want, int) and want > 0 and size != want
+
     def health(self, *, detail: bool = False) -> dict:
-        """One summary of "is the pharmacy's data being backed up?", cheap enough to poll: two small files,
-        no database query. Safe for every signed-in user (`detail=False` leaves the error text out).
-        Calling it restarts a scheduler or watchdog thread that died."""
+        """One summary of "is the pharmacy's data being backed up?", cheap enough to poll: two small files
+        and one look at the newest backup file, no database query. Safe for every signed-in user
+        (`detail=False` leaves the error text out). Calling it restarts a scheduler or watchdog thread that died."""
         self._ensure_threads()
         cfg, st = self.settings(), self.state()
         now = datetime.now()
@@ -462,10 +490,18 @@ class AutoBackup:
             reasons.append("scheduler_stuck")
         else:
             scheduler = "running"
-        stale = any(r in ("stale", "never", "scheduler_dead", "scheduler_stuck") for r in reasons)
+        if self._newest_missing(st):
+            reasons.append("file_missing")
+        stale = any(r in ("stale", "never", "scheduler_dead", "scheduler_stuck", "file_missing") for r in reasons)
         if st.get("low_disk"):
             reasons.append("low_disk")
-        out = {"ok": not reasons, "level": "ok" if not reasons else "warning" if reasons == ["low_disk"] else "error",
+        off = self._when(st.get("offsite_at"))
+        if cfg.get("offsite_dir") and good and (off is None or now - off > timedelta(days=OFFSITE_STALE_DAYS)):
+            reasons.append("offsite_stale")          # a folder is set, there is a backup, and no recent copy of it
+        if st.get("last_warning"):
+            reasons.append("incomplete")
+        level = "ok" if not reasons else "warning" if all(r in WARNINGS for r in reasons) else "error"
+        out = {"ok": not reasons, "level": level,
                "stale": stale, "last_good_at": good.isoformat(timespec="seconds") if good else None,
                "last_fresh_at": fresh.isoformat(timespec="seconds") if fresh else None,
                "last_fail_at": st.get("last_fail_at"), "age_min": age, "limit_min": limit, "scheduler": scheduler,
@@ -473,6 +509,37 @@ class AutoBackup:
                "free_bytes": st.get("free_bytes"), "reasons": reasons}
         if detail:
             out["last_error"] = st.get("last_error")
+        return out
+
+    def screen(self, *, detail: bool = False) -> dict:
+        """The one answer for the screen (F114): is there anything about the backups a person must see, and the
+        line to show. `detail=False` is safe for every signed-in user (no error text, no folder); `detail=True`
+        is for who may manage the settings, and its line says where to go.
+
+        It carries the keys the screen already reads with their old meaning (`warn`, `failed`, `late`,
+        `last_good_at` = the last backup or "nothing changed" check, `ok` = how the last run ended,
+        `interval_min`, `last_fail_at`; with detail `last_error` and `offsite_error`), so the route can return
+        this as it is. New: `healthy`, `level` (ok / warning / error), `reasons`, `text`, `last_backup_at`.
+        `warn` is now true for every reason, not only "failed" and "late"."""
+        h = self.health(detail=detail)
+        st = self.state()
+        failed = st.get("last_ok") is False
+        fresh = self._when(h["last_fresh_at"])
+        late = fresh is not None and datetime.now() - fresh > timedelta(minutes=h["limit_min"])
+        text = None
+        if h["reasons"]:
+            said = "، ".join(LINES[r] for r in h["reasons"] if r in LINES)
+            if h["level"] == "error" and h["last_fresh_at"]:
+                said += f" — آخر نسخة سليمة: {h['last_fresh_at'][:16].replace('T', ' ')}"
+            do = "افتح «البرنامج والنسخ الاحتياطي»." if detail else "بلّغ صاحب الصيدلية."
+            text = f"{'✕' if h['level'] == 'error' else '⚠'} {said}. {do}"
+        out = {"warn": bool(h["reasons"]), "healthy": h["ok"], "level": h["level"], "reasons": h["reasons"],
+               "text": text, "failed": failed, "late": late, "ok": st.get("last_ok"),
+               "last_good_at": h["last_fresh_at"], "last_backup_at": h["last_good_at"],
+               "interval_min": h["limit_min"] // STALE_INTERVALS, "last_fail_at": st.get("last_fail_at")}
+        if detail:
+            out["last_error"] = st.get("last_error") if failed else None
+            out["offsite_error"] = st.get("offsite_error")
         return out
 
     def _ensure_threads(self) -> None:
@@ -529,6 +596,7 @@ class AutoBackup:
             else:
                 since = "لا توجد نسخة سليمة حتى الآن."
             why = {"scheduler_dead": "جدول النسخ توقف.", "scheduler_stuck": "نسخة بدأت ولم تنتهِ.",
+                   "file_missing": "ملف آخر نسخة احتياطية غير موجود على الجهاز.",
                    "failed": f"آخر محاولة فشلت: {(h.get('last_error') or '')[:120]}"}
             body = " ".join([since] + [why[r] for r in h["reasons"] if r in why]
                             + ["افتح الإعدادات ← النسخ الاحتياطي واضغط «اعمل نسخة الآن»، ولو فشلت بلّغ الدعم."])
