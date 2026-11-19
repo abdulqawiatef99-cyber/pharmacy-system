@@ -635,7 +635,9 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                  "sell_price": r.get("sell_price"),
                  "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)),
                  "batch_no": (f"{ident(r.get('store_id'))}-{ident(r.get('counter_id'))}"
-                              if ident(r.get("counter_id")) else f"{ident(r.get('store_id'))}-{ident(r.get('pa_id'))}")}
+                              if ident(r.get("counter_id")) else f"{ident(r.get('store_id'))}-{ident(r.get('pa_id'))}"),
+                 "raw": {"vendor_id": ident(r.get("vendor_id")) or None, "tax_price": r.get("tax_price") or None,
+                         "counter_id": ident(r.get("counter_id")) or None}}
             _plan_hospital_row(p, items.get(h["product_id"]), h, chosen["table"])
             p.hospital.append(h)
             continue
@@ -1806,7 +1808,8 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                                         batch_id=bid, unit_cost=h["unit_cost"], ref_type="import_run", ref_id=run_id,
                                         ref_line_id=h["pa_id"], note="رصيد افتتاحي من إي ستوك: ملك المستشفى")
                 units += h["units"]
-                rows.append(({"pa_id": h["pa_id"], "product_id": h["product_id"], "store_id": h["store_id"]}, iid))
+                rows.append(({"pa_id": h["pa_id"], "product_id": h["product_id"], "store_id": h["store_id"],
+                              "owner": "hospital", **h.get("raw", {})}, iid))
             return rows, {"hospital_rows": len(rows), "units": units}
         runs["hospital"], r = _step(db, ctx, "opening_stock", "hospital_stock",
                                     H("hospital", ex.sha(src.split(":")[0]), items_sha), esha, label, do_hospital)
