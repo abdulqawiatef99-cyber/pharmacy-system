@@ -3796,8 +3796,19 @@ async function viewSupplier(id) {
 }
 
 // ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
+// supplier-return proposals: each answer is for the supplier (and the line's batch) asked about; one that comes back
+// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368)
+const SR = { gen: 0, busy: false };
+async function srPropose(l, supplier) {
+  const gen = SR.gen, ask = (l.ask = (l.ask || 0) + 1);
+  try {
+    const v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
+    if (gen === SR.gen && ask === l.ask) l.unit_value = v;
+  } catch { /* keep the value shown */ }
+}
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
+  SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
   app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
@@ -3819,7 +3830,7 @@ async function viewSupplierReturns(arg) {
       ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
-    const val = async (l) => { try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent($("#srSup")?.value || "")}`)).unit_value; } catch { /* keep */ } draw(); };
+    const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
@@ -3832,14 +3843,16 @@ async function viewSupplierReturns(arg) {
     if (!batches.length) { toast("هذا الصنف ليس له رصيد", true); return; }
     const b = batches[0], l = { item: c, batches, batch_id: b.batch_id || null, qty_base: Math.min(b.qty, c.pack_size || 1), reason: (b.expiry_date || "9") < isoDay(new Date()) ? "expired" : "near_expiry", unit_value: 0 };
     lines.push(l); draw();
-    try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${c.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent($("#srSup")?.value || "")}`)).unit_value; } catch { /* zero */ }
+    await srPropose(l, $("#srSup")?.value);
     draw();
   };
   // the proposed value is that supplier's price: another supplier, every line asked again (#324 S30)
   $("#srSup")?.addEventListener("change", async () => {
-    for (const l of lines) {
-      try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent($("#srSup").value || "")}`)).unit_value; } catch { /* keep */ }
-    }
+    const gen = ++SR.gen;
+    SR.busy = true; $("#srGo").disabled = true;               // the return waits for the new supplier's prices
+    await Promise.all(lines.map((l) => srPropose(l, $("#srSup").value)));
+    if (gen !== SR.gen) return;                                // a newer change is still asking
+    SR.busy = false; $("#srGo").disabled = false;
     draw();
   });
   if ($("#srQ")) {
@@ -3851,6 +3864,7 @@ async function viewSupplierReturns(arg) {
       document.querySelectorAll("[data-pick]").forEach((x) => x.addEventListener("click", () => { $("#srRes").innerHTML = ""; $("#srQ").value = ""; addItem(x.dataset.pick).catch((e) => toast(e.message, true)); }));
     }, 250); });
     $("#srGo").addEventListener("click", async () => {
+      if (SR.busy) return;
       if (!$("#srSup").value) { toast("اختر المورد", true); return; }
       if (!lines.length) { toast("أضف صنفًا واحدًا على الأقل", true); return; }
       const w = window.open("", "_blank");

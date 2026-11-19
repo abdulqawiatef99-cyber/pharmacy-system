@@ -117,3 +117,40 @@ class TestS30ReturnProposalKnowsTheSupplier(APICase):
         body = JS[start:JS.index("\nasync function ", start + 10)]
         self.assertEqual(body.count("/api/supplier-returns/suggest?"), body.count("&supplier="))
         self.assertIn('$("#srSup")?.addEventListener("change"', body)
+
+
+class TestCodexReview368(APICase):
+    """#368 Codex P1: an answer for the supplier chosen before must not land on the lines after the supplier
+    changed, and the return waits until the new prices are in."""
+
+    def test_an_older_supplier_answer_is_dropped(self):
+        import json
+        import shutil
+        import subprocess
+        if not shutil.which("node"):
+            self.skipTest("node is not installed")
+        start = JS.index("// supplier-return proposals")
+        fn = JS[start:JS.index("\n}\n", JS.index("async function srPropose(")) + 3]
+        out = subprocess.run(["node", "-e", """
+const waits = {};
+async function api(path) { const s = new URL("http://x" + path).searchParams.get("supplier");
+  return new Promise((r) => { waits[s] = () => r({ unit_value: s === "A" ? 100 : 200 }); }); }
+""" + fn + """
+(async () => {
+  const l = { item: { id: "i" }, batch_id: null, unit_value: 0 };
+  const a = srPropose(l, "A");
+  SR.gen++;
+  const b = srPropose(l, "B");
+  waits.B(); await b; waits.A(); await a;
+  console.log(JSON.stringify(l.unit_value));
+})();
+"""], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), 200)
+
+    def test_the_return_waits_for_the_new_prices(self):
+        start = JS.index("async function viewSupplierReturns(")
+        body = JS[start:JS.index("\nasync function ", start + 10)]
+        at = body.index('$("#srSup")?.addEventListener("change"')
+        self.assertIn('$("#srGo").disabled = true', body[at:at + 600])
+        self.assertIn("if (SR.busy) return;", body[body.index('$("#srGo").addEventListener("click"'):][:200])
