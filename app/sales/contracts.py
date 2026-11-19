@@ -334,7 +334,8 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
         q = (f"SELECT {h('sales_id')} sid, {h('bill_number')} bill, {h('insert_date')} at, {h('customer_id')} cust,"
              f" {h('store_id')} store, {h('ticket_name')} tname, {h('ticket_id')} tref, {h('ticket_num')} tno,"
              f" {ln('product_id')} pid, {ln('amount')} amount, {ln('sell_price')} sp, {ln('buy_price')} bp,"
-             f" {ln('total_sell')} ts, {ln('disc_money')} dm, {ln('back_amount')} back, {ln('back_price')} bpr"
+             f" {ln('total_sell')} ts, {ln('disc_money')} dm, {ln('back_amount')} back, {ln('back_price')} bpr,"
+             f" {ln('details_id')} did"
              f' FROM "e_Sales_header" h JOIN "e_{lt}" l ON l."{lc["sales_id"]}"=h."{hc["sales_id"]}"'
              f" WHERE substr({h('insert_date')}, 1, 10) BETWEEN ? AND ?"
              f" AND {h('customer_id')} IN ({','.join('?' * len(ids))}){lwhere}")
@@ -342,32 +343,51 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
         # E-Stock's return documents name the invoice and product, not the line: what they hold beyond the
         # lines' own back_amount is taken off that product's lines once, in order, as the old-invoice return
         # counts it (Codex on #381; estock_returns._invoice)
+        from . import estock_returns as er
+        idn = er._ident                       # E-Stock ids as ids: 1 = 1.0 (Codex on #340), as the old-invoice return
         extra: dict[tuple, Decimal] = {}
         if "e_Back_Sales_details" in tables and found:
             bc = cols("e_Back_Sales_details")
             if {"sales_id", "product_id", "back_amount"} <= set(bc):
-                sids = sorted({r["sid"] for r in found})
+                sids = {idn(r["sid"]) for r in found}
                 for b in con.execute(f'SELECT "{bc["sales_id"]}" sid, "{bc["product_id"]}" pid, "{bc["back_amount"]}" ba'
-                                     f' FROM "e_Back_Sales_details" WHERE "{bc["sales_id"]}" IN ({",".join("?" * len(sids))})',
-                                     sids):
-                    key = (b["sid"], b["pid"])
-                    extra[key] = extra.get(key, Decimal(0)) + (_dec(b["ba"]) or Decimal(0))
+                                     ' FROM "e_Back_Sales_details"'):
+                    if idn(b["sid"]) in sids:
+                        key = (idn(b["sid"]), idn(b["pid"]))
+                        extra[key] = extra.get(key, Decimal(0)) + (_dec(b["ba"]) or Decimal(0))
                 for r in found:
-                    key = (r["sid"], r["pid"])
+                    key = (idn(r["sid"]), idn(r["pid"]))
                     if key in extra:
                         extra[key] -= _dec(r["back"]) or Decimal(0)
+        # returns the program made on these old invoices (estock_returns, audit records): base units and refunds
+        item_map = {idn(r["estock_id"]): r["program_id"] for r in con.execute("SELECT estock_id, program_id FROM map_items")} \
+            if "map_items" in tables else {}
+        packs = {r["id"]: r["pack_size"] or 1 for r in db.all(
+            f"SELECT id, pack_size FROM items WHERE org_id=? AND id IN ({','.join('?' * len(item_map)) or 'NULL'})",
+            (ctx.org_id, *item_map.values()))}
+        prog: dict[tuple, list] = {}
+        for sid in {idn(r["sid"]) for r in found}:
+            for hh in er._program_history(db, ctx, sid):
+                for lk, units in (hh.get("lines") or {}).items():
+                    v = prog.setdefault((sid, str(lk)), [0, 0])
+                    v[0] += int(units)
+                    v[1] += int((hh.get("line_refunds") or {}).get(str(lk), 0))
         for r in found:
             amt, back = _dec(r["amount"]) or Decimal(0), _dec(r["back"]) or Decimal(0)
-            key = (r["sid"], r["pid"])
+            key = (idn(r["sid"]), idn(r["pid"]))
             if extra.get(key, 0) > 0:
                 take = min(extra[key], amt - back)
                 extra[key] -= take
                 back += take
+            pu, prefund = prog.get((idn(r["sid"]), idn(r["did"])), (0, 0))
+            pack = packs.get(item_map.get(idn(r["pid"])), 1)
+            prog_back = Decimal(pu) / pack
             sp, bp, ts, dm, bpr = (_dec(r[x]) for x in ("sp", "bp", "ts", "dm", "bpr"))
-            if amt - back == 0:
+            if amt - back - prog_back <= 0:
                 continue
             gross = ts if ts is not None else amt * (sp or 0) - (dm or 0)
-            sale = gross - back * (bpr if bpr is not None else (sp or 0))
+            sale = gross - back * (bpr if bpr is not None else (sp or 0)) - Decimal(prefund) / 100
+            back += prog_back
             code, name = prods.get(r["pid"], (r["pid"], None))
             row = {"source": "estock", "day": (r["at"] or "")[:10], "invoice": r["bill"] or r["sid"],
                    "customer_id": ids[r["cust"]], "customer": customers[ids[r["cust"]]], "ticket_name": r["tname"], "ticket_ref": r["tref"],

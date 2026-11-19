@@ -332,3 +332,35 @@ class TestCodexReview381Claim(ImportBase):
         lines = [r for r in self._claim(t)["lines"] if r["source"] == "estock" and r["item_code"] == "100"
                  and r["invoice"] == "1"]
         self.assertEqual([r["qty"] for r in lines], ["1"])                       # 2 sold, 1 returned: 1 claimed
+
+
+class TestCodexReview340d(TestCodexReview381Claim):
+    """Codex on #340 @9bf8793 (each failed before the fix)."""
+
+    def test_p1_a_program_return_on_an_old_invoice_is_not_claimed(self):
+        from app.sales import estock_returns as er
+        from app.sales.cash import CashDrawer
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Back_Sales_details"], t["Back_sales_header"] = [], []
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        k.link_customer(self.db, self.ctx, cust, kid)
+        before = [r for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
+                  if r["source"] == "estock" and r["invoice"] == "1" and r["item_code"] == "100"]
+        self.assertEqual([r["qty"] for r in before], ["1"])
+        CashDrawer(self.db).open(self.ctx, 0)
+        er.return_items(self.db, self.ctx, "1", {"1": 3}, reason="مرتجع عميل", key="r1")   # the whole pack, 3 units
+        after = [r for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
+                 if r["source"] == "estock" and r["invoice"] == "1" and r["item_code"] == "100"]
+        self.assertEqual(after, [])
+
+    def test_p2_return_documents_match_ids_written_as_decimals(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Back_Sales_details"][0].update({"sales_id": "1.0", "product_id": "1.0"})
+        lines = [r for r in self._claim(t)["lines"] if r["source"] == "estock" and r["invoice"] == "1"]
+        self.assertNotIn("100", [r["item_code"] for r in lines])
+
+    # the inherited tests run here too: they must keep passing
