@@ -104,6 +104,10 @@ ALTER TABLE expenses ADD COLUMN account_id TEXT REFERENCES money_accounts(id);
 ALTER TABLE expense_schedules ADD COLUMN account_id TEXT REFERENCES money_accounts(id);
 ALTER TABLE staff_advances ADD COLUMN account_id TEXT REFERENCES money_accounts(id);
 
+-- A transfer proof approved for part of the sale's transfer (#324 M2-01): how much it confirms arrived.
+-- NULL = the whole transfer (every proof approved before this column).
+ALTER TABLE sale_attachments ADD COLUMN confirmed_amount INTEGER CHECK (confirmed_amount IS NULL OR confirmed_amount > 0);
+
 -- Ledger kind 'discount': an early-payment discount from a supplier (F106) or a claim discount given to
 -- a customer (F108). SQLite cannot change a CHECK, so both ledgers are rebuilt with the same columns,
 -- index and append-only triggers.

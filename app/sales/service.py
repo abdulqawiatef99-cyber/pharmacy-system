@@ -1092,18 +1092,20 @@ class Sales:
                 received = (s["paid_cash"] or 0) + (s["paid_card"] or 0) + (s["paid_transfer"] or 0)
                 # a transfer the owner or a manager marked "not received" is money the shop never got: it funds no
                 # refund, in cash or to a card (#324 M2-01)
-                unreceived = bool(s["paid_transfer"] and self.db.one(
-                    "SELECT 1 FROM sale_attachments WHERE org_id=? AND sale_id=? AND review='problem'",
-                    (ctx.org_id, sid)))
-                if unreceived:
-                    received -= s["paid_transfer"]
+                # ... and only the part confirmed when a reviewer approved part of it (#324 M2-01)
+                unreceived = False
+                if s["paid_transfer"]:
+                    from .attachments import transfer_state
+                    got = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["received"]
+                    unreceived = got < s["paid_transfer"]
+                    received -= s["paid_transfer"] - got
                 refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns WHERE sale_id=? AND org_id=?"
                                        " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
                     if unreceived:
-                        raise Conflict(f"تحويل هذه الفاتورة مُسجَّل أنه لم يصل، فلا يُرد {how} (الحد الأقصى {egp(can)} ج)",
+                        raise Conflict(f"تحويل هذه الفاتورة لم يتأكد وصوله كاملًا، فلا يُرد {how} (الحد الأقصى {egp(can)} ج)",
                                        code="cash_refund_exceeds_paid",
                                        details={"max_cash": can, "refund": refund, "transfer_not_received": True})
                     raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"

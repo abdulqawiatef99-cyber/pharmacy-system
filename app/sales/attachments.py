@@ -80,7 +80,7 @@ def attach(db: Database, upload_dir: Path, ctx: Context, sale_id: str, data: byt
 
 def listing(db: Database, ctx: Context, sale_id: str) -> list[dict]:
     return [dict(r) for r in db.all(
-        "SELECT a.id, a.kind, a.note, a.review, a.review_note, a.reviewed_at, a.created_at, f.mime_type, f.size_bytes,"
+        "SELECT a.id, a.kind, a.note, a.review, a.review_note, a.confirmed_amount, a.reviewed_at, a.created_at, f.mime_type, f.size_bytes,"
         " u.full_name by_name, r.full_name reviewed_name FROM sale_attachments a JOIN source_files f ON f.id=a.file_id"
         " LEFT JOIN users u ON u.id=a.created_by LEFT JOIN users r ON r.id=a.reviewed_by"
         " WHERE a.org_id=? AND a.sale_id=? ORDER BY a.created_at", (ctx.org_id, sale_id))]
@@ -101,7 +101,10 @@ def file(db: Database, upload_dir: Path, ctx: Context, att_id: str) -> tuple[byt
     return p.read_bytes(), r["mime_type"]
 
 
-def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None = None) -> dict:
+def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None = None,
+           amount: int | None = None) -> dict:
+    """ok with `amount`: this proof shows only that much of the sale's transfer arrived (#324 M2-01). The rest
+    is then not counted as received: it funds no refund and shows as a problem in the transfers report."""
     ctx.require("sales.totals")
     r = db.one("SELECT * FROM sale_attachments WHERE id=? AND org_id=?", (att_id, ctx.org_id))
     if not r:
@@ -109,16 +112,51 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
     note = (note or "").strip()[:200] or None
     if not ok and not note:
         raise ValidationFailed("اكتب المشكلة (مثال: المبلغ لم يصل / المبلغ أقل)")
+    sale = db.one("SELECT sale_no, paid_transfer FROM sales WHERE id=? AND org_id=?", (r["sale_id"], ctx.org_id))
+    if amount is not None:
+        if not ok or isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= (sale["paid_transfer"] or 0):
+            raise ValidationFailed("اكتب المبلغ الذي وصل (أكبر من صفر ولا يزيد عن مبلغ التحويل)")
     with db.transaction():
-        db.execute("UPDATE sale_attachments SET review=?, review_note=?, reviewed_by=?, reviewed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
-                   " WHERE id=?", ("ok" if ok else "problem", note, ctx.user_id, att_id))
+        db.execute("UPDATE sale_attachments SET review=?, review_note=?, confirmed_amount=?, reviewed_by=?,"
+                   " reviewed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                   ("ok" if ok else "problem", note, amount if ok else None, ctx.user_id, att_id))
         audit.record(db, ctx, "sale.transfer_review", "sale", r["sale_id"], before={"review": r["review"]},
-                     after={"review": "ok" if ok else "problem", "note": note})
+                     after={"review": "ok" if ok else "problem", "note": note, "amount": amount})
+        got = transfer_state(db, ctx.org_id, r["sale_id"], sale["paid_transfer"] or 0)
         if not ok:
-            s = db.one("SELECT sale_no, paid_transfer FROM sales WHERE id=?", (r["sale_id"],))
-            notify.emit(db, ctx, "transfer_problem", "error", f"مشكلة في تحويل فاتورة {s['sale_no']} ({s['paid_transfer'] / 100:,.2f} ج)",
+            notify.emit(db, ctx, "transfer_problem", "error", f"مشكلة في تحويل فاتورة {sale['sale_no']} ({sale['paid_transfer'] / 100:,.2f} ج)",
                         note, "sale", r["sale_id"])
+        elif got["state"] == "problem":     # a part confirmed and nothing else waiting: the rest did not come
+            notify.emit(db, ctx, "transfer_problem", "error",
+                        f"وصل {got['verified'] / 100:,.2f} ج فقط من تحويل فاتورة {sale['sale_no']}"
+                        f" ({sale['paid_transfer'] / 100:,.2f} ج)", note, "sale", r["sale_id"])
     return dict(db.one("SELECT * FROM sale_attachments WHERE id=?", (att_id,)))
+
+
+def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) -> dict:
+    """What a sale's transfer proofs say: `verified` (confirmed amounts; a proof approved without an amount
+    confirms the whole transfer), `received` (what may fund a refund: the whole transfer until a reviewer
+    says otherwise, by a problem or by approving only part of it), and the report's `state`."""
+    return _state(db.all("SELECT review, confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
+                         (org_id, sale_id)), paid_transfer)
+
+
+def _state(rows, paid_transfer: int) -> dict:
+    verified = min(paid_transfer, sum((r["confirmed_amount"] if r["confirmed_amount"] is not None else paid_transfer)
+                                      for r in rows if r["review"] == "ok"))
+    problem = any(r["review"] == "problem" for r in rows)
+    pending = any(r["review"] == "pending" for r in rows)
+    partial = any(r["review"] == "ok" and r["confirmed_amount"] is not None for r in rows) and verified < paid_transfer
+    if not rows:
+        state = "missing"
+    elif verified >= paid_transfer:
+        state = "ok"
+    elif problem or (partial and not pending):
+        state = "problem"
+    else:
+        state = "pending"
+    short = problem or (partial and not pending)
+    return {"verified": verified, "received": verified if short else paid_transfer, "state": state}
 
 
 def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
@@ -139,9 +177,19 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         " FROM sales s LEFT JOIN users u ON u.id=s.created_by WHERE s.org_id=? AND s.paid_transfer>0 AND s.status<>'draft'"
         " AND s.completed_at>=? AND s.completed_at<? ORDER BY s.completed_at DESC",
         (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))]
+    # the confirmed amounts of the period's proofs in one read (#324 M2-01): "ok" counts what was confirmed, the rest
+    # of a sale's transfer counts under its state
+    proofs: dict[str, list] = {}
+    for p in db.all("SELECT a.sale_id, a.review, a.confirmed_amount FROM sale_attachments a JOIN sales s ON s.id=a.sale_id"
+                    " WHERE a.org_id=? AND s.org_id=? AND s.paid_transfer>0 AND s.completed_at>=? AND s.completed_at<?",
+                    (ctx.org_id, ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1])):
+        proofs.setdefault(p["sale_id"], []).append(p)
     for r in rows:
-        r["state"] = "voided" if r["status"] == "voided" else "missing" if not r["proofs"] else r["review"]
-    tot = lambda st: sum(r["paid_transfer"] for r in rows if r["state"] == st)  # noqa: E731
+        st = _state(proofs.get(r["id"], []), r["paid_transfer"])
+        r["verified"] = st["verified"]
+        r["state"] = "voided" if r["status"] == "voided" else st["state"]
+    live = [r for r in rows if r["state"] != "voided"]
+    rest = lambda st: sum(r["paid_transfer"] - r["verified"] for r in live if r["state"] == st)  # noqa: E731
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows,
-            "totals": {"all": sum(r["paid_transfer"] for r in rows if r["state"] != "voided"), "missing": tot("missing"),
-                       "pending": tot("pending"), "ok": tot("ok"), "problem": tot("problem")}}
+            "totals": {"all": sum(r["paid_transfer"] for r in live), "missing": rest("missing"),
+                       "pending": rest("pending"), "ok": sum(r["verified"] for r in live), "problem": rest("problem")}}

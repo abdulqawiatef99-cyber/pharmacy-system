@@ -947,7 +947,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def attachment_review(req):
         from ..sales import attachments as att
         b = await body(req)
-        return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note")))
+        amount = b.get("amount")
+        if amount is not None:                      # part of the transfer arrived (#324 M2-01)
+            amount = _int(amount, "amount")
+        return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note"), amount=amount))
 
     # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
     @handler

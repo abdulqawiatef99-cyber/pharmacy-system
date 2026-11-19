@@ -2730,8 +2730,9 @@ async function viewSale(id) {
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
       <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ تمت مراجعتها", problem: "✕ بها مشكلة", pending: "⚠ بانتظار المراجعة" }[a.review]}</span>
-        ${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
-        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>` : ""}
+        ${a.review === "ok" && a.confirmed_amount != null ? `<div><span>المبلغ الذي وصل:</span> ${money(a.confirmed_amount)} ج</div>` : ""}${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
+        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>
+          <button class="btn small secondary" data-rvpart="${esc(a.id)}">وصل جزء منه</button>` : ""}
         ${can("sales.totals") && a.review !== "problem" ? `<button class="btn small secondary" data-rvbad="${esc(a.id)}">✕ بها مشكلة</button>` : ""}</figcaption></figure>`).join("")}</div>
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>الصافي</th>
@@ -2770,6 +2771,12 @@ async function viewSale(id) {
   });
   app.querySelectorAll("[data-rvok]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/attachments/${b.dataset.rvok}/review`, { method: "POST", body: { ok: true } }); viewSale(id); } catch (err) { toast(err.message, true); }
+  }));
+  // only part of the transfer arrived: the amount confirmed is what counts as received (#324 M2-01)
+  app.querySelectorAll("[data-rvpart]").forEach((b) => b.addEventListener("click", async () => {
+    const amount = toPiasters(prompt("كم وصل من التحويل؟ (ج)") || "");
+    if (!(amount > 0)) return;
+    try { await api(`/api/attachments/${b.dataset.rvpart}/review`, { method: "POST", body: { ok: true, amount } }); viewSale(id); } catch (err) { toast(err.message, true); }
   }));
   app.querySelectorAll("[data-rvbad]").forEach((b) => b.addEventListener("click", async () => {
     const note = prompt("ما المشكلة؟ (مثال: المبلغ لم يصل / المبلغ أقل)"); if (!note) return;
