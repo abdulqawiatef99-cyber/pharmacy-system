@@ -34,7 +34,6 @@ jobs:
         tool: ${{ fromJSON(inputs.tool == 'both' && '["nuitka","pyinstaller"]' || format('["{0}"]', inputs.tool)) }}
     env:
       PYTHONUTF8: "1"
-      EVAL_OUT: ${{ runner.temp }}\compiled-eval
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,13 +69,13 @@ jobs:
       - name: Baseline (the program as it ships today, plain Python)
         shell: pwsh
         run: |
-          python scripts/ci/compiled_build_eval.py check --tool python --out "$env:EVAL_OUT"
+          python scripts/ci/compiled_build_eval.py check --tool python --out "$env:RUNNER_TEMP\compiled-eval"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build (${{ matrix.tool }})
         shell: pwsh
         run: |
-          python scripts/ci/compiled_build_eval.py build --tool ${{ matrix.tool }} --out "$env:EVAL_OUT"
+          python scripts/ci/compiled_build_eval.py build --tool ${{ matrix.tool }} --out "$env:RUNNER_TEMP\compiled-eval"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Runs after a failed build too, so the report says "the build failed" instead of nothing.
@@ -84,7 +83,7 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
-          python scripts/ci/compiled_build_eval.py check --tool ${{ matrix.tool }} --out "$env:EVAL_OUT" --extra-dll fribidi
+          python scripts/ci/compiled_build_eval.py check --tool ${{ matrix.tool }} --out "$env:RUNNER_TEMP\compiled-eval" --extra-dll fribidi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The report only (two small text files per tool). The compiled program itself is never uploaded.

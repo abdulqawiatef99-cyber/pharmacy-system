@@ -58,6 +58,10 @@ class TestWorkflow(unittest.TestCase):
         for tool in ("nuitka", "pyinstaller"):
             self.assertNotIn(tool, requirements)                      # build tools never ship to the pharmacy
 
+    def test_the_runner_context_is_used_only_inside_steps(self):
+        """GitHub refuses the whole file when `runner.*` appears in a job's own env (first dispatch, 19/11)."""
+        self.assertNotIn("runner.", self.code[:self.code.index("    steps:")])
+
     def test_the_baseline_and_the_report_step_always_have_something_to_say(self):
         self.assertIn("check --tool python", self.code)
         check = self.code[self.code.index("Checks from the compiled folder"):]
