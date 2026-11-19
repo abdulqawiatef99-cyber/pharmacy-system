@@ -41,7 +41,7 @@ class TestReleaseValidation(unittest.TestCase):
                 report = validate(Path(temporary), Path(temporary) / 'logs')
             self.assertTrue(report['ok'])
             budgets = [c.kwargs['timeout'] for c in run.call_args_list]
-            self.assertEqual(budgets, [900, 300, 300, 300])                  # tests, selftest, init, verify
+            self.assertEqual(budgets, [1800, 300, 300, 300])                  # tests, selftest, init, verify
 
     def test_timeout_is_recorded_and_temporary_database_directory_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:

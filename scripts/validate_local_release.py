@@ -23,8 +23,10 @@ def isolated_environment(data: Path) -> dict[str, str]:
     return env
 
 
-# The whole suite (850+ tests on 12/11) takes over 300 s on a GitHub Windows runner: the other steps keep 300 s
-TESTS_TIMEOUT = 900
+# The whole suite on a GitHub Windows runner: over 300 s with 850 tests (12/11), 12 minutes with 1,830 (19/11
+# morning), and with 1,905 it was cut at 900 s after about 1,500 of them (run 1052): about 19 minutes. The limit
+# is there to stop a hung run, not to fail a slow one; the other steps keep 300 s.
+TESTS_TIMEOUT = 1800
 
 
 def validate(root: Path, output: Path, *, timeout: int = 300, tests_timeout: int = TESTS_TIMEOUT) -> dict:
