@@ -37,7 +37,9 @@ class TestMoneyPlacesBecomeAccounts(Base):
         for i in (2, 3, 4, 5, 7, 8, 9, 10, 11):
             a = self.acct(i)
             self.assertIsNotNone(a, NAMES[i - 1])
-            self.assertEqual(self.bal(a["id"]), i * 1000 + 25, NAMES[i - 1])
+            # owner 20/11 00:50: the treasury's E-Stock figure is a reference, not money: it opens at zero
+            self.assertEqual(self.bal(a["id"]), 0 if i == 2 else i * 1000 + 25, NAMES[i - 1])
+        self.assertFalse(self.db.one("SELECT 1 FROM money_movements WHERE account_id=?", (self.acct(2)["id"],)))
         self.assertEqual(self.acct(2)["kind"], "treasury")
         self.assertEqual(self.acct(3)["kind"], "bank")
         self.assertEqual(self.acct(8)["kind"], "wallet")
@@ -128,18 +130,18 @@ class TestCodexReview381(Base):
 
     def test_p1_a_fractional_piaster_opening_is_rounded_and_listed_never_silently(self):
         t = tables()
-        t["Cash_depots"][1]["cd_balance"] = "20.2550"                         # «خزينة 1»
+        t["Cash_depots"][2]["cd_balance"] = "20.2550"                         # «حساب بنك مصر» (the treasury is a reference)
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         line = [d for d in res["plan"].dq if d["table"] == "Cash_depots" and "كسر قرش" in d["action"]]
         self.assertEqual(len(line), 1)
         self.assertIn("Cash_depots", res["plan"].checks["rounding"])
-        acct = self.db.one("SELECT id FROM money_accounts WHERE source_ref='estock:2'")["id"]
+        acct = self.db.one("SELECT id FROM money_accounts WHERE source_ref='estock:3'")["id"]
         self.assertEqual(self.db.one("SELECT sum(amount) b FROM money_movements WHERE account_id=?", (acct,))["b"], 2026)
 
     def test_p1_with_no_round_piastres_a_fractional_opening_stops_the_move(self):
         t = tables()
-        t["Cash_depots"][1]["cd_balance"] = "20.2550"
+        t["Cash_depots"][2]["cd_balance"] = "20.2550"
         res = self.run_import(tables=t, round_piastres=False)
         self.assertFalse(res["ok"])
         self.assertFalse(self.db.one("SELECT 1 FROM money_movements"))
@@ -150,7 +152,7 @@ class TestCodexReview381b(Base):
 
     def test_p1_an_unreadable_account_balance_stops_the_move_and_posts_nothing(self):
         t = tables()
-        t["Cash_depots"][1]["cd_balance"] = "not-a-number"                    # «خزينة 1»
+        t["Cash_depots"][2]["cd_balance"] = "not-a-number"                    # «حساب بنك مصر»
         res = self.run_import(tables=t)
         self.assertFalse(res["ok"])
         self.assertTrue(any(d["table"] == "Cash_depots" and d["severity"] == "block" for d in res["plan"].dq))
@@ -160,7 +162,7 @@ class TestCodexReview381b(Base):
     def test_p1_on_the_old_schema_the_same_value_is_only_listed(self):
         from unittest import mock
         t = tables()
-        t["Cash_depots"][1]["cd_balance"] = "not-a-number"
+        t["Cash_depots"][2]["cd_balance"] = "not-a-number"
         with mock.patch.object(estock_db, "_has_money", return_value=False):
             res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
