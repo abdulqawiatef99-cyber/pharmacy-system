@@ -73,7 +73,9 @@ def customer_sales(db: Database, ctx: Context, date_from: str, date_to: str) -> 
     rows = [dict(r) for r in db.all(
         "SELECT s.customer_id, c.name, c.phone, count(*) n, sum(s.subtotal) gross, sum(s.discount_total) discount, sum(s.total) total,"
         " sum(s.returned_total) returns, sum(s.on_credit) credit, max(s.completed_at) last_at,"
-        " (SELECT coalesce(sum(amount),0) FROM customer_ledger WHERE customer_id=s.customer_id) balance"
+        # org_id: the ledger's index starts with it; without it the whole ledger was read once per customer
+        # (#324 R9, #304 B9), and a row of another pharmacy could be added in
+        " (SELECT coalesce(sum(amount),0) FROM customer_ledger WHERE org_id=s.org_id AND customer_id=s.customer_id) balance"
         " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id"
         " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
         " GROUP BY s.customer_id", (ctx.org_id, ctx.branch_id, lo, hi))]
@@ -267,35 +269,72 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
 
 
 # ------------------------------------------------------------------ items not sold
+_IDS = 500           # item ids per IN (...) query, far below SQLite's limit on bound parameters
+UNSOLD_SHORT_DAYS = 62
+
+
 def unsold_items(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
-    """Items in stock now that had no sale in the period, most money tied up first."""
+    """Items in stock now that had no sale in the period, most money tied up first.
+
+    Built from the period's sales, not item by item: the old single query asked, for every item in stock,
+    "was it sold in the period?", "when was it last sold?" and "when did it last arrive?", the last one
+    without the pharmacy id its index starts with, so the whole stock ledger was read once per unsold item
+    (174 s for one month in a medium pharmacy, F104 / #324 R8 / #304 B7)."""
     ctx.require("sales.totals")
     ctx.require("inventory.read")
     d1, d2, lo, hi = _period(date_from, date_to)
     o, b = ctx.org_id, ctx.branch_id
-    show_cost = ctx.can("costs.read")
+    show_cost, see_hidden = ctx.can("costs.read"), ctx.can("items.hidden")
+    # "was it sold in the period?", the cheaper way round for the period asked:
+    # - a short period: the items on the period's own invoices, read once (a month is a twelfth of a year's lines);
+    # - a long one: item by item, stopping at the first sale found (over years almost every item has one at once;
+    #   reading every invoice line of several years instead would be the slow part).
+    short = (d2 - d1).days <= UNSOLD_SHORT_DAYS
+    sold: set = set()
+    probe, probe_params = "", ()
+    if short:
+        sold = {r["item_id"] for r in db.all(
+            "SELECT DISTINCT l.item_id FROM sales s JOIN sale_lines l ON l.sale_id=s.id WHERE s.org_id=? AND s.branch_id=?"
+            " AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?", (o, b, lo, hi))}
+    else:
+        # CROSS JOIN fixes the order: the item's own lines first, then each line's invoice. Left to choose,
+        # SQLite starts from every invoice of the period, once per item
+        probe = (" AND NOT EXISTS (SELECT 1 FROM sale_lines l CROSS JOIN sales s ON s.id=l.sale_id WHERE l.item_id=i.id"
+                 " AND s.org_id=i.org_id AND s.branch_id=sb.branch_id AND s.status='completed'"
+                 " AND s.completed_at>=? AND s.completed_at<?)")
+        probe_params = (lo, hi)
     rows = []
     for r in db.all(
             "SELECT i.id item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.public_price, i.hidden, c.name category,"
-            " sum(sb.qty) qty, min(CASE WHEN sb.qty>0 THEN bt.expiry_date END) expiry, ic.avg_cost,"
-            " (SELECT max(s.completed_at) FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE l.item_id=i.id AND s.status='completed'"
-            "  AND s.branch_id=?) last_sold,"
-            " (SELECT max(m.created_at) FROM stock_movements m WHERE m.item_id=i.id AND m.branch_id=? AND m.movement_type IN ('purchase','opening')) last_in"
-            " FROM items i JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+            " sum(sb.qty) qty, min(CASE WHEN sb.qty>0 THEN bt.expiry_date END) expiry, ic.avg_cost"
+            " FROM stock_balances sb JOIN items i ON i.id=sb.item_id AND i.org_id=sb.org_id"
             " LEFT JOIN batches bt ON bt.id=nullif(sb.batch_key,'') LEFT JOIN categories c ON c.id=i.category_id"
-            " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=i.org_id AND ic.branch_id=?"
-            " WHERE i.org_id=? AND i.status='active' AND i.is_service=0"
-            " AND NOT EXISTS (SELECT 1 FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE l.item_id=i.id AND s.status='completed'"
-            "  AND s.branch_id=? AND s.completed_at>=? AND s.completed_at<?)"
-            " GROUP BY i.id HAVING sum(sb.qty) > 0", (b, b, b, b, o, b, lo, hi)):
+            " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=i.org_id AND ic.branch_id=sb.branch_id"
+            f" WHERE sb.org_id=? AND sb.branch_id=? AND i.status='active' AND i.is_service=0{probe}"
+            " GROUP BY i.id HAVING sum(sb.qty) > 0", (o, b, *probe_params)):
         d = dict(r)
-        if d.pop("hidden") and not ctx.can("items.hidden"):
+        if d["item_id"] in sold or (d.pop("hidden") and not see_hidden):
             continue
+        d.pop("hidden", None)
+        d["last_sold"] = d["last_in"] = None
         d["price_value"] = retail_value(d["qty"], d["public_price"] or 0, d["pack_size"])   # the sale's own rule
         cost = d.pop("avg_cost")
         if show_cost:
             d["cost_value"] = int((Decimal(cost) * d["qty"] * 100).to_integral_value(ROUND_HALF_UP)) if cost is not None else None
         rows.append(d)
+    by_id = {d["item_id"]: d for d in rows}
+    ids = list(by_id)
+    for k in range(0, len(ids), _IDS):     # the two dates, only for the items listed, each from the item's own rows
+        part = ids[k:k + _IDS]
+        marks = ",".join("?" * len(part))
+        for r in db.all("SELECT l.item_id, max(s.completed_at) t FROM sale_lines l CROSS JOIN sales s ON s.id=l.sale_id"
+                        f" WHERE l.item_id IN ({marks}) AND s.org_id=? AND s.branch_id=? AND s.status='completed'"
+                        " GROUP BY l.item_id", (*part, o, b)):
+            by_id[r["item_id"]]["last_sold"] = r["t"]
+        for r in db.all("SELECT m.item_id, max(m.created_at) t FROM stock_movements m WHERE m.org_id=? AND m.branch_id=?"
+                        f" AND m.item_id IN ({marks}) AND m.movement_type IN ('purchase','opening') GROUP BY m.item_id",
+                        (o, b, *part)):
+            by_id[r["item_id"]]["last_in"] = r["t"]
     key = "cost_value" if show_cost else "price_value"
     rows.sort(key=lambda r: -(r.get(key) or 0))
     tot = {"n": len(rows), "price_value": sum(r["price_value"] for r in rows)}
