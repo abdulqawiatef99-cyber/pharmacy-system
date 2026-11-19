@@ -1,7 +1,8 @@
 """#324 audit M2, the sales and cash findings in app/sales and app/api (first half): M2-03 cash received below the
 cash part, M2-06 an old count screen closing a new shift, M2-07 offsetting price changes, M2-08 a contract rate
 changed under the posting, M2-19 malformed money inputs, M2-20 one buyer under two phone formats, M2-26 opening
-a shift answered with 403 after it committed. Each test failed on develop `5592748`. Synthetic data only."""
+a shift answered with 403 after it committed, and M2-25 (the routes' half). Each test failed on develop `5592748`
+(M2-25 on `c5470e1`, after the core half merged). Synthetic data only."""
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -268,3 +269,26 @@ class TestM2_20DoublesRoute(ApiBase):
         self.login_as("seller2", PW)
         self.assertEqual(self.c.get("/api/customers/phone-doubles", headers=H).status_code, 403)
         self.assertIn('api("/api/customers/phone-doubles")', JS)
+
+
+class TestM2_25ReplayCleanupInTheRoutes(ApiBase):
+    """The keyed-POST reservation used to scan the replay table on every request; it now asks the one helper,
+    which cleans at most once an hour (the core half came in #364)."""
+
+    def test_the_reservation_cleans_through_the_helper(self):
+        from unittest.mock import patch
+
+        from app.core import idempotency
+        idempotency._pruned_at.clear()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path, request_hash, status,"
+                            " response, created_at) VALUES (?,?,?,?,?,?,?,?, datetime('now','-30 days'))",
+                            (self.ctx.org_id, self.ctx.user_id, "old", "POST", "/x", "h", 201, "{}"))
+        real, calls = idempotency.prune, []
+        with patch.object(idempotency, "prune", lambda db, *a, **kw: calls.append(1) or real(db, *a, **kw)):
+            for key in ("p-1", "p-2"):
+                self.assertEqual(self.post("/api/cash/open", {"opening_cash": 0}, key).status_code in (201, 409), True)
+        self.assertEqual(len(calls), 2)                                   # asked each time ...
+        self.assertIsNone(self.db.one("SELECT 1 FROM idempotency_keys WHERE key='old'"))   # ... cleaned once
+        self.assertNotIn("DELETE FROM idempotency_keys WHERE created_at", (Path(__file__).resolve().parents[1]
+                         / "app" / "api" / "app.py").read_text(encoding="utf-8"))

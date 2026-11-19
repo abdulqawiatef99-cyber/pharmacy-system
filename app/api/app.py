@@ -315,8 +315,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         with db.transaction():
             hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
             if not hit:
-                db.execute("DELETE FROM idempotency_keys WHERE created_at < datetime('now', ?)",
-                           (f"-{IDEMPOTENCY_TTL_DAYS} days",))
+                idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)   # at most once an hour, not a scan per POST (#324 M2-25)
                 db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
                            " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
                            (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(ctx.permissions))))
