@@ -145,6 +145,22 @@ def _money_pending(plan) -> list[dict]:
     return out
 
 
+def _money_moved_line(pending: list[dict], money: dict) -> dict:
+    """The candidate schema: the account places became accounts with their openings (estock_db money step)."""
+    accts = [d for d in pending if not d["shift"]]
+    shift = [d for d in pending if d["shift"]]
+    tot = sum(abs(d["balance"]) for d in accts)
+    parts = "، ".join(f"«{d['name']}» {_money(d['balance'])} ج" for d in sorted(accts, key=lambda d: -abs(d["balance"])))
+    done = (f"اتنقلت حسابات في البرنامج ({money['accounts']} حساب) برصيدها الافتتاحي من إي ستوك، واتطابقت"
+            + ("" if not money.get("mismatches") else f" إلا {money['mismatches']} (القسم ٢)"))
+    if shift:
+        done += "؛ " + "، ".join(f"«{d['name']}» {_money(d['balance'])} ج" for d in shift) + \
+            " درج الشيفت: مش حساب، يبقى نقدية أول شيفت لما تفتح الشيفت"
+    return {"what": "حسابات الفلوس من إي ستوك (الخزنة والبنك والمحافظ)", "estock": f"{parts} — القيمة {_money(tot)} ج",
+            "done": done, "ask": "اعدّ الخزنة وراجع كل محفظة وحساب بنك؛ أي فرق يتسجل بالجرد من شاشة الحسابات",
+            "value": tot}
+
+
 def _money_line(pending: list[dict]) -> dict | None:
     if not pending:
         return None
@@ -235,7 +251,9 @@ def write(path: Path, plan, rec: dict) -> Path:
     owner = [d for d in plan.dq if _for_owner(d)]
     rest = [d for d in plan.dq if not _for_owner(d)]
     blocked = bool(plan.blocking)
-    pending = _money_pending(plan)
+    moved_money = rec.get("money")                 # the candidate schema posted the accounts (estock_db money step)
+    places = _money_pending(plan)
+    pending = [] if moved_money else places
     if blocked:
         result = f"النتيجة: النقل وقف — فيه {len(plan.blocking)} حاجة لازم تقررها الأول، ومفيش أي حاجة اتكتبت"
     elif rec.get("ok") and pending:
@@ -257,7 +275,7 @@ def write(path: Path, plan, rec: dict) -> Path:
                         "done": "وقف النقل لحد قرارك (مفيش حاجة اتكتبت)" if d["severity"] == "block"
                                 else (done or _plain(d["action"])),
                         "ask": ask, "value": v, "stops": d["severity"] == "block"})
-    ml = _money_line(pending)
+    ml = _money_moved_line(places, moved_money) if moved_money else _money_line(pending)
     if ml:
         entries.append(ml)
     bl = _balances_line(plan)
@@ -272,6 +290,10 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines += [f"  {n}) {e['what']}", f"     في إي ستوك: {e['estock']}", f"     البرنامج عمل: {e['done']}",
                   f"     المطلوب منك: {e['ask']}"]
     lines += ["", "٢. المطابقة (قد إيه اتطابق وقد إيه لأ):"] + _margin(plan, rec)
+    if moved_money:
+        lines.append(f"  الخزنة والمحافظ: {moved_money['accounts']} حساب اتنقل بإجمالي {_money(moved_money['program_total'])} ج"
+                     f" — اتطابق {moved_money['accounts'] - moved_money['mismatches']} من {moved_money['accounts']}"
+                     f" ({_pct(moved_money['accounts'] - moved_money['mismatches'], moved_money['accounts'])})")
     if pending:
         lines.append(f"  الخزنة والمحافظ: {len(pending)} حساب بإجمالي {_money(sum(abs(d['balance']) for d in pending))} ج"
                      " لسه ما اتنقلتش (خدمة الحسابات F105)؛ مش داخلين في المطابقة لحد ما يتنقلوا")
