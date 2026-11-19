@@ -45,7 +45,7 @@ class TestS6X6SupplierRetry(APICase):
     def setUp(self):
         super().setUp()
         self.sid = cat.create_supplier(self.db, self.ctx, name="مورد المرتجع")
-        _stock(self.db, self.ctx, self.pan, 10)
+        self.lot = _stock(self.db, self.ctx, self.pan, 10)
         CashDrawer(self.db).open(self.ctx, 100000)
 
     def staff(self, deny):
@@ -69,8 +69,8 @@ class TestS6X6SupplierRetry(APICase):
     def test_return_without_purchases_read_posts_once_and_answers_success(self):
         c = self.staff("purchases.read")
         hdr = {**H, "Idempotency-Key": "ret-1"}
-        body = {"supplier_id": self.sid, "lines": [{"item_id": self.pan, "qty_base": 1, "reason": "expired",
-                                                     "unit_value": 100}]}
+        body = {"supplier_id": self.sid, "lines": [{"item_id": self.pan, "batch_id": self.lot, "qty_base": 1,
+                                                     "reason": "expired", "unit_value": 100}]}
         first = c.post("/api/supplier-returns", json=body, headers=hdr)
         self.assertEqual(first.status_code, 200, first.text)
         retry = c.post("/api/supplier-returns", json=body, headers=hdr)

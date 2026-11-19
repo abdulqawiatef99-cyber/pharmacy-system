@@ -218,6 +218,8 @@ class WritePaths(DBTestCase):
         self.assertEqual(sum(m["qty_delta"] for m in w.moves), -24)
 
     def test_supplier_return_with_and_without_batch(self):
+        with self.db.transaction():          # stock kept without a lot: the only stock a return without a batch takes
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=3, movement_type="opening")
         with self.watch() as w:
             returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "batch_id": self.b1, "qty_base": 2,
                                                           "reason": "expired"}])
