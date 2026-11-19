@@ -400,6 +400,19 @@ def cmd_import_estock_db(a, s):
     from app.core import backup
     from app.core.errors import DomainError
     from app.dataimport import estock_archive, estock_db
+    if a.status:      # estock-db-import.bat: is the latest E-Stock read complete? Reads files only, writes nothing
+        try:
+            ex = estock_db.Export(Path(a.dir), a.database)
+        except DomainError as e:
+            sys.exit(f"FAIL: {e.message}")
+        print("E-Stock read:", " + ".join(ex.runs), f"({len(ex.tables)} tables, {ex.instance}/{ex.database})")
+        if ex.missing:
+            print("NOT READ:", ", ".join(ex.missing))
+            sys.exit(3)
+        print("READ: COMPLETE")
+        return
+    if not a.username:
+        sys.exit("FAIL: --username is required")
     db = _db(s)
     pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
     tok = accounts.login(db, a.username, pw)["token"]
@@ -408,7 +421,7 @@ def cmd_import_estock_db(a, s):
             sys.exit(f"الملف أو الفولدر مش موجود: {f}")
     out_dir = Path(a.out) if a.out else s.data_dir / "reports" / \
         f"estock-db-{datetime.now():%Y%m%d-%H%M%S}{'' if a.apply else '-dry'}"
-    archive = s.data_dir / estock_archive.NAME
+    archive = Path(db.path).parent / estock_archive.NAME     # beside the database, where backup and restore look
     tmp, target = None, db
     try:
         why = estock_db.refusal(db, accounts.resolve_session(db, tok), estock_db.Export(Path(a.dir), a.database).source_sha())
@@ -431,7 +444,7 @@ def cmd_import_estock_db(a, s):
         res = estock_db.run(target, ctx, export_dir=Path(a.dir), out_dir=out_dir, archive_path=archive,
                             write_archive=a.apply, confirm_file=Path(a.confirm) if a.confirm else None,
                             packs_file=Path(a.packs) if a.packs else None, stock_source=a.stock_source,
-                            stores=a.store, database=a.database)
+                            stores=a.store, database=a.database, round_piastres=not getattr(a, "no_round_piastres", False))
     except DomainError as e:
         sys.exit(f"FAIL: {e.message}" + ("\nلو اتكتب جزء، كمّل بنفس الأمر ونفس التصدير، أو رجّع النسخة الاحتياطية"
                                          if a.apply else ""))
@@ -625,14 +638,18 @@ def main(argv=None):
     ie.add_argument("--apply", action="store_true", help="اكتب فعلًا (الافتراضي تجربة على نسخة)")
     ie.add_argument("--backup-dir", default=None)
     ed = sub.add_parser("import-estock-db", help="move the whole E-Stock database from estock-db-read.bat's export")
-    ed.add_argument("--dir", required=True, help="export folder (the one with tables\\manifest.csv)")
+    ed.add_argument("--dir", required=True,
+                    help="one read (the folder with tables\\manifest.csv) or estock-db-read\\ (newest read + its retries)")
+    ed.add_argument("--status", action="store_true", help="only say whether the read is complete (exit 3: tables missing)")
     ed.add_argument("--confirm", help="openings-to-confirm.xlsx after the owner filled the confirmed column")
     ed.add_argument("--packs", help="pack sizes decided by a person (.xlsx or .json), for broken unit conversions")
     ed.add_argument("--stock-source", help="live stock table when it is not clear, e.g. Product_Amount:3")
     ed.add_argument("--store", action="append", help="E-Stock store name or id (repeat); default: الصيدلية")
     ed.add_argument("--database", help="E-Stock database name when the export holds more than one (default stock)")
     ed.add_argument("--out", help="reports folder (default data/reports/estock-db-<time>)")
-    ed.add_argument("--username", required=True)
+    ed.add_argument("--no-round-piastres", action="store_true",
+                    help="block balances with a fraction of a piaster instead of the owner's rule (half up, each listed)")
+    ed.add_argument("--username")
     ed.add_argument("--password", help="for automation only; prefer the prompt")
     ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")
     ed.add_argument("--backup-dir", default=None)
