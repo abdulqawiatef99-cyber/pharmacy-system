@@ -411,6 +411,10 @@ def cmd_import_estock_db(a, s):
             sys.exit(3)
         print("READ: COMPLETE")
         return
+    if getattr(a, "rehearsal", False):
+        if a.apply:
+            sys.exit("FAIL: --rehearsal is a trial only: it never applies")
+        return _estock_db_rehearsal(a, s)
     if not a.username:
         sys.exit("FAIL: --username is required")
     db = _db(s)
@@ -427,8 +431,9 @@ def cmd_import_estock_db(a, s):
         why = estock_db.refusal(db, accounts.resolve_session(db, tok), estock_db.Export(Path(a.dir), a.database).source_sha())
     except DomainError as e:
         sys.exit(f"FAIL: {e.message}")
-    if why:
-        sys.exit(f"FAIL: {why}")
+    if why:            # exit 4: this database holds other data (estock-db-import.bat then runs the rehearsal)
+        print(f"FAIL: {why}", file=sys.stderr)
+        sys.exit(4)
     if not a.apply:
         tmp = Path(tempfile.mkdtemp(prefix="estock-db-dry-"))
         db.backup_to(tmp / "copy.db")
@@ -457,6 +462,42 @@ def cmd_import_estock_db(a, s):
         copy = s.backup_path / f"estock-archive-{datetime.now():%Y%m%d-%H%M%S}.sqlite"
         shutil.copy2(archive, copy)
         print("نسخة من أرشيف إي ستوك:", copy)
+    _estock_db_print(a, res)
+
+
+def _estock_db_rehearsal(a, s):
+    """The daytime trial while the program still holds trial data (Codex on #362): the same dry run, on a NEW
+    EMPTY database in a temp folder with a throwaway owner. The real database is never opened, nothing is kept
+    but the reports (the owner report and the balances to confirm)."""
+    import secrets
+    import shutil
+    import tempfile
+    from app.core.errors import DomainError
+    from app.dataimport import estock_archive, estock_db
+    out_dir = Path(a.out) if a.out else s.data_dir / "reports" / f"estock-db-{datetime.now():%Y%m%d-%H%M%S}-rehearsal"
+    tmp = Path(tempfile.mkdtemp(prefix="estock-db-rehearsal-"))
+    print("== REHEARSAL: تجربة على قاعدة جديدة فاضية (قاعدة البرنامج ما اتفتحتش ومفيش أي حاجة اتكتبت فيها) ==")
+    try:
+        target = Database(tmp / "rehearsal.db")
+        target.migrate()
+        pw = secrets.token_urlsafe(18) + "-Aa1"
+        accounts.create_organization(target, name="تجربة نقل إي ستوك", owner_username="owner",
+                                     owner_full_name="Owner", owner_password=pw)
+        ctx = accounts.resolve_session(target, accounts.login(target, "owner", pw)["token"])
+        res = estock_db.run(target, ctx, export_dir=Path(a.dir), out_dir=out_dir, archive_path=tmp / estock_archive.NAME,
+                            write_archive=False, confirm_file=Path(a.confirm) if a.confirm else None,
+                            packs_file=Path(a.packs) if a.packs else None, stock_source=a.stock_source,
+                            stores=a.store, database=a.database,
+                            round_piastres=not getattr(a, "no_round_piastres", False))
+        target.close()
+    except DomainError as e:
+        sys.exit(f"FAIL: {e.message}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    _estock_db_print(a, res)
+
+
+def _estock_db_print(a, res):
     rec, plan = res["reconciliation"], res["plan"]
     sd = plan.stock_source.get("decision") or {}
     print(f"جدول الرصيد: {sd.get('key', 'مش متحدد')} — {sd.get('why', '')}")
@@ -652,6 +693,8 @@ def main(argv=None):
     ed.add_argument("--username")
     ed.add_argument("--password", help="for automation only; prefer the prompt")
     ed.add_argument("--apply", action="store_true", help="write for real (default: dry run on a copy)")
+    ed.add_argument("--rehearsal", action="store_true",
+                    help="trial on a new empty database (the program still holds trial data); never applies")
     ed.add_argument("--backup-dir", default=None)
     sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
