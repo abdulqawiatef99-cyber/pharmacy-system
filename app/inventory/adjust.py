@@ -98,7 +98,7 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
                    (ctx.org_id, ctx.branch_id, item_id))["q"]
         if set_to is not None:
             qty_delta = set_to - current
-        if not isinstance(qty_delta, int) or qty_delta == 0:
+        if not isinstance(qty_delta, int) or isinstance(qty_delta, bool) or qty_delta == 0:
             raise ValidationFailed("لا يوجد تغيير في الرصيد")
         note = check_reason(reason, note, qty_delta > 0)
         if qty_delta > 0:

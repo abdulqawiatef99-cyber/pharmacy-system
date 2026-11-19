@@ -70,7 +70,7 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     branch_id = branch_id or ctx.branch_id
     if not branch_id:
         raise ValidationFailed("لا يوجد فرع محدد")
-    if not isinstance(qty_delta, int) or qty_delta == 0:
+    if not isinstance(qty_delta, int) or isinstance(qty_delta, bool) or qty_delta == 0:     # true is not 1 unit
         raise ValidationFailed("الكمية يجب أن تكون عددًا صحيحًا غير صفري")
     if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
         raise NotFound("الصنف غير موجود")

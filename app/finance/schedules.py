@@ -12,7 +12,7 @@ import re
 from datetime import date
 
 from ..core import audit, notify
-from ..core.errors import NotFound, ValidationFailed
+from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -33,11 +33,16 @@ def _add(period: str, months: int) -> str:
     return f"{y:04d}-{m:02d}"
 
 
+# a period counts as paid unless its expense was rejected before any money left: a rejected payment whose
+# cash already left the drawer stays paid, so the same bill is never offered (and paid) a second time (M2-12)
+TAKEN = "(status<>'rejected' OR shift_id IS NOT NULL)"
+
+
 def next_open(db: Database, s: dict, today: date) -> dict | None:
     """First period not paid (or pending) and not skipped, looking up to a year ahead."""
     skipped = set(json.loads(s["skipped"] or "[]"))
-    done = {r["schedule_period"] for r in db.all(
-        "SELECT schedule_period FROM expenses WHERE schedule_id=? AND status<>'rejected'", (s["id"],))}
+    done = {r["schedule_period"] for r in db.all(f"SELECT schedule_period FROM expenses WHERE schedule_id=? AND {TAKEN}",
+                                                 (s["id"],))}
     p, limit = s["start_month"], _add(f"{today.year:04d}-{today.month:02d}", 12)
     while p <= limit:
         if p not in done and p not in skipped:
@@ -57,7 +62,7 @@ def listing(db: Database, ctx: Context, today: date | None = None) -> list[dict]
                     " WHERE s.org_id=? ORDER BY s.is_active DESC, s.day_of_month, s.name", (ctx.org_id,)):
         d = dict(r)
         d["next"] = next_open(db, d, today) if d["is_active"] else None
-        d["last_paid"] = db.one("SELECT max(schedule_period) p FROM expenses WHERE schedule_id=? AND status<>'rejected'",
+        d["last_paid"] = db.one(f"SELECT max(schedule_period) p FROM expenses WHERE schedule_id=? AND {TAKEN}",
                                 (d["id"],))["p"]
         out.append(d)
     order = {"late": 0, "soon": 1, "later": 2}
@@ -153,7 +158,7 @@ def _own_period(s: dict, period) -> str:
 
 
 def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_from: str | None = None,
-        note: str | None = None, period: str | None = None) -> dict:
+        note: str | None = None, period: str | None = None, expected_amount: int | None = None) -> dict:
     """Records one period's expense (normal approval rules) and moves the schedule on. With `period` (the month
     the screen showed) exactly that month is paid or refused; a second press never pays the month after it."""
     ctx.require("expenses.approve")
@@ -167,7 +172,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
     amount = amount if amount is not None else s["amount"]
     if not amount:
         raise ValidationFailed("اكتب المبلغ هذه المرة")
-    taken = ("SELECT 1 FROM expenses WHERE org_id=? AND schedule_id=? AND schedule_period=? AND status<>'rejected'",
+    taken = (f"SELECT 1 FROM expenses WHERE org_id=? AND schedule_id=? AND schedule_period=? AND {TAKEN}",
              (ctx.org_id, sid, period))
     if db.one(*taken):
         raise ValidationFailed("هذا الشهر سُجّل من قبل")
@@ -175,6 +180,15 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
         # again under the write lock: two screens must not record this period twice
         if db.one(*taken):
             raise ValidationFailed("هذا الشهر سُجّل من قبل")
+        # the bill as it is now, not as an old screen showed it (M2-11)
+        now = _get(db, ctx, sid)
+        if not now["is_active"]:
+            raise Conflict("البند ده اتوقف؛ حدّث الشاشة", code="schedule_changed")
+        if period in set(json.loads(now["skipped"] or "[]")):
+            raise Conflict("الشهر ده اتعلّم «ليس هذه المرة»؛ حدّث الشاشة", code="schedule_changed")
+        if expected_amount is not None and (amount if amount is not None else now["amount"]) != expected_amount:
+            raise Conflict("مبلغ البند اتغير من شاشة تانية؛ حدّث الشاشة", code="schedule_changed",
+                           details={"amount": now["amount"]})
         e = fin.record(db, ctx, category_id=s["category_id"], amount=amount,
                        paid_from=paid_from or s.get("account_id") or s["paid_from"],
                        note=(note or s["name"]) + f" ({period})", kind="schedule")

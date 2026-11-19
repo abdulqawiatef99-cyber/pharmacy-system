@@ -33,6 +33,9 @@ set "APPLIED=%OUT%\estock-db-apply.txt"
 set "STAMP="
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" ^<nul') do set "STAMP=%%t"
 set "REP=%OUT%\reports-%STAMP%"
+REM never show an earlier run's owner report as this one's
+if exist "%OUT%\owner-report.txt" del /q "%OUT%\owner-report.txt"
+set "OWNERSHOWN="
 set "STOPPED=0"
 echo ==== estock db import %DATE% %TIME% ==== >> "%LOG%"
 echo program: %INST% >> "%LOG%"
@@ -55,6 +58,9 @@ if errorlevel 1 (set "MSG=some E-Stock tables still could not be read (see the l
 call :log PASS "E-Stock read complete: %READS% (newest full read + its retries)"
 
 set "EXTRA="
+REM the confirmed balances are read once, at the start: remember the file as it was (time and size)
+set "CONFSTAMP=none"
+if exist "%OUT%\openings-confirmed.xlsx" for %%f in ("%OUT%\openings-confirmed.xlsx") do set "CONFSTAMP=%%~tf %%~zf"
 if exist "%OUT%\openings-confirmed.xlsx" set "EXTRA=%EXTRA% --confirm "%OUT%\openings-confirmed.xlsx""
 if exist "%OUT%\packs.json" set "EXTRA=%EXTRA% --packs "%OUT%\packs.json""
 if exist "%OUT%\packs.xlsx" set "EXTRA=%EXTRA% --packs "%OUT%\packs.xlsx""
@@ -80,24 +86,30 @@ if errorlevel 1 (set "MSG=the program could not be stopped (see the log)" & goto
 call :log PASS "program stopped (only its own python processes)"
 set "PHARM_DATA_DIR=%DATA%"
 
-REM dry run: on a copy of the database, nothing is written to the real one
+REM dry run: on a copy of the database, nothing is written to the real one; owner-report.txt (what needs the
+REM owner first, how much matched, the rest by kind) is copied next to the balances file and opened
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
-type "%DRY%"
-type "%DRY%" >> "%LOG%"
+type "%DRY%" & type "%DRY%" >> "%LOG%"
 if exist "%REP%-dry\openings-to-confirm.xlsx" copy /y "%REP%-dry\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
+if "%RC%"=="4" goto rehearsal
 if not "%RC%"=="0" (set "MSG=dry run failed, exit %RC%: nothing was moved (reports in %REP%-dry)" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%DRY%" >nul
 if errorlevel 1 (set "MSG=dry run: the reconciliation is not OK: nothing was moved (reports in %REP%-dry)" & goto fail)
 call :log PASS "dry run on a copy: reconciliation OK (reports %REP%-dry)"
+call :owner "%REP%-dry"
 
 echo.
-echo Read the dry run above (also in %DRY%). Balances to confirm: %OUT%\openings-to-confirm.xlsx
+echo Read the owner report first: %OUT%\owner-report.txt (opened in Notepad).
+echo The dry run is above (also in %DRY%). Balances to confirm: %OUT%\openings-to-confirm.xlsx
 set "ANS="
 set /p "ANS=Type YES to apply the move to the real database: "
 if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was moved" & goto fail)
 call :log PASS "apply confirmed by the user"
+set "NOWSTAMP=none"
+if exist "%OUT%\openings-confirmed.xlsx" for %%f in ("%OUT%\openings-confirmed.xlsx") do set "NOWSTAMP=%%~tf %%~zf"
+if not "%NOWSTAMP%"=="%CONFSTAMP%" (set "MSG=openings-confirmed.xlsx appeared or changed after the dry run: run this again so the dry run uses it: nothing was moved" & goto fail)
 
 REM the real move: import-estock-db --apply takes its own verified backup first
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%" --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
@@ -107,6 +119,7 @@ type "%APPLIED%" >> "%LOG%"
 if not "%RC%"=="0" (set "MSG=move failed, exit %RC%: restore the backup named in %APPLIED% before any sale" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%APPLIED%" >nul
 if errorlevel 1 (set "MSG=move: the reconciliation is not OK: restore the backup named in %APPLIED%" & goto fail)
+call :owner "%REP%" quiet
 call :log PASS "move applied after its own verified backup (reports %REP%)"
 
 "%PY%" "%MANAGE%" verify >> "%LOG%" 2>&1
@@ -124,8 +137,31 @@ pause
 endlocal
 exit /b 0
 
+:rehearsal
+REM the program still holds trial data, so the move refuses its database (exit 4). The daytime trial runs on a
+REM NEW EMPTY database in a temp folder instead: the program's database is not opened, nothing is written to it,
+REM and there is no YES. Tonight: launch-fresh-start.bat first, then this again for the real move.
+call :log NOTE "the program's database holds trial data: rehearsal on a new empty database (nothing is written)"
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-rehearsal" --rehearsal > "%DRY%" 2>&1
+set "RC=%ERRORLEVEL%"
+type "%DRY%" & type "%DRY%" >> "%LOG%"
+if exist "%REP%-rehearsal\openings-to-confirm.xlsx" copy /y "%REP%-rehearsal\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
+call :owner "%REP%-rehearsal"
+if not "%RC%"=="0" (set "MSG=rehearsal failed, exit %RC%: nothing was moved (reports in %REP%-rehearsal)" & goto fail)
+call :log PASS "REHEARSAL ONLY: nothing was moved (reports %REP%-rehearsal). Tonight: launch-fresh-start.bat first, then this again"
+set "PHARM_DATA_DIR="
+if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
+echo.
+echo REHEARSAL DONE. Read %OUT%\owner-report.txt and fill openings-confirmed.xlsx; nothing was moved.
+pause
+endlocal
+exit /b 0
+
 :fail
 call :log FAIL "%MSG%"
+REM the real move's own report when it ran (a failed apply must never show the trial's 100%), else the trial's
+if exist "%REP%\owner-report.txt" call :owner "%REP%"
+if not exist "%REP%\owner-report.txt" if not defined OWNERSHOWN call :owner "%REP%-dry"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 echo.
@@ -139,6 +175,15 @@ exit /b 1
 REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
 >> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
+exit /b 0
+
+:owner
+REM owner-report.txt (what needs the owner first, how much matched, the rest by kind): next to the balances
+REM file, opened in Notepad unless "quiet" or an automated run
+if not exist "%~1\owner-report.txt" exit /b 0
+copy /y "%~1\owner-report.txt" "%OUT%\owner-report.txt" >nul
+if "%~2"=="" if not defined PHARM_E2E_ANSWER start "" notepad "%OUT%\owner-report.txt"
+set "OWNERSHOWN=1"
 exit /b 0
 
 :reread

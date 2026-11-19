@@ -54,15 +54,17 @@ def add_category(db: Database, ctx: Context, name: str) -> list[dict]:
     name = (name or "").strip()
     if len(name) < 2:
         raise ValidationFailed("اكتب اسم البند")
+    cid = new_id()
     with db.transaction():
         try:
             db.execute("INSERT INTO expense_categories (id, org_id, name, sort) VALUES (?,?,?,"
                        " (SELECT coalesce(max(sort),0)+1 FROM expense_categories WHERE org_id=?))",
-                       (new_id(), ctx.org_id, name, ctx.org_id))
+                       (cid, ctx.org_id, name, ctx.org_id))
         except Exception as e:
             if "UNIQUE" in str(e):
                 raise Conflict("البند موجود") from e
             raise
+        audit.record(db, ctx, "expense_category.create", "expense_category", cid, after={"name": name})   # M2-18
     return categories(db, ctx)
 
 
@@ -147,6 +149,30 @@ def listing(db: Database, ctx: Context, *, status: str | None = None, month: str
         p += [date_from[:10], date_to[:10]]
     q += " ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 5000"
     return [dict(r) for r in db.all(q, tuple(p))]
+
+
+def totals(db: Database, ctx: Context, *, status: str | None = None, month: str | None = None,
+           date_from: str | None = None, date_to: str | None = None) -> dict:
+    """The period's totals by status over every row the person may see, not only the rows the list shows
+    (the list stops at 5,000, M2-21)."""
+    ctx.require("expenses.record")
+    q, p = "SELECT status, count(*) n, coalesce(sum(amount),0) t FROM expenses WHERE org_id=?", [ctx.org_id]
+    if not ctx.can("expenses.approve"):
+        q += " AND created_by=?"
+        p.append(ctx.user_id)
+    if status:
+        q += " AND status=?"
+        p.append(status)
+    if month:
+        q += " AND substr(spent_on,1,7)=?"
+        p.append(month)
+    if date_from and date_to:
+        q += " AND spent_on>=? AND spent_on<=?"
+        p += [date_from[:10], date_to[:10]]
+    out = {"approved": 0, "approved_n": 0, "pending": 0, "pending_n": 0, "rejected": 0, "rejected_n": 0}
+    for r in db.all(q + " GROUP BY status", tuple(p)):
+        out[r["status"]], out[r["status"] + "_n"] = r["t"], r["n"]
+    return out
 
 
 def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | None = None) -> dict:

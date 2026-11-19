@@ -488,8 +488,13 @@ class TestBat(unittest.TestCase):
 
     def test_dry_run_confirm_apply_verify_in_order(self):
         L = self.lines
-        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
+        main = L[:L.index(":rehearsal")]                   # the rehearsal (exit 4, trial data) has its own run below
+        runs = [i for i, l in enumerate(main) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
         self.assertEqual(len(runs), 2)
+        rehearsal = [l for l in L[L.index(":rehearsal"):] if '"%MANAGE%" import-estock-db' in l]
+        self.assertEqual(len(rehearsal), 1)
+        self.assertIn("--rehearsal", rehearsal[0])
+        self.assertNotIn("--apply", rehearsal[0])
         dry, apply = runs
         self.assertNotIn("--apply", L[dry])
         self.assertIn("--apply", L[apply])
@@ -517,6 +522,8 @@ class TestBat(unittest.TestCase):
     def test_every_failure_is_logged(self):
         L = self.lines
         for l in L[:L.index(":fail")]:
+            if l == 'if "%RC%"=="4" goto rehearsal':      # not a failure: the database holds trial data (#362)
+                continue
             if l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
         self.assertIn('call :log FAIL "%MSG%"', L)
@@ -1266,3 +1273,38 @@ class TestCodexReview345d(Base):
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         it = self.item("104")
         self.assertEqual((it["pack_size"], it["pack_unit_name"], it["base_unit_name"]), (3, "علبة", "شريط"))
+
+
+class TestRehearsal(Base):
+    """Codex on #362: the daytime trial runs while the program still holds trial data; the real database
+    refuses the move then (exit 4), so the trial runs on a NEW EMPTY database and writes nothing real."""
+    cmd = TestCommand.cmd
+
+    def _trial_sale(self):
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        iid = cat.create_item(self.db, self.ctx, {"name_en": "Trial Tab", "pack_size": 1, "public_price": 1000})
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=iid, qty_delta=5, movement_type="adjustment",
+                              unit_cost=Decimal("5"), ref_type="trial", ref_id="t1", note="trial")
+
+    def test_a_database_with_trial_data_refuses_with_exit_4(self):
+        self._trial_sale()
+        code, out, _ = self.cmd(self.export(), False)
+        self.assertEqual(code, 4, out)
+
+    def test_rehearsal_on_an_empty_database_touches_nothing_real(self):
+        self._trial_sale()
+        before = self.db.one("SELECT count(*) n FROM items")["n"]
+        code, out, s = self.cmd(self.export(), False, rehearsal=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn("RECONCILIATION: OK", out)
+        self.assertIn("REHEARSAL", out)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM items")["n"], before)       # the real one is untouched
+        self.assertFalse((Path(self.db.path).parent / estock_archive.NAME).exists())
+        self.assertTrue((self.tmp / "oFalse" / "openings-to-confirm.xlsx").exists())   # what the trial is for
+
+    def test_rehearsal_never_applies(self):
+        code, out, _ = self.cmd(self.export(), True, rehearsal=True)
+        self.assertNotEqual(code, 0)
+        self.assertFalse(self.db.one("SELECT 1 FROM items"))

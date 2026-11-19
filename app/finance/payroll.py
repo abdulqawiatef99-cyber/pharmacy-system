@@ -11,7 +11,7 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
-from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.errors import Conflict, NotFound, ValidationFailed, Forbidden
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..sales.service import _local_date, local_today
@@ -63,8 +63,13 @@ def month_sheet(db: Database, ctx: Context, month: str) -> dict:
     people = [dict(r) for r in db.all(
         "SELECT u.id, u.full_name, r.name role_name, coalesce(p.monthly_salary,0) monthly_salary, coalesce(p.work_days,26) work_days"
         " FROM memberships m JOIN users u ON u.id=m.user_id JOIN roles r ON r.id=m.role_id LEFT JOIN staff_pay p"
-        " ON p.user_id=u.id AND p.org_id=m.org_id WHERE m.org_id=? AND m.is_active=1 AND r.code<>'owner' ORDER BY u.full_name",
-        (ctx.org_id,))]
+        " ON p.user_id=u.id AND p.org_id=m.org_id WHERE m.org_id=? AND r.code<>'owner'"
+        # a person whose login was stopped stays on the sheet of a month he has attendance, an advance or a
+        # salary in, so his final month can be approved and paid (M2-15)
+        " AND (m.is_active=1 OR EXISTS(SELECT 1 FROM attendance a WHERE a.org_id=m.org_id AND a.user_id=u.id"
+        "  AND substr(a.day,1,7)=?) OR EXISTS(SELECT 1 FROM staff_advances v WHERE v.org_id=m.org_id AND v.user_id=u.id"
+        "  AND v.month=?) OR EXISTS(SELECT 1 FROM payroll y WHERE y.org_id=m.org_id AND y.user_id=u.id AND y.month=?))"
+        " ORDER BY u.full_name", (ctx.org_id, month, month, month))]
     for p in people:
         p["days_present"] = db.one("SELECT count(DISTINCT day) d FROM attendance WHERE org_id=? AND user_id=? AND substr(day,1,7)=?",
                                    (ctx.org_id, p["id"], month))["d"]
@@ -204,7 +209,7 @@ def approve(db: Database, ctx: Context, uid: str, month: str, bonus: int = 0, de
     return month_sheet(db, ctx, month)
 
 
-def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dict:
+def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str, expected_net: int | None = None) -> dict:
     ctx.require("payroll.manage")
     pr = db.one("SELECT * FROM payroll WHERE org_id=? AND user_id=? AND month=?", (ctx.org_id, uid, month))
     if not pr:
@@ -228,6 +233,22 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str) -> dic
         if now_adv != pr["advances"]:
             raise Conflict("تغيّرت السلف بعد اعتماد الراتب؛ اعتمد الراتب مرة أخرى قبل الصرف", code="payroll_changed",
                            details={"approved_advances": pr["advances"], "advances_now": now_adv})
+        # the approval as it was shown, and still made from today's salary and attendance (M2-14)
+        if expected_net is not None and expected_net != pr["net"]:
+            raise Conflict("الراتب اتعدّل من شاشة تانية؛ حدّث الشاشة قبل الصرف", code="payroll_changed",
+                           details={"net": pr["net"]})
+        cur = db.one("SELECT coalesce(p.monthly_salary,0) s, coalesce(p.work_days,26) w FROM memberships m"
+                     " LEFT JOIN staff_pay p ON p.org_id=m.org_id AND p.user_id=m.user_id WHERE m.org_id=? AND m.user_id=?",
+                     (ctx.org_id, uid))
+        present = db.one("SELECT count(DISTINCT day) d FROM attendance WHERE org_id=? AND user_id=? AND substr(day,1,7)=?",
+                         (ctx.org_id, uid, month))["d"]
+        if cur and (cur["s"], cur["w"], present) != (pr["base"], pr["work_days"], pr["days_present"]):
+            raise Conflict("الحضور أو المرتب اتغير بعد الاعتماد؛ اعتمد الراتب مرة أخرى قبل الصرف", code="payroll_changed")
+        # the salary expense must be approved now: never pay out cash for an expense left pending (M2-13)
+        for amount in (pr["net"], pr["advances"]):
+            if amount > 0 and not fin._can_approve(db, ctx, amount):
+                raise Forbidden(f"الراتب أكبر من حد المدير ({fin.manager_limit(db, ctx.org_id) / 100:,.0f} ج) — يحتاج إلى المالك",
+                                code="approval_required", details={"permission": "users.manage", "label": "صرف راتب كبير"})
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 

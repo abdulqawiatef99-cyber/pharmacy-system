@@ -2,7 +2,8 @@
 
 Never deleted: invoices (sales and purchases), customer and supplier accounts, cash drawer,
 expenses, stock movements, the audit log — the law requires keeping the books for years and
-they are small (a busy pharmacy adds roughly 20-40 MB a year; backups are compressed ~10x).
+they stay manageable (measured on a synthetic year of a mid-size pharmacy, 80,000 invoices: under 1 GB of
+database, docs/specs/09 section 4; backups are compressed).
 
 Cleaned once a day: notifications older than 180 days, expired or closed sign-in sessions after
 30 days, and the short-lived retry cache. Old automatic backups are pruned by the backup job.
@@ -39,6 +40,9 @@ def clean(db: Database) -> dict:
             "DELETE FROM sessions WHERE (expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?) OR"
             " (revoked_at IS NOT NULL AND revoked_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?)))",
             (f"-{SESSION_DAYS} days", f"-{SESSION_DAYS} days")).rowcount
+        # the retry cache: the requests clean it at most once an hour themselves; here whatever the hour
+        from . import idempotency
+        out["retry_cache"] = idempotency.prune(db, force=True)
     # No PRAGMA optimize / ANALYZE: statistics gathered on a small database go stale after a bulk load
     # and made the planner scan whole tables (#249); the queries are built for SQLite's default plans.
     return out

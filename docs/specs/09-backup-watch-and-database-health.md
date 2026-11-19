@@ -81,6 +81,7 @@ Still on the event loop in `app/api/app.py` (not changed here): the two procurem
 | server log | `logs/server.log` and `logs/restore.log` trimmed in place to their newest 5 MB when over 20 MB (the launcher keeps them open for append and nothing shortened them before) |
 | notifications | Deleted after 180 days (unchanged) |
 | sessions | Expired or closed ones deleted after 30 days (unchanged) |
+| retry cache (`idempotency_keys`) | Answers older than 7 days are removed once a day, and by the requests themselves at most once an hour. Before, every keyed POST read the whole table to delete nothing (Codex audit M2-25). The generic path in `app/api/app.py` still does until it calls `idempotency.prune` |
 | audit log, safety log, stock movements, invoices | Never deleted. The first three also refuse DELETE by trigger. How long the law requires is the owner's question (#113) |
 | safety log volume | The notice "no verified ingredient data for item X" was 95% of `safety_events` (440,696 of 464,792 rows in a year, medium) and a quarter of the database with its indexes. Now recorded the first time it is shown for an item in a month; still shown on every sale. Real warnings and every decision are recorded every time |
 
