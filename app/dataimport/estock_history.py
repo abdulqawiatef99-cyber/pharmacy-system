@@ -157,9 +157,11 @@ _KINDS = {
 
 
 def invoices(db: Database, ctx: Context, kind: str = "sale", *, q: str | None = None, date_from: str | None = None,
-             date_to: str | None = None, party_id: str | None = None, limit: int = 200) -> list[dict]:
+             date_to: str | None = None, party_id: str | None = None, item_id: str | None = None,
+             ticket: str | None = None, limit: int = 200) -> list[dict]:
     """Old E-Stock invoices (kind sale / sale_return / purchase), newest first. `q` = invoice or bill number;
-    `party_id` = the program's customer (sales, returns) or supplier (purchases)."""
+    `party_id` = the program's customer (sales, returns) or supplier (purchases); `item_id` = invoices with that
+    program item on a line; `ticket` = a sale whose ticket name, id or number contains it (spaces trimmed)."""
     if kind not in _KINDS:
         raise ValidationFailed("نوع الفاتورة غير معروف")
     head, idc, _, partyc, pmap, perm, totc = _KINDS[kind]
@@ -173,6 +175,23 @@ def invoices(db: Database, ctx: Context, kind: str = "sale", *, q: str | None = 
             where.append(f"({a.col(head, idc)}=? OR trim({a.col(head, 'bill_number')})=?)")
             params += [str(q).strip(), str(q).strip()]
         _period(where, params, a.col(head, "insert_date"), date_from, date_to)
+        if item_id:
+            pids = _program_to_estock(a, "items", item_id)
+            if not pids:
+                return []
+            lt, extra, xp = a.lines() if kind == "sale" else (_KINDS[kind][2], "", ())
+            if not a.has(lt):
+                return []
+            where.append(f'{a.col(head, idc)} IN (SELECT {a.col(lt, idc, "l")} FROM "e_{lt}" l WHERE'
+                         f' {a.col(lt, "product_id", "l")} IN ({",".join("?" * len(pids))}){extra})')
+            params += [*pids, *xp]
+        if ticket:
+            if kind != "sale":
+                return []
+            t = f"%{str(ticket).strip()}%"
+            where.append(f"(trim({a.col(head, 'ticket_num')}) LIKE ? OR trim({a.col(head, 'ticket_id')}) LIKE ?"
+                         f" OR trim({a.col(head, 'ticket_name')}) LIKE ?)")
+            params += [t, t, t]
         if party_id:
             ids = _program_to_estock(a, pmap, party_id)
             if not ids:
@@ -331,6 +350,20 @@ def statement(db: Database, ctx: Context, kind: str, party_id: str) -> list[dict
     return [{"source": SOURCE, "estock_id": r["id"], "day": _day(r["at"]), "at": r["at"], "type": r["type"],
              "for_him": _egp(r["for_him"]), "for_me": _egp(r["for_me"]), "total": _egp(r["total"]), "notes": r["notes"],
              "estock_gf_id": r["gf"]} for r in rows]
+
+
+def statement_with_opening(db: Database, ctx: Context, kind: str, party_id: str) -> dict:
+    """The old statement as E-Stock holds it, with its last running total, next to the program's opening line
+    (what the move posted, and any confirmed adjustment), so the two can be read side by side."""
+    lines = statement(db, ctx, kind, party_id)
+    ledger, col = ("customer_ledger", "customer_id") if kind == "customer" else ("supplier_ledger", "supplier_id")
+    opening = db.all(f"SELECT amount, kind, note, created_at FROM {ledger} WHERE org_id=? AND {col}=? AND"
+                     " (note LIKE '%رصيد افتتاحي%' OR note LIKE '%تسوية افتتاحية%') ORDER BY created_at",
+                     (ctx.org_id, party_id))
+    return {"source": SOURCE, "lines": lines, "estock_last_total": lines[-1]["total"] if lines else None,
+            "program_opening": [{"amount": r["amount"], "kind": r["kind"], "note": r["note"], "at": r["created_at"]}
+                                for r in opening],
+            "program_opening_total": sum(r["amount"] for r in opening)}
 
 
 def shift_closes(db: Database, ctx: Context, *, date_from: str | None = None, date_to: str | None = None,

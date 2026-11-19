@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import lzma
+import os
 import re
 import shutil
 import sqlite3
@@ -223,6 +224,57 @@ def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
     return [p for _, p in _attachment_checks(db, z) if p]
 
 
+SNAPSHOT_STEP_PAGES = 2048        # pages copied per step: 8 MB at the usual 4 KB page
+
+
+def snapshot(db: Database, dest: Path, *, pages: int = SNAPSHOT_STEP_PAGES, on_step=None) -> None:
+    """A consistent copy of the live database for a backup, written so that nobody waits for it.
+
+    Measured on a 1 GB database (scale.py, medium, one year): the one-step copy ended with a single flush of
+    the whole file, and a sale committed at that moment waited about a second for the disk (#304, F59). Here
+    the copy is made `pages` at a time and each step is flushed by itself, so no flush is big.
+    - One read snapshot is held for the whole copy. A stepped SQLite backup otherwise starts again from the
+      first page every time another connection writes, and would never finish in a working pharmacy; under
+      the snapshot it sees the database as it was at the start and sales simply go on.
+    - The copy is a temporary file that is checked (integrity_check, sha256) right after it is written, so it
+      has no journal and no forced syncs of its own; the per-step flush only keeps dirty data small.
+    `on_step(remaining, total)` is called after each step (tests)."""
+    src = db.conn
+    if src.in_transaction:            # the caller's own transaction or read snapshot: one step, as before
+        db.backup_to(dest)
+        return
+    target = sqlite3.connect(str(dest))
+    fd = None
+    try:
+        target.execute("PRAGMA journal_mode = OFF")
+        target.execute("PRAGMA synchronous = OFF")
+
+        def step(status, remaining, total):
+            nonlocal fd
+            try:
+                if fd is None:
+                    fd = os.open(str(dest), os.O_RDWR | getattr(os, "O_BINARY", 0))
+                os.fsync(fd)
+            except OSError:           # a file system that cannot flush on demand: the copy is still good
+                pass
+            if on_step:
+                on_step(remaining, total)
+
+        src.execute("BEGIN")
+        src.execute("SELECT count(*) FROM sqlite_master").fetchone()      # the read snapshot starts here
+        src.backup(target, pages=pages, progress=step)
+    finally:
+        if src.in_transaction:
+            src.execute("ROLLBACK")
+        target.close()
+        if fd is not None:
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+            os.close(fd)
+
+
 def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> Path:
     """tag 'auto' marks scheduled backups: only those are ever deleted by retention."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -234,7 +286,7 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
         n += 1
     with tempfile.TemporaryDirectory() as tmp:
         snap = Path(tmp) / "pharmacy.db"
-        db.backup_to(snap)
+        snapshot(db, snap)
         check = Database(snap)
         try:
             problems = integrity_problems(check)

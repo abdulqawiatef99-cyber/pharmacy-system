@@ -12,6 +12,11 @@
 - Off-site copy: the newest backup is also copied to a folder the owner picks (USB disk,
   external drive, a Google Drive folder synced on the PC), with the same retention.
   A warning appears when that copy is older than 3 days.
+- Watchdog (the backup must never stop silently): a second thread, independent of the scheduler, checks
+  every minute. It restarts a scheduler thread that died, and tells the owner once a day while the backup
+  is stale (no good backup or "nothing changed" check for two intervals, or the scheduler dead or stuck).
+  Reading the summary (health()) restarts dead threads too, so the screen is a third watcher. Free disk
+  space is measured before every run. Each of these events is written in the audit log.
 Settings and state live in small JSON files in the data folder (not in the database, so
 a restore never rolls them back).
 """
@@ -27,7 +32,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..db import Database
-from . import audit, backup, notify
+from . import audit, backup, notify, responsive
 from .errors import ValidationFailed
 from .numbers import whole_number
 from .permissions import Context
@@ -42,6 +47,11 @@ OFFSITE_STALE_DAYS = 3
 NAME = re.compile(r"^pharmacy-backup-(\d{8})-(\d{6})(?:-\d+)?-auto(-incomplete)?\.zip$")
 INCOMPLETE = "-auto-incomplete.zip"
 PART_STALE_SECONDS = 3600
+WATCH_SECONDS = 60               # how often the watchdog looks
+STALE_INTERVALS = 2              # stale = no good backup or check for this many intervals
+STALE_NOTIFY_HOURS = 24          # one notification a day while it stays stale
+STUCK_SECONDS = 45 * 60          # a single run longer than this is reported as stuck
+MIN_FREE_BYTES = 1024 ** 3       # warn below 1 GiB free, or below twice (database + last backup)
 
 _instance: "AutoBackup | None" = None
 
@@ -116,6 +126,16 @@ class AutoBackup:
         self.stop_event = threading.Event()
         self.pending_reason = None
         self.thread: threading.Thread | None = None
+        # watchdog: its own thread, stop signal, lock and state file, so nothing it does waits for a backup
+        self.watch_path = state_dir / "backup_watchdog.json"
+        self.watch_thread: threading.Thread | None = None
+        self.watch_stop = threading.Event()
+        self.watch_lock = threading.Lock()
+        self._started = False
+        self.started_at: datetime | None = None
+        self.run_started: float | None = None        # time.monotonic() while a run is in progress
+        self.restarts = 0
+        self._own = {"a": 0, "n": 0}                 # audit rows / notifications written by the current run
 
     # ----------------------------------------------------------------- settings / state
     def _read(self, path: Path, default: dict) -> dict:
@@ -181,66 +201,127 @@ class AutoBackup:
                         " (SELECT count(*) FROM cash_movements) c, (SELECT count(*) FROM notifications) n")
         return "|".join(str(r[k]) for k in r.keys())
 
+    def _after_own_writes(self, fp: str) -> str:
+        """The fingerprint as it will read once this run's own notifications and audit rows are counted:
+        they are not changes to back up. Without this every warning forced one more backup, and a record
+        per event would force one for ever."""
+        parts = fp.split("|")
+        try:
+            parts[0], parts[-1] = str(int(parts[0]) + self._own["a"]), str(int(parts[-1]) + self._own["n"])
+        except (ValueError, IndexError):
+            return fp
+        return "|".join(parts)
+
+    def _disk(self, st: dict) -> tuple[int | None, bool]:
+        """(free bytes where the backups are written, is that low?). Low = under MIN_FREE_BYTES, or under
+        twice what one backup needs (a copy of the database plus the archive)."""
+        try:
+            folder = self.backup_dir if self.backup_dir.exists() else self.backup_dir.parent
+            free = int(shutil.disk_usage(folder).free)
+        except (OSError, ValueError):
+            return None, False               # cannot be measured: a failed backup is reported by itself
+        try:
+            size = Path(self.db.path).stat().st_size
+        except OSError:
+            size = 0
+        last = st.get("last_bytes")
+        need = size + (last if isinstance(last, int) and last > 0 else 0)
+        return free, free < max(MIN_FREE_BYTES, 2 * need)
+
+    def _measure_disk(self, st: dict) -> None:
+        """Free space into the state; when low, one warning a day (with its audit row)."""
+        st["free_bytes"], st["low_disk"] = self._disk(st)
+        if st["low_disk"]:
+            mb = st["free_bytes"] // (1024 * 1024)
+            self._notify_once(st, "disk_notified", "warning", "مساحة القرص قليلة للنسخ الاحتياطي",
+                              f"المساحة الفاضية على قرص النسخ {mb:,} ميجا فقط. فضّي مساحة أو غيّر مكان النسخ قبل ما"
+                              " النسخ يفشل.", hours=24, audit_action="backup.low_disk",
+                              audit_after={"free_bytes": st["free_bytes"], "folder": str(self.backup_dir)})
+        else:
+            st["disk_notified"] = None
+
     def run(self, reason: str = "schedule", *, force: bool = False) -> dict:
         with self.lock:
-            st = self.state()
-            fp = self._fingerprint()
-            if not force and st.get("last_ok") and st.get("fingerprint") == fp:
-                st["last_check_at"] = datetime.now().isoformat(timespec="seconds")
-                self._write(self.state_path, st)
-                # #202: a change made outside the program (a hand edit, a damaged file) does not change the
-                # fingerprint, so the stock check runs on the "no changes" path too (Codex P2 on #213)
-                self._check_stock()
-                return {"skipped": "no_changes", **st}
-            started = time.monotonic()
+            self.run_started = time.monotonic()       # the watchdog reports a run that never ends
             try:
-                out = backup.create(self.db, self.upload_dir, self.backup_dir, tag="auto")
-                hard, soft = backup.split_problems(backup.quick_check(out))
-                if hard:
-                    out.unlink(missing_ok=True)
-                    raise RuntimeError("; ".join(hard + soft))
-                warning, lost = None, {}
-                if soft:
-                    # the database part is good: one lost upload must not stop every backup. Keep the
-                    # file under a name that says so, and tell the owner which files are affected.
-                    stem = out.name[:-len("-auto.zip")]
-                    parts = stem.split("-")          # pharmacy-backup-<date>-<time>[-<n>]
-                    base, n = "-".join(parts[:4]), int(parts[4]) if len(parts) > 4 else 0
-                    marked = out.with_name(stem + INCOMPLETE)
-                    while marked.exists():           # two incomplete backups in one second: never overwrite
-                        n += 1
-                        marked = out.with_name(f"{base}-{n}{INCOMPLETE}")
-                    out.replace(marked)
-                    out = marked
-                    lost = self._file_names(soft)    # per pharmacy: a file name is that pharmacy's own data
-                    warning = (f"{len(soft)} attachment file(s) missing or changed; the backup holds the data"
-                               " without them")
-                    log.warning("automatic backup kept as incomplete (%s): %s", out.name, "; ".join(soft))
-                cfg = self.settings()
-                removed = prune(self.backup_dir, cfg)
-                st.update(last_at=datetime.now().isoformat(timespec="seconds"), last_file=out.name,
-                          last_bytes=out.stat().st_size, last_seconds=round(time.monotonic() - started, 1),
-                          last_ok=True, last_error=None, last_reason=reason, fingerprint=fp, fail_notified=None,
-                          last_warning=warning, last_warning_files=lost or {})
-                if soft:
-                    self._notify_once(st, "warn_notified", "warning", "النسخة الاحتياطية ناقصها ملفات فواتير",
-                                      {o: ("البيانات اتحفظت، لكن الملفات دي ناقصة أو متغيّرة على الجهاز: "
-                                           + "، ".join(names))[:400] for o, names in lost.items()}, hours=24)
-                else:
-                    st["warn_notified"] = None
-                if removed:
-                    log.info("removed old backups: %s", removed)
-                self._offsite(out, cfg, st)
-            except Exception as e:                   # never let a failed backup take the program down
-                log.exception("automatic backup failed")
-                st.update(last_ok=False, last_error=str(e)[:300], last_fail_at=datetime.now().isoformat(timespec="seconds"))
-                self._notify_once(st, "fail_notified", "error", "فشلت النسخة الاحتياطية التلقائية",
-                                  str(e)[:200], hours=6)
-            self._write(self.state_path, st)
-        # #202: recompute every stock balance from the ledger after each backup run (also when it failed: a
-        # stock mismatch is one reason a backup is refused). Alerts and audits only; never repairs.
-        self._check_stock()
+                st, ran = self._run(reason, force)
+            finally:
+                self.run_started = None
+        if ran:
+            # #202: recompute every stock balance from the ledger after each backup run (also when it failed:
+            # a stock mismatch is one reason a backup is refused). Alerts and audits only; never repairs.
+            self._check_stock()
         return st
+
+    def _run(self, reason: str, force: bool) -> tuple[dict, bool]:
+        """(state, was a backup attempted). Called with the backup lock held."""
+        st = self.state()
+        fp = self._fingerprint()
+        self._own = {"a": 0, "n": 0}
+        if not force and st.get("last_ok") and st.get("fingerprint") == fp:
+            st["last_check_at"] = datetime.now().isoformat(timespec="seconds")
+            # the disk is measured here too: the warning must clear when space is freed, and appear when it
+            # runs low, without waiting for the next change to the data (Codex P2 on #350)
+            self._measure_disk(st)
+            st["fingerprint"] = self._after_own_writes(fp)
+            self._offsite_catch_up(self.settings(), st)
+            self._write(self.state_path, st)
+            # #202: a change made outside the program (a hand edit, a damaged file) does not change the
+            # fingerprint, so the stock check runs on the "no changes" path too (Codex P2 on #213)
+            self._check_stock()
+            return {"skipped": "no_changes", **st}, False
+        started = time.monotonic()
+        failed_before = st.get("last_ok") is False
+        self._measure_disk(st)
+        try:
+            out = backup.create(self.db, self.upload_dir, self.backup_dir, tag="auto")
+            hard, soft = backup.split_problems(backup.quick_check(out))
+            if hard:
+                out.unlink(missing_ok=True)
+                raise RuntimeError("; ".join(hard + soft))
+            warning, lost = None, {}
+            if soft:
+                # the database part is good: one lost upload must not stop every backup. Keep the
+                # file under a name that says so, and tell the owner which files are affected.
+                stem = out.name[:-len("-auto.zip")]
+                parts = stem.split("-")          # pharmacy-backup-<date>-<time>[-<n>]
+                base, n = "-".join(parts[:4]), int(parts[4]) if len(parts) > 4 else 0
+                marked = out.with_name(stem + INCOMPLETE)
+                while marked.exists():           # two incomplete backups in one second: never overwrite
+                    n += 1
+                    marked = out.with_name(f"{base}-{n}{INCOMPLETE}")
+                out.replace(marked)
+                out = marked
+                lost = self._file_names(soft)    # per pharmacy: a file name is that pharmacy's own data
+                warning = (f"{len(soft)} attachment file(s) missing or changed; the backup holds the data"
+                           " without them")
+                log.warning("automatic backup kept as incomplete (%s): %s", out.name, "; ".join(soft))
+            cfg = self.settings()
+            removed = prune(self.backup_dir, cfg)
+            st.update(last_at=datetime.now().isoformat(timespec="seconds"), last_file=out.name,
+                      last_bytes=out.stat().st_size, last_seconds=round(time.monotonic() - started, 1),
+                      last_ok=True, last_error=None, last_reason=reason, fingerprint=fp, fail_notified=None,
+                      last_warning=warning, last_warning_files=lost or {})
+            if soft:
+                self._notify_once(st, "warn_notified", "warning", "النسخة الاحتياطية ناقصها ملفات فواتير",
+                                  {o: ("البيانات اتحفظت، لكن الملفات دي ناقصة أو متغيّرة على الجهاز: "
+                                       + "، ".join(names))[:400] for o, names in lost.items()}, hours=24)
+            else:
+                st["warn_notified"] = None
+            if removed:
+                log.info("removed old backups: %s", removed)
+            self._offsite(out, cfg, st)
+            if failed_before:
+                self._record("backup.recovered", {"file": out.name, "reason": reason})
+            st["fingerprint"] = self._after_own_writes(fp)
+        except Exception as e:                   # never let a failed backup take the program down
+            log.exception("automatic backup failed")
+            st.update(last_ok=False, last_error=str(e)[:300], last_fail_at=datetime.now().isoformat(timespec="seconds"))
+            self._notify_once(st, "fail_notified", "error", "فشلت النسخة الاحتياطية التلقائية",
+                              str(e)[:200], hours=6, audit_action="backup.failed",
+                              audit_after={"error": str(e)[:300], "reason": reason})
+        self._write(self.state_path, st)
+        return st, True
 
     def _file_names(self, problems: list[str]) -> dict[str, list[str]]:
         """Per pharmacy, the names its owner knows (as uploaded) for the attachments these problems are about."""
@@ -284,11 +365,32 @@ class AutoBackup:
                                   f"آخر نسخة خارج الجهاز: {last[:10] if last else 'لا يوجد'} — وصّل ذاكرة الفلاش أو القرص",
                                   hours=24)
 
-    def _notify_once(self, st: dict, key: str, severity: str, title: str, body, *, hours: int) -> None:
-        """`body`: one text for every pharmacy, or {org_id: text} to tell each pharmacy only about its own files."""
-        last = st.get(key)
-        if last and datetime.fromisoformat(last) > datetime.now() - timedelta(hours=hours):
+    def _offsite_catch_up(self, cfg: dict, st: dict) -> None:
+        """Nothing changed, so no new backup: but if the newest one never reached the off-device folder (the
+        drive was unplugged when it was made), copy it now that the folder is there. The "no changes" path
+        used to return before the copy, so a reconnected drive stayed without the latest backup until the
+        next change (#324 X27)."""
+        d, name = cfg.get("offsite_dir"), st.get("last_file")
+        if not d or not name:
             return
+        try:
+            newest, folder = self.backup_dir / str(name), Path(d)
+            if newest.is_file() and folder.is_dir() and not (folder / newest.name).exists():
+                self._offsite(newest, cfg, st)
+        except Exception:                             # a bad path in the settings: the next real run reports it
+            log.exception("off-device catch-up copy failed")
+
+    def _notify_once(self, st: dict, key: str, severity: str, title: str, body, *, hours: int,
+                     audit_action: str | None = None, audit_after: dict | None = None) -> bool:
+        """`body`: one text for every pharmacy, or {org_id: text} to tell each pharmacy only about its own files.
+        With `audit_action`, the event is also written in each pharmacy's audit log, in the same transaction.
+        True when it was told now (False: already told within `hours`)."""
+        last = st.get(key)
+        try:
+            if last and datetime.fromisoformat(last) > datetime.now() - timedelta(hours=hours):
+                return False
+        except (TypeError, ValueError):               # a state file edited by hand: tell again
+            pass
         try:
             with self.db.transaction():
                 for o in self.db.all("SELECT id FROM organizations WHERE status='active'"):
@@ -296,9 +398,157 @@ class AutoBackup:
                     if text:
                         notify.emit(self.db, Context(user_id="system", org_id=o["id"], branch_id=None),
                                     "backup", severity, title, text, "system", None)
+                        self._own["n"] += 1
+                    if audit_action:
+                        audit.record(self.db, None, audit_action, "system", None, after=audit_after, org_id=o["id"])
+                        self._own["a"] += 1
             st[key] = datetime.now().isoformat(timespec="seconds")
+            return True
         except Exception:
             log.exception("could not record backup notification")
+            return False
+
+    def _record(self, action: str, after: dict) -> None:
+        """An audit row in every pharmacy for a backup event that needs no notification."""
+        try:
+            with self.db.transaction():
+                for o in self.db.all("SELECT id FROM organizations WHERE status='active'"):
+                    audit.record(self.db, None, action, "system", None, after=after, org_id=o["id"])
+                    self._own["a"] += 1
+        except Exception:
+            log.exception("could not record %s", action)
+
+    # ----------------------------------------------------------------- watchdog
+    @staticmethod
+    def _when(v) -> datetime | None:
+        """A time read from a state file, or None: not a time, or in the future (the PC clock moved back,
+        so it says nothing about when the backup really was)."""
+        try:
+            t = datetime.fromisoformat(v)
+        except (TypeError, ValueError):
+            return None
+        return t if t <= datetime.now() else None
+
+    def health(self, *, detail: bool = False) -> dict:
+        """One summary of "is the pharmacy's data being backed up?", cheap enough to poll: two small files,
+        no database query. Safe for every signed-in user (`detail=False` leaves the error text out).
+        Calling it restarts a scheduler or watchdog thread that died."""
+        self._ensure_threads()
+        cfg, st = self.settings(), self.state()
+        now = datetime.now()
+        interval = cfg.get("interval_min")
+        if interval not in INTERVALS:
+            interval = DEFAULTS["interval_min"]
+        limit = STALE_INTERVALS * interval
+        good = self._when(st.get("last_at"))
+        checked = self._when(st.get("last_check_at")) if st.get("last_ok") else None   # a check after a failure proves nothing
+        fresh = max((t for t in (good, checked) if t), default=None)
+        age = int((now - fresh).total_seconds() // 60) if fresh else None
+        reasons = []
+        if st.get("last_ok") is False:
+            reasons.append("failed")
+        if fresh:
+            if age > limit:
+                reasons.append("stale")
+        elif self.started_at and (now - self.started_at) > timedelta(minutes=limit):
+            reasons.append("never")
+        if not self._started or self.stop_event.is_set():
+            scheduler = "stopped"
+        elif self.thread is None or not self.thread.is_alive():
+            scheduler = "dead"
+            reasons.append("scheduler_dead")
+        elif self.run_started is not None and time.monotonic() - self.run_started > STUCK_SECONDS:
+            scheduler = "stuck"
+            reasons.append("scheduler_stuck")
+        else:
+            scheduler = "running"
+        stale = any(r in ("stale", "never", "scheduler_dead", "scheduler_stuck") for r in reasons)
+        if st.get("low_disk"):
+            reasons.append("low_disk")
+        out = {"ok": not reasons, "level": "ok" if not reasons else "warning" if reasons == ["low_disk"] else "error",
+               "stale": stale, "last_good_at": good.isoformat(timespec="seconds") if good else None,
+               "last_fresh_at": fresh.isoformat(timespec="seconds") if fresh else None,
+               "last_fail_at": st.get("last_fail_at"), "age_min": age, "limit_min": limit, "scheduler": scheduler,
+               "scheduler_restarts": self.restarts, "low_disk": bool(st.get("low_disk")),
+               "free_bytes": st.get("free_bytes"), "reasons": reasons}
+        if detail:
+            out["last_error"] = st.get("last_error")
+        return out
+
+    def _ensure_threads(self) -> None:
+        """Start again whichever of the two threads is not running. Called by the watchdog, and by every
+        read of the summary: no single thread's death can stop the backups unnoticed."""
+        if not self._started or self.stop_event.is_set():
+            return
+        restarted = False
+        with self.watch_lock:
+            if not self._started or self.stop_event.is_set():
+                return
+            if self.thread is None or not self.thread.is_alive():
+                self._spawn_scheduler()
+                self.restarts += 1
+                restarted = True
+            if self.watch_thread is None or not self.watch_thread.is_alive():
+                self._spawn_watchdog()
+        if restarted:
+            log.error("the automatic backup scheduler thread had stopped; restarted (%d)", self.restarts)
+            w = self._read(self.watch_path, {})
+            self._notify_once(w, "restart_notified", "warning", "توقف جدول النسخ الاحتياطي وأُعيد تشغيله",
+                              "جدول النسخ الاحتياطي التلقائي توقف وأعاده البرنامج للعمل. لو اتكررت الرسالة بلّغ الدعم.",
+                              hours=STALE_NOTIFY_HOURS, audit_action="backup.scheduler_restart",
+                              audit_after={"restarts": self.restarts})
+            self._save_watch(w)
+
+    def _spawn_scheduler(self) -> None:
+        self.thread = threading.Thread(target=self._loop, name="auto-backup", daemon=True)
+        self.thread.start()
+
+    def _spawn_watchdog(self) -> None:
+        self.watch_thread = threading.Thread(target=self._watch, name="backup-watchdog", daemon=True)
+        self.watch_thread.start()
+
+    def _save_watch(self, w: dict) -> None:
+        try:
+            self._write(self.watch_path, w)
+        except OSError:
+            log.exception("could not save the backup watchdog state")
+
+    def watch_once(self) -> dict:
+        """One look by the watchdog. Never takes the backup lock: a run that hangs (a dead USB drive, a
+        network folder) must not silence the alarm about it."""
+        h = self.health(detail=True)
+        w = self._read(self.watch_path, {})
+        before = dict(w)
+        if h["stale"]:
+            w.setdefault("stale_since", datetime.now().isoformat(timespec="seconds"))
+            last = h["last_good_at"]
+            if last and h["age_min"] is not None:
+                hours = h["age_min"] // 60
+                since = f"آخر نسخة سليمة: {last[:16].replace('T', ' ')} (من {hours} ساعة)." if hours else \
+                    f"آخر نسخة سليمة: {last[:16].replace('T', ' ')}."
+            else:
+                since = "لا توجد نسخة سليمة حتى الآن."
+            why = {"scheduler_dead": "جدول النسخ توقف.", "scheduler_stuck": "نسخة بدأت ولم تنتهِ.",
+                   "failed": f"آخر محاولة فشلت: {(h.get('last_error') or '')[:120]}"}
+            body = " ".join([since] + [why[r] for r in h["reasons"] if r in why]
+                            + ["افتح الإعدادات ← النسخ الاحتياطي واضغط «اعمل نسخة الآن»، ولو فشلت بلّغ الدعم."])
+            self._notify_once(w, "stale_notified", "error", "النسخ الاحتياطي متوقف", body, hours=STALE_NOTIFY_HOURS,
+                              audit_action="backup.stale",
+                              audit_after={"reasons": h["reasons"], "last_good_at": last, "age_min": h["age_min"]})
+        elif w.get("stale_since"):
+            self._record("backup.recovered", {"stale_since": w["stale_since"], "last_good_at": h["last_good_at"]})
+            w.pop("stale_since", None)
+            w.pop("stale_notified", None)
+        if w != before:
+            self._save_watch(w)
+        return h
+
+    def _watch(self) -> None:
+        while not self.watch_stop.wait(WATCH_SECONDS):
+            try:
+                self.watch_once()
+            except Exception:                          # the watchdog must outlive any one bad look
+                log.exception("backup watchdog: check failed")
 
     # ----------------------------------------------------------------- status for the owner
     def status(self, ctx: Context) -> dict:
@@ -312,7 +562,7 @@ class AutoBackup:
         shown = {k: v for k, v in st.items() if k != "fingerprint"}
         by_org = shown.get("last_warning_files")
         shown["last_warning_files"] = (by_org or {}).get(ctx.org_id, []) if isinstance(by_org, dict) else []
-        return {"settings": cfg, "state": shown,
+        return {"settings": cfg, "state": shown, "health": self.health(detail=True),
                 "folder": str(self.backup_dir), "next_at": due.isoformat(timespec="minutes") if due else None,
                 "offsite_stale": bool(cfg.get("offsite_dir")) and (
                     not off or datetime.fromisoformat(off) < datetime.now() - timedelta(days=OFFSITE_STALE_DAYS)),
@@ -358,15 +608,25 @@ class AutoBackup:
     def start(self) -> None:
         global _instance
         _instance = self
-        self.thread = threading.Thread(target=self._loop, name="auto-backup", daemon=True)
-        self.thread.start()
+        self.stop_event.clear()
+        self.watch_stop.clear()
+        self.started_at = datetime.now()
+        responsive.apply()          # the backup's own checks must not make a cashier's request wait
+        with self.watch_lock:
+            self.restarts = 0
+            self._spawn_scheduler()
+            self._spawn_watchdog()
+            self._started = True
 
     def stop(self) -> None:
         """On a normal shutdown: one last backup if something changed."""
         global _instance
+        self._started = False
         self.stop_event.set()
+        self.watch_stop.set()
         self.wake.set()
-        if self.thread:
-            self.thread.join(timeout=5)
+        for t in (self.thread, self.watch_thread):
+            if t:
+                t.join(timeout=5)
         _instance = None
         self.run("shutdown")

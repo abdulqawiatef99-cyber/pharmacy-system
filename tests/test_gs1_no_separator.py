@@ -34,7 +34,7 @@ class TestWithoutSeparator(unittest.TestCase):
 
     def test_not_a_date_is_not_a_cut(self):
         # 17 followed by six digits that are not a date (month 13) stays inside the batch
-        self.check(GTIN + "10B171399" + "21S1", None, "B171399", "S1")
+        self.check(GTIN + "10B171399" + "21SER001", None, "B171399", "SER001")
 
     def test_with_separators_unchanged(self):
         self.check(GTIN + "21SER17" + "\x1d" + "17270630" + "10B21", "2027-06-30", "B21", "SER17")
