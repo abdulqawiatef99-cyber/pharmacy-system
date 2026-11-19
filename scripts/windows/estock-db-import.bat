@@ -33,6 +33,9 @@ set "APPLIED=%OUT%\estock-db-apply.txt"
 set "STAMP="
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" ^<nul') do set "STAMP=%%t"
 set "REP=%OUT%\reports-%STAMP%"
+REM never show an earlier run's owner report as this one's
+if exist "%OUT%\owner-report.txt" del /q "%OUT%\owner-report.txt"
+set "OWNERSHOWN="
 set "STOPPED=0"
 echo ==== estock db import %DATE% %TIME% ==== >> "%LOG%"
 echo program: %INST% >> "%LOG%"
@@ -80,7 +83,8 @@ if errorlevel 1 (set "MSG=the program could not be stopped (see the log)" & goto
 call :log PASS "program stopped (only its own python processes)"
 set "PHARM_DATA_DIR=%DATA%"
 
-REM dry run: on a copy of the database, nothing is written to the real one
+REM dry run: on a copy of the database, nothing is written to the real one; owner-report.txt (what needs the
+REM owner first, how much matched, the rest by kind) is copied next to the balances file and opened
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%DRY%"
@@ -90,9 +94,11 @@ if not "%RC%"=="0" (set "MSG=dry run failed, exit %RC%: nothing was moved (repor
 findstr /c:"RECONCILIATION: OK" "%DRY%" >nul
 if errorlevel 1 (set "MSG=dry run: the reconciliation is not OK: nothing was moved (reports in %REP%-dry)" & goto fail)
 call :log PASS "dry run on a copy: reconciliation OK (reports %REP%-dry)"
+call :owner "%REP%-dry"
 
 echo.
-echo Read the dry run above (also in %DRY%). Balances to confirm: %OUT%\openings-to-confirm.xlsx
+echo Read the owner report first: %OUT%\owner-report.txt (opened in Notepad).
+echo The dry run is above (also in %DRY%). Balances to confirm: %OUT%\openings-to-confirm.xlsx
 set "ANS="
 set /p "ANS=Type YES to apply the move to the real database: "
 if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
@@ -107,6 +113,7 @@ type "%APPLIED%" >> "%LOG%"
 if not "%RC%"=="0" (set "MSG=move failed, exit %RC%: restore the backup named in %APPLIED% before any sale" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%APPLIED%" >nul
 if errorlevel 1 (set "MSG=move: the reconciliation is not OK: restore the backup named in %APPLIED%" & goto fail)
+call :owner "%REP%" quiet
 call :log PASS "move applied after its own verified backup (reports %REP%)"
 
 "%PY%" "%MANAGE%" verify >> "%LOG%" 2>&1
@@ -126,6 +133,7 @@ exit /b 0
 
 :fail
 call :log FAIL "%MSG%"
+if not defined OWNERSHOWN call :owner "%REP%-dry"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 echo.
@@ -139,6 +147,15 @@ exit /b 1
 REM redirection first: a message ending in a digit must not become a handle number (" 1>>")
 >> "%LOG%" echo %DATE% %TIME% %~1 - %~2
 echo %~1 - %~2
+exit /b 0
+
+:owner
+REM owner-report.txt (what needs the owner first, how much matched, the rest by kind): next to the balances
+REM file, opened in Notepad unless "quiet" or an automated run
+if not exist "%~1\owner-report.txt" exit /b 0
+copy /y "%~1\owner-report.txt" "%OUT%\owner-report.txt" >nul
+if "%~2"=="" if not defined PHARM_E2E_ANSWER start "" notepad "%OUT%\owner-report.txt"
+set "OWNERSHOWN=1"
 exit /b 0
 
 :reread

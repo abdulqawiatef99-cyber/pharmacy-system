@@ -1772,7 +1772,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
     paths = {"data_quality": out_dir / "data-quality.csv", "reconciliation": out_dir / "reconciliation.txt",
              "json": out_dir / "report.json", "openings": out_dir / "openings-to-confirm.xlsx",
              "supplier_contacts": out_dir / "supplier-contacts.csv", "item_extras": out_dir / "item-extras.csv",
-             "hospital_stock": out_dir / "hospital-stock.csv"}
+             "hospital_stock": out_dir / "hospital-stock.csv", "owner": out_dir / "owner-report.txt"}
     order = {"block": 0, "review": 1, "fixed": 2, "info": 3}
     with open(paths["data_quality"], "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
@@ -1859,6 +1859,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
         lines += ["", f"عدم مطابقة ({len(rec['mismatches'])})، الأكبر قيمة الأول:"]
         lines += [f"  [{m['what']}] {m['code']} {m['name']}: {m['detail']} ({m['value']} ج)" for m in rec["mismatches"]]
     paths["reconciliation"].write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    from . import estock_owner_report
+    estock_owner_report.write(paths["owner"], plan, rec)       # the page the owner reads (manager 19/11)
     paths["json"].write_text(json.dumps({"reconciliation": rec, "stock_source": {k: v for k, v in plan.stock_source.items()},
                                          "checks": plan.checks, "rules": plan.rules, "extra": extra,
                                          "data_quality_rows": len(plan.dq)}, ensure_ascii=False, indent=1, default=str),

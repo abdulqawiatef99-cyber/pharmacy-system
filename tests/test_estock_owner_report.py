@@ -1,0 +1,115 @@
+"""The report the owner reads on the trial (19/11): owner-report.txt. Arabic, plain words; what needs him first,
+largest value first, each line saying what it is, E-Stock's figure, what the program did and the one thing he
+must decide; how much matched and how much did not; the rest grouped by kind with counts. Synthetic data only."""
+import re
+from pathlib import Path
+
+from tests.test_estock_db_import import Base, base_tables, product, stock_row
+
+LABELS = ("في إي ستوك:", "البرنامج عمل:", "المطلوب منك:")
+
+
+class _R(Base):
+    def report(self, **kw) -> str:
+        res = self.run_import(**kw)
+        self.res = res
+        return Path(res["reports"]["owner"]).read_text(encoding="utf-8-sig")
+
+    @staticmethod
+    def section(text: str, start: str, end: str | None) -> str:
+        a = text.index(start)
+        return text[a:text.index(end, a)] if end else text[a:]
+
+    @staticmethod
+    def entries(sec: str) -> list[str]:
+        return re.split(r"\n(?=\s*\d+\) )", sec)[1:]
+
+
+class TestOwnerReport(_R):
+    def test_sections_in_order_and_the_result_first(self):
+        t = self.report()
+        self.assertTrue(t.startswith("تقرير نقل إي ستوك"))
+        first = t.splitlines()[1]
+        self.assertIn("النتيجة:", first)
+        self.assertIn("اتنقل", first)
+        a, b, c = (t.index(x) for x in ("١. محتاج قرارك", "٢. المطابقة", "٣. الباقي"))
+        self.assertLess(a, b)
+        self.assertLess(b, c)
+
+    def test_owner_lines_largest_first_each_with_the_four_parts(self):
+        tb = base_tables()
+        tb["Purchase_header"][0]["class"] = "1"
+        tb["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "3", "total_bill": "7000.0000"}]
+        t = self.report(tables=tb)
+        sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        es = self.entries(sec)
+        self.assertGreaterEqual(len(es), 3)
+        vals = []
+        for e in es:
+            for lab in LABELS:
+                self.assertIn(lab, e, e)
+            m = re.search(r"القيمة ([\d,.]+) ج", e)
+            vals.append(float(m.group(1).replace(",", "")) if m else 0.0)
+        self.assertEqual(vals, sorted(vals, reverse=True))
+        self.assertIn("تحت التصريف", es[0])                       # the 7,000 purchase class is the largest
+        self.assertNotIn("OWNER", sec)                             # plain words, no internal tags
+
+    def test_balances_to_confirm_is_an_owner_line(self):
+        sec = self.section(self.report(), "١. محتاج قرارك", "٢. المطابقة")
+        line = [e for e in self.entries(sec) if "أرصدة" in e][0]
+        self.assertIn("أكّد", line)
+        self.assertRegex(line, r"\d+ مورد")
+        self.assertRegex(line, r"\d+ عميل")
+
+    def test_matched_and_not_matched_are_visible(self):
+        sec = self.section(self.report(), "٢. المطابقة", "٣. الباقي")
+        for what in ("الأصناف", "المخزون", "الموردين", "العملاء", "التاريخ"):
+            self.assertIn(what, sec)
+        self.assertIn("100%", sec)
+        self.assertRegex(sec, r"اتطابق \d+ من \d+")
+        self.assertIn("الفرق", sec)
+        self.assertIn("عدم مطابقة: مفيش", sec)
+
+    def test_the_rest_is_grouped_by_kind_with_counts(self):
+        tb = base_tables()
+        tb["Customer"] += [{"customer_id": str(10 + i), "customer_code": f"X{i}", "customer_name_ar": f"عميل {i}",
+                            "mobile": "12", "customer_current_money": "0", "deleted": "0", "active": "1"}
+                           for i in range(3)]
+        sec = self.section(self.report(tables=tb), "٣. الباقي", None)
+        groups = [ln for ln in sec.splitlines() if re.match(r"\s*- .+: \d+ سطر", ln)]
+        self.assertTrue(groups, sec)
+        self.assertTrue(any(int(re.search(r": (\d+) سطر", g).group(1)) >= 3 for g in groups), groups)
+        self.assertIn("data-quality.csv", sec)
+
+
+class TestOwnerReportWhenBlocked(_R):
+    def test_a_blocking_line_says_nothing_was_written_and_what_to_decide(self):
+        tb = base_tables()
+        tb["Products"].append(product(5, "104", "Testbroken Tab", product_unit3="3", product_unit1_3="2.5"))
+        tb["Product_Amount"].append(stock_row(11, 5, 1, "2", "10.0000", "2027-01-01T00:00:00"))
+        tb["Purchase_header"][0]["class"] = "3"                 # a 500 owner line that does not stop the move
+        t = self.report(tables=tb)
+        self.assertFalse(self.res["ok"])
+        self.assertIn("وقف", t.splitlines()[1])
+        sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        es = self.entries(sec)
+        e = es[0]                                               # what stops the move comes first, whatever its value
+        self.assertIn("104", e)
+        self.assertIn("وقف النقل", e)
+        self.assertIn("كام وحدة", e)
+        self.assertIn("معامل الوحدة الصغرى", e)
+
+
+class TestBatShowsTheOwnerReport(_R):
+    def test_opened_after_the_dry_run_before_yes_and_on_failure(self):
+        root = Path(__file__).resolve().parents[1]
+        lines = [l.strip() for l in (root / "scripts/windows/estock-db-import.bat").read_text(encoding="utf-8").splitlines()]
+        show = lines.index('call :owner "%REP%-dry"')
+        yes = next(i for i, l in enumerate(lines) if 'set /p "ANS=Type YES' in l)
+        self.assertLess(show, yes)
+        fail = lines.index(":fail")
+        self.assertTrue(any(":owner" in l for l in lines[fail:fail + 4]))      # when the move stops, he sees why
+        sub = lines[lines.index(":owner"):]
+        self.assertIn("notepad", " ".join(sub[:8]))
+        self.assertIn("PHARM_E2E_ANSWER", " ".join(sub[:8]))                    # never opens in automated runs
+        self.assertTrue(any('del /q "%OUT%\\owner-report.txt"' in l for l in lines))  # an earlier run's report is not this one
