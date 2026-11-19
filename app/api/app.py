@@ -1033,6 +1033,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         qp = req.query_params
         return J(await off_loop(fin.profit, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
+    def backup_health() -> dict:
+        """The last good automatic backup and whether it is late: red when the last run failed, or the last good
+        one (a run that found no changes counts) is older than two intervals."""
+        from datetime import datetime, timedelta
+        st, cfg = autob.state(), autob.settings()
+        interval = int(cfg.get("interval_min") or 60)
+        times = [st.get("last_at")] + ([st.get("last_check_at")] if st.get("last_ok") else [])
+        good = None
+        for t in times:
+            try:
+                d = datetime.fromisoformat(t) if t else None
+            except (TypeError, ValueError):
+                d = None
+            if d and d <= datetime.now() and (good is None or d > good):
+                good = d
+        failed = st.get("last_ok") is False
+        late = good is not None and datetime.now() - good > timedelta(minutes=2 * interval)
+        return {"last_good_at": good.isoformat(timespec="seconds") if good else None, "ok": st.get("last_ok"),
+                "failed": failed, "late": late, "warn": failed or late, "interval_min": interval,
+                "last_fail_at": st.get("last_fail_at"), "last_error": st.get("last_error") if failed else None,
+                "offsite_error": st.get("offsite_error")}
+
+    @handler
+    async def backup_health_view(req):
+        ctx_of(req).require("settings.manage")
+        return J(backup_health())
+
     @handler
     async def home_view(req):
         from ..reports import service as rep_svc
@@ -1040,7 +1067,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         out = await off_loop(rep_svc.home, db, ctx)
         if ctx.can("settings.manage"):
             st = autob.state()
-            out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
+            out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error"),
+                             **backup_health()}
         return J(out)
 
     @handler
@@ -2417,6 +2445,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/staff", staff_sheet, methods=["GET", "POST"]),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
+        Route("/api/backup/health", backup_health_view),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
