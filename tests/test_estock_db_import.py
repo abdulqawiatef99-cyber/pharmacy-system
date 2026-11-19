@@ -1211,13 +1211,36 @@ class TestCodexReview345b(Base):
         vendor = t.pop("Vendor")
         write_export(root / "20261118-100000", t)
         (root / "20261118-100000" / "summary.txt").write_text(
-            "RESULT: PARTIAL - x; 1 not read:\\n   PC / stock.dbo.Vendor\\n", encoding="utf-8-sig")
+            "RESULT: PARTIAL - x; 1 not read:\n   PC / stock.dbo.Vendor\n", encoding="utf-8-sig")
         (root / "20261118-110000" / "tables").mkdir(parents=True)          # a retry that failed: no manifest
         (root / "20261118-110000" / "summary.txt").write_text(
-            "retry of run 20261118-100000: 1 table(s)\\nRESULT: PARTIAL - 0 tables; 1 not read:\\n   PC / stock.dbo.Vendor\\n",
+            "retry of run 20261118-100000: 1 table(s)\nRESULT: PARTIAL - 0 tables; 1 not read:\n   PC / stock.dbo.Vendor\n",
             encoding="utf-8-sig")
         write_export(root / "20261118-120000", {"Vendor": vendor})
         (root / "20261118-120000" / "summary.txt").write_text(
-            "retry of run 20261118-110000: 1 table(s)\\nRESULT: PASS - 1 tables\\n", encoding="utf-8-sig")
+            "retry of run 20261118-110000: 1 table(s)\nRESULT: PASS - 1 tables\n", encoding="utf-8-sig")
         ex = estock_db.Export(root)
         self.assertEqual((ex.missing, ex.runs), ([], ["20261118-100000", "20261118-120000"]))
+
+
+class TestCodexReview345c(Base):
+    """Codex on #345 @5dcf3e5 (each failed before the fix)."""
+
+    def test_p2_a_failed_read_is_never_complete(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        write_export(root / "20261118-100000", base_tables())
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "RESULT: FAIL - the connection dropped (nothing in E-Stock was changed)\n", encoding="utf-8-sig")
+        with self.assertRaises(estock_db.ExportError):
+            estock_db.Export(root)
+        one = root / "20261118-100000"                      # the same run given directly
+        self.assertTrue(estock_db.Export(one).missing)
+
+    def test_p2_a_blank_expiry_does_not_break_the_mirror_check(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "1"}]
+        t["Product_Amount"].append(stock_row(60, 1, 1, "2", "24.0000", ""))       # no expiry, same item and store
+        t["Branches_Product_Amount"] = [dict(r, branch_id="1") for r in t["Product_Amount"]]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertTrue(res["plan"].stock_source["mirror_check"]["equal"])

@@ -68,6 +68,9 @@ class ExportError(ValidationFailed):
 csv.field_size_limit(min(sys.maxsize, 2 ** 31 - 1))
 
 
+FINISHED = ("PASS", "PARTIAL")                      # RESULT of a read that ran to its end
+
+
 def read_summary(run: Path) -> dict:
     """What estock-db-read.ps1 says about one run (summary.txt): its result, whether it was a retry of
     another run or a partial read (-Only), and the tables it could not read ("db.schema.table", lower
@@ -107,16 +110,18 @@ def resolve_runs(root: Path) -> tuple[list[Path], list[str]]:
     runs = sorted((d for d in Path(root).iterdir() if d.is_dir() and (d / "summary.txt").is_file()),
                   key=lambda d: d.name)
     info = {d.name: read_summary(d) for d in runs}
+    # a read that failed or never wrote its RESULT line is not a complete read (#345): never the base
     full = [d for d in runs if not info[d.name]["retry_of"] and not info[d.name]["only"]
-            and (d / "tables" / "manifest.csv").is_file()]
+            and info[d.name]["result"] in FINISHED and (d / "tables" / "manifest.csv").is_file()]
     if not full:
         raise ExportError(f"مفيش قراية كاملة لإي ستوك في {root}: شغّل estock-db-read.bat الأول")
     base = full[-1]
     chain, names = [base], {base.name}
     for d in runs:
         if d.name > base.name and info[d.name]["retry_of"] in names:
-            chain.append(d)
             names.add(d.name)
+            if info[d.name]["result"] in FINISHED:       # a failed retry is ancestry only, never an input
+                chain.append(d)
     missing = set(info[base.name]["failed"])
     for d in chain[1:]:
         man = d / "tables" / "manifest.csv"
@@ -140,12 +145,16 @@ class Export:
 
     def __init__(self, folder: Path, database: str | None = None):
         folder = Path(folder)
+        unfinished = None
         cands = [folder / "manifest.csv", folder / "tables" / "manifest.csv"]
         man = next((p for p in cands if p.is_file()), None)
         if man:
             dirs = [man.parent]
             run = man.parent.parent if man.parent.name == "tables" else man.parent
-            missing = read_summary(run)["failed"]
+            sm = read_summary(run)
+            missing = sm["failed"]
+            if (run / "summary.txt").is_file() and sm["result"] not in FINISHED:
+                unfinished = f"{run.name} (القراية مخلصتش: {sm['result'] or 'من غير نتيجة'})"   # a whole read (#345)
         elif folder.is_dir() and any((d / "summary.txt").is_file() for d in folder.iterdir() if d.is_dir()):
             dirs, missing = resolve_runs(folder)
         else:
@@ -181,6 +190,8 @@ class Export:
                                 "path": r["_dir"] / r["file"].replace("\\", "/")}
         db = self.database.lower()
         self.missing = [m for m in missing if m.split(".", 1)[0].split(" (", 1)[0] == db]
+        if unfinished:
+            self.missing.append(unfinished)
         self._cache: dict[str, list[dict]] = {}
         self._raw: dict[str, tuple[list[str], list[list[str]]]] = {}
 
@@ -703,7 +714,7 @@ def _mirror_check(ex: Export, p: Plan, chosen: dict, groups: dict) -> str:
     if not mirror:
         p.stock_source["mirror_check"] = {"branch": b, "result": "no mirror rows for this branch"}
         return f" (مفيش نسخة للفرع {b} في Branches_Product_Amount للمقارنة)"
-    key = lambda r: (ident(r.get("product_id")), ident(r.get("store_id")), iso_day(r.get("exp_date")),   # noqa: E731
+    key = lambda r: (ident(r.get("product_id")), ident(r.get("store_id")), iso_day(r.get("exp_date")) or "",   # noqa: E731
                      str(dec(r.get("amount")) or 0), str(dec(r.get("buy_price")) or 0))
     a, m = sorted(map(key, chosen["rows"])), sorted(map(key, mirror["rows"]))
     same = a == m
