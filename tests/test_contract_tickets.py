@@ -259,8 +259,13 @@ class TestArchiveBoundToItsPharmacy(ImportBase):
         self.assertTrue(self.run_import()["ok"])
         kid = self._contract()
         self.assertTrue(k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"])
-        with closing(sqlite3.connect(Path(self.db.path).parent / estock_archive.NAME)) as con, con:
+        import os
+        import stat
+        arch = Path(self.db.path).parent / estock_archive.NAME
+        os.chmod(arch, stat.S_IREAD | stat.S_IWRITE)            # the archive is kept read-only; this test edits it
+        with closing(sqlite3.connect(arch)) as con, con:
             con.execute("UPDATE meta SET value='another-org' WHERE key='org_id'")
+        os.chmod(arch, stat.S_IREAD)
         self.assertEqual(k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"], [])
         self.assertEqual([r for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
                           if r["source"] == "estock"], [])
