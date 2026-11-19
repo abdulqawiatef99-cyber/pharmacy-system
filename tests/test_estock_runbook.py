@@ -37,3 +37,10 @@ class TestLaunchNightRunbook(unittest.TestCase):
     def test_the_excel_route_is_only_a_fallback(self):
         self.assertLess(self.sec.index("`estock-db-import.bat`"), self.sec.index("`estock-import.bat`"))
         self.assertIn("احتياطي بس", self.sec)
+
+    def test_codex_362_the_trial_runs_on_an_empty_database_and_the_file_comes_first(self):
+        trial = self.sec[self.sec.index("### أ."):self.sec.index("### ب.")]
+        self.assertIn("REHEARSAL", trial)
+        self.assertIn("قاعدة جديدة فاضية", trial)
+        self.assertIn("قبل ما تشغّل `estock-db-import.bat`", trial)
+        self.assertIn("وهو مستني YES", trial)
