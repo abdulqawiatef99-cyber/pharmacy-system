@@ -142,3 +142,25 @@ class TestCodexReview380b(Base):
                 estock_archive.build(estock_db.Export(folder), path, {}, org_id=self.ctx.org_id)
         self.assertTrue(path.exists())
         self.assertEqual(path.read_bytes(), before)
+
+
+class TestCodexReview381Branch(Base):
+    """Codex on #381: a quarantined row of ANOTHER branch's mirror never blocks this pharmacy's returns."""
+
+    def _tables(self, bad_sid):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "3", "co_name": "x"}]
+        t["Back_Sales_details"], t["Back_sales_header"] = [], []
+        t["Branches_sales_details"].append({"branch_id": "1", "details_id": "77", "sales_id": bad_sid,
+                                            "product_id": "1", "amount": "1", "update_date": "0247-05-12T00:00:00"})
+        return t
+
+    def test_p2_another_branchs_quarantined_line_does_not_block_a_local_invoice(self):
+        from app.sales import estock_returns as er
+        self.assertTrue(self.run_import(tables=self._tables("1"))["ok"])
+        self.assertTrue(er.invoice_lines(self.db, self.ctx, "1"))       # not estock_history_quarantined
+
+    def test_p2_another_branchs_unreadable_invoice_id_does_not_block_every_return(self):
+        from app.sales import estock_returns as er
+        self.assertTrue(self.run_import(tables=self._tables("-7.4e18"))["ok"])
+        self.assertTrue(er.invoice_lines(self.db, self.ctx, "1"))
