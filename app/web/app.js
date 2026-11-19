@@ -4125,7 +4125,10 @@ async function renderContracts(edit = null) {
 
 async function viewCustomer(id) {
   const c = await api(`/api/customers/${id}`), canM = ME.permissions.includes("customers.manage");
-  const chans = canM && c.balance > 0 ? (await api("/api/payment-channels")).channels.filter((x) => x.is_active) : [];
+  // the payment methods list needs the sale permission: without it the collection is still offered, with no method
+  // choice (#348 Codex P2), and nothing asks for an approval PIN just to open the customer
+  const chans = canM && c.balance > 0 && ME.permissions.includes("sales.create")
+    ? (await api("/api/payment-channels")).channels.filter((x) => x.is_active) : [];
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><div class="row between"><h1>${esc(c.name)}</h1>
       ${ME.permissions.includes("sales.create") ? `<button class="btn" id="cuSale">فاتورة له</button>` : ""}</div>

@@ -742,6 +742,11 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
             left -= take
             if left <= 0:
                 break
+    # a card refund may be more than the sale's card part (a split sale refunded in full to the card, which the
+    # return rules allow): the rest also goes back through the sale's own card account (#348 Codex P1)
+    if left and rows:
+        out.append(_post(db, ctx, rows[0]["account_id"], -left, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
+                         meta=meta, check=False, active=False))
     return out
 
 

@@ -213,3 +213,16 @@ class TestCodexReview348b(PlanCase):
         fin.record(self.db, self.ctx, category_id=self.cat, amount=100, paid_from=t)
         rows = fin.listing(self.db, self.ctx)
         self.assertEqual(rows[0]["account"], money.TREASURY_NAME)
+
+
+class TestCodexReview348c(WiringCase):
+    """#348 Codex, third pass (P1): a split cash + card sale refunded in full to the card posts the whole refund
+    to the card's account, not only the card part."""
+
+    def test_full_card_refund_of_a_split_sale(self):
+        a = self.sell(self.pan, payments=[{"method": "cash", "amount": 2000},
+                                          {"method": "card", "amount": 2000, "channel_id": self.card_ch}], units=2)
+        d = a if "lines" in a else a["sale"]
+        self.call("POST", f"/api/sales/{d['id']}/return", json={"lines": {d["lines"][0]["id"]: 2},
+                                                               "refund_method": "card", "reason": "العميل رجّعه"})
+        self.assertEqual(self.bal(self.paymob), 2000 - 4000)
