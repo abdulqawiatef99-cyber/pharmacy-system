@@ -93,9 +93,8 @@ def file(db: Database, upload_dir: Path, ctx: Context, att_id: str) -> tuple[byt
     if not r:
         raise NotFound("المرفق غير موجود")
     _sale(db, ctx, r["sale_id"])
-    p = Path(r["storage_path"])
-    if not p.exists():
-        p = upload_dir / r["org_id"] / "transfers" / p.name
+    # only the current upload folder, by the file's own name: a path saved elsewhere is never read (#324 X26)
+    p = upload_dir / r["org_id"] / "transfers" / Path(r["storage_path"]).name
     if not p.exists():
         raise NotFound("ملف الصورة غير موجود على هذا الجهاز")
     return p.read_bytes(), r["mime_type"]
@@ -133,9 +132,9 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"
         "   WHERE p.sale_id=s.id AND p.method='transfer') channel,"
-        " (SELECT count(*) FROM sale_attachments a WHERE a.sale_id=s.id) proofs,"
+        " (SELECT count(*) FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) proofs,"   # #324 B8
         " (SELECT CASE WHEN sum(a.review='problem') THEN 'problem' WHEN sum(a.review='pending') THEN 'pending'"
-        "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.sale_id=s.id) review"
+        "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) review"
         " FROM sales s LEFT JOIN users u ON u.id=s.created_by WHERE s.org_id=? AND s.paid_transfer>0 AND s.status<>'draft'"
         " AND s.completed_at>=? AND s.completed_at<? ORDER BY s.completed_at DESC",
         (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))]
