@@ -555,3 +555,27 @@ class TestShiftCloseHandover(MoneyCase):
         with self.assertRaises(NotFound):
             self.cd.close(self.ctx, 14000, to_account="nope")
         self.assertTrue(money.drawer_balance(self.db, self.ctx)["open"])
+class TestCodexReview342b(MoneyCase):
+    """#342 Codex (second pass, P2): settings.manage without cash.see_expected is refused BEFORE anything is
+    written, never after the account was saved."""
+
+    def _no_balances(self):
+        from app.core import accounts
+        uid = people.add_user(self.db, self.ctx, username="setter", full_name="S", password=PW, role_code="manager")
+        people.set_exception(self.db, self.ctx, uid, "settings.manage", "grant")
+        people.set_exception(self.db, self.ctx, uid, "cash.see_expected", "deny")
+        return self.login("setter", PW)
+
+    def test_create_update_and_route_write_nothing_when_refused(self):
+        c = self._no_balances()
+        n = lambda: self.db.one("SELECT count(*) n FROM money_accounts")["n"]          # noqa: E731
+        before = n()
+        with self.assertRaises(Forbidden):
+            money.create_account(self.db, c, "حساب جديد", "bank")
+        self.assertEqual(n(), before)
+        with self.assertRaises(Forbidden):
+            money.update_account(self.db, c, self.bank, {"name": "اسم تاني"})
+        self.assertEqual(money.get_account(self.db, self.ctx, self.bank)["name"], "إنستاباي")
+        with self.assertRaises(Forbidden):
+            money.set_route(self.db, c, "card", None, self.bank)
+        self.assertIsNone(money.route_for(self.db, self.ctx.org_id, "card", None))
