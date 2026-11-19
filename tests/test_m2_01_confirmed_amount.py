@@ -72,3 +72,20 @@ class TestTheScreenAsksTheAmount(Base):
         self.assertIn("data-rvpart", js)
         at = js.index('querySelectorAll("[data-rvpart]")')
         self.assertIn("body: { ok: true, amount", js[at:at + 600])
+
+
+class TestCodexReview342c(TestConfirmedAmount):
+    """#342 Codex P1: a new proof waiting for review does not lift the cap a partial confirmation set."""
+
+    test_a_part_confirmed_is_what_the_report_counts = test_only_what_was_confirmed_funds_a_refund = None
+    test_the_whole_transfer_confirmed_as_before = test_two_proofs_add_up = None
+    test_an_amount_is_a_whole_positive_number_within_the_transfer = test_the_route_takes_the_amount = None
+
+    def test_a_pending_proof_keeps_the_confirmed_cap(self):
+        att.review(self.db, self.ctx, self.aid, True, amount=2000)
+        att.attach(self.db, self.tmp, self.ctx, self.sale["id"], PNG + b"3")          # waits for review
+        line = self.sale["lines"][0]["id"]
+        self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
+        with self.assertRaises(Conflict):
+            self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
+        self.assertEqual(self.report()["rows"][0]["state"], "pending")              # the report still waits
