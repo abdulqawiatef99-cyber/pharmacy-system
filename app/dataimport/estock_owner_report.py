@@ -101,18 +101,26 @@ def _for_owner(d: dict) -> bool:
 
 
 def _balances_line(plan) -> dict | None:
-    real = [d for d in plan.suppliers + plan.customers if not d.get("internal") and d.get("balance")]
+    """E-Stock's own balances (estock_balance) and, apart, what the owner corrected (balance - estock_balance)."""
+    real = [d for d in plan.suppliers + plan.customers if not d.get("internal")
+            and (d.get("estock_balance") or d.get("balance"))]
     if not real:
         return None
     sup = sum(1 for d in real if d["kind"] == "supplier")
     cus = len(real) - sup
-    tot = Decimal(sum(abs(d["balance"]) for d in real)) / 100
-    return {"what": f"أرصدة {sup} مورد و{cus} عميل اتنقلت زي ما هي في إي ستوك",
-            "estock": f"إجمالي الأرصدة {_money(tot)} ج (الأكبر الأول في openings-to-confirm.xlsx)",
-            "done": "اتسجلت رصيد افتتاحي لكل واحد، والحسابات الداخلية برّه الإجمالي",
+    src = Decimal(sum(abs(d.get("estock_balance") or 0) for d in real)) / 100
+    fixed = [d for d in real if d.get("balance") != d.get("estock_balance")]
+    adj = Decimal(sum(abs((d.get("balance") or 0) - (d.get("estock_balance") or 0)) for d in fixed)) / 100
+    done = "اتسجلت رصيد افتتاحي لكل واحد، والحسابات الداخلية برّه الإجمالي"
+    if fixed:
+        done += (f"؛ {len(fixed)} رصيد أكدته برقم تاني: الفرق {_money(adj)} ج اتسجل تسوية افتتاحية"
+                 " (والباقي زي إي ستوك)")
+    return {"what": f"أرصدة {sup} مورد و{cus} عميل" + (" اتنقلت زي ما هي في إي ستوك" if not fixed else " اتنقلت"),
+            "estock": f"إجمالي الأرصدة في إي ستوك {_money(src)} ج (الأكبر الأول في openings-to-confirm.xlsx)",
+            "done": done,
             "ask": "أكّد الرصيد الحقيقي لكل مورد وعميل من البرنامج بعد النقل (أو في openings-to-confirm.xlsx قبله)؛"
                    " الفرق بيتسجل تسوية افتتاحية مش دفع",
-            "value": tot}
+            "value": src}
 
 
 PENDING_ACTIONS = ("account", "account_stopped", "first_shift_opening")
