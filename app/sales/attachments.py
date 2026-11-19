@@ -135,7 +135,8 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
 def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) -> dict:
     """What a sale's transfer proofs say: `verified` (confirmed amounts; a proof approved without an amount
     confirms the whole transfer), `received` (what may fund a refund: the whole transfer until a reviewer
-    says otherwise, by a problem or by approving only part of it), and the report's `state`."""
+    says otherwise, by a problem or by approving only part of it; a proof still waiting adds nothing until
+    it is approved), and the report's `state`."""
     return _state(db.all("SELECT review, confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
                          (org_id, sale_id)), paid_transfer)
 
@@ -154,7 +155,8 @@ def _state(rows, paid_transfer: int) -> dict:
         state = "problem"
     else:
         state = "pending"
-    short = problem or (partial and not pending)
+    # a reviewer's partial confirmation or problem sets the cap; a new proof still waiting never lifts it (#342)
+    short = problem or partial
     return {"verified": verified, "received": verified if short else paid_transfer, "state": state}
 
 
