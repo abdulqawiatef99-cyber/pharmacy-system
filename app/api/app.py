@@ -97,6 +97,7 @@ JSON_LIMITS = {"/api/export/xlsx": MAX_EXPORT_JSON}
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
 FEATURE_PREFIXES = (("/api/sales", "sales"), ("/api/customers", "sales"), ("/receipt", "sales"),
+                    ("/api/estock/sales", "sales"),       # returns against old E-Stock invoices (#358 Codex P2)
                     ("/api/cash", "sales"), ("/api/print", "sales"),
                     ("/api/purchases", "purchasing"), ("/api/imports", "dataimport"),
                     ("/api/counts", "counting"), ("/api/procurement", "procurement"),
@@ -934,6 +935,65 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note")))
 
+    # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
+    @handler
+    async def estock_available(req):
+        from ..dataimport import estock_history as eh
+        ctx = ctx_of(req)
+        if not any(ctx.allowed(p) for p in ("sales.read", "items.read", "purchases.read", "suppliers.read")):
+            ctx.require("sales.read")             # only someone who may open one of the history screens asks
+        return J({"available": eh.available(db)})
+
+    @handler
+    async def estock_invoices(req):
+        from ..dataimport import estock_history as eh
+        qp = req.query_params
+        return J({"invoices": await off_loop(eh.invoices, db, ctx_of(req), qp.get("kind") or "sale",
+                                             q=qp.get("q") or None, date_from=qp.get("from") or None,
+                                             date_to=qp.get("to") or None, party_id=qp.get("party") or None,
+                                             item_id=qp.get("item") or None, ticket=qp.get("ticket") or None,
+                                             limit=_int(qp.get("limit") or 200, "limit"))})
+
+    @handler
+    async def estock_invoice(req):
+        from ..dataimport import estock_history as eh
+        return J(await off_loop(eh.invoice, db, ctx_of(req), req.path_params["kind"], req.path_params["id"]))
+
+    @handler
+    async def estock_customer_items(req):
+        from ..dataimport import estock_history as eh
+        return J({"items": await off_loop(eh.customer_items, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_item_history(req):
+        from ..dataimport import estock_history as eh
+        return J({"history": await off_loop(eh.item_history, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_statement(req):
+        from ..dataimport import estock_history as eh
+        return J(await off_loop(eh.statement_with_opening, db, ctx_of(req), req.path_params["kind"],
+                                req.path_params["id"]))
+
+    @handler
+    async def estock_return_lines(req):
+        from ..sales import estock_returns as er
+        return J({"lines": await off_loop(er.invoice_lines, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_return(req):
+        """A return against an old E-Stock sale (#346): money back only the way it was received, never more."""
+        from ..sales import estock_returns as er
+        ctx = ctx_of(req)
+        b = await body(req)
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
+        key = req.headers.get("idempotency-key", "").strip()
+        return J(er.return_items(db, ctx, req.path_params["id"], lines, reason=str(b.get("reason") or ""), key=key),
+                 status_code=201)
+
     @handler
     async def transfers_report(req):
         from ..sales import attachments as att
@@ -1033,6 +1093,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         qp = req.query_params
         return J(await off_loop(fin.profit, db, ctx_of(req), qp.get("from", ""), qp.get("to", "")))
 
+    def backup_health() -> dict:
+        """The last good automatic backup and whether it is late: red when the last run failed, or the last good
+        one (a run that found no changes counts) is older than two intervals."""
+        from datetime import datetime, timedelta
+        st, cfg = autob.state(), autob.settings()
+        interval = int(cfg.get("interval_min") or 60)
+        times = [st.get("last_at")] + ([st.get("last_check_at")] if st.get("last_ok") else [])
+        good = None
+        for t in times:
+            try:
+                d = datetime.fromisoformat(t) if t else None
+            except (TypeError, ValueError):
+                d = None
+            if d and d <= datetime.now() and (good is None or d > good):
+                good = d
+        failed = st.get("last_ok") is False
+        late = good is not None and datetime.now() - good > timedelta(minutes=2 * interval)
+        return {"last_good_at": good.isoformat(timespec="seconds") if good else None, "ok": st.get("last_ok"),
+                "failed": failed, "late": late, "warn": failed or late, "interval_min": interval,
+                "last_fail_at": st.get("last_fail_at"), "last_error": st.get("last_error") if failed else None,
+                "offsite_error": st.get("offsite_error")}
+
+    @handler
+    async def backup_health_view(req):
+        ctx_of(req).require("settings.manage")
+        return J(backup_health())
+
     @handler
     async def home_view(req):
         from ..reports import service as rep_svc
@@ -1040,7 +1127,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         out = await off_loop(rep_svc.home, db, ctx)
         if ctx.can("settings.manage"):
             st = autob.state()
-            out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error")}
+            out["backup"] = {"last_at": st.get("last_at"), "ok": st.get("last_ok"), "offsite_error": st.get("offsite_error"),
+                             **backup_health()}
         return J(out)
 
     @handler
@@ -2386,6 +2474,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/staff", staff_sheet, methods=["GET", "POST"]),
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
+        Route("/api/backup/health", backup_health_view),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
@@ -2480,6 +2569,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/estock/available", estock_available),
+        Route("/api/estock/invoices", estock_invoices),
+        Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
+        Route("/api/estock/customers/{id}/items", estock_customer_items),
+        Route("/api/estock/items/{id}/history", estock_item_history),
+        Route("/api/estock/statement/{kind}/{id}", estock_statement),
+        Route("/api/estock/sales/{id}/return-lines", estock_return_lines),
+        Route("/api/estock/sales/{id}/return", estock_return, methods=["POST"]),
         Route("/api/customers", customers_list),
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),

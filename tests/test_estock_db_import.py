@@ -85,8 +85,11 @@ def base_tables():
     t["Back_Sales_details"] = [{"back_sales_id": "1", "sales_id": "1", "product_id": "1", "back_amount": "1"}]
     t["Purchase_header"] = [{"purchase_id": "1", "vendor_id": "1", "total_bill": "500.0000", "bill_date": OLD}]
     t["Purchase_details"] = [{"details_id": "1", "purchase_id": "1", "product_id": "1", "amount": "20", "buy_price": "24.0000"}]
-    t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "30.0000", "gc_for_me": "150.0000"}]
-    t["Gedo_Vendors"] = [{"gv_id": "1", "vendor_id": "1", "gv_for_him": "500.0000", "gv_for_me": "0.0000"}]
+    # E-Stock's signs (summary.txt ranges): a charge is + in one column, a payment - in the other
+    t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "-30.0000", "gc_for_me": "150.0000",
+                            "total": "120.0000"}]
+    t["Gedo_Vendors"] = [{"gv_id": "1", "vendor_id": "1", "gv_for_him": "600.0000", "gv_for_me": "-100.0000",
+                          "total": "500.0000"}]
     t["Shortcoming"] = [{"id": "1", "product_id": "62212345678901234", "amount": "2", "store_id": "1"}]
     t["Cash_disk_close"] = [{"cdc_id": "1", "cdc_curr_cash": "1000.0000", "cdc_act_cash": "999.5000"}]
     t["Customer"] = [
@@ -136,6 +139,7 @@ class Base(DBTestCase):
 
     def run_import(self, tables=None, folder=None, write_archive=True, **kw):
         folder = folder or self.export(tables)
+        self._last = folder
         return estock_db.run(self.db, self.ctx, export_dir=folder, out_dir=self.tmp / "reports",
                              archive_path=self.tmp / estock_archive.NAME, write_archive=write_archive, **kw)
 
@@ -172,7 +176,11 @@ class TestFullMove(Base):
         exp = {r["expiry_date"] for r in self.db.all("SELECT expiry_date FROM batches WHERE item_id=?",
                                                      (self.item("100")["id"],))}
         self.assertEqual(exp, {"2027-05-01", "2026-12-01"})
-        self.assertIsNone(self.db.one("SELECT batch_id FROM stock_movements WHERE item_id=?", (self.item("E4")["id"],))["batch_id"])
+        b = self.db.one("SELECT b.batch_no, b.expiry_date, b.public_price FROM stock_movements m JOIN batches b"
+                        " ON b.id=m.batch_id WHERE m.item_id=?", (self.item("E4")["id"],))
+        self.assertEqual((b["batch_no"], b["expiry_date"]), ("1-1", None))   # E-Stock's batch key, no expiry
+        self.assertEqual(self.db.one("SELECT public_price FROM batches WHERE batch_no='1-1' AND item_id=?",
+                                     (self.item("100")["id"],))["public_price"], 3000)
         self.assertEqual(res["plan"].stock_source["decision"]["key"], "Product_Amount:3")
         st = res["reconciliation"]["stock"]
         self.assertEqual((st["planned_units"], st["program_units"]), (66, 66))
@@ -184,7 +192,8 @@ class TestFullMove(Base):
         self.assertEqual(c["أحمد تجربة"]["phone2"], "0223456789")
         self.assertIsNone(c["منى تجربة"]["phone"])                # same number as Ahmed: kept in the notes
         self.assertIn("01012345678", c["منى تجربة"]["notes"])
-        self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (0, 50000))
+        # E-Stock's 9,999,999,999,999 = no limit there: kept as-is, never 0 (0 = no credit at all here)
+        self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (999999999999900, 50000))
         self.assertEqual(c["عميل C3"]["is_active"], 0)
         bal = {r["customer_id"]: (r["amount"], r["kind"]) for r in self.db.all("SELECT * FROM customer_ledger")}
         self.assertEqual(bal, {c["أحمد تجربة"]["id"]: (12000, "adjustment"), c["منى تجربة"]["id"]: (-1550, "adjustment")})
@@ -361,16 +370,17 @@ class TestRefusalsAndDecisions(Base):
             self.run_import(tables=t)
 
     def test_unclear_live_stock_table_stops_and_explicit_choice_works(self):
-        t = base_tables()
-        t["Branches_Product_Amount"] = [stock_row(9, 1, 1, "50", "24.0000", "2027-05-01T00:00:00", branch="1"),
-                                        stock_row(10, 3, 1, "1", "140.0000", "2027-05-01T00:00:00", branch="1")]
+        t = base_tables()                                   # no Product_Amount: two fresh branch groups
+        t["Branches_Product_Amount"] = [dict(r, branch_id="3") for r in t.pop("Product_Amount")] + \
+            [stock_row(9, 1, 1, "50", "24.0000", "2027-05-01T00:00:00", branch="1"),
+             stock_row(10, 3, 1, "1", "140.0000", "2027-05-01T00:00:00", branch="1")]
         folder = self.export(t)
         res = self.run_import(folder=folder)
         self.assertFalse(res["ok"])
         self.assertFalse(res["applied"])
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
         self.assertIn("stock_source", {b["field"] for b in res["plan"].blocking})
-        res = self.run_import(folder=folder, stock_source="Product_Amount:3")
+        res = self.run_import(folder=folder, stock_source="Branches_Product_Amount:3")
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
 
     def test_broken_unit_conversion_needs_a_pack_decision(self):
@@ -396,7 +406,8 @@ class TestRefusalsAndDecisions(Base):
 
     def test_opposite_balance_sign_in_the_statements_blocks(self):
         t = base_tables()
-        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "150.0000", "gc_for_me": "30.0000"}]
+        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "30.0000", "gc_for_me": "-150.0000",
+                                "total": "-120.0000"}]
         res = self.run_import(tables=t)
         self.assertFalse(res["ok"])
         self.assertIn("balance sign", {b["field"] for b in res["plan"].blocking})
@@ -420,7 +431,7 @@ class TestCommand(Base):
         s = SimpleNamespace(data_dir=self.tmp / "data", upload_dir=self.tmp / "data" / "uploads",
                             backup_path=self.tmp / "backups")
         s.data_dir.mkdir(exist_ok=True)
-        a = SimpleNamespace(username="owner", password=OWNER_PW, dir=str(folder), confirm=None, packs=None,
+        a = SimpleNamespace(username="owner", password=OWNER_PW, dir=str(folder), confirm=None, packs=None, status=False,
                             stock_source=None, store=None, database=None, out=str(self.tmp / ("o" + str(apply))),
                             apply=apply, backup_dir=None, **kw)
         buf = io.StringIO()
@@ -445,7 +456,13 @@ class TestCommand(Base):
         self.assertIn("RECONCILIATION: OK", out)
         self.assertTrue(list(s.backup_path.glob("pharmacy-backup-*-pre-estock-db.zip")))
         self.assertTrue(list(s.backup_path.glob("estock-archive-*.sqlite")))
-        self.assertTrue((s.data_dir / estock_archive.NAME).exists())
+        # beside the database the backup reads (here outside the data folder, as with PHARM_DB_PATH; #339 review)
+        self.assertTrue((Path(self.db.path).parent / estock_archive.NAME).exists())
+        self.assertFalse((s.data_dir / estock_archive.NAME).exists())
+        from app.core import backup
+        import zipfile
+        with zipfile.ZipFile(backup.create(self.db, s.upload_dir, self.tmp / "bk2")) as z:
+            self.assertIn(backup.ARCHIVE_MEMBER, z.namelist())
         self.assertEqual(self.db.one("SELECT count(*) n FROM items")["n"], 5)
 
     def test_failed_reconciliation_exits_non_zero(self):
@@ -471,7 +488,7 @@ class TestBat(unittest.TestCase):
 
     def test_dry_run_confirm_apply_verify_in_order(self):
         L = self.lines
-        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l]
+        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
         self.assertEqual(len(runs), 2)
         dry, apply = runs
         self.assertNotIn("--apply", L[dry])
@@ -526,10 +543,28 @@ class TestCodexReview339(Base):
         t = base_tables()
         t["Customer"][0]["customer_current_money"] = "120.0050"
         t["Gedo_customers"] = []
-        res = self.run_import(tables=t)
+        res = self.run_import(tables=t, round_piastres=False)          # --no-round-piastres
         self.assertFalse(res["ok"])
         self.assertIn(("C1", "customer_current_money"), {(b["code"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM customer_ledger"))
+
+    def test_sub_piastre_balance_rounds_half_up_by_default_listed_with_totals(self):
+        """Owner 19/11: half up to the piaster, one line per value with its difference, totals reported."""
+        t = base_tables()
+        t["Vendor"][0]["vendor_current_money"] = "675493.1710"
+        t["Gedo_Vendors"] = []
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        row = [d for d in res["plan"].dq if d["field"] == "vendor_current_money"][0]
+        self.assertEqual(row["severity"], "fixed")
+        self.assertIn("-0.001", row["action"])
+        self.assertEqual(self.db.one("SELECT amount FROM supplier_ledger WHERE amount>0")["amount"], 67549317)
+        self.assertEqual(res["plan"].checks["rounding"]["Vendor"]["values"], 1)
+        self.assertIn("تقريب كسور القرش", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t, round_piastres=False)
+        self.assertIn("vendor_current_money", {d["field"] for d in res["plan"].blocking})
 
     def test_p1_sub_piastre_price_is_listed_not_silent(self):
         t = base_tables()
@@ -680,10 +715,45 @@ class TestOpeningBalancesInTheProgram(Base):
         with self.assertRaises(NotFound):
             self.ob.confirm(self.db, self.ctx, "supplier", other, 100)
 
+    def test_a_confirmation_without_a_difference_also_closes_the_import(self):
+        """#339 review: confirming the same figure posts no ledger row, but no import step may run after it."""
+        self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 50000)                # = E-Stock: no row
+        self.assertEqual(self.db.one("SELECT count(*) n FROM supplier_ledger WHERE supplier_id=?", (self.v1,))["n"], 1)
+        with self.assertRaises(Conflict):
+            self.run_import(folder=self.folder)
+
     def test_no_import_step_runs_after_a_confirmation_in_the_program(self):
         self.ob.confirm(self.db, self.ctx, "supplier", self.v1, 45000)
         with self.assertRaises(Conflict):
             self.run_import(folder=self.folder)
+
+
+class TestStatementSigns(Base):
+    """Manager 22:15 (summary.txt ranges): balance = sum(for_him + for_me), and the last running total."""
+
+    def test_realistic_signs_match_the_balance(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        sign = res["plan"].checks["balance_sign"]
+        self.assertEqual((sign["customers"]["statement_matches"], sign["suppliers"]["statement_matches"]), (1, 1))
+
+    def test_the_last_running_total_counts_when_the_lines_do_not_add_up(self):
+        t = base_tables()
+        t["Gedo_customers"] = [{"gc_id": "1", "customer_id": "1", "gc_for_him": "0", "gc_for_me": "999.0000",
+                                "total": "120.0000", "insert_date": "2026-11-01T10:00:00"}]
+        res = self.run_import(tables=t)
+        self.assertEqual(res["plan"].checks["balance_sign"]["customers"]["last_total_matches"], 1)
+
+    def test_one_odd_party_does_not_block(self):
+        t = base_tables()
+        t["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "عميل رابع",
+                              "customer_current_money": "50.0000"})
+        t["Customer"].append({"customer_id": "5", "customer_code": "C5", "customer_name_ar": "عميل خامس",
+                              "customer_current_money": "70.0000"})
+        t["Gedo_customers"] += [{"gc_id": "2", "customer_id": "4", "gc_for_him": "0", "gc_for_me": "-50.0000"},
+                                {"gc_id": "3", "customer_id": "5", "gc_for_him": "0", "gc_for_me": "70.0000"}]
+        res = self.run_import(tables=t)                 # 2 of 3 match, 1 negated: not most of them
+        self.assertNotIn("balance sign", {b["field"] for b in res["plan"].blocking})
 
 
 class TestOwnerDecisions1118(Base):
@@ -698,21 +768,501 @@ class TestOwnerDecisions1118(Base):
         self.assertIn(("101", "review"), exp)
         self.assertIn("للمراجعة", Path(res["reports"]["data_quality"]).read_text(encoding="utf-8-sig"))
 
-    def test_treasury_and_wallets_are_information_only(self):
+    def test_treasury_and_wallets_are_found_with_their_source_and_kept_pending(self):
+        """Owner 22:05: they move (F105 posts them); until then every figure is in the report, none dropped."""
         t = base_tables()
-        t["Gedo_Financial"] = [{"gf_id": "1", "gf_for_me": "1500.5000", "gf_for_him": "200.0000", "total": "1300.5000"}]
+        t["Gedo_Financial"] = [{"gf_id": "1", "fcs_id": "1", "gf_for_me": "1500.5000", "gf_for_him": "200.0000"},
+                               {"gf_id": "2", "fcs_id": "2", "gf_for_me": "300.0000", "gf_for_him": "0.0000"}]
+        t["Financial_cash_safe"] = [{"fcs_id": "1", "fcs_name": "الخزنة الرئيسية"}, {"fcs_id": "2", "fcs_name": "فودافون كاش"}]
+        t["Networks"] = [{"network_id": "2", "network_name": "إنستاباي"}]
+        t["Cash_disk_close"][0].update({"cdc_fcs_id": "1", "cdc_trans_value": "900.0000"})
         t["Sales_header"][0]["network_id"] = "2"
         t["Sales_header"][0]["network_money"] = "54.0000"
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         mi = res["plan"].checks["money_info"]
-        tables = {x["table"]: x for x in mi["tables"]}
-        self.assertEqual(tables["Gedo_Financial"]["sums"]["gf_for_me"], "1500.50")
-        self.assertIn("Cash_disk_close", tables)
+        gf = {x["table"]: x for x in mi["tables"]}["Gedo_Financial"]
+        self.assertEqual(gf["sums"]["gf_for_me"], "1800.50")
+        self.assertEqual([(g["id"], g["name"], g["gf_for_me"]) for g in gf["by"]["fcs_id"]],
+                         [("1", "الخزنة الرئيسية", "1500.50"), ("2", "فودافون كاش", "300.00")])
+        self.assertEqual(mi["shift_transfers"][0]["total"], "900.00")
         self.assertEqual(mi["last_shift_close"][0]["counted_cash"], "999.50")
-        self.assertEqual(mi["sales_by_network"], [{"source": "Sales_header.network_money", "network_id": "2", "total": "54.00"}])
-        for table in ("cash_movements", "cash_shifts"):
+        self.assertEqual([(n["network_id"], n["name"], n["total"]) for n in mi["sales_by_network"]], [("2", "إنستاباي", "54.00")])
+        review = {(d["table"], d["field"]) for d in res["plan"].dq if d["severity"] == "review"}
+        self.assertIn(("Gedo_Financial", "gf_for_me"), review)
+        self.assertIn(("Cash_disk_close", "cdc_trans_value"), review)
+        for table in ("cash_movements", "cash_shifts"):          # posted only by F105's service, once
             self.assertFalse(self.db.one(f"SELECT 1 FROM {table}"), table)
         rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
-        self.assertIn("مفيش رصيد خزنة ولا محفظة", rec)
-        self.assertIn("Gedo_Financial", rec)
+        self.assertIn("MONEY OPENING: PENDING", rec)
+        self.assertIn("الخزنة الرئيسية", rec)
+
+
+class TestPartialReadIsCompletedFirst(Base):
+    """Manager 18/11: a PARTIAL read is completed by reading only the failed tables again, then merged."""
+
+    def runs(self, with_retry=True):
+        root = Path(tempfile.mkdtemp(dir=self.tmp, prefix="estock-db-read"))
+        t = base_tables()
+        vendor = t.pop("Vendor")
+        write_export(root / "20261118-100000", t)
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "E-Stock database read (read only) 20261118-100000\nRESULT: PARTIAL - 25 tables read; 2 not read:\n"
+            "   PC / stock.dbo.Vendor\n   PC / stock.dbo.Products (stats)\nfull tables: ...\n", encoding="utf-8-sig")
+        if with_retry:
+            write_export(root / "20261118-110000", {"Vendor": vendor})
+            (root / "20261118-110000" / "summary.txt").write_text(
+                "E-Stock database read (read only) 20261118-110000\nretry of run 20261118-100000: 1 table(s)\n"
+                "only: stock.dbo.Vendor\nRESULT: PASS - 1 tables, 2 rows read.\n", encoding="utf-8-sig")
+        return root
+
+    def test_a_partial_read_blocks_and_status_says_so(self):
+        root = self.runs(with_retry=False)
+        ex = estock_db.Export(root)
+        self.assertEqual(ex.missing, ["stock.dbo.vendor"])               # the (stats) one was exported
+        from app.core.errors import ValidationFailed
+        with self.assertRaises(ValidationFailed):                         # Vendor is required
+            self.run_import(folder=root)
+        code, out = self.status(root)
+        self.assertEqual(code, 3)
+        self.assertIn("NOT READ: stock.dbo.vendor", out)
+
+    def test_the_retry_completes_the_read_and_the_move_passes(self):
+        root = self.runs()
+        ex = estock_db.Export(root)
+        self.assertEqual((ex.missing, ex.runs), ([], ["20261118-100000", "20261118-110000"]))
+        self.assertTrue(ex.has("Vendor") and ex.has("Products"))
+        res = self.run_import(folder=root)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual(self.db.one("SELECT count(*) n FROM suppliers")["n"], 2)
+        code, out = self.status(root)
+        self.assertEqual(code, 0)
+        self.assertIn("READ: COMPLETE", out)
+
+    def test_a_newer_read_of_a_table_replaces_the_first(self):
+        root = self.runs()
+        t = base_tables()
+        t["Customer"][0]["customer_current_money"] = "130.0000"
+        t["Gedo_customers"] = []
+        write_export(root / "20261118-120000", {"Customer": t["Customer"]})
+        (root / "20261118-120000" / "summary.txt").write_text(
+            "retry of run 20261118-110000: 1 table(s)\nonly: Customer\nRESULT: PASS - 1 tables\n", encoding="utf-8-sig")
+        ex = estock_db.Export(root)
+        self.assertEqual(ex.rows("Customer")[0]["customer_current_money"], "130.0000")
+
+    def test_no_full_read(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        (root / "x").mkdir()
+        (root / "x" / "summary.txt").write_text("only: Customer\nRESULT: PASS\n", encoding="utf-8")
+        with self.assertRaises(estock_db.ExportError):
+            estock_db.Export(root)
+
+    def status(self, root):
+        import manage
+        a = SimpleNamespace(status=True, dir=str(root), database=None)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            try:
+                manage.cmd_import_estock_db(a, SimpleNamespace())
+                return 0, buf.getvalue()
+            except SystemExit as e:
+                return e.code, buf.getvalue()
+
+    def test_bat_checks_the_read_and_rereads_once_before_anything(self):
+        L = TestBat()
+        L.setUp()
+        lines = L.lines
+        status = [i for i, l in enumerate(lines) if "--status" in l and '"%MANAGE%" import-estock-db' in l]
+        self.assertEqual(len(status), 2)
+        reread = next(i for i, l in enumerate(lines) if l == 'if "%RC%"=="3" call :reread')
+        stop = next(i for i, l in enumerate(lines) if l == "call :stopprog")
+        self.assertTrue(status[0] < reread < status[1] < stop)
+        self.assertTrue(lines[status[1] + 1].startswith("if errorlevel 1 (set"))
+        sub = lines[lines.index(":reread"):]
+        self.assertIn('-File "%~dp0estock-db-read.ps1" -RetryFailed <nul', sub[2])
+        self.assertTrue(all('--dir "%READS%"' in l for l in lines if '"%MANAGE%" import-estock-db' in l))
+
+
+class TestManagerSchemaReview(Base):
+    """Manager 22:15, from E-Stock's real summary.txt."""
+
+    def test_a_row_read_twice_blocks(self):
+        t = base_tables()
+        t["Product_Amount"].append(dict(t["Product_Amount"][0]))           # pa_id 1 twice
+        res = self.run_import(tables=t)
+        self.assertIn(("Product_Amount", "pa_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
+        self.assertFalse(self.db.one("SELECT 1 FROM items"))
+
+    def test_tables_that_end_at_different_times_are_listed(self):
+        t = base_tables()
+        t["Gedo_Financial"] = [{"gf_id": "5", "insert_date": "2026-11-18T10:13:00.000"}]
+        t["Sales_header"][0]["gf_id"] = "7"
+        res = self.run_import(tables=t)
+        got = {(d["field"], d["severity"]) for d in res["plan"].dq}
+        self.assertIn(("insert_date", "review"), got)
+        self.assertIn(("gf_id", "review"), got)
+
+    def test_branch_mirror_rows_of_the_other_pharmacy_are_left_out(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "3", "co_name": "x"}]
+        t["Branches_sales_details"].append({"branch_id": "2", "details_id": "1", "sales_id": "1", "product_id": "3",
+                                            "amount": "9", "sale_unit_change": "5", "insert_date": SOLD})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertNotIn(("102", "sale_unit_change"), {(d["code"], d["field"]) for d in res["plan"].dq})
+        from app.dataimport import estock_db as e
+        self.assertEqual(len(e.sales_lines(e.Export(self.export(t)))), 2)
+
+    def test_product_amount_is_compared_with_the_branch_mirror(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "1"}]
+        t["Branches_Product_Amount"] = [dict(r, branch_id="1") for r in t["Product_Amount"]]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["plan"].stock_source["mirror_check"]["equal"])
+        self.assertEqual(res["plan"].stock_source["decision"]["key"], "Product_Amount:3")
+        t["Branches_Product_Amount"][0]["amount"] = "11"
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t)
+        self.assertFalse(res["plan"].stock_source["mirror_check"]["equal"])
+        self.assertIn(("stock", "mirror"), {(d["table"], d["field"]) for d in res["plan"].dq})
+
+    def test_the_hospital_store_is_listed_in_full_and_never_in_the_pharmacy_stock(self):
+        res = self.run_import()
+        row = [d for d in res["plan"].dq if d["field"] == "store_id"][0]
+        self.assertEqual((row["severity"], row["estock_id"], row["value_egp"]), ("review", "2", "560.00"))
+        self.assertIn("ملك المستشفى", row["action"])
+        text = Path(res["reports"]["hospital_stock"]).read_text(encoding="utf-8-sig")
+        self.assertIn("Testaclav 1g Tab", text)
+        self.assertIn("2027-01-01", text)
+        self.assertEqual(self.units("102"), 28)                  # the pharmacy's own 28; the hospital's 4 packs apart
+
+    def test_stock_rows_keep_vendor_and_tax_in_the_import_row(self):
+        import json
+        self.run_import()
+        raw = [json.loads(r["raw"]) for r in self.db.all(
+            "SELECT r.raw FROM import_rows r JOIN import_runs u ON u.id=r.run_id WHERE u.kind='opening_stock'")]
+        self.assertTrue(all("vendor_id" in x and "tax_price" in x and "counter_id" in x for x in raw))
+
+
+class TestItemExtras(Base):
+    def test_unit_names_and_everything_else_is_kept_and_listed(self):
+        import json
+        t = base_tables()
+        t["Products"][0].update({"product_unit1": "1", "notes": "ممنوع للحوامل", "product_fast_code": "TM5",
+                                 "group_id": "4", "product_max_disc": "10", "unit2_sell_price": "10.0000"})
+        t["Product_groups"] = [{"group_id": "4", "group_name_ar": "مسكنات"}]
+        t["Products"].append(product(10, "108", "Testnoexp Gel", product_has_expire="0"))
+        t["Product_Amount"].append(stock_row(50, 10, 1, "2", "5.0000", ""))
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        it = self.item("100")
+        self.assertEqual((it["pack_unit_name"], it["base_unit_name"]), ("علبة", "شريط"))
+        raw = json.loads(self.db.one("SELECT r.raw FROM import_rows r WHERE r.target_id=?", (it["id"],))["raw"])
+        self.assertEqual((raw["extras"]["notes"], raw["extras"]["group"], raw["extras"]["fast_code"]),
+                         ("ممنوع للحوامل", "مسكنات", "TM5"))
+        csv_text = Path(res["reports"]["item_extras"]).read_text(encoding="utf-8-sig")
+        self.assertIn("ممنوع للحوامل", csv_text)
+        self.assertIn("max_disc", csv_text)
+        exp = {d["code"]: d["severity"] for d in res["plan"].dq if d["field"] == "expiry"}
+        self.assertEqual(exp["108"], "info")                         # E-Stock says: no expiry for this item
+
+
+class TestPartyExtras(Base):
+    def test_customer_extras_in_notes_and_sell_price_buy_reported(self):
+        t = base_tables()
+        t["Customer"][0].update({"customer_pay_type": "2", "sales_man": "7", "sell_price_buy": "1"})
+        t["Vendor"][0]["vendor_max_money"] = "50000.0000"
+        res = self.run_import(tables=t)
+        notes = self.db.one("SELECT notes FROM customers WHERE name='أحمد تجربة'")["notes"]
+        for word in ("طريقة الدفع في إي ستوك: 2", "المندوب: 7", "البيع بسعر الشراء: 1"):
+            self.assertIn(word, notes)
+        self.assertIn(("C1", "sell_price_buy", "review"), {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertIn("vendor_max_money: 50000.0000", Path(res["reports"]["supplier_contacts"]).read_text(encoding="utf-8-sig"))
+
+
+class TestArchiveSecretsAndTickets(Base):
+    def test_plain_text_passwords_are_not_copied_and_tickets_are_counted_trimmed(self):
+        t = base_tables()
+        t["Employee"] = [{"emp_id": "1", "emp_name": "موظف تجربة", "pass": "secret-1"}]
+        t["Sales_header"][0].update({"ticket_name": "   ", "ticket_id": "", "ticket_num": "  ", "bill_number": "  "})
+        t["Sales_header"][1]["ticket_num"] = "T-123      "
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        con = estock_archive.open_ro(self.tmp / estock_archive.NAME)
+        try:
+            cols = [r[1] for r in con.execute('PRAGMA table_info("e_Employee")')]
+            self.assertNotIn("pass", cols)
+            self.assertEqual(con.execute("SELECT name FROM employees WHERE estock_id='1'").fetchone()[0], "موظف تجربة")
+            self.assertIn("Employee.pass", con.execute("SELECT value FROM meta WHERE key='left_out_columns'").fetchone()[0])
+            self.assertTrue(con.execute("SELECT 1 FROM sqlite_master WHERE name='ix_e_Sales_header_ticket_num'").fetchone())
+        finally:
+            con.close()
+        self.assertIn(("Employee.pass", "info"), {(d["field"], d["severity"]) for d in res["plan"].dq})   # owner: not needed
+        self.assertEqual(res["plan"].checks["tickets"]["with_ticket_after_trim"], 1)
+        from app.dataimport import estock_history as h
+        self.assertEqual([r["ticket_no"] for r in h.invoices(self.db, self.ctx, "sale") if r["estock_id"] == "2"], ["T-123"])
+
+
+class TestOwnerReportLines(Base):
+    def test_one_line_each_for_the_owner(self):
+        t = base_tables()
+        t["Sales_header"].append({"sales_id": "3", "customer_id": "77", "total_bill_net": "5", "insert_date": SOLD})
+        t["Purchase_header"].append({"purchase_id": "2", "vendor_id": "9", "total_bill": "404.1500",
+                                     "bill_date": "2026-07-11T00:00:00", "bill_number": "PK"})
+        t["Gedo_branches"] = [{"gb_id": "1", "total": "100.0000", "insert_date": "2026-05-29T10:00:00"},
+                              {"gb_id": "2", "total": "250.5000", "insert_date": "2026-05-30T10:00:00"}]
+        t["Branches_sales_details"] += [
+            {"branch_id": "3", "details_id": "8", "sales_id": "1", "product_id": "1", "total_sell": "55232.6600", "insert_date": SOLD},
+            {"branch_id": "3", "details_id": "9", "sales_id": "2", "product_id": "1", "total_sell": "-55232.6600", "insert_date": SOLD}]
+        t["Purchase_header"].append({"purchase_id": "4", "vendor_id": "1", "total_bill": "404.1500",
+                                     "bill_date": "2026-07-11T00:00:00", "bill_number": "PK-1"})
+        t["Employee"] = [{"emp_id": "5", "emp_name": "موظف قديم", "pass": "x"}]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
+        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
+        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
+        d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
+        self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_ledger WHERE kind='purchase'"))
+        # the other pharmacy: its own account with the last balance
+        b = self.db.one("SELECT id FROM suppliers WHERE name=?", (estock_db.BRANCH_ACCOUNT_NAME,))
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (b["id"],))["a"], 25050)
+        # staff: stopped users with their names
+        u = self.db.one("SELECT u.id, u.full_name, m.is_active FROM users u JOIN memberships m ON m.user_id=u.id"
+                        " WHERE u.username='estock-5'")
+        self.assertEqual((u["full_name"], u["is_active"]), ("موظف قديم", 0))
+        # the same export again changes nothing
+        n = (self.db.one("SELECT count(*) n FROM purchase_invoices")["n"], self.db.one("SELECT count(*) n FROM users")["n"])
+        res = self.run_import(folder=self._last)
+        self.assertEqual((self.db.one("SELECT count(*) n FROM purchase_invoices")["n"],
+                          self.db.one("SELECT count(*) n FROM users")["n"]), n)
+
+
+class TestCashDepots(Base):
+    def test_every_depot_is_in_the_plan_and_the_report_not_posted(self):
+        t = base_tables()
+        t["Cash_depots"] = [{"cd_id": "1", "cd_name": "الخزنة الرئيسية", "cd_class": "1", "cd_balance": "12500.2500"},
+                            {"cd_id": "2", "cd_name": "إنستاباي", "cd_class": "3", "cd_balance": "830.0000"},
+                            {"cd_id": "3", "cd_name": "فودافون كاش", "cd_class": "3", "cd_balance": "-15.0000"}]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        d = res["plan"].checks["money_info"]["cash_depots"]
+        self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
+                         [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
+                          ("3", "فودافون كاش", "3", "-15.00")])
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
+        self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
+
+
+class TestCreditLimits(Base):
+    """Manager 22:35: a limit above 1,000,000 means "no limit" in E-Stock; 0 in the program means no credit."""
+
+    def sell_on_credit(self, cust_name, amount_units=1):
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        s = Sales(self.db)
+        cid = self.db.one("SELECT id FROM customers WHERE name=?", (cust_name,))["id"]
+        if not self.db.one("SELECT 1 FROM cash_shifts WHERE status='open'"):
+            CashDrawer(self.db).open(self.ctx, 0)
+        sid = s.create(self.ctx, cid)
+        s.add_line(self.ctx, sid, self.item("100")["id"], units=amount_units)
+        tot = s.get(self.ctx, sid)["total"]
+        f = s.safety_check(self.ctx, sid)
+        return s.complete(self.ctx, sid, on_credit=tot, safety_decisions={i: "ok" for i in range(len(f))})
+
+    def test_no_limit_in_estock_keeps_credit_sales_working(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.sell_on_credit("أحمد تجربة")                                # would be refused with a 0 limit
+        row = [d for d in res["plan"].dq if d["code"] == "C1" and d["field"] == "customer_max_money"][0]
+        self.assertIn("من غير حد", row["action"])
+
+    def test_zero_limit_means_no_credit_in_the_program(self):
+        from app.core.errors import Conflict as C
+        t = base_tables()
+        t["Customer"][1]["customer_max_money"] = "0"
+        res = self.run_import(tables=t)
+        with self.assertRaises(C) as e:                          # 30 EGP on top of -15.50 is over a 0 limit
+            self.sell_on_credit("منى تجربة", amount_units=3)
+        self.assertEqual(e.exception.code, "credit_limit")
+        # owner 19/11: 0 in E-Stock while buying on credit = no limit, as E-Stock behaved
+        t["Customer"][0]["customer_max_money"] = "0"                    # Ahmed: 0 in E-Stock and owes 120
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t)
+        self.assertIn(("C1", "customer_max_money", "info"),
+                      {(d["code"], d["field"], d["severity"]) for d in res["plan"].dq})
+        self.assertEqual(self.db.one("SELECT credit_limit FROM customers WHERE name='أحمد تجربة'")["credit_limit"],
+                         estock_db.NO_LIMIT)
+        self.sell_on_credit("أحمد تجربة")
+
+
+class TestCashDepotsAsOnTheScreen(Base):
+    """Manager 22:28, from E-Stock's «النقدية المتاحة»: all 11 move as they are; 6 and 10 listed for the owner."""
+
+    def test_eleven_depots(self):
+        names = ["نقطة بيع 1", "خزينة 1", "حساب بنك مصر", "نقطة بيع 2", "نقطة بيع 3", "0000", "انستا باي",
+                 "فودافون كاش", "اتصالات كاش", "فيزا باى موب - موقوف", "امان"]
+        t = base_tables()
+        t["Cash_depots"] = [{"cd_id": str(i), "cd_name": n, "cd_class": "1", "cd_balance": f"{i * 10}.0000"}
+                            for i, n in enumerate(names, start=1)]
+        t["Cash_disk_close"][0].update({"cdc_cash_id": "1", "insert_date": "2026-11-15T14:19:00.000"})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        d = {x["estock_id"]: x for x in res["plan"].checks["money_info"]["cash_depots"]}
+        self.assertEqual(len(d), 11)
+        self.assertEqual([d[i]["role"] for i in ("1", "2", "3", "6", "7", "8", "9", "10", "11")],
+                         ["drawer", "treasury", "bank", "junk", "wallet", "wallet", "wallet", "wallet", "wallet"])
+        self.assertEqual(d["1"]["last_close"], "2026-11-15T14:19:00.000")
+        # owner 19/11: 1 = the shift drawer (first shift opening), 6 = no account, 10 = a stopped account
+        self.assertEqual({k: d[k]["action"] for k in d},
+                         {"1": "first_shift_opening", "2": "account", "3": "account", "4": "account", "5": "account",
+                          "6": "no_account", "7": "account", "8": "account", "9": "account", "10": "account_stopped",
+                          "11": "account"})
+        owner = {x["estock_id"] for x in res["plan"].dq if x["table"] == "Cash_depots" and x["action"].startswith("OWNER")}
+        self.assertEqual(owner, {"6"})                          # «0000» holds 60.00 here: one line with the figure
+        self.assertIn("60.00", [x for x in res["plan"].dq if x["table"] == "Cash_depots" and x["estock_id"] == "6"][0]["action"])
+        self.assertTrue(any(x["field"] == "last_close" for x in res["plan"].dq))
+
+
+class TestScreenTour2245(Base):
+    """Manager 22:45: internal accounts, purchase classes, junk masters, E-Stock settings."""
+
+    def test_misc_sources_supplier_and_internal_consumption_customer(self):
+        """Owner 19/11: «جرد» is a real supplier (occasional sources); «الصيدلية» is internal consumption."""
+        t = base_tables()
+        t["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "جرد", "vendor_current_money": "900.0000"})
+        t["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "الصيدليه",
+                              "customer_current_money": "300.0000", "sell_price_buy": "1"})
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        v = self.db.one("SELECT id FROM suppliers WHERE name='مصادر متفرقة (جرد)'")
+        self.assertTrue(v)
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (v["id"],))["a"], 90000)
+        con = estock_archive.open_ro(self.tmp / estock_archive.NAME)
+        try:                                           # the E-Stock id still maps to it; the old name stays there
+            self.assertEqual(con.execute("SELECT program_id FROM map_suppliers WHERE estock_id='3'").fetchone()[0], v["id"])
+            self.assertEqual(con.execute('SELECT vendor_name_ar FROM "e_Vendor" WHERE vendor_id=\'3\'').fetchone()[0], "جرد")
+        finally:
+            con.close()
+        c = self.db.one("SELECT name, notes FROM customers WHERE name LIKE '%حساب داخلي%'")
+        self.assertIn("استهلاك الصيدلية الداخلي", c["notes"])
+        s, cu = res["reconciliation"]["suppliers"], res["reconciliation"]["customers"]
+        self.assertEqual((s["internal_accounts"], s["real_balance_total"]), (0, "1380.00"))
+        self.assertEqual((cu["internal_balance_total"], cu["real_balance_total"]), ("300.00", "104.50"))
+        self.assertNotIn("internal", {d["field"] for d in res["plan"].dq if d["table"] == "Vendor"})
+
+    def test_purchase_classes_are_counted_for_the_owner(self):
+        t = base_tables()
+        t["Purchase_header"][0]["class"] = "1"
+        t["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "3", "total_bill": "700.0000"},
+                                 {"purchase_id": "3", "vendor_id": "2", "class": "3", "total_bill": "300.0000",
+                                  "total_after_back": "250.0000"}]
+        res = self.run_import(tables=t)
+        pc = res["plan"].checks["purchase_classes"]
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
+
+    def test_junk_master_names_are_listed_and_not_used(self):
+        t = base_tables()
+        t["Product_units"].append({"unit_id": "6", "unit_name_ar": "6"})
+        t["Products"][1].update({"product_unit1": "6"})
+        res = self.run_import(tables=t)
+        self.assertIn(("Product_units", "6"), {(d["table"], d["estock_id"]) for d in res["plan"].dq if d["field"] == "name"})
+        self.assertEqual(self.item("101")["pack_unit_name"], "pack")             # not "6"
+
+    def test_estock_settings_are_in_the_report(self):
+        res = self.run_import()
+        rec = Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig")
+        self.assertIn("مرتجع البيع خلال 7 أيام", rec)
+        self.assertIn("مفيش إيصال تحت 20 جنيه", rec)
+
+
+class TestCodexReview345b(Base):
+    """Codex on #345 @5eb8cd6 (each failed before the fix)."""
+
+    def test_p1_the_branch_account_honours_its_confirmed_balance(self):
+        from openpyxl import load_workbook
+        t = base_tables()
+        t["Gedo_branches"] = [{"gb_id": "1", "total": "100.0000", "insert_date": "2026-05-30T10:00:00"}]
+        first = self.run_import(tables=t, write_archive=False)
+        wb = load_workbook(first["reports"]["openings"])
+        for r in wb.active.iter_rows(min_row=2):
+            if r[1].value == estock_db.BRANCH_ACCOUNT_ID:
+                r[5].value = -100
+        conf = self.tmp / "c.xlsx"
+        wb.save(conf)
+        self.db.close()
+        Base.setUp(self)
+        res = self.run_import(tables=t, confirm_file=conf)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        b = self.db.one("SELECT id FROM suppliers WHERE name=?", (estock_db.BRANCH_ACCOUNT_NAME,))["id"]
+        self.assertEqual(self.db.one("SELECT sum(amount) a FROM supplier_ledger WHERE supplier_id=?", (b,))["a"], -10000)
+
+    def test_p2_a_retry_that_exported_nothing_does_not_break_the_read(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        t = base_tables()
+        vendor = t.pop("Vendor")
+        write_export(root / "20261118-100000", t)
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "RESULT: PARTIAL - x; 1 not read:\n   PC / stock.dbo.Vendor\n", encoding="utf-8-sig")
+        (root / "20261118-110000" / "tables").mkdir(parents=True)          # a retry that failed: no manifest
+        (root / "20261118-110000" / "summary.txt").write_text(
+            "retry of run 20261118-100000: 1 table(s)\nRESULT: PARTIAL - 0 tables; 1 not read:\n   PC / stock.dbo.Vendor\n",
+            encoding="utf-8-sig")
+        write_export(root / "20261118-120000", {"Vendor": vendor})
+        (root / "20261118-120000" / "summary.txt").write_text(
+            "retry of run 20261118-110000: 1 table(s)\nRESULT: PASS - 1 tables\n", encoding="utf-8-sig")
+        ex = estock_db.Export(root)
+        self.assertEqual((ex.missing, ex.runs), ([], ["20261118-100000", "20261118-120000"]))
+
+
+class TestCodexReview345c(Base):
+    """Codex on #345 @5dcf3e5 (each failed before the fix)."""
+
+    def test_p2_a_failed_read_is_never_complete(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        write_export(root / "20261118-100000", base_tables())
+        (root / "20261118-100000" / "summary.txt").write_text(
+            "RESULT: FAIL - the connection dropped (nothing in E-Stock was changed)\n", encoding="utf-8-sig")
+        with self.assertRaises(estock_db.ExportError):
+            estock_db.Export(root)
+        one = root / "20261118-100000"                      # the same run given directly
+        self.assertTrue(estock_db.Export(one).missing)
+
+    def test_p2_a_blank_expiry_does_not_break_the_mirror_check(self):
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "1"}]
+        t["Product_Amount"].append(stock_row(60, 1, 1, "2", "24.0000", ""))       # no expiry, same item and store
+        t["Branches_Product_Amount"] = [dict(r, branch_id="1") for r in t["Product_Amount"]]
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertTrue(res["plan"].stock_source["mirror_check"]["equal"])
+
+
+class TestCodexReview345d(Base):
+    """Codex on #345 @04d6b9e (each failed before the fix)."""
+
+    def test_p2_fully_returned_purchase_counts_zero_after_returns(self):
+        t = base_tables()
+        t["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "7", "total_bill": "500.0000",
+                                  "total_after_back": "0.0000"}]
+        res = self.run_import(tables=t)
+        self.assertEqual(res["plan"].checks["purchase_classes"]["7"]["after_returns"], "0.00")
+
+    def test_p2_unit_names_follow_the_decided_pack(self):
+        t = base_tables()
+        t["Products"].append(product(5, "104", "Testbroken Tab", product_unit2="2", product_unit1_2=""))
+        folder = self.export(t)
+        packs = self.tmp / "packs.json"
+        packs.write_text('{"104": 3}', encoding="utf-8")
+        res = self.run_import(folder=folder, packs_file=packs)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        it = self.item("104")
+        self.assertEqual((it["pack_size"], it["pack_unit_name"], it["base_unit_name"]), (3, "علبة", "شريط"))

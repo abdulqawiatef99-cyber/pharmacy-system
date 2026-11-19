@@ -18,6 +18,13 @@ from ..db import Database
 log = logging.getLogger("pharm.retention")
 NOTIFICATION_DAYS = 180
 SESSION_DAYS = 30
+# the books: no cleanup job may ever name these tables (the first three also refuse DELETE by trigger)
+KEPT_FOR_EVER = ("audit_log", "safety_events", "stock_movements", "sales", "purchase_invoices")
+
+
+def _log_max_mb() -> int:
+    from . import dbhealth
+    return dbhealth.LOG_MAX_BYTES // (1024 * 1024)
 
 
 def clean(db: Database) -> dict:
@@ -62,4 +69,5 @@ def sizes(db: Database, db_path: Path, upload_dir: Path, backup_dir: Path) -> di
             "rows": {t: db.one(f"SELECT count(*) c FROM {t}")["c"] for t in ("sales", "sale_lines", "purchase_invoices",
                                                                            "stock_movements", "audit_log", "notifications")},
             "since": first[:10] if first else None,
-            "policy": {"notifications_days": NOTIFICATION_DAYS, "sessions_days": SESSION_DAYS}}
+            "policy": {"notifications_days": NOTIFICATION_DAYS, "sessions_days": SESSION_DAYS,
+                       "kept_for_ever": list(KEPT_FOR_EVER), "server_log_max_mb": _log_max_mb()}}

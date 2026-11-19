@@ -82,6 +82,8 @@ class _OrgIndex:
 
 MEMO_MAX = 5000
 _cache: dict[str, tuple[str, _OrgIndex]] = {}
+# org -> item id -> ((name_en, name_ar, strength_norm, dosage_form), parsed entry or None when it has no name)
+_parsed: dict[str, dict[str, tuple[tuple, "_IndexedItem | None"]]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -97,30 +99,48 @@ def _index(db: Database, org_id: str) -> _OrgIndex:
         hit = _cache.get(org_id)
         if hit and hit[0] == ver:
             return hit[1]
+        known = _parsed.get(org_id, {})
     rows = db.all("SELECT id, name_en, name_ar, strength_norm, dosage_form FROM items"
                   " WHERE org_id=? AND status='active'", (org_id,))
-    items = []
+    items, seen = [], {}
     for r in rows:
-        parsed = [parse_name(n) for n in (r["name_en"], r["name_ar"]) if n]
-        if not parsed:
-            continue
-        items.append(_IndexedItem(
-            item_id=r["id"], label=r["name_en"] or r["name_ar"], parsed=parsed,
-            strength=r["strength_norm"] or next((p.strength for p in parsed if p.strength), None),
-            form=r["dosage_form"] or next((p.form for p in parsed if p.form), None),
-            content=next((p.content for p in parsed if p.content), None),
-            pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
-            modifiers=frozenset().union(*(p.modifiers for p in parsed)),
-        ))
+        # parsing a name is the whole cost of a rebuild (0.8 s for 15,000 names), and a rebuild follows every
+        # item change: an item whose names and fields are what they were keeps its parsed entry (#304 B4)
+        key = (r["name_en"], r["name_ar"], r["strength_norm"], r["dosage_form"])
+        old = known.get(r["id"])
+        if old is not None and old[0] == key:
+            it = old[1]
+        else:
+            parsed = [parse_name(n) for n in (r["name_en"], r["name_ar"]) if n]
+            it = _IndexedItem(
+                item_id=r["id"], label=r["name_en"] or r["name_ar"], parsed=parsed,
+                strength=r["strength_norm"] or next((p.strength for p in parsed if p.strength), None),
+                form=r["dosage_form"] or next((p.form for p in parsed if p.form), None),
+                content=next((p.content for p in parsed if p.content), None),
+                pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
+                modifiers=frozenset().union(*(p.modifiers for p in parsed)),
+            ) if parsed else None
+        seen[r["id"]] = (key, it)
+        if it is not None:
+            items.append(it)
     idx = _OrgIndex(items)
     with _cache_lock:
         _cache[org_id] = (ver, idx)
+        _parsed[org_id] = seen           # only the items of this build: a stopped or deleted item is dropped
     return idx
 
 
 def invalidate(org_id: str) -> None:
+    """The catalog changed: the next question builds the index again (the parsed names are kept, see _index)."""
     with _cache_lock:
         _cache.pop(org_id, None)
+
+
+def forget(org_id: str) -> None:
+    """Drop the index and the parsed names of a pharmacy (tests; a build from nothing)."""
+    with _cache_lock:
+        _cache.pop(org_id, None)
+        _parsed.pop(org_id, None)
 
 
 # ---------------------------------------------------------------------------

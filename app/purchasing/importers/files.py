@@ -58,6 +58,9 @@ INSTRUCTION_SHEETS = {"تعليمات", "instructions", "readme"}
 # a supplier file could stall the server for everyone (#140). Far above a real E-Stock export.
 MAX_XLSX_UNPACKED = 256 * 1024 * 1024
 MAX_XLSX_CELLS = 5_000_000
+# A sheet without its declared size and with one cell far down makes openpyxl hand back an empty row for
+# every missing one: a 5 KB file became a million rows that cost nothing of the cell budget (#324 X19).
+MAX_XLSX_EMPTY_ROWS = 100_000
 TOO_BIG = "ملف Excel كبير جدًا (عدد الخلايا أو حجمه بعد فك الضغط أكبر من المسموح)"
 
 
@@ -73,11 +76,14 @@ def check_xlsx_size(data: bytes) -> None:
 
 
 def sheet_rows(ws, budget: list[int]) -> list[list]:
-    """All rows of a sheet; ``budget[0]`` is the cells left for the whole workbook."""
-    rows = []
+    """All rows of a sheet; ``budget[0]`` is the cells left for the whole workbook. A row without cells
+    costs one cell, and a sheet may hold MAX_XLSX_EMPTY_ROWS of them."""
+    rows, empty = [], 0
     for r in ws.iter_rows(values_only=True):
-        budget[0] -= len(r)
-        if budget[0] < 0:
+        budget[0] -= len(r) or 1
+        if not r:
+            empty += 1
+        if budget[0] < 0 or empty > MAX_XLSX_EMPTY_ROWS:
             raise ValidationFailed(TOO_BIG, code="too_large")
         rows.append(list(r))
     return rows
