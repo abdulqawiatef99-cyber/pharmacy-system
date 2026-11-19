@@ -82,23 +82,35 @@ class TestTemplate(unittest.TestCase):
         self.assertEqual(helpers._migrated_template(), helpers._migrated_template())
 
 
-class TestEachTestIsItsOwn(DBTestCase):
-    seen: list = []
+class TestEachTestIsItsOwn(unittest.TestCase):
+    def test_three_set_ups_in_a_row_share_no_file_no_pharmacy_and_no_user(self):
+        """One test, three complete set-up and tear-down cycles of DBTestCase: it needs no other test to have run."""
+        class Probe(DBTestCase):
+            def runTest(self):
+                pass
 
-    def remember(self):
-        self.seen.append((str(self.db.path), self.ctx.org_id, self.ctx.user_id))
-
-    def test_one(self):
-        self.remember()
-        self.assertEqual(self.db.one("SELECT count(*) n FROM organizations")["n"], 1)
-        self.assertEqual(self.db.one("SELECT id FROM organizations")["id"], self.ctx.org_id)
-
-    def test_two(self):
-        self.remember()
-        self.assertEqual(self.db.one("SELECT count(*) n FROM organizations")["n"], 1)
-
-    def test_zz_the_three_did_not_share_a_file_a_pharmacy_or_a_user(self):
-        self.remember()
-        self.assertEqual(len(self.seen), 3)
-        for k in range(3):
-            self.assertEqual(len({s[k] for s in self.seen}), 3, k)
+        seen = []
+        for _ in range(3):
+            case = Probe()
+            case.setUp()
+            try:
+                self.assertEqual(case.db.one("SELECT count(*) n FROM organizations")["n"], 1)
+                self.assertEqual(case.db.one("SELECT id FROM organizations")["id"], case.ctx.org_id)
+                with case.db.transaction():                      # something only this copy has
+                    case.db.execute("CREATE TABLE only_here (x)")
+                seen.append((str(case.db.path), case.ctx.org_id, case.ctx.user_id,
+                             case.db.one("SELECT created_at FROM organizations")["created_at"]))
+                folder = case.tmp
+            finally:
+                case.tearDown()
+            self.assertFalse(folder.exists())                    # each copy is removed with its test
+        for k, what in enumerate(("file", "pharmacy", "user")):
+            self.assertEqual(len({s[k] for s in seen}), 3, what)
+        self.assertEqual(sorted(s[3] for s in seen), [s[3] for s in seen])      # each pharmacy made in its own set-up
+        other = fresh_database(Path(tempfile.mkdtemp(prefix="pharm-test-tpl-")) / "later.db")
+        try:
+            self.assertIsNone(other.one("SELECT name FROM sqlite_master WHERE name='only_here'"))
+        finally:
+            path = Path(other.path)
+            other.close()
+            shutil.rmtree(path.parent, ignore_errors=True)
