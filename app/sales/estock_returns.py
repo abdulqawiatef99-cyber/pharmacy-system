@@ -105,14 +105,31 @@ def _quarantine_guard(con, sales_id: str) -> None:
     what was sold or already returned is not known, so no refund is made (Codex on #380). A quarantined row
     whose invoice id itself is unreadable could be any invoice: then no old invoice is refunded."""
     unknown, ids = False, set()
+    # only this pharmacy's lines count (Codex on #381), as _local_lines reads them: Sales_details when it was read,
+    # else this branch's rows of the Branches_ mirror; another branch's quarantined row says nothing about ours
+    local_details = _has(con, "Sales_details") and con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone()
+    branch = None
+    if _has(con, "co_inf"):
+        r = con.execute('SELECT * FROM "e_co_inf" LIMIT 1').fetchone()
+        if r is not None:
+            branch = _ident({k.lower(): r[k] for k in r.keys()}.get("branch_id")) or None
     for t in QUARANTINE_TABLES:
         if not con.execute("SELECT 1 FROM sqlite_master WHERE name=?", (f"q_{t}",)).fetchone():
             continue
+        if t == "Branches_sales_details" and local_details:
+            continue                                   # the local lines are Sales_details: the mirror is not used
         cols = {r[1].lower(): r[1] for r in con.execute(f'PRAGMA table_info("q_{t}")')}
         if "sales_id" not in cols:
             unknown = True
             continue
-        for (v,) in con.execute(f'SELECT "{cols["sales_id"]}" FROM "q_{t}"'):
+        mirror = t == "Branches_sales_details" and branch is not None and "branch_id" in cols
+        sel = f'"{cols["sales_id"]}"' + (f', "{cols["branch_id"]}"' if mirror else ", NULL")
+        for v, b in con.execute(f'SELECT {sel} FROM "q_{t}"'):
+            if mirror and _ident(b) != branch:
+                bd = _dec(b)
+                # a readable other branch is not ours; an impossible id (the importer's rule, #383 review) keeps the hold
+                if bd is not None and bd == bd.to_integral_value() and -1 <= bd <= 2 ** 53:
+                    continue
             d = _dec(v)
             if d is None or d != d.to_integral_value() or not (0 < d < 2 ** 53):
                 unknown = True
