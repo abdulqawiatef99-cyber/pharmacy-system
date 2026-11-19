@@ -249,6 +249,12 @@ def pay(db: Database, ctx: Context, uid: str, month: str, paid_from: str, expect
             if amount > 0 and not fin._can_approve(db, ctx, amount):
                 raise Forbidden(f"الراتب أكبر من حد المدير ({fin.manager_limit(db, ctx.org_id) / 100:,.0f} ج) — يحتاج إلى المالك",
                                 code="approval_required", details={"permission": "users.manage", "label": "صرف راتب كبير"})
+        # money that never passed through the pharmacy's accounts is the owner's decision (as for expenses): a
+        # manager's salary "from outside" would be marked paid with its expense still pending (#348 Codex)
+        from . import money
+        if paid_from == money.OUTSIDE and pr["net"] > 0 and not money.is_owner(ctx):
+            raise Forbidden("راتب من خارج حسابات البرنامج يصرفه المالك", code="approval_required",
+                            details={"permission": "users.manage", "label": "صرف راتب من خارج الحسابات"})
         _pay_tx(db, ctx, pr, name, cat["id"], month, uid, paid_from)
     return month_sheet(db, ctx, month)
 
