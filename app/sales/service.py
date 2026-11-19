@@ -820,7 +820,9 @@ class Sales:
 
     # ------------------------------------------------------------ payments
     def _check_payments(self, ctx: Context, payments) -> list[dict]:
-        if not isinstance(payments, list) or not payments or len(payments) > 6:
+        # an empty list is a sale worth nothing (100% discount, #324 M11): the total check below still refuses
+        # it for any sale that costs something
+        if not isinstance(payments, list) or len(payments) > 6:
             raise ValidationFailed("طريقة الدفع غير صحيحة")
         channels = {r["id"]: dict(r) for r in self.db.all(
             "SELECT * FROM payment_channels WHERE org_id=? AND is_active=1", (ctx.org_id,))}
@@ -964,8 +966,12 @@ class Sales:
             if d["status"] not in order or order.index(status) <= order.index(d["status"]):
                 raise Conflict("هذه الحالة سُجّلت من قبل", code="delivery_state")
             if status == "settled":
-                cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم مبلغ توصيل الفاتورة {d['sale_no']}",
-                            branch_id=d["branch_id"])
+                shift = cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم مبلغ توصيل الفاتورة {d['sale_no']}",
+                                    branch_id=d["branch_id"]) or cash.open_shift_id(self.db, ctx, d["branch_id"])
+                # completed while no shift was open: it belongs to the shift its cash came into (#324 M9)
+                if shift:
+                    self.db.execute("UPDATE sales SET shift_id=? WHERE id=? AND org_id=? AND shift_id IS NULL",
+                                    (shift, sid, ctx.org_id))
                 self.db.execute("UPDATE sale_deliveries SET status='settled', settled_at=?, settled_by=?,"
                                 " delivered_at=coalesce(delivered_at, ?) WHERE sale_id=?",
                                 (_now(), ctx.user_id, _now(), sid))

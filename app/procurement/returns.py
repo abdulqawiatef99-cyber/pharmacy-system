@@ -17,26 +17,56 @@ REASONS = {"expired": "منتهي الصلاحية", "near_expiry": "قارب ع
 MAX_LINES = 200
 
 
-def suggest_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
+def suggest_value(db: Database, ctx: Context, item_id: str, batch_id: str | None, supplier_id: str | None = None) -> int:
     """The value the return screen proposes. It is a purchase cost, so it is shown only to who may
     record a return and see its values (the same rights create() asks for a typed value)."""
     ctx.require("purchases.approve")
     if not (ctx.can("costs.read") or ctx.can("suppliers.pay")):
         ctx.require("suppliers.pay")
-    return _unit_value(db, ctx, item_id, batch_id)
+    return _unit_value(db, ctx, item_id, batch_id, supplier_id)
 
 
-def _unit_value(db: Database, ctx: Context, item_id: str, batch_id: str | None) -> int:
-    """Piasters per base unit: the net price paid for that batch on its purchase invoice,
-    else the item's average cost. No permission check: create() values a return with it for a
-    user who never sees the figure."""
-    if batch_id:
-        r = db.one("SELECT unit_cost FROM stock_movements WHERE org_id=? AND item_id=? AND batch_id=? AND movement_type IN"
-                   " ('purchase','opening') AND unit_cost IS NOT NULL ORDER BY created_at DESC LIMIT 1", (ctx.org_id, item_id, batch_id))
+def _half_up(v: Decimal) -> int:
+    return int(v.to_integral_value(ROUND_HALF_UP))
+
+
+def _unit_cost(db: Database, ctx: Context, item_id: str, batch_id: str | None, supplier_id: str | None) -> Decimal | None:
+    """Piasters per base unit, exact (not rounded): what THIS supplier was paid for the lot on its last standing
+    invoice. A lot can come from two suppliers at two prices, and the latest price of the lot from anyone
+    credited supplier A with supplier B's price (#324 S30). When this supplier never invoiced the lot (opening
+    stock, another supplier's lot, no supplier chosen yet): the lowest price paid for the lot, so the proposal
+    never credits more than someone was paid. Untracked stock without such an invoice: the average cost."""
+    if supplier_id:
+        r = db.one("SELECT m.unit_cost FROM stock_movements m JOIN purchase_invoices pi ON pi.id=m.ref_id AND pi.org_id=m.org_id"
+                   " WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.batch_id IS ? AND m.movement_type='purchase'"
+                   " AND m.ref_type='purchase_invoice' AND m.unit_cost IS NOT NULL AND pi.supplier_id=? AND pi.status='approved'"
+                   " ORDER BY m.rowid DESC LIMIT 1", (ctx.org_id, ctx.branch_id, item_id, batch_id, supplier_id))
         if r:
-            return int((Decimal(r["unit_cost"]) * 100).to_integral_value(ROUND_HALF_UP))
+            return Decimal(r["unit_cost"]) * 100
+    if batch_id:
+        paid = [Decimal(r["unit_cost"]) for r in db.all(
+            "SELECT m.unit_cost FROM stock_movements m LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice'"
+            " AND pi.id=m.ref_id AND pi.org_id=m.org_id WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.batch_id=?"
+            " AND m.movement_type IN ('purchase','opening') AND m.unit_cost IS NOT NULL"
+            " AND coalesce(pi.status,'approved')<>'cancelled'", (ctx.org_id, ctx.branch_id, item_id, batch_id))]
+        if paid:
+            return min(paid) * 100
     c = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
-    return int((c * 100).to_integral_value(ROUND_HALF_UP)) if c is not None else 0
+    return c * 100 if c is not None else None
+
+
+def _unit_value(db: Database, ctx: Context, item_id: str, batch_id: str | None, supplier_id: str | None = None) -> int:
+    """Whole piasters per base unit, for the screen. No permission check: create() values a return with it
+    for a user who never sees the figure."""
+    c = _unit_cost(db, ctx, item_id, batch_id, supplier_id)
+    return _half_up(c) if c is not None else 0
+
+
+def _pieces(qty: int, value: int) -> list[tuple[int, int]]:
+    """`qty` units worth `value` piasters together, as lines of whole piasters per unit that add up to it
+    exactly: three units worth 100 are two at 33 and one at 34 (never 3 x 33 = 99)."""
+    base, extra = divmod(value, qty)
+    return [(qty, base)] if not extra else [(qty - extra, base), (extra, base + 1)]
 
 
 def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note: str | None = None) -> dict:
@@ -52,22 +82,34 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
         qty, reason = ln.get("qty_base"), ln.get("reason")
         if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
             raise NotFound("صنف غير موجود")
-        if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND item_id=?", (batch_id, item_id)):
+        if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND org_id=? AND item_id=?",
+                                   (batch_id, ctx.org_id, item_id)):
             raise NotFound("التشغيلة لا تخص الصنف")
         if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:     # true is not 1 unit
             raise ValidationFailed("الكمية غير صحيحة")
         if reason not in REASONS:
             raise ValidationFailed("اختر سبب المرتجع لكل صنف")
         value = ln.get("unit_value")
-        if value is None:
-            value = _unit_value(db, ctx, item_id, batch_id)
-        elif not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
-            # a typed value credits the supplier's account with that amount: only who may see the values
-            ctx.require("suppliers.pay")
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValidationFailed("قيمة الوحدة غير صحيحة")
-        clean.append((item_id, batch_id, qty, value, reason))
-    total = sum(q * v for _, _, q, v, _ in clean)
+        if value is not None:
+            if not (ctx.can("costs.read") or ctx.allowed("suppliers.pay")):
+                # a typed value credits the supplier's account with that amount: only who may see the values
+                ctx.require("suppliers.pay")
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValidationFailed("قيمة الوحدة غير صحيحة")
+        cost = _unit_cost(db, ctx, item_id, batch_id, supplier_id)
+        # the proposal the screen was shown and sent back untouched. The screen may have asked before the
+        # supplier was chosen (it then got the lot's lowest price): both proposals mean "at the purchase
+        # price", and that price is this supplier's own. Keeping the blind figure credited supplier B with
+        # supplier A's lower price (Codex on #347)
+        proposed = {_unit_value(db, ctx, item_id, batch_id, supplier_id), _unit_value(db, ctx, item_id, batch_id)}
+        if value is None or (cost is not None and value in proposed):
+            # at the purchase price: the quantity is multiplied by the exact cost and rounded once. Rounding
+            # the unit first credited 99 piasters for a whole three-unit pack bought for 100 (#324 S31)
+            pieces = _pieces(qty, _half_up(cost * qty) if cost is not None else 0)
+        else:
+            pieces = [(qty, value)]
+        clean.append((item_id, batch_id, reason, pieces))
+    total = sum(q * v for _, _, _, pieces in clean for q, v in pieces)
     rid = new_id()
     with db.transaction():
         db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,'supplier_return',1)"
@@ -79,29 +121,18 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
         db.execute("INSERT INTO supplier_returns (id, org_id, branch_id, supplier_id, return_no, total, note, created_by)"
                    " VALUES (?,?,?,?,?,?,?,?)", (rid, ctx.org_id, ctx.branch_id, supplier_id, no, total,
                                                 (note or "").strip()[:200] or None, ctx.user_id))
-        for item_id, batch_id, qty, value, reason in clean:
-            lid = new_id()
-            db.execute("INSERT INTO supplier_return_lines (id, return_id, item_id, batch_id, qty_base, unit_value, reason)"
-                       " VALUES (?,?,?,?,?,?,?)", (lid, rid, item_id, batch_id, qty, value, reason))
-            if batch_id:
+        for item_id, batch_id, reason, pieces in clean:
+            for qty, value in pieces:
+                # no lot named = the stock kept without a lot, and only that: it used to take the
+                # earliest-expiring dated lot instead and leave the untracked row untouched (#324 S29)
+                if not batch_id and inv.batch_qty(db, ctx.org_id, ctx.branch_id, item_id, None) < qty:
+                    raise Conflict("الكمية أكبر من الرصيد المسجل بدون تشغيلة؛ اختر التشغيلة", code="insufficient_stock")
+                lid = new_id()
+                db.execute("INSERT INTO supplier_return_lines (id, return_id, item_id, batch_id, qty_base, unit_value, reason)"
+                           " VALUES (?,?,?,?,?,?,?)", (lid, rid, item_id, batch_id, qty, value, reason))
                 inv.post_movement(db, ctx, item_id=item_id, qty_delta=-qty, batch_id=batch_id, movement_type="supplier_return",
                                   unit_cost=avg_cost(db, ctx.org_id, ctx.branch_id, item_id), ref_type="supplier_return",
                                   ref_id=rid, ref_line_id=lid, note=f"مرتجع للمورد {sup['name']}", reason=reason)
-            else:
-                left = qty
-                for r in db.all("SELECT sb.batch_key, sb.qty FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
-                                " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty>0 ORDER BY b.expiry_date IS NULL,"
-                                " b.expiry_date", (ctx.org_id, ctx.branch_id, item_id)):
-                    n = min(left, r["qty"])
-                    inv.post_movement(db, ctx, item_id=item_id, qty_delta=-n, batch_id=r["batch_key"] or None,
-                                      movement_type="supplier_return", unit_cost=avg_cost(db, ctx.org_id, ctx.branch_id, item_id),
-                                      ref_type="supplier_return", ref_id=rid, ref_line_id=lid,
-                                      note=f"مرتجع للمورد {sup['name']}", reason=reason)
-                    left -= n
-                    if not left:
-                        break
-                if left:
-                    raise Conflict("الكمية أكبر من الرصيد", code="insufficient_stock")
         if total:
             db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
                        " VALUES (?,?,?,?,'return',?,?,?)", (new_id(), ctx.org_id, supplier_id, -total, rid,
@@ -126,7 +157,8 @@ def get(db: Database, ctx: Context, rid: str) -> dict:
     out = dict(r)
     out["lines"] = [dict(x) | {"reason_label": REASONS.get(x["reason"], x["reason"])} for x in db.all(
         "SELECT l.*, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, b.batch_no, b.expiry_date FROM supplier_return_lines l"
-        " JOIN items i ON i.id=l.item_id LEFT JOIN batches b ON b.id=l.batch_id WHERE l.return_id=? ORDER BY i.name_en", (rid,))]
+        " JOIN items i ON i.id=l.item_id LEFT JOIN batches b ON b.id=l.batch_id WHERE l.return_id=?"
+        " ORDER BY i.name_en, l.rowid", (rid,))]
     if not (ctx.can("suppliers.pay") or ctx.can("costs.read")):
         out.pop("total", None)
         for x in out["lines"]:

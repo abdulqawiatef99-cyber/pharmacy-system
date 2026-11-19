@@ -131,6 +131,8 @@ class Purchasing:
                                 file_id: str | None, supplier_id: str | None) -> str:
         if not ctx.branch_id:
             raise ValidationFailed("لا يوجد فرع محدد للمستخدم")
+        if supplier_id:      # a supplier id typed by the caller: this pharmacy's own, or nothing is created (#324 S5/X11)
+            self._own_supplier(ctx, supplier_id)
         # a supplier name read with low confidence is never linked by itself: the invoice's liability would go
         # to whoever it guessed; the person picks the supplier (supplier_missing blocks approval, #324 S24)
         guessed = (ex.header_confidence or {}).get("supplier_name")
@@ -181,6 +183,10 @@ class Purchasing:
                          after={"method": ex.method, "lines": len(ex.lines), "file_id": file_id,
                                 "warnings": ex.warnings})
         return inv_id
+
+    def _own_supplier(self, ctx: Context, supplier_id: str) -> None:
+        if not self.db.one("SELECT 1 FROM suppliers WHERE id=? AND org_id=?", (supplier_id, ctx.org_id)):
+            raise NotFound("المورد غير موجود")
 
     def _apply_match(self, ctx: Context, row: dict, supplier_id: str | None) -> None:
         r = matching.match_line(self.db, ctx.org_id, raw_name=row["raw_name"],
@@ -252,7 +258,7 @@ class Purchasing:
             l["field_confidence"] = json.loads(l["field_confidence"])
             if l["item_id"]:
                 it = self.db.one("SELECT name_en, name_ar, strength, dosage_form, pack_size,"
-                                 " public_price FROM items WHERE id=?", (l["item_id"],))
+                                 " public_price FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
                 l["item"] = dict(it) if it else None
             if with_candidates and l["match_status"] in ("suggested", "unmatched"):
                 cands = matching.fuzzy_candidates(self.db, ctx.org_id, l["raw_name"], 5)
@@ -264,7 +270,7 @@ class Purchasing:
         inv["acknowledged_issues"] = json.loads(inv["acknowledged_issues"])
         inv.pop("raw_extraction", None)
         if inv["supplier_id"]:
-            s = self.db.one("SELECT name FROM suppliers WHERE id=?", (inv["supplier_id"],))
+            s = self.db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (inv["supplier_id"], ctx.org_id))
             inv["supplier_name"] = s["name"] if s else None
         return {"invoice": inv, "lines": lines, "issues": [i.as_dict() for i in issues],
                 "can_approve": inv["status"] == "draft" and not validation.blocking(issues)}
@@ -343,11 +349,35 @@ class Purchasing:
                 except sqlite3.IntegrityError as e:
                     raise Conflict("توجد فاتورة بالرقم نفسه من المورد نفسه مسجلة من قبل",
                                    code="duplicate_invoice") from e
+                after = dict(clean)
+                if "supplier_id" in clean and (clean["supplier_id"] or None) != (inv["supplier_id"] or None):
+                    rematched = self._rematch(ctx, inv_id, clean["supplier_id"] or None)
+                    if rematched:
+                        after["rematched"] = rematched
                 self._refresh_totals(ctx, inv_id)
                 self._bump(inv_id)
                 audit.record(self.db, ctx, "purchase.header_edit", "purchase_invoice", inv_id,
-                             before={k: inv[k] for k in clean}, after=clean)
+                             before={k: inv[k] for k in clean}, after=after)
         return self.get(ctx, inv_id)
+
+    def _rematch(self, ctx: Context, inv_id: str, supplier_id: str | None) -> list[dict]:
+        """The supplier was corrected: a line matched through the old supplier's own codes or names is matched
+        again as if the invoice had been read under the right one (#324 S19: SKU9 is the 100 mg item at one
+        supplier and the 200 mg item at another). A line a person confirmed keeps its item."""
+        changed = []
+        for l in self.db.all("SELECT id, raw_name, raw_code, raw_barcode, item_id, match_method, match_status"
+                             " FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? AND match_status<>'confirmed'"
+                             " ORDER BY line_no", (inv_id, ctx.org_id)):
+            row = {"raw_name": l["raw_name"], "raw_code": l["raw_code"], "raw_barcode": l["raw_barcode"]}
+            self._apply_match(ctx, row, supplier_id)
+            if (row["item_id"], row["match_method"], row["match_status"]) == \
+                    (l["item_id"], l["match_method"], l["match_status"]):
+                continue
+            self.db.execute("UPDATE purchase_invoice_lines SET item_id=?, match_method=?, match_score=?, match_status=?"
+                            " WHERE id=? AND org_id=?", (row["item_id"], row["match_method"], row["match_score"],
+                                                         row["match_status"], l["id"], ctx.org_id))
+            changed.append({"line_id": l["id"], "from": l["item_id"], "to": row["item_id"]})
+        return changed
 
     def update_line(self, ctx: Context, inv_id: str, line_id: str, changes: dict,
                     version: int | None) -> dict:
@@ -529,6 +559,8 @@ class Purchasing:
         ctx.require("purchases.approve")
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
+            if inv["supplier_id"]:      # second line of defence: the liability never goes to another pharmacy's supplier
+                self._own_supplier(ctx, inv["supplier_id"])
             lines = [dict(r) for r in self.db.all(
                 "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
                 (inv_id, ctx.org_id))]
@@ -651,31 +683,93 @@ class Purchasing:
                 raise Conflict("عُدّلت الفاتورة، حدّث الصفحة", code="stale_version")
             if inv["status"] == "cancelled":
                 raise Conflict("الفاتورة ملغاة بالفعل")
+            reversed_units = returned_units = credited = 0
             if inv["status"] == "approved":
                 ctx.require("purchases.cancel")
-                moves = self.db.all("SELECT * FROM stock_movements WHERE ref_type='purchase_invoice'"
-                                    " AND ref_id=? AND movement_type='purchase'", (inv_id,))
+                moves = self.db.all("SELECT * FROM stock_movements WHERE org_id=? AND ref_type='purchase_invoice'"
+                                    " AND ref_id=? AND movement_type='purchase' ORDER BY rowid", (ctx.org_id, inv_id))
                 for m in moves:
+                    # read again per movement: an earlier line of this invoice may sit on the same lot
+                    receipts = self._lot_receipts(ctx, m["branch_id"], m["item_id"], m["batch_id"])
+                    me = next(p for p in receipts if p["id"] == m["id"])
+                    returned_units += sum(q for q, _ in me["took"])
+                    credited += sum(q * v for q, v in me["took"])
+                    if me["left"] <= 0:           # every unit of this line already went back to the supplier
+                        continue
+                    # what later deliveries of the same lot brought in is theirs: without this, cancelling took
+                    # another supplier's units, or passed although this invoice's own units were sold (#324 S28)
+                    theirs = sum(p["left"] for p in receipts if p["seq"] > me["seq"] and p["ref_id"] != inv_id)
+                    have = inventory.batch_qty(self.db, ctx.org_id, m["branch_id"], m["item_id"], m["batch_id"])
+                    if have - theirs < me["left"]:
+                        raise Conflict("الكمية غير متاحة في المخزون (ربما بيعت)", code="insufficient_stock",
+                                       details={"item_id": m["item_id"], "available": max(have - theirs, 0),
+                                                "requested": me["left"]})
                     inventory.post_movement(self.db, ctx, item_id=m["item_id"],
-                                            qty_delta=-m["qty_delta"],
+                                            qty_delta=-me["left"],
                                             movement_type="purchase_reversal",
                                             batch_id=m["batch_id"], unit_cost=Decimal(m["unit_cost"]),
                                             ref_type="purchase_invoice", ref_id=inv_id,
                                             ref_line_id=m["ref_line_id"], branch_id=m["branch_id"],
                                             note=reason)
+                    reversed_units += me["left"]
             else:
                 ctx.require("purchases.edit")
             self.db.execute("UPDATE purchase_invoices SET status='cancelled', cancelled_by=?,"
                             " cancelled_at=?, cancel_reason=?, version=version+1 WHERE id=?",
                             (ctx.user_id, accounts.iso(accounts.utcnow()), reason.strip(), inv_id))
             if inv["status"] == "approved" and inv["supplier_id"]:
-                posted = self.db.one("SELECT coalesce(sum(amount),0) a FROM supplier_ledger WHERE ref_id=? AND kind='purchase'",
-                                     (inv_id,))["a"]
-                if posted:
+                posted = self.db.one("SELECT coalesce(sum(amount),0) a FROM supplier_ledger WHERE org_id=? AND ref_id=?"
+                                     " AND kind='purchase'", (ctx.org_id, inv_id))["a"]
+                # the returns already credited for this invoice's units are not credited again: the invoice and
+                # its returns together come to zero, whatever value each return was agreed at
+                credit = posted - credited
+                if posted and credit:
                     self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                     " created_by) VALUES (?,?,?,?,'adjustment',?,?,?)",
-                                    (new_id(), ctx.org_id, inv["supplier_id"], -posted, inv_id,
+                                    (new_id(), ctx.org_id, inv["supplier_id"], -credit, inv_id,
                                      f"إلغاء فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
             audit.record(self.db, ctx, "purchase.cancel", "purchase_invoice", inv_id,
-                         before={"status": inv["status"]}, after={"reason": reason})
+                         before={"status": inv["status"]},
+                         after={"reason": reason, "reversed_units": reversed_units,
+                                "already_returned_units": returned_units, "already_credited": credited})
         return self.get(ctx, inv_id, with_candidates=False)
+
+    def _lot_receipts(self, ctx: Context, branch_id: str, item_id: str, batch_id: str | None) -> list[dict]:
+        """Every receipt of one lot in ledger order, with what is still its own: `left` = received, minus what
+        its cancellation reversed, minus what went back to its supplier; `took` = those returns as
+        (units, piasters credited per unit). A return to a supplier is taken from that supplier's receipts of
+        the lot, oldest first: a return slip names the supplier and the lot, not the invoice."""
+        receipts: list[dict] = []
+        by_line: dict[tuple, dict] = {}
+        for r in self.db.all(
+                "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
+                " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value"
+                " FROM stock_movements m"
+                " LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice' AND pi.id=m.ref_id AND pi.org_id=m.org_id"
+                " LEFT JOIN supplier_returns sr ON m.movement_type='supplier_return' AND sr.id=m.ref_id AND sr.org_id=m.org_id"
+                " LEFT JOIN supplier_return_lines sl ON m.movement_type='supplier_return' AND sl.id=m.ref_line_id"
+                " WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.batch_id IS ?"
+                " AND m.movement_type IN ('purchase','opening','purchase_reversal','supplier_return') ORDER BY m.rowid",
+                (ctx.org_id, branch_id, item_id, batch_id)):
+            if r["movement_type"] in ("purchase", "opening"):
+                if r["qty_delta"] > 0:
+                    p = {"seq": r["seq"], "id": r["id"], "ref_id": r["ref_id"] if r["ref_type"] == "purchase_invoice" else None,
+                         "supplier_id": r["bought_from"], "left": r["qty_delta"], "took": []}
+                    receipts.append(p)
+                    if p["ref_id"]:
+                        by_line[(r["ref_id"], r["ref_line_id"])] = p
+            elif r["movement_type"] == "purchase_reversal":
+                p = by_line.get((r["ref_id"], r["ref_line_id"]))
+                if p:
+                    p["left"] = max(p["left"] + r["qty_delta"], 0)
+            elif r["returned_to"]:
+                n = -r["qty_delta"]
+                for p in receipts:
+                    if n <= 0:
+                        break
+                    if p["supplier_id"] == r["returned_to"] and p["left"] > 0:
+                        t = min(n, p["left"])
+                        p["left"] -= t
+                        p["took"].append((t, r["unit_value"] or 0))
+                        n -= t
+        return receipts

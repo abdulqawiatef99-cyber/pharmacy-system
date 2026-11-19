@@ -409,6 +409,12 @@ async function route() {
   else if (ME.stock_alert !== undefined) { showStockAlert(ME.stock_alert); delete ME.stock_alert; }
   else refreshStockAlert();
   if (ME && !route.alertTimer) route.alertTimer = setInterval(refreshStockAlert, 60000);
+  // per signed-in person: after a logout and another login in the same tab, the new person's view is read now
+  if (!ME) { showBackupAlert(null); clearInterval(route.backupTimer); route.backupTimer = null; route.backupUser = null; }
+  else if (route.backupUser !== ME.user.id) {
+    route.backupUser = ME.user.id; clearInterval(route.backupTimer);
+    refreshBackupAlert(); route.backupTimer = setInterval(refreshBackupAlert, 300000);
+  }
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
@@ -418,6 +424,23 @@ async function route() {
     if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } setTimeout(tourAuto, 400); return; }
   }
   location.hash = "#/home";
+}
+// the last good automatic backup in the top bar; red under it when the last run failed or it is late (two intervals)
+async function refreshBackupAlert() {
+  if (!ME?.permissions?.includes("settings.manage") || document.hidden) { if (!ME) showBackupAlert(null); return; }
+  try { showBackupAlert(await api("/api/backup/health")); } catch { /* offline: keep what is shown */ }
+}
+function backupText(h) {
+  if (h.failed) return `✕ آخر نسخة احتياطية تلقائية فشلت${h.last_good_at ? ` — آخر نسخة سليمة: ${stamp(h.last_good_at)}` : ""}. افتح «البرنامج والنسخ الاحتياطي».`;
+  return `⚠ النسخة الاحتياطية التلقائية متأخرة — آخر نسخة سليمة: ${stamp(h.last_good_at)}. افتح «البرنامج والنسخ الاحتياطي».`;
+}
+function showBackupAlert(h) {
+  const bar = $("#backupAlert"), when = $("#backupWhen");
+  if (!bar || !when) return;
+  bar.hidden = !(h && h.warn);
+  when.hidden = !h || !("ok" in h);
+  if (h && "ok" in h) when.textContent = `آخر نسخة احتياطية: ${h.last_good_at ? stamp(h.last_good_at) : "لا توجد بعد"}`;
+  if (h && h.warn) bar.textContent = backupText(h);
 }
 // #202: red banner while the last stock integrity check found balances that do not match the stock ledger
 async function refreshStockAlert() {
@@ -4360,7 +4383,7 @@ async function viewHome() {
     ${h.sales ? `<div>مبيعات اليوم<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن اليوم نفسه من الأسبوع الماضي` : ""}</span></div>` : ""}
     <div>فواتيرك اليوم<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
     <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الشيفت مفتوح" : "⚠ الشيفت مغلق"}<b>${h.shift_open ? "شغّال" : "افتحه"}</b></div>
-    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(hhmm(h.backup.last_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
+    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.warn ? "t-err" : "t-ok"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.failed ? "✕ النسخة الاحتياطية فشلت" : h.backup.late ? "⚠ النسخة الاحتياطية متأخرة" : "✓ آخر نسخة احتياطية"}<b>${h.backup.last_good_at ? esc(stamp(h.backup.last_good_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : h.backup.warn ? `<a href="#/system">افتح «البرنامج والنسخ الاحتياطي»</a>` : ""}</span></div>` : ""}
   </div>
   <section class="panel mt"><h2>يحتاج إلى انتباهك</h2>
     <ul class="notes">${h.alerts.map((a) => `<li><span class="badge ${lvl[a.level][0]}">${lvl[a.level][1]}</span><div>${esc(a.text)} ${a.link ? `<a href="${a.link}">افتح</a>` : ""}</div></li>`).join("")
