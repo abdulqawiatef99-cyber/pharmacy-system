@@ -3797,14 +3797,18 @@ async function viewSupplier(id) {
 
 // ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
 // supplier-return proposals: each answer is for the supplier (and the line's batch) asked about; one that comes back
-// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368)
+// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368).
+// A proposal is only shown: the return sends a value only when the person typed it, and the server prices the
+// others at this supplier's own purchase price. A failed ask clears the old figure instead of keeping it.
 const SR = { gen: 0, busy: false };
 async function srPropose(l, supplier) {
+  if (l.typed) return;                                       // a typed value is the person's, never replaced
   const gen = SR.gen, ask = (l.ask = (l.ask || 0) + 1);
+  let v = null;
   try {
-    const v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
-    if (gen === SR.gen && ask === l.ask) l.unit_value = v;
-  } catch { /* keep the value shown */ }
+    v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
+  } catch { /* unknown here: the server prices it */ }
+  if (gen === SR.gen && ask === l.ask) l.unit_value = v;
 }
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
@@ -3827,14 +3831,18 @@ async function viewSupplierReturns(arg) {
       <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "بدون تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
       <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
       <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
-      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
+      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${l.unit_value == null ? "" : money(l.unit_value)}" placeholder="بسعر الشراء"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
     const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
-    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sv].unit_value = toPiasters(x.value) || 0; draw(); }));
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") { l.typed = false; val(l); return; }     // emptied: back to the purchase price
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true; draw();
+    }));
     document.querySelectorAll("[data-sx]").forEach((x) => x.addEventListener("click", () => { lines.splice(+x.dataset.sx, 1); draw(); }));
   };
   const addItem = async (itemId) => {
@@ -3870,7 +3878,7 @@ async function viewSupplierReturns(arg) {
       const w = window.open("", "_blank");
       try {
         const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: $("#srSup").value, note: $("#srNote").value || null,
-          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ ? { unit_value: l.unit_value } : {}) })) } });
+          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ && l.typed ? { unit_value: l.unit_value } : {}) })) } });
         toast(`✓ مرتجع رقم ${r.return_no} تم التسجيل`);
         if (w) w.location = `/supplier-return/${r.id}`;
         location.hash = "#/supplier-returns";
