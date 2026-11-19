@@ -110,3 +110,35 @@ class TestCodexReview380(Base):
         with closing(sqlite3.connect(path)) as con:
             self.assertEqual(con.execute('SELECT count(*) FROM "e_Sales_details"').fetchone()[0], 1)
             self.assertEqual(con.execute("SELECT value FROM meta WHERE key='format'").fetchone()[0], "2")
+
+
+class TestCodexReview380b(Base):
+    """Codex on #380 @45096b1 (each failed before the fix)."""
+
+    def test_p2_a_purchase_whose_lines_were_quarantined_is_not_a_parked_draft(self):
+        t = base_tables()
+        t["Purchase_details"][0]["update_date"] = "0247-05-12T00:00:00"
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual(res["plan"].parked, [])
+        self.assertFalse(self.db.one("SELECT 1 FROM purchase_invoices"))
+
+    def test_p2_the_old_archive_survives_a_failed_rebuild(self):
+        import os
+        from unittest import mock
+        from app.dataimport import estock_archive
+        folder = self.export(tables())
+        path = self.tmp / "old.sqlite"
+        estock_archive.build(estock_db.Export(folder), path, {}, org_id=self.ctx.org_id)
+        os.chmod(path, 0o644)
+        with closing(sqlite3.connect(path)) as con, con:
+            con.execute("UPDATE meta SET value='1' WHERE key='format'")
+        before = path.read_bytes()
+        real = sqlite3.connect
+        with mock.patch.object(estock_archive.sqlite3, "connect",
+                               side_effect=lambda p, *a, **k: (_ for _ in ()).throw(OSError("disk"))
+                               if str(p).endswith(".part") else real(p, *a, **k)):
+            with self.assertRaises(OSError):
+                estock_archive.build(estock_db.Export(folder), path, {}, org_id=self.ctx.org_id)
+        self.assertTrue(path.exists())
+        self.assertEqual(path.read_bytes(), before)

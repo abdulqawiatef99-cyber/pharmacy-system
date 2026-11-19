@@ -299,6 +299,25 @@ class Export:
             self._quarantine[key] = out
         return self._quarantine[key]
 
+    def quarantined_ids(self, name: str, col: str) -> tuple[set[str], bool]:
+        """The ids in `col` of a table's quarantined rows, and whether any of them is unreadable."""
+        q = self.quarantined(name)
+        if not q:
+            return set(), False
+        head, data = self.raw(name)
+        low = [h.strip().lower() for h in head]
+        if col not in low:
+            return set(), True
+        i = low.index(col)
+        ids, unknown = set(), False
+        for n in q:
+            v = data[n][i] if i < len(data[n]) else ""
+            if implausible(col, v) or not v.strip():
+                unknown = True
+            else:
+                ids.add(ident(v))
+        return ids, unknown
+
     def rows(self, name: str) -> list[dict]:
         """Rows as dicts with lower-case column names (E-Stock mixes PV_id / pv_id); a history row with
         impossible values is left out (it stays in the archive's quarantine table)."""
@@ -1162,8 +1181,14 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
                     kind="review")
     # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
+    # a quarantined line still says the invoice had lines (Codex on #380): never a new draft from unknown contents;
+    # a quarantined line whose invoice id is unreadable could be any invoice: then no draft at all
+    q_ids, q_unknown = ex.quarantined_ids("Purchase_details", "purchase_id")
+    with_lines |= q_ids
     sup_ids = {d["estock_id"] for d in p.suppliers}
     for r in ex.rows("Purchase_header"):
+        if q_unknown:
+            break
         if ident(r.get("purchase_id")) not in with_lines:
             v = dec(r.get("total_bill")) or 0
             day = iso_day(r.get("bill_date")) or iso_day(r.get("insert_date"))

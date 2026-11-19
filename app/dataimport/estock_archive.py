@@ -80,12 +80,18 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
             if r and r[0] == FORMAT:
                 return {r[0]: r[1] for r in con.execute("SELECT name, rows FROM tables")}
         # the same export, archived by an older version without the quarantine (Codex on #380): rebuilt from
-        # the export (it holds nothing else), never reused with impossible rows in its e_ tables
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        path.unlink()
+        # the export (it holds nothing else), never reused with impossible rows in its e_ tables. The old file
+        # stays until the new one is built and checked; os.replace below swaps them in one step
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)       # Windows: os.replace cannot overwrite a read-only file
+    old_kept = path.exists()
     tmp = path.with_name(path.name + ".part")
     tmp.unlink(missing_ok=True)
-    con = sqlite3.connect(tmp)
+    try:
+        con = sqlite3.connect(tmp)
+    except Exception:
+        if old_kept:
+            os.chmod(path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)    # the old archive, as it was
+        raise
     counts: dict[str, int] = {}
     try:
         con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -144,6 +150,12 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
         con.commit()
         if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("archive integrity check failed")
+    except Exception:
+        con.close()
+        tmp.unlink(missing_ok=True)
+        if old_kept:
+            os.chmod(path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)    # the old archive stays, as it was
+        raise
     finally:
         con.close()
     if not keep:
