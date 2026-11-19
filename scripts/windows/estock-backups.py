@@ -77,9 +77,10 @@ def desktops(env=None) -> list[str]:
     """The Desktop folders a backup may have been saved to: the user's (it may be redirected, e.g. into
     OneDrive) and the shared one. A folder on the network is returned as it is (the scan reports it as not
     searched); of the local ones, only those that exist."""
-    env = os.environ if env is None else env
+    real = env is None                    # a made-up environment (tests) must not pick up this PC's own Desktop
+    env = os.environ if real else env
     found = []
-    if os.name == "nt":
+    if real and os.name == "nt":
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
