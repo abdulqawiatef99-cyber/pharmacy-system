@@ -273,3 +273,33 @@ class TestArchiveBoundToItsPharmacy(ImportBase):
         qty = [r["qty"] for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
                if r["source"] == "estock" and r["item_code"] == "100"]
         self.assertNotIn("99", qty)
+
+
+class TestClaimLocalDay(_TicketBase):
+    """Codex on #340 @a5985e2: a program sale's claim day is its local (Cairo) day, not its UTC day."""
+
+    def setUp(self):
+        import os
+        import time
+        self._tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Africa/Cairo"
+        time.tzset()
+        super().setUp()
+
+    def tearDown(self):
+        import os
+        import time
+        super().tearDown()
+        if self._tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._tz
+        time.tzset()
+
+    def test_p2_a_sale_just_after_midnight_is_dated_its_local_day(self):
+        sid = self.sale(self.cust)
+        self.complete(sid)
+        with self.db.transaction():                     # 00:30 on 16 July 2026 in Cairo (UTC+3)
+            self.db.execute("UPDATE sales SET completed_at='2026-07-15T21:30:00.000000Z' WHERE id=?", (sid,))
+        lines = k.claim(self.db, self.ctx, self.kid, "2026-07-16", "2026-07-16")["lines"]
+        self.assertEqual([r["day"] for r in lines if r["source"] == "program"], ["2026-07-16"])

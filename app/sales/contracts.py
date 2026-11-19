@@ -224,7 +224,7 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
     E-Stock line values come from its archive: sale = total_sell (else amount x sell_price - disc_money)
     minus back_amount x back_price; cost = (amount - back_amount) x buy_price. To be checked once against
     E-Stock's own «مبيعات أصناف عميل» report in the rehearsal before a real claim."""
-    from .service import local_day_bounds, outstanding_value, returns_history
+    from .service import _local_date, local_day_bounds, outstanding_value, returns_history
     ctx.require("sales.totals")
     show_cost = ctx.can("costs.read")
     k = db.one("SELECT * FROM contracts WHERE id=? AND org_id=?", (contract_id, ctx.org_id))
@@ -256,7 +256,8 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
         cost = sum((Decimal(a["unit_cost"]) * kept[a["id"]] for a in allocs if a["unit_cost"] is not None), Decimal(0))
         sale = Decimal(outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
                                          history.get(l["sale_id"], []))) / 100
-        row = {"source": "program", "day": (s["completed_at"] or "")[:10], "invoice": str(s["sale_no"]),
+        # the local day, as the period filter counts it (completed_at is UTC)
+        row = {"source": "program", "day": _local_date(s["completed_at"]).isoformat(), "invoice": str(s["sale_no"]),
                "customer_id": s["customer_id"], "customer": s["customer"], "ticket_name": s["ticket_name"], "ticket_ref": s["ticket_ref"],
                "ticket_no": s["ticket_no"], "store": "الصيدلية", "item_code": l["code"], "item": l["name"],
                "qty": str(sum(kept.values())), "qty_unit": "base", "sale": _egp(sale), "_sale": sale}
