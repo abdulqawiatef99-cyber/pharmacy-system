@@ -1,6 +1,7 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"⚠ أول 3000 فاتورة فقط من الفترة": "⚠ Only the first 3000 invoices of the period",
 "بسعر الشراء": "At the purchase price",
 "المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع": "The amount the customer paid is less than the cash due. Correct the amount or split the payment",
 "⚠ رقم واحد مسجل لأكثر من عميل": "⚠ One number saved for more than one customer",

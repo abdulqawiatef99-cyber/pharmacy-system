@@ -249,6 +249,9 @@ async function askApproval(details, message, method, path) {
 }
 
 const API = { busy: 0, last: 0 };
+// set by wireRange() while a period change starts its reads: a GET answered after a newer choice is dropped (#324 R25)
+let RANGE_CALL = null;
+const RANGE_SEQ = {};
 const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
 // Money forms: the same POST (path + body) sent again within 4 seconds is a double click or a double
 // Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
@@ -273,7 +276,7 @@ function onceKey(method, apiPath, bodyText) {
 }
 onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
-  const apiPath = path.split("?")[0];
+  const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
   let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -301,6 +304,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       }
     }
     data = await r.json().catch(() => ({}));
+    if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
     // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
     if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
@@ -1408,7 +1412,11 @@ async function printLabels(list) {
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
-  catch (er) { toast(er.message, true); if (er.code === "print_failed") page(); }
+  catch (er) {
+    // the owner switched labels to the browser after this tab read the setting: print there, read it again next time (#324 R16)
+    if (er.code === "labels_in_browser") { LABEL_CFG = null; return page(); }
+    toast(er.message, true); if (er.code === "print_failed") page();
+  }
 }
 
 async function viewItems() {
@@ -2527,6 +2535,8 @@ async function viewSalesAdvanced() {
     draw();
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
+  // a file or a printout of a capped list says so, as the screen does (#324 R22)
+  const subOut = () => sub() + (R.truncated ? " — ⚠ أول 3000 فاتورة فقط من الفترة" : "");
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -2564,7 +2574,7 @@ async function viewSalesAdvanced() {
     }));
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
-    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", sub(), sheets()));
+    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -2612,7 +2622,7 @@ async function viewSalesAdvanced() {
       if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); }
       box.append(copy);
     }
-    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", sub());
+    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", subOut());
   };
   document.querySelectorAll("[data-ip]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.ip];
@@ -3827,12 +3837,15 @@ async function viewSupplierReturns(arg) {
   const lines = [];
   const draw = () => {
     if (!$("#srLines")) return;
+    // a redraw while a value field is focused (an answer arriving) puts the focus back, so typing goes on there
+    const focused = document.activeElement?.dataset?.sv;
     $("#srLines").innerHTML = lines.map((l, i) => `<tr><td>${itemHtml(l.item)}</td>
       <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "بدون تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
       <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
       <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
       ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${l.unit_value == null ? "" : money(l.unit_value)}" placeholder="بسعر الشراء"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
+    if (focused != null) { const x = $(`#srLines [data-sv="${focused}"]`); if (x) x.focus(); }
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
     const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
@@ -4359,12 +4372,21 @@ async function viewHome() {
 // ------------------------------------------------------------------ reports
 // ------------------------------------------------------------------ periods, Excel export, print preview
 const isoDay = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+// the pharmacy's calendar day (Cairo), whatever the device clock's zone; days are counted on the calendar, never as
+// 24 hours, so the night the clocks go back has a yesterday (#324 R24). Noon local keeps isoDay() on that date.
+function cairoDay() {
+  try {
+    const [y, m, d] = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(new Date()).split("-").map(Number);
+    return [y, m - 1, d];
+  } catch { const n = new Date(); return [n.getFullYear(), n.getMonth(), n.getDate()]; }
+}
 function periodPresets() {
-  const now = new Date(), y = now.getFullYear(), m = now.getMonth(), day = 86400000;
+  const [y, m, d] = cairoDay(), at = (yy, mm, dd) => new Date(yy, mm, dd, 12), now = at(y, m, d);
   return {
-    today: ["اليوم", now, now], yesterday: ["أمس", new Date(now - day), new Date(now - day)],
-    week: ["آخر 7 أيام", new Date(now - 6 * day), now], month: ["هذا الشهر", new Date(y, m, 1), now],
-    last: ["الشهر الماضي", new Date(y, m - 1, 1), new Date(y, m, 0)], year: ["هذه السنة", new Date(y, 0, 1), now],
+    today: ["اليوم", now, now], yesterday: ["أمس", at(y, m, d - 1), at(y, m, d - 1)],
+    week: ["آخر 7 أيام", at(y, m, d - 6), now], month: ["هذا الشهر", at(y, m, 1), now],
+    last: ["الشهر الماضي", at(y, m - 1, 1), at(y, m, 0)], year: ["هذه السنة", at(y, 0, 1), now],
   };
 }
 // a "from — to" bar with quick choices; onChange(from, to) runs on every change
@@ -4376,7 +4398,13 @@ function rangeBar(id, preset = "month") {
 }
 function wireRange(id, onChange) {
   const box = $(`#${id}`), f = box.querySelector("[data-rf]"), t = box.querySelector("[data-rt]");
-  const go = () => { if (f.value && t.value) onChange(f.value, t.value); };
+  // each choice is numbered; the reads it starts carry the number, and an answer for an older choice is dropped (#324 R25)
+  const go = () => {
+    if (!(f.value && t.value)) return;
+    const seq = (RANGE_SEQ[id] = (RANGE_SEQ[id] || 0) + 1);
+    RANGE_CALL = { id, seq };
+    try { onChange(f.value, t.value); } finally { RANGE_CALL = null; }
+  };
   box.querySelectorAll("[data-rp]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.rp];
     box.querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", x === b));
