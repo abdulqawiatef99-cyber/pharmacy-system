@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..db import Database
-from . import audit, backup, notify
+from . import audit, backup, notify, responsive
 from .errors import ValidationFailed
 from .numbers import whole_number
 from .permissions import Context
@@ -228,6 +228,18 @@ class AutoBackup:
         need = size + (last if isinstance(last, int) and last > 0 else 0)
         return free, free < max(MIN_FREE_BYTES, 2 * need)
 
+    def _measure_disk(self, st: dict) -> None:
+        """Free space into the state; when low, one warning a day (with its audit row)."""
+        st["free_bytes"], st["low_disk"] = self._disk(st)
+        if st["low_disk"]:
+            mb = st["free_bytes"] // (1024 * 1024)
+            self._notify_once(st, "disk_notified", "warning", "مساحة القرص قليلة للنسخ الاحتياطي",
+                              f"المساحة الفاضية على قرص النسخ {mb:,} ميجا فقط. فضّي مساحة أو غيّر مكان النسخ قبل ما"
+                              " النسخ يفشل.", hours=24, audit_action="backup.low_disk",
+                              audit_after={"free_bytes": st["free_bytes"], "folder": str(self.backup_dir)})
+        else:
+            st["disk_notified"] = None
+
     def run(self, reason: str = "schedule", *, force: bool = False) -> dict:
         with self.lock:
             self.run_started = time.monotonic()       # the watchdog reports a run that never ends
@@ -248,6 +260,10 @@ class AutoBackup:
         self._own = {"a": 0, "n": 0}
         if not force and st.get("last_ok") and st.get("fingerprint") == fp:
             st["last_check_at"] = datetime.now().isoformat(timespec="seconds")
+            # the disk is measured here too: the warning must clear when space is freed, and appear when it
+            # runs low, without waiting for the next change to the data (Codex P2 on #350)
+            self._measure_disk(st)
+            st["fingerprint"] = self._after_own_writes(fp)
             self._offsite_catch_up(self.settings(), st)
             self._write(self.state_path, st)
             # #202: a change made outside the program (a hand edit, a damaged file) does not change the
@@ -256,15 +272,7 @@ class AutoBackup:
             return {"skipped": "no_changes", **st}, False
         started = time.monotonic()
         failed_before = st.get("last_ok") is False
-        st["free_bytes"], st["low_disk"] = self._disk(st)
-        if st["low_disk"]:
-            mb = st["free_bytes"] // (1024 * 1024)
-            self._notify_once(st, "disk_notified", "warning", "مساحة القرص قليلة للنسخ الاحتياطي",
-                              f"المساحة الفاضية على قرص النسخ {mb:,} ميجا فقط. فضّي مساحة أو غيّر مكان النسخ قبل ما"
-                              " النسخ يفشل.", hours=24, audit_action="backup.low_disk",
-                              audit_after={"free_bytes": st["free_bytes"], "folder": str(self.backup_dir)})
-        else:
-            st["disk_notified"] = None
+        self._measure_disk(st)
         try:
             out = backup.create(self.db, self.upload_dir, self.backup_dir, tag="auto")
             hard, soft = backup.split_problems(backup.quick_check(out))
@@ -603,6 +611,7 @@ class AutoBackup:
         self.stop_event.clear()
         self.watch_stop.clear()
         self.started_at = datetime.now()
+        responsive.apply()          # the backup's own checks must not make a cashier's request wait
         with self.watch_lock:
             self.restarts = 0
             self._spawn_scheduler()

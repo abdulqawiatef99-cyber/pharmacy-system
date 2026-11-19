@@ -286,6 +286,27 @@ class TestDiskSpace(_Case):
         self.assertEqual((st["low_disk"], st["free_bytes"]), (False, 50 * 1024 ** 3))
         self.assertTrue(self.ab.health()["ok"])
 
+    def test_the_warning_clears_when_space_is_freed_even_if_nothing_changed(self):
+        """Codex P2 on #350: the "nothing changed" path returned before the disk was measured, so the badge
+        stayed on after the owner freed space, until the next sale."""
+        with mock.patch.object(autobackup.shutil, "disk_usage", return_value=Usage(10 ** 12, 10 ** 12, 200 * 1024 ** 2)):
+            self.assertTrue(self.ab.run()["low_disk"])
+        with mock.patch.object(autobackup.shutil, "disk_usage", return_value=Usage(10 ** 12, 0, 50 * 1024 ** 3)):
+            st = self.ab.run()
+        self.assertEqual(st.get("skipped"), "no_changes")
+        self.assertEqual((st["low_disk"], st["free_bytes"]), (False, 50 * 1024 ** 3))
+        self.assertTrue(self.ab.health()["ok"])
+
+    def test_space_running_low_between_backups_is_noticed_without_forcing_a_backup(self):
+        self.ab.run()
+        with mock.patch.object(autobackup.shutil, "disk_usage", return_value=Usage(10 ** 12, 10 ** 12, 200 * 1024 ** 2)):
+            first = self.ab.run()
+            again = self.ab.run()
+        self.assertEqual((first.get("skipped"), again.get("skipped")), ("no_changes", "no_changes"))
+        self.assertTrue(again["low_disk"])
+        self.assertEqual(len(self.notes(DISK_TITLE)), 1)
+        self.assertEqual(len(self.audits("backup.low_disk")), 1)
+
     def test_space_is_measured_against_the_data_size(self):
         """Plenty for a small pharmacy is not enough for a large database: twice (database + last backup)."""
         self.set_state(last_bytes=3 * 1024 ** 3)
