@@ -424,9 +424,38 @@ class Plan:
         return [d for d in self.dq if d["severity"] == "block"]
 
 
+CLASS_MEANINGS = {"cash": "كاش", "credit": "آجل", "consignment": "تحت التصريف"}
+CLASS_WORDS = {"cash": "cash", "كاش": "cash", "نقدي": "cash", "credit": "credit", "آجل": "credit", "اجل": "credit",
+               "consignment": "consignment", "تحت التصريف": "consignment"}
+# what the program does with each answer (manager 20/11 00:25: plain words, before the owner chooses)
+CLASS_EFFECT = {
+    "cash": "كاش = اتدفعت وقتها: الفواتير تاريخ في الأرشيف بس، ومفيش رصيد مورد ولا مخزون بيتغيّر.",
+    "credit": "آجل = على حساب المورد: رصيد المورد اللي بيتنقل هو رصيده في إي ستوك (فيه الفواتير دي)، والفواتير تاريخ في الأرشيف.",
+    "consignment": ("تحت التصريف = بضاعة المورد عندك لحد ما تتباع: البرنامج لسه مابيفرّقهاش عن بضاعتك، فرصيدها بيتنقل في"
+                    " مخزونك زي إي ستوك ورصيد المورد زي إي ستوك؛ واتعلّمت كده في التقرير."),
+}
+
+
+def read_classes(path: Path | None) -> dict[str, str]:
+    """The owner's answers for Purchase_header.class, in the same decision file as the packs:
+    packs.json = {"packs": {"<code>": n}, "classes": {"1": "كاش", "2": "آجل", "3": "تحت التصريف"}}."""
+    if not path or Path(path).suffix.lower() != ".json":
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out = {}
+    for k, v in (raw.get("classes") or {}).items() if isinstance(raw, dict) else ():
+        meaning = CLASS_WORDS.get(str(v or "").strip().lower()) or CLASS_WORDS.get(str(v or "").strip())
+        if not meaning:
+            raise ValidationFailed(f"معنى غير معروف لنوع فواتير الشراء {k}: {v} (كاش أو آجل أو تحت التصريف)")
+        out[str(k).strip()] = meaning
+    return out
+
+
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
-               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True) -> Plan:
+               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True,
+               classes: dict[str, str] | None = None) -> Plan:
     p = Plan(confirm_rows=(confirm or {}).get("rows", {}), rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
+                    "classes": dict(classes or {}),
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
@@ -1203,7 +1232,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if missing:
             p.issue(master, ", ".join(sorted(missing, key=lambda x: dec(x) or 0)), "", key,
                     f"{len(missing)} رقم، {sum(missing.values())} سطر",
-                    f"OWNER: التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
+                    f"التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
                     kind="review")
     # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
@@ -1265,7 +1294,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if abs(v) >= 10000:
             rev = by_value.get(-v)
             p.issue("sales lines", sid, pid, "line value", egp(v),
-                    "OWNER: سطر بيع كبير" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
+                    "سطر بيع كبير (تاريخ في الأرشيف بس)" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
                     kind="review")
     # purchases paid cash / on account / on consignment (تحت التصريف): how Purchase_header.class splits them.
     # Which value is consignment is E-Stock's code: every value is listed with its invoices and value, and
@@ -1281,10 +1310,18 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         x[3].add(ident(r.get("vendor_id")))
     p.checks["purchase_classes"] = {c: {"invoices": n, "total_bill": egp(t), "after_returns": egp(a), "vendors": len(v)}
                                     for c, (n, t, a, v) in sorted(classes.items())}
+    answered = p.rules.get("classes") or {}
     for c, (n, t, a, v) in sorted(classes.items()):
-        p.issue("Purchase_header", "", "", "class", c,
-                f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
-                " التصريف؟ بضاعة تحت التصريف مابتتحسبش ملكنا ولا دين عادي من غير قرار", value_egp=a, kind="review")
+        meaning = answered.get(c)
+        if meaning:
+            p.checks["purchase_classes"][c]["meaning"] = meaning
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"{n} فاتورة شراء بقيمة {egp(t)} من {len(v)} مورد: المالك قال «{CLASS_MEANINGS[meaning]}» ← "
+                    + CLASS_EFFECT[meaning], value_egp=a, kind="fixed")
+        else:
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
+                    " التصريف؟", value_egp=a, kind="review")
     # master rows whose name has no letter (units "6", "15", "16"; the money place "0000"): kept as they are
     for table, idc, cols in (("Product_units", "unit_id", ("unit_name_ar", "unit_name_en")),
                              ("Product_groups", "group_id", ("group_name_ar", "group_name_en")),
@@ -2141,9 +2178,10 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     from .estock_job import read_packs
     ex = Export(export_dir, database)
     packs = read_packs(Path(packs_file)) if packs_file else {}
+    classes = read_classes(Path(packs_file)) if packs_file else {}
     confirm = read_confirm(Path(confirm_file)) if confirm_file else {}
     plan = build_plan(ex, packs=packs, stock_source=stock_source, stores=stores, confirm=confirm,
-                      round_piastres=round_piastres)
+                      round_piastres=round_piastres, classes=classes)
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")

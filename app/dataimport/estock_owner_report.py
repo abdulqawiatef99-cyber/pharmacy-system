@@ -32,7 +32,7 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
     (r"table not read", "جدول ماتقراش من إي ستوك",
      "شغّل estock-db-import.bat تاني (بيعيد قراية الجدول ده لوحده). لو فضل، اقفل إي ستوك واعمل القراية من الأول"),
     (r"--packs", "عدد الوحدات في العلبة مش واضح في إي ستوك",
-     "قول كام وحدة في العلبة للصنف ده (بيتكتب في ملف القرار packs.json)"),
+     "قول كام وحدة في العلبة للصنف ده؛ بيتكتب في launch-night\\packs.json كده: {\"packs\": {\"<الكود>\": <عدد الوحدات>}}"),
     (r"stock_source", "مش واضح أنهي جدول رصيد هو الشغال",
      "قارن إجمالي المخزون بتقرير إي ستوك وقول أنهي جدول هو الصح"),
     (r"مش موجود في جدول الأصناف", "رصيد على صنف ممسوح من إي ستوك",
@@ -49,7 +49,13 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
      "ما اتعملتش مسودة؛ مكتوبة هنا وفي الأرشيف بس"),
     (r"سطر بيع كبير", "سطر بيع بقيمة كبيرة", "اتأكد إن الرقم ده صح في إي ستوك (غالبًا غلطة إدخال)",
      "السطر محفوظ في الأرشيف زي ما هو (تاريخ بس، مابيأثرش على المخزون ولا الأرصدة)"),
-    (r"^class$", "نوع فواتير شراء (class)", "قول الرقم ده معناه إيه: كاش ولا آجل ولا تحت التصريف",
+    (r"^class$", "نوع فواتير شراء (class)",
+     ("قول الرقم ده معناه إيه، في نفس ملف القرار launch-night\\packs.json:"
+     " {\"classes\": {\"<الرقم>\": \"كاش\" أو \"آجل\" أو \"تحت التصريف\"}} — "
+     "كاش = اتدفعت وقتها: الفواتير تاريخ في الأرشيف بس ومفيش رصيد ولا مخزون بيتغيّر؛ "
+     "آجل = على حساب المورد: رصيد المورد اللي بيتنقل هو رصيده في إي ستوك (فيه الفواتير دي)؛ "
+     "تحت التصريف = بضاعة المورد عندك لحد ما تتباع: البرنامج لسه مابيفرّقهاش عن بضاعتك، فرصيدها بيتنقل في مخزونك"
+     " ورصيد المورد زي إي ستوك، واتعلّمت كده في التقرير"),
      "الفواتير محفوظة في الأرشيف زي ما هي؛ ولا واحدة اتحسبت بضاعة تحت التصريف ولا دين جديد"),
     (r"مالوش حساب في البرنامج", "خزنة من غير حساب في البرنامج وعليها رصيد", "قول الرصيد ده يروح أنهي حساب",
      "ما اتعملهاش حساب (قرارك)؛ رصيدها مكتوب هنا وتاريخها في الأرشيف"),
@@ -89,8 +95,39 @@ def _ask(d: dict) -> tuple[str, str, str | None]:
     return _plain(d.get("action", "")).split(":")[0], "راجع السطر ده وقول القرار", None
 
 
-def _who(d: dict) -> str:
+def _names(plan) -> dict:
+    """E-Stock's names as the owner sees them: items by product id and by code, parties by kind and id."""
+    items, codes, parties = {}, {}, {}
+    for it in getattr(plan, "items", []):
+        en, ar = it.get("name_en") or "", it.get("name_ar") or ""
+        nm = f"«{en}» / «{ar}»" if en and ar and en != ar else (f"«{en or ar}»" if en or ar else "")
+        items[str(it.get("product_id"))] = (it.get("code") or "", nm)
+        if it.get("code"):
+            codes[str(it["code"])] = (it["code"], nm)
+    for d in list(getattr(plan, "suppliers", [])) + list(getattr(plan, "customers", [])):
+        parties[(d.get("kind"), str(d.get("estock_id")))] = (d.get("code") or "", f"«{d['name']}»" if d.get("name") else "")
+    return {"items": items, "codes": codes, "parties": parties}
+
+
+ITEM_TABLES = {"Products", "Product_Amount", "Branches_Product_Amount", "stock"}
+
+
+def _who(d: dict, names: dict | None = None) -> str:
     kind = TABLE_AR.get(d.get("table", ""), d.get("table", ""))
+    names = names or {}
+    t, eid, code = d.get("table", ""), str(d.get("estock_id") or ""), str(d.get("code") or "")
+    hit = None
+    if t == "Products":
+        hit = names.get("items", {}).get(eid) or names.get("codes", {}).get(code)
+    elif t in ITEM_TABLES:
+        hit = names.get("codes", {}).get(code) or names.get("items", {}).get(code)
+    elif t == "Customer":
+        hit = names.get("parties", {}).get(("customer", eid))
+    elif t == "Vendor":
+        hit = names.get("parties", {}).get(("supplier", eid))
+    if hit and hit[1]:
+        # the name and code as E-Stock shows them, then E-Stock's own number (manager 20/11 00:25)
+        return f"{kind} {hit[1]} (كود {hit[0] or code or '-'}، رقمه في إي ستوك {eid or '-'})"
     out = kind
     if d.get("field") == "impossible values" and kind != d.get("table"):
         out += f" ({d['table']})"                  # the E-Stock table to look at
@@ -248,6 +285,7 @@ def _group_key(d: dict) -> str:
 
 
 def write(path: Path, plan, rec: dict) -> Path:
+    names = _names(plan)
     owner = [d for d in plan.dq if _for_owner(d)]
     rest = [d for d in plan.dq if not _for_owner(d)]
     blocked = bool(plan.blocking)
@@ -268,7 +306,7 @@ def write(path: Path, plan, rec: dict) -> Path:
     for d in owner:
         what, ask, done = _ask(d)
         v = _value(d)
-        entries.append({"what": f"{_who(d)} — {what}",
+        entries.append({"what": f"{_who(d, names)} — {what}",
                         "estock": (f"{FIELD_AR[d['field']]} " if d.get("field") in FIELD_AR else "") + f"{d['estock_value']}"
                                   + (f" — القيمة {_money(v)} ج" if v else "")
                                   + (f" ({_plain(d['action']).split(':')[0]})" if done else ""),

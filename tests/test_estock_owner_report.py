@@ -186,3 +186,44 @@ class TestCodexReview361c(_R):
         self.assertIn("655.50", e)                                   # E-Stock's own total, as in the workbook
         self.assertIn("50.00", e)                                    # the owner's correction, shown apart
         self.assertIn("أكدته", e)
+
+
+class TestManager0025(_R):
+    """Manager 20/11 00:25 after the cashier-PC rehearsal (each failed before the change)."""
+
+    def test_a_every_owner_line_names_the_item_with_its_code(self):
+        tb = base_tables()
+        tb["Products"].append(product(5, "104", "Testbroken Tab", "دواء تجربة مكسور", product_unit3="3",
+                                      product_unit1_3="2.5"))
+        tb["Product_Amount"].append(stock_row(11, 5, 1, "2", "10.0000", "2027-01-01T00:00:00"))
+        sec = self.section(self.report(tables=tb), "١. محتاج قرارك", "٢. المطابقة")
+        e = [x for x in self.entries(sec) if "104" in x][0]
+        self.assertIn("«Testbroken Tab»", e)
+        self.assertIn("كود 104", e)
+        self.assertIn("packs.json", e)
+
+    def test_b_classes_say_what_each_choice_does_and_are_answered_in_the_decision_file(self):
+        import json
+        tb = base_tables()
+        tb["Purchase_header"][0]["class"] = "3"
+        t = self.report(tables=tb)
+        sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        e = [x for x in self.entries(sec) if "class" in x][0]
+        for choice in ("كاش", "آجل", "تحت التصريف", '"classes"'):
+            self.assertIn(choice, e)
+        dec = self.tmp / "packs.json"
+        dec.write_text(json.dumps({"classes": {"3": "تحت التصريف"}}, ensure_ascii=False), encoding="utf-8")
+        self.db.close()
+        from tests.helpers import DBTestCase
+        DBTestCase.setUp(self)
+        t2 = self.report(tables=tb, packs_file=dec)
+        sec2 = self.section(t2, "١. محتاج قرارك", "٢. المطابقة")
+        self.assertNotIn("class", sec2)                                  # answered: out of section 1
+        self.assertEqual(self.res["plan"].checks["purchase_classes"]["3"]["meaning"], "consignment")
+
+    def test_c_a_big_sale_line_is_archive_only_and_not_in_section_1(self):
+        tb = base_tables()
+        tb["Branches_sales_details"][0].update({"total_sell": "25000.0000"})
+        t = self.report(tables=tb)
+        self.assertNotIn("سطر بيع", self.section(t, "١. محتاج قرارك", "٢. المطابقة"))
+        self.assertIn("سطر بيع", self.section(t, "٣. الباقي", None))
