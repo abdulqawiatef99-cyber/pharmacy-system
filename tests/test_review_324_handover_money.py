@@ -154,3 +154,40 @@ async function api(path) { const s = new URL("http://x" + path).searchParams.get
         at = body.index('$("#srSup")?.addEventListener("change"')
         self.assertIn('$("#srGo").disabled = true', body[at:at + 600])
         self.assertIn("if (SR.busy) return;", body[body.index('$("#srGo").addEventListener("click"'):][:200])
+
+
+class TestCodexReview368b(APICase):
+    """#368 Codex P1 (second): a proposal that fails for the new supplier must not leave the old supplier's price
+    to be sent. Only a value the person typed is sent; any proposed value is left to the server, which prices
+    the line at this supplier's own purchase price."""
+
+    def run_js(self, script):
+        import json
+        import shutil
+        import subprocess
+        if not shutil.which("node"):
+            self.skipTest("node is not installed")
+        start = JS.index("// supplier-return proposals")
+        fn = JS[start:JS.index("\n}\n", JS.index("async function srPropose(")) + 3]
+        out = subprocess.run(["node", "-e", fn + script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_a_failed_proposal_leaves_no_old_price(self):
+        out = self.run_js("""
+let fail = false;
+async function api() { if (fail) throw new Error("offline"); return { unit_value: 1200 }; }
+(async () => {
+  const l = { item: { id: "i" }, batch_id: null, unit_value: 0 }, typed = { item: { id: "j" }, unit_value: 1500, typed: true };
+  await srPropose(l, "A"); const a = l.unit_value;
+  SR.gen++; fail = true; await srPropose(l, "B"); await srPropose(typed, "B");
+  console.log(JSON.stringify([a, l.unit_value, typed.unit_value]));
+})();
+""")
+        self.assertEqual(out, [1200, None, 1500])            # A's 1200 is gone; a typed value stays
+
+    def test_only_a_typed_value_is_sent(self):
+        start = JS.index("async function viewSupplierReturns(")
+        body = JS[start:JS.index("\nasync function ", start + 10)]
+        self.assertIn("...(money_ && l.typed ? { unit_value: l.unit_value } : {})", body)
+        self.assertIn("l.typed = true", body)
