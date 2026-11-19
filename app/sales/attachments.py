@@ -122,6 +122,9 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
         audit.record(db, ctx, "sale.transfer_review", "sale", r["sale_id"], before={"review": r["review"]},
                      after={"review": "ok" if ok else "problem", "note": note, "amount": amount})
         got = transfer_state(db, ctx.org_id, r["sale_id"], sale["paid_transfer"] or 0)
+        # the routed account keeps only what was confirmed to have come (Codex on #381)
+        from ..finance import money
+        money.settle_transfer_review(db, ctx, r["sale_id"], got["received"])
         if not ok:
             notify.emit(db, ctx, "transfer_problem", "error", f"مشكلة في تحويل فاتورة {sale['sale_no']} ({sale['paid_transfer'] / 100:,.2f} ج)",
                         note, "sale", r["sale_id"])

@@ -724,7 +724,22 @@ def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amo
         return None
     # a refund back to the card / wallet is what really happened at the machine: it is recorded even if it
     # takes the account below zero (never blocks a customer's return); the count then shows the truth
-    return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check)
+    return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check,
+                 meta={"method": method})
+
+
+def _card_refund_account(db: Database, ctx: Context, sale_id: str) -> str | None:
+    """Where a card refund leaves from when the sale itself put nothing on an account (a cash sale refunded to
+    the card, or a card sale from before its channel was routed or before 0038): the sale's own card channel,
+    else the card method's route, else the only routed card channel."""
+    p = db.one("SELECT channel_id FROM sale_payments WHERE org_id=? AND sale_id=? AND method='card'"
+               " ORDER BY rowid LIMIT 1", (ctx.org_id, sale_id))
+    acc = route_for(db, ctx.org_id, "card", p["channel_id"] if p else None)
+    if acc:
+        return acc
+    only = db.all("SELECT DISTINCT r.account_id FROM money_routes r JOIN payment_channels c ON c.id=r.channel_id"
+                  " AND c.org_id=r.org_id WHERE r.org_id=? AND r.method='card' AND c.is_active=1", (ctx.org_id,))
+    return only[0]["account_id"] if len(only) == 1 else None
 
 
 def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = None, *, ref_type: str,
@@ -750,7 +765,56 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
     if left and rows:
         out.append(_post(db, ctx, rows[0]["account_id"], -left, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
                          meta=meta, check=False, active=False))
+    elif left and not rows:
+        # the sale put nothing on an account, yet the card machine paid the customer: the money still leaves
+        # the card's account, or the balances would show money the pharmacy no longer has (Codex on #381)
+        acc = _card_refund_account(db, ctx, sale_id)
+        if acc:
+            out.append(_post(db, ctx, acc, -left, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
+                             meta=meta, check=False, active=False))
     return out
+
+
+def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: int) -> int:
+    """After a transfer proof review: the sale's routed transfer money that did not come is taken back off its
+    account(s), and given back if a later review confirms it (Codex on #381). One correction movement per change,
+    kind 'sale' with ref_type 'transfer_review', so the account's net for the sale is what was confirmed and a
+    later void reverses only that. Returns the amount posted (negative = taken off). Inside the caller's
+    transaction; never blocked by the balance."""
+    s = db.one("SELECT status, sale_no, paid_transfer FROM sales WHERE id=? AND org_id=?", (sale_id, ctx.org_id))
+    if not s or s["status"] != "completed" or not s["paid_transfer"]:
+        return 0
+    got = {}
+    for r in db.all("SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
+                    " AND ref_type='sale' ORDER BY rowid", (ctx.org_id, sale_id)):
+        if json.loads(r["meta"] or "{}").get("method") == "transfer":
+            got[r["account_id"]] = got.get(r["account_id"], 0) + r["amount"]
+    routed = sum(got.values())
+    if not routed:
+        return 0
+    fixed = {r["account_id"]: r["t"] for r in db.all(
+        "SELECT account_id, sum(amount) t FROM money_movements WHERE org_id=? AND ref_id=? AND ref_type='transfer_review'"
+        " GROUP BY account_id", (ctx.org_id, sale_id))}
+    short = max(0, min(routed, s["paid_transfer"] - max(0, received)))      # what should be off the accounts
+    delta = -short - sum(fixed.values())                                     # < 0: take more off; > 0: give back
+    posted, note = 0, f"تحويل فاتورة {s['sale_no']}: المؤكد وصوله {received / 100:,.2f} ج"
+    for acc, amt in (got.items() if delta < 0 else reversed(list(got.items()))):
+        if not delta:
+            break
+        if delta < 0:      # take off what is still on this account for the sale
+            step = -min(-delta, amt + fixed.get(acc, 0))
+        else:              # give back only what was taken off this account
+            step = min(delta, -fixed.get(acc, 0))
+        if step:
+            _post(db, ctx, acc, step, "sale", ref_type="transfer_review", ref_id=sale_id, note=note,
+                  meta={"method": "transfer", "received": received}, check=False, active=False)
+            fixed[acc] = fixed.get(acc, 0) + step
+            delta -= step
+            posted += step
+    if posted:
+        audit.record(db, ctx, "money.transfer_review", "sale", sale_id,
+                     after={"received": received, "posted": posted, "off_accounts": -sum(fixed.values())})
+    return posted
 
 
 # -------------------------------------------------------------------------- reports
