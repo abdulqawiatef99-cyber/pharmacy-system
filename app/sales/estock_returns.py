@@ -202,9 +202,15 @@ def return_items(db: Database, ctx: Context, sales_id: str, lines: dict, *, reas
         raise ValidationFailed("اكتب سبب المرتجع")
     if not isinstance(lines, dict) or not lines:
         raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+    norm: dict[str, int] = {}
     for k, q in lines.items():
         if isinstance(q, bool) or not isinstance(q, int) or q <= 0:
             raise ValidationFailed("كمية المرتجع غير صحيحة")
+        sk = str(k).strip()
+        if sk in norm:                             # '1' and 1 are one line: never counted twice (#346 review)
+            raise ValidationFailed("السطر متكرر في المرتجع", code="duplicate_line")
+        norm[sk] = q
+    lines = norm
     inv = _invoice(db, ctx, sales_id)
     try:
         age = (date.today() - date.fromisoformat(inv["day"])).days

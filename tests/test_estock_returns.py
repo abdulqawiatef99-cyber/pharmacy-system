@@ -172,3 +172,15 @@ def _repeated():
     t["Back_sales_header"] = [{"back_sales_id": "1", "sales_id": "1", "customer_id": "1", "total_bill_net": "30.0000"}]
     t["Back_Sales_details"] = [{"back_sales_id": "1", "sales_id": "1", "product_id": "1", "back_amount": "1"}]
     return t
+
+
+class TestCodexReview346b(_Base):
+    """Codex on #346 @7ac34a1 (failed before the fix)."""
+
+    def test_p2_one_line_under_two_key_forms_is_refused(self):
+        with self.assertRaises(ValidationFailed):
+            self.ret({"1": 3, 1: 3})
+        self.assertEqual((self.ledger(), self.cash()), ([], []))
+        self.assertFalse(self.db.one("SELECT 1 FROM stock_movements WHERE ref_type='estock_sale_return'"))
+        r = self.ret({1: 3}, key="int")                       # an int key alone is the same line
+        self.assertEqual(r["lines"], {"1": 3})
