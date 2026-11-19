@@ -159,3 +159,27 @@ class TestCodexReview361b(_R):
         self.assertIn("فودافون كاش", e)
         margin = self.section(t, "٢. المطابقة", "٣. الباقي")
         self.assertIn("لسه ما اتنقلتش", margin)
+
+
+class TestCodexReview361c(_R):
+    """Codex on #361 @b27c26a: the balances line shows E-Stock's own total and the owner's corrections apart."""
+
+    def test_p2_estock_total_and_confirmed_adjustments_apart(self):
+        from openpyxl import load_workbook
+        from tests.helpers import DBTestCase
+        res = self.run_import()
+        wb = load_workbook(res["reports"]["openings"])
+        ws = wb.active
+        for r in ws.iter_rows(min_row=2):
+            if r[1].value == "1" and r[0].value == "مورد":
+                r[5].value = 450                                     # E-Stock 500, the owner says 450
+        conf = self.tmp / "confirmed.xlsx"
+        wb.save(conf)
+        self.db.close()
+        DBTestCase.setUp(self)
+        t = self.report(confirm_file=conf)
+        sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        e = [x for x in self.entries(sec) if "أرصدة" in x][0]
+        self.assertIn("655.50", e)                                   # E-Stock's own total, as in the workbook
+        self.assertIn("50.00", e)                                    # the owner's correction, shown apart
+        self.assertIn("أكدته", e)
