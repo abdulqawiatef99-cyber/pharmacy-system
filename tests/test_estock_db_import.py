@@ -1244,3 +1244,25 @@ class TestCodexReview345c(Base):
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         self.assertTrue(res["plan"].stock_source["mirror_check"]["equal"])
+
+
+class TestCodexReview345d(Base):
+    """Codex on #345 @04d6b9e (each failed before the fix)."""
+
+    def test_p2_fully_returned_purchase_counts_zero_after_returns(self):
+        t = base_tables()
+        t["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "7", "total_bill": "500.0000",
+                                  "total_after_back": "0.0000"}]
+        res = self.run_import(tables=t)
+        self.assertEqual(res["plan"].checks["purchase_classes"]["7"]["after_returns"], "0.00")
+
+    def test_p2_unit_names_follow_the_decided_pack(self):
+        t = base_tables()
+        t["Products"].append(product(5, "104", "Testbroken Tab", product_unit2="2", product_unit1_2=""))
+        folder = self.export(t)
+        packs = self.tmp / "packs.json"
+        packs.write_text('{"104": 3}', encoding="utf-8")
+        res = self.run_import(folder=folder, packs_file=packs)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        it = self.item("104")
+        self.assertEqual((it["pack_size"], it["pack_unit_name"], it["base_unit_name"]), (3, "علبة", "شريط"))
