@@ -338,8 +338,31 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
              f' FROM "e_Sales_header" h JOIN "e_{lt}" l ON l."{lc["sales_id"]}"=h."{hc["sales_id"]}"'
              f" WHERE substr({h('insert_date')}, 1, 10) BETWEEN ? AND ?"
              f" AND {h('customer_id')} IN ({','.join('?' * len(ids))}){lwhere}")
-        for r in con.execute(q, (d1.isoformat(), d2.isoformat(), *ids, *lparams)):
+        found = con.execute(q, (d1.isoformat(), d2.isoformat(), *ids, *lparams)).fetchall()
+        # E-Stock's return documents name the invoice and product, not the line: what they hold beyond the
+        # lines' own back_amount is taken off that product's lines once, in order, as the old-invoice return
+        # counts it (Codex on #381; estock_returns._invoice)
+        extra: dict[tuple, Decimal] = {}
+        if "e_Back_Sales_details" in tables and found:
+            bc = cols("e_Back_Sales_details")
+            if {"sales_id", "product_id", "back_amount"} <= set(bc):
+                sids = sorted({r["sid"] for r in found})
+                for b in con.execute(f'SELECT "{bc["sales_id"]}" sid, "{bc["product_id"]}" pid, "{bc["back_amount"]}" ba'
+                                     f' FROM "e_Back_Sales_details" WHERE "{bc["sales_id"]}" IN ({",".join("?" * len(sids))})',
+                                     sids):
+                    key = (b["sid"], b["pid"])
+                    extra[key] = extra.get(key, Decimal(0)) + (_dec(b["ba"]) or Decimal(0))
+                for r in found:
+                    key = (r["sid"], r["pid"])
+                    if key in extra:
+                        extra[key] -= _dec(r["back"]) or Decimal(0)
+        for r in found:
             amt, back = _dec(r["amount"]) or Decimal(0), _dec(r["back"]) or Decimal(0)
+            key = (r["sid"], r["pid"])
+            if extra.get(key, 0) > 0:
+                take = min(extra[key], amt - back)
+                extra[key] -= take
+                back += take
             sp, bp, ts, dm, bpr = (_dec(r[x]) for x in ("sp", "bp", "ts", "dm", "bpr"))
             if amt - back == 0:
                 continue

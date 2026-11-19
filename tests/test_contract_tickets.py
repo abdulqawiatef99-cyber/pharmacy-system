@@ -135,7 +135,8 @@ class TestOneClaimAcrossTheMove(ImportBase):
         s.complete(self.ctx, sid, paid_cash=tot, safety_decisions={i: "ok" for i in range(len(f))})
         c = k.claim(self.db, self.ctx, kid, "2026-11-01", "2099-12-31")
         got = [(r["source"], r["invoice"], r["ticket_no"], r["item_code"], r["qty"], r["sale"], r["cost"]) for r in c["lines"]]
-        self.assertIn(("estock", "1", None, "100", "1", "30.00", "24.00"), got)
+        # invoice 1's pack of item 100 came back in E-Stock's return documents: not claimed (Codex on #381)
+        self.assertNotIn(("estock", "1", None, "100", "1", "30.00", "24.00"), got)
         self.assertIn(("estock", "2", "T-123", "100", "1", "30.00", "24.00"), got)
         self.assertNotIn("102", [g[3] for g in got])                     # fully returned in E-Stock
         prog = [g for g in got if g[0] == "program"]
@@ -145,9 +146,9 @@ class TestOneClaimAcrossTheMove(ImportBase):
         self.assertEqual(prog[0][6], "24.00")                            # 3 units x 8.00 (E-Stock cost per unit)
         self.assertEqual(c["sources"], ["estock", "program"])
         shelf = c["totals"][cust]["stores"]["الصيدلية"]                    # E-Stock's «الصيدليه» + the program: one store
-        self.assertEqual(shelf["lines"], 3)
-        self.assertEqual(shelf["sale"], f"{60 + tot / 100:.2f}")
-        self.assertEqual(shelf["cost"], "72.00")
+        self.assertEqual(shelf["lines"], 2)
+        self.assertEqual(shelf["sale"], f"{30 + tot / 100:.2f}")
+        self.assertEqual(shelf["cost"], "48.00")
 
     def test_cost_needs_costs_read(self):
         from app.core import people
@@ -225,6 +226,7 @@ class TestCodexReview340c(ImportBase):
         from tests.test_estock_db_import import base_tables
         t = base_tables()
         t["Branches_sales_details"][0].update({"buy_price": "-24.0000", "total_sell": "30.0000"})
+        t["Back_Sales_details"] = []                      # the line stays sold (no return document)
         self.assertTrue(self.run_import(tables=t)["ok"])
         cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
         kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
@@ -303,3 +305,30 @@ class TestClaimLocalDay(_TicketBase):
             self.db.execute("UPDATE sales SET completed_at='2026-07-15T21:30:00.000000Z' WHERE id=?", (sid,))
         lines = k.claim(self.db, self.ctx, self.kid, "2026-07-16", "2026-07-16")["lines"]
         self.assertEqual([r["day"] for r in lines if r["source"] == "program"], ["2026-07-16"])
+
+
+class TestCodexReview381Claim(ImportBase):
+    """Codex on #381 (#340's claim): an E-Stock return kept only in its return documents (Back_Sales_details,
+    not the line's back_amount) is taken off the claim once, as the old-invoice return counts it."""
+
+    def _claim(self, t):
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        k.link_customer(self.db, self.ctx, cust, kid)
+        return k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")
+
+    def test_p1_a_document_only_return_is_not_claimed(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()                       # invoice 1: one pack of item 100, returned in Back_Sales_details only
+        lines = [r for r in self._claim(t)["lines"] if r["source"] == "estock" and r["invoice"] == "1"]
+        self.assertNotIn("100", [r["item_code"] for r in lines])
+
+    def test_p1_counted_once_across_two_lines_of_the_same_item(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        d = t["Branches_sales_details"]
+        d.append(dict(d[0], details_id="9", amount="1", total_sell="30.0000"))   # a second pack of item 100
+        lines = [r for r in self._claim(t)["lines"] if r["source"] == "estock" and r["item_code"] == "100"
+                 and r["invoice"] == "1"]
+        self.assertEqual([r["qty"] for r in lines], ["1"])                       # 2 sold, 1 returned: 1 claimed
