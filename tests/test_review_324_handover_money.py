@@ -191,3 +191,24 @@ async function api() { if (fail) throw new Error("offline"); return { unit_value
         body = JS[start:JS.index("\nasync function ", start + 10)]
         self.assertIn("...(money_ && l.typed ? { unit_value: l.unit_value } : {})", body)
         self.assertIn("l.typed = true", body)
+
+
+class TestCodexReview368c(TestCodexReview368b):
+    """#368 Codex P1 (third): a value typed while a proposal is still on its way is kept."""
+
+    test_a_failed_proposal_leaves_no_old_price = None
+    test_only_a_typed_value_is_sent = None
+
+    def test_a_value_typed_during_the_ask_is_kept(self):
+        out = self.run_js("""
+let done;
+async function api() { return new Promise((r) => { done = () => r({ unit_value: 1800 }); }); }
+(async () => {
+  const l = { item: { id: "i" }, batch_id: null, unit_value: 0 };
+  const p = srPropose(l, "B");
+  l.unit_value = 1500; l.typed = true;                      // typed before the answer came
+  done(); await p;
+  console.log(JSON.stringify(l.unit_value));
+})();
+""")
+        self.assertEqual(out, 1500)

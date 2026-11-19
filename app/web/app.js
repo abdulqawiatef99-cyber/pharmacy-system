@@ -3808,7 +3808,7 @@ async function srPropose(l, supplier) {
   try {
     v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
   } catch { /* unknown here: the server prices it */ }
-  if (gen === SR.gen && ask === l.ask) l.unit_value = v;
+  if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
 }
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
