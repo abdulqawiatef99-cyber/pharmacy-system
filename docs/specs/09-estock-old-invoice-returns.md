@@ -21,10 +21,11 @@ must not refund more than was paid, put stock back twice, or lose track of what 
    nothing). The item is the program item mapped from `product_id` (`map_items`); an unmapped item is refused.
 2. **Quantity sold** in base units = `amount x pack_size` of the program item (whole units only; a fraction that
    is not whole units is refused, never rounded).
-3. **Already returned** = E-Stock's own returns of that line, max(`back_amount` on the line, sum of
-   `Back_Sales_details.back_amount` for the same invoice and product) x pack, plus the program's returns of that
-   line (sum of its `sale_return` stock movements with `ref_type='estock_sale_return'`, `ref_id` = invoice,
-   `ref_line_id` = line). A return above what is left is refused.
+3. **Already returned** = E-Stock's own returns of that line: its `back_amount`, plus its share of what the
+   invoice's `Back_Sales_details` hold for that product beyond the product's lines' own `back_amount` (the
+   documents name the product, not the line: the rest is spread over the product's lines in order, once, never
+   on each line), x pack; plus the program's returns of that line (the units in the audit records of its
+   returns, so a service line, which has no stock movement, counts too). A return above what is left is refused.
 4. **Value** of the returned units: the line's net (`total_sell`, else `amount x sell_price - disc_money`) x
    units / units sold, half up to the piaster; the return that empties the line refunds exactly what is left of
    the line's net, so all returns of a line add up to its net, never a piaster more.
@@ -42,7 +43,8 @@ must not refund more than was paid, put stock back twice, or lose track of what 
    expiry = the line's `exp_date`, cost per base unit = `buy_price / pack` (6 decimals, as the import). Service
    items take no stock.
 7. **Permissions**: `sales.return`; the E-Stock cashier is never the current user, so `sales.return_others`;
-   older than the return window (`return_window_days`): `sales.return_late`.
+   older than the return window (`return_window_days`): `sales.return_late`; an item of a no-return category
+   (`categories.no_return`, e.g. fridge, personal use): `sales.return_restricted`, as program returns.
 8. **One audit record** `estock.sale_return` (entity `estock_sale`, id = the invoice) with the return id, key,
    lines, line refunds, the parts refunded and the total, inside the same transaction as every write.
 

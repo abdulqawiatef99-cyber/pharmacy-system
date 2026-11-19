@@ -121,3 +121,54 @@ class TestNotMoreThanReceived(_Base):
         self.assertEqual(self.cash(), [])
         r = self.ret({"1": 1}, key="small")                   # 10.00: the cash that was paid
         self.assertEqual(r["parts"], {"account": 0, "cash": 1000, "card": 0})
+
+
+class TestCodexReview346(_Base):
+    """Codex on #346 @d884121 (each failed before the fix)."""
+
+    def test_p1_a_no_return_category_needs_the_restricted_permission(self):
+        from app.catalog import card
+        card.ensure_default_categories(self.db)
+        cat = {c["name"]: c for c in card.list_categories(self.db, self.ctx)}["ثلاجة"]
+        self.assertTrue(cat["no_return"])
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET category_id=? WHERE code='102'", (cat["id"],))
+        import dataclasses
+        people.add_user(self.db, self.ctx, username="pharm1", full_name="P", password=PW, role_code="pharmacist")
+        ph = self.login("pharm1", PW)                  # every return permission but the restricted one
+        ph = dataclasses.replace(ph, permissions=ph.permissions | {"sales.return_others", "sales.return_late"})
+        self.assertFalse(ph.allowed("sales.return_restricted"))
+        with self.assertRaises(Forbidden) as e:
+            self.ret({"2": 7}, ctx=ph)
+        self.assertEqual(e.exception.details["permission"], "sales.return_restricted")
+        self.assertEqual(self.ledger(), [])
+        self.assertTrue(self.ret({"2": 7})["refund"])                    # the owner may
+
+    def test_p2_a_service_line_returned_in_full_cannot_be_returned_again(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET is_service=1 WHERE code='102'")
+        self.ret({"2": 7}, key="a")
+        lines = {l["line_key"]: l for l in er.invoice_lines(self.db, self.ctx, "1")}
+        self.assertEqual(lines["2"]["returned_units"], 7)
+        with self.assertRaises(Conflict):
+            self.ret({"2": 1}, key="b")
+
+
+class TestCodexReview346Repeated(_Base):
+    """One E-Stock return of a product sold on two lines counts once, not on each line."""
+    TABLES = staticmethod(lambda: _repeated())
+
+    def test_p2_b_historical_return_allocated_once(self):
+        lines = {l["line_key"]: l for l in er.invoice_lines(self.db, self.ctx, "1")}
+        self.assertEqual(lines["1"]["returned_units"] + lines["3"]["returned_units"], 3)
+        r = self.ret({"3": 3} if lines["3"]["returned_units"] == 0 else {"1": 3})
+        self.assertEqual(r["refund"], 3000)
+
+
+def _repeated():
+    t = tables()
+    t["Sales_header"][0].update({"total_bill_net": "95.0000", "bill_cash": "50.0000"})
+    t["Branches_sales_details"].append(dict(t["Branches_sales_details"][0], details_id="3", counter_id="13"))
+    t["Back_sales_header"] = [{"back_sales_id": "1", "sales_id": "1", "customer_id": "1", "total_bill_net": "30.0000"}]
+    t["Back_Sales_details"] = [{"back_sales_id": "1", "sales_id": "1", "product_id": "1", "back_amount": "1"}]
+    return t

@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from contextlib import closing
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from ..core import audit
-from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
@@ -107,6 +108,13 @@ def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
         lines = _local_lines(con, sales_id)
         back_lines = _rows(con, "Back_Sales_details", {"sales_id": sales_id})
         back_heads = _rows(con, "Back_sales_header", {"sales_id": sales_id})
+    # E-Stock's return documents name the product, not the line: what they hold beyond the lines' own
+    # back_amount is spread over that product's lines in order, once (#346 review), never on each line
+    extra: dict[str, Decimal] = defaultdict(Decimal)
+    for b in back_lines:
+        extra[_ident(b.get("product_id"))] += _dec(b.get("back_amount")) or 0
+    for l in lines:
+        extra[_ident(l.get("product_id"))] -= _dec(l.get("back_amount")) or 0
     out_lines = {}
     for n, l in enumerate(lines, start=1):
         key = _ident(l.get("details_id")) or str(n)
@@ -115,11 +123,12 @@ def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
         item = db.one("SELECT id, pack_size, is_service, coalesce(name_en, name_ar) name FROM items WHERE id=? AND org_id=?",
                       (iid, ctx.org_id)) if iid else None
         amt, back = _dec(l.get("amount")) or Decimal(0), _dec(l.get("back_amount")) or Decimal(0)
-        back_docs = sum((_dec(b.get("back_amount")) or 0) for b in back_lines if _ident(b.get("product_id")) == pid)
+        take = max(Decimal(0), min(extra[pid], amt - back))
+        extra[pid] -= take
         ts = _dec(l.get("total_sell"))
         net = ts if ts is not None else amt * (_dec(l.get("sell_price")) or 0) - (_dec(l.get("disc_money")) or 0)
         pack = item["pack_size"] if item else 1
-        sold, ret = amt * pack, max(back, back_docs) * pack
+        sold, ret = amt * pack, (back + take) * pack
         out_lines[key] = {
             "line_key": key, "product_id": pid, "item_id": item["id"] if item else None, "item": item["name"] if item else None,
             "is_service": bool(item["is_service"]) if item else False, "pack": pack,
@@ -146,9 +155,10 @@ def _program_history(db: Database, ctx: Context, sales_id: str) -> list[dict]:
         " ORDER BY rowid", (ctx.org_id, ACTION, sales_id))]
 
 
-def _returned_in_program(db: Database, ctx: Context, sales_id: str, key: str) -> int:
-    return int(db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE org_id=? AND ref_type=? AND ref_id=?"
-                      " AND ref_line_id=?", (ctx.org_id, REF, sales_id, key))["q"])
+def _returned_in_program(hist: list[dict], key: str) -> int:
+    """Units of the line the program already took back, from the audit records of its returns: a service line
+    has no stock movement, so the movements cannot count it (#346 review)."""
+    return sum(int(hh.get("lines", {}).get(key, 0)) for hh in hist)
 
 
 def invoice_lines(db: Database, ctx: Context, sales_id: str) -> list[dict]:
@@ -160,7 +170,7 @@ def invoice_lines(db: Database, ctx: Context, sales_id: str) -> list[dict]:
     for k, l in inv["lines"].items():
         refunded = sum(int(hh.get("line_refunds", {}).get(k, 0)) for hh in hist)
         out.append({**{x: l[x] for x in ("line_key", "item_id", "item", "sold_units", "net", "expiry")},
-                    "returned_units": (l["estock_returned_units"] or 0) + _returned_in_program(db, ctx, str(sales_id), k),
+                    "returned_units": (l["estock_returned_units"] or 0) + _returned_in_program(hist, k),
                     "refunded_in_program": refunded})
     return out
 
@@ -214,9 +224,16 @@ def return_items(db: Database, ctx: Context, sales_id: str, lines: dict, *, reas
                 raise NotFound("السطر ده مش في الفاتورة")
             if not l["item_id"]:
                 raise ValidationFailed("صنف الفاتورة القديمة مش مربوط بصنف في البرنامج", code="unmapped_item")
+            nr = db.one("SELECT c.name FROM items i JOIN categories c ON c.id=i.category_id"
+                        " WHERE i.id=? AND i.org_id=? AND c.no_return=1", (l["item_id"], ctx.org_id))
+            if nr and not ctx.allowed("sales.return_restricted"):     # as Sales.return_items (#346 review)
+                raise Forbidden(f"هذا الصنف من قسم «{nr['name']}» ولا يُقبل إرجاعه ولا استبداله",
+                                code="approval_required",
+                                details={"permission": "sales.return_restricted",
+                                         "label": f"مرتجع صنف من قسم «{nr['name']}»"})
             if l["sold_units"] is None or l["estock_returned_units"] is None:
                 raise ValidationFailed("كمية السطر في إي ستوك مش عدد صحيح من الوحدات", code="fractional_line")
-            done = l["estock_returned_units"] + _returned_in_program(db, ctx, sales_id, str(k))
+            done = l["estock_returned_units"] + _returned_in_program(hist, str(k))
             left_units = l["sold_units"] - done
             if q > left_units:
                 raise Conflict(f"الباقي من السطر ده {max(0, left_units)} وحدة بس", code="return_exceeds_sold",
