@@ -153,3 +153,39 @@ class TestScreensApi(WiringCase):
         self.call("POST", "/api/cash/close", json={"counted_cash": 14000, "float_left": 5000, "to_account": "treasury"})
         self.assertEqual(self.bal(self.t), 9000)
 
+
+
+class TestCodexReview348(WiringCase):
+    """#348 Codex: P1 a void / card refund reverses the account the sale really went to, whatever the route is
+    now; P2 a schedule switched to 'outside' forgets its old account."""
+
+    def _card_sale(self):
+        a = self.sell(self.pan, payments=[{"method": "card", "amount": 4000, "channel_id": self.card_ch}], units=2)
+        return a if "lines" in a else a["sale"]
+
+    def test_void_after_a_reroute_takes_it_back_from_the_original_account(self):
+        d = self._card_sale()
+        self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"account_id": self.wallet})
+        self.call("POST", f"/api/sales/{d['id']}/void", json={"reason": "خطأ في الفاتورة"})
+        self.assertEqual((self.bal(self.paymob), self.bal(self.wallet)), (0, 0))
+
+    def test_void_after_a_regroup_still_takes_it_back(self):
+        d = self._card_sale()
+        self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"kind": "transfer"})
+        self.call("POST", f"/api/sales/{d['id']}/void", json={"reason": "خطأ في الفاتورة"})
+        self.assertEqual(self.bal(self.paymob), 0)
+
+    def test_card_refund_after_a_reroute_comes_from_the_original_account(self):
+        d = self._card_sale()
+        self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"account_id": self.wallet})
+        self.call("POST", f"/api/sales/{d['id']}/return", json={"lines": {d["lines"][0]["id"]: 1},
+                                                               "refund_method": "card", "reason": "العميل رجّعه"})
+        self.assertEqual((self.bal(self.paymob), self.bal(self.wallet)), (2000, 0))
+
+    def test_a_schedule_switched_to_outside_forgets_its_account(self):
+        from app.finance import schedules
+        cat_id = fin.categories(self.db, self.ctx)[0]["id"]
+        s = schedules.save(self.db, self.ctx, {"name": "إيجار", "category_id": cat_id, "amount": 100, "day_of_month": 1,
+                                               "paid_from": self.t})
+        s = schedules.save(self.db, self.ctx, {"paid_from": "outside"}, s["id"])
+        self.assertEqual((s["paid_from"], s["account_id"]), ("outside", None))

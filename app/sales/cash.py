@@ -193,7 +193,7 @@ class CashDrawer:
         from ..finance import money
         with self.db.transaction():
             sid0 = require_open_shift(self.db, ctx)
-            s0 = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=?", (sid0,))
+            s0 = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=?", (sid0, ctx.org_id))
             if float_left is None and handover is None and not ctx.can("cash.manage"):
                 left = counted_cash          # nobody received it: everything stays in the drawer for the next shift
             else:

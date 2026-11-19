@@ -1109,11 +1109,8 @@ class Sales:
             if refund_method == "card" and refund:
                 # back through the card / wallet the sale was paid with (the first one, if it was split)
                 from ..finance import money
-                p = self.db.one("SELECT method, channel_id FROM sale_payments WHERE sale_id=? AND org_id=?"
-                                " AND method IN ('card','transfer') ORDER BY rowid LIMIT 1", (sid, ctx.org_id))
-                if p:
-                    money.receive(self.db, ctx, p["method"], p["channel_id"], -refund, "refund", ref_type="sale_return",
-                                  ref_id=rid, note=f"مرتجع فاتورة {s['sale_no']}")
+                money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
+                                   meta={"return_id": rid})
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1176,10 +1173,7 @@ class Sales:
             else:
                 cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
             from ..finance import money
-            for p in self.db.all("SELECT method, channel_id, amount FROM sale_payments WHERE sale_id=? AND org_id=?"
-                                 " AND method IN ('card','transfer')", (sid, ctx.org_id)):
-                money.receive(self.db, ctx, p["method"], p["channel_id"], -p["amount"], "refund", ref_type="sale_void",
-                              ref_id=sid, note=f"إلغاء فاتورة {s['sale_no']}")
+            money.reverse_sale(self.db, ctx, sid, ref_type="sale_void", note=f"إلغاء فاتورة {s['sale_no']}")
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",

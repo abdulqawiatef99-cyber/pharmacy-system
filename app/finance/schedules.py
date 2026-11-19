@@ -78,6 +78,8 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
               "paid_from", "account_id", "note", "is_active"):
         if k in data:
             v[k] = data[k]
+    if "paid_from" in data and "account_id" not in data:
+        v["account_id"] = None               # a new source replaces the old account (#348 Codex P2)
     v["name"] = str(v.get("name") or "").strip()[:80]
     if len(v["name"]) < 2:
         raise ValidationFailed("اكتب اسم البند (مثال: إيجار الصيدلية)")

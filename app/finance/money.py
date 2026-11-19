@@ -721,6 +721,27 @@ def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amo
     return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check)
 
 
+def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = None, *, ref_type: str,
+                 note: str | None = None, meta: dict | None = None) -> list[str]:
+    """Take a sale's card / wallet money back (a void: all of it; a card refund: `amount`) from the accounts the
+    sale really went to, read from its own movements, never from today's routes (#348 Codex P1). Inside the
+    caller's transaction; recorded even below zero or on a stopped account (a return is never blocked)."""
+    rows = db.all("SELECT account_id, sum(amount) net FROM money_movements WHERE org_id=? AND ref_id=?"
+                  " AND kind IN ('sale','refund') GROUP BY account_id ORDER BY min(rowid)", (ctx.org_id, sale_id))
+    left, out = amount, []
+    for r in rows:
+        take = r["net"] if left is None else min(r["net"], left)
+        if take <= 0:
+            continue
+        out.append(_post(db, ctx, r["account_id"], -take, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
+                         meta=meta, check=False, active=False))
+        if left is not None:
+            left -= take
+            if left <= 0:
+                break
+    return out
+
+
 # -------------------------------------------------------------------------- reports
 def _bounds(date_from: str | None, date_to: str | None) -> tuple[date, date, str, str]:
     from ..sales.service import local_day_bounds, local_today
