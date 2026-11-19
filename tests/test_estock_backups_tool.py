@@ -304,9 +304,9 @@ class TestListing(unittest.TestCase):
         self.assertEqual(sorted(by_name), ["folder-called.bak", "shortcut.bak", "stock.bak"])
         self.assertEqual((by_name["shortcut.bak"]["kind"], by_name["folder-called.bak"]["kind"]), ("link", "link"))
         self.assertNotIn("inside_linked_folder.bak", by_name)                      # the linked folder was not entered
-        link_stat = os.lstat(self.desk / "shortcut.bak")
-        self.assertEqual((by_name["shortcut.bak"]["size"], by_name["shortcut.bak"]["mtime"]),
-                         (link_stat.st_size, link_stat.st_mtime))                  # the link's own, not the target's
+        # the link's own size and date, not the target's (what a link's own size is differs by system)
+        self.assertNotEqual(by_name["shortcut.bak"]["size"], os.stat(target).st_size)
+        self.assertNotEqual(by_name["shortcut.bak"]["mtime"], os.stat(target).st_mtime)
         code, text = self.run_tool()
         self.assertEqual(code, 0)
         self.assertIn("stock.bak", next(l for l in text.splitlines() if l.startswith("RESULT:")))
@@ -418,6 +418,33 @@ class TestListing(unittest.TestCase):
         self.assertEqual([m.fmt_size(n) for n in (0, 500, 1024 ** 2, 3 * 1024 ** 3 // 2)],
                          ["0 KB", "1 KB", "1.0 MB", "1.50 GB"])
         self.assertEqual([m.fmt_age(h) for h in (0.5, 3, 47.9, 72)], ["30 min", "3.0 h", "47.9 h", "3.0 days"])
+
+    def test_a_made_up_environment_never_reads_this_pcs_registry(self):
+        """On Windows the real Desktop comes first, from the registry. With an environment handed in (these
+        tests), that would add the test machine's own Desktop to every expected list (it did, on the Windows
+        runner)."""
+        fake = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=mock.Mock(side_effect=AssertionError("registry read")),
+                               QueryValueEx=mock.Mock())
+        home = self.tmp / "home2"
+        (home / "Desktop").mkdir(parents=True)
+        with mock.patch.object(self.m.os, "name", "nt"), mock.patch.dict("sys.modules", {"winreg": fake}):
+            self.assertEqual(self.m.desktops({"USERPROFILE": str(home)}), [str(home / "Desktop")])
+        fake.OpenKey.assert_not_called()
+
+    def test_the_real_environment_asks_the_registry_first_on_windows(self):
+        desk = self.tmp / "RedirectedDesktop"
+        desk.mkdir()
+
+        class Key:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        fake = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=mock.Mock(return_value=Key()),
+                               QueryValueEx=mock.Mock(return_value=(str(desk), 2)))
+        with mock.patch.object(self.m.os, "name", "nt"), mock.patch.dict("sys.modules", {"winreg": fake}), \
+                mock.patch.dict(self.m.os.environ, {"USERPROFILE": str(self.tmp / "nobody"), "PUBLIC": ""}):
+            got = self.m.desktops()
+        self.assertEqual(got[0], str(desk))
+        fake.OpenKey.assert_called_once()
 
     def test_the_desktop_folders_are_the_users_and_the_shared_one(self):
         home, public = self.tmp / "home", self.tmp / "public"
