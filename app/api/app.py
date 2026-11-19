@@ -295,6 +295,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when there is one, so the fingerprint of every other request stays what it was before."""
         return b"?" + req.url.query.encode() if req.url.query else b""
 
+    def _same_form(req: Request, raw: bytes) -> bytes:
+        """A file upload sent again carries a new multipart boundary around the same fields and file: the
+        fingerprint is taken without it, so a retry replays instead of being called a different request
+        (#324 M2-23). Any other body is fingerprinted as it is."""
+        m = re.search(r'boundary="?([^";]+)"?', req.headers.get("content-type", ""))
+        if not m or not req.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            return raw
+        return raw.replace(b"--" + m.group(1).encode("latin-1"), b"--\x00boundary")
+
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
@@ -307,7 +316,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return await fn(req)
         ctx = ctx_of(req)
         raw = await _read_body(req)
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
+                               + _same_form(req, raw)).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its

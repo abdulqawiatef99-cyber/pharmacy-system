@@ -254,11 +254,16 @@ const API_MAX_APPROVALS = 8;                    // more than any action needs; s
 // Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
+// A money form whose every attempt lost its answer has an UNKNOWN outcome: sent again unchanged, however much
+// later, it carries the same key, so the server replays it or says it is unconfirmed instead of posting a second
+// time. The key is dropped once any answer comes back (#324 M2-10).
+const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
   /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
 function onceKey(method, apiPath, bodyText) {
-  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  if (UNSURE.has(sig)) return UNSURE.get(sig);
   for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
   const hit = ONCE_SENT.get(sig);
   if (hit) return hit.key;
@@ -266,14 +271,17 @@ function onceKey(method, apiPath, bodyText) {
   ONCE_SENT.set(sig, { key, at: now });
   return key;
 }
+onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0];
+  let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
     _key = _key || onceKey(method, apiPath, opts.body);
+    if (onceKey.applies(method, apiPath, opts.body)) sig = `${method} ${apiPath} ${opts.body}`;
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
@@ -285,11 +293,16 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        if (attempt >= 2) {
+          if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
+          throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        }
         await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
       }
     }
     data = await r.json().catch(() => ({}));
+    // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
+    if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
