@@ -1,0 +1,338 @@
+"""Compiled-build evaluation (docs/PROTECTION_PLAN.md, layer 3): the workflow and its script are a
+measurement only. These tests pin what they may never do (run by themselves, publish, read a secret,
+write into the repository) and check the script's own arithmetic on small made-up folders.
+"""
+import contextlib
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "compiled-build-eval.yml"
+
+sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+import compiled_build_eval as ev  # noqa: E402
+import compiled_eval_entry as entry  # noqa: E402
+
+
+class TestWorkflow(unittest.TestCase):
+    def setUp(self):
+        self.text = WORKFLOW.read_text(encoding="utf-8")
+        self.code = "\n".join(line for line in self.text.splitlines() if not line.lstrip().startswith("#"))
+
+    def test_it_starts_by_hand_only(self):
+        triggers = self.code[self.code.index("\non:"):self.code.index("\npermissions:")]
+        self.assertIn("workflow_dispatch:", triggers)
+        for event in ("push", "pull_request", "schedule", "workflow_run", "release", "issue_comment"):
+            self.assertNotRegex(triggers, rf"(?m)^\s*{event}\b", event)
+
+    def test_it_cannot_write_publish_or_read_a_secret(self):
+        self.assertRegex(self.code, r"(?m)^permissions:\n  contents: read\n")
+        self.assertEqual(self.code.count("permissions:"), 1)          # no job widens it
+        self.assertNotIn("secrets.", self.code)
+        self.assertNotIn("GH_TOKEN", self.code)
+        self.assertNotIn("gh release", self.code)
+        self.assertNotIn("ISCC", self.code)                           # never builds an installer
+        self.assertIn("persist-credentials: false", self.code)
+
+    def test_only_the_report_is_uploaded_never_the_program(self):
+        upload = self.code[self.code.index("actions/upload-artifact"):]
+        paths = re.findall(r"(?m)^\s+(\$\{\{ runner\.temp \}\}\S+)$", upload)
+        self.assertEqual(len(paths), 2)
+        for p in paths:
+            self.assertRegex(p, r"report-\*\.(json|md)$")
+        self.assertIn("retention-days: 14", upload)
+
+    def test_runner_and_tools_are_pinned_and_requirements_are_not_changed(self):
+        self.assertIn("runs-on: windows-2025", self.code)
+        self.assertIn("timeout-minutes:", self.code)
+        self.assertRegex(self.code, r"pip install nuitka==\d+(\.\d+)+")
+        self.assertRegex(self.code, r"pip install pyinstaller==\d+(\.\d+)+ pyinstaller-hooks-contrib==\d+\.\d+")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+        for tool in ("nuitka", "pyinstaller"):
+            self.assertNotIn(tool, requirements)                      # build tools never ship to the pharmacy
+
+    def test_the_runner_context_is_used_only_inside_steps(self):
+        """GitHub refuses the whole file when `runner.*` appears in a job's own env (first dispatch, 19/11)."""
+        self.assertNotIn("runner.", self.code[:self.code.index("    steps:")])
+
+    def test_the_baseline_and_the_report_step_always_have_something_to_say(self):
+        self.assertIn("check --tool python", self.code)
+        check = self.code[self.code.index("Checks from the compiled folder"):]
+        self.assertIn("if: ${{ !cancelled() }}", check.split("shell:")[0])
+
+
+class TestBuildCommands(unittest.TestCase):
+    def setUp(self):
+        self.out = Path(tempfile.gettempdir()) / "eval-out"
+
+    def test_both_tools_build_a_folder_from_the_evaluation_entry_with_the_data_the_program_reads(self):
+        for tool in ev.TOOLS:
+            cmd = ev.build_command(tool, self.out)
+            joined = " ".join(cmd)
+            self.assertEqual(cmd[-1], str(ev.ENTRY), tool)
+            self.assertEqual(cmd[0], sys.executable, tool)            # the pinned tool of this Python, as a module
+            for data in ("app/web", "app/migrations", "release_protocol.json"):
+                self.assertIn(data, joined.replace("\\", "/"), f"{tool}: {data}")
+            self.assertIn(str(self.out), joined, tool)                # output goes outside the repository
+            self.assertNotIn("onefile", joined, tool)                 # one-file programs unpack on every start
+        self.assertIn("--standalone", ev.build_command("nuitka", self.out))
+        self.assertIn("--onedir", ev.build_command("pyinstaller", self.out))
+
+    def test_the_data_the_program_reads_exists(self):
+        for d in ev.DATA_DIRS:
+            self.assertTrue((ROOT / d).is_dir(), d)
+        for f in ev.DATA_FILES:
+            self.assertTrue((ROOT / f).is_file(), f)
+
+    def test_unknown_tool_is_refused(self):
+        with self.assertRaises(ValueError):
+            ev.build_command("py2exe", self.out)
+        with self.assertRaises(ValueError):
+            ev.dist_dir("python", self.out)
+
+    def test_output_inside_the_repository_is_refused(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ev.main(["build", "--tool", "nuitka", "--out", str(ROOT / "build-eval")])
+        self.assertFalse((ROOT / "build-eval").exists())
+
+
+class TestMeasurements(unittest.TestCase):
+    def test_tree_size_counts_files_and_bytes_and_lists_the_largest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "sub").mkdir()
+            (d / "a.bin").write_bytes(b"x" * 10)
+            (d / "sub" / "b.bin").write_bytes(b"x" * 30)
+            size = ev.tree_size(d)
+            self.assertEqual((size["files"], size["bytes"]), (2, 40))
+            self.assertEqual(size["largest"][0], {"file": "sub/b.bin", "bytes": 30})
+            self.assertGreater(ev.compressed_size(d), 0)
+
+    def test_source_exposure_sees_our_files_and_our_text_but_not_library_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "app" / "sales").mkdir(parents=True)
+            (d / "_internal" / "app").mkdir(parents=True)
+            (d / "openpyxl").mkdir()
+            (d / "app" / "sales" / "service.py").write_text("x = 1\n", encoding="utf-8")
+            (d / "_internal" / "app" / "db.pyc").write_bytes(b"\x00")
+            (d / "_internal" / "manage.py").write_text(
+                "# Embedded Windows Python ignores PYTHONPATH; choose code before importing app.\n", encoding="utf-8")
+            (d / "openpyxl" / "cell.py").write_text("y = 2\n", encoding="utf-8")          # a library: not ours
+            e = ev.source_exposure(d)
+            self.assertEqual((e["own_py_files"], e["own_pyc_files"]), (2, 1))
+            self.assertTrue(e["comment_text_readable"])
+            self.assertFalse(e["docstring_text_readable"])
+
+    def test_the_text_markers_really_are_in_the_source(self):
+        """If manage.py is reworded the markers must follow, or "not readable" would mean nothing."""
+        src = (ROOT / "manage.py").read_bytes()
+        self.assertIn(b"Embedded Windows Python ignores PYTHONPATH", src)
+        self.assertIn(b"Command line for running and administering", src)
+
+    def test_clean_folder_has_no_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "pharmacy-eval.bin").write_bytes(b"\x7fELF...")
+            e = ev.source_exposure(d)
+            self.assertEqual(e, {"own_py_files": 0, "own_pyc_files": 0, "comment_text_readable": False,
+                                 "docstring_text_readable": False})
+
+
+def _good_report() -> dict:
+    return {"tool": "nuitka", "platform": "win32", "python": "3.13.9",
+            "build": {"ok": True, "seconds": 900.0},
+            "size": {"files": 120, "bytes": 90 * 1024 * 1024, "compressed_bytes": 30 * 1024 * 1024, "largest": []},
+            "probe": {"sqlite": "OK 3.50", "arabic_receipt(pillow)": "WARN: raqm/fribidi missing"},
+            "probe_exit": 0,
+            "start": {"first_seconds": 1.2, "best_seconds": 0.4, "ok": True},
+            "commands": {"selftest": {"ok": True, "seconds": 2.0}, "init": {"ok": True, "seconds": 1.0}},
+            "serve": {"healthy": True, "seconds_to_healthy": 1.5, "start_page": True},
+            "source_exposure": {"own_py_files": 0, "own_pyc_files": 0, "comment_text_readable": False,
+                                "docstring_text_readable": True},
+            "antivirus": {"ran": True, "exit": 0, "clean": True}}
+
+
+class TestReport(unittest.TestCase):
+    def test_a_complete_run_passes_and_a_warning_is_not_a_failure(self):
+        report = _good_report()
+        self.assertTrue(ev.passed(report))
+        md = ev.markdown(report)
+        self.assertIn("**Result: PASS**", md)
+        self.assertIn("90.0 MB in 120 files; about 30.0 MB compressed", md)
+        self.assertIn("Microsoft Defender scan: clean", md)
+
+    def test_the_plain_python_numbers_are_shown_next_to_the_compiled_ones(self):
+        report = _good_report()
+        report["baseline"] = {"start_best_seconds": 0.2, "seconds_to_healthy": 0.9, "selftest_seconds": 1.1}
+        self.assertIn("Plain Python on the same machine: start best 0.2 s, server healthy after 0.9 s, `selftest` 1.1 s",
+                      ev.markdown(report))
+        self.assertNotIn("Plain Python", ev.markdown(_good_report()))
+
+    def test_each_kind_of_failure_fails_the_run(self):
+        breakers = {
+            "library": lambda r: r["probe"].update({"pdf(pdfplumber)": "FAIL: ImportError: x"}),
+            "command": lambda r: r["commands"]["selftest"].update(ok=False, output="SELFTEST FAILED"),
+            "start": lambda r: r["start"].update(ok=False),
+            "server": lambda r: r["serve"].update(healthy=False),
+            "start page": lambda r: r["serve"].update(start_page=False),
+            "no build": lambda r: r.update(error="no compiled program: the build failed"),
+            "build failed but a program was found": lambda r: r["build"].update(ok=False),      # Codex on #379
+            "no build record for a compiled tool": lambda r: r.pop("build"),
+            "probe printed its answers and then crashed": lambda r: r.update(probe_exit=-1073741819),
+            "no probe exit status": lambda r: r.pop("probe_exit"),
+            "no probe": lambda r: r.pop("probe"),
+            "no commands": lambda r: r.pop("commands"),
+        }
+        for name, breaker in breakers.items():
+            report = _good_report()
+            breaker(report)
+            self.assertFalse(ev.passed(report), name)
+            self.assertIn("**Result: FAIL**", ev.markdown(report), name)
+
+    def test_plain_python_needs_no_build_record(self):
+        report = _good_report()
+        report.update(tool="python")
+        for key in ("build", "size", "source_exposure", "antivirus"):
+            report.pop(key)
+        self.assertTrue(ev.passed(report))
+
+    def test_finish_writes_both_files_and_returns_the_result(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            env = {k: os.environ.pop(k) for k in ("GITHUB_STEP_SUMMARY", "GITHUB_ACTIONS") if k in os.environ}
+            try:
+                os.environ["GITHUB_ACTIONS"] = "true"
+                os.environ["GITHUB_STEP_SUMMARY"] = str(Path(tmp) / "summary.md")
+                self.assertEqual(ev.finish(_good_report(), Path(tmp)), 0)
+                bad = _good_report()
+                bad["serve"]["healthy"] = False
+                self.assertEqual(ev.finish(bad, Path(tmp)), 1)
+            finally:
+                os.environ.pop("GITHUB_ACTIONS", None)
+                os.environ.pop("GITHUB_STEP_SUMMARY", None)
+                os.environ.update(env)
+            self.assertEqual(json.loads((Path(tmp) / "report-nuitka.json").read_text(encoding="utf-8"))["tool"], "nuitka")
+            self.assertIn("Result: FAIL", (Path(tmp) / "report-nuitka.md").read_text(encoding="utf-8"))
+            self.assertIn("Result: PASS", (Path(tmp) / "summary.md").read_text(encoding="utf-8"))
+            self.assertIn("::notice title=compiled-build-eval nuitka::", out.getvalue())
+            self.assertIn("::error title=compiled-build-eval nuitka::", out.getvalue())
+
+
+class TestIsolation(unittest.TestCase):
+    """Codex P1 on #379: run on a PC that has the pharmacy's own settings in its environment, the checks
+    must still touch nothing outside their temporary folder (AGENTS.md: real data is never touched)."""
+
+    OUTSIDE = {"PHARM_DB_PATH": "real.db", "PHARM_UPLOAD_DIR": "real-uploads", "PHARM_BACKUP_DIR": "real-backups",
+               "PHARM_DATA_DIR": "real-data"}
+
+    def test_every_data_path_is_inside_the_work_folder_whatever_the_caller_had_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work, real = Path(tmp) / "work", Path(tmp) / "real"
+            inherited = {k: str(real / v) for k, v in self.OUTSIDE.items()}
+            inherited.update(PHARM_GITHUB_TOKEN="x" * 20, ANTHROPIC_API_KEY="y" * 20, PHARM_PRINTER="win:Receipt",
+                             PHARM_RELEASE_CANDIDATE="1", PHARM_UPDATE_REPO="someone/else", PATH=os.environ["PATH"])
+            with mock.patch.dict(os.environ, inherited, clear=True):
+                env = ev.isolated_environment(work)
+            for name in self.OUTSIDE:
+                self.assertTrue(Path(env[name]).is_relative_to(work), f"{name}={env[name]}")
+            self.assertEqual(env["PHARM_PRINTER"], "none")                 # never a real printer or drawer
+            self.assertEqual(env["PATH"], os.environ["PATH"])              # the rest of the environment is kept
+            allowed = set(self.OUTSIDE) | {"PHARM_PRINTER"}
+            self.assertEqual({k for k in env if k.startswith("PHARM_")}, allowed)    # no token, no update repo
+            self.assertFalse(env.get("ANTHROPIC_API_KEY"))
+
+    def test_a_whole_check_run_leaves_the_callers_database_and_folders_untouched(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir()
+            inherited = {k: str(real / v) for k, v in self.OUTSIDE.items()}
+            with mock.patch.dict(os.environ, inherited), contextlib.redirect_stdout(io.StringIO()):
+                code = ev.cmd_check("python", Path(tmp) / "out", None)
+            self.assertEqual(code, 0)
+            self.assertEqual(list(real.iterdir()), [])                     # no database, no backup, nothing
+
+
+class TestStaleOutput(unittest.TestCase):
+    """Codex on #379: checks must never run a program left by an earlier build and call it this build's."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.out = Path(tmp.name).resolve()
+        self.exe = ev.dist_dir("nuitka", self.out) / ev.exe_name()
+        self.exe.parent.mkdir(parents=True)
+        self.exe.write_bytes(b"left by an earlier build")
+
+    def quiet(self):
+        return contextlib.redirect_stdout(io.StringIO())
+
+    def test_a_failed_build_removes_what_an_earlier_build_left(self):
+        failing = [sys.executable, "-c", "import sys; sys.exit(3)"]
+        with mock.patch.object(ev, "build_command", return_value=failing), self.quiet():
+            self.assertEqual(ev.cmd_build("nuitka", self.out), 1)
+        self.assertFalse(self.exe.exists())
+        self.assertFalse(self.exe.parent.exists())
+        record = json.loads((self.out / "build-nuitka.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["ok"], record["exit"]), (False, 3))
+
+    def test_a_build_tool_that_exits_zero_without_a_program_is_a_failed_build(self):
+        with mock.patch.object(ev, "build_command", return_value=[sys.executable, "-c", "pass"]), self.quiet():
+            self.assertEqual(ev.cmd_build("nuitka", self.out), 1)
+        self.assertFalse(json.loads((self.out / "build-nuitka.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_checks_do_not_run_a_program_when_the_build_failed_or_left_no_record(self):
+        def must_not_run(*a, **k):
+            raise AssertionError("the stale program was started")
+        for record in ({"tool": "nuitka", "ok": False, "exit": 1, "seconds": 5.0}, None):
+            record_file = self.out / "build-nuitka.json"
+            record_file.unlink(missing_ok=True)
+            if record is not None:
+                record_file.write_text(json.dumps(record), encoding="utf-8")
+            with mock.patch.object(ev, "run", must_not_run), mock.patch.object(ev, "serve_smoke", must_not_run), \
+                    self.quiet():
+                self.assertEqual(ev.cmd_check("nuitka", self.out, None), 1)
+            report = json.loads((self.out / "report-nuitka.json").read_text(encoding="utf-8"))
+            self.assertIn("build", report["error"])
+            self.assertNotIn("probe", report)
+            self.assertIn("**Result: FAIL**", (self.out / "report-nuitka.md").read_text(encoding="utf-8"))
+
+
+class TestEntry(unittest.TestCase):
+    def test_the_hand_written_pdf_is_read_back(self):
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(entry._tiny_pdf("PROBE 12345"))) as doc:
+            self.assertIn("PROBE 12345", doc.pages[0].extract_text())
+
+    def test_probe_reports_every_library_and_never_raises(self):
+        result = entry.probe()
+        for name in ("sqlite", "web_files", "migrations", "excel(openpyxl)", "pdf(pdfplumber)", "pdf(pypdfium2)",
+                     "arabic_receipt(pillow)", "signature(cryptography)", "tls(certifi)", "server(uvicorn)",
+                     "windows_printing(pywin32)"):
+            self.assertIn(name, result)
+            self.assertFalse(result[name].startswith("FAIL"), f"{name}: {result[name]}")
+
+    def test_other_command_lines_go_to_the_program_unchanged(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            r = subprocess.run([sys.executable, str(ev.ENTRY), "selftest", "--quick"], capture_output=True, text=True,
+                               encoding="utf-8", cwd=tmp,
+                               env={**os.environ, "PHARM_DATA_DIR": str(Path(tmp) / "data"), "PYTHONUTF8": "1",
+                                    "PYTHONPATH": str(ROOT), "PHARM_PRINTER": "none"})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("SELFTEST PASSED", r.stdout)
+
+    def test_the_entry_is_not_part_of_the_program(self):
+        """Nothing under app/ or the launcher may import the evaluation files."""
+        for p in [*ROOT.glob("app/**/*.py"), ROOT / "manage.py", ROOT / "launcher.py", ROOT / "release_bootstrap.py"]:
+            self.assertNotIn("compiled_eval", p.read_text(encoding="utf-8"), p.name)
+
+
+if __name__ == "__main__":
+    unittest.main()

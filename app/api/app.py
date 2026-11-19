@@ -420,6 +420,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- auth
     @handler
     async def login(req):
+        # only from the program's own screen or a JSON client: a form on another site (text/plain) cannot sign a
+        # browser in to someone else's account (#324 X25)
+        if req.headers.get("x-requested-with") != "pharm" and \
+                not req.headers.get("content-type", "").lower().startswith("application/json"):
+            raise Unauthorized("طلب غير موثّق", code="csrf")
         login_limiter.check(client_ip(req))
         b = await body(req)
         res = accounts.login(db, str(b.get("username", "")), str(b.get("password", "")),
@@ -709,7 +714,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def contract_report(req):
         from ..sales import contracts as k
         qp = req.query_params
-        return J(k.report(db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
+        return J(await off_loop(k.report, db, ctx_of(req), req.path_params["id"], qp.get("from", ""), qp.get("to", "")))
 
     @handler
     async def customer_contract(req):
@@ -723,8 +728,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def audit_list(req):
         qp = req.query_params
-        return J(audit.listing(db, ctx_of(req), qp.get("from", ""), qp.get("to", ""), qp.get("user") or None,
-                               qp.get("group") or None))
+        return J(await off_loop(audit.listing, db, ctx_of(req), qp.get("from", ""), qp.get("to", ""),
+                                qp.get("user") or None, qp.get("group") or None))
 
     @handler
     async def item_flags(req):
@@ -819,7 +824,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if req.method == "GET":
             qp = req.query_params
             if rid == "suggest":
-                return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None)})
+                return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None,
+                                                              qp.get("supplier") or None)})
             if rid:
                 return J(returns.get(db, ctx, rid))
             return J(returns.listing(db, ctx, qp.get("from", ""), qp.get("to", ""), qp.get("supplier") or None))
@@ -1826,7 +1832,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def proc_suggest(req):
         ctx = ctx_of(req)
-        return J(Procurement(db).suggest(ctx, **_sugg_params(req)))
+        return J(await off_loop(Procurement(db).suggest, ctx, **_sugg_params(req)))
 
     @handler
     async def proc_suggest_xlsx(req):
@@ -1838,11 +1844,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def proc_health(req):
-        return J(Procurement(db).stock_health(ctx_of(req)))
+        return J(await off_loop(Procurement(db).stock_health, ctx_of(req)))
 
     @handler
     async def proc_supplier_costs(req):
-        return J(Procurement(db).supplier_costs(ctx_of(req), req.path_params["id"]))
+        return J(await off_loop(Procurement(db).supplier_costs, ctx_of(req), req.path_params["id"]))
 
     @handler
     async def proc_offer(req):
