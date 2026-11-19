@@ -242,7 +242,7 @@ class TestScale(Base):
             integrity._sales(self.db, self.ctx.org_id)
         finally:
             self.db.conn.set_trace_callback(None)
-        plan = [r[3] for q in sql if q.lstrip().upper().startswith("WITH")
+        plan = [r[3] for q in sql if "stock_movements" in q          # the one statement of the sales check
                 for r in self.db.conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()]
         self.assertTrue(plan)
         self.assertEqual([d for d in plan if "CORRELATED" in d], [], plan)

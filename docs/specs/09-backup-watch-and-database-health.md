@@ -147,3 +147,36 @@ snapshot with the code of 19/11: every request was timed, then `ANALYZE` was run
 No request gained from statistics, and the #249 risk stays (a pharmacy that imports years of history in one night
 would run on the statistics of the day before). So: no ANALYZE, on a schedule or otherwise. The queries that need a
 particular index say so in the SQL (`+branch_id`, `CROSS JOIN`, a materialized sub-query), with a test of the plan.
+
+## 7. Second round, 19/11 morning: the year sales report and the stock check
+
+Three lines were still over a limit at large in section 5. The name index is in `app/catalog/matching.py`
+(a rebuild parses only the items that changed: 1,429 → 134 ms for 15,000 items). The other two:
+
+| Screen | Cause | Now |
+|---|---|---|
+| Sales report, «الأصناف الأكثر مبيعًا» (`app/reports/service.py`) | One row per sale line of the period was read into Python and added up there: a million rows for a year of a large pharmacy. The cost of the 50 items listed was then read starting from every line those items ever had | The database adds up per item (two questions: quantities and costs, money). Only the lines of invoices with a return, and lines from before `line_total` existed, are read one by one, because only they need the return rule |
+| «مطابقة الأرصدة» (`app/inventory/integrity.py`); it runs at every start, after every automatic backup and from the owner's button | The comparison of each invoice with the stock it moved grouped the movements, the lines and the returns into three temporary tables and built an index on each. The per-item totals were recomputed although every lot had just been found right | One pass: the three are read once each and added up together per invoice and item. The per-item totals are read only when a lot is off (an item's total is the sum of its lots on both sides, so equal lots give equal items) |
+
+Measured by calling the function directly on the same snapshots as section 5, same machine, cache warm, best of
+three (the request times of section 5 are higher: they include the web server). Milliseconds.
+
+| Measure | Medium before | Medium after | Large before | Large after |
+|---|---|---|---|---|
+| Sales report, a year | 1,246 | 750 | 5,101 | 3,010 |
+| Sales report, a month | 169 | 43 | 803 | 164 |
+| Sales report, a day | 69 | 4 | 581 | 13 |
+| «مطابقة الأرصدة» | 3,305 | 1,060 | 17,229 | 5,028 |
+
+Checks that the figures did not change:
+- Sales report: on the large snapshot (364,664 sales, 7,177 returns in the year) the old and the new code give the
+  same quantity, revenue and profit for each of the 15,000 items, for the year and for the month. In the tests the
+  old code is kept as the reference for every shape of line (a box over two lots, a partial, a full and a repeated
+  return, a return that refunds 0.00, a line without a recorded total, an unknown cost).
+- Stock check: the old query is kept in the tests as the reference for every kind of difference it finds.
+- One visible change: items with exactly the same revenue are listed by item id. Before, their order was the
+  order the database happened to answer in.
+
+Still open after this round (large): the transfers report over all years (`app/sales/attachments.py`), the first
+safety check after the program starts (the first build of the name index, once a day), and the size of a backup of
+a 4.5 GB database (section 5).
