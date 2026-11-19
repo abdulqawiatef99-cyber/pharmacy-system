@@ -1067,7 +1067,9 @@ class TestCashDepots(Base):
         self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
                          [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
                           ("3", "فودافون كاش", "3", "-15.00")])
-        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        # owner 20/11 00:50: the treasury's E-Stock figure is a reference (info), the two wallets are reviewed
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 2)
+        self.assertTrue(d[0]["reference_only"])
         self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
         self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
 
@@ -1178,7 +1180,8 @@ class TestScreenTour2245(Base):
                                   "total_after_back": "250.0000"}]
         res = self.run_import(tables=t)
         pc = res["plan"].checks["purchase_classes"]
-        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2,
+                                   "meaning": "consignment"})                     # owner 20/11 00:50
         self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
 
     def test_junk_master_names_are_listed_and_not_used(self):

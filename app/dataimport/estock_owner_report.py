@@ -119,8 +119,8 @@ def _who(d: dict, names: dict | None = None) -> str:
     hit = None
     if t == "Products":
         hit = names.get("items", {}).get(eid) or names.get("codes", {}).get(code)
-    elif t in ITEM_TABLES:
-        hit = names.get("codes", {}).get(code) or names.get("items", {}).get(code)
+    elif t in ITEM_TABLES and d.get("field") != "product_id":      # a missing product's id is not a code (#384)
+        hit = names.get("codes", {}).get(code)
     elif t == "Customer":
         hit = names.get("parties", {}).get(("customer", eid))
     elif t == "Vendor":
@@ -176,7 +176,7 @@ def _money_pending(plan) -> list[dict]:
             bal = Decimal(str(d.get("balance") or 0))
         except InvalidOperation:
             continue
-        if bal and d.get("action") in PENDING_ACTIONS:
+        if bal and d.get("action") in PENDING_ACTIONS and not d.get("reference_only"):
             out.append({"name": d.get("name") or d.get("estock_id"), "balance": bal,
                         "shift": d.get("action") == "first_shift_opening"})
     return out
@@ -268,6 +268,9 @@ def _group_key(d: dict) -> str:
     return f"{label}: {head}"
 
 
+DOUBT_MAX = 200
+
+
 def write(path: Path, plan, rec: dict) -> Path:
     names = _names(plan)
     owner = [d for d in plan.dq if _for_owner(d)]
@@ -324,5 +327,20 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines.append(f"  - {key}: {len(ds)} سطر ({kinds})" + (f"، قيمتهم {_money(tot)} ج" if tot else ""))
     if not rest:
         lines.append("  مفيش.")
+    refs = [d for d in (plan.checks.get("money_info") or {}).get("cash_depots", []) if d.get("reference_only")]
+    if refs:
+        lines += ["", "  أرقام مرجع بس (مش فلوس اتنقلت):"]
+        lines += [f"    - «{d['name']}» في إي ستوك {_money(d.get('balance') or 0)} ج: قرار المالك إنها مش فلوس حقيقية؛"
+                  " حسابها بيبدأ بصفر ودرج أول شيفت = اللي تعدّه ليلة النقل" for d in refs]
+    doubt = [d for d in plan.dq if d["table"] == "Products" and d["severity"] in ("review", "block")
+             and not _for_owner(d)]
+    if doubt:
+        lines += ["", f"  أصناف مشكوك فيها ({len(doubt)} سطر؛ اتنقلت زي ما هي في إي ستوك، الكل في data-quality.csv):"]
+        for d in sorted(doubt, key=lambda d: (-_value(d), d["code"]))[:DOUBT_MAX]:
+            v = _value(d)
+            lines.append(f"    - {_who(d, names)}: {FIELD_AR.get(d['field'], d['field'])} {d['estock_value']}"
+                         + (f" — القيمة {_money(v)} ج" if v else "") + f" — {_plain(d['action'])}")
+        if len(doubt) > DOUBT_MAX:
+            lines.append(f"    والباقي ({len(doubt) - DOUBT_MAX}) في data-quality.csv")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     return path

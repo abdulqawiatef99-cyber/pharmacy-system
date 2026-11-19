@@ -38,8 +38,8 @@ class TestOwnerReport(_R):
 
     def test_owner_lines_largest_first_each_with_the_four_parts(self):
         tb = base_tables()
-        tb["Purchase_header"][0]["class"] = "1"
-        tb["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "3", "total_bill": "7000.0000"}]
+        tb["Purchase_header"][0]["class"] = "5"
+        tb["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "7", "total_bill": "7000.0000"}]
         t = self.report(tables=tb)
         sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
         es = self.entries(sec)
@@ -51,7 +51,7 @@ class TestOwnerReport(_R):
             m = re.search(r"القيمة ([\d,.]+) ج", e)
             vals.append(float(m.group(1).replace(",", "")) if m else 0.0)
         self.assertEqual(vals, sorted(vals, reverse=True))
-        self.assertIn("تحت التصريف", es[0])                       # the 7,000 purchase class is the largest
+        self.assertIn("تحت التصريف", es[0])                       # the 7,000 purchase class (unknown 7) is the largest
         self.assertNotIn("OWNER", sec)                             # plain words, no internal tags
 
     def test_balances_to_confirm_is_an_owner_line(self):
@@ -87,7 +87,7 @@ class TestOwnerReportWhenBlocked(_R):
         tb = base_tables()
         tb["Products"].append(product(5, "104", "Testbroken Tab", product_unit3="3", product_unit1_3="2.5"))
         tb["Product_Amount"].append(stock_row(11, 5, 1, "2", "10.0000", "2027-01-01T00:00:00"))
-        tb["Purchase_header"][0]["class"] = "3"                 # a 500 owner line that does not stop the move
+        tb["Purchase_header"][0]["class"] = "7"                 # a 500 owner line that does not stop the move
         t = self.report(tables=tb)
         self.assertFalse(self.res["ok"])
         self.assertIn("وقف", t.splitlines()[1])
@@ -153,10 +153,12 @@ class TestCodexReview361b(_R):
         self.assertIn("الخزنة والمحافظ", first)
         sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
         e = [x for x in self.entries(sec) if "الخزنة والمحافظ" in x][0]
-        self.assertIn("1,700.00", e)                               # 1,200 + 500, both still waiting
+        self.assertIn("500.00", e)                                 # owner 20/11 00:50: the treasury is a reference
+        self.assertNotIn("1,200.00", e)
         self.assertIn("ما اتنقلتش", e)
         self.assertIn("F105", e)
         self.assertIn("فودافون كاش", e)
+        self.assertIn("مرجع", self.section(t, "٣. الباقي", None))
         margin = self.section(t, "٢. المطابقة", "٣. الباقي")
         self.assertIn("لسه ما اتنقلتش", margin)
 
@@ -202,21 +204,21 @@ class TestManager0025(_R):
     def test_b_classes_say_what_each_choice_does_and_are_answered_in_the_decision_file(self):
         import json
         tb = base_tables()
-        tb["Purchase_header"][0]["class"] = "3"
+        tb["Purchase_header"][0]["class"] = "7"
         t = self.report(tables=tb)
         sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
         e = [x for x in self.entries(sec) if "class" in x][0]
         for choice in ("كاش", "آجل", "تحت التصريف", '"classes"'):
             self.assertIn(choice, e)
         dec = self.tmp / "packs.json"
-        dec.write_text(json.dumps({"classes": {"3": "تحت التصريف"}}, ensure_ascii=False), encoding="utf-8")
+        dec.write_text(json.dumps({"classes": {"7": "تحت التصريف"}}, ensure_ascii=False), encoding="utf-8")
         self.db.close()
         from tests.helpers import DBTestCase
         DBTestCase.setUp(self)
         t2 = self.report(tables=tb, packs_file=dec)
         sec2 = self.section(t2, "١. محتاج قرارك", "٢. المطابقة")
         self.assertNotIn("class", sec2)                                  # answered: out of section 1
-        self.assertEqual(self.res["plan"].checks["purchase_classes"]["3"]["meaning"], "consignment")
+        self.assertEqual(self.res["plan"].checks["purchase_classes"]["7"]["meaning"], "consignment")
 
     def test_c_a_big_sale_line_is_archive_only_and_not_in_section_1(self):
         tb = base_tables()
@@ -224,3 +226,80 @@ class TestManager0025(_R):
         t = self.report(tables=tb)
         self.assertNotIn("سطر بيع", self.section(t, "١. محتاج قرارك", "٢. المطابقة"))
         self.assertIn("سطر بيع", self.section(t, "٣. الباقي", None))
+
+
+class TestCodexReview384(_R):
+    """Codex on #384 @b78aada (each failed before the fix)."""
+
+    def test_p2_a_stock_of_a_missing_product_is_not_named_after_another_item(self):
+        tb = base_tables()
+        tb["Product_Amount"].append(stock_row(12, 100, 1, "2", "10.0000", "2027-01-01T00:00:00"))  # id 100: no product
+        t = self.report(tables=tb)
+        line = [x for x in self.entries(self.section(t, "١. محتاج قرارك", "٢. المطابقة")) if "ممسوح" in x]
+        self.assertTrue(line, t)
+        self.assertNotIn("Testamol", line[0])                            # code 100 is another item (product id 1)
+        self.assertIn("رقم 100", line[0])
+
+    def test_p2_b_class_answers_in_packs_json_count_when_packs_xlsx_is_chosen(self):
+        import json
+        from openpyxl import Workbook
+        tb = base_tables()
+        tb["Purchase_header"][0]["class"] = "7"
+        wb = Workbook()
+        wb.active.append(["الكود", "عدد الوحدات"])
+        wb.active.append(["100", 3])
+        xl = self.tmp / "packs.xlsx"
+        wb.save(xl)
+        (self.tmp / "packs.json").write_text(json.dumps({"classes": {"7": "آجل"}}, ensure_ascii=False), encoding="utf-8")
+        self.report(tables=tb, packs_file=xl)
+        self.assertEqual(self.res["plan"].checks["purchase_classes"]["7"]["meaning"], "credit")
+
+
+class TestOwner0050(_R):
+    """Owner 20/11 00:50, relayed by the manager (each failed before the change)."""
+
+    def test_classes_1_2_3_are_the_owners_decision_without_a_file(self):
+        tb = base_tables()
+        tb["Purchase_header"][0]["class"] = "2"
+        tb["Purchase_header"] += [{"purchase_id": "2", "vendor_id": "1", "class": "1", "total_bill": "70.0000"},
+                                  {"purchase_id": "3", "vendor_id": "1", "class": "3", "total_bill": "90.0000"}]
+        t = self.report(tables=tb)
+        self.assertNotIn("class", self.section(t, "١. محتاج قرارك", "٢. المطابقة"))
+        pc = self.res["plan"].checks["purchase_classes"]
+        self.assertEqual({c: pc[c]["meaning"] for c in ("1", "2", "3")},
+                         {"1": "cash", "2": "credit", "3": "consignment"})
+
+    def test_a_cancelled_item_with_unclear_units_and_no_stock_moves_stopped_and_is_listed(self):
+        tb = base_tables()
+        tb["Products"].append(product(5, "104", "Testcancelled Tab", "صنف ملغي", product_unit3="3",
+                                      product_unit1_3="2.5", deleted="1"))
+        t = self.report(tables=tb)
+        self.assertTrue(self.res["ok"], self.res.get("plan").blocking)
+        it = self.db.one("SELECT * FROM items WHERE code='104'")
+        self.assertTrue(it)
+        self.assertEqual(it["status"], "inactive")
+        self.assertNotIn("104", self.section(t, "١. محتاج قرارك", "٢. المطابقة"))
+        doubt = self.section(t, "أصناف مشكوك فيها", None)
+        self.assertIn("«Testcancelled Tab»", doubt)
+        self.assertIn("كود 104", doubt)
+
+    def test_a_cancelled_item_with_unclear_units_and_stock_still_stops(self):
+        tb = base_tables()
+        tb["Products"].append(product(5, "104", "Testcancelled Tab", "صنف ملغي", product_unit3="3",
+                                      product_unit1_3="2.5", deleted="1"))
+        tb["Product_Amount"].append(stock_row(11, 5, 1, "2", "10.0000", "2027-01-01T00:00:00"))
+        self.report(tables=tb)
+        self.assertFalse(self.res["ok"])                                  # its stock needs the real pack
+
+    def test_the_treasury_is_a_reference_figure_not_money(self):
+        tb = base_tables()
+        tb["Cash_depots"] = [{"cd_id": "1", "cd_name": "الخزينة", "cd_class": "1", "cd_balance": "1200.0000"},
+                             {"cd_id": "2", "cd_name": "فودافون كاش", "cd_class": "1", "cd_balance": "500.0000"}]
+        t = self.report(tables=tb)
+        d = [x for x in self.res["plan"].checks["money_info"]["cash_depots"] if x["estock_id"] == "1"][0]
+        self.assertTrue(d.get("reference_only"))
+        sec1 = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        self.assertNotIn("1,200.00", sec1)                                # not counted as money to move
+        self.assertIn("500.00", sec1)
+        self.assertIn("مرجع", t)
+        self.assertIn("1,200.00", t)
