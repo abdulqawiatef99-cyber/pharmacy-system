@@ -11,7 +11,7 @@ set "INST=%LOCALAPPDATA%\Programs\PharmacyPlatform"
 if exist "%~dp0..\..\..\python\pythonw.exe" for %%i in ("%~dp0..\..\..") do set "INST=%%~fi"
 set "PY=%INST%\python\python.exe"
 set "RC=3"
-if not exist "%PY%" echo RESULT: FAIL - the program's Python was not found: %PY%
+if not exist "%PY%" echo RESULT: FAIL - the program's Python was not found: "%PY%"
 if not exist "%PY%" goto done
 if not exist "%~dp0estock-backups.py" echo RESULT: FAIL - estock-backups.py is missing next to this file
 if not exist "%~dp0estock-backups.py" goto done

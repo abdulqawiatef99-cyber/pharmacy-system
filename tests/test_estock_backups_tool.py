@@ -11,6 +11,8 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from app.core import tools_folder as tf
 
@@ -61,6 +63,13 @@ class TestLauncher(unittest.TestCase):
         for line in self.code:                                   # a ")" in a user name would end a ( ... ) block
             if "%PY%" in line or "%INST%" in line:
                 self.assertFalse(line.lower().startswith("if") and "(" in line.split('"')[-1], line)
+
+    def test_every_path_is_expanded_inside_quotes(self):
+        """A folder name with "&" in it would otherwise be run as a command (Codex P1 on #369)."""
+        for line in self.code:
+            outside = re.sub(r'"[^"]*"', "", line)
+            for var in ("%PY%", "%INST%", "%~dp0", "%LOCALAPPDATA%", "%TEMP%", "%%~fi"):
+                self.assertNotIn(var, outside, line)
 
     def test_the_window_stays_open_and_the_code_is_explained(self):
         self.assertIn("pause >nul", self.code)
@@ -193,19 +202,102 @@ class TestListing(unittest.TestCase):
         self.assertIn("type not certain", next(l for l in text.splitlines() if l.startswith("RESULT:")))
         self.assertIn("مش مؤكد", self.m.arabic_message(self.m.verdict(self.m.scan([str(self.d)])[0], NOW)))
 
-    def test_a_backup_being_written_right_now_counts_as_a_database_backup(self):
-        """SQL Server holds the file it is writing: it cannot be opened, and it is the newest one."""
-        self.bak(self.d, "stock_old.bak", 80)
-        locked = self.bak(self.d, "stock_now.bak", 0.2)
+    def locked(self, path):
+        """As if this one file refused to be opened."""
         real = self.m.kind
-        self.m.kind = lambda path: "unread" if path == locked else real(path)
-        try:
+        return mock.patch.object(self.m, "kind", lambda p, attributes=0: "unread" if p == path else real(p, attributes))
+
+    def test_a_file_that_cannot_be_opened_never_changes_the_answer_and_is_named(self):
+        """Codex P2 on #369. A fresh .bak nobody could read proves nothing: it may be any program's file, or the
+        backup SQL Server is writing right now (it locks it). The stale database backup is still reported, and
+        the note says to run again."""
+        self.bak(self.d, "stock_old.bak", 100)
+        fresh = self.bak(self.desk, "who_knows.bak", 1)
+        with self.locked(fresh):
             code, text = self.run_tool()
-        finally:
-            self.m.kind = real
+            v = self.m.verdict(self.m.scan([str(self.d), str(self.desk)])[0], NOW)
+        self.assertEqual(code, 1)
+        result = next(l for l in text.splitlines() if l.startswith("RESULT:"))
+        self.assertIn("WARNING", result)
+        self.assertIn("stock_old.bak", result)
+        self.assertIn(" unread ", next(l for l in text.splitlines() if "who_knows.bak" in l and l[:4].isdigit()))
+        note = next(l for l in text.splitlines() if l.startswith("NOTE:"))
+        self.assertIn("1 newer .bak file(s)", note)
+        self.assertIn("run this again in a few minutes", note)
+        self.assertEqual((v["code"], v["basis"], v["unchecked"]), ("old", "sql", 1))
+        self.assertIn("شغّل الأداة تاني", self.m.arabic_message(v))
+
+    def test_an_unreadable_file_older_than_the_backup_judged_is_not_worth_a_note(self):
+        old = self.bak(self.d, "old_locked.bak", 300)
+        self.bak(self.d, "stock.bak", 2)
+        with self.locked(old):
+            code, text = self.run_tool()
         self.assertEqual(code, 0)
-        self.assertIn("stock_now.bak", next(l for l in text.splitlines() if l.startswith("RESULT:")))
-        self.assertIn(" unread ", next(l for l in text.splitlines() if "stock_now.bak" in l and l[:4].isdigit()))
+        self.assertNotIn("NOTE:", text)
+
+    def test_a_file_in_the_cloud_is_listed_but_never_opened(self):
+        """Codex P1 on #369: opening a OneDrive "online only" file downloads it and writes it to the disk."""
+        self.bak(self.d, "stock.bak", 3)
+        cloud = self.bak(self.desk, "onedrive_copy.bak", 1)
+        real_stat, real_open, opened = os.stat, open, []
+
+        def stat(path, *a, **k):
+            st = real_stat(path, *a, **k)
+            if str(path) == cloud:
+                return SimpleNamespace(st_mtime=st.st_mtime, st_size=st.st_size, st_file_attributes=0x400000)
+            return st
+
+        def spy(path, *a, **k):
+            opened.append(str(path))
+            return real_open(path, *a, **k)
+        with mock.patch.object(self.m.os, "stat", stat), mock.patch("builtins.open", spy):
+            code, text = self.run_tool()
+        self.assertNotIn(cloud, opened)
+        self.assertEqual(len(opened), 1)                                           # the local one's 8 bytes
+        self.assertIn(" cloud ", next(l for l in text.splitlines() if "onedrive_copy.bak" in l and l[:4].isdigit()))
+        self.assertEqual(code, 0)
+        self.assertIn("stock.bak", next(l for l in text.splitlines() if l.startswith("RESULT:")))
+        self.assertIn("NOTE: 1 newer", text)
+        for flag in (0x1000, 0x40000, 0x400000):                                   # offline, recall on open, on data access
+            self.assertEqual(self.m.kind("/no/such/file.bak", flag), "cloud")
+
+    def test_a_place_on_the_network_is_not_even_asked_whether_it_exists(self):
+        """Codex P1 on #369: a Desktop redirected to a server share. `isdir` on it is already a network call."""
+        self.bak(self.d, "stock.bak", 3)
+        share = r"\\server\redirected\Desktop"
+        probed = []
+        real_isdir, real_walk = os.path.isdir, os.walk
+        with mock.patch.object(self.m.os.path, "isdir", lambda p: probed.append(str(p)) or real_isdir(p)), \
+                mock.patch.object(self.m.os, "walk", lambda p, **k: probed.append(str(p)) or real_walk(p, **k)):
+            code, text = self.run_tool(self.d, share)
+        self.assertNotIn(share, probed)
+        self.assertIn("not searched (on the network; this tool stays on this PC): " + share, text)
+        self.assertNotIn(share, next(l for l in text.splitlines() if l.startswith("searched:")))
+        self.assertEqual(code, 0)
+
+    def test_what_counts_as_the_network(self):
+        m = self.m
+        mapped = lambda root: m.DRIVE_REMOTE if root == "Z:\\" else 3            # Z: is a mapped drive, the rest fixed
+        self.assertTrue(m.is_remote(r"\\server\share\Desktop", mapped))
+        self.assertTrue(m.is_remote("//server/share/Desktop", mapped))
+        self.assertTrue(m.is_remote(r"Z:\Backups", mapped))
+        self.assertFalse(m.is_remote("D:\\", mapped))
+        self.assertFalse(m.is_remote(r"C:\Users\someone\Desktop", mapped))
+        self.assertFalse(m.is_remote(str(self.d), mapped))
+
+    def test_a_network_desktop_from_the_settings_is_kept_to_be_reported_not_probed(self):
+        share = r"\\server\users\someone"
+        probed = []
+        real_isdir = os.path.isdir
+        with mock.patch.object(self.m.os.path, "isdir", lambda p: probed.append(str(p)) or real_isdir(p)):
+            got = self.m.desktops({"USERPROFILE": share})
+        self.assertEqual(got, [share + os.sep + "Desktop", os.path.join(share, "OneDrive", "Desktop")])
+        self.assertEqual(probed, [])
+
+    def test_nothing_found_says_when_a_network_place_was_left_out(self):
+        code, text = self.run_tool(self.d, r"\\server\share")
+        self.assertEqual(code, 2)
+        self.assertIn("A network place was not searched", text)
 
     def test_deleted_files_and_missing_places_are_passed_over(self):
         self.bak(self.d / "$RECYCLE.BIN" / "S-1-5", "deleted.bak", 1)

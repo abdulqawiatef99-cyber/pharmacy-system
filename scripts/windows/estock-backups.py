@@ -10,6 +10,12 @@ What it does, and nothing else:
 It never writes, renames or deletes a file, never connects to SQL Server or to E-Stock, and sends nothing
 anywhere. Standard library only, so it runs with the program's own Python from the tools folder.
 
+Staying on this PC (Codex review of #369):
+- a place on the network (a Desktop redirected to a server share, a mapped drive) is not searched at all, not
+  even asked whether it exists: that question already goes over the network;
+- a file that lives in the cloud (OneDrive "online only") is listed from its name, size and date but never
+  opened: opening it would download it and write it to this disk.
+
 Exit code: 0 = the newest backup is at most 24 hours old, 1 = older, 2 = no .bak file found.
 """
 from __future__ import annotations
@@ -22,13 +28,39 @@ from datetime import datetime
 MAX_AGE_HOURS = 24
 SHOW = 30                                    # rows printed; the count of all files found is always printed
 SKIP_DIRS = {"$recycle.bin", "system volume information"}        # deleted files and Windows' own store
+# Windows file attributes of a file whose content is not on this disk: OFFLINE, RECALL_ON_OPEN,
+# RECALL_ON_DATA_ACCESS (OneDrive Files On-Demand and the like). Reading such a file fetches it.
+CLOUD_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
+DRIVE_REMOTE = 4
 # a native SQL Server backup starts with a tape-format block ("TAPE"); a compressed one with "MSSQLBAK"
 SQL_MARKS = (b"TAPE", b"MSSQLBAK")
 
 
+def _drive_type(root: str) -> int:
+    """Windows' own answer for a drive root such as "D:\\" (4 = a network drive). It reads the local drive
+    table and does not touch the drive. 0 where it cannot be asked."""
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+        return int(ctypes.windll.kernel32.GetDriveTypeW(root))
+    except Exception:
+        return 0
+
+
+def is_remote(path: str, drive_type=_drive_type) -> bool:
+    """A path on another computer: \\\\server\\share..., or a drive letter mapped to one. Decided from the text
+    of the path and the local drive table only."""
+    p = str(path)
+    if p.startswith(("\\\\", "//")):
+        return True
+    return len(p) >= 2 and p[0].isalpha() and p[1] == ":" and drive_type(p[:2] + "\\") == DRIVE_REMOTE
+
+
 def desktops(env=None) -> list[str]:
     """The Desktop folders a backup may have been saved to: the user's (it may be redirected, e.g. into
-    OneDrive) and the shared one. Only folders that exist."""
+    OneDrive) and the shared one. A folder on the network is returned as it is (the scan reports it as not
+    searched); of the local ones, only those that exist."""
     env = os.environ if env is None else env
     found = []
     if os.name == "nt":
@@ -45,8 +77,8 @@ def desktops(env=None) -> list[str]:
         found.append(os.path.join(env["PUBLIC"], "Desktop"))
     out, seen = [], set()
     for p in found:
-        key = os.path.normcase(os.path.abspath(p))
-        if key not in seen and os.path.isdir(p):
+        key = os.path.normcase(p if is_remote(p) else os.path.abspath(p))
+        if key not in seen and (is_remote(p) or os.path.isdir(p)):      # a network path is never probed
             seen.add(key)
             out.append(p)
     return out
@@ -56,8 +88,11 @@ def default_roots() -> list[str]:
     return ["D:\\"] + desktops()
 
 
-def kind(path: str) -> str:
-    """'sql' = a SQL Server database backup, 'other' = some other file named .bak, 'unread' = could not look."""
+def kind(path: str, attributes: int = 0) -> str:
+    """'sql' = a SQL Server database backup, 'other' = some other file named .bak, 'unread' = could not
+    look, 'cloud' = its content is not on this disk, so it was not opened."""
+    if attributes & CLOUD_ATTRIBUTES:
+        return "cloud"
     try:
         with open(path, "rb") as f:
             head = f.read(8)
@@ -66,11 +101,15 @@ def kind(path: str) -> str:
     return "sql" if head.startswith(SQL_MARKS) else "other"
 
 
-def scan(roots, progress=None) -> tuple[list[dict], list[str]]:
-    """Every .bak file under the roots, as {path, mtime, size, kind}; and the roots that do not exist.
-    A folder that cannot be opened is passed over: the list is what this user can see."""
-    files, missing, seen = [], [], set()
+def scan(roots, progress=None, remote=is_remote) -> tuple[list[dict], list[str], list[str]]:
+    """Every .bak file under the roots, as {path, mtime, size, kind}; the roots that do not exist; and the
+    roots on the network, which were not searched. A folder that cannot be opened is passed over: the list is
+    what this user can see."""
+    files, missing, skipped, seen = [], [], [], set()
     for root in roots:
+        if remote(root):                            # before any look at it: even "does it exist" is a network call
+            skipped.append(root)
+            continue
         if not os.path.isdir(root):
             missing.append(root)
             continue
@@ -90,24 +129,29 @@ def scan(roots, progress=None) -> tuple[list[dict], list[str]]:
                 except OSError:
                     continue
                 seen.add(key)
-                files.append({"path": path, "mtime": st.st_mtime, "size": st.st_size, "kind": kind(path)})
+                files.append({"path": path, "mtime": st.st_mtime, "size": st.st_size,
+                              "kind": kind(path, getattr(st, "st_file_attributes", 0))})
     files.sort(key=lambda f: (-f["mtime"], f["path"]))
-    return files, missing
+    return files, missing, skipped
 
 
 def verdict(files, now: float) -> dict:
-    """code 'ok' / 'old' / 'none'. Judged on the SQL Server backups when any was recognised (basis 'sql');
-    otherwise on every .bak file found (basis 'any'), and the report says the type is not certain."""
-    # a file that could not be opened counts with the database backups: the one SQL Server is writing right now
-    # is locked, and it is the newest
-    sql = [f for f in files if f["kind"] in ("sql", "unread")]
+    """code 'ok' / 'old' / 'none'. Judged on the files recognised as SQL Server backups (basis 'sql'); when
+    none was recognised, on every .bak file found (basis 'any'), and the report says the type is not certain.
+
+    `unchecked`: files newer than the one judged that could not be looked into (locked, refused, or in the
+    cloud). They never change the answer: a file nobody could read proves nothing, neither that the backup
+    runs (it may be any program's .bak) nor that it does not (SQL Server locks the backup it is writing right
+    now). The report names them and says to run again."""
+    sql = [f for f in files if f["kind"] == "sql"]
     basis = sql or files
     if not basis:
-        return {"code": "none", "basis": "none", "newest": None, "age_hours": None}
+        return {"code": "none", "basis": "none", "newest": None, "age_hours": None, "unchecked": 0}
     newest = max(basis, key=lambda f: f["mtime"])
     age = max(0.0, (now - newest["mtime"]) / 3600)
+    unchecked = sum(1 for f in files if f["kind"] in ("unread", "cloud") and f["mtime"] > newest["mtime"]) if sql else 0
     return {"code": "ok" if age <= MAX_AGE_HOURS else "old", "basis": "sql" if sql else "any",
-            "newest": newest, "age_hours": age}
+            "newest": newest, "age_hours": age, "unchecked": unchecked}
 
 
 def fmt_size(n: int) -> str:
@@ -130,12 +174,14 @@ def fmt_date(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def report(files, missing, roots, now: float) -> list[str]:
+def report(files, missing, roots, now: float, skipped=()) -> list[str]:
     v = verdict(files, now)
     lines = [f"E-Stock backups on this PC (read only)  {fmt_date(now)}",
-             "searched: " + ", ".join(r for r in roots if r not in missing)
-             + ("" if not missing else "   not found: " + ", ".join(missing)),
-             f".bak files found: {len(files)} (SQL Server backups: {sum(f['kind'] == 'sql' for f in files)})", ""]
+             "searched: " + ", ".join(r for r in roots if r not in missing and r not in skipped)
+             + ("" if not missing else "   not found: " + ", ".join(missing))]
+    if skipped:
+        lines.append("not searched (on the network; this tool stays on this PC): " + ", ".join(skipped))
+    lines += [f".bak files found: {len(files)} (SQL Server backups: {sum(f['kind'] == 'sql' for f in files)})", ""]
     if files:
         lines.append(f"{'date':16}  {'age':>10}  {'size':>10}  {'type':6}  file")
         for f in files[:SHOW]:
@@ -146,7 +192,7 @@ def report(files, missing, roots, now: float) -> list[str]:
         lines.append("")
     if v["code"] == "none":
         lines.append("RESULT: NONE - no .bak file on D:\\ or the Desktop. Either E-Stock's backup never ran,"
-                     " or it saves somewhere else.")
+                     " or it saves somewhere else." + (" (A network place was not searched, see above.)" if skipped else ""))
         return lines
     what = "SQL Server backup" if v["basis"] == "sql" else ".bak file (none looks like a SQL Server backup: type not certain)"
     where = f"{fmt_date(v['newest']['mtime'])}, {fmt_age(v['age_hours'])} old: {v['newest']['path']}"
@@ -155,6 +201,10 @@ def report(files, missing, roots, now: float) -> list[str]:
     else:
         lines.append(f"RESULT: WARNING - the newest {what} is OLDER THAN {MAX_AGE_HOURS} HOURS ({where})."
                      " E-Stock's hourly backup is probably not running.")
+    if v["unchecked"]:
+        lines.append(f"NOTE: {v['unchecked']} newer .bak file(s) above could not be looked into (type 'unread' ="
+                     " locked or refused, 'cloud' = online only) and were not counted. If E-Stock is writing a"
+                     " backup right now, run this again in a few minutes.")
     return lines
 
 
@@ -167,6 +217,9 @@ def arabic_message(v: dict) -> str:
     hours = v["age_hours"]
     age = f"{round(hours * 60)} دقيقة" if hours < 1 else f"{hours:.1f} ساعة" if hours < 48 else f"{hours / 24:.1f} يوم"
     unsure = "" if v["basis"] == "sql" else "\n\n(ملحوظة: نوع الملفات مش مؤكد إنه نسخ قاعدة بيانات.)"
+    if v.get("unchecked"):
+        unsure += (f"\n\n(فيه {v['unchecked']} ملف أحدث ماقدرتش أفتحه عشان أتأكد منه، فماتحسبش."
+                   " لو إي ستوك بيعمل نسخة دلوقتي، شغّل الأداة تاني بعد كام دقيقة.)")
     if v["code"] == "ok":
         return f"أحدث نسخة احتياطية لإي ستوك: {when} (من {age}).\n\nالنسخ الاحتياطي شغال.{unsure}"
     return (f"تحذير: أحدث نسخة احتياطية لإي ستوك عمرها {age} ({when}).\n\n"
@@ -196,10 +249,10 @@ def main(argv=None, now: float | None = None, out=None) -> int:
     box = "--no-box" not in argv
     roots = [argv[i + 1] for i, a in enumerate(argv) if a == "--root" and i + 1 < len(argv)] or default_roots()
     now = time.time() if now is None else now
-    files, missing = scan(roots, progress=lambda r: print(f"searching {r} ... (a big disk can take a few minutes)",
-                                                           file=out, flush=True))
+    files, missing, skipped = scan(roots, progress=lambda r: print(
+        f"searching {r} ... (a big disk can take a few minutes)", file=out, flush=True))
     print("", file=out)
-    for line in report(files, missing, roots, now):
+    for line in report(files, missing, roots, now, skipped):
         print(line, file=out)
     v = verdict(files, now)
     if box:
