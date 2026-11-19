@@ -198,6 +198,19 @@ def defender_scan(path: Path) -> dict:
             "output": r["output"][-600:]}
 
 
+def isolated_environment(work: Path) -> dict[str, str]:
+    """The environment every checked program runs in. Nothing of the caller's pharmacy settings survives:
+    every PHARM_* variable is dropped (PHARM_DB_PATH alone would send `init` to the real database, since it
+    wins over the data folder in app/config.py), then each data path is set inside `work`. No update token,
+    no AI key, no printer. Same idea as scripts/validate_local_release.py."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PHARM_") and k != "ANTHROPIC_API_KEY"}
+    data = work / "data"
+    env.update(PHARM_DATA_DIR=str(data), PHARM_DB_PATH=str(data / "pharmacy.db"),
+               PHARM_UPLOAD_DIR=str(data / "uploads"), PHARM_BACKUP_DIR=str(work / "backups"),
+               PHARM_PRINTER="none", PYTHONUTF8="1", PYTHONPATH=str(ROOT))
+    return env
+
+
 def cmd_build(tool: str, out: Path) -> int:
     out.mkdir(parents=True, exist_ok=True)
     # nothing of an earlier build may survive: a failed build must not leave a program to be checked as its own
@@ -241,9 +254,7 @@ def cmd_check(tool: str, out: Path, extra_dll: Path | None) -> int:
             report["bytecode_archive"] = pyinstaller_bytecode(dist)
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         work = Path(tmp)
-        env = {**os.environ, "PHARM_DATA_DIR": str(work / "data"), "PYTHONUTF8": "1", "PYTHONPATH": str(ROOT),
-               "PHARM_PRINTER": "none"}
-        env.pop("PHARM_RELEASE_CANDIDATE", None)
+        env = isolated_environment(work)
         probe = run(cmd + ["--eval-probe"], env, cwd=work)
         try:
             report["probe"] = json.loads(probe["output"].strip().splitlines()[-1])

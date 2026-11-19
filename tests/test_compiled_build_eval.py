@@ -226,6 +226,40 @@ class TestReport(unittest.TestCase):
             self.assertIn("::error title=compiled-build-eval nuitka::", out.getvalue())
 
 
+class TestIsolation(unittest.TestCase):
+    """Codex P1 on #379: run on a PC that has the pharmacy's own settings in its environment, the checks
+    must still touch nothing outside their temporary folder (AGENTS.md: real data is never touched)."""
+
+    OUTSIDE = {"PHARM_DB_PATH": "real.db", "PHARM_UPLOAD_DIR": "real-uploads", "PHARM_BACKUP_DIR": "real-backups",
+               "PHARM_DATA_DIR": "real-data"}
+
+    def test_every_data_path_is_inside_the_work_folder_whatever_the_caller_had_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work, real = Path(tmp) / "work", Path(tmp) / "real"
+            inherited = {k: str(real / v) for k, v in self.OUTSIDE.items()}
+            inherited.update(PHARM_GITHUB_TOKEN="x" * 20, ANTHROPIC_API_KEY="y" * 20, PHARM_PRINTER="win:Receipt",
+                             PHARM_RELEASE_CANDIDATE="1", PHARM_UPDATE_REPO="someone/else", PATH=os.environ["PATH"])
+            with mock.patch.dict(os.environ, inherited, clear=True):
+                env = ev.isolated_environment(work)
+            for name in self.OUTSIDE:
+                self.assertTrue(Path(env[name]).is_relative_to(work), f"{name}={env[name]}")
+            self.assertEqual(env["PHARM_PRINTER"], "none")                 # never a real printer or drawer
+            self.assertEqual(env["PATH"], os.environ["PATH"])              # the rest of the environment is kept
+            allowed = set(self.OUTSIDE) | {"PHARM_PRINTER"}
+            self.assertEqual({k for k in env if k.startswith("PHARM_")}, allowed)    # no token, no update repo
+            self.assertFalse(env.get("ANTHROPIC_API_KEY"))
+
+    def test_a_whole_check_run_leaves_the_callers_database_and_folders_untouched(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir()
+            inherited = {k: str(real / v) for k, v in self.OUTSIDE.items()}
+            with mock.patch.dict(os.environ, inherited), contextlib.redirect_stdout(io.StringIO()):
+                code = ev.cmd_check("python", Path(tmp) / "out", None)
+            self.assertEqual(code, 0)
+            self.assertEqual(list(real.iterdir()), [])                     # no database, no backup, nothing
+
+
 class TestStaleOutput(unittest.TestCase):
     """Codex on #379: checks must never run a program left by an earlier build and call it this build's."""
 
