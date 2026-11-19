@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "compiled-build-eval.yml"
@@ -151,6 +152,7 @@ def _good_report() -> dict:
             "build": {"ok": True, "seconds": 900.0},
             "size": {"files": 120, "bytes": 90 * 1024 * 1024, "compressed_bytes": 30 * 1024 * 1024, "largest": []},
             "probe": {"sqlite": "OK 3.50", "arabic_receipt(pillow)": "WARN: raqm/fribidi missing"},
+            "probe_exit": 0,
             "start": {"first_seconds": 1.2, "best_seconds": 0.4, "ok": True},
             "commands": {"selftest": {"ok": True, "seconds": 2.0}, "init": {"ok": True, "seconds": 1.0}},
             "serve": {"healthy": True, "seconds_to_healthy": 1.5, "start_page": True},
@@ -183,6 +185,10 @@ class TestReport(unittest.TestCase):
             "server": lambda r: r["serve"].update(healthy=False),
             "start page": lambda r: r["serve"].update(start_page=False),
             "no build": lambda r: r.update(error="no compiled program: the build failed"),
+            "build failed but a program was found": lambda r: r["build"].update(ok=False),      # Codex on #379
+            "no build record for a compiled tool": lambda r: r.pop("build"),
+            "probe printed its answers and then crashed": lambda r: r.update(probe_exit=-1073741819),
+            "no probe exit status": lambda r: r.pop("probe_exit"),
             "no probe": lambda r: r.pop("probe"),
             "no commands": lambda r: r.pop("commands"),
         }
@@ -191,6 +197,13 @@ class TestReport(unittest.TestCase):
             breaker(report)
             self.assertFalse(ev.passed(report), name)
             self.assertIn("**Result: FAIL**", ev.markdown(report), name)
+
+    def test_plain_python_needs_no_build_record(self):
+        report = _good_report()
+        report.update(tool="python")
+        for key in ("build", "size", "source_exposure", "antivirus"):
+            report.pop(key)
+        self.assertTrue(ev.passed(report))
 
     def test_finish_writes_both_files_and_returns_the_result(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
@@ -211,6 +224,51 @@ class TestReport(unittest.TestCase):
             self.assertIn("Result: PASS", (Path(tmp) / "summary.md").read_text(encoding="utf-8"))
             self.assertIn("::notice title=compiled-build-eval nuitka::", out.getvalue())
             self.assertIn("::error title=compiled-build-eval nuitka::", out.getvalue())
+
+
+class TestStaleOutput(unittest.TestCase):
+    """Codex on #379: checks must never run a program left by an earlier build and call it this build's."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.out = Path(tmp.name).resolve()
+        self.exe = ev.dist_dir("nuitka", self.out) / ev.exe_name()
+        self.exe.parent.mkdir(parents=True)
+        self.exe.write_bytes(b"left by an earlier build")
+
+    def quiet(self):
+        return contextlib.redirect_stdout(io.StringIO())
+
+    def test_a_failed_build_removes_what_an_earlier_build_left(self):
+        failing = [sys.executable, "-c", "import sys; sys.exit(3)"]
+        with mock.patch.object(ev, "build_command", return_value=failing), self.quiet():
+            self.assertEqual(ev.cmd_build("nuitka", self.out), 1)
+        self.assertFalse(self.exe.exists())
+        self.assertFalse(self.exe.parent.exists())
+        record = json.loads((self.out / "build-nuitka.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["ok"], record["exit"]), (False, 3))
+
+    def test_a_build_tool_that_exits_zero_without_a_program_is_a_failed_build(self):
+        with mock.patch.object(ev, "build_command", return_value=[sys.executable, "-c", "pass"]), self.quiet():
+            self.assertEqual(ev.cmd_build("nuitka", self.out), 1)
+        self.assertFalse(json.loads((self.out / "build-nuitka.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_checks_do_not_run_a_program_when_the_build_failed_or_left_no_record(self):
+        def must_not_run(*a, **k):
+            raise AssertionError("the stale program was started")
+        for record in ({"tool": "nuitka", "ok": False, "exit": 1, "seconds": 5.0}, None):
+            record_file = self.out / "build-nuitka.json"
+            record_file.unlink(missing_ok=True)
+            if record is not None:
+                record_file.write_text(json.dumps(record), encoding="utf-8")
+            with mock.patch.object(ev, "run", must_not_run), mock.patch.object(ev, "serve_smoke", must_not_run), \
+                    self.quiet():
+                self.assertEqual(ev.cmd_check("nuitka", self.out, None), 1)
+            report = json.loads((self.out / "report-nuitka.json").read_text(encoding="utf-8"))
+            self.assertIn("build", report["error"])
+            self.assertNotIn("probe", report)
+            self.assertIn("**Result: FAIL**", (self.out / "report-nuitka.md").read_text(encoding="utf-8"))
 
 
 class TestEntry(unittest.TestCase):

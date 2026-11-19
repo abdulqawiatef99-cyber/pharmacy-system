@@ -200,6 +200,12 @@ def defender_scan(path: Path) -> dict:
 
 def cmd_build(tool: str, out: Path) -> int:
     out.mkdir(parents=True, exist_ok=True)
+    # nothing of an earlier build may survive: a failed build must not leave a program to be checked as its own
+    (out / f"build-{tool}.json").unlink(missing_ok=True)
+    shutil.rmtree(out / tool, ignore_errors=True)
+    if (out / tool).exists():
+        print(f"build {tool}: FAILED, the old output folder could not be removed: {out / tool}", flush=True)
+        return 1
     cmd = build_command(tool, out)
     print("build:", " ".join(cmd), flush=True)
     start = time.perf_counter()
@@ -220,6 +226,9 @@ def cmd_check(tool: str, out: Path, extra_dll: Path | None) -> int:
     cmd = program_cmd(tool, out)
     if tool != "python":
         dist = dist_dir(tool, out)
+        if report.get("build", {}).get("ok") is not True:      # never check a program this build did not make
+            report["error"] = "the build failed or left no record: nothing was checked"
+            return finish(report, out)
         if not Path(cmd[0]).is_file():
             report["error"] = "no compiled program: the build failed"
             return finish(report, out)
@@ -241,6 +250,7 @@ def cmd_check(tool: str, out: Path, extra_dll: Path | None) -> int:
         except (ValueError, IndexError):
             report["probe"] = {"probe": "FAIL: no answer: " + probe["output"][-800:]}
         report["probe_seconds"] = probe["seconds"]
+        report["probe_exit"] = probe["exit"]        # answers printed and then a crash on the way out is a failure
         starts = [run(cmd + ["--help"], env, cwd=work) for _ in range(3)]
         report["start"] = {"first_seconds": starts[0]["seconds"], "best_seconds": min(s["seconds"] for s in starts),
                            "ok": all(s["exit"] == 0 for s in starts)}
@@ -271,6 +281,8 @@ def cmd_check(tool: str, out: Path, extra_dll: Path | None) -> int:
 
 def passed(report: dict) -> bool:
     return ("error" not in report
+            and (report.get("tool") == "python" or report.get("build", {}).get("ok") is True)
+            and report.get("probe_exit") == 0
             and not any(str(v).startswith("FAIL") for v in report.get("probe", {"x": "FAIL"}).values())
             and report.get("start", {}).get("ok") is True
             and all(c["ok"] for c in report.get("commands", {"x": {"ok": False}}).values())
@@ -313,6 +325,8 @@ def markdown(report: dict) -> str:
         b = report["baseline"]
         lines.append(f"- Plain Python on the same machine: start best {b['start_best_seconds']} s, server healthy "
                      f"after {b['seconds_to_healthy']} s, `selftest` {b['selftest_seconds']} s")
+    if report.get("probe_exit") not in (None, 0):
+        lines.append(f"- Library probe process: FAILED, exit {report['probe_exit']}")
     lines += ["", "| Library check | Result |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in report.get("probe", {}).items()]
     failures = [(n, c.get("output", "")) for n, c in report.get("commands", {}).items() if not c["ok"]]
