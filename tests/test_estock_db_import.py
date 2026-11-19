@@ -1028,10 +1028,15 @@ class TestOwnerReportLines(Base):
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
-        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
-        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        every = {(d["table"], d["field"]): d for d in res["plan"].dq}
+        # manager 20/11 00:25: history-only lines (unknown ids in old invoices, a large sale line) are for review,
+        # not the owner's decisions; they change no money and no stock
+        self.assertEqual(every[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(every[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertNotIn(("Customer", "customer_id"), rows)
         self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
-        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        self.assertIn("سطر عكسه", every[("sales lines", "line value")]["action"])
+        self.assertNotIn(("sales lines", "line value"), rows)
         # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
         d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
         self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
@@ -1062,7 +1067,9 @@ class TestCashDepots(Base):
         self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
                          [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
                           ("3", "فودافون كاش", "3", "-15.00")])
-        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        # owner 20/11 00:50: the treasury's E-Stock figure is a reference (info), the two wallets are reviewed
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 2)
+        self.assertTrue(d[0]["reference_only"])
         self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
         self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
 
@@ -1173,7 +1180,8 @@ class TestScreenTour2245(Base):
                                   "total_after_back": "250.0000"}]
         res = self.run_import(tables=t)
         pc = res["plan"].checks["purchase_classes"]
-        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2,
+                                   "meaning": "consignment"})                     # owner 20/11 00:50
         self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
 
     def test_junk_master_names_are_listed_and_not_used(self):

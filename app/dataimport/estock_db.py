@@ -424,9 +424,53 @@ class Plan:
         return [d for d in self.dq if d["severity"] == "block"]
 
 
+CLASS_MEANINGS = {"cash": "كاش", "credit": "آجل", "consignment": "تحت التصريف"}
+CLASS_WORDS = {"cash": "cash", "كاش": "cash", "نقدي": "cash", "credit": "credit", "آجل": "credit", "اجل": "credit",
+               "consignment": "consignment", "تحت التصريف": "consignment"}
+# what the program does with each answer (manager 20/11 00:25: plain words, before the owner chooses)
+CLASS_EFFECT = {
+    "cash": "كاش = اتدفعت وقتها: الفواتير تاريخ في الأرشيف بس، ومفيش رصيد مورد ولا مخزون بيتغيّر.",
+    "credit": "آجل = على حساب المورد: رصيد المورد اللي بيتنقل هو رصيده في إي ستوك (فيه الفواتير دي)، والفواتير تاريخ في الأرشيف.",
+    "consignment": ("تحت التصريف = بضاعة المورد عندك لحد ما تتباع: البرنامج لسه مابيفرّقهاش عن بضاعتك، فرصيدها بيتنقل في"
+                    " مخزونك زي إي ستوك ورصيد المورد زي إي ستوك؛ واتعلّمت كده في التقرير."),
+}
+
+
+# owner 20/11 00:50: E-Stock's purchase screen offers كاش / آجل / تحت التصريف in that order (2,941 / 55 / 1 fit)
+OWNER_CLASSES = {"1": "cash", "2": "credit", "3": "consignment"}
+
+
+def decision_json(path: Path | None) -> Path | None:
+    """The decision file holding the class answers: packs.json itself, or the packs.json next to a chosen
+    packs.xlsx (the bat passes the workbook when both exist; Codex #384)."""
+    if not path:
+        return None
+    path = Path(path)
+    j = path if path.suffix.lower() == ".json" else path.with_suffix(".json")
+    return j if j.exists() else None
+
+
+def read_classes(path: Path | None) -> dict[str, str]:
+    """The owner's answers for Purchase_header.class, in the same decision file as the packs:
+    packs.json = {"packs": {"<code>": n}, "classes": {"1": "كاش", "2": "آجل", "3": "تحت التصريف"}}."""
+    path = decision_json(path)
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out = {}
+    for k, v in (raw.get("classes") or {}).items() if isinstance(raw, dict) else ():
+        meaning = CLASS_WORDS.get(str(v or "").strip().lower()) or CLASS_WORDS.get(str(v or "").strip())
+        if not meaning:
+            raise ValidationFailed(f"معنى غير معروف لنوع فواتير الشراء {k}: {v} (كاش أو آجل أو تحت التصريف)")
+        out[str(k).strip()] = meaning
+    return out
+
+
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
-               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True) -> Plan:
+               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True,
+               classes: dict[str, str] | None = None) -> Plan:
     p = Plan(confirm_rows=(confirm or {}).get("rows", {}), rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
+                    "classes": dict(classes or {}),
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
@@ -437,6 +481,7 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
                 block=True)
     _plan_items(ex, p, packs or {})
     _plan_stock(ex, p, stock_source, stores or [DEFAULT_STORE])
+    _settle_cancelled_items(p)
     _plan_parties(ex, p, confirm or {})
     _plan_history_checks(ex, p)
     _plan_money_info(ex, p)
@@ -579,6 +624,26 @@ def _pack_of(r: dict, p: Plan, pid: str, code: str) -> tuple[int, bool]:
                 "معامل الوحدة الصغرى مش مضاعف للوسطى: عدد الوحدات محتاج قرار (--packs)", block=True)
         return f3, True
     return (f3 if f3 and f3 > 1 else f2 if f2 and f2 > 1 else 1), False
+
+
+def _settle_cancelled_items(p: Plan) -> None:
+    """Owner 20/11 00:50: an item cancelled in E-Stock whose units are unclear moves stopped as E-Stock has it,
+    listed as doubtful, when it has no stock (nothing to count, nothing priced). With stock it still stops."""
+    stocked = {r["product_id"] for r in p.stock}
+    stock_codes = {d["code"] for d in p.dq if d["table"] in ("Product_Amount", "Branches_Product_Amount", "stock")}
+    for it in p.items:
+        if not (it.get("inactive") and it.get("pack_unknown") and not it.get("pack_decided")):
+            continue
+        if it["product_id"] in stocked or it["code"] in stock_codes:
+            continue
+        for d in p.dq:
+            if d["table"] == "Products" and d["estock_id"] == it["product_id"] and d["severity"] == "block" \
+                    and d["field"].startswith("product_unit1_"):
+                d["severity"] = "review"
+                d["action"] = (f"صنف ملغي في إي ستوك ومفيش عليه رصيد، وعدد وحداته مش واضح: اتنقل متوقف زي ما هو"
+                               f" بعبوة {it['pack_size']} (صنف مشكوك فيه؛ لو رجّعته اكتب عدد الوحدات في packs.json)")
+                d["doubtful"] = True
+        it["pack_unknown"] = False
 
 
 def _store_ids(ex: Export, stores: list[str]) -> tuple[set[str], list[dict]]:
@@ -1177,7 +1242,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if missing:
             p.issue(master, ", ".join(sorted(missing, key=lambda x: dec(x) or 0)), "", key,
                     f"{len(missing)} رقم، {sum(missing.values())} سطر",
-                    f"OWNER: التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
+                    f"التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
                     kind="review")
     # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
@@ -1239,7 +1304,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if abs(v) >= 10000:
             rev = by_value.get(-v)
             p.issue("sales lines", sid, pid, "line value", egp(v),
-                    "OWNER: سطر بيع كبير" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
+                    "سطر بيع كبير (تاريخ في الأرشيف بس)" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
                     kind="review")
     # purchases paid cash / on account / on consignment (تحت التصريف): how Purchase_header.class splits them.
     # Which value is consignment is E-Stock's code: every value is listed with its invoices and value, and
@@ -1255,10 +1320,18 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         x[3].add(ident(r.get("vendor_id")))
     p.checks["purchase_classes"] = {c: {"invoices": n, "total_bill": egp(t), "after_returns": egp(a), "vendors": len(v)}
                                     for c, (n, t, a, v) in sorted(classes.items())}
+    answered = {**OWNER_CLASSES, **(p.rules.get("classes") or {})}
     for c, (n, t, a, v) in sorted(classes.items()):
-        p.issue("Purchase_header", "", "", "class", c,
-                f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
-                " التصريف؟ بضاعة تحت التصريف مابتتحسبش ملكنا ولا دين عادي من غير قرار", value_egp=a, kind="review")
+        meaning = answered.get(c)
+        if meaning:
+            p.checks["purchase_classes"][c]["meaning"] = meaning
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"{n} فاتورة شراء بقيمة {egp(t)} من {len(v)} مورد: قرار المالك «{CLASS_MEANINGS[meaning]}» ← "
+                    + CLASS_EFFECT[meaning], value_egp=a, kind="fixed")
+        else:
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
+                    " التصريف؟", value_egp=a, kind="review")
     # master rows whose name has no letter (units "6", "15", "16"; the money place "0000"): kept as they are
     for table, idc, cols in (("Product_units", "unit_id", ("unit_name_ar", "unit_name_en")),
                              ("Product_groups", "group_id", ("group_name_ar", "group_name_en")),
@@ -1454,6 +1527,14 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
                 p.issue("Cash_depots", d["estock_id"], name, "last_close", ", ".join(x["estock_id"] for x in used) or "-",
                         "OWNER: مش واضح أنهي درج هو درج الشيفت (اتقفل فيه شيفتات)", value_egp=bal, kind="review")
             d["action"] = "account_stopped" if "موقوف" in name else "account"
+            if d["role"] == "treasury":
+                d["reference_only"] = True      # owner 20/11 00:50: not real cash; the account starts at zero
+                p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
+                        f"«{name}» (خزنة): رصيدها في إي ستوك {d['balance']} ج مرجع بس — قرار المالك: مش فلوس حقيقية"
+                        " (مدفوعات الموردين والمخازن اتسجلت منها، والإيداعات والإيجار والمرتبات ما اتسجلتش)؛"
+                        " حسابها في البرنامج بيبدأ بصفر، ودرج أول شيفت = اللي المالك يعدّه ليلة النقل",
+                        kind="info")
+                continue
             p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                     f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
                     + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
@@ -2015,9 +2096,16 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     from .estock_job import read_packs
     ex = Export(export_dir, database)
     packs = read_packs(Path(packs_file)) if packs_file else {}
+    side = decision_json(Path(packs_file)) if packs_file else None
+    if side and side != Path(packs_file):            # packs.xlsx chosen: packs.json next to it counts as well
+        for code, n in read_packs(side).items():
+            if packs.get(code, n) != n:
+                raise ValidationFailed(f"عدد الوحدات للكود {code} مختلف بين packs.xlsx ({packs[code]}) و packs.json ({n})")
+            packs[code] = n
+    classes = read_classes(Path(packs_file)) if packs_file else {}
     confirm = read_confirm(Path(confirm_file)) if confirm_file else {}
     plan = build_plan(ex, packs=packs, stock_source=stock_source, stores=stores, confirm=confirm,
-                      round_piastres=round_piastres)
+                      round_piastres=round_piastres, classes=classes)
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")
