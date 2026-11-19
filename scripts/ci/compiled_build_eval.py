@@ -260,6 +260,12 @@ def cmd_check(tool: str, out: Path, extra_dll: Path | None) -> int:
         report["serve"] = serve_smoke(cmd, env, work)
     if tool != "python":
         report["antivirus"] = defender_scan(dist_dir(tool, out))
+        baseline = out / "report-python.json"            # the same checks on plain Python, same machine
+        if baseline.is_file():
+            b = json.loads(baseline.read_text(encoding="utf-8"))
+            report["baseline"] = {"start_best_seconds": b.get("start", {}).get("best_seconds"),
+                                  "seconds_to_healthy": b.get("serve", {}).get("seconds_to_healthy"),
+                                  "selftest_seconds": b.get("commands", {}).get("selftest", {}).get("seconds")}
     return finish(report, out)
 
 
@@ -303,6 +309,10 @@ def markdown(report: dict) -> str:
         a = report["antivirus"]
         lines.append("- Microsoft Defender scan: " + (("clean" if a["clean"] else f"NOT clean (exit {a['exit']})")
                                                       if a["ran"] else f"not run ({a['why']})"))
+    if "baseline" in report:
+        b = report["baseline"]
+        lines.append(f"- Plain Python on the same machine: start best {b['start_best_seconds']} s, server healthy "
+                     f"after {b['seconds_to_healthy']} s, `selftest` {b['selftest_seconds']} s")
     lines += ["", "| Library check | Result |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in report.get("probe", {}).items()]
     failures = [(n, c.get("output", "")) for n, c in report.get("commands", {}).items() if not c["ok"]]

@@ -168,6 +168,13 @@ class TestReport(unittest.TestCase):
         self.assertIn("90.0 MB in 120 files; about 30.0 MB compressed", md)
         self.assertIn("Microsoft Defender scan: clean", md)
 
+    def test_the_plain_python_numbers_are_shown_next_to_the_compiled_ones(self):
+        report = _good_report()
+        report["baseline"] = {"start_best_seconds": 0.2, "seconds_to_healthy": 0.9, "selftest_seconds": 1.1}
+        self.assertIn("Plain Python on the same machine: start best 0.2 s, server healthy after 0.9 s, `selftest` 1.1 s",
+                      ev.markdown(report))
+        self.assertNotIn("Plain Python", ev.markdown(_good_report()))
+
     def test_each_kind_of_failure_fails_the_run(self):
         breakers = {
             "library": lambda r: r["probe"].update({"pdf(pdfplumber)": "FAIL: ImportError: x"}),
