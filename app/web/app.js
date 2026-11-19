@@ -438,6 +438,10 @@ function showBackupAlert(h) {
   when.hidden = !h || !("ok" in h);
   if (h && "ok" in h) when.textContent = `آخر نسخة احتياطية: ${h.last_good_at ? stamp(h.last_good_at) : "لا توجد بعد"}`;
   if (h && h.warn) bar.textContent = backupText(h);
+  // the same warning on «المزيد» and on «البرنامج والنسخ الاحتياطي», so it is seen from any screen
+  for (const id of ["#bkBadge", "#bkBadgeSys"]) { const x = $(id); if (x) x.hidden = !(h && h.warn); }
+  const bk = $("#bkBadge");
+  if (bk) bk.title = h && h.warn ? (h.failed ? "النسخة الاحتياطية فشلت" : "النسخة الاحتياطية متأخرة") : "";
 }
 // #202: red banner while the last stock integrity check found balances that do not match the stock ledger
 async function refreshStockAlert() {
