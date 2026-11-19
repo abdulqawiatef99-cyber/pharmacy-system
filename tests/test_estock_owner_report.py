@@ -113,3 +113,27 @@ class TestBatShowsTheOwnerReport(_R):
         self.assertIn("notepad", " ".join(sub[:8]))
         self.assertIn("PHARM_E2E_ANSWER", " ".join(sub[:8]))                    # never opens in automated runs
         self.assertTrue(any('del /q "%OUT%\\owner-report.txt"' in l for l in lines))  # an earlier run's report is not this one
+
+
+class TestCodexReview361(_R):
+    """Codex on #361 @0feea2c (each failed before the fix)."""
+
+    def test_p2_a_failed_apply_shows_its_own_report_not_the_trials(self):
+        root = Path(__file__).resolve().parents[1]
+        lines = [l.strip() for l in (root / "scripts/windows/estock-db-import.bat").read_text(encoding="utf-8").splitlines()]
+        fail = lines[lines.index(":fail"):lines.index(":fail") + 5]
+        applied = next(i for i, l in enumerate(fail) if 'call :owner "%REP%"' in l and "-dry" not in l)
+        self.assertIn('if exist "%REP%\\owner-report.txt"', fail[applied])
+        trial = next(i for i, l in enumerate(fail) if 'call :owner "%REP%-dry"' in l)
+        self.assertLess(applied, trial)
+        self.assertIn('if not exist "%REP%\\owner-report.txt"', fail[trial])
+
+    def test_p2_b_an_unclear_drawer_is_pending_not_posted(self):
+        from app.dataimport import estock_owner_report as r
+        d = {"table": "Cash_depots", "estock_id": "1", "code": "x", "field": "last_close", "estock_value": "1, 2",
+             "action": "OWNER: مش واضح أنهي درج هو درج الشيفت (اتقفل فيه شيفتات)", "value_egp": "10.00",
+             "severity": "review"}
+        _, _, done = r._ask(d)
+        self.assertNotIn("اتعمل حساب", done)
+        self.assertIn("ما اتنقلش", done)
+        self.assertIn("F105", done)

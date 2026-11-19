@@ -133,7 +133,9 @@ exit /b 0
 
 :fail
 call :log FAIL "%MSG%"
-if not defined OWNERSHOWN call :owner "%REP%-dry"
+REM the real move's own report when it ran (a failed apply must never show the trial's 100%), else the trial's
+if exist "%REP%\owner-report.txt" call :owner "%REP%"
+if not exist "%REP%\owner-report.txt" if not defined OWNERSHOWN call :owner "%REP%-dry"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 echo.
