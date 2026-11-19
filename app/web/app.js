@@ -181,6 +181,8 @@ const hintHtml = (h) => (!h ? "" : h.kind === "layout"
   : `<p class="badge b-info search-hint">ℹ لا يوجد اسم مطابق تمامًا — هذه أقرب الأصناف</p>`);
 
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// the server's discount_of: integer basis points, half up, never through a float percentage (#348)
+const discountOf = (gross, bp) => (bp ? Math.floor((gross * bp + 5000) / 10000) : 0);
 
 function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
@@ -3979,7 +3981,7 @@ async function viewSupplier(id) {
     $("#supDisc").hidden = !sp.dm.value;
     $("#supDiscL").textContent = pct ? "النسبة %" : "الخصم (ج)";
     if (!sp.dm.value || !a || !d) { $("#supPayHint").textContent = ""; return; }
-    const disc = pct ? Math.round(a * parseFloat(d) / 100) : toPiasters(d);
+    const disc = pct ? discountOf(a, toBp(d)) : toPiasters(d);
     const [paid, off] = pct ? [a - disc, a] : [a, a + disc];
     $("#supPayHint").textContent = `المدفوع: ${money(paid)} ج · الخصم: ${money(disc)} ج · يقل من حساب المورد: ${money(off)} ج`;
   };
@@ -3994,7 +3996,7 @@ async function viewSupplier(id) {
     e.preventDefault();
     const f = e.target, body = { source: f.src.value, method: f.chq.checked ? "cheque" : "", ref: f.r.value || null, note: f.n.value || null };
     // percent: the amount typed is what is cleared from the supplier's balance; the program works out the discount
-    if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: Math.round(parseFloat(f.d.value || 0) * 100) });
+    if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: toBp(f.d.value) || 0 });
     else Object.assign(body, { amount: toPiasters(f.a.value), discount: f.dm.value === "amt" ? toPiasters(f.d.value) || 0 : 0 });
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
       try { const r = await api(`/api/suppliers/${id}/pay`, { method: "POST", body });

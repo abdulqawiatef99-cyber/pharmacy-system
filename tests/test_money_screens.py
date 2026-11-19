@@ -96,3 +96,27 @@ class MoneyScreens(APICase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCodexReview348d(unittest.TestCase):
+    """#348 Codex P1: the supplier payment preview rounds the discount as the server does (integer basis points,
+    half up), so 3.75 EGP at 9.2% previews a 0.35 discount, the one that is posted."""
+
+    def test_the_preview_uses_the_server_rounding(self):
+        import json
+        import shutil
+        import subprocess
+        from pathlib import Path
+        js = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        if not shutil.which("node"):
+            self.skipTest("node is not installed")
+        a = js.index("const toBp = ")
+        b = js.index("const discountOf = ")
+        code = js[a:js.index("\n", a)] + "\n" + js[b:js.index("\n", b)] + \
+            "\nconsole.log(JSON.stringify([discountOf(375, toBp('9.2')), discountOf(1000, 1250), discountOf(1, 5000), discountOf(500, 0)]));"
+        out = subprocess.run(["node", "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [35, 125, 1, 0])
+        at = js.index('$("#supPayHint").textContent = `المدفوع')
+        self.assertIn("discountOf(a, toBp(d))", js[at - 300:at])
+        self.assertIn("discount_bp: toBp(f.d.value) || 0", js)
