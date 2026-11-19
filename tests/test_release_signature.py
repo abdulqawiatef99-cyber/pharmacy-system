@@ -131,11 +131,41 @@ class TestStrictManifest(Base):
                dict(files={**ok, "app/x.py.": sha}), dict(files={**ok, "app/x.py ": sha}),
                dict(files={**ok, "": sha}), dict(files={**ok, "x" * 401: sha}),
                dict(files={**ok, "APP/DB.PY": sha}),                             # same file on Windows
+               dict(files={**ok, "APP/other.py": sha}),                          # same folder on Windows
+               dict(files={**ok, "app/Web/extra.js": sha}),                      # deeper folder, other casing
+               dict(files={**ok, "app/db.py/x": sha}),                           # a file that is also a folder
+               dict(files={**ok, "APP/DB.PY/x": sha}),
+               dict(files={**ok, "app/NUL.py": sha}), dict(files={**ok, "app/CON": sha}),      # Windows devices
+               dict(files={**ok, "app/con/x.py": sha}), dict(files={**ok, "aux.txt": sha}),
+               dict(files={**ok, "app/Com1.tar.gz": sha}), dict(files={**ok, "app/lpt9": sha}),
                dict(files={**ok, "data/pharmacy.db": sha}), dict(files={**ok, "Backups/x.zip": sha}),
                dict(files={**ok, ".venv/x": sha}), dict(files={**ok, ".git/config": sha}),
                dict(files={**ok, ".release-source.json": sha})]
         for changes in bad:
             self.assertEqual(self.code(rs.verify_manifest, self.forged(**changes), self.trusted), "malformed", changes)
+
+    def test_names_that_only_look_like_devices_are_fine(self):
+        ok = self.manifest().payload()["files"]
+        sha = "0" * 64
+        for name in ("app/console.py", "app/nullable.py", "app/com10.py", "app/lpt0.txt", "app/auxiliary/x.py"):
+            self.assertIn(name, rs.verify_manifest(self.forged(files={**ok, name: sha}), self.trusted).files)
+
+    def test_what_the_signer_accepts_the_updater_can_stage(self):
+        """Codex on #378: a signed release the updater would refuse to stage is a dead release. The names
+        the updater refuses (app/core/updater.py _members) are refused before signing."""
+        import zipfile
+        from app.core import updater
+        sha = "0" * 64
+        for extra in ("app/NUL.py", "APP/other.py", "app/CON", "app/Web/extra.js"):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                for name, text in {**FILES, extra: "x"}.items():
+                    z.writestr(f"owner-repo-abc/{name}", text)
+            with self.assertRaises(updater.UpdateError, msg=extra):
+                updater.apply_zip(buf.getvalue(), self.dir / "program", code_home=self.dir / "code")
+            with self.assertRaises(rs.ReleaseSignatureError, msg=extra):
+                rs.from_payload({**self.manifest().payload(),
+                                 "files": {**self.manifest().payload()["files"], extra: sha}})
 
     def test_the_signing_side_refuses_what_the_program_would_refuse(self):
         m = self.manifest()
@@ -280,7 +310,7 @@ class TestTool(Base):
         code, out, err = self.run_cli("verify", "--public-key", public, "--signed", signed, "--tree", self.tree,
                                       "--channel", "main", "--installed-sequence", 6)
         self.assertEqual(code, 0, err)
-        for line in ("signature: OK", "channel and sequence: OK", "files: OK"):
+        for line in ("signature: OK", "channel: OK", "sequence: OK", "files: OK"):
             self.assertIn(line, out)
         # the customer side reads the same file
         self.assertEqual(rs.verify_manifest(signed.read_bytes(), [public]).files, plain["files"])
@@ -302,6 +332,24 @@ class TestTool(Base):
         _, other = self.keygen("other.key")
         code, _, err = self.run_cli("verify", "--public-key", other, "--signed", signed)
         self.assertEqual((code, "untrusted_key" in err), (2, True))
+
+    def test_an_older_release_is_refused_even_when_no_channel_is_named(self):
+        """Codex on #378: asking for the downgrade check must not depend on another flag."""
+        key, public = self.keygen()
+        manifest, signed = self.dir / "manifest.json", self.dir / "release.sig.json"
+        self.run_cli("manifest", "--tree", self.tree, "--channel", "main", "--commit", COMMIT, "--sequence", 7,
+                     "--out", manifest)
+        self.run_cli("sign", "--key", key, "--manifest", manifest, "--out", signed)
+        base = ("verify", "--public-key", public, "--signed", signed)
+        code, _, err = self.run_cli(*base, "--installed-sequence", 8)
+        self.assertEqual((code, "downgrade" in err), (2, True))
+        code, out, _ = self.run_cli(*base, "--installed-sequence", 7)
+        self.assertEqual(code, 0)
+        self.assertIn("sequence: OK", out)
+        code, out, _ = self.run_cli(*base)                         # nothing asked: nothing claimed
+        self.assertEqual(code, 0)
+        self.assertNotIn("sequence: OK", out)
+        self.assertNotIn("channel: OK", out)
 
     def test_an_edited_manifest_that_would_be_refused_is_not_signed(self):
         key, _ = self.keygen()

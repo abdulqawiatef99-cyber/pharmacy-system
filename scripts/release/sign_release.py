@@ -113,9 +113,12 @@ def cmd_verify(a) -> int:
     print(f"signature: OK (channel {manifest.channel}, version {manifest.version}, commit {manifest.commit[:12]}, "
           f"sequence {manifest.sequence}, {len(manifest.files)} files)")
     if a.channel:
-        rs.check_policy(manifest, channel=a.channel, protocol=manifest.protocol,
+        rs.check_policy(manifest, channel=a.channel, protocol=manifest.protocol)
+        print("channel: OK")
+    if a.installed_sequence is not None:            # asked for by itself too: never skipped for want of --channel
+        rs.check_policy(manifest, channel=manifest.channel, protocol=manifest.protocol,
                         installed_sequence=a.installed_sequence)
-        print("channel and sequence: OK")
+        print("sequence: OK")
     if a.archive:
         rs.check_archive(manifest, Path(a.archive).read_bytes())
         print("archive: OK")

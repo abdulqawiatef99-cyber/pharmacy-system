@@ -43,6 +43,10 @@ MAX_FILES = 15000                          # same ceiling as the updater's archi
 # release must not contain them, so "exactly the signed files" stays true after staging
 RESERVED_TOP = ("data", "backups", ".venv", "venv", ".git", "__pycache__", ".code-releases", ".release-source.json")
 STAGING_FILE = ".release-source.json"      # written by the updater into a staged release, not part of it
+# names Windows keeps for devices, with any extension (NUL.py is the device NUL). The updater refuses an
+# archive holding one (app/core/updater.py _members), so a manifest holding one is never signed: a release
+# the publisher can sign and no PC can stage would be a dead release
+_WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul"} | {f"{kind}{n}" for kind in ("com", "lpt") for n in range(1, 10)})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _VERSION = re.compile(r"[0-9]+(\.[0-9]+){1,3}([a-z0-9.+-]{0,20})")
@@ -74,6 +78,7 @@ def safe_path(name) -> bool:
     parts = PurePosixPath(name).parts
     return (PurePosixPath(name).as_posix() == name and not name.startswith("/") and ".." not in parts
             and all(p.rstrip(" .") == p and p != "." for p in parts)
+            and not any(p.split(".", 1)[0].casefold() in _WINDOWS_DEVICES for p in parts)
             and parts[0].casefold() not in RESERVED_TOP)
 
 
@@ -128,13 +133,20 @@ def from_payload(value) -> Manifest:
     files = value["files"]
     if not isinstance(files, dict) or not 1 <= len(files) <= MAX_FILES:
         bad("bad file list")
-    seen = set()
+    seen, folders = set(), {}
     for name, sha in files.items():
         if not safe_path(name) or not isinstance(sha, str) or not _SHA256.fullmatch(sha):
             bad(f"bad file entry: {str(name)[:80]}")
         if name.casefold() in seen:                 # Windows would write both names into one file
             bad(f"two files differ only by letter case: {name[:80]}")
         seen.add(name.casefold())
+        parts = name.split("/")
+        for i in range(1, len(parts)):              # app/ and APP/ are one folder on Windows (as the updater checks)
+            folder = "/".join(parts[:i])
+            if folders.setdefault(folder.casefold(), folder) != folder:
+                bad(f"one folder written with two letter cases: {folder[:80]}")
+    if seen & set(folders):                         # a file and a folder with the same name
+        bad("a name is used for both a file and a folder")
     if "manage.py" not in files or not any(n.startswith("app/") for n in files):
         bad("not a release of this program")
     return Manifest(value["channel"], value["version"], value["commit"], value["sequence"], released,
