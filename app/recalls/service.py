@@ -52,8 +52,13 @@ def extract_batches(text: str) -> list[str]:
 
 
 def _now() -> str:
-    from ..core.accounts import iso, utcnow
-    return iso(utcnow())
+    """Now, cut down to the millisecond like the stock ledger's own clock. The sale screen holds a recalled
+    lot received after its recall was handled by comparing this time with the receipt's; SQLite rounds a
+    microsecond time to the NEAREST millisecond, so a decision at .1236 s read as .124 and a receipt at
+    .1238 s (stored as .123) looked older than the decision and stayed sellable."""
+    from ..core import accounts
+    t = accounts.utcnow()
+    return accounts.iso(t.replace(microsecond=t.microsecond // 1000 * 1000))
 
 
 class Recalls:
