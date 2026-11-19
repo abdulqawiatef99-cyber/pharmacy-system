@@ -75,9 +75,8 @@ class TestAutomaticBackupWithAMissingFile(Base):
         problems = backup.verify_archive(self.bdir / st["last_file"])["problems"]
         self.assertEqual(len(problems), 1)
         self.assertIn("missing original attachment", problems[0])
-        with self.assertLogs("pharm.backup", level="WARNING"):
-            self.ab.run()                                              # the warning itself was a new record
-        self.assertEqual(self.ab.run().get("skipped"), "no_changes")    # then it settles: no loop
+        # the warning it wrote is its own record, not a change to back up: no second backup (it used to make one)
+        self.assertEqual(self.ab.run().get("skipped"), "no_changes")
         self.change()
         with self.assertLogs("pharm.backup", level="WARNING"):
             self.assertTrue(self.ab.run()["last_warning"])

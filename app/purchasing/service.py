@@ -14,7 +14,7 @@ import json
 import sqlite3
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .. import config as config_mod
 from ..catalog import matching, service as catalog
@@ -82,14 +82,21 @@ class Purchasing:
         return fid, sha
 
     def get_file(self, ctx: Context, file_id: str) -> tuple[bytes, str, str]:
+        """The original of a purchase invoice. Only that: every stored file of the pharmacy used to be served
+        here, so `purchases.read` opened another cashier's transfer proof (#324 X14)."""
         ctx.require("purchases.read")
-        r = self.db.one("SELECT * FROM source_files WHERE id=? AND org_id=?", (file_id, ctx.org_id))
+        r = self.db.one("SELECT f.* FROM source_files f WHERE f.id=? AND f.org_id=? AND EXISTS (SELECT 1 FROM"
+                        " purchase_invoices pi WHERE pi.org_id=f.org_id AND pi.source_file_id=f.id)",
+                        (file_id, ctx.org_id))
         if not r:
             raise NotFound("الملف غير موجود")
-        path = Path(r["storage_path"])
-        if not path.exists():   # restored on another machine / data folder moved
-            path = self.s.upload_dir / r["org_id"] / path.name
-        if not path.exists():
+        # the registered path is a record of where the file was written, not where to read it: after a restore
+        # into another folder (or on another PC) the old absolute path may still exist, and reading it made a
+        # restore look complete with the restored copy missing (#324 X26). Same layout as the backup uses.
+        stored = PurePosixPath(str(r["storage_path"]).replace("\\", "/"))
+        sub = ("transfers",) if stored.parent.name == "transfers" else ()
+        path = self.s.upload_dir.joinpath(r["org_id"], *sub, stored.name)
+        if stored.name in ("", ".", "..") or not path.is_file():
             raise NotFound("ملف الفاتورة الأصلي غير موجود على هذا الجهاز")
         return path.read_bytes(), r["mime_type"], r["filename"]
 
@@ -153,6 +160,16 @@ class Purchasing:
                                code="duplicate_invoice", details={"invoice_id": dup["id"]})
         inv_id = new_id()
         with self.db.transaction():
+            if file_id:
+                # asked again under the write lock: two uploads of one file both passed the check in
+                # import_file before either draft existed, and both could be approved (#324 S18)
+                dup = self.db.one(
+                    "SELECT pi.id FROM purchase_invoices pi JOIN source_files f ON f.id=pi.source_file_id"
+                    " WHERE pi.org_id=? AND pi.status<>'cancelled' AND f.sha256=(SELECT sha256 FROM source_files"
+                    " WHERE id=? AND org_id=?)", (ctx.org_id, file_id, ctx.org_id))
+                if dup:
+                    raise Conflict("هذا الملف سُجّل من قبل كفاتورة", code="duplicate_file",
+                                   details={"invoice_id": dup["id"]})
             self.db.execute(
                 "INSERT INTO purchase_invoices (id, org_id, branch_id, supplier_id, supplier_name_raw,"
                 " invoice_no, invoice_date, source_type, source_file_id, extraction_method,"
@@ -468,6 +485,8 @@ class Purchasing:
 
     def add_line(self, ctx: Context, inv_id: str, data: dict, version: int | None) -> dict:
         ctx.require("purchases.edit")
+        # one transaction for the line and its values: a refused value (2.5 packs) used to leave the blank
+        # line and a new version behind an answer that said "refused" (#324 S34)
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
             n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines"
@@ -491,10 +510,10 @@ class Purchasing:
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_add", "purchase_invoice", inv_id,
                          after={"line_id": row["id"], "raw_name": name})
-        rest = {k: v for k, v in data.items() if k in EDITABLE_LINE_FIELDS and k != "raw_name"}
-        cur = self.db.one("SELECT version FROM purchase_invoices WHERE id=?", (inv_id,))["version"]
-        if rest:
-            return self.update_line(ctx, inv_id, row["id"], rest, cur)
+            rest = {k: v for k, v in data.items() if k in EDITABLE_LINE_FIELDS and k != "raw_name"}
+            cur = self.db.one("SELECT version FROM purchase_invoices WHERE id=?", (inv_id,))["version"]
+            if rest:
+                return self.update_line(ctx, inv_id, row["id"], rest, cur)
         return self.get(ctx, inv_id)
 
     def delete_line(self, ctx: Context, inv_id: str, line_id: str, version: int | None) -> dict:
@@ -516,15 +535,20 @@ class Purchasing:
                               version: int | None, force: bool = False) -> dict:
         """New product the pharmacy never stocked: create it and link the line."""
         ctx.require("items.write")
-        inv, lines = self._load(ctx, inv_id)
-        line = next((l for l in lines if l["id"] == line_id), None)
-        if not line:
-            raise NotFound("السطر غير موجود")
-        data = {"name_en": line["raw_name"], "public_price": line["public_price"], **item}
-        barcodes = [line["raw_barcode"]] if line["raw_barcode"] else []
-        item_id = catalog.create_item(self.db, ctx, data, barcodes=barcodes, force=force,
-                                      source="purchase_invoice")
-        return self.update_line(ctx, inv_id, line_id, {"item_id": item_id}, version)
+        ctx.require("purchases.edit")
+        # the item and its link are one step: checked first and saved together, or a stale page (or a person
+        # who may not edit the invoice) left a new item in the catalogue linked to nothing (#324 S35)
+        with self.db.transaction():
+            self._draft_for_update(ctx, inv_id, version)
+            inv, lines = self._load(ctx, inv_id)
+            line = next((l for l in lines if l["id"] == line_id), None)
+            if not line:
+                raise NotFound("السطر غير موجود")
+            data = {"name_en": line["raw_name"], "public_price": line["public_price"], **item}
+            barcodes = [line["raw_barcode"]] if line["raw_barcode"] else []
+            item_id = catalog.create_item(self.db, ctx, data, barcodes=barcodes, force=force,
+                                          source="purchase_invoice")
+            return self.update_line(ctx, inv_id, line_id, {"item_id": item_id}, version)
 
     def acknowledge(self, ctx: Context, inv_id: str, code: str, reason: str,
                     line_id: str | None, version: int | None) -> dict:
@@ -723,7 +747,7 @@ class Purchasing:
                 # the returns already credited for this invoice's units are not credited again: the invoice and
                 # its returns together come to zero, whatever value each return was agreed at
                 credit = posted - credited
-                if posted and credit:
+                if credit:        # also when nothing was posted (a free invoice) but a return of it was credited
                     self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                     " created_by) VALUES (?,?,?,?,'adjustment',?,?,?)",
                                     (new_id(), ctx.org_id, inv["supplier_id"], -credit, inv_id,

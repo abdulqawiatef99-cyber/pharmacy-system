@@ -23,11 +23,13 @@ Every finding shown and every decision is written to safety_events.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
+from datetime import date
 
 from ..catalog import matching
 from ..catalog.normalize import normalize_text, parse_name
-from ..core import audit
+from ..core import accounts, audit
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -36,6 +38,20 @@ SEVERITY_ORDER = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "info": 0}
 SEVERITY_AR = {"critical": "حرجة", "high": "مرتفعة", "moderate": "متوسطة", "low": "منخفضة",
                "info": "معلومة", "insufficient": "لا توجد بيانات كافية"}
 RULE_TYPES = ("duplicate_ingredient", "interaction", "max_qty", "split_policy", "lookalike")
+# Notices that state a constant fact about an item (no decision asked): written to safety_events once per
+# item and month, not on every sale. Kept in memory: after a restart each is written once more at most.
+ONCE_A_MONTH = ("insufficient_data",)
+_logged: set[tuple] = set()
+_logged_lock = threading.Lock()
+
+
+def _today() -> date:
+    return date.today()
+
+
+def forget_logged_notices() -> None:
+    with _logged_lock:
+        _logged.clear()
 
 
 @dataclass
@@ -105,6 +121,13 @@ class SafetyEngine:
         with self.db.transaction():
             if not self.db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
                 raise NotFound("الصنف غير موجود")
+            if not ctx.can("safety.approve") and self.db.one(
+                    "SELECT 1 FROM item_ingredients WHERE org_id=? AND item_id=? AND status='verified'",
+                    (ctx.org_id, item_id)):
+                # replacing a verified composition switches the item's duplicate and interaction checks off
+                # until it is verified again: only who may verify may do that (#324 X8)
+                raise Forbidden("تركيبة هذا الصنف موثّقة؛ تغييرها يحتاج من له صلاحية اعتماد السلامة الدوائية",
+                                code="verified_composition")
             self.db.execute("DELETE FROM item_ingredients WHERE org_id=? AND item_id=?",
                             (ctx.org_id, item_id))
             for name, strength in ingredients:
@@ -186,11 +209,12 @@ class SafetyEngine:
             if r["status"] == "approved":
                 raise Conflict("القاعدة معتمدة بالفعل")
             if r["created_by"] == ctx.user_id:
-                others = [m for m in self.db.all(
-                    "SELECT r.permissions FROM memberships m JOIN roles r ON r.id=m.role_id"
-                    " JOIN users u ON u.id=m.user_id WHERE m.org_id=? AND m.user_id<>? AND"
-                    " m.is_active=1 AND u.is_active=1", (ctx.org_id, ctx.user_id))
-                    if "safety.approve" in json.loads(m["permissions"])]
+                # who else may approve, by what each person can really do (role, plus rights granted or
+                # denied to them): role defaults alone missed a pharmacist given safety.approve (#324 X9)
+                others = [m["user_id"] for m in self.db.all(
+                    "SELECT m.user_id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.org_id=?"
+                    " AND m.user_id<>? AND m.is_active=1 AND u.is_active=1", (ctx.org_id, ctx.user_id))
+                    if "safety.approve" in accounts.effective_access(self.db, ctx.org_id, m["user_id"])["permissions"]]
                 if others:
                     raise Forbidden("يجب أن يعتمد القاعدة مستخدم آخر مخوّل (مراجعة رباعية العين)",
                                     code="four_eyes")
@@ -363,11 +387,27 @@ class SafetyEngine:
         findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 1 if f.severity == "insufficient" else 0),
                       reverse=True)
         if log:
+            month = _today().strftime("%Y-%m")
+            fresh = []
             with self.db.transaction():
                 for f in findings:
                     if f.severity == "info" or f.code == "interaction_check_unavailable":
                         continue
+                    if f.code in ONCE_A_MONTH:
+                        # the same notice for the same item on every sale: recorded the first time it is shown
+                        # in a month, still shown every time (it was 95% of this table, #304 B10)
+                        key = (ctx.org_id, f.code, tuple(f.item_ids), month)
+                        with _logged_lock:
+                            if key in _logged:
+                                continue
+                        fresh.append(key)
                     self._event(ctx, context_type, context_id, f, "shown")
+            # remembered only once the rows are committed: a sale that fails and rolls back writes it next time
+            if fresh and not self.db.conn.in_transaction:
+                with _logged_lock:
+                    if len(_logged) > 500_000:          # a bound, never reached by one pharmacy in a month
+                        _logged.clear()
+                    _logged.update(fresh)
         return findings
 
     @staticmethod

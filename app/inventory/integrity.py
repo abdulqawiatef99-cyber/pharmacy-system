@@ -65,20 +65,26 @@ def _sales(db: Database, org_id: str) -> list[dict]:
     # Per (sale, item) that moved stock: net units moved by the sale, its returns and its void must equal what the
     # invoice says (returned minus sold; zero once voided). A pair with no movement is not judged here, because
     # whether an item is a service can change later (the write-path tests prove a sale always posts them).
+    #
+    # One pass (#304 B12): the movements, the invoice lines and the returned allocations are read once each and
+    # added up together per (sale, item); then each pair's invoice is looked up by its key. Before, each of the
+    # three was grouped into its own temporary table with an index built on the spot (14 s of the check's 17 s
+    # on a year of a large pharmacy). Never a per-line subquery either (Codex P2 on #209: that was quadratic).
+    # sold = the invoice lines themselves (not the allocations, which are written next to the movements).
+    # CROSS JOIN fixes the order: the returned allocations are few, so their lines are looked up from them, and
+    # the invoice from each pair.
     return [dict(r) for r in db.all(
-        "WITH mv AS (SELECT ref_id sale_id, item_id, sum(qty_delta) moved FROM stock_movements"
-        "            WHERE org_id=? AND ref_type IN ('sale','sale_void') GROUP BY ref_id, item_id),"
-        # sold = the invoice lines themselves (not the allocations, which are written next to the movements);
-        # each side aggregated once and joined, never a per-line subquery (Codex P2 on #209: that was quadratic)
-        " sd AS (SELECT sale_id, item_id, sum(qty_base) sold FROM sale_lines WHERE org_id=? GROUP BY sale_id, item_id),"
-        " rt AS (SELECT l.sale_id, l.item_id, sum(a.returned_qty) returned FROM sale_allocations a"
-        "        JOIN sale_lines l ON l.id = a.sale_line_id WHERE l.org_id=? GROUP BY l.sale_id, l.item_id)"
-        " SELECT s.id sale_id, s.sale_no, s.status, mv.item_id, mv.moved,"
-        "  CASE WHEN s.status='completed' THEN coalesce(rt.returned,0) - coalesce(sd.sold,0) ELSE 0 END expected"
-        " FROM mv JOIN sales s ON s.id = mv.sale_id AND s.org_id=?"
-        " LEFT JOIN sd ON sd.sale_id = mv.sale_id AND sd.item_id = mv.item_id"
-        " LEFT JOIN rt ON rt.sale_id = mv.sale_id AND rt.item_id = mv.item_id"
-        " WHERE mv.moved <> CASE WHEN s.status='completed' THEN coalesce(rt.returned,0) - coalesce(sd.sold,0) ELSE 0 END",
+        "SELECT s.id sale_id, s.sale_no, s.status, g.item_id, g.moved,"
+        "  CASE WHEN s.status='completed' THEN g.returned - g.sold ELSE 0 END expected"
+        " FROM (SELECT sale_id, item_id, sum(moved) moved, sum(sold) sold, sum(returned) returned"
+        "       FROM (SELECT ref_id sale_id, item_id, qty_delta moved, 0 sold, 0 returned, 1 mv FROM stock_movements"
+        "              WHERE org_id=? AND ref_type IN ('sale','sale_void')"
+        "             UNION ALL SELECT sale_id, item_id, 0, qty_base, 0, 0 FROM sale_lines WHERE org_id=?"
+        "             UNION ALL SELECT l.sale_id, l.item_id, 0, 0, a.returned_qty, 0 FROM sale_allocations a"
+        "              CROSS JOIN sale_lines l ON l.id = a.sale_line_id WHERE a.returned_qty <> 0 AND l.org_id=?)"
+        "       GROUP BY sale_id, item_id HAVING sum(mv) > 0) g"
+        " CROSS JOIN sales s ON s.id = g.sale_id AND s.org_id=?"
+        " WHERE g.moved <> CASE WHEN s.status='completed' THEN g.returned - g.sold ELSE 0 END",
         (org_id, org_id, org_id, org_id))]
 
 
@@ -98,7 +104,10 @@ def scan(db: Database, org_id: str) -> dict:
     """Read-only. {'ok', 'checked_at', 'counts': {kind: n}, kind: [first SAMPLE rows]}"""
     sales = _sales(db, org_id)
     acked = _acknowledged(db, org_id) if sales else set()
-    found = {"batches": inventory.verify_balances(db, org_id), "items": _items(db, org_id),
+    batches = inventory.verify_balances(db, org_id)
+    # an item's total is the sum of its lots' totals on both sides, so when every lot matches every item does:
+    # the second pass over the whole ledger is needed only to say which items a lot finding adds up to
+    found = {"batches": batches, "items": _items(db, org_id) if batches else [],
              "negative": _negative(db, org_id), "foreign_batch": _foreign_batch(db, org_id),
              # a reviewed row stays out only while its numbers are exactly the ones reviewed
              "sales": [r for r in sales if _ack_key(r) not in acked]}

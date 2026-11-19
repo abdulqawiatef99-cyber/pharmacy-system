@@ -132,3 +132,19 @@ class TestCodexReview345(TestHistory):
         self.assertTrue(self.run_import(tables=t)["ok"])
         nov = h.period_report(self.db, self.ctx, "2026-11-01", "2026-11-30")[0]
         self.assertEqual(nov["sales"], "0.01")                   # 0.008 rounded once, not 0.00 + 0.00
+
+
+
+class TestSearchAndOpening(TestHistory):
+    def test_search_by_item_and_ticket(self):
+        got = {r["estock_id"] for r in h.invoices(self.db, self.ctx, "sale", item_id=self.item("102")["id"])}
+        self.assertEqual(got, {"1"})
+        self.assertEqual({r["estock_id"] for r in h.invoices(self.db, self.ctx, "purchase", item_id=self.item("100")["id"])}, {"1"})
+        self.assertEqual([r["estock_id"] for r in h.invoices(self.db, self.ctx, "sale", ticket="T-12")], ["2"])
+        self.assertEqual(h.invoices(self.db, self.ctx, "sale", ticket="nothing"), [])
+        self.assertEqual(h.invoices(self.db, self.ctx, "sale", item_id="no-such-item"), [])
+
+    def test_old_statement_next_to_the_opening_line(self):
+        st = h.statement_with_opening(self.db, self.ctx, "customer", self.cust)
+        self.assertEqual((st["estock_last_total"], st["program_opening_total"]), ("120.00", 12000))
+        self.assertEqual(len(st["lines"]), 1)
