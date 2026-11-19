@@ -295,6 +295,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when there is one, so the fingerprint of every other request stays what it was before."""
         return b"?" + req.url.query.encode() if req.url.query else b""
 
+    def _same_form(req: Request, raw: bytes) -> bytes:
+        """A file upload sent again carries a new multipart boundary around the same fields and file: the
+        fingerprint is taken without it, so a retry replays instead of being called a different request
+        (#324 M2-23). Any other body is fingerprinted as it is."""
+        m = re.search(r'boundary="?([^";]+)"?', req.headers.get("content-type", ""))
+        if not m or not req.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            return raw
+        return raw.replace(b"--" + m.group(1).encode("latin-1"), b"--\x00boundary")
+
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
@@ -307,7 +316,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return await fn(req)
         ctx = ctx_of(req)
         raw = await _read_body(req)
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
+                               + _same_form(req, raw)).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its
@@ -315,8 +325,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         with db.transaction():
             hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
             if not hit:
-                db.execute("DELETE FROM idempotency_keys WHERE created_at < datetime('now', ?)",
-                           (f"-{IDEMPOTENCY_TTL_DAYS} days",))
+                idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)   # at most once an hour, not a scan per POST (#324 M2-25)
                 db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
                            " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
                            (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(ctx.permissions))))
@@ -1048,6 +1057,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..sales import customers as cu
         qp = req.query_params
         return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None)})
+
+    @handler
+    async def customers_phone_doubles(req):
+        from ..sales import customers as cu
+        return J({"doubles": cu.phone_doubles(db, ctx_of(req))})
 
     @handler
     async def customer_profile(req):
@@ -1971,6 +1985,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         given = _int(b.get("cash_given"), "المبلغ المدفوع من العميل")
         if not 0 <= given <= 100_000_000:
             raise ValidationFailed("المبلغ المدفوع من العميل غير صحيح")
+        # an amount typed below the cash part is a short tender, not a full payment: refused before posting so
+        # the cashier corrects it or splits the payment (#324 M2-03); nothing typed (0) prints no change
+        pays = b.get("payments") if isinstance(b.get("payments"), list) else None
+        cash_part = (sum(p.get("amount") for p in pays if isinstance(p, dict) and p.get("method") == "cash"
+                         and isinstance(p.get("amount"), int) and not isinstance(p.get("amount"), bool))
+                     if pays is not None else _int(b.get("paid_cash"), "cash"))
+        if 0 < given < cash_part:
+            raise ValidationFailed("المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع",
+                                   code="cash_given_short", details={"given": given, "cash": cash_part})
         done = Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
@@ -2010,10 +2033,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
-        q = "%" + req.query_params.get("q", "").strip() + "%"
         rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
                       f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
-                      (ctx.org_id, *[q] * cu.SEARCH_N))
+                      (ctx.org_id, *cu.search_terms(req.query_params.get("q", ""))))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -2055,6 +2077,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         sid = CashDrawer(db).open(ctx, _int(b.get("opening_cash"), "opening_cash"))
+        if not ctx.can("sales.read"):       # the shift is open: never a 403 after it committed (#324 M2-26)
+            s = db.one("SELECT id, status, opening_cash, opened_at FROM cash_shifts WHERE id=? AND org_id=?",
+                       (sid, ctx.org_id))
+            return J({**dict(s), "blind": True}, status_code=201)
         return J(CashDrawer(db).summary(ctx, sid), status_code=201)
 
     @handler
@@ -2092,9 +2118,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def cash_close(req):
         ctx = ctx_of(req)
         b = await body(req)
-        if isinstance(b.get("denominations"), dict):
-            return J(CashDrawer(db).close(ctx, note=b.get("note"), denominations=b["denominations"]))
-        return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note")))
+        shift = b.get("shift_id")
+        if shift is not None and not isinstance(shift, str):
+            raise ValidationFailed("الشيفت غير صحيح")
+        # a count is a map of notes or an amount, never an empty list or nothing at all (#324 M2-19)
+        if "denominations" in b:
+            if not isinstance(b["denominations"], dict):
+                raise ValidationFailed("عدد الفئات غير صحيح")
+            return J(CashDrawer(db).close(ctx, note=b.get("note"), denominations=b["denominations"], shift_id=shift))
+        if b.get("counted_cash") in (None, ""):
+            raise ValidationFailed("اكتب المبلغ المعدود في الخزينة")
+        return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note"), shift_id=shift))
 
     @handler
     async def cash_shifts(req):
@@ -2622,6 +2656,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
         Route("/api/customers/all", customers_all),
+        Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
         Route("/receipt/{id}", receipt),
