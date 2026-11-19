@@ -145,9 +145,12 @@ def cmd_show(a) -> int:
         licence = lic_mod.verify(data, [a.public_key])
         print("signature: OK")
     else:
-        env = se.strict_json(data)
         import base64
-        licence = lic_mod.from_payload(se.strict_json(base64.b64decode(env["payload"])))
+        import binascii
+        try:
+            licence = lic_mod.from_payload(se.strict_json(base64.b64decode(se.strict_json(data)["payload"])))
+        except (KeyError, TypeError, binascii.Error):
+            raise lic_mod.LicenseError("malformed", "not a licence file") from None
         print("signature: NOT CHECKED (give --public-key)")
     print(json.dumps(licence.payload(), ensure_ascii=False, indent=1))
     return 0

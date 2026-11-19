@@ -256,6 +256,14 @@ class TestIssue(Base):
         self.assertEqual(code, 2)
         self.assertIn("untrusted_key", err)
 
+    def test_show_on_a_file_that_is_not_a_licence_is_a_clean_error(self):
+        for content in (b"{}", b"[]", b"junk", b'{"payload": 5}', b'{"payload": "@@"}'):
+            bad = self.dir / "bad.lic"
+            bad.write_bytes(content)
+            code, _, err = self.run_cli("show", bad)
+            self.assertEqual(code, 2, content)
+            self.assertIn("malformed", err)
+
     def test_the_key_never_appears_in_what_the_tool_prints(self):
         code, out, err = self.issue("--kind", "perpetual", "--request", self.req_a)
         for text in (out, err, self.out.read_text(encoding="ascii")):

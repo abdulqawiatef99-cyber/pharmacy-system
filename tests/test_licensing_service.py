@@ -1,6 +1,7 @@
 """The licence file on a PC (app/licensing/service.py, clock.py): check, install, and the memory of
 the latest time seen. Also pins that the running program does not use any of this yet."""
 import json
+import re
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -209,9 +210,14 @@ class TestClock(unittest.TestCase):
         self.assertEqual(clock.remember(self.paths, T0), T0)
         self.assertEqual(clock.read(self.paths), T0)                     # the other copy holds it
 
-    def test_naive_now_is_refused(self):
+    def test_naive_times_are_refused_not_read_as_local_time(self):
         with self.assertRaises(ValueError):
             clock.remember(self.paths, datetime(2026, 12, 1))
+        with self.assertRaises(ValueError):
+            clock.remember(self.paths, T0, datetime(2027, 1, 1))
+        with self.assertRaises(ValueError):
+            clock.high_water(self.paths, datetime(2027, 1, 1))
+        self.assertIsNone(clock.read(self.paths))                        # and nothing was written
 
 
 class TestNotWiredYet(unittest.TestCase):
@@ -223,10 +229,19 @@ class TestNotWiredYet(unittest.TestCase):
                    if "licensing" not in p.relative_to(ROOT).parts and p.name != "signed_envelope.py"]
         program += [ROOT / "manage.py", ROOT / "launcher.py", ROOT / "release_bootstrap.py"]
         self.assertGreater(len(program), 50)
+        uses = re.compile(r"^\s*(from|import)\s+[\w., ]*\b(licensing|signed_envelope)\b", re.M)
         for p in program:
-            text = p.read_text(encoding="utf-8")
-            self.assertNotIn("licensing", text, p.relative_to(ROOT))
-            self.assertNotIn("signed_envelope", text, p.relative_to(ROOT))
+            found = uses.search(p.read_text(encoding="utf-8"))
+            self.assertIsNone(found, f"{p.relative_to(ROOT)}: {found.group(0).strip() if found else ''}")
+
+    def test_the_import_check_itself_catches_every_way_of_importing(self):
+        uses = re.compile(r"^\s*(from|import)\s+[\w., ]*\b(licensing|signed_envelope)\b", re.M)
+        for line in ("from app.licensing import service", "import app.licensing.service as lic",
+                     "from app import licensing", "    from app.core import audit, signed_envelope",
+                     "from app.core.signed_envelope import sign", "from . import licensing"):
+            self.assertIsNotNone(uses.search(line), line)
+        for line in ("# drug licensing rules of the authority", 'text = "licensing"', "licensing_note = 1"):
+            self.assertIsNone(uses.search(line), line)
 
     def test_the_library_touches_no_database_network_or_screen(self):
         for p in [*(ROOT / "app" / "licensing").glob("*.py"), ROOT / "app" / "core" / "signed_envelope.py"]:
