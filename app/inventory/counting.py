@@ -91,7 +91,7 @@ class Counting:
         ctx.require("inventory.count")
         if mode not in ("set", "add"):
             raise ValidationFailed("وضع غير صحيح")
-        if not isinstance(qty, int) or qty < 0:
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty < 0:        # true is not 1 unit
             raise ValidationFailed("الكمية يجب أن تكون عددًا صحيحًا موجبًا")
         with self.db.transaction():
             s = self._session(ctx, sid, open_only=True)
