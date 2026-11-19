@@ -94,16 +94,24 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
                     c += "_"
                 cols.append(c)
             tn = "e_" + t["name"]
+            # rows with impossible values (Export.quarantined): kept apart in q_<table> with why, never in e_
+            bad = ex.quarantined(t["name"]) if hasattr(ex, "quarantined") else {}
             con.execute(f"CREATE TABLE {_q(tn)} (" + ", ".join(f"{_q(c)} TEXT" for c in cols or ["col"]) + ")")
             if cols:
                 ph = ",".join("?" * len(cols))
                 width = len(cols)
+                cell = lambda r: [v if v != "" else None for v in (r + [""] * width)[:width]]   # noqa: E731
                 con.executemany(f"INSERT INTO {_q(tn)} VALUES ({ph})",
-                                ([v if v != "" else None for v in (r + [""] * width)[:width]] for r in rows))
+                                (cell(r) for n, r in enumerate(rows) if n not in bad))
                 for c in cols:
                     if c.lower() in INDEX_COLS:
                         con.execute(f"CREATE INDEX {_q('ix_' + tn + '_' + c)} ON {_q(tn)}({_q(c)})")
-            n = con.execute(f"SELECT count(*) FROM {_q(tn)}").fetchone()[0]
+                if bad:
+                    qn = "q_" + t["name"]
+                    con.execute(f"CREATE TABLE {_q(qn)} (_reason TEXT, " + ", ".join(f"{_q(c)} TEXT" for c in cols) + ")")
+                    con.executemany(f"INSERT INTO {_q(qn)} VALUES (?,{ph})",
+                                    ([bad[n], *cell(r)] for n, r in enumerate(rows) if n in bad))
+            n = con.execute(f"SELECT count(*) FROM {_q(tn)}").fetchone()[0] + len(bad)
             counts[t["name"]] = n
             con.execute("INSERT INTO tables VALUES (?,?,?,?)", (t["name"], t["schema"], n, t["rows"]))
         for kind, m in maps.items():

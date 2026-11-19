@@ -242,7 +242,7 @@ class TestFullMove(Base):
         finally:
             con.close()
         h = res["reconciliation"]["history"]
-        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2})
+        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2, "quarantined": 0})
         self.assertEqual(h["Gedo_customers"]["archive"], 1)
 
     def test_same_export_again_resumes_and_writes_nothing_twice(self):
