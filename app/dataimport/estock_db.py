@@ -1453,14 +1453,14 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
                  "class": (r.get(classc) or "").strip() if classc else "",
                  "balance": egp(bal) if bal is not None else None, "balance_column": balc,
                  "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal,
-                 "piasters": piasters(bal) if bal is not None else 0}    # what the account opens with (half up)
+                 "_raw": r.get(balc) if balc else None}
             if role == "drawer":
                 d["last_close"] = closes.get(d["estock_id"]) or None
             depots.append(d)
         # owner 19/11: what each depot becomes (F105 / #342 posts it; nothing here posts money)
         used = [d for d in depots if d["role"] == "drawer" and d.get("last_close")]
         for d in depots:
-            bal, name = d.pop("_bal"), d["name"]
+            bal, name, raw_bal = d.pop("_bal"), d["name"], d.pop("_raw", None)
             if d["role"] == "junk":
                 d["action"] = "no_account"          # «0000»: almost nothing; its history stays in the archive
                 if bal:
@@ -1481,6 +1481,10 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
                 p.issue("Cash_depots", d["estock_id"], name, "last_close", ", ".join(x["estock_id"] for x in used) or "-",
                         "OWNER: مش واضح أنهي درج هو درج الشيفت (اتقفل فيه شيفتات)", value_egp=bal, kind="review")
             d["action"] = "account_stopped" if "موقوف" in name else "account"
+            # what the account opens with: a fraction of a piaster is rounded half up and listed (owner 19/11),
+            # or stops the move with --no-round-piastres; never rounded silently (Codex on #381)
+            d["piasters"] = _balance_piastres(p, "Cash_depots", d["estock_id"], name, balc or "balance",
+                                              raw_bal, bal)
             p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                     f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
                     + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
@@ -1565,6 +1569,12 @@ def read_confirm(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------- applying
+# Codex on #381: inventory adjustments, counts and the average cost do not tell the hospital's batches from the
+# pharmacy's yet, so for launch the hospital's own store stays out of operational stock (listed in full in
+# hospital-stock.csv, as before). 0039 and the sale guard are in place; switch on when those paths filter by owner.
+HOSPITAL_BATCHES = False
+
+
 def _has_money(db: Database) -> bool:
     """The candidate schema (0038, money accounts) and its service: E-Stock's money places become accounts."""
     try:
@@ -1796,7 +1806,7 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
 
     # 4b) the hospital's own store (owner 19/11): hospital-owned batches, never the pharmacy's stock (0039)
     hosp = [h for h in plan.hospital if h.get("units")]
-    if hosp and _has_batch_owner(db):
+    if hosp and HOSPITAL_BATCHES and _has_batch_owner(db):
         def do_hospital(run_id):
             rows, units = [], 0
             for h in hosp:

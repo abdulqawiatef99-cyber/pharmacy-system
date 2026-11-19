@@ -1,6 +1,7 @@
 """The move on the launch-candidate schema (0038 money accounts, 0039 hospital-owned batches): E-Stock's money
 places become real accounts with their opening balances, and store 2 (the hospital's own stock) becomes
 hospital-owned batches that no normal sale can take. Synthetic data only."""
+from decimal import Decimal
 from pathlib import Path
 
 from app.dataimport import estock_db
@@ -62,9 +63,13 @@ class TestMoneyPlacesBecomeAccounts(Base):
 
 
 class TestHospitalStock(Base):
+    """Hospital-owned batches once inventory is ownership-aware (switched on here; off for launch, see below)."""
+
     def setUp(self):
         super().setUp()
-        self.res = self.run_import()
+        from unittest import mock
+        with mock.patch.object(estock_db, "HOSPITAL_BATCHES", True):
+            self.res = self.run_import()
 
     def test_store_2_lands_as_hospital_owned_batches(self):
         self.assertTrue(self.res["ok"], self.res["reconciliation"]["mismatches"])
@@ -105,3 +110,36 @@ class TestOnTheOldSchema(Base):
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         self.assertNotIn("money", res["runs"])
         self.assertEqual(self.db.one("SELECT count(*) n FROM money_accounts WHERE source_ref LIKE 'estock:%'")["n"], 0)
+
+
+class TestCodexReview381(Base):
+    """Codex on #381 @c9e46ba (each failed before the fix)."""
+
+    def test_p1_for_launch_store_2_never_enters_operational_stock(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertFalse(estock_db.HOSPITAL_BATCHES)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM batches WHERE owner='hospital'")["n"], 0)
+        self.assertEqual(self.units("102"), 28)                                # the pharmacy's own only
+        cost = self.db.one("SELECT avg_cost FROM item_costs WHERE item_id=?", (self.item("102")["id"],))
+        self.assertEqual(Decimal(cost["avg_cost"]) if cost else None, Decimal("10"))   # 140 / 14, no hospital mix
+        text = Path(res["reports"]["hospital_stock"]).read_text(encoding="utf-8-sig")
+        self.assertIn("Testaclav 1g Tab", text)                                # still listed in full
+
+    def test_p1_a_fractional_piaster_opening_is_rounded_and_listed_never_silently(self):
+        t = tables()
+        t["Cash_depots"][1]["cd_balance"] = "20.2550"                         # «خزينة 1»
+        res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        line = [d for d in res["plan"].dq if d["table"] == "Cash_depots" and "كسر قرش" in d["action"]]
+        self.assertEqual(len(line), 1)
+        self.assertIn("Cash_depots", res["plan"].checks["rounding"])
+        acct = self.db.one("SELECT id FROM money_accounts WHERE source_ref='estock:2'")["id"]
+        self.assertEqual(self.db.one("SELECT sum(amount) b FROM money_movements WHERE account_id=?", (acct,))["b"], 2026)
+
+    def test_p1_with_no_round_piastres_a_fractional_opening_stops_the_move(self):
+        t = tables()
+        t["Cash_depots"][1]["cd_balance"] = "20.2550"
+        res = self.run_import(tables=t, round_piastres=False)
+        self.assertFalse(res["ok"])
+        self.assertFalse(self.db.one("SELECT 1 FROM money_movements"))
