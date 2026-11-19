@@ -364,3 +364,18 @@ class TestCodexReview340d(TestCodexReview381Claim):
         self.assertNotIn("100", [r["item_code"] for r in lines])
 
     # the inherited tests run here too: they must keep passing
+
+
+class TestCodexReview340e(TestCodexReview381Claim):
+    """Codex on #381 @6b86ef8 (#340's claim): ids written as 1.0 in the header still match (failed before)."""
+
+    def test_p1_a_header_with_decimal_ids_is_still_claimed_and_listed(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Back_Sales_details"], t["Back_sales_header"] = [], []
+        t["Sales_header"][0].update({"customer_id": "1.0", "sales_id": "1.0"})
+        c = self._claim(t)
+        self.assertIn("100", [r["item_code"] for r in c["lines"] if r["source"] == "estock" and r["invoice"] in ("1", "1.0")])
+        kid = self.db.one("SELECT id FROM contracts")["id"]
+        listed = k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"]
+        self.assertIn("1.0", [e["estock_sales_id"] for e in listed])

@@ -157,22 +157,24 @@ def estock_history(db: Database, ctx: Context, contract_id: str, d1: date, d2: d
                 "SELECT 1 FROM sqlite_master WHERE name='map_customers'").fetchone():
             return []
         pick = lambda c: c if c in have else "NULL"   # noqa: E731 - a column E-Stock may not have
-        ids = {r["estock_id"]: r["program_id"] for r in con.execute("SELECT estock_id, program_id FROM map_customers")
+        from .estock_returns import _ident as idn          # E-Stock ids as ids: 1 = 1.0 (Codex on #381)
+        ids = {idn(r["estock_id"]): r["program_id"] for r in con.execute("SELECT estock_id, program_id FROM map_customers")
                if r["program_id"] in customers}
         if not ids:
             return []
         out = []
         q = (f'SELECT sales_id, customer_id, insert_date, {pick("bill_number")} bill_number, {pick("total_bill_net")} total,'
              f' {pick("ticket_name")} ticket_name, {pick("ticket_id")} ticket_ref, {pick("ticket_num")} ticket_no'
-             f' FROM "e_Sales_header" WHERE substr(insert_date, 1, 10) BETWEEN ? AND ? AND customer_id IN'
-             f' ({",".join("?" * len(ids))}) ORDER BY insert_date')
-        for r in con.execute(q, (d1.isoformat(), d2.isoformat(), *ids)):
+             f' FROM "e_Sales_header" WHERE substr(insert_date, 1, 10) BETWEEN ? AND ? ORDER BY insert_date')
+        for r in con.execute(q, (d1.isoformat(), d2.isoformat())):
+            if idn(r["customer_id"]) not in ids:
+                continue
             try:
                 total = int((Decimal(r["total"] or "0") * 100).quantize(Decimal(1), ROUND_HALF_UP))
             except InvalidOperation:
                 total = None
             out.append({"estock_sales_id": r["sales_id"], "bill_number": r["bill_number"], "day": (r["insert_date"] or "")[:10],
-                        "customer": customers[ids[r["customer_id"]]], "total": total,
+                        "customer": customers[ids[idn(r["customer_id"])]], "total": total,
                         "ticket_name": r["ticket_name"], "ticket_ref": r["ticket_ref"], "ticket_no": r["ticket_no"]})
         return out
 
@@ -331,20 +333,28 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
             f'SELECT "{pc["product_id"]}", "{pc.get("product_code", pc["product_id"])}",'
             f' coalesce("{pc.get("product_name_en", pc["product_id"])}", "{pc.get("product_name_ar", pc["product_id"])}")'
             f' FROM "e_Products"')} if "product_id" in pc else {}
-        q = (f"SELECT {h('sales_id')} sid, {h('bill_number')} bill, {h('insert_date')} at, {h('customer_id')} cust,"
-             f" {h('store_id')} store, {h('ticket_name')} tname, {h('ticket_id')} tref, {h('ticket_num')} tno,"
-             f" {ln('product_id')} pid, {ln('amount')} amount, {ln('sell_price')} sp, {ln('buy_price')} bp,"
-             f" {ln('total_sell')} ts, {ln('disc_money')} dm, {ln('back_amount')} back, {ln('back_price')} bpr,"
-             f" {ln('details_id')} did"
-             f' FROM "e_Sales_header" h JOIN "e_{lt}" l ON l."{lc["sales_id"]}"=h."{hc["sales_id"]}"'
-             f" WHERE substr({h('insert_date')}, 1, 10) BETWEEN ? AND ?"
-             f" AND {h('customer_id')} IN ({','.join('?' * len(ids))}){lwhere}")
-        found = con.execute(q, (d1.isoformat(), d2.isoformat(), *ids, *lparams)).fetchall()
+        from . import estock_returns as er
+        idn = er._ident                       # E-Stock ids as ids: 1 = 1.0 (Codex on #340/#381), as the old-invoice return
+        ids = {idn(k): v for k, v in ids.items()}
+        heads = {}
+        for r in con.execute(f"SELECT {h('sales_id')} sid, {h('bill_number')} bill, {h('insert_date')} at,"
+                             f" {h('customer_id')} cust, {h('store_id')} store, {h('ticket_name')} tname,"
+                             f" {h('ticket_id')} tref, {h('ticket_num')} tno FROM \"e_Sales_header\" h"
+                             f" WHERE substr({h('insert_date')}, 1, 10) BETWEEN ? AND ?", (d1.isoformat(), d2.isoformat())):
+            if idn(r["cust"]) in ids:
+                heads[idn(r["sid"])] = dict(r, cust=idn(r["cust"]))
+        found = []
+        if heads:
+            for r in con.execute(f"SELECT {ln('sales_id')} lsid, {ln('product_id')} pid, {ln('amount')} amount,"
+                                 f" {ln('sell_price')} sp, {ln('buy_price')} bp, {ln('total_sell')} ts, {ln('disc_money')} dm,"
+                                 f" {ln('back_amount')} back, {ln('back_price')} bpr, {ln('details_id')} did"
+                                 f' FROM "e_{lt}" l WHERE 1=1{lwhere}', lparams):
+                hd = heads.get(idn(r["lsid"]))
+                if hd:
+                    found.append({**hd, **dict(r)})
         # E-Stock's return documents name the invoice and product, not the line: what they hold beyond the
         # lines' own back_amount is taken off that product's lines once, in order, as the old-invoice return
         # counts it (Codex on #381; estock_returns._invoice)
-        from . import estock_returns as er
-        idn = er._ident                       # E-Stock ids as ids: 1 = 1.0 (Codex on #340), as the old-invoice return
         extra: dict[tuple, Decimal] = {}
         if "e_Back_Sales_details" in tables and found:
             bc = cols("e_Back_Sales_details")
