@@ -143,3 +143,24 @@ class TestCodexReview381(Base):
         res = self.run_import(tables=t, round_piastres=False)
         self.assertFalse(res["ok"])
         self.assertFalse(self.db.one("SELECT 1 FROM money_movements"))
+
+
+class TestCodexReview381b(Base):
+    """Codex on #381 @6b86ef8 (failed before the fix)."""
+
+    def test_p1_an_unreadable_account_balance_stops_the_move_and_posts_nothing(self):
+        t = tables()
+        t["Cash_depots"][1]["cd_balance"] = "not-a-number"                    # «خزينة 1»
+        res = self.run_import(tables=t)
+        self.assertFalse(res["ok"])
+        self.assertTrue(any(d["table"] == "Cash_depots" and d["severity"] == "block" for d in res["plan"].dq))
+        self.assertFalse(self.db.one("SELECT 1 FROM money_movements"))
+        self.assertFalse(self.db.one("SELECT 1 FROM audit_log WHERE action='money.opening'"))
+
+    def test_p1_on_the_old_schema_the_same_value_is_only_listed(self):
+        from unittest import mock
+        t = tables()
+        t["Cash_depots"][1]["cd_balance"] = "not-a-number"
+        with mock.patch.object(estock_db, "_has_money", return_value=False):
+            res = self.run_import(tables=t)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])

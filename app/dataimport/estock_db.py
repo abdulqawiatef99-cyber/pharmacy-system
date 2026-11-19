@@ -1484,7 +1484,7 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
             # what the account opens with: a fraction of a piaster is rounded half up and listed (owner 19/11),
             # or stops the move with --no-round-piastres; never rounded silently (Codex on #381)
             d["piasters"] = _balance_piastres(p, "Cash_depots", d["estock_id"], name, balc or "balance",
-                                              raw_bal, bal)
+                                              raw_bal, bal) if bal is not None else None    # unknown: never a zero
             p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                     f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
                     + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
@@ -1840,10 +1840,12 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                     kind, treasury = ("other", True) if treasury else ("treasury", True)   # one main treasury
                 aid = money.ensure_account(db, ctx, kind=kind, name=d["name"], source_ref=f"estock:{d['estock_id']}",
                                            is_active=d["action"] != "account_stopped")
-                money.post_opening(db, ctx, f"estock:{d['estock_id']}", d.get("piasters") or 0, source="estock",
+                if d.get("piasters") is None:            # run() blocks this before anything is written
+                    raise ValidationFailed(f"رصيد «{d['name']}» مش مقروء", code="blocking")
+                money.post_opening(db, ctx, f"estock:{d['estock_id']}", d["piasters"], source="estock",
                                    source_ref=f"Cash_depots:{d['estock_id']}", note=f"«{d['name']}» في إي ستوك")
-                total += d.get("piasters") or 0
-                rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": d.get("piasters") or 0}, aid))
+                total += d["piasters"]
+                rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": d["piasters"]}, aid))
             return rows, {"accounts": len(rows), "opening_total": total}
         runs["money"], r = _step(db, ctx, "customers", "money", H("money", ex.sha("Cash_depots")), esha, label, do_money)
         resumed += ["money"] if r else []
@@ -2145,6 +2147,13 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")
+    if _has_money(db):        # the money step will post these openings: an unknown balance is never a zero opening
+        for d in (plan.checks.get("money_info") or {}).get("cash_depots", []):
+            if d.get("action") in ("account", "account_stopped") and d.get("piasters") is None:
+                plan.issue("Cash_depots", d["estock_id"], d["name"], d.get("balance_column") or "balance",
+                           d.get("balance") or "(مش مقروء)",
+                           "رصيد مكان الفلوس ده مش مقروء من إي ستوك: الرصيد الافتتاحي لحسابه محتاج قرار قبل النقل",
+                           block=True)
     if write_archive and archive_path.exists() and (estock_archive.source_sha(archive_path) != ex.source_sha()
                                                     or estock_archive.owner_org(archive_path) != ctx.org_id):
         raise Conflict(f"فيه أرشيف إي ستوك من تصدير تاني: {archive_path}. مفيش أي حاجة اتكتبت", code="estock_db_refused")
