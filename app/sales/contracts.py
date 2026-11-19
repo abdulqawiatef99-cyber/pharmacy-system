@@ -4,11 +4,9 @@ cashier only picks the customer, and the discount is applied by itself (still ne
 cost without the owner)."""
 from __future__ import annotations
 
-import sqlite3
 from contextlib import closing
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from pathlib import Path
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -131,22 +129,29 @@ def set_ticket(db: Database, ctx: Context, sid: str, data: dict) -> dict:
     return vals
 
 
+def _archive(db: Database, ctx: Context):
+    """This pharmacy's E-Stock archive, read only, or None: through estock_archive.open_for, so another
+    pharmacy in the same database reads nothing from it (#345 review)."""
+    from ..core.errors import NotFound
+    from ..dataimport import estock_history as eh
+    if not eh.available(db):
+        return None
+    try:
+        return eh._con(db, ctx)
+    except NotFound:
+        return None
+
+
 def estock_history(db: Database, ctx: Context, contract_id: str, d1: date, d2: date) -> list[dict]:
     """E-Stock invoices of this contract's customers in the period, with their tickets, from the read-only
     archive next to the database (estock_archive.py). Empty when there is no archive. Never mixed into
     the program's totals: E-Stock history is shown apart."""
-    from ..dataimport import estock_archive
-    if db.path == ":memory:":
-        return []
-    path = Path(db.path).parent / estock_archive.NAME
-    if not path.exists():
-        return []
     customers = {r["id"]: r["name"] for r in db.all("SELECT id, name FROM customers WHERE org_id=? AND contract_id=?",
                                                     (ctx.org_id, contract_id))}
-    if not customers:
+    con = _archive(db, ctx) if customers else None
+    if con is None:
         return []
-    with closing(estock_archive.open_ro(path)) as con:
-        con.row_factory = sqlite3.Row
+    with closing(con):
         have = {r[1].lower() for r in con.execute('PRAGMA table_info("e_Sales_header")')}
         if not {"sales_id", "customer_id", "insert_date"} <= have or not con.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='map_customers'").fetchone():
@@ -295,28 +300,25 @@ def _store_label(name) -> str:
 
 
 def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, d2: date, show_cost: bool) -> list[dict]:
-    from ..dataimport import estock_archive
-    if db.path == ":memory:":
-        return []
-    path = Path(db.path).parent / estock_archive.NAME
-    if not path.exists():
-        return []
+    from ..dataimport.estock_history import _Arch
     customers = {r["id"]: r["name"] for r in db.all("SELECT id, name FROM customers WHERE org_id=? AND contract_id=?",
                                                     (ctx.org_id, contract_id))}
-    if not customers:
+    con = _archive(db, ctx) if customers else None
+    if con is None:
         return []
     out = []
-    with closing(estock_archive.open_ro(path)) as con:
-        con.row_factory = sqlite3.Row
+    with closing(con):
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {"e_Sales_header", "e_Branches_sales_details", "map_customers"} <= tables:
+        # the local lines only: Sales_details, else this branch's rows of the Branches_ mirror (#345 review)
+        lt, lwhere, lparams = _Arch(con).lines() if "e_Sales_header" in tables else ("", "", ())
+        if not {"e_Sales_header", f"e_{lt}", "map_customers"} <= tables:
             return []
         ids = {r["estock_id"]: r["program_id"] for r in con.execute("SELECT estock_id, program_id FROM map_customers")
                if r["program_id"] in customers}
         if not ids:
             return []
         cols = lambda t: {r[1].lower(): r[1] for r in con.execute(f'PRAGMA table_info("{t}")')}   # noqa: E731
-        hc, lc = cols("e_Sales_header"), cols("e_Branches_sales_details")
+        hc, lc = cols("e_Sales_header"), cols(f"e_{lt}")
         pc = cols("e_Products") if "e_Products" in tables else {}
         sc = cols("e_Stores") if "e_Stores" in tables else {}
         h = lambda c: f'h."{hc[c]}"' if c in hc else "NULL"   # noqa: E731 - E-Stock columns may be missing
@@ -332,10 +334,10 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
              f" {h('store_id')} store, {h('ticket_name')} tname, {h('ticket_id')} tref, {h('ticket_num')} tno,"
              f" {ln('product_id')} pid, {ln('amount')} amount, {ln('sell_price')} sp, {ln('buy_price')} bp,"
              f" {ln('total_sell')} ts, {ln('disc_money')} dm, {ln('back_amount')} back, {ln('back_price')} bpr"
-             f' FROM "e_Sales_header" h JOIN "e_Branches_sales_details" l ON l."{lc["sales_id"]}"=h."{hc["sales_id"]}"'
+             f' FROM "e_Sales_header" h JOIN "e_{lt}" l ON l."{lc["sales_id"]}"=h."{hc["sales_id"]}"'
              f" WHERE substr({h('insert_date')}, 1, 10) BETWEEN ? AND ?"
-             f" AND {h('customer_id')} IN ({','.join('?' * len(ids))})")
-        for r in con.execute(q, (d1.isoformat(), d2.isoformat(), *ids)):
+             f" AND {h('customer_id')} IN ({','.join('?' * len(ids))}){lwhere}")
+        for r in con.execute(q, (d1.isoformat(), d2.isoformat(), *ids, *lparams)):
             amt, back = _dec(r["amount"]) or Decimal(0), _dec(r["back"]) or Decimal(0)
             sp, bp, ts, dm, bpr = (_dec(r[x]) for x in ("sp", "bp", "ts", "dm", "bpr"))
             if amt - back == 0:

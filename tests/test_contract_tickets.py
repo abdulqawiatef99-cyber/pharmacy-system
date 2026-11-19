@@ -235,3 +235,41 @@ class TestCodexReview340c(ImportBase):
         shelf = c["totals"][cust]["stores"]["الصيدلية"]
         self.assertGreaterEqual(shelf["cost_unknown"], 1)
         self.assertFalse(shelf["cost"].startswith("-"))
+
+
+class TestArchiveBoundToItsPharmacy(ImportBase):
+    """The contract report and claim read the E-Stock archive through estock_archive.open_for (#345 review):
+    only the pharmacy it was imported for, and only this branch's lines."""
+
+    def _contract(self):
+        cust = self.db.one("SELECT id FROM customers WHERE name='أحمد تجربة'")["id"]
+        kid = k.save(self.db, self.ctx, {"name": "مستشفى تجربة"})[0]["id"]
+        k.link_customer(self.db, self.ctx, cust, kid)
+        return kid
+
+    def test_an_archive_of_another_pharmacy_is_not_read(self):
+        import sqlite3
+        from contextlib import closing
+        from pathlib import Path
+        from app.dataimport import estock_archive
+        self.assertTrue(self.run_import()["ok"])
+        kid = self._contract()
+        self.assertTrue(k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"])
+        with closing(sqlite3.connect(Path(self.db.path).parent / estock_archive.NAME)) as con, con:
+            con.execute("UPDATE meta SET value='another-org' WHERE key='org_id'")
+        self.assertEqual(k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"], [])
+        self.assertEqual([r for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
+                          if r["source"] == "estock"], [])
+
+    def test_the_claim_takes_only_this_branchs_lines(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["co_inf"] = [{"branch_id": "3", "co_name": "x"}]
+        t["Branches_sales_details"].append({"branch_id": "2", "details_id": "1", "sales_id": "1", "product_id": "1",
+                                            "amount": "99", "sell_price": "30.0000", "total_sell": "2970.0000",
+                                            "insert_date": "2026-11-18T10:00:00.000"})
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        kid = self._contract()
+        qty = [r["qty"] for r in k.claim(self.db, self.ctx, kid, "2026-11-01", "2026-11-30")["lines"]
+               if r["source"] == "estock" and r["item_code"] == "100"]
+        self.assertNotIn("99", qty)
