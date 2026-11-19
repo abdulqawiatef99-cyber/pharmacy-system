@@ -688,6 +688,11 @@ class Sales:
             s = self._draft(ctx, sid)
             if s["version"] != preview["version"]:
                 raise Conflict("عُدّلت الفاتورة أثناء الإتمام", code="stale_version")
+            # the contract terms again under the posting lock: a rate changed after the check above would
+            # otherwise post at the old price (#324 M2-08)
+            if self._reprice_contract(ctx, sid):
+                raise Conflict("تغيّر خصم التعاقد على هذه الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع",
+                               code="price_changed", details={"reason": "contract"})
             if on_credit:            # #143: again inside the write lock, so two cashiers cannot pass it together
                 c = self.db.one("SELECT credit_limit FROM customers WHERE id=? AND org_id=?",
                                 (s["customer_id"], ctx.org_id))
@@ -695,7 +700,7 @@ class Sales:
                 if not c or bal + on_credit > c["credit_limit"]:
                     raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
                                    details={"balance": bal, "limit": c["credit_limit"] if c else 0})
-            total = 0
+            total = subtotal = discount = 0
             below_cost = []
             for l in preview["lines"]:
                 item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
@@ -713,7 +718,14 @@ class Sales:
                                     (new_id(), l["id"], a["batch_id"], a["qty"], a["unit_price"],
                                      cost_row["avg_cost"] if cost_row else None, a["pack_price"], a["pack_size"]))
                 gross = line_gross((a["qty"], a) for a in plan)
-                net = gross - discount_of(gross, l["discount_bp"])
+                disc = discount_of(gross, l["discount_bp"])
+                net = gross - disc
+                # each line against the one the cashier confirmed: two price changes that cancel out keep the
+                # total but not the lines (#324 M2-07)
+                if (gross, disc) != (l["gross"], l["discount"]):
+                    raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
+                subtotal += gross
+                discount += disc
                 if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
                     if Decimal(net) < cost:
@@ -745,7 +757,7 @@ class Sales:
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
                             " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
-                            (no, preview["subtotal"], preview["discount_total"], total, paid_cash,
+                            (no, subtotal, discount, total, paid_cash,
                              paid_card, paid_transfer, on_credit, _now(), request_id, sid))
             if on_credit:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
@@ -816,7 +828,9 @@ class Sales:
             if not isinstance(p, dict):
                 raise ValidationFailed("طريقة الدفع غير صحيحة")
             m, amount, ch = p.get("method"), p.get("amount"), p.get("channel_id") or None
-            if m not in ("cash", "card", "transfer", "credit") or not isinstance(amount, int) or amount < 0:
+            # true is not 1 piaster (#324 M2-19)
+            if m not in ("cash", "card", "transfer", "credit") or isinstance(amount, bool) \
+                    or not isinstance(amount, int) or amount < 0:
                 raise ValidationFailed("طريقة الدفع غير صحيحة")
             if amount == 0:
                 continue
@@ -886,7 +900,7 @@ class Sales:
                     raise ValidationFailed("الفاتورة ليست توصيلًا")
                 fee = d.get("fee", None)
                 if fee is not None:
-                    if not isinstance(fee, int) or not 0 <= fee <= 100000:
+                    if isinstance(fee, bool) or not isinstance(fee, int) or not 0 <= fee <= 100000:   # #324 M2-19
                         raise ValidationFailed("رسوم التوصيل غير صحيحة")
                     self.db.execute("UPDATE sales SET delivery_fee=? WHERE id=?", (fee, sid))
                 for k in ("address", "phone", "courier"):
