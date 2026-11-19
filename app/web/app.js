@@ -255,7 +255,7 @@ const API_MAX_APPROVALS = 8;                    // more than any action needs; s
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
-  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/];
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
 function onceKey(method, apiPath, bodyText) {
   if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -333,16 +333,20 @@ function printInFrame(url) {
 const routes = [
   [/^#\/login$/, viewLogin],
   [/^#\/setup$/, viewSetup],
-  [/^#\/purchases$/, viewPurchases],
+  [/^#\/purchases$/, async () => { await viewPurchases(); estockPanel("list", "purchase"); }],
   [/^#\/purchases\/([\w-]+)$/, viewInvoice],
   [/^#\/items$/, viewItems],
   [/^#\/items\/([\w-]+)\/edit$/, viewItemEdit],
-  [/^#\/items\/([\w-]+)$/, viewItem],
+  [/^#\/items\/([\w-]+)$/, async (id) => { await viewItem(id); estockPanel("item", id); }],
   [/^#\/categories$/, viewCategories],
   [/^#\/groups$/, viewGroups],
   [/^#\/shift$/, viewShift],
   [/^#\/suppliers$/, viewSuppliers],
-  [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
+  [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
+  [/^#\/estock(?:\?.*)?$/, viewEstock],
+  [/^#\/estock\/(sale|sale_return|purchase)\/([^/?]+)$/, viewEstockInvoice],
+  [/^#\/estock-statement\/(customer|supplier)\/([\w-]+)$/, viewEstockStatement],
+  [/^#\/estock-item\/([\w-]+)$/, viewEstockItem],
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
   [/^#\/audit$/, viewAudit],
@@ -357,14 +361,14 @@ const routes = [
   [/^#\/owner-reports$/, viewOwnerReports],
   [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
-  [/^#\/customers\/([\w-]+)$/, viewCustomer],
+  [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
   [/^#\/deadstock$/, viewDeadstock],
-  [/^#\/sales$/, viewSales],
+  [/^#\/sales$/, async () => { await viewSales(); estockPanel("list", "sale"); }],
   [/^#\/system$/, viewSystem],
   [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
@@ -467,7 +471,7 @@ const SCREENS = {
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
-  customize: ["تخصيص الواجهة", "settings.manage"],
+  customize: ["تخصيص الواجهة", "settings.manage"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
@@ -3513,6 +3517,157 @@ async function viewShift() {
       if (err.code === "difference_note_required") e.target.note.focus();
     }
   });
+}
+
+// ------------------------------------------------------------------ E-Stock history (read only) and old-invoice returns
+// Owner 18/11: the old invoices are usable inside the program, not converted. Every row says it is E-Stock history.
+let ESTOCK_ON = null;
+async function estockOn() {
+  if (ESTOCK_ON === null) { try { ESTOCK_ON = (await api("/api/estock/available")).available; } catch { ESTOCK_ON = false; } }
+  return ESTOCK_ON;
+}
+const ES_KIND = { sale: "مبيعات", sale_return: "مرتجعات", purchase: "مشتريات" };
+const ES_BADGE = `<span class="badge b-info">من إي ستوك</span>`;
+const esMoney = (v) => (v == null ? "" : esc(v));          // E-Stock's amounts come as EGP text, shown as they are
+function hashQuery() {
+  const i = location.hash.indexOf("?");
+  return new URLSearchParams(i < 0 ? "" : location.hash.slice(i + 1));
+}
+
+async function viewEstock() {
+  if (!(await estockOn())) { app.innerHTML = `<section class="panel"><h1>تاريخ إي ستوك</h1><p class="muted">مفيش تاريخ إي ستوك في البرنامج ده (النقل ماتعملش).</p></section>`; return; }
+  const qp = hashQuery(), can = (p) => ME.permissions.includes(p);
+  const kinds = Object.keys(ES_KIND).filter((k) => can(k === "purchase" ? "purchases.read" : "sales.totals"));
+  let kind = kinds.includes(qp.get("kind")) ? qp.get("kind") : kinds[0];
+  if (!kind) { app.innerHTML = `<section class="panel"><h1>تاريخ إي ستوك</h1><p class="muted">مش مسموح لك تشوف الفواتير القديمة.</p></section>`; return; }
+  const party = qp.get("party") || "", item = qp.get("item") || "";
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>تاريخ إي ستوك</h1>${ES_BADGE}</div>
+    <p class="muted">فواتير البرنامج القديم كما هي، للبحث والفتح والمرتجع. مبالغها لا تدخل في حسابات البرنامج.</p>
+    <div class="seg2 small" id="esK">${kinds.map((k) => `<button type="button" data-k="${k}" class="${k === kind ? "on" : ""}">${k === kind ? "✓ " : ""}${ES_KIND[k]}</button>`).join("")}</div>
+    <form class="row mt" id="esF"><label class="f">رقم الفاتورة <input name="q"></label>
+      <label class="f">من <input type="date" name="from"></label><label class="f">إلى <input type="date" name="to"></label>
+      <label class="f" id="esTicket">رقم التذكرة <input name="ticket"></label><button class="btn small">ابحث</button></form>
+    ${party || item ? `<p class="muted">${party ? "الفواتير دي لعميل أو مورد واحد" : "الفواتير دي لصنف واحد"} — <a href="#/estock?kind=${kind}">اعرض الكل</a></p>` : ""}
+    <div id="esBox" class="mt"></div></section>`;
+  const f = $("#esF");
+  const load = async () => {
+    $("#esTicket").hidden = kind !== "sale";
+    const p = new URLSearchParams({ kind });
+    for (const k of ["q", "from", "to"]) if (f[k].value) p.set(k, f[k].value);
+    if (kind === "sale" && f.ticket.value) p.set("ticket", f.ticket.value);
+    if (party) p.set("party", party);
+    if (item) p.set("item", item);
+    const rows = (await api(`/api/estock/invoices?${p}`)).invoices;
+    $("#esBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>الرقم</th><th>${kind === "purchase" ? "المورد" : "العميل"}</th><th>الإجمالي</th>${kind === "purchase" ? "" : "<th>نقدي</th><th>فيزا ومحفظة</th>"}${kind === "sale" ? "<th>التذكرة</th>" : ""}<th></th></tr></thead><tbody>
+      ${rows.map((r) => `<tr class="clickable" data-go="${esc(r.estock_id)}"><td>${esc(r.day)}</td><td>${esc(r.bill_number || r.estock_id)}</td><td>${esc(r.party || "—")}</td>
+        <td class="num">${esMoney(r.total)}</td>${kind === "purchase" ? "" : `<td class="num">${esMoney(r.cash)}</td><td class="num">${esMoney(r.network)}</td>`}
+        ${kind === "sale" ? `<td>${esc([r.ticket_name, r.ticket_no].filter(Boolean).join(" "))}</td>` : ""}<td>${ES_BADGE}</td></tr>`).join("")
+        || `<tr><td colspan="8" class="muted">مفيش فواتير بالبحث ده</td></tr>`}</tbody></table></div>
+      ${rows.length >= 200 ? `<p class="muted">معروض أول 200 — ضيّق البحث بالتاريخ أو الرقم.</p>` : ""}`;
+    $("#esBox").querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${kind}/${tr.dataset.go}`; }));
+  };
+  document.querySelectorAll("#esK [data-k]").forEach((b) => b.addEventListener("click", () => {
+    kind = b.dataset.k;
+    document.querySelectorAll("#esK [data-k]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + ES_KIND[x.dataset.k]; });
+    load().catch((e) => toast(e.message, true));
+  }));
+  f.addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
+  await load();
+}
+
+async function viewEstockInvoice(kind, id) {
+  const inv = await api(`/api/estock/invoices/${kind}/${id}`), canRet = ME.permissions.includes("sales.return");
+  const cost = inv.lines.some((l) => "cost" in l);
+  app.innerHTML = `<section class="panel"><a href="#/estock?kind=${kind}">← تاريخ إي ستوك</a>
+    <div class="row between"><h1>فاتورة قديمة: ${ES_KIND[kind]} — رقم ${esc(inv.bill_number || inv.estock_id)}</h1>${ES_BADGE}</div>
+    <div class="totals"><div>التاريخ<b>${esc(inv.day)}</b></div><div>${kind === "purchase" ? "المورد" : "العميل"}<b>${esc(inv.party || "—")}</b></div>
+      <div>الإجمالي<b>${esMoney(inv.total)}</b></div>${kind === "purchase" ? "" : `<div>نقدي<b>${esMoney(inv.cash)}</b></div><div>فيزا ومحفظة<b>${esMoney(inv.network)}</b></div>`}
+      ${inv.ticket_no || inv.ticket_name ? `<div>التذكرة<b>${esc([inv.ticket_name, inv.ticket_no].filter(Boolean).join(" "))}</b></div>` : ""}</div>
+    <div class="tablewrap mt"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المرتجع منها</th><th>السعر</th><th>الخصم</th><th>الإجمالي</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
+    ${inv.lines.map((l) => `<tr><td>${l.item_id ? `<a href="#/items/${esc(l.item_id)}">${esc(l.item)}</a>` : `<span class="badge b-warn">⚠ صنف مش مربوط</span>`}</td>
+      <td class="num">${esc(l.qty ?? "")}</td><td class="num">${esc(l.returned ?? "")}</td><td class="num">${esMoney(l.price)}</td><td class="num">${esMoney(l.discount)}</td>
+      <td class="num">${esMoney(l.total)}</td>${cost ? `<td class="num">${esMoney(l.cost)}</td>` : ""}<td>${esc(l.expiry || "")}</td></tr>`).join("")}</tbody></table></div>
+    <p class="muted">الكميات بوحدات إي ستوك زي ما هي. فاتورة من البرنامج القديم: مبالغها لا تدخل في حسابات البرنامج.</p>
+    ${kind === "sale" && canRet ? `<button class="btn mt" id="esRet">مرتجع من فاتورة إي ستوك قديمة</button>` : ""}
+    <div id="esRetBox"></div></section>`;
+  $("#esRet")?.addEventListener("click", () => estockReturnForm(id).catch((e) => toast(e.message, true)));
+}
+
+async function estockReturnForm(id) {
+  const lines = (await api(`/api/estock/sales/${id}/return-lines`)).lines;
+  $("#esRet").hidden = true;
+  $("#esRetBox").innerHTML = `<form class="panel mt" id="esRetF"><h2>مرتجع من فاتورة إي ستوك قديمة</h2>
+    <p class="muted">الفلوس بترجع بنفس الطريقة اللي اتدفعت بيها وبحد أقصى اللي اتدفع فعلًا: الآجل يقل من حساب العميل الأول، وبعدين النقدي من الدرج، وبعدين الفيزا والمحفظة.</p>
+    <table><thead><tr><th>الصنف</th><th>المباع (وحدة)</th><th>رجع قبل كده</th><th>المرتجع الآن (وحدة)</th></tr></thead><tbody>
+    ${lines.map((l) => { const left = (l.sold_units ?? 0) - l.returned_units; return `<tr><td>${esc(l.item || "—")}</td><td class="num">${l.sold_units ?? "—"}</td><td class="num">${l.returned_units}</td>
+      <td>${l.item_id && l.sold_units != null && left > 0 ? `<input class="narrow" type="number" min="0" max="${left}" step="1" data-line="${esc(l.line_key)}" value="0">` : `<span class="muted">—</span>`}</td></tr>`; }).join("")}</tbody></table>
+    <label class="f mt">سبب المرتجع <input name="reason" required></label>
+    <div class="row mt"><button class="btn">سجّل المرتجع</button><button type="button" class="btn secondary" id="esRetNo">إلغاء</button></div></form>`;
+  $("#esRetNo").addEventListener("click", () => { $("#esRetBox").innerHTML = ""; $("#esRet").hidden = false; });
+  $("#esRetF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, body = { lines: {}, reason: f.reason.value };
+    f.querySelectorAll("[data-line]").forEach((inp) => { if (+inp.value > 0) body.lines[inp.dataset.line] = +inp.value; });
+    if (!Object.keys(body.lines).length) { toast("اختر الكمية المرتجعة", true); return; }
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try {
+        const r = await api(`/api/estock/sales/${id}/return`, { method: "POST", body });
+        const p = r.parts;
+        $("#esRetBox").innerHTML = "";             // gone at once: a second press cannot send it again (#358 Codex P1)
+        toast(`✓ اتسجل المرتجع: ${money(r.refund)} ج · من الحساب: ${money(p.account)} ج · نقدي: ${money(p.cash)} ج · فيزا ومحفظة: ${money(p.card)} ج`);
+        await viewEstockInvoice("sale", id);
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
+async function viewEstockStatement(kind, id) {
+  const st = await api(`/api/estock/statement/${kind}/${id}`);
+  const items = kind === "customer" ? (await api(`/api/estock/customers/${id}/items`)).items : [];
+  const back = kind === "customer" ? `#/customers/${id}` : `#/suppliers/${id}`;
+  app.innerHTML = `<section class="panel"><a href="${back}">← ${kind === "customer" ? "العميل" : "المورد"}</a>
+    <div class="row between"><h1>كشف الحساب القديم</h1>${ES_BADGE}</div>
+    <p class="muted">كشف الحساب زي ما كان في إي ستوك قبل سطر رصيد أول المدة في البرنامج.</p>
+    <div class="totals"><div>آخر رصيد في إي ستوك<b>${esMoney(st.estock_last_total) || "—"}</b></div>
+      <div>رصيد أول المدة في البرنامج<b>${money(st.program_opening_total)}</b></div></div>
+    <div class="tablewrap mt"><table><thead><tr><th>التاريخ</th><th>النوع</th><th>له</th><th>عليه</th><th>الرصيد</th><th>ملاحظات</th><th></th></tr></thead><tbody>
+    ${st.lines.map((l) => `<tr><td>${esc(l.day)}</td><td>${esc(l.type || "")}</td><td class="num">${esMoney(l.for_him)}</td><td class="num">${esMoney(l.for_me)}</td>
+      <td class="num">${esMoney(l.total)}</td><td>${esc(l.notes || "")}</td><td>${ES_BADGE}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">مفيش حركات قديمة</td></tr>`}</tbody></table></div>
+    ${kind === "customer" ? `<h2 class="mt">اشترى إيه في إي ستوك</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>عدد الفواتير</th><th>أول مرة</th><th>آخر مرة</th></tr></thead><tbody>
+      ${items.map((i) => `<tr><td>${i.item_id ? `<a href="#/items/${esc(i.item_id)}">${esc(i.item)}</a>` : "—"}</td><td class="num">${esc(i.qty)}</td><td class="num">${i.invoices}</td><td>${esc(i.first_day)}</td><td>${esc(i.last_day)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">مفيش</td></tr>`}</tbody></table>` : ""}
+    <p class="mt"><a href="#/estock?kind=${kind === "customer" ? "sale" : "purchase"}&party=${esc(id)}">فواتيره القديمة في إي ستوك ←</a></p></section>`;
+}
+
+async function viewEstockItem(id) {
+  const rows = (await api(`/api/estock/items/${id}/history`)).history, cost = rows.some((r) => "cost" in r);
+  app.innerHTML = `<section class="panel"><a href="#/items/${esc(id)}">← الصنف</a><div class="row between"><h1>حركة الصنف في إي ستوك</h1>${ES_BADGE}</div>
+    <div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>النوع</th><th>الفاتورة</th><th>العميل أو المورد</th><th>الكمية</th><th>السعر</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr class="clickable" data-go="${esc(r.kind)}/${esc(r.estock_id)}"><td>${esc(r.day)}</td><td>${ES_KIND[r.kind]}</td><td>${esc(r.bill_number || r.estock_id)}</td><td>${esc(r.party || "—")}</td>
+      <td class="num">${esc(r.qty ?? "")}</td><td class="num">${esMoney(r.price)}</td>${cost ? `<td class="num">${esMoney(r.cost)}</td>` : ""}<td>${esc(r.expiry || "")}</td></tr>`).join("")
+      || `<tr><td colspan="8" class="muted">مفيش حركة قديمة للصنف ده</td></tr>`}</tbody></table></div></section>`;
+  app.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
+}
+
+// a small «تاريخ إي ستوك» panel at the end of a customer, supplier or item page (only when there is history)
+async function estockPanel(kind, id) {
+  if (!id || id === "new" || !(await estockOn())) return;
+  const can = (p) => ME.permissions.includes(p), links = [];
+  if (kind === "list") {                    // the sales and purchases lists: the way into the old invoices
+    if (can(id === "purchase" ? "purchases.read" : "sales.totals")) links.push(`<a class="btn small secondary" href="#/estock?kind=${id}">فواتير إي ستوك القديمة</a>`);
+  } else if (kind === "customer") {
+    if (can("sales.totals")) links.push(`<a class="btn small secondary" href="#/estock?kind=sale&party=${esc(id)}">فواتيره القديمة</a>`);
+    if (can("sales.read")) links.push(`<a class="btn small secondary" href="#/estock-statement/customer/${esc(id)}">كشف حسابه القديم واللي اشتراه</a>`);
+  } else if (kind === "supplier") {
+    if (can("purchases.read")) links.push(`<a class="btn small secondary" href="#/estock?kind=purchase&party=${esc(id)}">مشترياته القديمة</a>`);
+    if (can("suppliers.read")) links.push(`<a class="btn small secondary" href="#/estock-statement/supplier/${esc(id)}">كشف حسابه القديم</a>`);
+  } else if (kind === "item" && can("items.read")) {
+    links.push(`<a class="btn small secondary" href="#/estock-item/${esc(id)}">حركته في إي ستوك</a>`);
+  }
+  if (!links.length || !app.isConnected) return;
+  const sec = document.createElement("section");
+  sec.className = "panel"; sec.id = "esPanel";
+  sec.innerHTML = `<div class="row between"><h2>تاريخ إي ستوك</h2>${ES_BADGE}</div><div class="row">${links.join("")}</div>`;
+  app.appendChild(sec);
 }
 
 // ------------------------------------------------------------------ suppliers and their accounts
