@@ -264,7 +264,9 @@ const ONCE_MS = 4000, ONCE_SENT = new Map();
 // time. The key is dropped once any answer comes back (#324 M2-10).
 const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
-  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/,
+  // money accounts (F105/F108): a transfer, the owner's money in or out, a count, an opening fix, a reconciliation
+  /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;

@@ -120,3 +120,24 @@ class TestCodexReview348d(unittest.TestCase):
         at = js.index('$("#supPayHint").textContent = `المدفوع')
         self.assertIn("discountOf(a, toBp(d))", js[at - 300:at])
         self.assertIn("discount_bp: toBp(f.d.value) || 0", js)
+
+
+from tests.test_review_m2_sales_proofs import TestM2_10RetryAfterALostAnswer  # noqa: E402
+
+
+class TestCodexReview348e(TestM2_10RetryAfterALostAnswer):
+    """#348 Codex P1: the money forms of this PR keep an uncertain operation's key like the other money forms,
+    so a retry after lost answers cannot move the money twice."""
+
+    test_the_same_form_sent_again_after_a_lost_answer_keeps_its_key = None
+    test_another_amount_is_another_operation = None
+
+    def test_every_money_moving_form_keeps_its_key(self):
+        for p, body in (("/api/money/transfer", {"from": "a", "to": "b", "amount": 3000}),
+                        ("/api/money/owner", {"account": "a", "amount": 3000, "kind": "owner_deposit"}),
+                        ("/api/money/accounts/a1/count", {"counted": 5000, "reason": "عد"}),
+                        ("/api/money/accounts/a1/adjust", {"correct_balance": 5000, "reason": "تصحيح"}),
+                        ("/api/reconcile", {"party": "supplier", "party_id": "s", "statement_balance": 100})):
+            with self.subTest(path=p):
+                a, b = self.keys([[p, body, 0, True], [p, body, 60000, False]])
+                self.assertEqual(a, b)
