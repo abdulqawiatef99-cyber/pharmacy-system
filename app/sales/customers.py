@@ -33,6 +33,20 @@ def clean_phone(v) -> str | None:
     return "0" + m.group(1) if m else s
 
 
+def search_terms(q: str) -> list[str]:
+    """The SEARCH_SQL parameters: a whole Egyptian mobile typed in any form is looked up in the form it is saved
+    in (01...), so +20 10... finds the customer; anything else (a name, part of a number) as typed."""
+    q = str(q or "").strip()
+    ph = q
+    try:
+        c = clean_phone(q)
+        if c and re.fullmatch(r"01[0125]\d{8}", c):
+            ph = c
+    except ValidationFailed:
+        pass
+    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3
+
+
 def phone_forms(ph: str) -> list[str]:
     """Every way the same number may already be saved (numbers saved before the canonical form)."""
     if re.fullmatch(r"01[0125]\d{8}", ph):
@@ -102,7 +116,7 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     params: list = [ctx.org_id]
     if q.strip():
         sql += f" AND ({SEARCH_SQL})"
-        params += [f"%{q.strip()}%"] * SEARCH_N
+        params += search_terms(q)
     # the filter runs before the 300 limit, so a big customer list never hides a debtor
     sql = f"SELECT * FROM ({sql}) WHERE 1=1"
     if only == "debt":

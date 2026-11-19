@@ -292,3 +292,24 @@ class TestM2_25ReplayCleanupInTheRoutes(ApiBase):
         self.assertIsNone(self.db.one("SELECT 1 FROM idempotency_keys WHERE key='old'"))   # ... cleaned once
         self.assertNotIn("DELETE FROM idempotency_keys WHERE created_at", (Path(__file__).resolve().parents[1]
                          / "app" / "api" / "app.py").read_text(encoding="utf-8"))
+
+
+class TestCodexReview366(ApiBase):
+    """#366 Codex: P1 the minimal open answer reads its shift by org too; P2 a full international number typed in
+    the search finds the customer saved under the local form."""
+
+    def test_the_minimal_open_answer_is_scoped_by_org(self):
+        at = JS_APP.index("if not ctx.can(\"sales.read\"):       # the shift is open")
+        self.assertIn("AND org_id=?", JS_APP[at:at + 300])
+
+    def test_an_international_number_typed_in_the_search_finds_the_customer(self):
+        cid = self.s.create_customer(self.ctx, name="عميل بحث", phone="+201001234567")
+        for q in ("+201001234567", "00201001234567", "+20 100 123 4567", "01001234567", "1234567", "عميل"):
+            with self.subTest(q=q):
+                r = self.c.get("/api/customers", params={"q": q}, headers=H).json()
+                self.assertIn(cid, [c["id"] for c in r])
+                rows = cu.listing(self.db, self.ctx, q)
+                self.assertIn(cid, [c["id"] for c in rows])
+
+
+JS_APP = (Path(__file__).resolve().parents[1] / "app" / "api" / "app.py").read_text(encoding="utf-8")
