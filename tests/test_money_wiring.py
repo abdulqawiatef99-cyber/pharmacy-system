@@ -226,3 +226,68 @@ class TestCodexReview348c(WiringCase):
         self.call("POST", f"/api/sales/{d['id']}/return", json={"lines": {d["lines"][0]["id"]: 2},
                                                                "refund_method": "card", "reason": "العميل رجّعه"})
         self.assertEqual(self.bal(self.paymob), 2000 - 4000)
+
+
+class TestLaunchGateCodex381(WiringCase):
+    """Installer gate, Codex on the candidate (#381), two P1s in the money wiring:
+    1. a card refund of a sale that put nothing on an account (a cash sale, or a card sale from before 0038 or
+       from before its channel was routed) still takes the money from the card's account;
+    2. a routed transfer approved for only part of it leaves on its account only the part that came, with one
+       audited correction movement that later reviews move up or down, never twice."""
+
+    def sale_id(self, a):
+        return (a if "lines" in a else a["sale"])["id"], (a if "lines" in a else a["sale"])["lines"][0]["id"]
+
+    def test_a_cash_sale_refunded_to_the_card_debits_the_card_account(self):
+        sid, line = self.sale_id(self.sell(self.pan, units=2))                      # 40.00 cash
+        self.call("POST", f"/api/sales/{sid}/return", json={"lines": {line: 1}, "refund_method": "card",
+                                                            "reason": "العميل رجّعه"})
+        self.assertEqual(self.bal(self.paymob), -2000)                               # the card machine paid it
+
+    def test_a_card_sale_made_before_its_channel_was_routed(self):
+        self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"account_id": None})
+        sid, line = self.sale_id(self.sell(self.pan, payments=[{"method": "card", "amount": 4000,
+                                                                "channel_id": self.card_ch}], units=2))
+        self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"account_id": self.paymob})
+        self.call("POST", f"/api/sales/{sid}/return", json={"lines": {line: 1}, "refund_method": "card",
+                                                            "reason": "العميل رجّعه"})
+        self.assertEqual(self.bal(self.paymob), -2000)
+
+    def proof(self, sid, data):
+        import io
+        r = self.c.post(f"/api/sales/{sid}/attachments", files={"file": ("t.png", io.BytesIO(data), "image/png")},
+                        headers=self.H())
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["attachments"][-1]["id"]
+
+    def review(self, aid, **body):
+        return self.call("POST", f"/api/attachments/{aid}/review", json={"ok": True, **body})
+
+    def test_a_part_approved_transfer_leaves_only_that_part_on_the_account(self):
+        from tests.test_attachments import PNG
+        sid, _ = self.sale_id(self.sell(self.pan, payments=[{"method": "transfer", "amount": 4000,
+                                                             "channel_id": self.tr_ch}], units=2))
+        self.assertEqual(self.bal(self.wallet), 4000)
+        a = self.proof(sid, PNG)
+        self.review(a, amount=1000)
+        self.assertEqual(self.bal(self.wallet), 1000)
+        self.review(a, amount=1000)                                                  # the same review again
+        self.assertEqual(self.bal(self.wallet), 1000)
+        b = self.proof(sid, PNG + b"2")
+        self.review(b, amount=3000)                                                  # the rest came after all
+        self.assertEqual(self.bal(self.wallet), 4000)
+        rows = self.db.all("SELECT amount FROM money_movements WHERE org_id=? AND ref_id=? AND ref_type='transfer_review'",
+                           (self.ctx.org_id, sid))
+        self.assertEqual(sorted(r["amount"] for r in rows), [-3000, 3000])
+        self.assertTrue(self.db.one("SELECT 1 FROM audit_log WHERE action='money.transfer_review' AND entity_id=?",
+                                    (sid,)))
+
+    def test_a_transfer_marked_not_received_leaves_nothing_and_a_void_after_it_does_not_double(self):
+        from tests.test_attachments import PNG
+        sid, _ = self.sale_id(self.sell(self.pan, payments=[{"method": "transfer", "amount": 4000,
+                                                             "channel_id": self.tr_ch}], units=2))
+        a = self.proof(sid, PNG)
+        self.call("POST", f"/api/attachments/{a}/review", json={"ok": False, "note": "لم يصل"})
+        self.assertEqual(self.bal(self.wallet), 0)
+        self.call("POST", f"/api/sales/{sid}/void", json={"reason": "خطأ في الفاتورة"})
+        self.assertEqual(self.bal(self.wallet), 0)                                   # never below what came
