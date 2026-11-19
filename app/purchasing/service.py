@@ -747,7 +747,7 @@ class Purchasing:
                 # the returns already credited for this invoice's units are not credited again: the invoice and
                 # its returns together come to zero, whatever value each return was agreed at
                 credit = posted - credited
-                if posted and credit:
+                if credit:        # also when nothing was posted (a free invoice) but a return of it was credited
                     self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                     " created_by) VALUES (?,?,?,?,'adjustment',?,?,?)",
                                     (new_id(), ctx.org_id, inv["supplier_id"], -credit, inv_id,
