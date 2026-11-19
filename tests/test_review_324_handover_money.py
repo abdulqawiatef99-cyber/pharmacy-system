@@ -233,6 +233,7 @@ const { chromium } = require('playwright');
   p.on('popup', (w) => w.close().catch(() => {}));
   await p.goto(base + '/#/supplier-returns?item=' + item);
   await p.waitForSelector('#srLines [data-sv="0"]');
+  await p.waitForFunction(() => document.querySelector('#srLines [data-sv="0"]').value === '12.00');   // the first proposal is in
   await p.selectOption('#srSup', supB);                         // B's price is now on its way
   await p.click('#srLines [data-sv="0"]');
   await p.keyboard.press('Control+A');
@@ -280,3 +281,9 @@ class TestCodexReview368e(APICase):
         body = JS[start:JS.index("\nasync function ", start + 10)]
         at = body.index('x.addEventListener("input"')
         self.assertIn("l.typed = true", body[at:at + 250])
+
+    def test_a_redraw_keeps_the_focus_in_the_value_field(self):
+        start = JS.index("async function viewSupplierReturns(")
+        body = JS[start:JS.index("\nasync function ", start + 10)]
+        self.assertIn("const focused = document.activeElement?.dataset?.sv;", body)
+        self.assertIn("x.focus()", body)
