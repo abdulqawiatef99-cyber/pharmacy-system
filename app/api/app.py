@@ -290,6 +290,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise ValidationFailed("صيغة الطلب غير صحيحة")
         return data
 
+    def _query_part(req: Request) -> bytes:
+        """The query string is part of the request (?month= names the month an advance goes to, M2-22). Added only
+        when there is one, so the fingerprint of every other request stays what it was before."""
+        return b"?" + req.url.query.encode() if req.url.query else b""
+
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
@@ -302,7 +307,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return await fn(req)
         ctx = ctx_of(req)
         raw = await _read_body(req)
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its
@@ -1010,9 +1015,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         if sid and b.get("action") == "pay":
             amt = b.get("amount")
+            exp = b.get("expected_amount")
             return J(schedules.pay(db, ctx, sid, _int(amt, "amount") if amt not in (None, "") else None,
                                    b.get("paid_from") or None, b.get("note"),
-                                   period=b["period"] if b.get("period") not in (None, "") else None))
+                                   period=b["period"] if b.get("period") not in (None, "") else None,
+                                   expected_amount=_int(exp, "amount") if exp not in (None, "") else None))
         if sid and b.get("action") == "skip":
             return J({"schedules": schedules.skip(db, ctx, sid, str(b.get("period", "")))})
         if "amount" in b and b["amount"] not in (None, ""):
@@ -1073,8 +1080,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def expenses_list(req):
         ctx = ctx_of(req)
         qp = req.query_params
-        return J({"expenses": fin.listing(db, ctx, status=qp.get("status") or None, month=qp.get("month") or None,
-                                                 date_from=qp.get("from") or None, date_to=qp.get("to") or None),
+        flt = dict(status=qp.get("status") or None, month=qp.get("month") or None, date_from=qp.get("from") or None,
+                   date_to=qp.get("to") or None)
+        return J({"expenses": fin.listing(db, ctx, **flt), "totals": fin.totals(db, ctx, **flt),
                   "categories": fin.categories(db, ctx), "manager_limit": fin.manager_limit(db, ctx.org_id)})
 
     @handler
@@ -1237,7 +1245,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 return J(pay.approve(db, ctx, uid, month, _int(b.get("bonus"), "bonus") or 0, _int(b.get("deduction"), "deduction") or 0,
                                      b.get("note")))
             elif a == "pay":
-                return J(pay.pay(db, ctx, uid, month, str(b.get("paid_from", "outside"))))
+                net = b.get("expected_net")
+                return J(pay.pay(db, ctx, uid, month, str(b.get("paid_from", "outside")),
+                                 expected_net=_int(net, "net") if net not in (None, "") else None))
             else:
                 raise ValidationFailed("عملية غير معروفة")
         return J(pay.month_sheet(db, ctx, month))
@@ -2037,7 +2047,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         raw = await req.body()
         key = req.headers.get("idempotency-key", "").strip()
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
 
         def perform():
             resp = J({"balance": Sales(db).customer_payment(
@@ -2077,7 +2087,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         raw = await req.body()
         key = req.headers.get("idempotency-key", "").strip()
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
 
         def perform():
             drawer = CashDrawer(db)

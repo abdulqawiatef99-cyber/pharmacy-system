@@ -91,7 +91,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
     ctx.require("suppliers.pay")
     if method == "outside":                      # older screens
         method = "cash"
-    if not isinstance(amount, int) or amount <= 0:
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:      # true is not 1 piastre
         raise ValidationFailed("المبلغ غير صحيح")
     if method not in PAY_METHODS:
         raise ValidationFailed("اختر طريقة الدفع")
