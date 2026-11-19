@@ -106,8 +106,8 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
     src = v.get("account_id") if v.get("paid_from") == "outside" and v.get("account_id") else v.get("paid_from")
     if src not in ("drawer", "outside"):
         from . import money
-        try:
-            src = money.resolve(db, ctx, str(src or ""))
+        try:                                  # the placeholder 'treasury' makes the treasury on this first write
+            src = money.writable(db, ctx, str(src or ""))
         except NotFound:
             raise ValidationFailed("اختر مصدر الدفع")
         v["paid_from"], v["account_id"] = "outside", src

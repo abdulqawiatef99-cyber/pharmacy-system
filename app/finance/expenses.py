@@ -128,9 +128,10 @@ def get(db: Database, ctx: Context, eid: str) -> dict:
 def listing(db: Database, ctx: Context, *, status: str | None = None, month: str | None = None,
             date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     ctx.require("expenses.record")
-    q = ("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name FROM expenses e"
+    q = ("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name, a.name account FROM expenses e"
          " JOIN expense_categories c ON c.id=e.category_id LEFT JOIN users u ON u.id=e.created_by"
-         " LEFT JOIN users d ON d.id=e.decided_by WHERE e.org_id=?")
+         " LEFT JOIN users d ON d.id=e.decided_by LEFT JOIN money_accounts a ON a.id=e.account_id AND a.org_id=e.org_id"
+         " WHERE e.org_id=?")
     p: list = [ctx.org_id]
     if not ctx.can("expenses.approve"):
         q += " AND e.created_by=?"           # employees see what they recorded

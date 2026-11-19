@@ -189,3 +189,27 @@ class TestCodexReview348(WiringCase):
                                                "paid_from": self.t})
         s = schedules.save(self.db, self.ctx, {"paid_from": "outside"}, s["id"])
         self.assertEqual((s["paid_from"], s["account_id"]), ("outside", None))
+
+
+class TestCodexReview348b(PlanCase):
+    """#348 Codex, second pass: a schedule saved with the treasury placeholder before the treasury exists; the
+    expense listing names the account an expense was paid from."""
+
+    def setUp(self):
+        super().setUp()
+        fin.ensure_defaults(self.db)
+        self.cat = fin.categories(self.db, self.ctx)[0]["id"]
+
+    def test_schedule_with_the_placeholder_treasury_on_a_fresh_pharmacy(self):
+        from app.finance import schedules
+        self.assertIsNone(money.find_treasury(self.db, self.ctx.org_id))
+        s = schedules.save(self.db, self.ctx, {"name": "إيجار", "category_id": self.cat, "amount": 100,
+                                               "day_of_month": 1, "paid_from": "treasury"})
+        self.assertEqual(s["account_id"], money.find_treasury(self.db, self.ctx.org_id))
+
+    def test_the_expense_list_names_the_account(self):
+        t = money.treasury_id(self.db, self.ctx)
+        money.owner_movement(self.db, self.ctx, t, 5000, "owner_deposit")
+        fin.record(self.db, self.ctx, category_id=self.cat, amount=100, paid_from=t)
+        rows = fin.listing(self.db, self.ctx)
+        self.assertEqual(rows[0]["account"], money.TREASURY_NAME)

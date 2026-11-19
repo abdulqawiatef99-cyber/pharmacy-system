@@ -125,6 +125,9 @@ def _writable(db: Database, ctx: Context, account: str) -> str:
     return resolve(db, ctx, account)
 
 
+writable = _writable
+
+
 def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *, ref_type: str | None = None,
           ref_id: str | None = None, note: str | None = None, meta: dict | None = None, check: bool = True,
           active: bool = True) -> str:
