@@ -246,6 +246,7 @@ def accounts(db: Database, ctx: Context, *, include_inactive: bool = False) -> l
 
 def create_account(db: Database, ctx: Context, name: str, kind: str, *, allow_negative: bool = False) -> dict:
     ctx.require("settings.manage")
+    ctx.require("cash.see_expected")         # the answer shows the balance: refused before anything is written
     name = (name or "").strip()[:60]
     if len(name) < 2:
         raise ValidationFailed("اكتب اسم الحساب")
@@ -276,6 +277,7 @@ def get_account(db: Database, ctx: Context, account_id: str) -> dict:
 def update_account(db: Database, ctx: Context, account_id: str, data: dict) -> dict:
     """Rename, allow/forbid a negative balance, stop/restart. Owner only (settings.manage)."""
     ctx.require("settings.manage")
+    ctx.require("cash.see_expected")
     with db.transaction():
         a = _account(db, ctx, account_id, active=False)
         changes: dict = {}
@@ -660,6 +662,7 @@ def set_route(db: Database, ctx: Context, method: str, channel_id: str | None, a
     """Owner: card / transfer money of this channel (or of the method, channel None) lands in this account.
     account_id None removes the route."""
     ctx.require("settings.manage")
+    ctx.require("cash.see_expected")
     if method not in METHODS:
         raise ValidationFailed("طريقة الدفع غير صحيحة")
     ch = channel_id or ""
