@@ -77,12 +77,14 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         cur = db.one("SELECT * FROM expense_schedules WHERE id=? AND org_id=?", (sid, ctx.org_id))
         if not cur:
             raise NotFound("البند المجدول غير موجود")
-    v = dict(cur) if cur else {"remind_days": 3, "every_months": 1, "paid_from": "outside", "is_active": 1,
+    v = dict(cur) if cur else {"remind_days": 3, "every_months": 1, "paid_from": "outside", "account_id": None, "is_active": 1,
                                "start_month": date.today().strftime("%Y-%m"), "amount": None, "note": None}
     for k in ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days",
-              "paid_from", "note", "is_active"):
+              "paid_from", "account_id", "note", "is_active"):
         if k in data:
             v[k] = data[k]
+    if "paid_from" in data and "account_id" not in data:
+        v["account_id"] = None               # a new source replaces the old account (#348 Codex P2)
     v["name"] = str(v.get("name") or "").strip()[:80]
     if len(v["name"]) < 2:
         raise ValidationFailed("اكتب اسم البند (مثال: إيجار الصيدلية)")
@@ -105,15 +107,25 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         raise ValidationFailed("التكرار غير صحيح")
     if not 0 <= v["remind_days"] <= 60:
         raise ValidationFailed("التذكير من 0 إلى 60 يومًا قبل الموعد")
-    if v["paid_from"] not in ("drawer", "outside"):
-        raise ValidationFailed("اختر مصدر الدفع")
+    # the source: the drawer, a money account (F105), or outside the program's accounts
+    src = v.get("account_id") if v.get("paid_from") == "outside" and v.get("account_id") else v.get("paid_from")
+    if src not in ("drawer", "outside"):
+        from . import money
+        try:                                  # the placeholder 'treasury' makes the treasury on this first write
+            src = money.writable(db, ctx, str(src or ""))
+        except NotFound:
+            raise ValidationFailed("اختر مصدر الدفع")
+        v["paid_from"], v["account_id"] = "outside", src
+    else:
+        v["paid_from"], v["account_id"] = src, None
     try:
         date.fromisoformat(str(v["start_month"]) + "-01")
     except ValueError:
         raise ValidationFailed("أول شهر غير صحيح")
     v["note"] = (str(v.get("note") or "").strip()[:200]) or None
     v["is_active"] = int(bool(v["is_active"]))
-    cols = ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days", "paid_from", "note", "is_active")
+    cols = ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days", "paid_from",
+            "account_id", "note", "is_active")
     with db.transaction():
         if cur:
             db.execute(f"UPDATE expense_schedules SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", (*[v[k] for k in cols], sid))
@@ -177,8 +189,9 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
         if expected_amount is not None and (amount if amount is not None else now["amount"]) != expected_amount:
             raise Conflict("مبلغ البند اتغير من شاشة تانية؛ حدّث الشاشة", code="schedule_changed",
                            details={"amount": now["amount"]})
-        e = fin.record(db, ctx, category_id=s["category_id"], amount=amount, paid_from=paid_from or s["paid_from"],
-                       note=(note or s["name"]) + f" ({period})")
+        e = fin.record(db, ctx, category_id=s["category_id"], amount=amount,
+                       paid_from=paid_from or s.get("account_id") or s["paid_from"],
+                       note=(note or s["name"]) + f" ({period})", kind="schedule")
         db.execute("UPDATE expenses SET schedule_id=?, schedule_period=? WHERE id=?", (sid, period, e["id"]))
     return {**fin.get(db, ctx, e["id"]), "schedule_period": period}
 

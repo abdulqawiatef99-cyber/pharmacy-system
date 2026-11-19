@@ -325,10 +325,10 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
-    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة"}
+    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة", "transfer": "محفظة إلكترونية"}
 
     def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
-                         method: str = "cash") -> int:
+                         method: str = "cash", channel_id: str | None = None) -> int:
         ctx.require("customers.manage")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
@@ -343,14 +343,25 @@ class Sales:
                 raise ValidationFailed(
                     "المبلغ أكبر من المستحق على العميل" if owed > 0 else "لا يوجد مبلغ مستحق على هذا العميل",
                     code="over_collection", details={"balance": owed, "amount": amount})
+            ch = None
+            if method != "cash" and channel_id:
+                ch = self.db.one("SELECT id, name FROM payment_channels WHERE id=? AND org_id=? AND kind=?",
+                                 (channel_id, ctx.org_id, method))
+                if not ch:
+                    raise ValidationFailed("وسيلة الدفع غير موجودة")
             if method == "cash":
                 cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
             # how it was paid stays with the row (no column for it): a card collection has no drawer movement
             said = (str(note).strip() if note else "")[:200]
-            how = self.COLLECTION_METHODS[method] + (f" — {said}" if said else "")
+            how = self.COLLECTION_METHODS[method] + (f" ({ch['name']})" if ch else "") + (f" — {said}" if said else "")
+            lid = new_id()
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
-                            (new_id(), ctx.org_id, customer_id, -amount, how, ctx.user_id))
+                            (lid, ctx.org_id, customer_id, -amount, how, ctx.user_id))
+            if method != "cash":                      # card / wallet money lands in its own account (F105)
+                from ..finance import money
+                money.receive(self.db, ctx, method, ch["id"] if ch else None, amount, "customer_payment",
+                              ref_type="customer_ledger", ref_id=lid, note=how)
             audit.record(self.db, ctx, "customer.payment", "customer", customer_id,
                          after={"amount": amount, "method": method})
         return self.balance(ctx, customer_id)
@@ -750,10 +761,14 @@ class Sales:
                 shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
                     or cash.require_open_shift(self.db, ctx, s["branch_id"])   # again inside the write lock
             self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
+            from ..finance import money
             for p in payments:
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount)"
                                 " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
                                                           p.get("channel_id"), p["amount"]))
+                if p["method"] in money.METHODS:            # card / wallet money lands in its own account (F105)
+                    money.receive(self.db, ctx, p["method"], p.get("channel_id"), p["amount"], "sale",
+                                  ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
                             " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
@@ -1092,18 +1107,20 @@ class Sales:
                 received = (s["paid_cash"] or 0) + (s["paid_card"] or 0) + (s["paid_transfer"] or 0)
                 # a transfer the owner or a manager marked "not received" is money the shop never got: it funds no
                 # refund, in cash or to a card (#324 M2-01)
-                unreceived = bool(s["paid_transfer"] and self.db.one(
-                    "SELECT 1 FROM sale_attachments WHERE org_id=? AND sale_id=? AND review='problem'",
-                    (ctx.org_id, sid)))
-                if unreceived:
-                    received -= s["paid_transfer"]
+                # ... and only the part confirmed when a reviewer approved part of it (#324 M2-01)
+                unreceived = False
+                if s["paid_transfer"]:
+                    from .attachments import transfer_state
+                    got = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["received"]
+                    unreceived = got < s["paid_transfer"]
+                    received -= s["paid_transfer"] - got
                 refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns WHERE sale_id=? AND org_id=?"
                                        " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
                     if unreceived:
-                        raise Conflict(f"تحويل هذه الفاتورة مُسجَّل أنه لم يصل، فلا يُرد {how} (الحد الأقصى {egp(can)} ج)",
+                        raise Conflict(f"تحويل هذه الفاتورة لم يتأكد وصوله كاملًا، فلا يُرد {how} (الحد الأقصى {egp(can)} ج)",
                                        code="cash_refund_exceeds_paid",
                                        details={"max_cash": can, "refund": refund, "transfer_not_received": True})
                     raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"
@@ -1122,6 +1139,11 @@ class Sales:
                                 (new_id(), ctx.org_id, s["customer_id"], -refund, rid, ctx.user_id))
             if refund_method == "cash":
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
+            if refund_method == "card" and refund:
+                # back through the card / wallet the sale was paid with (the first one, if it was split)
+                from ..finance import money
+                money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
+                                   meta={"return_id": rid})
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1183,6 +1205,8 @@ class Sales:
                                 (sid, ctx.org_id))
             else:
                 cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
+            from ..finance import money
+            money.reverse_sale(self.db, ctx, sid, ref_type="sale_void", note=f"إلغاء فاتورة {s['sale_no']}")
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",

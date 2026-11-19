@@ -69,12 +69,22 @@ def add_category(db: Database, ctx: Context, name: str) -> list[dict]:
 
 
 def record(db: Database, ctx: Context, *, category_id: str, amount: int, paid_from: str, note: str | None = None,
-           spent_on: str | None = None) -> dict:
+           spent_on: str | None = None, kind: str = "expense", move_money: bool = True) -> dict:
+    """paid_from: 'drawer', a money account id (F105: the account goes down, never below zero) or 'outside'
+    (outside the program's accounts: the owner's choice only). move_money=False books an expense whose money
+    already left (salary advances paid earlier): nothing moves and no source is asked."""
     ctx.require("expenses.record")
-    if not isinstance(amount, int) or amount <= 0:
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
         raise ValidationFailed("المبلغ غير صحيح")
-    if paid_from not in ("drawer", "outside"):
+    if not paid_from or not isinstance(paid_from, str):
         raise ValidationFailed("اختر مصدر المبلغ المدفوع")
+    from . import money
+    # 'outside' by anyone but the owner (an employee paid from his own pocket) is allowed, but always waits
+    # for the owner: only he decides money that never passed through the pharmacy's accounts
+    src = (money.OUTSIDE if paid_from == money.OUTSIDE else money.check_source(db, ctx, paid_from)) \
+        if move_money else money.OUTSIDE
+    col = "drawer" if src == money.DRAWER else "outside"
+    account_id = None if src in (money.DRAWER, money.OUTSIDE) else src
     try:
         day = date.fromisoformat(spent_on).isoformat() if spent_on else date.today().isoformat()
     except ValueError:
@@ -83,28 +93,35 @@ def record(db: Database, ctx: Context, *, category_id: str, amount: int, paid_fr
     if not cat:
         raise NotFound("البند غير موجود")
     eid = new_id()
-    auto = _can_approve(db, ctx, amount)
+    auto = _can_approve(db, ctx, amount) and (src != money.OUTSIDE or not move_money or money.is_owner(ctx))
+    if kind == "expense" and cat["name"].startswith("ضرائب"):
+        kind = "tax"
     with db.transaction():
         shift = None
-        if paid_from == "drawer":
-            shift = cash.record(db, ctx, -amount, "payout", eid, f"مصروف: {cat['name']}" + (f" — {note.strip()}" if note else ""))
-        db.execute("INSERT INTO expenses (id, org_id, branch_id, category_id, amount, spent_on, paid_from, note, status,"
-                   " shift_id, created_by, decided_by, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,"
+        if move_money and src != money.OUTSIDE:
+            shift = money.pay_out(db, ctx, src, amount, kind, ref_type="expense", ref_id=eid,
+                                  note=f"مصروف: {cat['name']}" + (f" — {note.strip()}" if note else ""))["shift_id"]
+        db.execute("INSERT INTO expenses (id, org_id, branch_id, category_id, amount, spent_on, paid_from, account_id, note,"
+                   " status, shift_id, created_by, decided_by, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,"
                    " CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END)",
-                   (eid, ctx.org_id, ctx.branch_id, category_id, amount, day, paid_from, (note or "").strip()[:200] or None,
-                    "approved" if auto else "pending", shift, ctx.user_id, ctx.user_id if auto else None, int(auto)))
+                   (eid, ctx.org_id, ctx.branch_id, category_id, amount, day, col, account_id,
+                    (note or "").strip()[:200] or None, "approved" if auto else "pending", shift, ctx.user_id,
+                    ctx.user_id if auto else None, int(auto)))
+        where = money.source_label(db, ctx, src) if move_money else "صُرف من قبل"
         audit.record(db, ctx, "expense.record", "expense", eid,
-                     after={"amount": amount, "category": cat["name"], "from": paid_from, "approved": auto})
+                     after={"amount": amount, "category": cat["name"], "from": src if move_money else "booked",
+                            "approved": auto})
         if not auto:
             notify.emit(db, ctx, "expense_pending", "warning", f"مصروف بانتظار موافقتك: {amount / 100:,.2f} ج — {cat['name']}",
-                        (note or "") + (" · من الخزينة" if paid_from == "drawer" else ""), "expense", eid)
+                        (note or "") + f" · {where}", "expense", eid)
     return get(db, ctx, eid)
 
 
 def get(db: Database, ctx: Context, eid: str) -> dict:
-    r = db.one("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name FROM expenses e"
+    r = db.one("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name, a.name account FROM expenses e"
                " JOIN expense_categories c ON c.id=e.category_id LEFT JOIN users u ON u.id=e.created_by"
-               " LEFT JOIN users d ON d.id=e.decided_by WHERE e.id=? AND e.org_id=?", (eid, ctx.org_id))
+               " LEFT JOIN users d ON d.id=e.decided_by LEFT JOIN money_accounts a ON a.id=e.account_id AND a.org_id=e.org_id"
+               " WHERE e.id=? AND e.org_id=?", (eid, ctx.org_id))
     if not r:
         raise NotFound("المصروف غير موجود")
     return dict(r)
@@ -113,9 +130,10 @@ def get(db: Database, ctx: Context, eid: str) -> dict:
 def listing(db: Database, ctx: Context, *, status: str | None = None, month: str | None = None,
             date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     ctx.require("expenses.record")
-    q = ("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name FROM expenses e"
+    q = ("SELECT e.*, c.name category, u.full_name by_name, d.full_name decided_name, a.name account FROM expenses e"
          " JOIN expense_categories c ON c.id=e.category_id LEFT JOIN users u ON u.id=e.created_by"
-         " LEFT JOIN users d ON d.id=e.decided_by WHERE e.org_id=?")
+         " LEFT JOIN users d ON d.id=e.decided_by LEFT JOIN money_accounts a ON a.id=e.account_id AND a.org_id=e.org_id"
+         " WHERE e.org_id=?")
     p: list = [ctx.org_id]
     if not ctx.can("expenses.approve"):
         q += " AND e.created_by=?"           # employees see what they recorded
@@ -161,6 +179,10 @@ def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | No
     e = get(db, ctx, eid)
     if e["status"] != "pending":
         raise Conflict("سبق اتخاذ قرار في هذا المصروف")
+    from . import money
+    if approve and e["paid_from"] == "outside" and not e["account_id"] and not money.is_owner(ctx):
+        raise Forbidden("مصروف من خارج حسابات البرنامج يعتمده المالك", code="approval_required",
+                        details={"permission": "users.manage", "label": "اعتماد مصروف من خارج الحسابات"})
     if not _can_approve(db, ctx, e["amount"]):
         if ctx.allowed("expenses.approve"):
             raise Forbidden(f"المبلغ أكبر من حد المدير ({manager_limit(db, ctx.org_id) / 100:,.0f} ج) — يحتاج إلى المالك",
@@ -178,8 +200,9 @@ def decide(db: Database, ctx: Context, eid: str, approve: bool, reason: str | No
             raise Conflict("سبق اتخاذ قرار في هذا المصروف")
         audit.record(db, ctx, "expense.approve" if approve else "expense.reject", "expense", eid,
                      after={"amount": e["amount"], "reason": reason})
-        if not approve and e["paid_from"] == "drawer":
-            notify.emit(db, ctx, "expense_rejected", "error", f"مصروف رُفض بعد صرفه من الخزينة: {e['amount'] / 100:,.2f} ج",
+        if not approve and (e["paid_from"] == "drawer" or e["account_id"]):
+            where = e["account"] or "الدرج"
+            notify.emit(db, ctx, "expense_rejected", "error", f"مصروف رُفض بعد صرفه من {where}: {e['amount'] / 100:,.2f} ج",
                         f"{e['category']} — سجّله {e['by_name']} · السبب: {reason.strip()}", "expense", eid)
     return get(db, ctx, eid)
 
@@ -211,7 +234,10 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         else:
             cost += Decimal(a["unit_cost"]) * a["q"] * 100
     cost_p = int(cost.to_integral_value(ROUND_HALF_UP))
-    revenue = s["sales"] - s["returns"]
+    from . import reconcile
+    claim = reconcile.claim_discounts(db, ctx.org_id, d1.isoformat(), d2.isoformat())        # F108: lowers revenue
+    supplier_disc = reconcile.discounts_received(db, ctx.org_id, d1.isoformat(), d2.isoformat())   # F106
+    revenue = s["sales"] - s["returns"] - claim
     exp = [dict(r) for r in db.all(
         "SELECT c.name category, sum(e.amount) amount FROM expenses e JOIN expense_categories c ON c.id=e.category_id"
         " WHERE e.org_id=? AND e.branch_id=? AND e.status='approved' AND e.spent_on BETWEEN ? AND ? GROUP BY c.id ORDER BY 2 DESC",
@@ -223,5 +249,7 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
     return {"from": d1.isoformat(), "to": d2.isoformat(), "invoices": s["n"], "sales": s["sales"], "discount": s["discount"],
             "returns": s["returns"], "revenue": revenue, "delivery_fees": s["fees"], "cost": cost_p, "gross_profit": gross,
             "gross_margin_pct": round(gross / revenue * 100, 1) if revenue else None, "expenses": exp,
-            "expenses_total": expenses_total, "net_profit": gross - expenses_total, "unknown_cost_lines": unknown,
+            "claim_discounts": claim, "supplier_discounts": supplier_disc,
+            "expenses_total": expenses_total, "net_profit": gross - expenses_total + supplier_disc,
+            "unknown_cost_lines": unknown,
             "pending_expenses": dict(pending)}
