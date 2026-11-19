@@ -934,6 +934,65 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note")))
 
+    # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
+    @handler
+    async def estock_available(req):
+        from ..dataimport import estock_history as eh
+        ctx = ctx_of(req)
+        if not any(ctx.allowed(p) for p in ("sales.read", "items.read", "purchases.read", "suppliers.read")):
+            ctx.require("sales.read")             # only someone who may open one of the history screens asks
+        return J({"available": eh.available(db)})
+
+    @handler
+    async def estock_invoices(req):
+        from ..dataimport import estock_history as eh
+        qp = req.query_params
+        return J({"invoices": await off_loop(eh.invoices, db, ctx_of(req), qp.get("kind") or "sale",
+                                             q=qp.get("q") or None, date_from=qp.get("from") or None,
+                                             date_to=qp.get("to") or None, party_id=qp.get("party") or None,
+                                             item_id=qp.get("item") or None, ticket=qp.get("ticket") or None,
+                                             limit=_int(qp.get("limit") or 200, "limit"))})
+
+    @handler
+    async def estock_invoice(req):
+        from ..dataimport import estock_history as eh
+        return J(await off_loop(eh.invoice, db, ctx_of(req), req.path_params["kind"], req.path_params["id"]))
+
+    @handler
+    async def estock_customer_items(req):
+        from ..dataimport import estock_history as eh
+        return J({"items": await off_loop(eh.customer_items, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_item_history(req):
+        from ..dataimport import estock_history as eh
+        return J({"history": await off_loop(eh.item_history, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_statement(req):
+        from ..dataimport import estock_history as eh
+        return J(await off_loop(eh.statement_with_opening, db, ctx_of(req), req.path_params["kind"],
+                                req.path_params["id"]))
+
+    @handler
+    async def estock_return_lines(req):
+        from ..sales import estock_returns as er
+        return J({"lines": await off_loop(er.invoice_lines, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
+    async def estock_return(req):
+        """A return against an old E-Stock sale (#346): money back only the way it was received, never more."""
+        from ..sales import estock_returns as er
+        ctx = ctx_of(req)
+        b = await body(req)
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
+        key = req.headers.get("idempotency-key", "").strip()
+        return J(er.return_items(db, ctx, req.path_params["id"], lines, reason=str(b.get("reason") or ""), key=key),
+                 status_code=201)
+
     @handler
     async def transfers_report(req):
         from ..sales import attachments as att
@@ -2540,6 +2599,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/estock/available", estock_available),
+        Route("/api/estock/invoices", estock_invoices),
+        Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
+        Route("/api/estock/customers/{id}/items", estock_customer_items),
+        Route("/api/estock/items/{id}/history", estock_item_history),
+        Route("/api/estock/statement/{kind}/{id}", estock_statement),
+        Route("/api/estock/sales/{id}/return-lines", estock_return_lines),
+        Route("/api/estock/sales/{id}/return", estock_return, methods=["POST"]),
         Route("/api/customers", customers_list),
         Route("/api/customers", customers_create, methods=["POST"]),
         Route("/api/customers/{id}/payments", customers_pay, methods=["POST"]),
