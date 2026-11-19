@@ -2023,10 +2023,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
-        q = "%" + req.query_params.get("q", "").strip() + "%"
         rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
                       f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
-                      (ctx.org_id, *[q] * cu.SEARCH_N))
+                      (ctx.org_id, *cu.search_terms(req.query_params.get("q", ""))))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -2069,7 +2068,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         sid = CashDrawer(db).open(ctx, _int(b.get("opening_cash"), "opening_cash"))
         if not ctx.can("sales.read"):       # the shift is open: never a 403 after it committed (#324 M2-26)
-            s = db.one("SELECT id, status, opening_cash, opened_at FROM cash_shifts WHERE id=?", (sid,))
+            s = db.one("SELECT id, status, opening_cash, opened_at FROM cash_shifts WHERE id=? AND org_id=?",
+                       (sid, ctx.org_id))
             return J({**dict(s), "blind": True}, status_code=201)
         return J(CashDrawer(db).summary(ctx, sid), status_code=201)
 
