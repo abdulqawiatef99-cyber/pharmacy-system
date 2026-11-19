@@ -1,0 +1,99 @@
+name: Compiled build evaluation
+
+# Protection plan (docs/PROTECTION_PLAN.md, layer 3): can the program ship as a compiled Windows program
+# instead of readable .py files? This is a measurement, not a release: it builds a compiled folder on a
+# throw-away runner, runs the program's own selftest and a start-up check from it on temporary data, and
+# prints a report (build time, size, start-up time, what of our source stays readable, Defender scan).
+# It never builds an installer, never publishes or uploads the program, and reads no secret.
+# Manual start only (Actions tab, "Run workflow"): it never runs on a push or a pull request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: "Which build to measure"
+        type: choice
+        options: [both, nuitka, pyinstaller]
+        default: both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compiled-build-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.tool }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: ${{ fromJSON(inputs.tool == 'both' && '["nuitka","pyinstaller"]' || format('["{0}"]', inputs.tool)) }}
+    env:
+      PYTHONUTF8: "1"
+      EVAL_OUT: ${{ runner.temp }}\compiled-eval
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Same as the installer build: Pillow needs FriBiDi next to the program to shape Arabic receipts.
+      - name: FriBiDi for Arabic shaping
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install fribidi:x64-windows
+          $dll = Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -Filter "fribidi*.dll"
+          if (-not $dll) { throw "fribidi dll not built" }
+          New-Item -ItemType Directory fribidi -Force | Out-Null
+          $dll | Copy-Item -Destination fribidi
+          Copy-Item fribidi\* (Split-Path (Get-Command python).Source)
+
+      # Build tools are pinned and installed on the runner only: requirements.txt is not changed.
+      - name: Install the program's libraries and the build tool
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ("${{ matrix.tool }}" -eq "nuitka") { python -m pip install nuitka==4.3.5 }
+          else { python -m pip install pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.10 }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Baseline (the program as it ships today, plain Python)
+        shell: pwsh
+        run: |
+          python scripts/ci/compiled_build_eval.py check --tool python --out "$env:EVAL_OUT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build (${{ matrix.tool }})
+        shell: pwsh
+        run: |
+          python scripts/ci/compiled_build_eval.py build --tool ${{ matrix.tool }} --out "$env:EVAL_OUT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Runs after a failed build too, so the report says "the build failed" instead of nothing.
+      - name: Checks from the compiled folder (${{ matrix.tool }})
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python scripts/ci/compiled_build_eval.py check --tool ${{ matrix.tool }} --out "$env:EVAL_OUT" --extra-dll fribidi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The report only (two small text files per tool). The compiled program itself is never uploaded.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          name: compiled-build-eval-${{ matrix.tool }}
+          path: |
+            ${{ runner.temp }}\compiled-eval\report-*.json
+            ${{ runner.temp }}\compiled-eval\report-*.md
+          retention-days: 14
