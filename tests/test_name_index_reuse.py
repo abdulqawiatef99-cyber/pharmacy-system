@@ -52,7 +52,8 @@ class TestNameIndexReuse(DBTestCase):
     def test_an_item_that_stopped_leaves_the_index_and_the_memory(self):
         matching._index(self.db, self.ctx.org_id)
         with self.db.transaction():
-            self.db.execute("UPDATE items SET status='inactive', updated_at='2031-01-01T00:00:00.000000Z' WHERE id=?", (self.ids[3],))
+            self.db.execute("UPDATE items SET status='inactive', updated_at='2031-01-01T00:00:00.000000Z'"
+                            " WHERE id=? AND org_id=?", (self.ids[3], self.ctx.org_id))
         matching.invalidate(self.ctx.org_id)
         idx = matching._index(self.db, self.ctx.org_id)
         self.assertNotIn(self.ids[3], idx.items)
