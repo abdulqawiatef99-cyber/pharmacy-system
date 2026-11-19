@@ -412,6 +412,15 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             it["barcodes"].append(bc)
         first = len(p.dq)
         it["pack_size"], it["pack_unknown"] = _pack_of(r, p, pid, code)
+        # the person's pack decision first: the unit names below follow the decided pack (#345 review)
+        if code in packs:
+            for d in p.dq[first:]:          # the person's decision settles the broken conversion
+                if d["severity"] == "block":
+                    d["severity"], d["action"] = "fixed", d["action"] + f" ← اتحدد من ملف القرار: {packs[code]}"
+            if packs[code] != it["pack_size"] or it["pack_unknown"]:
+                p.issue("Products", pid, code, "pack_size", it["pack_size"],
+                        f"عدد الوحدات من ملف القرار: {packs[code]}", kind="fixed")
+            it["pack_size"], it["pack_unknown"], it["pack_decided"] = packs[code], False, True
         # what the program has a column for, and the rest kept per item (item-extras.csv + the import row)
         u1, u2, u3 = (units.get(ident(r.get(f"product_unit{n}")), "") for n in (1, 2, 3))
         small = u3 if it["pack_size"] > 1 and dec(r.get("product_unit1_3")) == it["pack_size"] else \
@@ -438,14 +447,6 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             "made": r.get("product_made"), "site_id": r.get("site_id"), "pd_id": r.get("pd_id"),
             "print_barcode": r.get("product_print_barcode"), "no_print_name": r.get("no_print_name"),
             "amount_zero": r.get("amount_zero")}.items() if v not in (None, "", "0", "0.0000")}
-        if code in packs:
-            for d in p.dq[first:]:          # the person's decision settles the broken conversion
-                if d["severity"] == "block":
-                    d["severity"], d["action"] = "fixed", d["action"] + f" ← اتحدد من ملف القرار: {packs[code]}"
-            if packs[code] != it["pack_size"] or it["pack_unknown"]:
-                p.issue("Products", pid, code, "pack_size", it["pack_size"],
-                        f"عدد الوحدات من ملف القرار: {packs[code]}", kind="fixed")
-            it["pack_size"], it["pack_unknown"], it["pack_decided"] = packs[code], False, True
         p.items.append(it)
 
 
@@ -1115,7 +1116,8 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         x = classes[c]
         x[0] += 1
         x[1] += dec(r.get("total_bill")) or 0
-        x[2] += dec(r.get("total_after_back")) or dec(r.get("total_bill")) or 0
+        after = dec(r.get("total_after_back"))            # 0 = fully returned, not "missing" (#345 review)
+        x[2] += after if after is not None else (dec(r.get("total_bill")) or 0)
         x[3].add(ident(r.get("vendor_id")))
     p.checks["purchase_classes"] = {c: {"invoices": n, "total_bill": egp(t), "after_returns": egp(a), "vendors": len(v)}
                                     for c, (n, t, a, v) in sorted(classes.items())}
