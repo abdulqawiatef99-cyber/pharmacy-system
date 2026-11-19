@@ -41,6 +41,8 @@ def read(paths) -> datetime | None:
 
 def high_water(paths, *evidence: datetime | None) -> datetime | None:
     """The mark to judge by: the latest of the stored copies and any dated evidence from the data."""
+    if any(t is not None and t.tzinfo is None for t in evidence):
+        raise ValueError("pass aware datetimes")       # a naive time would be read as this PC's local time
     times = [t.astimezone(timezone.utc) for t in evidence if t is not None]
     stored = read(paths)
     if stored is not None:

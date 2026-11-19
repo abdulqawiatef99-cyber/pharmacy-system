@@ -48,10 +48,42 @@ def new_license_id(now: datetime) -> str:
 
 
 def read_ledger(path: Path) -> list[dict]:
+    """The publisher's record of issued licences. A line that cannot be read stops the tool: issuing on
+    top of a damaged record would hide a PC that is already licensed."""
     try:
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return []
+    rows = []
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            raise keyfile.KeyFileError(f"the ledger {path} is damaged at line {n}; repair it before issuing")
+        rows.append(row)
+    return rows
+
+
+def other_customers(rows: list[dict], licence: lic_mod.License) -> set[tuple[str, str]]:
+    """(customer, licence id) of every recorded licence of ANOTHER customer on one of this licence's PCs.
+    "The same PC" is judged by the licence's own rule (fingerprint.matches), in both directions: a PC whose
+    Windows was reinstalled, or whose board could not be read this time, is still that PC."""
+    found = set()
+    for row in rows:
+        if row.get("customer") == licence.customer:
+            continue
+        for parts in row.get("devices") or []:
+            try:
+                recorded = fingerprint.Device(dict(parts))
+            except (fingerprint.FingerprintError, TypeError, ValueError):
+                continue
+            if any(fingerprint.matches(recorded, d) or fingerprint.matches(d, recorded) for d in licence.devices):
+                found.add((str(row.get("customer")), str(row.get("license_id"))))
+    return found
 
 
 def build(a, now: datetime) -> tuple[lic_mod.License, list[str]]:
@@ -112,15 +144,9 @@ def cmd_issue(a) -> int:
     licence, labels = build(a, now)
     ledger = Path(a.ledger).expanduser().resolve() if a.ledger else key_path.parent / LEDGER_NAME
     keyfile.outside_any_repository(ledger)
-    others: dict[tuple, dict[str, str]] = {}          # per PC: other customers already licensed on it
-    for row in read_ledger(ledger):
-        if row.get("customer") != licence.customer:
-            for d in row.get("devices", []):
-                others.setdefault(tuple(sorted(d.items())), {})[str(row.get("customer"))] = str(row.get("license_id"))
-    for device in licence.devices:
-        for customer, lid in others.get(tuple(sorted(device.as_json().items())), {}).items():
-            print(f"WARNING: this PC already has a licence issued to another customer: {customer} ({lid})",
-                  file=sys.stderr)
+    for customer, lid in sorted(other_customers(read_ledger(ledger), licence)):
+        print(f"WARNING: this PC already has a licence issued to another customer: {customer} ({lid})",
+              file=sys.stderr)
     key = keyfile.load(key_path)
     data = lic_mod.issue(licence, key)
     row = {**licence.payload(), "labels": labels, "key": se.key_id(key), "file": out.name}
@@ -145,9 +171,12 @@ def cmd_show(a) -> int:
         licence = lic_mod.verify(data, [a.public_key])
         print("signature: OK")
     else:
-        env = se.strict_json(data)
         import base64
-        licence = lic_mod.from_payload(se.strict_json(base64.b64decode(env["payload"])))
+        import binascii
+        try:
+            licence = lic_mod.from_payload(se.strict_json(base64.b64decode(se.strict_json(data)["payload"])))
+        except (KeyError, TypeError, binascii.Error):
+            raise lic_mod.LicenseError("malformed", "not a licence file") from None
         print("signature: NOT CHECKED (give --public-key)")
     print(json.dumps(licence.payload(), ensure_ascii=False, indent=1))
     return 0

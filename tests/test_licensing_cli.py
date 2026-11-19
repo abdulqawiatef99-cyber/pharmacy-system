@@ -213,7 +213,37 @@ class TestIssue(Base):
         code, _, err = self.run_cli("issue", "--key", self.key, "--customer", "صيدلية تانية", "--kind", "perpetual",
                                     "--request", self.req_a, "--request", self.req_b, "--out", self.dir / "out" / "b.lic")
         self.assertEqual(code, 0)
+        # one line per recorded licence of the other customer on that PC (the first one and its renewal);
+        # the second PC of the request is new and adds nothing
+        self.assertEqual(err.count("already has a licence issued to another customer: صيدلية تجربة"), 2)
+
+    def test_the_same_pc_is_recognised_after_windows_was_reinstalled(self):
+        """Codex on #374: the ledger check must use the licence's own rule (same board = same PC), not an
+        exact comparison of every identifier."""
+        self.issue("--kind", "perpetual", "--request", self.req_a)
+        reinstalled = fp.from_raw({"board": "4c4c4544-0042-3510-8051-c7c04f4a3432", "system": "new-guid", "disk": "ffff0000"})
+        self.assertTrue(fp.matches(PC_A, reinstalled))
+        code, _, err = self.run_cli("issue", "--key", self.key, "--customer", "صيدلية تانية", "--kind", "perpetual",
+                                    "--request", fp.encode_request(reinstalled, "SAME-BOARD"),
+                                    "--out", self.dir / "out" / "b.lic")
+        self.assertEqual(code, 0)
         self.assertEqual(err.count("already has a licence issued to another customer: صيدلية تجربة"), 1)
+        # the board could not be read this time: the Windows installation and the disk still say it is that PC
+        no_board = fp.from_raw({"system": "guid-a", "disk": "a4f1c2d3"})
+        code, _, err = self.run_cli("issue", "--key", self.key, "--customer", "صيدلية تالتة", "--kind", "perpetual",
+                                    "--request", fp.encode_request(no_board, "NO-BOARD"),
+                                    "--out", self.dir / "out" / "c.lic")
+        self.assertEqual(code, 0)
+        self.assertIn("another customer: صيدلية تجربة", err)
+
+    def test_a_damaged_ledger_line_is_reported_not_ignored(self):
+        self.issue("--kind", "perpetual", "--request", self.req_a)
+        ledger = self.key.parent / cli.LEDGER_NAME
+        ledger.write_text(ledger.read_text(encoding="utf-8") + "this line is not a record\n", encoding="utf-8")
+        code, _, err = self.issue("--kind", "perpetual", "--request", self.req_b, out=self.dir / "out" / "d.lic")
+        self.assertEqual(code, 2)
+        self.assertIn("ledger", err)
+        self.assertFalse((self.dir / "out" / "d.lic").exists())
 
     def test_a_weak_request_is_marked_for_the_publisher(self):
         weak = fp.encode_request(WEAK, "OLD-PC")
@@ -255,6 +285,14 @@ class TestIssue(Base):
         code, _, err = self.run_cli("show", self.out, "--public-key", other_public)
         self.assertEqual(code, 2)
         self.assertIn("untrusted_key", err)
+
+    def test_show_on_a_file_that_is_not_a_licence_is_a_clean_error(self):
+        for content in (b"{}", b"[]", b"junk", b'{"payload": 5}', b'{"payload": "@@"}'):
+            bad = self.dir / "bad.lic"
+            bad.write_bytes(content)
+            code, _, err = self.run_cli("show", bad)
+            self.assertEqual(code, 2, content)
+            self.assertIn("malformed", err)
 
     def test_the_key_never_appears_in_what_the_tool_prints(self):
         code, out, err = self.issue("--kind", "perpetual", "--request", self.req_a)
