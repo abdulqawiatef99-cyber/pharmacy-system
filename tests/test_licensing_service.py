@@ -226,7 +226,10 @@ class TestNotWiredYet(unittest.TestCase):
 
     def test_nothing_the_program_runs_imports_licensing_or_the_envelope(self):
         program = [p for p in ROOT.glob("app/**/*.py")
-                   if "licensing" not in p.relative_to(ROOT).parts and p.name != "signed_envelope.py"]
+                   if "licensing" not in p.relative_to(ROOT).parts
+                   # the protection libraries themselves; release_signature.py is not wired either
+                   # (tests/test_release_signature.py pins that nothing imports it)
+                   and p.name not in ("signed_envelope.py", "release_signature.py")]
         program += [ROOT / "manage.py", ROOT / "launcher.py", ROOT / "release_bootstrap.py"]
         self.assertGreater(len(program), 50)
         uses = re.compile(r"^\s*(from|import)\s+[\w., ]*\b(licensing|signed_envelope)\b", re.M)
