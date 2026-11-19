@@ -1028,10 +1028,15 @@ class TestOwnerReportLines(Base):
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
-        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
-        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        every = {(d["table"], d["field"]): d for d in res["plan"].dq}
+        # manager 20/11 00:25: history-only lines (unknown ids in old invoices, a large sale line) are for review,
+        # not the owner's decisions; they change no money and no stock
+        self.assertEqual(every[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(every[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertNotIn(("Customer", "customer_id"), rows)
         self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
-        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        self.assertIn("سطر عكسه", every[("sales lines", "line value")]["action"])
+        self.assertNotIn(("sales lines", "line value"), rows)
         # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
         d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
         self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
