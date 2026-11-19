@@ -239,18 +239,18 @@ class TestListing(unittest.TestCase):
         """Codex P1 on #369: opening a OneDrive "online only" file downloads it and writes it to the disk."""
         self.bak(self.d, "stock.bak", 3)
         cloud = self.bak(self.desk, "onedrive_copy.bak", 1)
-        real_stat, real_open, opened = os.stat, open, []
+        real_stat, real_open, opened = self.m._entry_stat, open, []
 
-        def stat(path, *a, **k):
-            st = real_stat(path, *a, **k)
-            if str(path) == cloud:
+        def stat(entry):
+            st = real_stat(entry)
+            if entry.path == cloud:                                                # Windows marks it "recall on data access"
                 return SimpleNamespace(st_mtime=st.st_mtime, st_size=st.st_size, st_file_attributes=0x400000)
             return st
 
         def spy(path, *a, **k):
             opened.append(str(path))
             return real_open(path, *a, **k)
-        with mock.patch.object(self.m.os, "stat", stat), mock.patch("builtins.open", spy):
+        with mock.patch.object(self.m, "_entry_stat", stat), mock.patch("builtins.open", spy):
             code, text = self.run_tool()
         self.assertNotIn(cloud, opened)
         self.assertEqual(len(opened), 1)                                           # the local one's 8 bytes
@@ -266,14 +266,90 @@ class TestListing(unittest.TestCase):
         self.bak(self.d, "stock.bak", 3)
         share = r"\\server\redirected\Desktop"
         probed = []
-        real_isdir, real_walk = os.path.isdir, os.walk
+        real_isdir, real_scandir = os.path.isdir, os.scandir
         with mock.patch.object(self.m.os.path, "isdir", lambda p: probed.append(str(p)) or real_isdir(p)), \
-                mock.patch.object(self.m.os, "walk", lambda p, **k: probed.append(str(p)) or real_walk(p, **k)):
+                mock.patch.object(self.m.os, "scandir", lambda p: probed.append(str(p)) or real_scandir(p)):
             code, text = self.run_tool(self.d, share)
+        self.assertIn(str(self.d), probed)                                         # the spy does see what is searched
         self.assertNotIn(share, probed)
-        self.assertIn("not searched (on the network; this tool stays on this PC): " + share, text)
+        self.assertIn("not searched (on the network, or a link; this tool stays on this PC): " + share, text)
         self.assertNotIn(share, next(l for l in text.splitlines() if l.startswith("searched:")))
         self.assertEqual(code, 0)
+
+    def test_a_link_is_never_followed_file_or_folder(self):
+        """Codex P1 on #369 (second round): a .bak link on the Desktop, or a linked folder, can point at a server
+        share. Nothing is asked about a link's target: it is listed as a link, with the link's own date."""
+        self.bak(self.d, "stock.bak", 3)
+        outside = self.tmp / "elsewhere"                                           # stands for \\server\share
+        target = self.bak(outside, "remote_copy.bak", 1)
+        self.bak(outside / "folder", "inside_linked_folder.bak", 1)
+        try:
+            os.symlink(target, self.desk / "shortcut.bak")
+            os.symlink(outside / "folder", self.desk / "linked-folder", target_is_directory=True)
+            os.symlink(outside / "folder", self.desk / "folder-called.bak", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("links cannot be made here")
+        real_open, opened = open, []
+
+        def spy(path, *a, **k):
+            opened.append(str(path))
+            return real_open(path, *a, **k)
+        stats = []
+        real_stat = self.m._entry_stat
+        with mock.patch("builtins.open", spy), \
+                mock.patch.object(self.m, "_entry_stat", lambda e: stats.append((e.path, e.is_symlink())) or real_stat(e)):
+            files, _, _ = self.m.scan([str(self.d), str(self.desk)])
+        self.assertEqual(opened, [str(self.d / "stock.bak")])                      # the one real local file
+        by_name = {os.path.basename(f["path"]): f for f in files}
+        self.assertEqual(sorted(by_name), ["folder-called.bak", "shortcut.bak", "stock.bak"])
+        self.assertEqual((by_name["shortcut.bak"]["kind"], by_name["folder-called.bak"]["kind"]), ("link", "link"))
+        self.assertNotIn("inside_linked_folder.bak", by_name)                      # the linked folder was not entered
+        link_stat = os.lstat(self.desk / "shortcut.bak")
+        self.assertEqual((by_name["shortcut.bak"]["size"], by_name["shortcut.bak"]["mtime"]),
+                         (link_stat.st_size, link_stat.st_mtime))                  # the link's own, not the target's
+        code, text = self.run_tool()
+        self.assertEqual(code, 0)
+        self.assertIn("stock.bak", next(l for l in text.splitlines() if l.startswith("RESULT:")))
+        self.assertIn(" link ", next(l for l in text.splitlines() if "shortcut.bak" in l and l[:4].isdigit()))
+
+    def test_a_searched_place_that_is_itself_a_link_is_left_alone(self):
+        """A Desktop folder that is a link (to a server, say) is not entered and not asked about."""
+        real = self.tmp / "elsewhere" / "Desktop"
+        self.bak(real, "behind_the_link.bak", 1)
+        linked = self.tmp / "LinkedDesktop"
+        try:
+            os.symlink(real, linked, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("links cannot be made here")
+        probed = []
+        real_isdir, real_scandir = os.path.isdir, os.scandir
+        with mock.patch.object(self.m.os.path, "isdir", lambda p: probed.append(str(p)) or real_isdir(p)), \
+                mock.patch.object(self.m.os, "scandir", lambda p: probed.append(str(p)) or real_scandir(p)):
+            code, text = self.run_tool(self.d, linked)
+            home = self.tmp / "home"
+            home.mkdir()
+            os.symlink(real, home / "Desktop", target_is_directory=True)
+            found = self.m.desktops({"USERPROFILE": str(home)})
+        self.assertNotIn(str(linked), probed)
+        self.assertNotIn(str(home / "Desktop"), probed)
+        self.assertEqual(found, [str(home / "Desktop")])                           # kept, to be reported as not searched
+        self.assertNotIn("behind_the_link.bak", text)
+        self.assertIn("this tool stays on this PC): " + str(linked), text)
+        self.assertEqual(code, 2)
+
+    def test_a_link_alone_never_answers(self):
+        self.bak(self.d, "stock_old.bak", 100)
+        target = self.bak(self.tmp / "elsewhere", "fresh.bak", 1)
+        try:
+            os.symlink(target, self.desk / "fresh_link.bak")
+            t = NOW - HOUR                                                         # the link itself was made an hour ago
+            os.utime(self.desk / "fresh_link.bak", (t, t), follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            self.skipTest("links cannot be made or dated here")
+        code, text = self.run_tool()
+        self.assertEqual(code, 1)                                                  # the stale real backup is the answer
+        self.assertIn("stock_old.bak", next(l for l in text.splitlines() if l.startswith("RESULT:")))
+        self.assertIn("NOTE: 1 newer", text)
 
     def test_what_counts_as_the_network(self):
         m = self.m

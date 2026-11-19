@@ -14,7 +14,9 @@ Staying on this PC (Codex review of #369):
 - a place on the network (a Desktop redirected to a server share, a mapped drive) is not searched at all, not
   even asked whether it exists: that question already goes over the network;
 - a file that lives in the cloud (OneDrive "online only") is listed from its name, size and date but never
-  opened: opening it would download it and write it to this disk.
+  opened: opening it would download it and write it to this disk;
+- a link is never followed, file or folder (a shortcut-like link on the Desktop can point at a server): a
+  linked .bak is listed as a link, with the link's own date, and a linked folder is not entered.
 
 Exit code: 0 = the newest backup is at most 24 hours old, 1 = older, 2 = no .bak file found.
 """
@@ -32,6 +34,7 @@ SKIP_DIRS = {"$recycle.bin", "system volume information"}        # deleted files
 # RECALL_ON_DATA_ACCESS (OneDrive Files On-Demand and the like). Reading such a file fetches it.
 CLOUD_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
 DRIVE_REMOTE = 4
+UNCHECKED = ("unread", "cloud", "link")      # listed, never looked into, never counted
 # a native SQL Server backup starts with a tape-format block ("TAPE"); a compressed one with "MSSQLBAK"
 SQL_MARKS = (b"TAPE", b"MSSQLBAK")
 
@@ -57,6 +60,19 @@ def is_remote(path: str, drive_type=_drive_type) -> bool:
     return len(p) >= 2 and p[0].isalpha() and p[1] == ":" and drive_type(p[:2] + "\\") == DRIVE_REMOTE
 
 
+def is_link(path: str) -> bool:
+    """The path itself is a symbolic link or a junction (asked of the path, not of where it points)."""
+    try:
+        return os.path.islink(path) or getattr(os.path, "isjunction", lambda p: False)(path)
+    except OSError:
+        return True
+
+
+def off_limits(path: str, remote=is_remote) -> bool:
+    """A place this tool does not look into: on the network, or a link (which may lead there)."""
+    return remote(path) or is_link(path)
+
+
 def desktops(env=None) -> list[str]:
     """The Desktop folders a backup may have been saved to: the user's (it may be redirected, e.g. into
     OneDrive) and the shared one. A folder on the network is returned as it is (the scan reports it as not
@@ -78,7 +94,7 @@ def desktops(env=None) -> list[str]:
     out, seen = [], set()
     for p in found:
         key = os.path.normcase(p if is_remote(p) else os.path.abspath(p))
-        if key not in seen and (is_remote(p) or os.path.isdir(p)):      # a network path is never probed
+        if key not in seen and (off_limits(p) or os.path.isdir(p)):     # a network path or a link is never probed
             seen.add(key)
             out.append(p)
     return out
@@ -101,13 +117,56 @@ def kind(path: str, attributes: int = 0) -> str:
     return "sql" if head.startswith(SQL_MARKS) else "other"
 
 
+def _is_link(entry) -> bool:
+    """A symbolic link or a Windows junction. Answered from the folder listing itself, never from the target."""
+    try:
+        return entry.is_symlink() or getattr(entry, "is_junction", lambda: False)()
+    except OSError:
+        return True                                  # cannot tell: treat it as one, so it is not followed
+
+
+def _entry_stat(entry):
+    """Size, date and Windows attributes of the entry itself (for a link: of the link, not of its target)."""
+    return entry.stat(follow_symlinks=False)
+
+
+def _bak_entries(root: str):
+    """Every entry named *.bak under root, as (entry, is a link). Links are never followed: a linked folder is
+    not entered and nothing is asked about a link's target. A folder that cannot be listed is passed over."""
+    todo = [root]
+    while todo:
+        folder = todo.pop()
+        try:
+            with os.scandir(folder) as listing:
+                entries = sorted(listing, key=lambda e: e.name)
+        except OSError:
+            continue
+        for e in entries:
+            link = _is_link(e)
+            if e.name.lower().endswith(".bak"):
+                try:
+                    is_folder = (not link) and e.is_dir(follow_symlinks=False)
+                except OSError:
+                    is_folder = False
+                if not is_folder:
+                    yield e, link
+                    continue
+            if link:
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False) and e.name.lower() not in SKIP_DIRS:
+                    todo.append(e.path)
+            except OSError:
+                continue
+
+
 def scan(roots, progress=None, remote=is_remote) -> tuple[list[dict], list[str], list[str]]:
     """Every .bak file under the roots, as {path, mtime, size, kind}; the roots that do not exist; and the
-    roots on the network, which were not searched. A folder that cannot be opened is passed over: the list is
+    roots on the network or reached through a link, which were not searched. A folder that cannot be opened is passed over: the list is
     what this user can see."""
     files, missing, skipped, seen = [], [], [], set()
     for root in roots:
-        if remote(root):                            # before any look at it: even "does it exist" is a network call
+        if off_limits(root, remote):                # before any look at it: even "does it exist" is a network call
             skipped.append(root)
             continue
         if not os.path.isdir(root):
@@ -115,22 +174,18 @@ def scan(roots, progress=None, remote=is_remote) -> tuple[list[dict], list[str],
             continue
         if progress:
             progress(root)
-        for folder, dirs, names in os.walk(root, onerror=lambda e: None, followlinks=False):
-            dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
-            for name in names:
-                if not name.lower().endswith(".bak"):
-                    continue
-                path = os.path.join(folder, name)
-                key = os.path.normcase(os.path.abspath(path))
-                if key in seen:                     # the Desktop may itself be on D:\
-                    continue
-                try:
-                    st = os.stat(path)
-                except OSError:
-                    continue
-                seen.add(key)
-                files.append({"path": path, "mtime": st.st_mtime, "size": st.st_size,
-                              "kind": kind(path, getattr(st, "st_file_attributes", 0))})
+        for entry, link in _bak_entries(root):
+            path = entry.path
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:                         # the Desktop may itself be on D:\
+                continue
+            try:
+                st = _entry_stat(entry)
+            except OSError:
+                continue
+            seen.add(key)
+            files.append({"path": path, "mtime": st.st_mtime, "size": st.st_size,
+                          "kind": "link" if link else kind(path, getattr(st, "st_file_attributes", 0))})
     files.sort(key=lambda f: (-f["mtime"], f["path"]))
     return files, missing, skipped
 
@@ -139,8 +194,8 @@ def verdict(files, now: float) -> dict:
     """code 'ok' / 'old' / 'none'. Judged on the files recognised as SQL Server backups (basis 'sql'); when
     none was recognised, on every .bak file found (basis 'any'), and the report says the type is not certain.
 
-    `unchecked`: files newer than the one judged that could not be looked into (locked, refused, or in the
-    cloud). They never change the answer: a file nobody could read proves nothing, neither that the backup
+    `unchecked`: files newer than the one judged that could not be looked into (locked, refused, in the
+    cloud, or a link). They never change the answer: a file nobody could read proves nothing, neither that the backup
     runs (it may be any program's .bak) nor that it does not (SQL Server locks the backup it is writing right
     now). The report names them and says to run again."""
     sql = [f for f in files if f["kind"] == "sql"]
@@ -149,7 +204,7 @@ def verdict(files, now: float) -> dict:
         return {"code": "none", "basis": "none", "newest": None, "age_hours": None, "unchecked": 0}
     newest = max(basis, key=lambda f: f["mtime"])
     age = max(0.0, (now - newest["mtime"]) / 3600)
-    unchecked = sum(1 for f in files if f["kind"] in ("unread", "cloud") and f["mtime"] > newest["mtime"]) if sql else 0
+    unchecked = sum(1 for f in files if f["kind"] in UNCHECKED and f["mtime"] > newest["mtime"]) if sql else 0
     return {"code": "ok" if age <= MAX_AGE_HOURS else "old", "basis": "sql" if sql else "any",
             "newest": newest, "age_hours": age, "unchecked": unchecked}
 
@@ -180,7 +235,7 @@ def report(files, missing, roots, now: float, skipped=()) -> list[str]:
              "searched: " + ", ".join(r for r in roots if r not in missing and r not in skipped)
              + ("" if not missing else "   not found: " + ", ".join(missing))]
     if skipped:
-        lines.append("not searched (on the network; this tool stays on this PC): " + ", ".join(skipped))
+        lines.append("not searched (on the network, or a link; this tool stays on this PC): " + ", ".join(skipped))
     lines += [f".bak files found: {len(files)} (SQL Server backups: {sum(f['kind'] == 'sql' for f in files)})", ""]
     if files:
         lines.append(f"{'date':16}  {'age':>10}  {'size':>10}  {'type':6}  file")
@@ -203,7 +258,7 @@ def report(files, missing, roots, now: float, skipped=()) -> list[str]:
                      " E-Stock's hourly backup is probably not running.")
     if v["unchecked"]:
         lines.append(f"NOTE: {v['unchecked']} newer .bak file(s) above could not be looked into (type 'unread' ="
-                     " locked or refused, 'cloud' = online only) and were not counted. If E-Stock is writing a"
+                     " locked or refused, 'cloud' = online only, 'link' = a link, not followed) and were not counted. If E-Stock is writing a"
                      " backup right now, run this again in a few minutes.")
     return lines
 
