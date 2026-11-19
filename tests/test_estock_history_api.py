@@ -114,6 +114,7 @@ const { chromium } = require('playwright');
   await p.fill('#esRetF input[name=reason]', 'مرتجع عميل');
   const [res] = await Promise.all([p.waitForResponse((r) => r.url().endsWith('/return')), p.click('#esRetF button:not([type=button])')]);
   out.ret = [res.status(), (await res.json()).refund];
+  await p.waitForSelector('#esRet:not([hidden])');          // the invoice re-drawn after the return
   await p.goto(base + '/#/customers/' + cust);
   await p.waitForSelector('#esPanel a');
   out.custLinks = await p.$$eval('#esPanel a', (as) => as.length);
@@ -141,3 +142,16 @@ class TestHistoryScreens(ApiBase):
         self.assertGreaterEqual(out["custLinks"], 2)
         self.assertGreater(out["itemRows"], 0)
         self.assertEqual(out["errs"], [])
+
+
+class TestCodexReview358(ApiBase):
+    """#358 Codex P2: the old-invoice return follows the pharmacy's sales entitlement like the program's returns."""
+
+    def test_return_refused_when_sales_is_not_enabled(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE org_entitlements SET enabled=0 WHERE org_id=? AND feature='sales'", (self.ctx.org_id,))
+        r = self.c.post("/api/estock/sales/1/return", json={"lines": {"2": 1}, "reason": "مرتجع عميل"},
+                        headers={**H, "Idempotency-Key": "ent-1"})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (403, "feature_disabled"))
+        self.assertEqual(self.ledger(), [])
+        self.assertEqual(self.c.get("/api/estock/sales/1/return-lines", headers=H).status_code, 403)

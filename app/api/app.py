@@ -97,6 +97,7 @@ JSON_LIMITS = {"/api/export/xlsx": MAX_EXPORT_JSON}
 # URL prefix -> entitlement. A tool switched off for a pharmacy answers 403
 # without affecting the others.
 FEATURE_PREFIXES = (("/api/sales", "sales"), ("/api/customers", "sales"), ("/receipt", "sales"),
+                    ("/api/estock/sales", "sales"),       # returns against old E-Stock invoices (#358 Codex P2)
                     ("/api/cash", "sales"), ("/api/print", "sales"),
                     ("/api/purchases", "purchasing"), ("/api/imports", "dataimport"),
                     ("/api/counts", "counting"), ("/api/procurement", "procurement"),

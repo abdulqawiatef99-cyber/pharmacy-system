@@ -3579,7 +3579,7 @@ async function viewEstockInvoice(kind, id) {
     <div class="totals"><div>التاريخ<b>${esc(inv.day)}</b></div><div>${kind === "purchase" ? "المورد" : "العميل"}<b>${esc(inv.party || "—")}</b></div>
       <div>الإجمالي<b>${esMoney(inv.total)}</b></div>${kind === "purchase" ? "" : `<div>نقدي<b>${esMoney(inv.cash)}</b></div><div>فيزا ومحفظة<b>${esMoney(inv.network)}</b></div>`}
       ${inv.ticket_no || inv.ticket_name ? `<div>التذكرة<b>${esc([inv.ticket_name, inv.ticket_no].filter(Boolean).join(" "))}</b></div>` : ""}</div>
-    <div class="tablewrap mt"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>اترجع منها</th><th>السعر</th><th>الخصم</th><th>الإجمالي</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
+    <div class="tablewrap mt"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المرتجع منها</th><th>السعر</th><th>الخصم</th><th>الإجمالي</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
     ${inv.lines.map((l) => `<tr><td>${l.item_id ? `<a href="#/items/${esc(l.item_id)}">${esc(l.item)}</a>` : `<span class="badge b-warn">⚠ صنف مش مربوط</span>`}</td>
       <td class="num">${esc(l.qty ?? "")}</td><td class="num">${esc(l.returned ?? "")}</td><td class="num">${esMoney(l.price)}</td><td class="num">${esMoney(l.discount)}</td>
       <td class="num">${esMoney(l.total)}</td>${cost ? `<td class="num">${esMoney(l.cost)}</td>` : ""}<td>${esc(l.expiry || "")}</td></tr>`).join("")}</tbody></table></div>
@@ -3594,7 +3594,7 @@ async function estockReturnForm(id) {
   $("#esRet").hidden = true;
   $("#esRetBox").innerHTML = `<form class="panel mt" id="esRetF"><h2>مرتجع من فاتورة إي ستوك قديمة</h2>
     <p class="muted">الفلوس بترجع بنفس الطريقة اللي اتدفعت بيها وبحد أقصى اللي اتدفع فعلًا: الآجل يقل من حساب العميل الأول، وبعدين النقدي من الدرج، وبعدين الفيزا والمحفظة.</p>
-    <table><thead><tr><th>الصنف</th><th>اتباع (وحدة)</th><th>اترجع قبل كده</th><th>المرتجع الآن (وحدة)</th></tr></thead><tbody>
+    <table><thead><tr><th>الصنف</th><th>المباع (وحدة)</th><th>رجع قبل كده</th><th>المرتجع الآن (وحدة)</th></tr></thead><tbody>
     ${lines.map((l) => { const left = (l.sold_units ?? 0) - l.returned_units; return `<tr><td>${esc(l.item || "—")}</td><td class="num">${l.sold_units ?? "—"}</td><td class="num">${l.returned_units}</td>
       <td>${l.item_id && l.sold_units != null && left > 0 ? `<input class="narrow" type="number" min="0" max="${left}" step="1" data-line="${esc(l.line_key)}" value="0">` : `<span class="muted">—</span>`}</td></tr>`; }).join("")}</tbody></table>
     <label class="f mt">سبب المرتجع <input name="reason" required></label>
