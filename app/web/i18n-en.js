@@ -1,6 +1,9 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"النسخة": "Backup",
+"النسخة الاحتياطية فشلت": "The backup failed",
+"النسخة الاحتياطية متأخرة": "The backup is late",
 "آخر نسخة احتياطية": "Last backup",
 "آخر نسخة سليمة": "last good copy",
 "✕ آخر نسخة احتياطية تلقائية فشلت": "✕ The last automatic backup failed",
