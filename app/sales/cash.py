@@ -236,6 +236,19 @@ class CashDrawer:
         # voided while this shift was open (a void after the close belongs to the shift open at that time)
         voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL"
                              " AND (? IS NULL OR voided_at<?)", (shift_id, s["closed_at"], s["closed_at"]))["n"]
+        # and the same-day voids of an earlier shift's sales made while this one was open: their money left this
+        # drawer (#324 M8); the earlier shift keeps them as sales it had at its close
+        # a void is allowed on the sale's own day only, so such a sale was completed on or after the local start of
+        # the day this shift opened: that bound keeps the read to the index range of a day, not every void ever
+        from .service import _local_date, local_day_bounds
+        day0 = local_day_bounds(_local_date(s["opened_at"]))[0]
+        # a sale is completed before it is voided, so the close time also bounds completed_at (an old shift's
+        # report never reads the voids that came after it, #352 Codex P2)
+        voided += self.db.one("SELECT count(*) n FROM sales WHERE org_id=? AND branch_id=? AND status='voided'"
+                              " AND completed_at>=? AND completed_at<? AND sale_no IS NOT NULL"
+                              " AND (shift_id IS NULL OR shift_id<>?) AND voided_at>=? AND (? IS NULL OR voided_at<?)",
+                              (ctx.org_id, s["branch_id"], day0, s["closed_at"] or "9999-12-31", shift_id,
+                               s["opened_at"], s["closed_at"], s["closed_at"]))["n"]
         rets = _returns_of(self.db, s)
         by_channel = [dict(r) for r in self.db.all(
             "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
