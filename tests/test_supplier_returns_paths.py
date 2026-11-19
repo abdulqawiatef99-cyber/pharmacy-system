@@ -1,5 +1,5 @@
-"""Supplier returns (مرتجع مشتريات): the paths the first tests did not walk. Without a batch the stock leaves
-earliest expiry first at the average cost; every refusal leaves nothing behind (no stock, no account entry, no
+"""Supplier returns (مرتجع مشتريات): the paths the first tests did not walk. Without a batch only the stock kept
+without a lot leaves, at the average cost (#324 S29: it used to take the earliest-expiring lot); every refusal leaves nothing behind (no stock, no account entry, no
 slip number used); who may not see costs sees no values. Synthetic data only."""
 from datetime import timedelta
 from decimal import Decimal
@@ -34,15 +34,20 @@ class SupplierReturnPaths(Base):
                 self.db.one("SELECT count(*) n FROM supplier_returns")["n"],
                 self.db.one("SELECT count(*) n FROM stock_movements WHERE movement_type='supplier_return'")["n"])
 
-    def test_without_a_batch_the_nearest_expiry_leaves_first_at_the_average_cost(self):
+    def test_without_a_batch_only_untracked_stock_leaves_at_the_average_cost(self):
         self.assertEqual(returns.suggest_value(self.db, self.ctx, self.pan, None), 1550)
+        with self.assertRaises(Conflict):          # no stock without a lot: a dated lot is never taken instead
+            returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "qty_base": 6, "reason": "overstock"}])
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=8, movement_type="purchase",
+                              unit_cost=Decimal("15.5"))                                # the average stays 15.50
         r = returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "qty_base": 6, "reason": "overstock"}])
         self.assertEqual(r["total"], 6 * 1550)
-        self.assertEqual((self.batch(self.near), self.batch(self.b1)), (0, 18))          # 4 from NEAR, then 2
+        self.assertEqual((self.batch(self.near), self.batch(self.b1), self.batch(None)), (4, 20, 2))
         self.assertEqual(sup.balance(self.db, self.ctx.org_id, self.sup), -9300)
         moves = self.db.all("SELECT batch_id, qty_delta, ref_line_id FROM stock_movements WHERE movement_type='supplier_return'"
                             " ORDER BY rowid")
-        self.assertEqual([(m["batch_id"], m["qty_delta"]) for m in moves], [(self.near, -4), (self.b1, -2)])
+        self.assertEqual([(m["batch_id"], m["qty_delta"]) for m in moves], [(None, -6)])
         self.assertEqual({m["ref_line_id"] for m in moves}, {r["lines"][0]["id"]})
 
     def test_more_than_the_stock_without_a_batch_is_refused_and_leaves_nothing(self):
@@ -51,7 +56,8 @@ class SupplierReturnPaths(Base):
             returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "qty_base": 25, "reason": "expired"}])
         self.assertEqual(e.exception.code, "insufficient_stock")
         self.assertEqual(self.state(), before)
-        r = returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "qty_base": 1, "reason": "expired"}])
+        r = returns.create(self.db, self.ctx, self.sup, [{"item_id": self.pan, "batch_id": self.b1, "qty_base": 1,
+                                                          "reason": "expired"}])
         self.assertEqual(r["return_no"], 1)                                                  # the number was not used up
 
     def test_every_bad_line_is_refused_before_anything_moves(self):
