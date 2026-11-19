@@ -59,6 +59,45 @@ HISTORY_TABLES = ("Sales_header", "Branches_sales_details", "Back_sales_header",
                   "Purchase_header", "Purchase_details", "Branches_purchase_details", "Gedo_customers",
                   "Gedo_Vendors", "Shortcoming", "Cash_disk_close")
 DEFAULT_STORE = "الصيدلية"
+# History rows with values no pharmacy can have (a read taken while E-Stock writes, 19/11 15:34): quarantined
+# in the archive (q_<table>), never planned, summed, returned or reported as money.
+# (Shortcoming is not checked: E-Stock keeps barcodes in its product_id, listed for the owner as they are)
+SANITY_TABLES = tuple(t for t in HISTORY_TABLES if t != "Shortcoming") + ("Sales_details", "Gedo_Financial")
+ID_MAX = Decimal(2) ** 53                      # beyond this an id is not a counter any more
+QTY_MAX = Decimal(1_000_000)                   # units or packs on one line
+MONEY_MAX = Decimal(1_000_000_000)             # pounds on one line or one invoice
+_MONEY_WORDS = ("price", "money", "total", "disc", "cash", "net", "value", "for_me", "for_him", "balance")
+
+
+def _has_rule(col: str) -> bool:
+    c = col.strip().lower()
+    return (c.endswith("_date") or c == "date" or c == "id" or c.endswith("_id") or c in ("amount", "back_amount",
+            "sale_unit_change") or c.endswith("_amount") or any(w in c for w in _MONEY_WORDS))
+
+
+def implausible(col: str, raw: str) -> str | None:
+    """Why this cell is impossible, or None. Only clear impossibilities: a value that merely looks odd is
+    left to the planner's own checks."""
+    v = (raw or "").strip()
+    if not v:
+        return None
+    c = col.strip().lower()
+    if c.endswith("_date") or c == "date":
+        year = v[:4]
+        if not year.isdigit():
+            return None
+        lo, hi = (1899, 2200) if c.startswith("exp") else (1900, 2100)
+        return None if lo <= int(year) <= hi else f"{c}={v[:10]}"
+    d = dec(v)
+    if d is None:
+        return None
+    if c == "id" or c.endswith("_id"):
+        return None if (d == d.to_integral_value() and -1 <= d <= ID_MAX) else f"{c}={v}"
+    if c in ("amount", "back_amount", "sale_unit_change") or c.endswith("_amount"):
+        return None if abs(d) <= QTY_MAX else f"{c}={v}"
+    if any(w in c for w in _MONEY_WORDS):
+        return None if abs(d) <= MONEY_MAX else f"{c}={v}"
+    return None
 
 
 class ExportError(ValidationFailed):
@@ -221,6 +260,7 @@ class Export:
         if unfinished:
             self.missing.append(unfinished)
         self._cache: dict[str, list[dict]] = {}
+        self._quarantine: dict[str, dict[int, str]] = {}
         self._raw: dict[str, tuple[list[str], list[list[str]]]] = {}
 
     def has(self, name: str) -> bool:
@@ -244,8 +284,43 @@ class Export:
                 self._raw[key] = (head, [[keep(v, v) if len(v) < 24 else v for v in r] for r in rd])
         return self._raw[key]
 
+    def quarantined(self, name: str) -> dict[int, str]:
+        """{row index: why} for the rows of a history table with impossible values (see implausible())."""
+        key = name.lower()
+        if key not in self._quarantine:
+            out: dict[int, str] = {}
+            if key in self.tables and key in {t.lower() for t in SANITY_TABLES}:
+                head, data = self.raw(name)
+                cols = [(i, h) for i, h in enumerate(head) if _has_rule(h)]     # once per table, not per cell
+                for n, r in enumerate(data):
+                    why = [w for w in (implausible(h, r[i]) for i, h in cols if i < len(r)) if w]
+                    if why:
+                        out[n] = "؛ ".join(why)
+            self._quarantine[key] = out
+        return self._quarantine[key]
+
+    def quarantined_ids(self, name: str, col: str) -> tuple[set[str], bool]:
+        """The ids in `col` of a table's quarantined rows, and whether any of them is unreadable."""
+        q = self.quarantined(name)
+        if not q:
+            return set(), False
+        head, data = self.raw(name)
+        low = [h.strip().lower() for h in head]
+        if col not in low:
+            return set(), True
+        i = low.index(col)
+        ids, unknown = set(), False
+        for n in q:
+            v = data[n][i] if i < len(data[n]) else ""
+            if implausible(col, v) or not v.strip():
+                unknown = True
+            else:
+                ids.add(ident(v))
+        return ids, unknown
+
     def rows(self, name: str) -> list[dict]:
-        """Rows as dicts with lower-case column names (E-Stock mixes PV_id / pv_id)."""
+        """Rows as dicts with lower-case column names (E-Stock mixes PV_id / pv_id); a history row with
+        impossible values is left out (it stays in the archive's quarantine table)."""
         key = name.lower()
         if key not in self._cache:
             if key not in self.tables:
@@ -255,7 +330,8 @@ class Export:
                 index: dict[str, int] = {}
                 for i, h in enumerate(head):
                     index[h.strip().lower()] = i               # a repeated name: the last one, as dict(zip()) did
-                self._cache[key] = [Row(index, r) for r in data]
+                q = self.quarantined(name)
+                self._cache[key] = [Row(index, r) for n, r in enumerate(data) if n not in q]
         return self._cache[key]
 
     def sha(self, *names: str) -> str:
@@ -364,6 +440,7 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
     _plan_parties(ex, p, confirm or {})
     _plan_history_checks(ex, p)
     _plan_money_info(ex, p)
+    _plan_quarantine(ex, p)
     _plan_snapshot(ex, p)
     return p
 
@@ -701,6 +778,24 @@ def sales_lines(ex: Export) -> list[dict]:
         return ex.rows("Sales_details")
     b = local_branch(ex)
     return [r for r in ex.rows("Branches_sales_details") if b is None or ident(r.get("branch_id")) == b]
+
+
+RETURN_GUARDED = {"sales_header", "sales_details", "branches_sales_details", "back_sales_header", "back_sales_details"}
+
+
+def _plan_quarantine(ex: Export, p: Plan) -> None:
+    for t in SANITY_TABLES:
+        if not ex.has(t):
+            continue
+        q = ex.quarantined(t)
+        if q:
+            sample = "؛ ".join(sorted({w.split("=")[0] + "=" + w.split("=", 1)[1][:20] for v in q.values()
+                                       for w in v.split("؛ ")})[:5])
+            p.issue(ex.tables[t.lower()]["name"], "", "", "impossible values", f"{len(q)} سطر؛ مثلًا {sample}",
+                    "OWNER: سطور بقيم مستحيلة (غالبًا القراية كانت وإي ستوك شغال): اتحفظت لوحدها في الأرشيف"
+                    f" (q_{ex.tables[t.lower()]['name']}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير"
+                    + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
+                    kind="review")
 
 
 def _plan_snapshot(ex: Export, p: Plan) -> None:
@@ -1086,8 +1181,14 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
                     kind="review")
     # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
+    # a quarantined line still says the invoice had lines (Codex on #380): never a new draft from unknown contents;
+    # a quarantined line whose invoice id is unreadable could be any invoice: then no draft at all
+    q_ids, q_unknown = ex.quarantined_ids("Purchase_details", "purchase_id")
+    with_lines |= q_ids
     sup_ids = {d["estock_id"] for d in p.suppliers}
     for r in ex.rows("Purchase_header"):
+        if q_unknown:
+            break
         if ident(r.get("purchase_id")) not in with_lines:
             v = dec(r.get("total_bill")) or 0
             day = iso_day(r.get("bill_date")) or iso_day(r.get("insert_date"))
@@ -1768,12 +1869,14 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
     counts = {}
     for t in ex.tables.values():
         _, rows = ex.raw(t["name"])
-        c = {"manifest": t["rows"], "csv": len(rows), "archive": (archive_counts or {}).get(t["name"])}
+        c = {"manifest": t["rows"], "csv": len(rows), "archive": (archive_counts or {}).get(t["name"]),
+             "quarantined": len(ex.quarantined(t["name"]))}
         counts[t["name"]] = c
         if (t["rows"] is not None and c["csv"] != t["rows"]) or (archive_counts is not None and c["archive"] != c["csv"]):
             mm.append({"what": "history", "code": t["name"], "name": "", "value": Decimal(0),
                        "detail": f"عدد الصفوف: التصدير {t['rows']}، الملف {c['csv']}، الأرشيف {c['archive']}"})
     out["history"] = {k: counts[ex.tables[k.lower()]["name"]] for k in HISTORY_TABLES if ex.has(k)}
+    out["history_quarantined"] = {n: c["quarantined"] for n, c in counts.items() if c["quarantined"]}
     out["tables"] = len(counts)
     for b in plan.blocking:
         mm.append({"what": "data-quality", "code": b["code"], "name": b["field"], "detail": b["action"],

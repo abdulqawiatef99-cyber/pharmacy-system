@@ -53,6 +53,9 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
      "الفواتير محفوظة في الأرشيف زي ما هي؛ ولا واحدة اتحسبت بضاعة تحت التصريف ولا دين جديد"),
     (r"مالوش حساب في البرنامج", "خزنة من غير حساب في البرنامج وعليها رصيد", "قول الرصيد ده يروح أنهي حساب",
      "ما اتعملهاش حساب (قرارك)؛ رصيدها مكتوب هنا وتاريخها في الأرشيف"),
+    (r"^impossible values$", "سطور بقيم مستحيلة في إي ستوك",
+     "القراية النهائية تبقى وإي ستوك مقفول خالص؛ لو السطور دي فضلت بعدها، ابعت أرقام الفواتير دي من شاشة إي ستوك",
+     "اتحفظت لوحدها في الأرشيف ومش داخلة في أي حساب ولا مرتجع ولا تقرير ولا مطابقة فلوس"),
     (r"درج الشيفت", "مش واضح أنهي درج هو درج الشيفت", "قول أنهي درج هو درج الشيفت",
      "ما اتنقلش لسه: الرصيد مستني خدمة الحسابات (F105)، ومكتوب هنا بمصدره"),
 ]
@@ -89,6 +92,8 @@ def _ask(d: dict) -> tuple[str, str, str | None]:
 def _who(d: dict) -> str:
     kind = TABLE_AR.get(d.get("table", ""), d.get("table", ""))
     out = kind
+    if d.get("field") == "impossible values" and kind != d.get("table"):
+        out += f" ({d['table']})"                  # the E-Stock table to look at
     if d.get("estock_id"):
         out += f" رقم {d['estock_id']}"
     if d.get("code") and d.get("code") != d.get("estock_id"):
@@ -198,6 +203,10 @@ def _margin(plan, rec: dict) -> list[str]:
         rows = sum(v["csv"] for v in hist.values())
         out.append(f"  التاريخ: {len(hist)} جدول ({rows:,} سطر) اتحفظ في الأرشيف — اتطابق {same} من {len(hist)}"
                    f" ({_pct(same, len(hist))})")
+    qn = rec.get("history_quarantined") or {}
+    if qn:
+        out.append("  سطور اتعزلت (قيم مستحيلة، مش داخلة في أي حساب): "
+                   + "، ".join(f"{t} {n} سطر" for t, n in sorted(qn.items())))
     rnd = plan.checks.get("rounding") or {}
     if rnd:
         n = sum(v["values"] for v in rnd.values())
