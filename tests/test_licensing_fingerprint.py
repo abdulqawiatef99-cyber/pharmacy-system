@@ -141,10 +141,14 @@ class TestReading(unittest.TestCase):
     def test_current_never_raises_on_this_machine(self):
         self.assertIsInstance(fp.current(), fp.Device)
 
-    @unittest.skipUnless(os.name == "nt", "Windows only: the real registry and firmware calls")
-    def test_real_windows_identifiers_are_read_and_stable(self):
-        first, second = fp.raw_identifiers(), fp.raw_identifiers()
-        self.assertEqual(first, second)
+    def test_reading_twice_gives_the_same_answer_on_this_machine(self):
+        self.assertEqual(fp.raw_identifiers(), fp.raw_identifiers())
+
+    @unittest.skipUnless(os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true",
+                         "the real registry and firmware calls, on the Windows CI machine only: on a customer PC "
+                         "an unreadable part is allowed (the selftest there must not fail for it)")
+    def test_real_windows_identifiers_are_read(self):
+        first = fp.raw_identifiers()
         self.assertIn("system", first)                         # MachineGuid exists on every Windows
         self.assertRegex(first["disk"], r"^[0-9a-f]{8}$")
         self.assertTrue(fp.current().usable)
