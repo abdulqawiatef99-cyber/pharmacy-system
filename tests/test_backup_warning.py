@@ -72,5 +72,39 @@ class BackupWarningScreen(APICase):
         self.assertIn("آخر نسخة احتياطية", out["when"])
 
 
+SWITCH = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN.replace("[user, pw]", "['cashier1', 'Staff-Pass-2026']") + r"""
+  await p.goto(base + '/#/home');
+  await p.waitForSelector('#logout');
+  await p.waitForTimeout(300);
+  const asCashier = await p.locator('#backupAlert').isHidden();
+  await p.click('#logout');
+  await p.waitForSelector('#loginForm');
+  await p.evaluate(async ([u, w]) => fetch('/api/auth/login', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ username: u, password: w }) }), [user, pw]);
+  await p.goto(base + '/#/home');
+  await p.waitForSelector('#backupAlert:not([hidden])', { timeout: 5000 });   // now, not at the next 5-minute tick
+  console.log(JSON.stringify({ asCashier, bar: await p.locator('#backupAlert').innerText() }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class BackupWarningAfterAnotherLogin(APICase):
+    def test_the_owner_sees_it_at_once_after_a_cashier_logged_out_in_the_same_tab(self):
+        """#351 Codex P2."""
+        from app.core import people
+        people.add_user(self.db, self.ctx, username="cashier1", full_name="C", password="Staff-Pass-2026", role_code="assistant")
+        ab = AutoBackup(self.db, self.s.upload_dir, self.s.backup_path, self.s.data_dir)
+        ab._write(ab.state_path, {"last_ok": False, "last_at": "2026-11-18T23:00:00", "last_fail_at": "2026-11-19T01:00:00"})
+        out = run_node(self, SWITCH, "owner", OWNER_PW)
+        self.assertTrue(out["asCashier"])
+        self.assertIn("فشلت", out["bar"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -406,8 +406,12 @@ async function route() {
   else if (ME.stock_alert !== undefined) { showStockAlert(ME.stock_alert); delete ME.stock_alert; }
   else refreshStockAlert();
   if (ME && !route.alertTimer) route.alertTimer = setInterval(refreshStockAlert, 60000);
-  if (!ME) showBackupAlert(null);
-  else if (!route.backupTimer) { refreshBackupAlert(); route.backupTimer = setInterval(refreshBackupAlert, 300000); }
+  // per signed-in person: after a logout and another login in the same tab, the new person's view is read now
+  if (!ME) { showBackupAlert(null); clearInterval(route.backupTimer); route.backupTimer = null; route.backupUser = null; }
+  else if (route.backupUser !== ME.user.id) {
+    route.backupUser = ME.user.id; clearInterval(route.backupTimer);
+    refreshBackupAlert(); route.backupTimer = setInterval(refreshBackupAlert, 300000);
+  }
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
