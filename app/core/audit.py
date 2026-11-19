@@ -60,12 +60,26 @@ def record(db: Database, ctx: Context | None, action: str, entity_type: str | No
         (*fields, prev, _row_hash(prev, fields)))
 
 
+CHAIN_BLOCK = 2000
+
+
+def _blocks(cur):
+    while True:
+        rows = cur.fetchmany(CHAIN_BLOCK)
+        if not rows:
+            return
+        yield from rows
+
+
 def verify_chain(db: Database) -> list[dict]:
     """Returns problems found in the audit chain (empty list = intact)."""
     problems = []
     prev = "GENESIS"
     expected_seq = 1
-    for r in db.all("SELECT * FROM audit_log WHERE seq IS NOT NULL ORDER BY seq"):
+    # read a block at a time: the whole log in memory was 100 MB of rows for one year of a medium pharmacy,
+    # on every backup, and grows with every year kept (the log is never trimmed)
+    cur = db.conn.execute("SELECT * FROM audit_log WHERE seq IS NOT NULL ORDER BY seq")
+    for r in _blocks(cur):
         if r["seq"] != expected_seq:
             problems.append({"seq": expected_seq, "problem": "missing_row"})
             expected_seq = r["seq"]

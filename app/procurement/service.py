@@ -69,6 +69,11 @@ class Procurement:
             "SELECT period_start, period_end, qty_base FROM consumption_history WHERE org_id=? AND"
             " branch_id=? AND item_id=? AND period_end >= ? ORDER BY period_start",
             (ctx.org_id, ctx.branch_id, item_id, start.isoformat()))]
+        return self._usage_of(sold, periods, window_days)
+
+    def _usage_of(self, sold: int, periods: list[dict], window_days: int) -> dict:
+        """Daily use from the units sold here in the window and the imported periods that reach into it."""
+        start = self.today - timedelta(days=window_days)
         hist_qty, hist_days, rates = 0.0, 0, []
         for p in periods:
             ps, pe = date.fromisoformat(p["period_start"]), date.fromisoformat(p["period_end"])
@@ -92,6 +97,34 @@ class Procurement:
             cv = math.sqrt(sum((r - m) ** 2 for r in rates) / (len(rates) - 1)) / m
         return {"daily": daily, "periods": len(periods), "days_covered": days, "cv": cv,
                 "sold_in_system": sold, "history_qty": round(hist_qty, 2), "rates": rates}
+
+    def _all_items(self, ctx: Context, window_days: int) -> dict:
+        """What suggest() and stock_health() need for every item, in four questions instead of four per item
+        (#253 / #304 B6: 16,000 to 180,000 small queries took 12-25 s and held every other screen meanwhile).
+        Same figures as _usage / _sellable / _on_order give for one item."""
+        o, b, start = ctx.org_id, ctx.branch_id, (self.today - timedelta(days=window_days)).isoformat()
+        sold = {r["item_id"]: -int(r["q"]) for r in self.db.all(
+            # the window's sales are read through (org, type, time) and only then grouped. Asked in one plain
+            # GROUP BY, SQLite walks an index that starts with the item to save the sort: every movement the
+            # pharmacy ever made, instead of the last 90 days
+            "WITH w AS MATERIALIZED (SELECT item_id, qty_delta FROM stock_movements WHERE org_id=? AND +branch_id=?"
+            " AND movement_type IN ('sale','sale_return') AND created_at >= ?)"
+            " SELECT item_id, sum(qty_delta) q FROM w GROUP BY item_id", (o, b, start))}
+        periods: dict[str, list] = {}
+        for r in self.db.all("SELECT item_id, period_start, period_end, qty_base FROM consumption_history WHERE org_id=?"
+                             " AND branch_id=? AND period_end >= ? ORDER BY item_id, period_start", (o, b, start)):
+            periods.setdefault(r["item_id"], []).append(dict(r))
+        stock = {r["item_id"]: (int(r["q"]), int(r["x"])) for r in self.db.all(
+            "SELECT sb.item_id, coalesce(sum(sb.qty),0) q, coalesce(sum(CASE WHEN b.expiry_date IS NOT NULL AND"
+            " b.expiry_date<? THEN sb.qty ELSE 0 END),0) x FROM stock_balances sb LEFT JOIN batches b"
+            " ON b.id=nullif(sb.batch_key,'') WHERE sb.org_id=? AND sb.branch_id=? GROUP BY sb.item_id",
+            (self.today.isoformat(), o, b))}
+        on_order = {r["item_id"]: int(r["q"]) for r in self.db.all(
+            "SELECT l.item_id, coalesce(sum((l.qty + l.bonus_qty) * i.pack_size),0) q"
+            " FROM purchase_invoices p JOIN purchase_invoice_lines l ON l.invoice_id=p.id"
+            " JOIN items i ON i.id=l.item_id WHERE p.org_id=? AND p.branch_id=? AND p.status='draft'"
+            " AND l.item_id IS NOT NULL AND l.qty IS NOT NULL GROUP BY l.item_id", (o, b))}
+        return {"sold": sold, "periods": periods, "stock": stock, "on_order": on_order}
 
     def _on_hand(self, ctx: Context, item_id: str) -> int:
         return int(self.db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND"
@@ -120,9 +153,11 @@ class Procurement:
                 safety_days: int = 5, window_days: int = 90, only_needed: bool = True) -> list[dict]:
         ctx.require("purchases.read")
         out: list[Suggestion] = []
+        d = self._all_items(ctx, window_days)
         for it in self.db.all("SELECT * FROM items WHERE org_id=? AND status='active'", (ctx.org_id,)):
-            u = self._usage(ctx, it["id"], window_days)
-            (on_hand, expired), on_order = self._sellable(ctx, it["id"]), self._on_order(ctx, it["id"])
+            u = self._usage_of(d["sold"].get(it["id"], 0), d["periods"].get(it["id"], []), window_days)
+            total, expired = d["stock"].get(it["id"], (0, 0))
+            on_hand, on_order = total - expired, d["on_order"].get(it["id"], 0)
             daily = u["daily"]
             target = daily * (lead_days + cover_days + safety_days)
             need = max(target, it["min_stock"]) - on_hand - on_order
@@ -168,11 +203,18 @@ class Procurement:
                      expiry_days: int = 180) -> dict:
         ctx.require("inventory.read")
         slow, over, expiring = [], [], []
+        d = self._all_items(ctx, slow_days)
+        lots: dict[str, list] = {}       # every dated lot in stock, earliest expiry first, in one question
+        for b in self.db.all(
+                "SELECT sb.item_id, b.batch_no, b.expiry_date, sb.qty FROM stock_balances sb JOIN batches b"
+                " ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL"
+                " ORDER BY sb.item_id, b.expiry_date", (ctx.org_id, ctx.branch_id)):
+            lots.setdefault(b["item_id"], []).append(b)
         for it in self.db.all("SELECT * FROM items WHERE org_id=? AND status='active'", (ctx.org_id,)):
-            on_hand = self._on_hand(ctx, it["id"])
+            on_hand = d["stock"].get(it["id"], (0, 0))[0]
             if on_hand <= 0:
                 continue
-            u = self._usage(ctx, it["id"], slow_days)
+            u = self._usage_of(d["sold"].get(it["id"], 0), d["periods"].get(it["id"], []), slow_days)
             label = it["name_en"] or it["name_ar"]
             if u["daily"] == 0:
                 slow.append({"item_id": it["id"], "label": label, "on_hand": on_hand,
@@ -182,11 +224,7 @@ class Procurement:
                              "days_of_cover": round(on_hand / u["daily"]),
                              "reason": f"الرصيد يكفي أكثر من {overstock_days} يوم"})
             spent = 0       # demand already given to an earlier lot: each day's sales empty one lot, not all of them
-            for b in self.db.all(
-                    "SELECT b.batch_no, b.expiry_date, sb.qty FROM stock_balances sb JOIN batches b"
-                    " ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=?"
-                    " AND sb.qty>0 AND b.expiry_date IS NOT NULL ORDER BY b.expiry_date",
-                    (ctx.org_id, ctx.branch_id, it["id"])):
+            for b in lots.get(it["id"], []):
                 days_left = (date.fromisoformat(b["expiry_date"]) - self.today).days
                 if days_left > expiry_days:
                     continue
