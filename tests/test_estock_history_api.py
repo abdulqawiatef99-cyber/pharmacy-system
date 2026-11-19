@@ -155,3 +155,26 @@ class TestCodexReview358(ApiBase):
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (403, "feature_disabled"))
         self.assertEqual(self.ledger(), [])
         self.assertEqual(self.c.get("/api/estock/sales/1/return-lines", headers=H).status_code, 403)
+
+
+from tests.test_r3_double_submit import JS, TestScreenReusesTheKey  # noqa: E402
+
+
+class TestCodexReview358b(TestScreenReusesTheKey):
+    """#358 Codex P1: a second press while the invoice redraws must not post a second return."""
+
+    def test_the_same_return_within_4_seconds_keeps_its_key(self):
+        p, body = "/api/estock/sales/1/return", {"lines": {"2": 1}, "reason": "مرتجع عميل"}
+        a, b = self.keys([[p, body, 0], [p, body, 300]])
+        self.assertEqual(a, b)
+
+    def test_the_form_is_gone_before_the_invoice_redraws(self):
+        at = JS.index('await api(`/api/estock/sales/${id}/return`')
+        after = JS[at:at + 700]
+        self.assertIn('$("#esRetBox").innerHTML = ""', after)
+        self.assertLess(after.index('$("#esRetBox").innerHTML = ""'), after.index("await viewEstockInvoice"))
+
+    # the money-form cases of the parent class run in tests.test_r3_double_submit; not twice here
+    test_the_same_money_post_within_4_seconds_keeps_its_key = None
+    test_a_different_amount_or_a_later_press_is_a_new_request = None
+    test_scanning_the_same_item_twice_stays_two_lines = None

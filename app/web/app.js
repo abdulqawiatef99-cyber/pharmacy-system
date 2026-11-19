@@ -255,7 +255,7 @@ const API_MAX_APPROVALS = 8;                    // more than any action needs; s
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
-  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/];
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
 function onceKey(method, apiPath, bodyText) {
   if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -3609,8 +3609,9 @@ async function estockReturnForm(id) {
       try {
         const r = await api(`/api/estock/sales/${id}/return`, { method: "POST", body });
         const p = r.parts;
+        $("#esRetBox").innerHTML = "";             // gone at once: a second press cannot send it again (#358 Codex P1)
         toast(`✓ اتسجل المرتجع: ${money(r.refund)} ج · من الحساب: ${money(p.account)} ج · نقدي: ${money(p.cash)} ج · فيزا ومحفظة: ${money(p.card)} ج`);
-        viewEstockInvoice("sale", id);
+        await viewEstockInvoice("sale", id);
       } catch (err) { toast(err.message, true); }
     });
   });
