@@ -1,5 +1,7 @@
 """Ticket on contract sales (hospital / company ticket: name, id, number) and the E-Stock tickets from the
 archive in the contract report. Synthetic data only."""
+import unittest
+
 from app.core import people
 from app.core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from app.sales import contracts as k
@@ -277,6 +279,7 @@ class TestArchiveBoundToItsPharmacy(ImportBase):
         self.assertNotIn("99", qty)
 
 
+@unittest.skipUnless(hasattr(__import__("time"), "tzset"), "needs a settable time zone (not on Windows)")
 class TestClaimLocalDay(_TicketBase):
     """Codex on #340 @a5985e2: a program sale's claim day is its local (Cairo) day, not its UTC day."""
 
@@ -379,3 +382,26 @@ class TestCodexReview340e(TestCodexReview381Claim):
         kid = self.db.one("SELECT id FROM contracts")["id"]
         listed = k.report(self.db, self.ctx, kid, "2026-11-18", "2026-11-18")["estock"]
         self.assertIn("1.0", [e["estock_sales_id"] for e in listed])
+
+
+class TestCodexReview340f(TestCodexReview381Claim):
+    """Codex on #340 @60797f9 / #381 (each failed before the fix): returns are valued at what was charged."""
+
+    def _line(self, t):
+        return [r for r in self._claim(t)["lines"] if r["source"] == "estock" and r["invoice"] == "1"
+                and r["item_code"] == "100"]
+
+    def test_p2_a_line_return_without_back_price_is_valued_at_the_net_unit(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Back_Sales_details"], t["Back_sales_header"] = [], []
+        t["Branches_sales_details"][0].update({"amount": "2", "total_sell": "54.0000", "sell_price": "30.0000",
+                                               "back_amount": "1", "back_price": ""})
+        self.assertEqual([(r["qty"], r["sale"]) for r in self._line(t)], [("1", "27.00")])     # 54 / 2, not 54 - 30
+
+    def test_p2_a_document_only_return_is_valued_at_the_net_unit_not_zero(self):
+        from tests.test_estock_db_import import base_tables
+        t = base_tables()
+        t["Branches_sales_details"][0].update({"amount": "2", "total_sell": "60.0000", "sell_price": "30.0000",
+                                               "back_amount": "0", "back_price": "0"})
+        self.assertEqual([(r["qty"], r["sale"]) for r in self._line(t)], [("1", "30.00")])     # one pack kept

@@ -384,6 +384,7 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
                     v[1] += int((hh.get("line_refunds") or {}).get(str(lk), 0))
         for r in found:
             amt, back = _dec(r["amount"]) or Decimal(0), _dec(r["back"]) or Decimal(0)
+            line_back, take = back, Decimal(0)
             key = (idn(r["sid"]), idn(r["pid"]))
             if extra.get(key, 0) > 0:
                 take = min(extra[key], amt - back)
@@ -396,7 +397,12 @@ def _estock_claim_lines(db: Database, ctx: Context, contract_id: str, d1: date, 
             if amt - back - prog_back <= 0:
                 continue
             gross = ts if ts is not None else amt * (sp or 0) - (dm or 0)
-            sale = gross - back * (bpr if bpr is not None else (sp or 0)) - Decimal(prefund) / 100
+            # a returned pack comes off at what it was charged (Codex on #340/#381): the line's own return at its
+            # back_price when E-Stock kept one, else, and for a return kept only in the return documents, at the
+            # line's net price per pack (its discount included); the program's own returns by their exact refund
+            net_unit = gross / amt if amt else Decimal(0)
+            sale = gross - line_back * (bpr if bpr is not None and bpr > 0 else net_unit) - take * net_unit \
+                - Decimal(prefund) / 100
             back += prog_back
             code, name = prods.get(r["pid"], (r["pid"], None))
             row = {"source": "estock", "day": (r["at"] or "")[:10], "invoice": r["bill"] or r["sid"],
