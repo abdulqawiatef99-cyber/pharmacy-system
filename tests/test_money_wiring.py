@@ -291,3 +291,21 @@ class TestLaunchGateCodex381(WiringCase):
         self.assertEqual(self.bal(self.wallet), 0)
         self.call("POST", f"/api/sales/{sid}/void", json={"reason": "خطأ في الفاتورة"})
         self.assertEqual(self.bal(self.wallet), 0)                                   # never below what came
+
+
+class TestCodexReview348g(TestLaunchGateCodex381):
+    """#348 Codex P2: a transfer proof reviewed while the sale was still a draft is applied when the sale completes."""
+
+    test_a_cash_sale_refunded_to_the_card_debits_the_card_account = None
+    test_a_card_sale_made_before_its_channel_was_routed = None
+    test_a_part_approved_transfer_leaves_only_that_part_on_the_account = None
+    test_a_transfer_marked_not_received_leaves_nothing_and_a_void_after_it_does_not_double = None
+
+    def test_a_review_made_on_the_draft_counts_at_completion(self):
+        from tests.test_attachments import PNG
+        sid = self.draft()
+        d = self.line(sid, self.pan, units=2)
+        a = self.proof(sid, PNG)
+        self.call("POST", f"/api/attachments/{a}/review", json={"ok": False, "note": "لم يصل"})
+        self.complete(sid, [{"method": "transfer", "amount": d["total"], "channel_id": self.tr_ch}])
+        self.assertEqual(self.bal(self.wallet), 0)

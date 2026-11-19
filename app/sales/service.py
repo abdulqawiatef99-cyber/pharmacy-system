@@ -774,6 +774,10 @@ class Sales:
                             " complete_request_id=?, version=version+1 WHERE id=?",
                             (no, subtotal, discount, total, paid_cash,
                              paid_card, paid_transfer, on_credit, _now(), request_id, sid))
+            if paid_transfer:   # a proof already reviewed on the draft counts now the transfer is on its account (#348)
+                from .attachments import transfer_state
+                money.settle_transfer_review(self.db, ctx, sid,
+                                             transfer_state(self.db, ctx.org_id, sid, paid_transfer)["received"])
             if on_credit:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
