@@ -58,6 +58,9 @@ if errorlevel 1 (set "MSG=some E-Stock tables still could not be read (see the l
 call :log PASS "E-Stock read complete: %READS% (newest full read + its retries)"
 
 set "EXTRA="
+REM the confirmed balances are read once, at the start: remember the file as it was (time and size)
+set "CONFSTAMP=none"
+if exist "%OUT%\openings-confirmed.xlsx" for %%f in ("%OUT%\openings-confirmed.xlsx") do set "CONFSTAMP=%%~tf %%~zf"
 if exist "%OUT%\openings-confirmed.xlsx" set "EXTRA=%EXTRA% --confirm "%OUT%\openings-confirmed.xlsx""
 if exist "%OUT%\packs.json" set "EXTRA=%EXTRA% --packs "%OUT%\packs.json""
 if exist "%OUT%\packs.xlsx" set "EXTRA=%EXTRA% --packs "%OUT%\packs.xlsx""
@@ -87,9 +90,9 @@ REM dry run: on a copy of the database, nothing is written to the real one; owne
 REM owner first, how much matched, the rest by kind) is copied next to the balances file and opened
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
-type "%DRY%"
-type "%DRY%" >> "%LOG%"
+type "%DRY%" & type "%DRY%" >> "%LOG%"
 if exist "%REP%-dry\openings-to-confirm.xlsx" copy /y "%REP%-dry\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
+if "%RC%"=="4" goto rehearsal
 if not "%RC%"=="0" (set "MSG=dry run failed, exit %RC%: nothing was moved (reports in %REP%-dry)" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%DRY%" >nul
 if errorlevel 1 (set "MSG=dry run: the reconciliation is not OK: nothing was moved (reports in %REP%-dry)" & goto fail)
@@ -104,6 +107,9 @@ set /p "ANS=Type YES to apply the move to the real database: "
 if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was moved" & goto fail)
 call :log PASS "apply confirmed by the user"
+set "NOWSTAMP=none"
+if exist "%OUT%\openings-confirmed.xlsx" for %%f in ("%OUT%\openings-confirmed.xlsx") do set "NOWSTAMP=%%~tf %%~zf"
+if not "%NOWSTAMP%"=="%CONFSTAMP%" (set "MSG=openings-confirmed.xlsx appeared or changed after the dry run: run this again so the dry run uses it: nothing was moved" & goto fail)
 
 REM the real move: import-estock-db --apply takes its own verified backup first
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%" --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
@@ -127,6 +133,26 @@ call :log PASS "program started again and answers on port %PORT%"
 call :log PASS "ALL DONE - program started again"
 echo.
 echo DONE.
+pause
+endlocal
+exit /b 0
+
+:rehearsal
+REM the program still holds trial data, so the move refuses its database (exit 4). The daytime trial runs on a
+REM NEW EMPTY database in a temp folder instead: the program's database is not opened, nothing is written to it,
+REM and there is no YES. Tonight: launch-fresh-start.bat first, then this again for the real move.
+call :log NOTE "the program's database holds trial data: rehearsal on a new empty database (nothing is written)"
+"%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-rehearsal" --rehearsal > "%DRY%" 2>&1
+set "RC=%ERRORLEVEL%"
+type "%DRY%" & type "%DRY%" >> "%LOG%"
+if exist "%REP%-rehearsal\openings-to-confirm.xlsx" copy /y "%REP%-rehearsal\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
+call :owner "%REP%-rehearsal"
+if not "%RC%"=="0" (set "MSG=rehearsal failed, exit %RC%: nothing was moved (reports in %REP%-rehearsal)" & goto fail)
+call :log PASS "REHEARSAL ONLY: nothing was moved (reports %REP%-rehearsal). Tonight: launch-fresh-start.bat first, then this again"
+set "PHARM_DATA_DIR="
+if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
+echo.
+echo REHEARSAL DONE. Read %OUT%\owner-report.txt and fill openings-confirmed.xlsx; nothing was moved.
 pause
 endlocal
 exit /b 0

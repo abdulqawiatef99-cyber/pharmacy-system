@@ -488,8 +488,13 @@ class TestBat(unittest.TestCase):
 
     def test_dry_run_confirm_apply_verify_in_order(self):
         L = self.lines
-        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
+        main = L[:L.index(":rehearsal")]                   # the rehearsal (exit 4, trial data) has its own run below
+        runs = [i for i, l in enumerate(main) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
         self.assertEqual(len(runs), 2)
+        rehearsal = [l for l in L[L.index(":rehearsal"):] if '"%MANAGE%" import-estock-db' in l]
+        self.assertEqual(len(rehearsal), 1)
+        self.assertIn("--rehearsal", rehearsal[0])
+        self.assertNotIn("--apply", rehearsal[0])
         dry, apply = runs
         self.assertNotIn("--apply", L[dry])
         self.assertIn("--apply", L[apply])
@@ -517,6 +522,8 @@ class TestBat(unittest.TestCase):
     def test_every_failure_is_logged(self):
         L = self.lines
         for l in L[:L.index(":fail")]:
+            if l == 'if "%RC%"=="4" goto rehearsal':      # not a failure: the database holds trial data (#362)
+                continue
             if l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
         self.assertIn('call :log FAIL "%MSG%"', L)

@@ -44,3 +44,34 @@ class TestLaunchNightRunbook(unittest.TestCase):
         self.assertIn("قاعدة جديدة فاضية", trial)
         self.assertIn("قبل ما تشغّل `estock-db-import.bat`", trial)
         self.assertIn("وهو مستني YES", trial)
+
+
+class TestBatRehearsalAndConfirmFile(unittest.TestCase):
+    """Codex on #362: estock-db-import.bat runs the rehearsal when the program still holds trial data, and never
+    applies when openings-confirmed.xlsx appeared or changed after the dry run."""
+
+    def setUp(self):
+        self.L = [l.strip() for l in (ROOT / "scripts/windows/estock-db-import.bat").read_text(encoding="utf-8").splitlines()]
+
+    def test_exit_4_runs_the_rehearsal_without_yes(self):
+        dry = next(i for i, l in enumerate(self.L) if '"%MANAGE%" import-estock-db' in l and "-dry" in l)
+        to = next(i for i, l in enumerate(self.L) if l.startswith('if "%RC%"=="4"'))
+        self.assertTrue(dry < to < dry + 7)
+        self.assertIn("goto rehearsal", self.L[to])
+        r = self.L.index(":rehearsal")
+        block = self.L[r:r + 20]
+        run = next(l for l in block if '"%MANAGE%" import-estock-db' in l)
+        self.assertIn("--rehearsal", run)
+        self.assertNotIn("--apply", run)
+        self.assertTrue(any(":owner" in l for l in block))
+        self.assertFalse(any("Type YES" in l for l in block))
+        self.assertTrue(any("launch-fresh-start.bat" in l for l in block))
+
+    def test_a_confirm_file_that_appeared_or_changed_after_the_dry_run_stops_the_move(self):
+        yes = next(i for i, l in enumerate(self.L) if 'set /p "ANS=Type YES' in l)
+        apply = next(i for i, l in enumerate(self.L) if '"%MANAGE%" import-estock-db' in l and "--apply" in l)
+        guard = [l for l in self.L[yes:apply] if "openings-confirmed.xlsx" in l and "goto fail" in l]
+        self.assertTrue(guard, self.L[yes:apply])
+        self.assertTrue(any("CONFSTAMP" in l for l in self.L[yes:apply]))
+        start = next(i for i, l in enumerate(self.L) if "--confirm" in l and "EXTRA" in l)
+        self.assertTrue(any("CONFSTAMP" in l for l in self.L[start - 2:start + 3]))
