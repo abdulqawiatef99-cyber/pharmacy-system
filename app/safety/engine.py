@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 from ..catalog import matching
 from ..catalog.normalize import normalize_text, parse_name
-from ..core import audit
+from ..core import accounts, audit
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -105,6 +105,13 @@ class SafetyEngine:
         with self.db.transaction():
             if not self.db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
                 raise NotFound("الصنف غير موجود")
+            if not ctx.can("safety.approve") and self.db.one(
+                    "SELECT 1 FROM item_ingredients WHERE org_id=? AND item_id=? AND status='verified'",
+                    (ctx.org_id, item_id)):
+                # replacing a verified composition switches the item's duplicate and interaction checks off
+                # until it is verified again: only who may verify may do that (#324 X8)
+                raise Forbidden("تركيبة هذا الصنف موثّقة؛ تغييرها يحتاج من له صلاحية اعتماد السلامة الدوائية",
+                                code="verified_composition")
             self.db.execute("DELETE FROM item_ingredients WHERE org_id=? AND item_id=?",
                             (ctx.org_id, item_id))
             for name, strength in ingredients:
@@ -186,11 +193,12 @@ class SafetyEngine:
             if r["status"] == "approved":
                 raise Conflict("القاعدة معتمدة بالفعل")
             if r["created_by"] == ctx.user_id:
-                others = [m for m in self.db.all(
-                    "SELECT r.permissions FROM memberships m JOIN roles r ON r.id=m.role_id"
-                    " JOIN users u ON u.id=m.user_id WHERE m.org_id=? AND m.user_id<>? AND"
-                    " m.is_active=1 AND u.is_active=1", (ctx.org_id, ctx.user_id))
-                    if "safety.approve" in json.loads(m["permissions"])]
+                # who else may approve, by what each person can really do (role, plus rights granted or
+                # denied to them): role defaults alone missed a pharmacist given safety.approve (#324 X9)
+                others = [m["user_id"] for m in self.db.all(
+                    "SELECT m.user_id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.org_id=?"
+                    " AND m.user_id<>? AND m.is_active=1 AND u.is_active=1", (ctx.org_id, ctx.user_id))
+                    if "safety.approve" in accounts.effective_access(self.db, ctx.org_id, m["user_id"])["permissions"]]
                 if others:
                     raise Forbidden("يجب أن يعتمد القاعدة مستخدم آخر مخوّل (مراجعة رباعية العين)",
                                     code="four_eyes")

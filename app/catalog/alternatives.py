@@ -41,13 +41,19 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
     soon = (today + timedelta(days=SOON_DAYS)).isoformat()
     ids = [r["id"] for r in rows]
     marks = ",".join("?" * len(ids))
-    stock, expiry, cost = {}, {}, {}
+    stock, expiry, cost, gone = {}, {}, {}, {}
     if ctx.branch_id:
-        for s in db.all(f"SELECT sb.item_id, sum(sb.qty) q, min(CASE WHEN sb.qty>0 THEN b.expiry_date END) e"
+        # stock = what can be sold: a lot past its date is refused at the sale screen, so an equivalent with only
+        # expired stock is not "in stock" and never outranks one that can be handed over (#324 S40)
+        day = today.isoformat()
+        for s in db.all(f"SELECT sb.item_id, sum(sb.qty) q,"
+                        f" sum(CASE WHEN b.expiry_date IS NOT NULL AND b.expiry_date<? THEN sb.qty ELSE 0 END) x,"
+                        f" min(CASE WHEN sb.qty>0 AND b.expiry_date>=? THEN b.expiry_date END) e"
                         f" FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
                         f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id IN ({marks}) GROUP BY sb.item_id",
-                        (ctx.org_id, ctx.branch_id, *ids)):
-            stock[s["item_id"]], expiry[s["item_id"]] = s["q"] or 0, s["e"]
+                        (day, day, ctx.org_id, ctx.branch_id, *ids)):
+            gone[s["item_id"]] = s["x"] or 0
+            stock[s["item_id"]], expiry[s["item_id"]] = (s["q"] or 0) - gone[s["item_id"]], s["e"]
         for c in db.all(f"SELECT item_id, avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id IN ({marks})",
                         (ctx.org_id, ctx.branch_id, *ids)):
             if c["avg_cost"] is not None:
@@ -64,7 +70,7 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
         is_soon = bool(e and q > 0 and e <= soon)
         r["next_expiry"], r["expiry_soon"] = e, is_soon
         if show_stock:
-            r["stock_qty"] = q
+            r["stock_qty"], r["expired_qty"] = q, gone.get(r["id"], 0)
         if show_cost:
             r["margin_bp"] = margin
         has = q > 0 or r.get("is_service")
@@ -94,7 +100,9 @@ def for_item(db: Database, ctx: Context, item_id: str) -> dict:
         for x in _visible(ctx, db.all(f"SELECT {_COLS} FROM items WHERE org_id=? AND ingredient_key=? AND id<>?"
                                       " AND status='active'", (ctx.org_id, key, item_id))):
             xg = FORM_GROUP.get(x["dosage_form"] or "", x["dosage_form"])
-            exact = x["strength_norm"] == it["strength_norm"] and xg == grp
+            # an unknown strength is not "the same strength": two cards with the field empty were listed as
+            # exact equivalents (#324 S4)
+            exact = bool(it["strength_norm"]) and x["strength_norm"] == it["strength_norm"] and xg == grp
             (same if exact else other).append(x)
     groups = _groups_of(db, ctx, it)
     alts: dict[str, dict] = {}
