@@ -115,6 +115,36 @@ def _balances_line(plan) -> dict | None:
             "value": tot}
 
 
+PENDING_ACTIONS = ("account", "account_stopped", "first_shift_opening")
+
+
+def _money_pending(plan) -> list[dict]:
+    """Cash_depots balances that move with the accounts service (F105), not by this move: never hidden."""
+    out = []
+    for d in (plan.checks.get("money_info") or {}).get("cash_depots", []):
+        try:
+            bal = Decimal(str(d.get("balance") or 0))
+        except InvalidOperation:
+            continue
+        if bal and d.get("action") in PENDING_ACTIONS:
+            out.append({"name": d.get("name") or d.get("estock_id"), "balance": bal,
+                        "shift": d.get("action") == "first_shift_opening"})
+    return out
+
+
+def _money_line(pending: list[dict]) -> dict | None:
+    if not pending:
+        return None
+    tot = sum(abs(d["balance"]) for d in pending)
+    parts = "، ".join(f"«{d['name']}» {_money(d['balance'])} ج" + (" (درج الشيفت: نقدية أول شيفت)" if d["shift"] else "")
+                      for d in sorted(pending, key=lambda d: -abs(d["balance"])))
+    return {"what": f"رصيد الخزنة والمحافظ ({len(pending)} حساب) في إي ستوك",
+            "estock": f"{parts} — القيمة {_money(tot)} ج",
+            "done": "ما اتنقلتش لسه: بتتنقل أرصدة افتتاحية بخدمة الحسابات (F105) لما تنزل؛ مكتوبة هنا بمصدرها",
+            "ask": "اعدّ الخزنة وراجع المحافظ وأكّد إن الأرصدة دي صح؛ ولحد ما تتنقل ماتعتمدش على رصيدها في البرنامج",
+            "value": tot}
+
+
 def _pct(a, b) -> str:
     try:
         a, b = Decimal(a), Decimal(b)
@@ -188,8 +218,12 @@ def write(path: Path, plan, rec: dict) -> Path:
     owner = [d for d in plan.dq if _for_owner(d)]
     rest = [d for d in plan.dq if not _for_owner(d)]
     blocked = bool(plan.blocking)
+    pending = _money_pending(plan)
     if blocked:
         result = f"النتيجة: النقل وقف — فيه {len(plan.blocking)} حاجة لازم تقررها الأول، ومفيش أي حاجة اتكتبت"
+    elif rec.get("ok") and pending:
+        result = ("النتيجة: الأصناف والمخزون والموردين والعملاء والتاريخ اتنقلوا والمطابقة 100%؛"
+                  f" رصيد الخزنة والمحافظ ({_money(sum(abs(d['balance']) for d in pending))} ج) لسه ما اتنقلش — القسم ١")
     elif rec.get("ok"):
         result = "النتيجة: كل حاجة اتنقلت والمطابقة 100% — اللي تحت محتاج تأكيدك بس"
     else:
@@ -206,6 +240,9 @@ def write(path: Path, plan, rec: dict) -> Path:
                         "done": "وقف النقل لحد قرارك (مفيش حاجة اتكتبت)" if d["severity"] == "block"
                                 else (done or _plain(d["action"])),
                         "ask": ask, "value": v, "stops": d["severity"] == "block"})
+    ml = _money_line(pending)
+    if ml:
+        entries.append(ml)
     bl = _balances_line(plan)
     if bl and not blocked:
         bl["estock"] += f" — القيمة {_money(bl['value'])} ج"
@@ -218,6 +255,9 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines += [f"  {n}) {e['what']}", f"     في إي ستوك: {e['estock']}", f"     البرنامج عمل: {e['done']}",
                   f"     المطلوب منك: {e['ask']}"]
     lines += ["", "٢. المطابقة (قد إيه اتطابق وقد إيه لأ):"] + _margin(plan, rec)
+    if pending:
+        lines.append(f"  الخزنة والمحافظ: {len(pending)} حساب بإجمالي {_money(sum(abs(d['balance']) for d in pending))} ج"
+                     " لسه ما اتنقلتش (خدمة الحسابات F105)؛ مش داخلين في المطابقة لحد ما يتنقلوا")
     groups: dict[str, list] = defaultdict(list)
     for d in rest:
         groups[_group_key(d)].append(d)

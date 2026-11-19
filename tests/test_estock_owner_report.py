@@ -137,3 +137,25 @@ class TestCodexReview361(_R):
         self.assertNotIn("اتعمل حساب", done)
         self.assertIn("ما اتنقلش", done)
         self.assertIn("F105", done)
+
+
+class TestCodexReview361b(_R):
+    """Codex on #361 @f65cb69: money waiting for the accounts service (F105) is never hidden in a group."""
+
+    def test_p2_money_not_moved_yet_is_an_owner_line_and_the_result_says_so(self):
+        tb = base_tables()
+        tb["Cash_depots"] = [{"cd_id": "1", "cd_name": "الخزنة الرئيسية", "cd_class": "1", "cd_balance": "1200.0000"},
+                             {"cd_id": "2", "cd_name": "فودافون كاش", "cd_class": "1", "cd_balance": "500.0000"}]
+        t = self.report(tables=tb)
+        self.assertTrue(self.res["ok"])
+        first = t.splitlines()[1]
+        self.assertNotIn("كل حاجة اتنقلت", first)
+        self.assertIn("الخزنة والمحافظ", first)
+        sec = self.section(t, "١. محتاج قرارك", "٢. المطابقة")
+        e = [x for x in self.entries(sec) if "الخزنة والمحافظ" in x][0]
+        self.assertIn("1,700.00", e)                               # 1,200 + 500, both still waiting
+        self.assertIn("ما اتنقلتش", e)
+        self.assertIn("F105", e)
+        self.assertIn("فودافون كاش", e)
+        margin = self.section(t, "٢. المطابقة", "٣. الباقي")
+        self.assertIn("لسه ما اتنقلتش", margin)
