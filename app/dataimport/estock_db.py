@@ -31,6 +31,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -135,6 +136,33 @@ def resolve_runs(root: Path) -> tuple[list[Path], list[str]]:
     return [d for d in dirs if (d / "manifest.csv").is_file()], sorted(missing)
 
 
+class Row(Mapping):
+    """One exported row, read only: the file's own list of cells plus the table's shared column index, so a
+    table is held once (a dict per row cost ~2 KB at E-Stock's width: 700 MB at its full size, 19/11 scale run).
+    Behaves as the dict it replaced: r.get("col"), r["col"], "col" in r, dict(r), r.items()."""
+    __slots__ = ("_i", "_v")
+
+    def __init__(self, index: dict[str, int], values: list[str]):
+        self._i, self._v = index, values
+
+    def __getitem__(self, k: str) -> str:
+        i = self._i[k]
+        if i >= len(self._v):                  # a short line: the missing cells are absent, as zip() left them
+            raise KeyError(k)
+        return self._v[i]
+
+    def __iter__(self):
+        n = len(self._v)
+        return (k for k, i in self._i.items() if i < n)
+
+    def __len__(self) -> int:
+        n = len(self._v)
+        return sum(1 for i in self._i.values() if i < n)
+
+    def __repr__(self) -> str:
+        return f"Row({dict(self)!r})"
+
+
 class Export:
     """manifest.csv + one CSV per table (estock-db-read.ps1): UTF-8 with BOM, a header row, every cell
     text; NULL is empty, dates are SQL Server style 126, byte[] is b64:...
@@ -210,7 +238,10 @@ class Export:
             with open(t["path"], encoding="utf-8-sig", newline="") as f:
                 rd = csv.reader(f)
                 head = next(rd, [])
-                self._raw[key] = (head, [r for r in rd])
+                # most cells repeat ("0", "1", "0.0000", a date, a store id): one shared copy of each short value
+                same: dict[str, str] = {}
+                keep = same.setdefault
+                self._raw[key] = (head, [[keep(v, v) if len(v) < 24 else v for v in r] for r in rd])
         return self._raw[key]
 
     def rows(self, name: str) -> list[dict]:
@@ -221,8 +252,10 @@ class Export:
                 self._cache[key] = []
             else:
                 head, data = self.raw(name)
-                cols = [h.strip().lower() for h in head]
-                self._cache[key] = [dict(zip(cols, r)) for r in data]
+                index: dict[str, int] = {}
+                for i, h in enumerate(head):
+                    index[h.strip().lower()] = i               # a repeated name: the last one, as dict(zip()) did
+                self._cache[key] = [Row(index, r) for r in data]
         return self._cache[key]
 
     def sha(self, *names: str) -> str:
