@@ -178,12 +178,14 @@ class CashDrawer:
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
     def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
-              denominations: dict | None = None, *, float_left: int | None = None, to_account: str | None = None,
-              handover: bool | None = None) -> dict:
+              denominations: dict | None = None, shift_id: str | None = None, *, float_left: int | None = None,
+              to_account: str | None = None, handover: bool | None = None) -> dict:
         """Close the open shift. Like E-Stock's «تقفيل درج الكاشير»: the counted cash minus the float left for
         the next shift (default: this shift's opening cash) moves to a money account (default the main
         treasury) in the same transaction (F105). When the money is handed to another person, he confirms
-        with his own PIN (the approval on this request); the closer keeps it only if he may manage cash."""
+        with his own PIN (the approval on this request); the closer keeps it only if he may manage cash.
+        shift_id: the shift the count screen showed. A count made for a shift another till has closed since
+        never closes the next one (#324 M2-06)."""
         ctx.require("cash.close")
         detail = None
         if denominations is not None:
@@ -205,6 +207,9 @@ class CashDrawer:
                                        details={"counted": counted_cash, "float_left": left})
             receiver = self._receiver(ctx, counted_cash - left, handover)
             sid = require_open_shift(self.db, ctx)
+            if shift_id is not None and shift_id != sid:
+                raise Conflict("أُغلق هذا الشيفت وفُتح شيفت جديد بعده. حدّث الشاشة وعُدّ الخزينة من جديد",
+                               code="shift_changed")
             expected = self._expected(sid)
             diff = counted_cash - expected
             if diff and ctx.can("cash.see_expected") and len((note or "").strip()) < 3:

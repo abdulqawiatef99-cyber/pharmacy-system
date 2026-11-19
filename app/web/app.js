@@ -256,11 +256,16 @@ const API_MAX_APPROVALS = 8;                    // more than any action needs; s
 // Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
+// A money form whose every attempt lost its answer has an UNKNOWN outcome: sent again unchanged, however much
+// later, it carries the same key, so the server replays it or says it is unconfirmed instead of posting a second
+// time. The key is dropped once any answer comes back (#324 M2-10).
+const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
   /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
 function onceKey(method, apiPath, bodyText) {
-  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  if (UNSURE.has(sig)) return UNSURE.get(sig);
   for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
   const hit = ONCE_SENT.get(sig);
   if (hit) return hit.key;
@@ -268,14 +273,17 @@ function onceKey(method, apiPath, bodyText) {
   ONCE_SENT.set(sig, { key, at: now });
   return key;
 }
+onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0];
+  let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
     _key = _key || onceKey(method, apiPath, opts.body);
+    if (onceKey.applies(method, apiPath, opts.body)) sig = `${method} ${apiPath} ${opts.body}`;
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
@@ -287,11 +295,16 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        if (attempt >= 2) {
+          if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
+          throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        }
         await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
       }
     }
     data = await r.json().catch(() => ({}));
+    // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
+    if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
@@ -2728,8 +2741,9 @@ async function viewSale(id) {
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
       <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ تمت مراجعتها", problem: "✕ بها مشكلة", pending: "⚠ بانتظار المراجعة" }[a.review]}</span>
-        ${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
-        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>` : ""}
+        ${a.review === "ok" && a.confirmed_amount != null ? `<div><span>المبلغ الذي وصل:</span> ${money(a.confirmed_amount)} ج</div>` : ""}${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
+        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>
+          <button class="btn small secondary" data-rvpart="${esc(a.id)}">وصل جزء منه</button>` : ""}
         ${can("sales.totals") && a.review !== "problem" ? `<button class="btn small secondary" data-rvbad="${esc(a.id)}">✕ بها مشكلة</button>` : ""}</figcaption></figure>`).join("")}</div>
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>الصافي</th>
@@ -2768,6 +2782,12 @@ async function viewSale(id) {
   });
   app.querySelectorAll("[data-rvok]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/attachments/${b.dataset.rvok}/review`, { method: "POST", body: { ok: true } }); viewSale(id); } catch (err) { toast(err.message, true); }
+  }));
+  // only part of the transfer arrived: the amount confirmed is what counts as received (#324 M2-01)
+  app.querySelectorAll("[data-rvpart]").forEach((b) => b.addEventListener("click", async () => {
+    const amount = toPiasters(prompt("كم وصل من التحويل؟ (ج)") || "");
+    if (!(amount > 0)) return;
+    try { await api(`/api/attachments/${b.dataset.rvpart}/review`, { method: "POST", body: { ok: true, amount } }); viewSale(id); } catch (err) { toast(err.message, true); }
   }));
   app.querySelectorAll("[data-rvbad]").forEach((b) => b.addEventListener("click", async () => {
     const note = prompt("ما المشكلة؟ (مثال: المبلغ لم يصل / المبلغ أقل)"); if (!note) return;
@@ -3367,12 +3387,19 @@ async function complete(findings) {
     if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
     else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
   });
+  // F27: what the customer handed over — printed with the change due, never stored
+  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
+  // a typed amount below the cash part is a short tender, not a full payment (#324 M2-03)
+  const cashPart = payments.filter((p) => p.method === "cash").reduce((t, p) => t + (p.amount || 0), 0);
+  if (given && given < cashPart) {
+    toast(`المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع (${money(given)} / ${money(cashPart)})`, true);
+    $("#payGiven")?.focus();
+    return;
+  }
   const btn = $("#posDone");
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
-  // F27: what the customer handed over — printed with the change due, never stored
-  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
@@ -3524,7 +3551,7 @@ async function viewShift() {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
     try {
-      const f = e.target, body = { denominations: den, note: f.note.value || null };
+      const f = e.target, body = { shift_id: sh.id, denominations: den, note: f.note.value || null };
       if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
       const r = await api("/api/cash/close", { method: "POST", body });
       const d = r.difference, moved = r.float_left != null ? r.counted_cash - r.float_left : null;
@@ -4027,8 +4054,23 @@ async function viewSupplier(id) {
 }
 
 // ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
+// supplier-return proposals: each answer is for the supplier (and the line's batch) asked about; one that comes back
+// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368).
+// A proposal is only shown: the return sends a value only when the person typed it, and the server prices the
+// others at this supplier's own purchase price. A failed ask clears the old figure instead of keeping it.
+const SR = { gen: 0, busy: false };
+async function srPropose(l, supplier) {
+  if (l.typed) return;                                       // a typed value is the person's, never replaced
+  const gen = SR.gen, ask = (l.ask = (l.ask || 0) + 1);
+  let v = null;
+  try {
+    v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
+  } catch { /* unknown here: the server prices it */ }
+  if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
+}
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
+  SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
   app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
@@ -4047,14 +4089,25 @@ async function viewSupplierReturns(arg) {
       <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "بدون تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
       <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
       <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
-      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
+      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${l.unit_value == null ? "" : money(l.unit_value)}" placeholder="بسعر الشراء"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
-    const val = async (l) => { try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* keep */ } draw(); };
+    const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
-    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sv].unit_value = toPiasters(x.value) || 0; draw(); }));
+    // each keystroke is the person's value at once: an answer arriving while the field is still focused never
+    // replaces it, whatever the browser does with the field it redraws (#368)
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("input", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") return;
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true;
+    }));
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") { l.typed = false; val(l); return; }     // emptied: back to the purchase price
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true; draw();
+    }));
     document.querySelectorAll("[data-sx]").forEach((x) => x.addEventListener("click", () => { lines.splice(+x.dataset.sx, 1); draw(); }));
   };
   const addItem = async (itemId) => {
@@ -4063,9 +4116,18 @@ async function viewSupplierReturns(arg) {
     if (!batches.length) { toast("هذا الصنف ليس له رصيد", true); return; }
     const b = batches[0], l = { item: c, batches, batch_id: b.batch_id || null, qty_base: Math.min(b.qty, c.pack_size || 1), reason: (b.expiry_date || "9") < isoDay(new Date()) ? "expired" : "near_expiry", unit_value: 0 };
     lines.push(l); draw();
-    try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${c.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* zero */ }
+    await srPropose(l, $("#srSup")?.value);
     draw();
   };
+  // the proposed value is that supplier's price: another supplier, every line asked again (#324 S30)
+  $("#srSup")?.addEventListener("change", async () => {
+    const gen = ++SR.gen;
+    SR.busy = true; $("#srGo").disabled = true;               // the return waits for the new supplier's prices
+    await Promise.all(lines.map((l) => srPropose(l, $("#srSup").value)));
+    if (gen !== SR.gen) return;                                // a newer change is still asking
+    SR.busy = false; $("#srGo").disabled = false;
+    draw();
+  });
   if ($("#srQ")) {
     let t;
     $("#srQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => {
@@ -4075,12 +4137,13 @@ async function viewSupplierReturns(arg) {
       document.querySelectorAll("[data-pick]").forEach((x) => x.addEventListener("click", () => { $("#srRes").innerHTML = ""; $("#srQ").value = ""; addItem(x.dataset.pick).catch((e) => toast(e.message, true)); }));
     }, 250); });
     $("#srGo").addEventListener("click", async () => {
+      if (SR.busy) return;
       if (!$("#srSup").value) { toast("اختر المورد", true); return; }
       if (!lines.length) { toast("أضف صنفًا واحدًا على الأقل", true); return; }
       const w = window.open("", "_blank");
       try {
         const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: $("#srSup").value, note: $("#srNote").value || null,
-          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ ? { unit_value: l.unit_value } : {}) })) } });
+          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ && l.typed ? { unit_value: l.unit_value } : {}) })) } });
         toast(`✓ مرتجع رقم ${r.return_no} تم التسجيل`);
         if (w) w.location = `/supplier-return/${r.id}`;
         location.hash = "#/supplier-returns";
@@ -4203,6 +4266,7 @@ async function viewCustomers(filter = "") {
     <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم هاتف" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
+  ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
   ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
@@ -4224,6 +4288,14 @@ async function viewCustomers(filter = "") {
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
   };
   if ($("#ktBox")) renderContracts();
+  // one number saved in two forms (010… and +20 10…) before the program kept one form (#324 M2-20)
+  if ($("#cuDup")) api("/api/customers/phone-doubles").then((r) => {
+    if (!r.doubles.length || !$("#cuDup")) return;
+    $("#cuDup").innerHTML = `<h2>⚠ رقم واحد مسجل لأكثر من عميل</h2><p class="muted">الرقم نفسه مكتوب بصيغتين مختلفتين. راجع العملاء واترك الرقم لعميل واحد حتى لا يكون للمشتري الواحد حسابان آجلان.</p>
+      <table><thead><tr><th>الرقم</th><th>العملاء</th></tr></thead><tbody>${r.doubles.map((d) => `<tr><td dir="ltr">${esc(d.phone)}</td>
+      <td>${d.customers.map((c) => `<a href="#/customers/${esc(c.id)}">${esc(c.name)}</a>`).join("، ")}</td></tr>`).join("")}</tbody></table>`;
+    $("#cuDup").hidden = false;
+  }).catch(() => { /* the list stays without the notice */ });
   let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
   const FT = { "": "كل العملاء", debt: "العملاء الذين عليهم مستحقات", refill: "اقترب موعد طلبهم الشهري" };
   wireTools("cust", () => { const { list, f } = cur; return { title: "تقرير العملاء", subtitle: FT[f] + ($("#cuQ").value ? ` — بحث: ${$("#cuQ").value}` : ""), el: $("#cuRep"), sheets: [
