@@ -476,7 +476,9 @@ class AutoBackup:
         if st.get("last_ok") is False:
             reasons.append("failed")
         if fresh:
-            if age > limit:
+            # to the second, as the screen's "late" always was: `age` is whole minutes, and comparing that with
+            # the limit said "fine" for the minute after the limit (Codex P2 on #370)
+            if now - fresh > timedelta(minutes=limit):
                 reasons.append("stale")
         elif self.started_at and (now - self.started_at) > timedelta(minutes=limit):
             reasons.append("never")

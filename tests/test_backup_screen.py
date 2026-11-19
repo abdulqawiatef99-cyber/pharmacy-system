@@ -60,6 +60,20 @@ class TestTheOldKeysStayAsTheyWere(_Case):
         self.assertEqual((s["warn"], s["late"], s["failed"]), (True, True, False))
         self.assertIn("متأخرة", s["text"])
 
+    def test_late_starts_at_the_same_second_for_every_key(self):
+        """Codex P2 on #370: 120 minutes and 30 seconds after the last good backup, `late` was true (to the
+        second) while `warn` was still false (whole minutes), so the swap would have hidden a warning for a
+        minute."""
+        self.ab.run()
+        self.set_state(last_at=ago(minutes=120, seconds=30), last_check_at=None)
+        s = self.same()
+        self.assertEqual((s["late"], s["warn"], s["healthy"], s["level"], s["reasons"]),
+                         (True, True, False, "error", ["stale"]))
+        self.assertIn("متأخرة", s["text"])
+        self.set_state(last_at=ago(minutes=119, seconds=30))
+        s = self.same()
+        self.assertEqual((s["late"], s["warn"], s["reasons"]), (False, False, []))
+
     def test_a_check_that_found_no_changes_keeps_it_fresh(self):
         self.ab.run()
         self.set_state(last_at=ago(hours=30), last_check_at=ago(minutes=10))
