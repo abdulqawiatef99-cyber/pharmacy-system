@@ -55,7 +55,8 @@ const { chromium } = require('playwright');
 """ + LOGIN + r"""
   await p.goto(base + '/#/home');
   await p.waitForSelector('#backupAlert:not([hidden])');
-  const out = { bar: await p.locator('#backupAlert').innerText(), when: await p.locator('#backupWhen').innerText() };
+  const out = { bar: await p.locator('#backupAlert').innerText(), when: await p.locator('#backupWhen').innerText(),
+                badges: [await p.locator('#bkBadge').isVisible(), !(await p.locator('#bkBadgeSys').getAttribute('hidden'))] };
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -70,6 +71,7 @@ class BackupWarningScreen(APICase):
         out = run_node(self, SCRIPT, "owner", OWNER_PW)
         self.assertIn("فشلت", out["bar"])
         self.assertIn("آخر نسخة احتياطية", out["when"])
+        self.assertEqual(out["badges"], [True, True])                # also on «المزيد» and on the system link
 
 
 SWITCH = r"""
