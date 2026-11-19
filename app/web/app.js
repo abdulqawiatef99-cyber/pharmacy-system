@@ -3818,7 +3818,7 @@ async function srPropose(l, supplier) {
   try {
     v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
   } catch { /* unknown here: the server prices it */ }
-  if (gen === SR.gen && ask === l.ask) l.unit_value = v;
+  if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
 }
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
@@ -3848,6 +3848,13 @@ async function viewSupplierReturns(arg) {
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
+    // each keystroke is the person's value at once: an answer arriving while the field is still focused never
+    // replaces it, whatever the browser does with the field it redraws (#368)
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("input", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") return;
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true;
+    }));
     document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => {
       const l = lines[x.dataset.sv];
       if (x.value.trim() === "") { l.typed = false; val(l); return; }     // emptied: back to the purchase price

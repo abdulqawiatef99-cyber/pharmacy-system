@@ -26,8 +26,8 @@ Goal: the automatic backup can never stop silently.
 | Field | Meaning |
 |---|---|
 | `ok` | false = show the badge |
-| `level` | `ok`, `warning` (low disk only), `error` |
-| `stale` | no good backup or "nothing changed" check for 2 x `interval_min`, or the scheduler dead or stuck |
+| `level` | `ok`, `warning` (only `low_disk`, `offsite_stale`, `incomplete`), `error` |
+| `stale` | no good backup or "nothing changed" check for 2 x `interval_min`, the scheduler dead or stuck, or the newest backup file gone from the disk |
 | `last_good_at` | last backup file written |
 | `last_fresh_at` | latest of `last_good_at` and the last "nothing changed" check after a good backup |
 | `last_fail_at`, `last_error` | the last failed run (`last_error` only in `status`) |
@@ -35,7 +35,7 @@ Goal: the automatic backup can never stop silently.
 | `scheduler` | `running`, `dead`, `stuck` (one run longer than 45 minutes), `stopped` |
 | `scheduler_restarts` | restarts since the program started |
 | `low_disk`, `free_bytes` | from the last run |
-| `reasons` | `failed`, `stale`, `never`, `scheduler_dead`, `scheduler_stuck`, `low_disk` |
+| `reasons` | `failed`, `stale`, `never`, `scheduler_dead`, `scheduler_stuck`, `file_missing`, `low_disk`, `offsite_stale`, `incomplete` (section 8) |
 
 Rules that must stay true:
 - The watchdog never takes the backup lock. A run stuck on a dead USB drive cannot silence the alarm about itself.
@@ -181,3 +181,50 @@ Checks that the figures did not change:
 Still open after this round (large): the transfers report over all years (`app/sales/attachments.py`), the first
 safety check after the program starts (the first build of the name index, once a day), and the size of a backup of
 a 4.5 GB database (section 5).
+
+## 8. F114: a silent failure shows on the screen (`AutoBackup.screen`)
+
+Owner, 19/11: a backup that failed or stopped without a word must show on the screen.
+
+The gap was not in the watchdog but between it and the screen. The top bar and the red line under it ask
+`backup_health()` in `app/api/app.py`, which has its own older rule: "the last run failed, or the last good one is
+older than two intervals". These said nothing on the screen:
+
+| Case | Old answer | Now (`reasons`, `level`) |
+|---|---|---|
+| No backup was ever made (a new install whose first runs never happen) | `warn` false for ever: "late" needs a good backup to be late from | `never`, error |
+| The scheduler thread is dead, or one run never ends | nothing until two intervals after the last good backup | `scheduler_dead` / `scheduler_stuck`, error |
+| The newest backup file was deleted, or its disk died | nothing | `file_missing`, error; and the next run makes a new backup although the data did not change (before, an unchanged database was never backed up again) |
+| The disk the backups are written to is nearly full | a notification only | `low_disk`, warning |
+| The copy outside the PC is more than 3 days old | a notification, and a field on the settings page | `offsite_stale`, warning |
+| The backup holds the data but some attachment files were missing | a notification | `incomplete`, warning |
+
+`AutoBackup.screen(detail=False)` is the one answer for the screen:
+
+| Key | Meaning |
+|---|---|
+| `warn` | show the line and the badges: true for **every** reason (before: failed or late only) |
+| `level` | `ok`, `warning`, `error`: the colour |
+| `text` | the line, ready to show, worst reason first (`None` when all is well) |
+| `reasons` | the codes above |
+| `healthy` | no reason at all |
+| `failed`, `late`, `ok`, `last_good_at`, `interval_min`, `last_fail_at` | exactly what the route answers today (pinned against a copy of the route's code in `tests/test_backup_screen.py`); `ok` is how the last run ended, `last_good_at` the last backup or "nothing changed" check |
+| `last_backup_at` | when the newest backup file was written |
+| `last_error`, `offsite_error` | only with `detail=True` |
+
+`detail=False` carries no error text and no folder name, so it can go to every signed-in user; its line ends with
+«بلّغ صاحب الصيدلية». `detail=True` is for `settings.manage`; its line ends with «افتح «البرنامج والنسخ الاحتياطي»».
+Reading it costs two small files and one look at the newest backup file: no database query, nothing written
+(test), so the five-minute poll of the screen can stay.
+
+### Hooks for the screen's owner (not done here: `app/api/app.py` and `app/web/*` are the money session's)
+
+1. `app/api/app.py`, `backup_health()`: `return autob.screen(detail=True)`. The keys the screen reads keep their
+   meaning, so nothing else has to change for the first step; `warn` simply becomes true in the six cases above.
+2. `app/web/app.js`, `showBackupAlert`: `bar.textContent = h.text || backupText(h)`, and the class of the line by
+   `h.level` (a warning is not red).
+3. Everyone sees it, not only the owner: `backup_health_view` without `require("settings.manage")`, answering
+   `autob.screen(detail=ctx.can("settings.manage"))`; `refreshBackupAlert` without its permission check; the home
+   view the same. A cashier then reads «... بلّغ صاحب الصيدلية.» on the day the backups stop, instead of nobody
+   reading anything until the owner signs in.
+4. Optional: the badge «النسخة» on «المزيد» by `h.level`.

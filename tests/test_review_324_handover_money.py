@@ -191,3 +191,92 @@ async function api() { if (fail) throw new Error("offline"); return { unit_value
         body = JS[start:JS.index("\nasync function ", start + 10)]
         self.assertIn("...(money_ && l.typed ? { unit_value: l.unit_value } : {})", body)
         self.assertIn("l.typed = true", body)
+
+
+class TestCodexReview368c(TestCodexReview368b):
+    """#368 Codex P1 (third): a value typed while a proposal is still on its way is kept."""
+
+    test_a_failed_proposal_leaves_no_old_price = None
+    test_only_a_typed_value_is_sent = None
+
+    def test_a_value_typed_during_the_ask_is_kept(self):
+        out = self.run_js("""
+let done;
+async function api() { return new Promise((r) => { done = () => r({ unit_value: 1800 }); }); }
+(async () => {
+  const l = { item: { id: "i" }, batch_id: null, unit_value: 0 };
+  const p = srPropose(l, "B");
+  l.unit_value = 1500; l.typed = true;                      // typed before the answer came
+  done(); await p;
+  console.log(JSON.stringify(l.unit_value));
+})();
+""")
+        self.assertEqual(out, 1500)
+
+
+TYPING = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, item, supB] = process.argv.slice(1);
+""" + __import__("tests.pos_browser", fromlist=["LOGIN"]).LOGIN + r"""
+  let release, sent = null;
+  const held = new Promise((r) => { release = r; });
+  await p.route('**/api/supplier-returns/suggest*', async (route) => {
+    if (route.request().url().includes('supplier=' + supB)) { await held; return route.fulfill({ json: { unit_value: 1800 } }); }
+    return route.fulfill({ json: { unit_value: 1200 } });
+  });
+  await p.route('**/api/supplier-returns', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    sent = JSON.parse(route.request().postData());
+    return route.fulfill({ status: 422, json: { error: { code: 'x', message: 'stop' } } });
+  });
+  p.on('popup', (w) => w.close().catch(() => {}));
+  await p.goto(base + '/#/supplier-returns?item=' + item);
+  await p.waitForSelector('#srLines [data-sv="0"]');
+  await p.selectOption('#srSup', supB);                         // B's price is now on its way
+  await p.click('#srLines [data-sv="0"]');
+  await p.keyboard.press('Control+A');
+  await p.keyboard.type('15');                                  // typed, the field still focused
+  release();
+  await p.waitForFunction(() => !document.querySelector('#srGo').disabled);
+  await p.click('#srGo');
+  await p.waitForFunction(() => true);
+  for (let i = 0; i < 50 && !sent; i++) await p.waitForTimeout(100);
+  console.log(JSON.stringify({ value: await p.inputValue('#srLines [data-sv="0"]'), sent }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+from tests.helpers import needs_browser  # noqa: E402
+
+
+@needs_browser
+class TestCodexReview368d(APICase):
+    """#368 Codex P1 (fourth): a value typed while the proposal is pending, the field still focused, is the one
+    shown and sent. Run in the browser with the proposal answer held back."""
+
+    def test_typing_during_the_ask_wins(self):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        from tests.helpers import OWNER_PW
+        from tests.pos_browser import run_node
+        with self.db.transaction():
+            bt = inv.get_or_create_batch(self.db, self.ctx, self.pan, "B1", (date.today() + timedelta(days=60)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=10, batch_id=bt, movement_type="purchase",
+                              unit_cost=Decimal("10"))
+        sup_b = cat.create_supplier(self.db, self.ctx, name="مورد تجربة ب")
+        out = run_node(self, TYPING, "owner", OWNER_PW, self.pan, sup_b)
+        self.assertIn(out["value"], ("15", "15.00"))
+        self.assertEqual(out["sent"]["lines"][0].get("unit_value"), 1500)
+
+
+class TestCodexReview368e(APICase):
+    def test_each_keystroke_is_kept(self):
+        start = JS.index("async function viewSupplierReturns(")
+        body = JS[start:JS.index("\nasync function ", start + 10)]
+        at = body.index('x.addEventListener("input"')
+        self.assertIn("l.typed = true", body[at:at + 250])
