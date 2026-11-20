@@ -961,7 +961,7 @@ def local_branch(ex: Export) -> str | None:
 
 def sales_lines(ex: Export) -> list[dict]:
     """The local sales lines: Sales_details when it was read, else the Branches_ mirror of this branch only."""
-    if ex.has("Sales_details") and ex.rows("Sales_details"):
+    if ex.has("Sales_details") and ex.raw("Sales_details")[1]:    # read, even if quarantine set every line apart
         return ex.rows("Sales_details")
     b = local_branch(ex)
     return [r for r in ex.rows("Branches_sales_details") if b is None or ident(r.get("branch_id")) == b]

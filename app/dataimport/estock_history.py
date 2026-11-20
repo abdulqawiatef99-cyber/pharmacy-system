@@ -95,7 +95,10 @@ class _Arch:
         """The local sales lines: Sales_details when it was read, else the Branches_ mirror of co_inf.branch_id
         only (the mirror also holds the other pharmacy's rows, with overlapping ids; #345 review).
         Returns (table, extra WHERE on alias l, params)."""
-        if self.has("Sales_details") and self.rows('SELECT 1 FROM "e_Sales_details" LIMIT 1'):
+        # a local table emptied by quarantine is still the source, never the mirror (Codex on #385)
+        if self.has("Sales_details") and (self.rows('SELECT 1 FROM "e_Sales_details" LIMIT 1') or (
+                self.rows("SELECT 1 FROM sqlite_master WHERE name='q_Sales_details'")
+                and self.rows('SELECT 1 FROM "q_Sales_details" LIMIT 1'))):
             return "Sales_details", "", ()
         b = None
         if self.has("co_inf"):

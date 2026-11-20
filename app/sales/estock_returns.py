@@ -79,9 +79,20 @@ def _rows(con, t: str, where: dict) -> list[dict]:
     return out
 
 
+def _local_read(con) -> bool:
+    """Sales_details was read: it has rows in use or rows set apart at the move. A local table that quarantine
+    emptied is still the source; the Branches_ mirror never brings its lines back (Codex on #385)."""
+    if not _has(con, "Sales_details"):
+        return False
+    if con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone():
+        return True
+    q = con.execute("SELECT 1 FROM sqlite_master WHERE name='q_Sales_details'").fetchone()
+    return bool(q and con.execute('SELECT 1 FROM "q_Sales_details" LIMIT 1').fetchone())
+
+
 def _local_lines(con, sales_id: str) -> list[dict]:
     """The invoice's lines from the local table: Sales_details when it was read, else this branch's mirror."""
-    if _has(con, "Sales_details") and con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone():
+    if _local_read(con):
         return _rows(con, "Sales_details", {"sales_id": sales_id})
     branch = None
     if _has(con, "co_inf"):
@@ -108,7 +119,7 @@ def _quarantine_guard(con, sales_id: str) -> None:
     unknown, ids, clash = False, set(), set()
     # only this pharmacy's lines count (Codex on #381), as _local_lines reads them: Sales_details when it was read,
     # else this branch's rows of the Branches_ mirror; another branch's quarantined row says nothing about ours
-    local_details = _has(con, "Sales_details") and con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone()
+    local_details = _local_read(con)
     branch = None
     if _has(con, "co_inf"):
         r = con.execute('SELECT * FROM "e_co_inf" LIMIT 1').fetchone()
