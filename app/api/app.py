@@ -1281,7 +1281,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
         def run():
             return {"day": dayhealth.day_checks(db, ctx, backup=backup_health()),
-                    "pc": dayhealth.pc_checks(db, s.data_dir)}
+                    "pc": dayhealth.pc_checks(db, s.data_dir, org_id=ctx.org_id)}
         return J(await off_loop(run))
 
     @handler
