@@ -16,9 +16,12 @@ Stage 0 is deliberately small and generic (file swaps from a journal, health che
 future change to the update logic lives in stage 1 and ships by the button. A new updater is checked
 before it is selected: the candidate's own `update --self-check` (keys load, signature verify, deps
 path) must pass. Recovery never depends on stage 1: stage 0 can always undo, and the installer
-remains the last resort. Stage 0 writes `code-releases/bootstrap.json` (`{"bootstrap": 2}`); stage 1
-refuses every smart batch when that capability is missing (old launcher: installer first; the
-button keeps today's code-only path there).
+remains the last resort. Stage 0 tells the program it starts what it can apply: `PHARM_BOOTSTRAP=2` in
+the server's environment; stage 1 refuses every smart batch when that capability is missing (old
+launcher: installer first; the button keeps today's code-only path there). Under a launcher only the
+environment counts: `code-releases/bootstrap.json` (also written by stage 0) outlives the launcher when
+an older installer is put back, and that launcher never applies a batch, so exit 75 would only restart
+the program again and again (second review). The file is read only by commands run by hand.
 The state file `active-release.json` keeps format 1 (installed launchers keep reading it);
 `release_protocol.json` stays `{"protocol": 1}` (today's installed updater requires it).
 
@@ -32,12 +35,27 @@ On a push to `main` or `develop`, CI publishes release `update-<channel>` with:
   deps:{id,sha256,size}, migrations:[…]}` and `manifest.sig` (Ed25519, base64).
 Signing key: repository secret `UPDATE_SIGNING_KEY`; public keys in `release_keys/*.pub`. No secret →
 CI publishes nothing (fail closed). Trust root = the keys in the **active** release, never the
-downloaded one; a new key ships inside a release signed by the old key.
+downloaded one; a new key ships inside a release signed by the old key. The secret reaches only the two
+steps that read it. The build log names the committed key that verified the signature (`update-1.pub`;
+the spare `update-2-spare.pub` stays offline for rotation and must never be the one signing).
+**Dry run:** a PR labelled `ci` that touches the signing path (this workflow, `scripts/release/`,
+`release_keys/`, `update_sign.py`, `smart_update.py`, `requirements.txt`), or a manual run on a work
+branch, goes through the same steps (key present, package set, build, sign, verify the way the PC
+reads it) and publishes nothing, so a missing or wrong key shows before the merge.
+
+**Channels (owner 20/11):** the pharmacy PC follows the official release, `main`; `develop` is for test
+PCs. An install from a work branch (a review installer, like the launch candidate on the pharmacy PC)
+follows `main` as soon as `main` contains its commit (GitHub compare), never an older `main`; until
+then it is offered nothing. The first update from `main` records `ref = main`, so the PC stays there.
 
 ## 3. Flow
 1. **Check** (badge, every 10 min): manifest + signature → «فيه تحديث» with the plain Arabic list:
    the lines of `docs/CHANGES_AR.md` that the active release does not have (one batch, whatever the
-   number of merges).
+   number of merges). Only forward: with the installed commit time known (a smart update records it)
+   the times decide; an installer or a code-only update records none, so GitHub must show the
+   bundle's commit containing the installed one (a bundle that lags behind a code-only update is
+   no update). An offline bundle with nothing to compare is the owner's own choice; the copy check
+   still refuses a database the code is too old for.
 2. **Prepare** (program keeps working): download with resume into `code-releases/downloads/`, verify
    sha256 + size; stage the code (existing immutable release dirs); extract packages into
    `code-releases/deps/<id>/` only when `id` differs from the installed set; candidate `selftest
