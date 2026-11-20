@@ -2155,10 +2155,7 @@ async function viewSystem() {
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
       <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
       <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `لا توجد (فرع ${esc(st.candidate || "?")})`}</b></div></div>
-    ${smartUpdateHtml(st.smart || {}) || (st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
-      ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
-         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
-      : `<p class="badge b-ok">البرنامج محدّث</p>`)}
+    ${updatePanelHtml(st)}
     <pre id="updOut" class="muted" hidden></pre>`;
   bindSmartUpdate();
   api("/api/system/storage").then((x) => {
@@ -2184,10 +2181,20 @@ async function viewSystem() {
   });
 }
 // docs/SMART_UPDATE.md: one batch, plain Arabic list, «now» or «after closing», never during a sale.
-function smartUpdateHtml(u) {
+// the last smart result is shown on its own: it never hides the classic button (Codex P2 on e9f9f20)
+function updatePanelHtml(st) {
+  return smartLastHtml(st.smart || {}) + (smartUpdateHtml(st.smart || {}) || (st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
+    ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
+         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
+    : `<p class="badge b-ok">البرنامج محدّث</p>`));
+}
+function smartLastHtml(u) {
   const res = u.result || {};
-  const last = res.state === "rolled_back" ? `<p class="badge b-warn">آخر تحديث ما اشتغلش، فالبرنامج رجع لوحده للنسخة اللي قبله وبياناتك زي ما هي.</p>`
+  return res.state === "rolled_back" ? `<p class="badge b-warn">آخر تحديث ما اشتغلش، فالبرنامج رجع لوحده للنسخة اللي قبله وبياناتك زي ما هي.</p>`
     : res.state === "aborted" ? `<p class="badge b-warn">آخر تحديث اتلغى قبل ما يغيّر حاجة: ${esc(res.reason || "")}</p>` : "";
+}
+function smartUpdateHtml(u) {
+  const last = "";
   if (u.request) {
     return `${last}<p class="badge b-ok">✓ التحديث جاهز ومستني <b>${u.request.when === "after_close" ? "قفل الوردية" : "أول دقيقة هادية"}</b></p>
       ${u.waiting ? `<p class="muted">مستني: ${esc(u.waiting)}</p>` : ""}
