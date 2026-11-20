@@ -40,6 +40,7 @@ PERMISSIONS: dict[str, str] = {
     "inventory.count": "تسجيل الجرد",
     "costs.read": "عرض التكلفة والربح",
     "users.manage": "المستخدمون والصلاحيات",
+    "users.permissions": "فتح وقفل صلاحيات الموظفين (غير المالك والمدير، وفي حدود صلاحياته)",
     "settings.manage": "الإعدادات والنسخ الاحتياطي والتحديث",
     "payroll.manage": "الحضور والرواتب والسلف",
     "audit.read": "عرض سجل العمليات",
@@ -80,7 +81,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve", "balances.correct"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
                           "safety.manage", "safety.approve"]),
-    ("الإدارة", ["users.manage", "settings.manage", "payroll.manage"]),
+    ("الإدارة", ["users.manage", "users.permissions", "settings.manage", "payroll.manage"]),
 ]
 assert sorted(p for _, ps in GROUPS for p in ps) == sorted(PERMISSIONS), "every permission in one group"
 
@@ -94,7 +95,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
     "manager": ("مدير", _EMPLOYEE + [
         "items.write", "items.price", "items.hidden", "suppliers.write", "suppliers.pay", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
-        "audit.read", "safety.override", "expenses.approve", "balances.correct"], 0),
+        "audit.read", "safety.override", "expenses.approve", "balances.correct", "users.permissions"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
         "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
     "assistant": ("مساعد", list(_EMPLOYEE), 0),
@@ -102,7 +103,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-11-21b"
+ROLES_VERSION = "2026-11-21c"
 
 
 @dataclass(frozen=True)

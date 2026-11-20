@@ -423,7 +423,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
-    $("#navUsers").hidden = !ME.permissions.includes("users.manage");
+    $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
     $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
@@ -499,7 +499,7 @@ const SCREENS = {
   expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
   procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
-  import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
+  import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.permissions"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
   customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
@@ -508,7 +508,7 @@ const SCREENS = {
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
-  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة، وF9 يتمم البيع، وF4 يختار طباعة الإيصال أو لا، وF2 يفتح فاتورة جديدة، وF8 يفتح الدرج بسبب (لمن له صلاحية الخزينة).", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
   sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
@@ -606,7 +606,7 @@ const TOUR = {
     ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
     ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
     ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
-    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
     ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
     ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
   ],
@@ -3122,7 +3122,7 @@ async function viewPos() {
   <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
       <span class="x" data-close="${esc(d.id)}" title="أغلق هذه الفاتورة" aria-label="إغلاق">✕</span></button>`).join("")}
-    <button class="tab add" id="tabNew" title="فاتورة جديدة (F2)">+ فاتورة <kbd>F2</kbd></button></nav>
+    <button class="tab add" id="tabNew" title="فاتورة جديدة (Insert)">+ فاتورة <kbd>Insert</kbd></button></nav>
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
@@ -3130,7 +3130,7 @@ async function viewPos() {
       <div id="posRes" class="results"></div>
       <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F4</kbd> إيصال · <kbd>F2</kbd> فاتورة جديدة${ME.permissions.includes("cash.manage") ? ` · <kbd>F8</kbd> فتح الدرج` : ""}</p>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · ${posKeysHtml()}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
@@ -3240,12 +3240,79 @@ document.addEventListener("keydown", (e) => {
     if (location.hash.startsWith("#/pos") && !$("dialog[open]")) $("#posQ")?.focus();
   }
 }, true);
-document.addEventListener("keydown", (e) => {
+// Part 3 (owner C): selling by keyboard only. Fixed defaults in this table; changing them from Settings comes later
+// (the same table, so nothing else moves). F1 on the empty line searches, F2/F3/F6/Delete act on the chosen line
+// (↑ ↓ choose it), F10 goes to the payment first and saves on the second press, F11 opens the drawer.
+const POS_KEYS = [["F1", "بحث عن صنف"], ["↑ ↓", "اختار صنف"], ["F2", "رصيد الصنف في الفروع"], ["F3", "كارت الصنف"],
+  ["F6", "الكمية"], ["Delete", "شيل الصنف"], ["F4", "إيصال"], ["F10", "الدفع ثم الحفظ"], ["F11", "فتح الدرج"],
+  ["F7", "مرتجع واستبدال"], ["Insert", "فاتورة جديدة"], ["Ctrl+Tab", "الفاتورة اللي بعدها"], ["Ctrl+Delete", "إلغاء الفاتورة"],
+  ["Esc", "رجوع للبحث"]];
+let POS_SEL = -1;                 // the chosen cart line; -1 = the empty search line
+function posKeysHtml() {
+  return POS_KEYS.filter(([k]) => k !== "F11" || ME.permissions.includes("cash.manage"))
+    .map(([k, t]) => `<kbd>${esc(k)}</kbd> ${esc(t)}`).join(" · ");
+}
+function posMark() {
+  const rows = [...document.querySelectorAll("#posCart tbody tr")].filter((r) => !r.querySelector("td[colspan]"));
+  if (POS_SEL >= rows.length) POS_SEL = rows.length - 1;
+  rows.forEach((r, i) => r.classList.toggle("sel", i === POS_SEL));
+  if (POS_SEL >= 0) rows[POS_SEL]?.scrollIntoView({ block: "nearest" });
+}
+function posLine() {
+  if (!SALE || !SALE.lines.length) return null;
+  const rows = [...document.querySelectorAll("#posCart tbody tr")];
+  const id = rows[POS_SEL]?.querySelector("[data-rm]")?.dataset.rm;
+  return SALE.lines.find((l) => l.id === id) || (POS_SEL < 0 ? SALE.lines[SALE.lines.length - 1] : null);
+}
+async function posBranchStock(l) {
+  const r = await api(`/api/items/${l.item_id || l.item.id}/branch-stock`);
+  const d = document.createElement("dialog");
+  d.innerHTML = `<form method="dialog"><h2>${esc(itemText(r.item))}</h2><table><tbody>${r.branches.map((b) => `<tr><td>${esc(b.name)}${b.here ? " (هنا)" : ""}</td>
+    <td class="num"><b>${esc(fmtStock(b.qty, { pack_size: r.item.pack_size }))}</b></td></tr>`).join("")}</tbody></table>
+    <p class="muted small">كل أجهزة الفرع بتشوف نفس الرصيد.</p><button class="btn">تمام</button></form>`;
+  document.body.appendChild(d); d.addEventListener("close", () => { d.remove(); $("#posQ")?.focus(); }); d.showModal();
+}
+document.addEventListener("keydown", async (e) => {
   if (!location.hash.startsWith("#/pos") || $("dialog[open]")) return;
-  if (e.key === "F2") { e.preventDefault(); newTab(); }
-  if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
-  if (e.key === "F4") { e.preventDefault(); $("#posRcpt")?.click(); }
-  if (e.key === "F8" && ME.permissions.includes("cash.manage")) { e.preventDefault(); drawerDialog(); }
+  const k = (e.ctrlKey ? "Ctrl+" : "") + e.key, typing = e.target.matches?.("input, select, textarea") && e.target.id !== "posQ";
+  const go = (fn) => { e.preventDefault(); Promise.resolve().then(fn).catch((er) => toast(er.message, true)); };
+  if (k === "F1") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
+  if (k === "F2" || k === "F3" || k === "F6") {
+    const l = posLine();
+    if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
+    if (k === "F2") return go(() => posBranchStock(l));
+    if (k === "F3") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
+    return go(() => {
+      const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
+      const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
+      if (Number(v) > 0) patchLine(l.id, { qty_base: packs ? Number(v) * l.item.pack_size : Number(v) });
+    });
+  }
+  if (k === "F4") return go(() => $("#posRcpt")?.click());
+  if (k === "F9") return go(() => $("#posDone")?.click());
+  if (k === "F10") return go(() => {
+    if ($("#posSide")?.contains(document.activeElement)) { $("#posDone")?.click(); return; }
+    ($("#posSide select, #posSide input:not([type=hidden]), #posSide button") || $("#posDone"))?.focus();
+  });
+  if ((k === "F11" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
+  if (k === "F7") return go(() => { location.hash = "#/exchange"; });
+  if (k === "Insert") return go(() => newTab());
+  if (k === "Ctrl+Tab") return go(() => {
+    const tabs = [...document.querySelectorAll("[data-tab]")], i = tabs.findIndex((t) => t.classList.contains("on"));
+    if (tabs.length > 1) tabs[(i + 1) % tabs.length].click();
+  });
+  if (k === "Ctrl+Delete") return go(() => document.querySelector(`[data-close="${SALE?.id}"]`)?.click());
+  if (typing) return;
+  const q = $("#posQ"), onEmptySearch = !q || document.activeElement !== q || !q.value;
+  if ((k === "ArrowUp" || k === "ArrowDown") && onEmptySearch && SALE?.lines.length) {
+    return go(() => {
+      const n = SALE.lines.length;
+      POS_SEL = k === "ArrowUp" ? (POS_SEL < 0 ? n - 1 : Math.max(0, POS_SEL - 1)) : (POS_SEL < 0 || POS_SEL >= n - 1 ? -1 : POS_SEL + 1);
+      posMark(); if (POS_SEL < 0) q?.focus(); else q?.blur();
+    });
+  }
+  if (k === "Delete" && POS_SEL >= 0) return go(() => document.querySelectorAll("#posCart tbody tr")[POS_SEL]?.querySelector("[data-rm]")?.click());
+  if (k === "Escape" && POS_SEL >= 0) return go(() => { POS_SEL = -1; posMark(); q?.focus(); });
 });
 
 // Manual drawer opening (#81): cash.manage (checked by the server too), a reason, recorded with the shift.
@@ -3311,6 +3378,7 @@ function renderCart(findings = null) {
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
+  posMark();
   const line = (id) => s.lines.find((l) => l.id === id);
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
   $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
@@ -5428,7 +5496,8 @@ function viewMe() {
 const ROLE_CLS = { owner: "b-brand", manager: "b-ok", pharmacist: "b-info", assistant: "b-plain" };
 const pctOf = (bp) => (bp == null ? "" : String(bp / 100));
 async function viewUsers() {
-  if (!ME.permissions.includes("users.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
+  // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
+  if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
@@ -5475,7 +5544,7 @@ async function viewUsers() {
 }
 
 async function viewUser(id) {
-  if (!ME.permissions.includes("users.manage")) { location.hash = "#/users"; return; }
+  if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { location.hash = "#/users"; return; }
   const [m, { roles }] = await Promise.all([api(`/api/users/${id}`), api("/api/users")]);
   const u = m.user, owner = u.role === "owner", mine = String(u.id) === String(ME.user.id);
   // #131: changing one's own sign-in needs the current password (an open session alone is not enough)
@@ -5484,7 +5553,7 @@ async function viewUser(id) {
   const cell = (v) => (v ? `<span class="ok">✓ مسموح</span>` : `<span class="muted">✕ ممنوع</span>`);
   const pick = (it) => {
     if (owner) return `<span class="ok">✓ مسموح</span>`;
-    if (it.code === "users.manage") return `<span class="muted">للمالك فقط</span>`;
+    if (it.code === "users.manage" || (!ME.permissions.includes("users.manage") && it.code === "users.permissions")) return `<span class="muted">للمالك فقط</span>`;
     const def = it.roles[u.role];
     return `<select data-perm="${it.code}" class="${it.exception === "grant" ? "ex-grant" : it.exception === "deny" ? "ex-deny" : ""}">
       <option value="default" ${!it.exception ? "selected" : ""}>${def ? "✓ مسموح" : "✕ ممنوع"} (الافتراضي)</option>

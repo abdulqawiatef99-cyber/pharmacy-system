@@ -2202,6 +2202,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(done)
 
     @handler
+    async def item_branch_stock(req):
+        from ..catalog import card as _card
+        return J(_card.branch_stock(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
     async def returns_find(req):
         return J({"sales": await off_loop(Sales(db).find_for_return, ctx_of(req), req.query_params.get("q", ""))})
 
@@ -2859,6 +2864,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
         Route("/api/stock/reasons", stock_reasons),
