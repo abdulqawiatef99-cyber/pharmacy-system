@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from ..core import audit
-from ..dataimport.estock_db import COPY_REASON
+from ..dataimport.estock_db import CONFLICT_REASON, COPY_REASON
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -105,7 +105,7 @@ def _quarantine_guard(con, sales_id: str) -> None:
     """A row of this invoice (its lines or a return of it) was quarantined at the move (impossible values, #380):
     what was sold or already returned is not known, so no refund is made (Codex on #380). A quarantined row
     whose invoice id itself is unreadable could be any invoice: then no old invoice is refunded."""
-    unknown, ids = False, set()
+    unknown, ids, clash = False, set(), set()
     # only this pharmacy's lines count (Codex on #381), as _local_lines reads them: Sales_details when it was read,
     # else this branch's rows of the Branches_ mirror; another branch's quarantined row says nothing about ours
     local_details = _has(con, "Sales_details") and con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone()
@@ -126,7 +126,8 @@ def _quarantine_guard(con, sales_id: str) -> None:
         mirror = t == "Branches_sales_details" and branch is not None and "branch_id" in cols
         sel = f'"{cols["sales_id"]}"' + (f', "{cols["branch_id"]}"' if mirror else ", NULL")
         # an exact second copy of a row (Codex on #385) is set apart and read once: it hides nothing
-        for v, b in con.execute(f'SELECT {sel} FROM "q_{t}" WHERE coalesce(_reason, \'\') <> ?', (COPY_REASON,)):
+        for v, b, why in con.execute(f'SELECT {sel}, _reason FROM "q_{t}" WHERE coalesce(_reason, \'\') <> ?',
+                                     (COPY_REASON,)):
             if mirror and _ident(b) != branch:
                 bd = _dec(b)
                 # a readable other branch is not ours; an impossible id (the importer's rule, #383 review) keeps the hold
@@ -137,6 +138,11 @@ def _quarantine_guard(con, sales_id: str) -> None:
                 unknown = True
             else:
                 ids.add(str(int(d)))
+                if why == CONFLICT_REASON:
+                    clash.add(str(int(d)))
+    if sales_id in clash and not unknown:
+        raise Conflict("فاتورة إي ستوك دي متسجلة أكتر من مرة ببيانات مختلفة: المرتجع عليها موقوف لحد ما المالك يراجعها",
+                       code="estock_history_duplicate")
     if unknown or sales_id in ids:
         raise Conflict("فاتورة إي ستوك دي (أو مرتجعها) فيها سطر اتعزل في النقل بقيم مستحيلة: المرتجع عليها موقوف لحد ما"
                        " المالك يراجعها", code="estock_history_quarantined",

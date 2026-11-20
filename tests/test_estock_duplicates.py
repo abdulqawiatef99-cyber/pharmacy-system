@@ -27,9 +27,10 @@ class TestPerInvoiceLineNumbers(Base):
         t = base_tables()
         t["Sales_details"] = sales_details() + [dict(sales_details()[0], total_sell="31.0000")]
         res = self.run_import(tables=t)
-        line = [d for d in res["plan"].dq if d["table"] == "Sales_details" and d["field"] == "sales_id+details_id"]
+        # both rows of the clashing line are set apart (Codex on #385) and listed for review
+        line = [d for d in res["plan"].dq if d["table"] == "Sales_details" and d["field"] == "same id, other cells"]
         self.assertTrue(line, res["plan"].dq)
-        self.assertIn("1/1", line[0]["estock_id"])
+        self.assertEqual(line[0]["estock_value"], "2 سطر")
 
 
 class TestDuplicateStockRow(_R):
@@ -203,3 +204,19 @@ class TestCodexReview385b(Base):
         t["Sales_header"].append(dict(t["Sales_header"][0]))                   # invoice 1 twice, the same cells
         self.assertTrue(self.run_import(tables=t)["ok"])
         self.assertTrue(er.invoice_lines(self.db, self.ctx, "1"))
+
+
+
+class TestCodexReview385c(Base):
+    """Codex on #385 @3266ab9 (failed before the fix): an invoice with two different headers is not added
+    to the history reports twice; its rows stay in the archive for review."""
+
+    def test_p2_a_clashing_invoice_is_left_out_of_history_aggregates(self):
+        from app.dataimport import estock_history as h
+        t = base_tables()
+        t["Sales_header"].append(dict(t["Sales_header"][0], bill_cash="0"))     # invoice 1 twice, other cells
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        got = h.invoices(self.db, self.ctx, "sale")
+        self.assertNotIn("1", [r["estock_id"] for r in got])
+        cust = self.db.one("SELECT id FROM customers WHERE name LIKE '%أحمد%'")["id"]
+        self.assertFalse([r for r in h.customer_items(self.db, self.ctx, cust) if (r.get("qty") or 0) > 1])
