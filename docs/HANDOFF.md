@@ -7,6 +7,24 @@
 
 
 
+
+## 21/11 00:15 Cairo — part 3 in progress: items 0–1 done (PRs open), items 2–6c for the next sessions (READ THIS FIRST)
+Stack (none merged; nothing published; no main, no installer): #386 `claude/smart-update` @ `77a392a` (gate met, held for the key) ← #391 `claude/p3-0-signing-keys` (item 0) ← #392 `claude/p3-1-last-installer-rehearsal` (item 1). Merge order once the key is settled: #386 → #391 → #392 (each re-targeted to develop as the one below merges).
+1. Done
+   - Item 0 (#391): `signing-key-check.bat` (which committed key each .txt on the flash drive matches; never prints a key) + `new-signing-key.bat` (new spare `update-3` to `F:\pharmacy-update-keys`), both in «أدوات الصيدلية»; `docs/SMART_UPDATE.md` has outcomes (a) update-1 found → into the secret, spare offline; (b) not found → update-2 signs, update-3 new spare, `update-1.pub` removed (and the key-set guard test in `tests/test_smart_update_review.py` updated). The dry run on `77a392a` proved the chain works and signs with **update-2-spare**.
+   - Item 1 (#392): `tests/test_last_installer_rehearsal.py` — one signed batch with a migration + a package change + an updater change goes prepare → «حدّث دلوقتي» → exit 75 → launcher `settle()` runs the real `--apply-prepared` → swap → first start; a second batch whose first start fails rolls DB (byte for byte) and code back.
+2. Not done (next sessions, one PR per group, tests first, stacked on #392 or on develop once #386 is in; Codex + CI linux/windows each)
+   - Item 2 balance correction screen (suppliers/customers after the move): reason + audit; owner/manager. Build on `app/dataimport/opening_balances.py` (`listing`, `confirm`) and `app.finance.reconcile.post_adjustment`; no migration expected. **Strongest model (money).**
+   - Item 3 move report wording (idea 32) + #385 small fixes: `app/dataimport/estock_owner_report.py`, `estock_db.py`. Opus.
+   - Item 4 day health report at shift close (idea 28) + PC health check (idea 30). Opus; money figures read-only.
+   - Item 5 desktop buttons for the move steps (idea 31): `scripts/windows/*` + `app/core/tools_folder.py` TOOLS. Opus.
+   - Item 6a sale return + replacement sale in one operation (three totals, cash/credit/card, sold/return/previously returned qty, return price after discount, search by item code / invoice / customer code, return window from settings, default 7 days; the returned item is NOT booked as a purchase). Likely a migration (settings key only if possible). **Strongest model (money + stock).**
+   - Item 6b purchase return from invoice (supplier + invoice no. loads lines; supplier credit-note no.; bonus returned separately; added tax; value and cost; default payment = on account). Check #310 (owner's bonus-line rule). **Strongest model.**
+   - Item 6c (manager addendum 23:xx) permissions parity with E-Stock's 12 groups (general data, items, stores, suppliers, purchases, customers, sales, daily accounts, general accounts, orders, staff, main/branches): table of E-Stock group → our permission codes (`app/core/permissions.py`, roles); every staff member keeps exactly sale, drawer, returns, purchases; add any missing must-have permission. Needs each employee's E-Stock rights (read on the pharmacy PC, read only). Strongest model (permissions).
+   - Then: one Codex review over all of part 3, CI green, HANDOFF/STATUS, #113, stop.
+3. Facts for the report: the last installer built (`81a71c1`, run 44762691207) is **34,798,343 bytes = 33.2 MB** with no pharmacy data (data lives in `%LOCALAPPDATA%\PharmacyPlatform`); the next one (with #386) is not built yet, expected about the same.
+4. Next session start: Claude Code, strongest model for items 2 / 6a / 6b / 6c, Opus for 3 / 4 / 5. Read this entry, #391/#392 Codex results, then item 2.
+
 ## 20/11 23:40 Cairo — part 2 closed, part 3 approved (owner 23:18) (READ THIS FIRST)
 - #386 gate met on `77a392a`: CI linux + windows ✅, signing dry run ✅ (run 44818446743), Codex clean (after 1 P1 + 2 P2 fixed test-first: abandoned journal restores the moved DB, classic update keeps the package set, panel keeps the classic button), suite 2375 OK. **Not merged on purpose:** a merge publishes `update-develop`, and the dry run shows the secret is the **spare** key (`signed with release_keys/update-2-spare.pub`). Owner 23:18: nothing published before the key is settled = part 3 item 0.
 - Part 3 (owner 23:18, «موافق، بس عاوزين تبقى آخر مرة نحط مثبت»): 0 key checker + key decision, 1 last-installer rehearsal (migration + package + updater change through the button, auto-rollback), 2 balance correction screen, 3 move report wording + #385 small fixes, 4 day health report + PC health, 5 desktop move buttons, 6a sale return + replacement on one screen, 6b purchase return from invoice. Branches stack on `claude/smart-update` until #386 merges. No main, no installer.
