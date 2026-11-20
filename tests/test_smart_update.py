@@ -289,6 +289,25 @@ class TestApply(SmartUpdateBase):
             db.close()
         self.assertEqual(p["release"], su.pending_request(self.data)["release"])
 
+    def test_audit_import_position_rolls_back_with_the_database(self):
+        """Codex P1 on 6f3d1f1: events imported into a database that is then put back are imported again."""
+        from app.db import Database
+        releases.log_event(self.home, step="apply", ok=True)
+        before = self.live_bytes()                                                 # the database put back later
+        db = Database(self.s.db_path)
+        self.assertEqual(su.import_log(db, self.data), 1)
+        db.close()
+        self.s.db_path.write_bytes(before)                                         # undo of a failed first start
+        releases.log_event(self.home, step="rollback", ok=True)
+        db = Database(self.s.db_path)
+        try:
+            self.assertEqual(su.import_log(db, self.data), 2)                      # apply again, then rollback
+            steps = [r["action"] for r in db.all("SELECT action FROM audit_log WHERE action LIKE 'system.update.%'"
+                                                   " ORDER BY seq")]
+            self.assertEqual(steps, ["system.update.apply", "system.update.rollback"])
+        finally:
+            db.close()
+
     def test_manual_code_rollback_refused_after_a_database_update(self):
         self.add_migration()
         self.build()

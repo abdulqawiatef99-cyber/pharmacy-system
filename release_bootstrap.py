@@ -51,9 +51,18 @@ def atomic_json(path: Path, value: dict) -> None:
 
 
 @contextmanager
-def locked(home: Path):
+def stage0_lock(home: Path):
+    """One launcher at a time owns the journal, the swap and the first start (Codex P1 on #386). Held for the
+    launcher's whole life; a second launcher gets ReleaseError and only opens the browser."""
+    with locked(home, name="stage0.lock"):
+        yield
+
+
+@contextmanager
+def locked(home: Path, name: str = "release.lock"):
+    home = Path(home)
     home.mkdir(parents=True, exist_ok=True)
-    with open(home / "release.lock", "a+b") as f:
+    with open(home / name, "a+b") as f:
         if os.name == "nt":
             import msvcrt
             if f.seek(0, 2) == 0:

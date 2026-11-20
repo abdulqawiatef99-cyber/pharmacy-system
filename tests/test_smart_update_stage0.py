@@ -244,6 +244,24 @@ class TestCodexFindings386(Stage0Base):
             code = launcher.main()
         return code, spawn
 
+    def test_second_launcher_never_touches_the_swap(self):
+        """Codex P1 on 6f3d1f1: the icon opened twice must not run two swaps at once."""
+        rid = self.stage_and_select()
+        self.prepare_journal(rid)
+        with releases.stage0_lock(self.home):                 # the first launcher is still working
+            with patch.object(launcher, "ROOT", self.root), \
+                    patch.object(launcher, "home", return_value=self.app_home), \
+                    patch.object(launcher, "running", return_value=False), \
+                    patch.object(launcher, "open_when_ready") as wait, \
+                    patch.object(launcher.subprocess, "Popen") as spawn, \
+                    patch.object(releases, "resume_journal") as resume:
+                self.assertEqual(launcher.main(), 0)
+        spawn.assert_not_called()
+        resume.assert_not_called()
+        wait.assert_called_once()
+        self.assertEqual(releases.read_journal(self.home)["state"], "ready")
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
+
     def test_unsettled_journal_never_starts_a_program(self):
         code, spawn = self.launch("always")
         self.assertNotEqual(code, 0)

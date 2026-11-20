@@ -650,36 +650,41 @@ def candidate_check(settings, open_db) -> dict:
 
 # --------------------------------------------------------------------------- audit and status
 def import_log(db, data_dir: Path) -> int:
-    """Copy new lines of update-log.jsonl (written by stage 0/1 outside the database) into the audit log."""
+    """Copy new lines of update-log.jsonl (written by stage 0/1 outside the database) into the audit log.
+    The position read so far is kept IN the database (org_settings), in the same transaction as the audit
+    rows: a database put back by an undo also puts the position back, so no event is ever skipped
+    (Codex P1 on #386)."""
     from . import audit
-    home = home_of(data_dir)
-    log, mark = home / "update-log.jsonl", home / "update-log.audited"
-    if not log.exists():
+    log = home_of(data_dir) / "update-log.jsonl"
+    if not log.exists() or not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='org_settings'"):
         return 0
-    try:
-        done = int(mark.read_text(encoding="ascii").strip() or 0)
-    except (OSError, ValueError):
-        done = 0
+    org = db.one("SELECT id FROM organizations ORDER BY created_at LIMIT 1")
+    if not org:
+        return 0
     data = log.read_bytes()
-    if done > len(data):
-        done = 0
-    chunk = data[done:]
-    end = chunk.rfind(b"\n") + 1
-    if not end:
-        return 0
     n = 0
-    org = db.one("SELECT id FROM organizations ORDER BY created_at LIMIT 1") if db.one(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizations'") else None
     with db.transaction():
+        row = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='update_log_offset'", (org["id"],))
+        try:
+            done = int(row["value"]) if row else 0
+        except ValueError:
+            done = 0
+        if done > len(data):
+            done = 0
+        chunk = data[done:]
+        end = chunk.rfind(b"\n") + 1
+        if not end:
+            return 0
         for line in chunk[:end].decode("utf-8", "replace").splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
                 event = {"raw": line[:300]}
             audit.record(db, None, f"system.update.{event.get('step', 'event')}", "system", None, after=event,
-                         org_id=org["id"] if org else None, user_id="system")
+                         org_id=org["id"], user_id="system")
             n += 1
-    mark.write_text(str(done + end), encoding="ascii")
+        db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'update_log_offset', ?)"
+                   " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (org["id"], str(done + end)))
     return n
 
 

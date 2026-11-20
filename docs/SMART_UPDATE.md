@@ -65,7 +65,11 @@ downloaded one; a new key ships inside a release signed by the old key.
    pointer back, journal `rolled_back`, start the old version. A power cut at any step is resumed from
    the journal state on the next start.
 8. **Report**: the next start (old or new code) audits every step from `update-log.jsonl` and shows
-   the result in Arabic on the program page.
+   the result in Arabic on the program page. The position read so far is kept in the database itself,
+   so a database put back by an undo re-imports the events it lost.
+
+Only one launcher runs steps 5–7 at a time (`stage0.lock`, held for the launcher's life); opening the
+icon twice only opens the browser.
 
 Any failure in 2–5: nothing selected, the live DB untouched, candidate files deleted, Arabic message.
 

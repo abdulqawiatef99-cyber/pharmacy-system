@@ -126,6 +126,19 @@ def main() -> int:
         webbrowser.open(URL)
         return 0
     h = home()
+    lock = releases.stage0_lock(releases.code_home(h / "data"))
+    try:
+        lock.__enter__()
+    except releases.ReleaseError:            # another launcher is starting the program (or updating it)
+        open_when_ready(timeout=600)
+        return 0
+    try:
+        return _main(h)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _main(h: Path) -> int:
     for d in ("data", "backups", "logs"):
         (h / d).mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
