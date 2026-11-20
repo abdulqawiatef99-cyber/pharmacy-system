@@ -8,6 +8,10 @@
 
 
 
+## 21/11 part 3 session 2 — progress log (READ THIS FIRST; newest line last)
+- Item 2 done: #394 `claude/p3-2-balance-correction` @ `f866030` (stacked on #392). Permission `balances.correct` (owner+manager, per person), reason required, `reconcile.post_adjustment` type opening, stale-screen guard. Suite 2382 OK. Codex + CI asked.
+- Notes: ideas 28/30/31/32 and "#385 small fixes" have no written list in the repo; items 3–5 are built from the one-line plan below, assumptions stated in each PR.
+
 ## 21/11 00:15 Cairo — part 3 in progress: items 0–1 done (PRs open), items 2–6c for the next sessions (READ THIS FIRST)
 Stack (none merged; nothing published; no main, no installer): #386 `claude/smart-update` @ `77a392a` (gate met, held for the key) ← #391 `claude/p3-0-signing-keys` (item 0) ← #392 `claude/p3-1-last-installer-rehearsal` (item 1). Merge order once the key is settled: #386 → #391 → #392 (each re-targeted to develop as the one below merges).
 1. Done
