@@ -258,3 +258,51 @@ class TestSigningKeys(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.test_smart_update_stage0 import Stage0Base  # noqa: E402
+
+
+class TestAbandonedJournalPutsTheDatabaseBack(Stage0Base):
+    """Codex P1 on 005db1b: a power cut mid-swap, then a new installer clears the selected release before the
+    journal is resumed. Abandoning the journal must first put back any live database it already moved."""
+
+    def installer_clears_the_pointer(self):
+        st = releases.read_state(self.home)
+        releases.atomic_json(self.home / "active-release.json", {**st, "active": None, "previous": None,
+                                                                  "pending": False})
+
+    def test_first_move_done_then_installer(self):
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.live, prev)                                # power cut after the first move
+        self.installer_clears_the_pointer()
+        self.assertEqual(releases.resume_journal(self.home), "abandoned")
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
+        self.assertTrue(releases.settled(self.home))
+
+    def test_both_moves_done_then_installer(self):
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.live, prev)
+        os.replace(cand, self.live)                                # journal write to "swapped" lost
+        self.installer_clears_the_pointer()
+        self.assertEqual(releases.resume_journal(self.home), "abandoned")
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")    # the old code gets the old database
+
+    def test_undo_that_cannot_finish_keeps_the_journal_and_starts_nothing(self):
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.live, prev)
+        self.installer_clears_the_pointer()
+        with mock.patch.object(releases, "_undo_one", side_effect=OSError("locked")):
+            with self.assertRaises(releases.ReleaseError):
+                releases.resume_journal(self.home)
+        self.assertEqual(releases.read_journal(self.home)["state"], "ready")
+        self.assertFalse(releases.settled(self.home))
+        self.assertTrue(cand.exists())
+        self.assertEqual(releases.resume_journal(self.home), "abandoned")   # next start finishes it
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")

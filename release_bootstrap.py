@@ -414,6 +414,16 @@ def resume_journal(home: Path) -> str:
     if state == "ready":
         st = read_state(home)
         if (st.get("active") or {}).get("id") != j.get("release") or not st.get("pending"):
+            # e.g. a power cut mid-swap, then a new installer cleared the pointer: any live database this
+            # journal already moved goes back first; if that fails the journal stays "ready" and no program
+            # starts (an empty database must never be created over a missing one; Codex P1 on 005db1b)
+            try:
+                for s in j.get("swaps", []):
+                    if Path(s["previous"]).exists():
+                        _undo_one(s)
+            except (ReleaseError, OSError, KeyError, TypeError) as exc:
+                log_event(home, step="swap", ok=False, release=j.get("release"), reason=f"abandon: {exc}")
+                raise ReleaseError(f"Live database could not be put back yet: {exc}") from exc
             return _abort(home, j, "abandoned", "the update was not selected")
         try:
             for s in j["swaps"]:
