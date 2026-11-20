@@ -27,7 +27,7 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
-DEFAULT_RETURN_DAYS = 14
+DEFAULT_RETURN_DAYS = 7          # owner, part 3 item 6a: default 7 days; Settings can change it
 
 
 def egp(piasters: int) -> str:
@@ -1161,6 +1161,123 @@ class Sales:
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
         return {"return_id": rid, "refund": refund}
+
+    def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:
+        """Completed sales to return from, by invoice number, item code or barcode, or customer phone or name
+        (part 3 item 6a). Newest first; each line says sold / already returned / still returnable and its net
+        after the discount, and each sale whether it is inside the return window. Only sales the person may see."""
+        ctx.require("sales.return")
+        term = (q or "").strip()
+        if not term:
+            return []
+        ids: list[str] = []
+        args_base = (ctx.org_id,)
+        if term.isdigit() and len(term) <= 9:
+            ids += [r["id"] for r in self.db.all("SELECT id FROM sales WHERE org_id=? AND status='completed' AND sale_no=?"
+                                                 " ORDER BY completed_at DESC LIMIT ?", (*args_base, int(term), limit))]
+        ids += [r["id"] for r in self.db.all(
+            "SELECT DISTINCT s.id, s.completed_at FROM sales s JOIN sale_lines l ON l.sale_id=s.id JOIN items i ON i.id=l.item_id"
+            " WHERE s.org_id=? AND s.status='completed' AND (i.code=? OR i.id IN (SELECT item_id FROM item_barcodes"
+            " WHERE barcode=?)) ORDER BY s.completed_at DESC LIMIT ?", (ctx.org_id, term, term, limit))]
+        ids += [r["id"] for r in self.db.all(
+            "SELECT s.id FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.org_id=? AND s.status='completed'"
+            " AND (c.phone=? OR c.name LIKE ?) ORDER BY s.completed_at DESC LIMIT ?",
+            (ctx.org_id, term, f"%{term}%" if len(term) >= 3 else term, limit))]
+        days = return_window_days(self.db, ctx.org_id)
+        out, seen = [], set()
+        for sid in ids:
+            if sid in seen or len(out) >= limit:
+                continue
+            seen.add(sid)
+            try:
+                sale = self.get(ctx, sid)
+            except Forbidden:
+                continue
+            age = (self.today - _local_date(sale["completed_at"])).days
+            lines = []
+            for l in sale["lines"]:
+                sold = sum(a["qty"] for a in l["allocations"])
+                back = sum(a.get("returned_qty") or 0 for a in l["allocations"])
+                lines.append({"id": l["id"], "item_id": l["item_id"], "name": l["item"]["name"],
+                              "code": l["item"].get("code"), "sold": sold, "returned": back,
+                              "returnable": sold - back, "net": l["net"], "discount_bp": l["discount_bp"]})
+            out.append({"id": sid, "sale_no": sale["sale_no"], "completed_at": sale["completed_at"], "total": sale["total"],
+                        "customer": (sale.get("customer") or {}).get("name"), "customer_id": sale["customer_id"],
+                        "paid_cash": sale["paid_cash"], "on_credit": sale["on_credit"], "paid_card": sale["paid_card"],
+                        "age_days": age, "in_window": age <= days, "window_days": days, "lines": lines})
+        return out
+
+    # ------------------------------------------------------------ part 3 item 6a: return + replacement in one go
+    def return_value(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str) -> int:
+        """What a return would pay back, after the discount and every return rule, WITHOUT writing anything:
+        the return runs inside a transaction that is rolled back (part 3 item 6a, the three totals)."""
+        if self.db.conn.in_transaction:
+            raise RuntimeError("return_value runs only at the top level")
+
+        class _Undo(Exception):
+            pass
+        try:
+            with self.db.transaction():
+                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع")
+                raise _Undo(r["refund"])
+        except _Undo as u:
+            return u.args[0]
+
+    def exchange(self, ctx: Context, sid: str, lines: dict[str, int], new_sid: str, *, refund_method: str,
+                 pay_method: str = "cash", reason: str, channel_id: str | None = None, version: int | None = None,
+                 request_id: str | None = None, safety_decisions: dict[int, str] | None = None,
+                 confirm_below_cost: bool = False) -> dict:
+        """A sale return and its replacement sale as ONE operation (one transaction: both or neither).
+
+        The returned value R follows every rule of `return_items` (window, who sold it, no-return sections, the
+        cash cap of #142) and goes back by `refund_method`. The new sale N is then paid first from that same
+        place up to R, so the two cancel out, and only the net is settled: N > R -> the customer pays N - R by
+        `pay_method`; N < R -> he gets R - N back by `refund_method`. The returned goods go back to stock as a
+        sale return (never a purchase). Returns {"returned": R, "new_total": N, "net": N - R, ...}."""
+        ctx.require("sales.return")
+        ctx.require("sales.create")
+        if pay_method not in ("cash", "card", "transfer", "credit") or refund_method not in ("cash", "card", "credit"):
+            raise ValidationFailed("طريقة الدفع غير صحيحة")
+        if sid == new_sid:
+            raise ValidationFailed("فاتورة الاستبدال لازم تكون فاتورة جديدة")
+        if request_id:
+            done = self.db.one("SELECT status, complete_request_id FROM sales WHERE id=? AND org_id=?",
+                               (new_sid, ctx.org_id))
+            if done and done["status"] == "completed" and done["complete_request_id"] == request_id:
+                a = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
+                                " AND action='sale.exchange'", (ctx.org_id, new_sid))
+                return {**json.loads(a["after_json"]), "sale": self.get(ctx, new_sid), "replayed": True}
+        with self.db.transaction():
+            orig = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+            new = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (new_sid, ctx.org_id))
+            if not orig or not new:
+                raise NotFound("الفاتورة غير موجودة")
+            if new["status"] != "draft":
+                raise Conflict("فاتورة الاستبدال مكتملة أو ملغاة", code="not_draft")
+            if orig["customer_id"] and new["customer_id"] and orig["customer_id"] != new["customer_id"]:
+                raise ValidationFailed("فاتورة الاستبدال لنفس عميل الفاتورة الأصلية", code="customer_mismatch")
+            if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer
+                self.db.execute("UPDATE sales SET customer_id=? WHERE id=?", (orig["customer_id"], new_sid))
+            ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
+                                    reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
+            r_value = ret["refund"]
+            n_total = self.get(ctx, new_sid)["total"]
+            offset = min(r_value, n_total)
+            payments = []
+            if offset:
+                payments.append({"method": refund_method, "amount": offset, "channel_id": channel_id})
+            if n_total - offset:
+                payments.append({"method": pay_method, "amount": n_total - offset, "channel_id": channel_id})
+            if refund_method == "card" and pay_method == "card" and len(payments) == 2:
+                payments = [{"method": "card", "amount": n_total, "channel_id": channel_id}]
+            sale = self.complete(ctx, new_sid, payments=payments, version=version, request_id=request_id,
+                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost)
+            out = {"return_id": ret["return_id"], "original_sale_id": sid, "sale_id": new_sid,
+                   "returned": r_value, "new_total": n_total, "net": n_total - r_value,
+                   "refund_method": refund_method, "pay_method": pay_method,
+                   "settled": {"pay": max(0, n_total - r_value), "refund": max(0, r_value - n_total)}}
+            audit.record(self.db, ctx, "sale.exchange", "sale", new_sid, after=out)
+        return {**out, "sale": sale}
 
     def return_receipt(self, ctx: Context, rid: str) -> dict:
         """One return with its items, for the printed return slip."""

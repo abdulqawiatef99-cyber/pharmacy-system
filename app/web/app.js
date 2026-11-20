@@ -268,7 +268,9 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // money accounts (F105/F108): a transfer, the owner's money in or out, a count, an opening fix, a reconciliation
   /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/,
   // part 3 item 2: an opening balance corrected after the move
-  /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/];
+  /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/,
+  // part 3 item 6a: a return with its replacement sale
+  /^\/api\/sales\/[^/]+\/exchange$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -367,6 +369,7 @@ const routes = [
   [/^#\/money$/, viewMoney],
   [/^#\/money\/([\w-]+)$/, viewMoneyAccount],
   [/^#\/reconcile$/, viewReconcile],
+  [/^#\/exchange$/, viewExchange],
   [/^#\/opening-fix$/, viewOpeningFix],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
@@ -489,7 +492,7 @@ function showStockAlert(a) {
 }
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
-  pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], purchases: ["الشراء", "purchases.read"],
+  pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], exchange: ["مرتجع واستبدال", "sales.return"], purchases: ["الشراء", "purchases.read"],
   items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
   expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
@@ -2778,6 +2781,90 @@ function refundOptions(s) {
   const want = refundDefault(s), ok = opts.filter((o) => !o[2]);
   const pick = ok.some((o) => o[0] === want) ? want : (ok[0] || opts[0])[0];
   return opts.map(([v, t, off]) => ({ value: v, label: t, disabled: off, selected: v === pick }));
+}
+
+// ------------------------------------------------------------------ return + replacement in one operation (part 3 item 6a)
+// Search the invoice by its number, an item code / barcode, or the customer's phone or name; type the quantities
+// coming back; add the replacement items; the three totals (returned, new, net) come from the server before saving.
+// Only the net is paid or given back. The returned goods go back to stock as a sale return, never a purchase.
+async function viewExchange() {
+  app.innerHTML = `<section class="panel"><h1>مرتجع واستبدال</h1>
+    <form class="row" id="exF"><input name="q" class="grow" placeholder="رقم الفاتورة أو كود الصنف أو الباركود أو تليفون العميل أو اسمه" autofocus><button class="btn small">ابحث</button></form>
+    <div id="exList" class="mt"></div></section><div id="exSale"></div>`;
+  let sale = null, draft = null;
+  const H = (t) => `<span class="muted small">${t}</span>`;
+  const totals = async () => {
+    const lines = {};
+    document.querySelectorAll("[data-xr]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.xr] = v; });
+    const box = $("#exTot");
+    if (!box) return null;
+    if (!Object.keys(lines).length || !draft) { box.innerHTML = H("اكتب كمية المرتجع وضيف صنف الاستبدال"); return null; }
+    try {
+      const t = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { preview: true, lines, new_sale_id: draft.id, refund_method: $("#exRm").value } });
+      box.innerHTML = `<div class="totals"><div>قيمة المرتجع<b>${money(t.returned)}</b></div><div>فاتورة الاستبدال<b>${money(t.new_total)}</b></div>
+        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>`;
+      return { lines, t };
+    } catch (e) { box.innerHTML = `<p class="badge b-err">${esc(e.message)}</p>`; return null; }
+  };
+  const drawDraft = () => {
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+      <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
+    $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
+      try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
+    }));
+  };
+  const open = async (id) => {
+    sale = (await api(`/api/returns/find?q=${encodeURIComponent($("#exF").q.value)}`)).sales.find((x) => x.id === id);
+    const full = await api(`/api/sales/${id}`);
+    $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
+      ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (${sale.window_days} يوم)</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
+      <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
+      ${sale.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+        <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
+      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
+        <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
+      <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
+      <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div>
+      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+        <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
+    draft = null; drawDraft(); totals();
+    document.querySelectorAll("[data-xr]").forEach((i) => i.addEventListener("input", () => totals()));
+    $("#exRm").addEventListener("change", () => totals());
+    $("#exAdd").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const q = e.target.q.value.trim(), n = typedWhole(e.target.n.value) || 1;
+      if (!q) return;
+      try {
+        const r = await findItems(q, 1), it = (r.items || r)[0];
+        if (!it) { toast("الصنف مش موجود", true); return; }
+        if (!draft) draft = await api("/api/sales", { method: "POST", body: { customer_id: sale.customer_id || null } });
+        draft = await api(`/api/sales/${draft.id}/lines`, { method: "POST", body: { item_id: it.id, units: n, client_ref: newKey() } });
+        e.target.q.value = ""; drawDraft(); totals();
+      } catch (err) { toast(err.message, true); }
+    });
+    $("#exGo").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget, got = await totals();
+      if (!got) { toast("اكتب كمية المرتجع وضيف صنف الاستبدال", true); return; }
+      await withBusy(btn, async () => {
+        try {
+          const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, reason: $("#exWhy").value, version: draft.version, request_id: newKey(), receipt: true } });
+          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
+          location.hash = `#/sales/${r.sale_id}`;
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+  };
+  $("#exF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api(`/api/returns/find?q=${encodeURIComponent(e.target.q.value)}`);
+      $("#exList").innerHTML = r.sales.length ? `<table><thead><tr><th>الفاتورة</th><th>اليوم</th><th>العميل</th><th>الإجمالي</th><th></th></tr></thead><tbody>
+        ${r.sales.map((x) => `<tr class="clickable" data-xs="${esc(x.id)}"><td>${x.sale_no}</td><td>${esc(dayOf(x.completed_at))}</td><td>${esc(x.customer || "")}</td><td class="num">${money(x.total)}</td>
+          <td>${x.in_window ? "" : `<span class="badge b-warn">بعد المدة</span>`}</td></tr>`).join("")}</tbody></table>` : H("مفيش فواتير بالبحث ده");
+      $("#exList").querySelectorAll("[data-xs]").forEach((tr) => tr.addEventListener("click", () => open(tr.dataset.xs).catch((err) => toast(err.message, true))));
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 async function viewSale(id) {

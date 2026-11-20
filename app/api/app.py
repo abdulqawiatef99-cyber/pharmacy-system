@@ -2166,6 +2166,40 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                         reason=str(b.get("reason", ""))))
 
     @handler
+    async def sales_exchange(req):
+        """Part 3 item 6a: a return and its replacement sale in one operation."""
+        ctx = ctx_of(req)
+        b = await body(req)
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
+        if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
+            sales = Sales(db)
+            r_value = sales.return_value(ctx, req.path_params["id"], lines,
+                                         refund_method=str(b.get("refund_method", "")))
+            n_total = sales.get(ctx, str(b.get("new_sale_id", "")))["total"] if b.get("new_sale_id") else 0
+            return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
+        decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
+        done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
+                                  refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
+                                  reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
+                                  version=b.get("version"),
+                                  request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")))
+        if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
+            sale = done["sale"]
+            if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
+                    done["settled"]["refund"] and done["refund_method"] == "cash"):
+                sale = {**sale, "paid_cash": 0}
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, sale, b.get("receipt") is True, 0)
+        return J(done)
+
+    @handler
+    async def returns_find(req):
+        return J({"sales": await off_loop(Sales(db).find_for_return, ctx_of(req), req.query_params.get("q", ""))})
+
+    @handler
     async def sales_void(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2907,6 +2941,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
+        Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
+        Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),

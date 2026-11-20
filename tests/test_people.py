@@ -163,13 +163,14 @@ class TestReturns(People):
         self.assertEqual(json.loads(audit_row["after_json"])["approved_by"], self.ids["owner"])
         self.s.return_items(self.ph, sale["id"], self._line(sale), refund_method="cash", reason="مش محتاجه")
 
-    def test_window_14_days(self):
+    def test_window_7_days_by_default(self):
+        """Owner, part 3 item 6a: the return window defaults to 7 days (it was 14); Settings can change it."""
         sale = self.sell(ctx=self.ph)
-        later = Sales(self.db, today=T + timedelta(days=15))
+        later = Sales(self.db, today=T + timedelta(days=8))
         with self.assertRaises(Forbidden) as e:
             later.return_items(self.ph, sale["id"], self._line(sale), refund_method="cash", reason="متأخر")
         self.assertEqual(e.exception.details["permission"], "sales.return_late")
-        Sales(self.db, today=T + timedelta(days=14)).return_items(
+        Sales(self.db, today=T + timedelta(days=7)).return_items(
             self.ph, sale["id"], self._line(sale), refund_method="cash", reason="في المدة")
         later.return_items(self.ctx, sale["id"], self._line(sale), refund_method="cash", reason="المالك")
 
