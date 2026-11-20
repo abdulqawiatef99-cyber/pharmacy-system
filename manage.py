@@ -596,6 +596,9 @@ def cmd_update(a, s):
         staged = updater.apply_zip(data, root, code_home=home)
         candidate = Path(staged["release"])
         releases.check_compatible(releases.current_root(root, home), candidate)
+        # Same requirements as the active release (checked just above): a package set a smart update brought
+        # stays selected, or the code would fall back to the installer's older packages (Codex P2 on 89907fe)
+        deps = (state.get("active") or {}).get("deps")
         # A candidate check must not open/migrate the real pharmacy database.
         with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
             isolated = Path(tmp)
@@ -603,6 +606,9 @@ def cmd_update(a, s):
                    "PHARM_DB_PATH": str(isolated / "test.db"), "PHARM_UPLOAD_DIR": str(isolated / "uploads"),
                    "PHARM_BACKUP_DIR": str(isolated / "backups"), "PHARM_PRINTER": "none",
                    "PYTHONUTF8": "1"}
+            env.pop("PHARM_DEPS_DIR", None)
+            if deps:                       # the candidate is checked with the packages it will run with
+                env["PHARM_DEPS_DIR"] = str(home / "deps" / deps)
             check = subprocess.run([sys.executable, str(candidate / "manage.py"), "selftest", "--quick"],
                                    cwd=candidate, env=env, timeout=120)
             if check.returncode:
@@ -619,7 +625,8 @@ def cmd_update(a, s):
         # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
         ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
         releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat()},
+                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat(),
+                           **({"deps": deps} if deps else {})},
                           expected_active=expected_active)
         print(f"Prepared {staged['files']} files; restart to check the selected release.")
         print("Previous code is retained. No pip install or database migration was run.")

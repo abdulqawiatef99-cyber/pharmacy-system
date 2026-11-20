@@ -306,3 +306,37 @@ class TestAbandonedJournalPutsTheDatabaseBack(Stage0Base):
         self.assertTrue(cand.exists())
         self.assertEqual(releases.resume_journal(self.home), "abandoned")   # next start finishes it
         self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
+
+
+class TestClassicUpdateKeepsThePackageSet(TestCommandLineFollowsMain):
+    """Codex P2 on 89907fe: after a smart update brought its own packages, a code-only update with the same
+    requirements keeps them selected (and checks the candidate with them)."""
+
+    def test_update_without_ref_moves_a_review_install_to_main_or_changes_nothing(self):
+        pass                                     # covered by the parent class; not repeated here
+
+    def test_deps_carried_through_a_classic_update(self):
+        from types import SimpleNamespace
+        from app.core import backup
+        ident = "d" * 64
+        staged = {"release": str(self.tmp), "id": "r2", "files": 1}
+        seen, envs = [], []
+        state = {"active": {"id": "r1", "sha": "a" * 40, "ref": "main", "deps": ident}}
+        with contextlib.ExitStack() as stack:
+            for p in (mock.patch.object(updater, "read_token", return_value=None),
+                      mock.patch.object(updater, "installed", return_value=state["active"]),
+                      mock.patch.object(updater, "latest_sha", return_value="b" * 40),
+                      mock.patch.object(updater, "download", return_value=b"zip"),
+                      mock.patch.object(updater, "apply_zip", return_value=staged),
+                      mock.patch.object(releases, "read_state", return_value=state),
+                      mock.patch.object(releases, "current_root", return_value=self.tmp),
+                      mock.patch.object(releases, "check_compatible"),
+                      mock.patch.object(subprocess, "run",
+                                        side_effect=lambda *a, **k: envs.append(k["env"]) or SimpleNamespace(returncode=0)),
+                      mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"),
+                      mock.patch.object(backup, "verify_archive", return_value={"problems": []}),
+                      mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3]))):
+                stack.enter_context(p)
+            self.manage.main(["update"])
+        self.assertEqual(seen[0]["deps"], ident)
+        self.assertTrue(envs[0]["PHARM_DEPS_DIR"].endswith(ident))
