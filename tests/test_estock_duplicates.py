@@ -181,3 +181,25 @@ class TestCodexReview385(Base):
         dec.write_text(json.dumps({"duplicates": {"1": 3}}), encoding="utf-8")
         res = self.run_import(tables=t, packs_file=dec)
         self.assertFalse(res["ok"])
+
+
+class TestCodexReview385b(Base):
+    """Codex on #385 @0f19b3b (failed before the fix)."""
+
+    def test_p1_one_invoice_number_with_two_different_headers_holds_returns(self):
+        from app.core.errors import Conflict
+        from app.sales import estock_returns as er
+        t = base_tables()
+        t["Sales_header"][0]["bill_cash"] = "30.0000"
+        t["Sales_header"].append(dict(t["Sales_header"][0], bill_cash="0"))     # invoice 1 twice, other payment
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        with self.assertRaises(Conflict) as e:
+            er.return_items(self.db, self.ctx, "1", {"1": 1}, reason="مرتجع عميل", key="k3")
+        self.assertEqual(e.exception.code, "estock_history_duplicate")
+
+    def test_an_exact_copy_of_a_header_does_not_hold_returns(self):
+        from app.sales import estock_returns as er
+        t = base_tables()
+        t["Sales_header"].append(dict(t["Sales_header"][0]))                   # invoice 1 twice, the same cells
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        self.assertTrue(er.invoice_lines(self.db, self.ctx, "1"))
