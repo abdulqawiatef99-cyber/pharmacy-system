@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 TOOLS = ("estock-db-read.bat", "estock-db-read.ps1", "estock-db-read-one.bat", "estock-db-import.bat",
-         "estock-import.bat", "launch-fresh-start.bat")
+         "estock-import.bat", "launch-fresh-start.bat", "estock-backups.bat", "estock-backups.py")
 SHORTCUT = "أدوات الصيدلية.url"
 README = "اقرأني.txt"
 README_TEXT = (
@@ -27,7 +27,8 @@ README_TEXT = (
     "estock-db-read-one.bat   إعادة قراية الجداول اللي ماتقريتش بس\r\n"
     "estock-db-import.bat     نقل إي ستوك كله للبرنامج (تجربة الأول، وبعدين YES)\r\n"
     "estock-import.bat        النقل القديم من ملفات إكسيل\r\n"
-    "launch-fresh-start.bat   بداية من الصفر قبل الإطلاق بس\r\n")
+    "launch-fresh-start.bat   بداية من الصفر قبل الإطلاق بس\r\n"
+    "estock-backups.bat       عرض نسخ إي ستوك الاحتياطية اللي على الجهاز وعمر أحدث نسخة (قراية بس)\r\n")
 log = logging.getLogger("pharm.tools")
 
 

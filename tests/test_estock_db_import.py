@@ -150,8 +150,11 @@ class Base(DBTestCase):
         return self.db.one("SELECT * FROM items WHERE code=?", (code,))
 
     def units(self, code):
-        return self.db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE item_id=?",
-                           (self.item(code)["id"],))["q"]
+        """The pharmacy's own units of the item (with 0039 a hospital-owned batch is not the pharmacy's)."""
+        own = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if any(
+            r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)")) else ""
+        return self.db.one("SELECT coalesce(sum(m.qty_delta),0) q FROM stock_movements m LEFT JOIN batches b ON"
+                           f" b.id=m.batch_id WHERE m.item_id=?{own}", (self.item(code)["id"],))["q"]
 
 
 class TestFullMove(Base):
@@ -242,7 +245,7 @@ class TestFullMove(Base):
         finally:
             con.close()
         h = res["reconciliation"]["history"]
-        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2})
+        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2, "quarantined": 0})
         self.assertEqual(h["Gedo_customers"]["archive"], 1)
 
     def test_same_export_again_resumes_and_writes_nothing_twice(self):
@@ -488,8 +491,13 @@ class TestBat(unittest.TestCase):
 
     def test_dry_run_confirm_apply_verify_in_order(self):
         L = self.lines
-        runs = [i for i, l in enumerate(L) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
+        main = L[:L.index(":rehearsal")]                   # the rehearsal (exit 4, trial data) has its own run below
+        runs = [i for i, l in enumerate(main) if '"%MANAGE%" import-estock-db' in l and "--status" not in l]
         self.assertEqual(len(runs), 2)
+        rehearsal = [l for l in L[L.index(":rehearsal"):] if '"%MANAGE%" import-estock-db' in l]
+        self.assertEqual(len(rehearsal), 1)
+        self.assertIn("--rehearsal", rehearsal[0])
+        self.assertNotIn("--apply", rehearsal[0])
         dry, apply = runs
         self.assertNotIn("--apply", L[dry])
         self.assertIn("--apply", L[apply])
@@ -517,6 +525,8 @@ class TestBat(unittest.TestCase):
     def test_every_failure_is_logged(self):
         L = self.lines
         for l in L[:L.index(":fail")]:
+            if l == 'if "%RC%"=="4" goto rehearsal':      # not a failure: the database holds trial data (#362)
+                continue
             if l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
         self.assertIn('call :log FAIL "%MSG%"', L)
@@ -888,7 +898,9 @@ class TestManagerSchemaReview(Base):
 
     def test_a_row_read_twice_blocks(self):
         t = base_tables()
-        t["Product_Amount"].append(dict(t["Product_Amount"][0]))           # pa_id 1 twice
+        # manager 20/11 15:15: an exact copy counts once (tests/test_estock_duplicates.py); two different rows
+        # with one stock number still stop the move
+        t["Product_Amount"].append(dict(t["Product_Amount"][0], amount="3"))     # pa_id 1 twice, other cells
         res = self.run_import(tables=t)
         self.assertIn(("Product_Amount", "pa_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
@@ -899,7 +911,7 @@ class TestManagerSchemaReview(Base):
         t["Sales_header"][0]["gf_id"] = "7"
         res = self.run_import(tables=t)
         got = {(d["field"], d["severity"]) for d in res["plan"].dq}
-        self.assertIn(("insert_date", "review"), got)
+        self.assertIn(("insert_date", "info"), got)          # manager 20/11 15:15: what it is, for information
         self.assertIn(("gf_id", "review"), got)
 
     def test_branch_mirror_rows_of_the_other_pharmacy_are_left_out(self):
@@ -1021,10 +1033,15 @@ class TestOwnerReportLines(Base):
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
-        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
-        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        every = {(d["table"], d["field"]): d for d in res["plan"].dq}
+        # manager 20/11 00:25: history-only lines (unknown ids in old invoices, a large sale line) are for review,
+        # not the owner's decisions; they change no money and no stock
+        self.assertEqual(every[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(every[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertNotIn(("Customer", "customer_id"), rows)
         self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
-        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        self.assertIn("سطر عكسه", every[("sales lines", "line value")]["action"])
+        self.assertNotIn(("sales lines", "line value"), rows)
         # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
         d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
         self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
@@ -1055,7 +1072,9 @@ class TestCashDepots(Base):
         self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
                          [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
                           ("3", "فودافون كاش", "3", "-15.00")])
-        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        # owner 20/11 00:50: the treasury's E-Stock figure is a reference (info), the two wallets are reviewed
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 2)
+        self.assertTrue(d[0]["reference_only"])
         self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
         self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
 
@@ -1166,7 +1185,8 @@ class TestScreenTour2245(Base):
                                   "total_after_back": "250.0000"}]
         res = self.run_import(tables=t)
         pc = res["plan"].checks["purchase_classes"]
-        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2,
+                                   "meaning": "consignment"})                     # owner 20/11 00:50
         self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
 
     def test_junk_master_names_are_listed_and_not_used(self):
@@ -1266,3 +1286,38 @@ class TestCodexReview345d(Base):
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         it = self.item("104")
         self.assertEqual((it["pack_size"], it["pack_unit_name"], it["base_unit_name"]), (3, "علبة", "شريط"))
+
+
+class TestRehearsal(Base):
+    """Codex on #362: the daytime trial runs while the program still holds trial data; the real database
+    refuses the move then (exit 4), so the trial runs on a NEW EMPTY database and writes nothing real."""
+    cmd = TestCommand.cmd
+
+    def _trial_sale(self):
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        iid = cat.create_item(self.db, self.ctx, {"name_en": "Trial Tab", "pack_size": 1, "public_price": 1000})
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=iid, qty_delta=5, movement_type="adjustment",
+                              unit_cost=Decimal("5"), ref_type="trial", ref_id="t1", note="trial")
+
+    def test_a_database_with_trial_data_refuses_with_exit_4(self):
+        self._trial_sale()
+        code, out, _ = self.cmd(self.export(), False)
+        self.assertEqual(code, 4, out)
+
+    def test_rehearsal_on_an_empty_database_touches_nothing_real(self):
+        self._trial_sale()
+        before = self.db.one("SELECT count(*) n FROM items")["n"]
+        code, out, s = self.cmd(self.export(), False, rehearsal=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn("RECONCILIATION: OK", out)
+        self.assertIn("REHEARSAL", out)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM items")["n"], before)       # the real one is untouched
+        self.assertFalse((Path(self.db.path).parent / estock_archive.NAME).exists())
+        self.assertTrue((self.tmp / "oFalse" / "openings-to-confirm.xlsx").exists())   # what the trial is for
+
+    def test_rehearsal_never_applies(self):
+        code, out, _ = self.cmd(self.export(), True, rehearsal=True)
+        self.assertNotEqual(code, 0)
+        self.assertFalse(self.db.one("SELECT 1 FROM items"))

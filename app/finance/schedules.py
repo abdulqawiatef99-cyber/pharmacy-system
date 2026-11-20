@@ -12,7 +12,7 @@ import re
 from datetime import date
 
 from ..core import audit, notify
-from ..core.errors import NotFound, ValidationFailed
+from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -33,11 +33,18 @@ def _add(period: str, months: int) -> str:
     return f"{y:04d}-{m:02d}"
 
 
+# a period counts as paid unless its expense was rejected before any money left: a rejected payment whose
+# cash already left the drawer stays paid, so the same bill is never offered (and paid) a second time (M2-12)
+# a period is taken unless it was rejected before any money left: a drawer or money-account payment already went
+# out when it waits for approval, so its rejection never reopens the month (M2-12; account: #348 Codex)
+TAKEN = "(status<>'rejected' OR shift_id IS NOT NULL OR account_id IS NOT NULL)"
+
+
 def next_open(db: Database, s: dict, today: date) -> dict | None:
     """First period not paid (or pending) and not skipped, looking up to a year ahead."""
     skipped = set(json.loads(s["skipped"] or "[]"))
-    done = {r["schedule_period"] for r in db.all(
-        "SELECT schedule_period FROM expenses WHERE schedule_id=? AND status<>'rejected'", (s["id"],))}
+    done = {r["schedule_period"] for r in db.all(f"SELECT schedule_period FROM expenses WHERE schedule_id=? AND {TAKEN}",
+                                                 (s["id"],))}
     p, limit = s["start_month"], _add(f"{today.year:04d}-{today.month:02d}", 12)
     while p <= limit:
         if p not in done and p not in skipped:
@@ -57,7 +64,7 @@ def listing(db: Database, ctx: Context, today: date | None = None) -> list[dict]
                     " WHERE s.org_id=? ORDER BY s.is_active DESC, s.day_of_month, s.name", (ctx.org_id,)):
         d = dict(r)
         d["next"] = next_open(db, d, today) if d["is_active"] else None
-        d["last_paid"] = db.one("SELECT max(schedule_period) p FROM expenses WHERE schedule_id=? AND status<>'rejected'",
+        d["last_paid"] = db.one(f"SELECT max(schedule_period) p FROM expenses WHERE schedule_id=? AND {TAKEN}",
                                 (d["id"],))["p"]
         out.append(d)
     order = {"late": 0, "soon": 1, "later": 2}
@@ -72,12 +79,14 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         cur = db.one("SELECT * FROM expense_schedules WHERE id=? AND org_id=?", (sid, ctx.org_id))
         if not cur:
             raise NotFound("البند المجدول غير موجود")
-    v = dict(cur) if cur else {"remind_days": 3, "every_months": 1, "paid_from": "outside", "is_active": 1,
+    v = dict(cur) if cur else {"remind_days": 3, "every_months": 1, "paid_from": "outside", "account_id": None, "is_active": 1,
                                "start_month": date.today().strftime("%Y-%m"), "amount": None, "note": None}
     for k in ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days",
-              "paid_from", "note", "is_active"):
+              "paid_from", "account_id", "note", "is_active"):
         if k in data:
             v[k] = data[k]
+    if "paid_from" in data and "account_id" not in data:
+        v["account_id"] = None               # a new source replaces the old account (#348 Codex P2)
     v["name"] = str(v.get("name") or "").strip()[:80]
     if len(v["name"]) < 2:
         raise ValidationFailed("اكتب اسم البند (مثال: إيجار الصيدلية)")
@@ -100,15 +109,25 @@ def save(db: Database, ctx: Context, data: dict, sid: str | None = None) -> dict
         raise ValidationFailed("التكرار غير صحيح")
     if not 0 <= v["remind_days"] <= 60:
         raise ValidationFailed("التذكير من 0 إلى 60 يومًا قبل الموعد")
-    if v["paid_from"] not in ("drawer", "outside"):
-        raise ValidationFailed("اختر مصدر الدفع")
+    # the source: the drawer, a money account (F105), or outside the program's accounts
+    src = v.get("account_id") if v.get("paid_from") == "outside" and v.get("account_id") else v.get("paid_from")
+    if src not in ("drawer", "outside"):
+        from . import money
+        try:                                  # the placeholder 'treasury' makes the treasury on this first write
+            src = money.writable(db, ctx, str(src or ""))
+        except NotFound:
+            raise ValidationFailed("اختر مصدر الدفع")
+        v["paid_from"], v["account_id"] = "outside", src
+    else:
+        v["paid_from"], v["account_id"] = src, None
     try:
         date.fromisoformat(str(v["start_month"]) + "-01")
     except ValueError:
         raise ValidationFailed("أول شهر غير صحيح")
     v["note"] = (str(v.get("note") or "").strip()[:200]) or None
     v["is_active"] = int(bool(v["is_active"]))
-    cols = ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days", "paid_from", "note", "is_active")
+    cols = ("name", "category_id", "amount", "day_of_month", "every_months", "start_month", "remind_days", "paid_from",
+            "account_id", "note", "is_active")
     with db.transaction():
         if cur:
             db.execute(f"UPDATE expense_schedules SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", (*[v[k] for k in cols], sid))
@@ -141,7 +160,7 @@ def _own_period(s: dict, period) -> str:
 
 
 def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_from: str | None = None,
-        note: str | None = None, period: str | None = None) -> dict:
+        note: str | None = None, period: str | None = None, expected_amount: int | None = None) -> dict:
     """Records one period's expense (normal approval rules) and moves the schedule on. With `period` (the month
     the screen showed) exactly that month is paid or refused; a second press never pays the month after it."""
     ctx.require("expenses.approve")
@@ -155,7 +174,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
     amount = amount if amount is not None else s["amount"]
     if not amount:
         raise ValidationFailed("اكتب المبلغ هذه المرة")
-    taken = ("SELECT 1 FROM expenses WHERE org_id=? AND schedule_id=? AND schedule_period=? AND status<>'rejected'",
+    taken = (f"SELECT 1 FROM expenses WHERE org_id=? AND schedule_id=? AND schedule_period=? AND {TAKEN}",
              (ctx.org_id, sid, period))
     if db.one(*taken):
         raise ValidationFailed("هذا الشهر سُجّل من قبل")
@@ -163,8 +182,18 @@ def pay(db: Database, ctx: Context, sid: str, amount: int | None = None, paid_fr
         # again under the write lock: two screens must not record this period twice
         if db.one(*taken):
             raise ValidationFailed("هذا الشهر سُجّل من قبل")
-        e = fin.record(db, ctx, category_id=s["category_id"], amount=amount, paid_from=paid_from or s["paid_from"],
-                       note=(note or s["name"]) + f" ({period})")
+        # the bill as it is now, not as an old screen showed it (M2-11)
+        now = _get(db, ctx, sid)
+        if not now["is_active"]:
+            raise Conflict("البند ده اتوقف؛ حدّث الشاشة", code="schedule_changed")
+        if period in set(json.loads(now["skipped"] or "[]")):
+            raise Conflict("الشهر ده اتعلّم «ليس هذه المرة»؛ حدّث الشاشة", code="schedule_changed")
+        if expected_amount is not None and (amount if amount is not None else now["amount"]) != expected_amount:
+            raise Conflict("مبلغ البند اتغير من شاشة تانية؛ حدّث الشاشة", code="schedule_changed",
+                           details={"amount": now["amount"]})
+        e = fin.record(db, ctx, category_id=s["category_id"], amount=amount,
+                       paid_from=paid_from or s.get("account_id") or s["paid_from"],
+                       note=(note or s["name"]) + f" ({period})", kind="schedule")
         db.execute("UPDATE expenses SET schedule_id=?, schedule_period=? WHERE id=?", (sid, period, e["id"]))
     return {**fin.get(db, ctx, e["id"]), "schedule_period": period}
 

@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from ..core import audit
+from ..dataimport.estock_db import CONFLICT_REASON, COPY_REASON
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -78,9 +79,20 @@ def _rows(con, t: str, where: dict) -> list[dict]:
     return out
 
 
+def _local_read(con) -> bool:
+    """Sales_details was read: it has rows in use or rows set apart at the move. A local table that quarantine
+    emptied is still the source; the Branches_ mirror never brings its lines back (Codex on #385)."""
+    if not _has(con, "Sales_details"):
+        return False
+    if con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone():
+        return True
+    q = con.execute("SELECT 1 FROM sqlite_master WHERE name='q_Sales_details'").fetchone()
+    return bool(q and con.execute('SELECT 1 FROM "q_Sales_details" LIMIT 1').fetchone())
+
+
 def _local_lines(con, sales_id: str) -> list[dict]:
     """The invoice's lines from the local table: Sales_details when it was read, else this branch's mirror."""
-    if _has(con, "Sales_details") and con.execute('SELECT 1 FROM "e_Sales_details" LIMIT 1').fetchone():
+    if _local_read(con):
         return _rows(con, "Sales_details", {"sales_id": sales_id})
     branch = None
     if _has(con, "co_inf"):
@@ -97,12 +109,69 @@ def _map(con, kind: str) -> dict[str, str]:
     return {r[0]: r[1] for r in con.execute(f'SELECT estock_id, program_id FROM "map_{kind}"')}
 
 
+QUARANTINE_TABLES = ("Sales_header", "Sales_details", "Branches_sales_details", "Back_sales_header", "Back_Sales_details")
+
+
+def _quarantine_guard(con, sales_id: str) -> None:
+    """A row of this invoice (its lines or a return of it) was quarantined at the move (impossible values, #380):
+    what was sold or already returned is not known, so no refund is made (Codex on #380). A quarantined row
+    whose invoice id itself is unreadable could be any invoice: then no old invoice is refunded."""
+    unknown, ids, clash = False, set(), set()
+    # only this pharmacy's lines count (Codex on #381), as _local_lines reads them: Sales_details when it was read,
+    # else this branch's rows of the Branches_ mirror; another branch's quarantined row says nothing about ours
+    local_details = _local_read(con)
+    branch = None
+    if _has(con, "co_inf"):
+        r = con.execute('SELECT * FROM "e_co_inf" LIMIT 1').fetchone()
+        if r is not None:
+            branch = _ident({k.lower(): r[k] for k in r.keys()}.get("branch_id")) or None
+    for t in QUARANTINE_TABLES:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name=?", (f"q_{t}",)).fetchone():
+            continue
+        if t == "Branches_sales_details" and local_details:
+            continue                                   # the local lines are Sales_details: the mirror is not used
+        cols = {r[1].lower(): r[1] for r in con.execute(f'PRAGMA table_info("q_{t}")')}
+        if "sales_id" not in cols:
+            unknown = True
+            continue
+        mirror = t == "Branches_sales_details" and branch is not None and "branch_id" in cols
+        sel = f'"{cols["sales_id"]}"' + (f', "{cols["branch_id"]}"' if mirror else ", NULL")
+        # an exact second copy of a row (Codex on #385) is set apart and read once: it hides nothing
+        for v, b, why in con.execute(f'SELECT {sel}, _reason FROM "q_{t}" WHERE coalesce(_reason, \'\') <> ?',
+                                     (COPY_REASON,)):
+            if mirror and _ident(b) != branch:
+                bd = _dec(b)
+                # a readable other branch is not ours; an impossible id (the importer's rule, #383 review) keeps the hold
+                if bd is not None and bd == bd.to_integral_value() and -1 <= bd <= 2 ** 53:
+                    continue
+            d = _dec(v)
+            if d is None or d != d.to_integral_value() or not (0 < d < 2 ** 53):
+                unknown = True
+            else:
+                ids.add(str(int(d)))
+                if why == CONFLICT_REASON:
+                    clash.add(str(int(d)))
+    if sales_id in clash and not unknown:
+        raise Conflict("فاتورة إي ستوك دي متسجلة أكتر من مرة ببيانات مختلفة: المرتجع عليها موقوف لحد ما المالك يراجعها",
+                       code="estock_history_duplicate")
+    if unknown or sales_id in ids:
+        raise Conflict("فاتورة إي ستوك دي (أو مرتجعها) فيها سطر اتعزل في النقل بقيم مستحيلة: المرتجع عليها موقوف لحد ما"
+                       " المالك يراجعها", code="estock_history_quarantined",
+                       details={"invoice": sales_id, "all_invoices": unknown})
+
+
 def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
     """Everything a return needs, read from the archive (no write)."""
     with closing(_archive(db, ctx)) as con:
+        _quarantine_guard(con, sales_id)
         heads = _rows(con, "Sales_header", {"sales_id": sales_id})
         if not heads:
             raise NotFound("الفاتورة دي مش في تاريخ إي ستوك")
+        if len(heads) > 1:
+            # one invoice number twice with different cells (an exact copy is set apart at the move): which
+            # payment the refund follows is not known (Codex on #385)
+            raise Conflict("فاتورة إي ستوك دي متسجلة مرتين ببيانات مختلفة: المرتجع عليها موقوف لحد ما المالك يراجعها",
+                           code="estock_history_duplicate")
         h = heads[0]
         items, customers = _map(con, "items"), _map(con, "customers")
         lines = _local_lines(con, sales_id)
@@ -116,6 +185,11 @@ def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
     for l in lines:
         extra[_ident(l.get("product_id"))] -= _dec(l.get("back_amount")) or 0
     out_lines = {}
+    keys = [_ident(l.get("details_id")) or str(n) for n, l in enumerate(lines, start=1)]
+    if len(set(keys)) != len(keys):
+        # E-Stock holds one line number of this invoice twice with different cells: what was sold is not known
+        raise Conflict("فاتورة إي ستوك دي فيها سطرين بنفس الرقم وبيانات مختلفة: المرتجع عليها موقوف لحد ما المالك"
+                       " يراجعها", code="estock_history_duplicate")
     for n, l in enumerate(lines, start=1):
         key = _ident(l.get("details_id")) or str(n)
         pid = _ident(l.get("product_id"))

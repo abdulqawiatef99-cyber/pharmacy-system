@@ -36,7 +36,8 @@ def read_packs(path: Path) -> dict[str, int]:
     header contains 'القرار' or 'عدد الوحدات' (the review sheet we send)."""
     if path.suffix.lower() == ".json":
         raw = json.loads(path.read_text(encoding="utf-8"))
-        raw = raw.get("packs", raw)
+        # the same file may hold only the class answers or the duplicate choices
+        raw = raw.get("packs", {} if {"classes", "duplicates"} & set(raw) else raw)
         out = {}
         for k, v in raw.items():
             if not v:

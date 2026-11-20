@@ -325,10 +325,10 @@ class Sales:
         return int(self.db.one("SELECT coalesce(sum(amount),0) b FROM customer_ledger WHERE org_id=?"
                                " AND customer_id=?", (ctx.org_id, customer_id))["b"])
 
-    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة"}
+    COLLECTION_METHODS = {"cash": "نقدًا", "card": "بطاقة", "transfer": "محفظة إلكترونية"}
 
     def customer_payment(self, ctx: Context, customer_id: str, amount: int, note: str | None = None,
-                         method: str = "cash") -> int:
+                         method: str = "cash", channel_id: str | None = None) -> int:
         ctx.require("customers.manage")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValidationFailed("يجب أن يكون المبلغ أكبر من صفر")
@@ -343,14 +343,25 @@ class Sales:
                 raise ValidationFailed(
                     "المبلغ أكبر من المستحق على العميل" if owed > 0 else "لا يوجد مبلغ مستحق على هذا العميل",
                     code="over_collection", details={"balance": owed, "amount": amount})
+            ch = None
+            if method != "cash" and channel_id:
+                ch = self.db.one("SELECT id, name FROM payment_channels WHERE id=? AND org_id=? AND kind=?",
+                                 (channel_id, ctx.org_id, method))
+                if not ch:
+                    raise ValidationFailed("وسيلة الدفع غير موجودة")
             if method == "cash":
                 cash.record(self.db, ctx, amount, "customer_payment", customer_id, note)
             # how it was paid stays with the row (no column for it): a card collection has no drawer movement
             said = (str(note).strip() if note else "")[:200]
-            how = self.COLLECTION_METHODS[method] + (f" — {said}" if said else "")
+            how = self.COLLECTION_METHODS[method] + (f" ({ch['name']})" if ch else "") + (f" — {said}" if said else "")
+            lid = new_id()
             self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, note,"
                             " created_by) VALUES (?,?,?,?, 'payment', ?, ?)",
-                            (new_id(), ctx.org_id, customer_id, -amount, how, ctx.user_id))
+                            (lid, ctx.org_id, customer_id, -amount, how, ctx.user_id))
+            if method != "cash":                      # card / wallet money lands in its own account (F105)
+                from ..finance import money
+                money.receive(self.db, ctx, method, ch["id"] if ch else None, amount, "customer_payment",
+                              ref_type="customer_ledger", ref_id=lid, note=how)
             audit.record(self.db, ctx, "customer.payment", "customer", customer_id,
                          after={"amount": amount, "method": method})
         return self.balance(ctx, customer_id)
@@ -385,7 +396,11 @@ class Sales:
         for this batch: status 'confirmed'; 'pending' and 'not_ours' do not hold the stock, and 'handled'
         holds only units of the lot that came in after it was handled: the same recalled lot received again
         by any way, a purchase, a return or a count, #324 S1). Compared at the ledger's millisecond precision,
-        a receipt in the same millisecond as the decision counts as after it (the safe side)."""
+        a receipt in the same millisecond as the decision counts as after it (the safe side). A batch owned
+        by the hospital (0039: E-Stock's store 2, owner 19/11) is never the pharmacy's to sell: left out."""
+        if not hasattr(self, "_owner_sql"):      # 0039 present? (a database before it has no batch owner)
+            has = any(r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)"))
+            self._owner_sql = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if has else ""
         rows = self.db.all(
             "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price,"
             " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.batch_id=sb.batch_key"
@@ -394,7 +409,7 @@ class Sales:
             "              AND sm.item_id=sb.item_id AND sm.batch_id=m.batch_id"
             "              AND sm.qty_delta>0 AND sm.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', m.decided_at))))) recalled"
             " FROM stock_balances sb LEFT JOIN batches b ON b.id = nullif(sb.batch_key,'')"
-            " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0"
+            " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0" + self._owner_sql +
             " ORDER BY b.expiry_date IS NULL, b.expiry_date", (ctx.org_id, branch_id, item_id))
         today = self.today.isoformat()
         return [{**dict(r), "expired": bool(r["expiry_date"] and r["expiry_date"] < today)} for r in rows]
@@ -688,6 +703,11 @@ class Sales:
             s = self._draft(ctx, sid)
             if s["version"] != preview["version"]:
                 raise Conflict("عُدّلت الفاتورة أثناء الإتمام", code="stale_version")
+            # the contract terms again under the posting lock: a rate changed after the check above would
+            # otherwise post at the old price (#324 M2-08)
+            if self._reprice_contract(ctx, sid):
+                raise Conflict("تغيّر خصم التعاقد على هذه الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع",
+                               code="price_changed", details={"reason": "contract"})
             if on_credit:            # #143: again inside the write lock, so two cashiers cannot pass it together
                 c = self.db.one("SELECT credit_limit FROM customers WHERE id=? AND org_id=?",
                                 (s["customer_id"], ctx.org_id))
@@ -695,7 +715,7 @@ class Sales:
                 if not c or bal + on_credit > c["credit_limit"]:
                     raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
                                    details={"balance": bal, "limit": c["credit_limit"] if c else 0})
-            total = 0
+            total = subtotal = discount = 0
             below_cost = []
             for l in preview["lines"]:
                 item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
@@ -713,7 +733,14 @@ class Sales:
                                     (new_id(), l["id"], a["batch_id"], a["qty"], a["unit_price"],
                                      cost_row["avg_cost"] if cost_row else None, a["pack_price"], a["pack_size"]))
                 gross = line_gross((a["qty"], a) for a in plan)
-                net = gross - discount_of(gross, l["discount_bp"])
+                disc = discount_of(gross, l["discount_bp"])
+                net = gross - disc
+                # each line against the one the cashier confirmed: two price changes that cancel out keep the
+                # total but not the lines (#324 M2-07)
+                if (gross, disc) != (l["gross"], l["discount"]):
+                    raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
+                subtotal += gross
+                discount += disc
                 if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
                     if Decimal(net) < cost:
@@ -738,15 +765,23 @@ class Sales:
                 shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
                     or cash.require_open_shift(self.db, ctx, s["branch_id"])   # again inside the write lock
             self.db.execute("UPDATE sales SET shift_id=? WHERE id=?", (shift, sid))
+            from ..finance import money
             for p in payments:
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount)"
                                 " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
                                                           p.get("channel_id"), p["amount"]))
+                if p["method"] in money.METHODS:            # card / wallet money lands in its own account (F105)
+                    money.receive(self.db, ctx, p["method"], p.get("channel_id"), p["amount"], "sale",
+                                  ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
                             " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
-                            (no, preview["subtotal"], preview["discount_total"], total, paid_cash,
+                            (no, subtotal, discount, total, paid_cash,
                              paid_card, paid_transfer, on_credit, _now(), request_id, sid))
+            if paid_transfer:   # a proof already reviewed on the draft counts now the transfer is on its account (#348)
+                from .attachments import transfer_state
+                money.settle_transfer_review(self.db, ctx, sid,
+                                             transfer_state(self.db, ctx.org_id, sid, paid_transfer)["received"])
             if on_credit:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
@@ -816,7 +851,9 @@ class Sales:
             if not isinstance(p, dict):
                 raise ValidationFailed("طريقة الدفع غير صحيحة")
             m, amount, ch = p.get("method"), p.get("amount"), p.get("channel_id") or None
-            if m not in ("cash", "card", "transfer", "credit") or not isinstance(amount, int) or amount < 0:
+            # true is not 1 piaster (#324 M2-19)
+            if m not in ("cash", "card", "transfer", "credit") or isinstance(amount, bool) \
+                    or not isinstance(amount, int) or amount < 0:
                 raise ValidationFailed("طريقة الدفع غير صحيحة")
             if amount == 0:
                 continue
@@ -886,7 +923,7 @@ class Sales:
                     raise ValidationFailed("الفاتورة ليست توصيلًا")
                 fee = d.get("fee", None)
                 if fee is not None:
-                    if not isinstance(fee, int) or not 0 <= fee <= 100000:
+                    if isinstance(fee, bool) or not isinstance(fee, int) or not 0 <= fee <= 100000:   # #324 M2-19
                         raise ValidationFailed("رسوم التوصيل غير صحيحة")
                     self.db.execute("UPDATE sales SET delivery_fee=? WHERE id=?", (fee, sid))
                 for k in ("address", "phone", "courier"):
@@ -1076,11 +1113,24 @@ class Sales:
                 # back to the account, so a debt can never turn into cash out of the drawer.
                 # (a delivery sale reaches here only once settled, so its courier cash is in the drawer)
                 received = (s["paid_cash"] or 0) + (s["paid_card"] or 0) + (s["paid_transfer"] or 0)
+                # a transfer the owner or a manager marked "not received" is money the shop never got: it funds no
+                # refund, in cash or to a card (#324 M2-01)
+                # ... and only the part confirmed when a reviewer approved part of it (#324 M2-01)
+                unreceived = False
+                if s["paid_transfer"]:
+                    from .attachments import transfer_state
+                    got = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["received"]
+                    unreceived = got < s["paid_transfer"]
+                    received -= s["paid_transfer"] - got
                 refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns WHERE sale_id=? AND org_id=?"
                                        " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
                 can = max(0, received - refunded)
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
+                    if unreceived:
+                        raise Conflict(f"تحويل هذه الفاتورة لم يتأكد وصوله كاملًا، فلا يُرد {how} (الحد الأقصى {egp(can)} ج)",
+                                       code="cash_refund_exceeds_paid",
+                                       details={"max_cash": can, "refund": refund, "transfer_not_received": True})
                     raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
@@ -1097,6 +1147,11 @@ class Sales:
                                 (new_id(), ctx.org_id, s["customer_id"], -refund, rid, ctx.user_id))
             if refund_method == "cash":
                 cash.record(self.db, ctx, -refund, "refund", rid, reason, branch_id=s["branch_id"])
+            if refund_method == "card" and refund:
+                # back through the card / wallet the sale was paid with (the first one, if it was split)
+                from ..finance import money
+                money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
+                                   meta={"return_id": rid})
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1158,6 +1213,8 @@ class Sales:
                                 (sid, ctx.org_id))
             else:
                 cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
+            from ..finance import money
+            money.reverse_sale(self.db, ctx, sid, ref_type="sale_void", note=f"إلغاء فاتورة {s['sale_no']}")
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",

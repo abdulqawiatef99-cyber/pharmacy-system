@@ -11,7 +11,8 @@ What is done, and when:
 - VACUUM only when a person asks (`python -m app.core.dbhealth vacuum`, with the program stopped): it rewrites
   the whole file, needs free disk for a second copy and locks everything while it runs. The books are
   append-only, so free pages come only from cleaned notifications and sessions: a few megabytes a year.
-- No ANALYZE / PRAGMA optimize: see retention.clean (#249) and docs/specs/sqlite-health.md for the measurement.
+- No ANALYZE / PRAGMA optimize: see retention.clean (#249) and docs/specs/09-backup-watch-and-database-health.md
+  section 6 for the measurement.
 
 Never deleted, here or anywhere: the audit log, the safety log, stock movements, invoices (retention.py).
 """

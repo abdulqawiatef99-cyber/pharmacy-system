@@ -17,15 +17,41 @@ SEARCH_N = 5
 TEXT_FIELDS = ("name", "name_alt", "address1", "address2", "phone", "phone2", "phone3", "notes")
 
 
+EG_MOBILE = re.compile(r"(?:\+|00)?20(1[0125]\d{8})")
+
+
 def clean_phone(v) -> str | None:
-    """Keeps digits and a leading +; Arabic-Indic digits become 0-9."""
+    """Keeps digits and a leading +; Arabic-Indic digits become 0-9. An Egyptian mobile in its international
+    form (+20 / 0020 / 20) is saved as the local 01... number, so one buyer is one number (#324 M2-20)."""
     s = str(v or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     s = re.sub(r"[^\d+]", "", s)
     if not s:
         return None
     if not re.fullmatch(r"\+?\d{3,15}", s):
         raise ValidationFailed(f"رقم الهاتف غير صحيح: {v}")
-    return s
+    m = EG_MOBILE.fullmatch(s)
+    return "0" + m.group(1) if m else s
+
+
+def search_terms(q: str) -> list[str]:
+    """The SEARCH_SQL parameters: a whole Egyptian mobile typed in any form is looked up in the form it is saved
+    in (01...), so +20 10... finds the customer; anything else (a name, part of a number) as typed."""
+    q = str(q or "").strip()
+    ph = q
+    try:
+        c = clean_phone(q)
+        if c and re.fullmatch(r"01[0125]\d{8}", c):
+            ph = c
+    except ValidationFailed:
+        pass
+    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3
+
+
+def phone_forms(ph: str) -> list[str]:
+    """Every way the same number may already be saved (numbers saved before the canonical form)."""
+    if re.fullmatch(r"01[0125]\d{8}", ph):
+        return [ph, "+2" + ph, "002" + ph, "2" + ph]
+    return [ph]
 
 
 def wa_number(phone: str | None) -> str | None:
@@ -40,10 +66,35 @@ def wa_number(phone: str | None) -> str | None:
     return None
 
 
+def canonical(ph: str) -> str:
+    """A saved number in the form clean_phone gives today (one saved before keeps its text if odd)."""
+    try:
+        return clean_phone(ph) or ph
+    except ValidationFailed:
+        return ph
+
+
+def phone_doubles(db: Database, ctx: Context) -> list[dict]:
+    """Customers that share one number in two forms, saved before the canonical form: for the owner to
+    review and merge by hand (#324 M2-20). Nothing is changed here."""
+    ctx.require("customers.manage")
+    groups: dict[str, dict[str, dict]] = {}
+    for r in db.all("SELECT id, name, phone, phone2, phone3 FROM customers WHERE org_id=? AND is_active=1"
+                    " AND coalesce(phone, phone2, phone3) IS NOT NULL", (ctx.org_id,)):
+        for k in ("phone", "phone2", "phone3"):
+            if r[k]:
+                groups.setdefault(canonical(r[k]), {})[r["id"]] = {"id": r["id"], "name": r["name"]}
+    return [{"phone": ph, "customers": list(cs.values())} for ph, cs in sorted(groups.items()) if len(cs) > 1]
+
+
 def check_phones(db: Database, org_id: str, phones: list[str], exclude: str | None = None) -> None:
+    """Call inside the write transaction: two tills saving the same number cannot both pass."""
     for ph in phones:
-        r = db.one("SELECT id, name FROM customers WHERE org_id=? AND (phone=? OR phone2=? OR phone3=?)"
-                   + (" AND id<>?" if exclude else ""), (org_id, ph, ph, ph) + ((exclude,) if exclude else ()))
+        forms = phone_forms(ph)
+        q = ",".join("?" * len(forms))
+        r = db.one(f"SELECT id, name FROM customers WHERE org_id=? AND (phone IN ({q}) OR phone2 IN ({q})"
+                   f" OR phone3 IN ({q}))" + (" AND id<>?" if exclude else ""),
+                   (org_id, *forms, *forms, *forms) + ((exclude,) if exclude else ()))
         if r:
             raise Conflict(f"رقم {ph} مسجل للعميل {r['name']}")
     if len(set(phones)) != len(phones):
@@ -65,7 +116,7 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     params: list = [ctx.org_id]
     if q.strip():
         sql += f" AND ({SEARCH_SQL})"
-        params += [f"%{q.strip()}%"] * SEARCH_N
+        params += search_terms(q)
     # the filter runs before the 300 limit, so a big customer list never hides a debtor
     sql = f"SELECT * FROM ({sql}) WHERE 1=1"
     if only == "debt":
@@ -89,8 +140,6 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
     if "name" in ch and not ch["name"]:
         raise ValidationFailed("اسم العميل مطلوب")
     phones = [ch.get(k, c[k]) for k in ("phone", "phone2", "phone3")]
-    if any(k.startswith("phone") for k in ch):
-        check_phones(db, ctx.org_id, [p for p in phones if p], exclude=cid)
     if "credit_limit" in data:
         try:                                   # as on create: true is not 1 piaster, and no number SQLite cannot hold
             v = whole_number(data["credit_limit"])
@@ -103,6 +152,8 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
         ch["whatsapp_ok"] = int(bool(data["whatsapp_ok"]))
     if ch:
         with db.transaction():
+            if any(k.startswith("phone") for k in ch):        # inside the write, as on create (#324 M2-20)
+                check_phones(db, ctx.org_id, [canonical(p) for p in phones if p], exclude=cid)
             try:
                 db.execute(f"UPDATE customers SET {', '.join(f'{k}=?' for k in ch)} WHERE id=?", (*ch.values(), cid))
             except Exception as e:

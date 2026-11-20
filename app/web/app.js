@@ -181,6 +181,8 @@ const hintHtml = (h) => (!h ? "" : h.kind === "layout"
   : `<p class="badge b-info search-hint">ℹ لا يوجد اسم مطابق تمامًا — هذه أقرب الأصناف</p>`);
 
 const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// the server's discount_of: integer basis points, half up, never through a float percentage (#348)
+const discountOf = (gross, bp) => (bp ? Math.floor((gross * bp + 5000) / 10000) : 0);
 
 function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
@@ -249,16 +251,26 @@ async function askApproval(details, message, method, path) {
 }
 
 const API = { busy: 0, last: 0 };
+// set by wireRange() while a period change starts its reads: a GET answered after a newer choice is dropped (#324 R25)
+let RANGE_CALL = null;
+const RANGE_SEQ = {};
 const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
 // Money forms: the same POST (path + body) sent again within 4 seconds is a double click or a double
 // Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
+// A money form whose every attempt lost its answer has an UNKNOWN outcome: sent again unchanged, however much
+// later, it carries the same key, so the server replays it or says it is unconfirmed instead of posting a second
+// time. The key is dropped once any answer comes back (#324 M2-10).
+const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
-  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/,
+  // money accounts (F105/F108): a transfer, the owner's money in or out, a count, an opening fix, a reconciliation
+  /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/];
 function onceKey(method, apiPath, bodyText) {
-  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  if (UNSURE.has(sig)) return UNSURE.get(sig);
   for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
   const hit = ONCE_SENT.get(sig);
   if (hit) return hit.key;
@@ -266,14 +278,17 @@ function onceKey(method, apiPath, bodyText) {
   ONCE_SENT.set(sig, { key, at: now });
   return key;
 }
+onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
-  const apiPath = path.split("?")[0];
+  const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
+  let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
     _key = _key || onceKey(method, apiPath, opts.body);
+    if (onceKey.applies(method, apiPath, opts.body)) sig = `${method} ${apiPath} ${opts.body}`;
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
@@ -285,11 +300,17 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        if (attempt >= 2) {
+          if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
+          throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        }
         await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
       }
     }
     data = await r.json().catch(() => ({}));
+    if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
+    // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
+    if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
@@ -341,6 +362,9 @@ const routes = [
   [/^#\/categories$/, viewCategories],
   [/^#\/groups$/, viewGroups],
   [/^#\/shift$/, viewShift],
+  [/^#\/money$/, viewMoney],
+  [/^#\/money\/([\w-]+)$/, viewMoneyAccount],
+  [/^#\/reconcile$/, viewReconcile],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
   [/^#\/estock(?:\?.*)?$/, viewEstock],
@@ -471,7 +495,8 @@ const SCREENS = {
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
-  customize: ["تخصيص الواجهة", "settings.manage"], estock: ["تاريخ إي ستوك", "sales.read"],
+  customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
+  reconcile: ["مطابقة الأرصدة", "cash.see_expected"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
@@ -1395,7 +1420,11 @@ async function printLabels(list) {
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
-  catch (er) { toast(er.message, true); if (er.code === "print_failed") page(); }
+  catch (er) {
+    // the owner switched labels to the browser after this tab read the setting: print there, read it again next time (#324 R16)
+    if (er.code === "labels_in_browser") { LABEL_CFG = null; return page(); }
+    toast(er.message, true); if (er.code === "print_failed") page();
+  }
 }
 
 async function viewItems() {
@@ -2370,17 +2399,22 @@ async function renderReceiptCfg(c) {
     catch (err) { toast(err.message, true); }
   });
 }
-function renderChannels(list) {
+const CH_GROUP = { card: "فيزا", transfer: "محفظة إلكترونية" };
+async function renderChannels(list) {
   CHANNELS = null;
-  $("#chBox").innerHTML = `<p class="muted">ما يُضاف هنا يظهر في شاشة البيع عند اختيار بطاقة أو تحويل، ويُجمَع تلقائيًا عند إغلاق الشيفت.</p>
-    <table><thead><tr><th>النوع</th><th>الاسم</th><th>مفعّل</th><th></th></tr></thead><tbody>
-    ${list.map((c) => `<tr data-id="${esc(c.id)}"><td>${c.kind === "card" ? "جهاز بطاقات" : "تحويل / محفظة"}</td><td><input name="name" value="${esc(c.name)}"></td>
+  const accs = await moneyAccounts(true), seeAcc = ME.permissions.includes("cash.see_expected");
+  $("#chBox").innerHTML = `<p class="muted">الكاشير بيختار المجموعة (فيزا أو محفظة إلكترونية) وبعدين الطريقة. كل طريقة فلوسها بتنزل في حسابها، وبيتراجع كل حساب لوحده.</p>
+    <table><thead><tr><th>المجموعة</th><th>الاسم</th>${seeAcc ? "<th>الفلوس بتنزل في</th>" : ""}<th>مفعّل</th><th></th></tr></thead><tbody>
+    ${list.map((c) => `<tr data-id="${esc(c.id)}"><td><select name="kind">${Object.entries(CH_GROUP).map(([k, t]) => `<option value="${k}" ${c.kind === k ? "selected" : ""}>${t}</option>`).join("")}</select></td><td><input name="name" value="${esc(c.name)}"></td>
+      ${seeAcc ? `<td><select name="acc"><option value="">— مش محدد —</option>${srcOptions(accs, c.account_id, { drawer: false, outside: false })}</select></td>` : ""}
       <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""}></td><td><button class="btn small secondary" data-chsave>احفظ</button></td></tr>`).join("")}</tbody></table>
-    <form class="row mt" id="chNew"><label class="f">النوع <select name="kind"><option value="card">جهاز بطاقات</option><option value="transfer">تحويل / محفظة</option></select></label>
+    <form class="row mt" id="chNew"><label class="f">المجموعة <select name="kind"><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
       <label class="f">الاسم <input name="name" required placeholder="مثال: جهاز البنك الأهلي"></label><button class="btn small">أضف</button></form>`;
   document.querySelectorAll("[data-chsave]").forEach((b) => b.addEventListener("click", async () => {
     const tr = b.closest("tr");
-    try { renderChannels((await api(`/api/payment-channels/${tr.dataset.id}`, { method: "PATCH", body: { name: tr.querySelector("[name=name]").value, is_active: tr.querySelector("[name=is_active]").checked } })).channels); toast("تم الحفظ"); }
+    const body = { name: tr.querySelector("[name=name]").value, is_active: tr.querySelector("[name=is_active]").checked, kind: tr.querySelector("[name=kind]").value };
+    if (tr.querySelector("[name=acc]")) body.account_id = tr.querySelector("[name=acc]").value || null;
+    try { renderChannels((await api(`/api/payment-channels/${tr.dataset.id}`, { method: "PATCH", body })).channels); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   }));
   $("#chNew").addEventListener("submit", async (e) => {
@@ -2514,6 +2548,8 @@ async function viewSalesAdvanced() {
     draw();
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
+  // a file or a printout of a capped list says so, as the screen does (#324 R22)
+  const subOut = () => sub() + (R.truncated ? " — ⚠ أول 3000 فاتورة فقط من الفترة" : "");
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -2551,7 +2587,7 @@ async function viewSalesAdvanced() {
     }));
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
-    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", sub(), sheets()));
+    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -2599,7 +2635,7 @@ async function viewSalesAdvanced() {
       if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); }
       box.append(copy);
     }
-    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", sub());
+    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", subOut());
   };
   document.querySelectorAll("[data-ip]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.ip];
@@ -2717,8 +2753,9 @@ async function viewSale(id) {
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
       <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ تمت مراجعتها", problem: "✕ بها مشكلة", pending: "⚠ بانتظار المراجعة" }[a.review]}</span>
-        ${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
-        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>` : ""}
+        ${a.review === "ok" && a.confirmed_amount != null ? `<div><span>المبلغ الذي وصل:</span> ${money(a.confirmed_amount)} ج</div>` : ""}${a.review_note ? `<div>${esc(a.review_note)}</div>` : ""}<div class="muted small">${esc(a.by_name || "")}${a.reviewed_name ? ` · راجعها ${esc(a.reviewed_name)}` : ""}</div>
+        ${can("sales.totals") && a.review !== "ok" ? `<button class="btn small" data-rvok="${esc(a.id)}">✓ وصل المبلغ</button>
+          <button class="btn small secondary" data-rvpart="${esc(a.id)}">وصل جزء منه</button>` : ""}
         ${can("sales.totals") && a.review !== "problem" ? `<button class="btn small secondary" data-rvbad="${esc(a.id)}">✕ بها مشكلة</button>` : ""}</figcaption></figure>`).join("")}</div>
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>الصافي</th>
@@ -2757,6 +2794,12 @@ async function viewSale(id) {
   });
   app.querySelectorAll("[data-rvok]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/attachments/${b.dataset.rvok}/review`, { method: "POST", body: { ok: true } }); viewSale(id); } catch (err) { toast(err.message, true); }
+  }));
+  // only part of the transfer arrived: the amount confirmed is what counts as received (#324 M2-01)
+  app.querySelectorAll("[data-rvpart]").forEach((b) => b.addEventListener("click", async () => {
+    const amount = toPiasters(prompt("كم وصل من التحويل؟ (ج)") || "");
+    if (!(amount > 0)) return;
+    try { await api(`/api/attachments/${b.dataset.rvpart}/review`, { method: "POST", body: { ok: true, amount } }); viewSale(id); } catch (err) { toast(err.message, true); }
   }));
   app.querySelectorAll("[data-rvbad]").forEach((b) => b.addEventListener("click", async () => {
     const note = prompt("ما المشكلة؟ (مثال: المبلغ لم يصل / المبلغ أقل)"); if (!note) return;
@@ -2918,7 +2961,8 @@ function receiptWanted(sale, cfg, override) {
 }
 let RCFG = null;                      // receipt settings, read once per POS visit
 const lastSale = () => { try { return JSON.parse(sessionStorage.getItem("posLast") || "null"); } catch { return null; } };
-const METHODS = [["cash", "نقدي"], ["card", "بطاقة"], ["transfer", "تحويل"], ["credit", "آجل"]];
+// owner's design 19/11: the kind first («فيزا», «محفظة إلكترونية»), then which one; each one lands in its own account
+const METHODS = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "محفظة إلكترونية"], ["credit", "آجل"]];
 // screenshot of the transfer, saved with the invoice for the owner to check (optional)
 const proofInput = (s) => `<label class="f mt proof">📎 صورة التحويل ${(s.attachments || []).length ? `<span class="badge b-ok">✓ ${(s.attachments || []).length} صورة</span>` : `<span class="muted">(اختياري — للمراجعة)</span>`}
   <input type="file" id="posProof" accept="image/*,application/pdf"></label>`;
@@ -3191,11 +3235,11 @@ function renderSide() {
         <p class="badge ${remaining === 0 ? "b-ok" : "b-warn"} mt">${remaining === 0 ? "✓ الدفع كامل" : `⚠ المتبقي ${money(remaining)}`}</p>
         <p><a href="#" id="splitOff">رجوع لطريقة دفع واحدة</a></p>`
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
-        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "الجهاز" : "المحفظة / طريقة التحويل"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
+        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
-        <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء ببطاقة أو تحويل)</a></p>`}
+        <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : "اطبع إيصال لهذا البيع (F4)"}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>F4</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
@@ -3355,12 +3399,19 @@ async function complete(findings) {
     if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
     else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
   });
+  // F27: what the customer handed over — printed with the change due, never stored
+  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
+  // a typed amount below the cash part is a short tender, not a full payment (#324 M2-03)
+  const cashPart = payments.filter((p) => p.method === "cash").reduce((t, p) => t + (p.amount || 0), 0);
+  if (given && given < cashPart) {
+    toast(`المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع (${money(given)} / ${money(cashPart)})`, true);
+    $("#payGiven")?.focus();
+    return;
+  }
   const btn = $("#posDone");
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
-  // F27: what the customer handed over — printed with the change due, never stored
-  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
@@ -3446,16 +3497,17 @@ const denomLabel = (d) => (d >= 100 ? `${d / 100} جنيه` : d === 50 ? "نصف
 async function viewShift() {
   let sh = null;
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
-  const seeAll = ME.permissions.includes("cash.see_expected");
+  const seeAll = ME.permissions.includes("cash.see_expected"), keeps = ME.permissions.includes("cash.manage");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
+  const accs = await moneyAccounts(true), lastFloat = (accs.find((a) => a.id === "drawer") || {}).balance;
   const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
   if (!sh) {
-    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
-      <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="0" class="big"></label>
+    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
+      <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
     $("#shOpen").addEventListener("submit", async (e) => {
@@ -3466,7 +3518,8 @@ async function viewShift() {
     return;
   }
   const k = sh.cash_by_kind || {};
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
+  const moneyLink = seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : "";
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>${moneyLink}
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
@@ -3481,6 +3534,11 @@ async function viewShift() {
     ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
     <tfoot><tr><th>الإجمالي المعدود</th><th></th><th class="num big" id="dTotal">0.00</th></tr></tfoot></table>
     <label class="f mt">ملاحظة (اختياري) <input name="note"></label>
+    <fieldset class="mt"><legend>الفلوس بعد التقفيل</legend>
+      <label class="chk"><input type="checkbox" name="ho" ${keeps ? "" : "checked"}> ${keeps ? "هسلّم الفلوس لحد تاني (هيكتب الرقم السري بتاعه)" : "سلّم النقدية لمدير أو للمالك (هيكتب الرقم السري بتاعه)"}</label>
+      <div class="row" id="shMove" ${keeps ? "" : ""}><label class="f">الفكة اللي هتفضل في الدرج للشيفت الجاي (ج) <input name="fl" type="number" step="0.25" min="0" value="${money(sh.opening_cash)}"></label>
+      ${accs.length ? `<label class="f">الباقي يتحول إلى <select name="to">${srcOptions(accs, "treasury", { drawer: false, outside: false })}</select></label>` : ""}</div>
+      <p class="muted small">${keeps ? "لو مش هتسلّم لحد، الفلوس بتتحول باسمك." : "لو محدش استلم، الفلوس كلها بتفضل في الدرج للشيفت الجاي."}</p></fieldset>
     <button class="btn big">إغلاق الشيفت وطباعة التقرير</button></form>` : ""}
   ${hist}`;
   const recalc = () => {
@@ -3505,11 +3563,14 @@ async function viewShift() {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
     try {
-      const r = await api("/api/cash/close", { method: "POST", body: { denominations: den, note: e.target.note.value || null } });
-      const d = r.difference;
+      const f = e.target, body = { shift_id: sh.id, denominations: den, note: f.note.value || null };
+      if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
+      const r = await api("/api/cash/close", { method: "POST", body });
+      const d = r.difference, moved = r.float_left != null ? r.counted_cash - r.float_left : null;
       app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1>
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
-        <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
+        <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div>
+          ${moved != null ? `<div>اتحوّل من الدرج<b>${money(moved)}</b></div><div>الفكة للشيفت الجاي<b>${money(r.float_left)}</b></div>` : ""}</div>
         <div class="row mt"><a class="btn" id="shPrint" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح شيفت جديدًا</a></div></section>`;
       $("#shPrint").addEventListener("click", (ev) => { ev.preventDefault(); printShiftReport(r.id); });
       printShiftReport(r.id);
@@ -3531,6 +3592,215 @@ async function printShiftReport(id) {
   }
 }
 // ------------------------------------------------------------------ end #97
+
+// ------------------------------------------------------------------ money accounts (F105): where the money is
+let MONEY = null;                                   // {accounts, kinds, movement_kinds}, read once per screen
+async function moneyAccounts(force = false) {
+  if (!ME.permissions.includes("cash.see_expected")) return [];
+  if (!MONEY || force) MONEY = await api("/api/money/accounts");
+  return MONEY.accounts;
+}
+const isOwnerMe = () => ME.role === "owner";
+// a payout source: the drawer, a money account (with its balance), or outside the program's accounts
+function srcOptions(accs, sel, { drawer = true, outside = true, ownerOutside = false } = {}) {
+  const o = [];
+  if (sel === "treasury") sel = (accs.find((a) => a.kind === "treasury") || {}).id || (drawer ? "drawer" : sel);
+  if (drawer) o.push(`<option value="drawer" ${sel === "drawer" ? "selected" : ""}>من خزينة الشيفت</option>`);
+  for (const a of accs) {
+    if (a.id === "drawer" || !a.is_active) continue;
+    o.push(`<option value="${esc(a.id)}" ${sel === a.id ? "selected" : ""}>${esc(a.name)} — ${money(a.balance)} ج</option>`);
+  }
+  if (outside && (!ownerOutside || isOwnerMe())) {
+    o.push(`<option value="outside" ${sel === "outside" ? "selected" : ""}>${isOwnerMe() ? "من خارج حسابات البرنامج (من جيبي)" : "من جيبي (ينتظر موافقة المالك)"}</option>`);
+  }
+  return o.join("");
+}
+const srcName = (e) => e.account || (e.paid_from === "drawer" ? "درج الشيفت" : "من خارج الحسابات");
+const MV_SIGN = (a) => (a < 0 ? `<span class="err">− ${money(-a)}</span>` : `<span class="ok">+ ${money(a)}</span>`);
+
+async function viewMoney() {
+  const accs = await moneyAccounts(true), owner = isOwnerMe(), canM = ME.permissions.includes("cash.manage");
+  const total = accs.reduce((x, a) => x + (a.balance || 0), 0);
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الخزنة والحسابات</h1><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a></div>
+    <div class="totals"><div>كل الفلوس في البرنامج<b>${money(total)} ج</b><span>عدد الأماكن: ${accs.length}</span></div></div>
+    <table><thead><tr><th>المكان</th><th>النوع</th><th>الرصيد</th><th></th></tr></thead><tbody>
+    ${accs.map((a) => `<tr><td><b>${esc(a.name)}</b>${a.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}${a.allow_negative ? ` <span class="chip">مسموح بالسالب</span>` : ""}</td>
+      <td>${a.id === "drawer" ? (a.shift_open ? "الشيفت مفتوح" : "الفكة من آخر شيفت") : esc(a.kind_label || "")}</td>
+      <td class="num"><b>${money(a.balance)}</b></td>
+      <td class="row">${a.id === "drawer" ? `<a href="#/shift">الشيفت</a>` : `<a class="btn small secondary" href="#/money/${esc(a.id)}">كشف الحساب</a>
+        ${canM && a.is_active ? `<button class="btn small secondary" data-count="${esc(a.id)}" data-name="${esc(a.name)}" data-bal="${a.balance}">جرد الحساب</button>` : ""}`}</td></tr>`).join("")}</tbody></table>
+    <div id="mCount"></div></section>
+  ${canM ? `<div class="grid2"><form class="panel" id="mTr"><h2>تحويل بين الحسابات</h2>
+      <label class="f">من <select name="from">${srcOptions(accs, "drawer", { outside: false })}</select></label>
+      <label class="f">إلى <select name="to">${srcOptions(accs, "treasury", { outside: false })}</select></label>
+      <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+      <label class="f">ملاحظة <input name="n" placeholder="مثال: توريد من الدرج للخزنة"></label><button class="btn mt">حوّل</button></form>
+    <form class="panel" id="mOwn"><h2>مسحوبات وإيداع المالك</h2>
+      <div class="seg2 small"><button type="button" class="on" data-ok="owner_withdrawal">✓ مسحوبات</button><button type="button" data-ok="owner_deposit">إيداع</button></div>
+      <label class="f mt">الحساب <select name="acc">${srcOptions(accs, "treasury", { outside: false })}</select></label>
+      <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+      <label class="f">ملاحظة <input name="n"></label><button class="btn mt">سجّل</button>
+      <p class="muted">المسحوبات والإيداع ليست مصروفات: لا تدخل في حساب الربح.</p></form></div>` : ""}
+  ${owner ? `<form class="panel row" id="mNew"><h2 class="grow">حساب جديد</h2>
+      <label class="f">الاسم <input name="name" required placeholder="مثال: اتصالات كاش"></label>
+      <label class="f">النوع <select name="kind">${Object.entries(MONEY.kinds).filter(([k]) => k !== "treasury").map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></label>
+      <button class="btn small">أضف</button></form>` : ""}
+  <section class="panel" id="mSum"><div class="row between"><h2>الفلوس راحت فين</h2>${reportTools("msum")}</div>
+    <div class="row noprint">${rangeBar("mRange", "month")}<div class="seg2 small" id="mBy"><button type="button" class="on" data-by="day">✓ يومي</button><button type="button" data-by="month">شهري</button></div></div>
+    <div id="mSumBox"></div></section>`;
+  let ok = "owner_withdrawal", by = "day", sum = null, range = null;
+  document.querySelectorAll("[data-ok]").forEach((b) => b.addEventListener("click", () => {
+    ok = b.dataset.ok;
+    document.querySelectorAll("[data-ok]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + (x.dataset.ok === "owner_withdrawal" ? "مسحوبات" : "إيداع"); });
+  }));
+  document.querySelectorAll("[data-count]").forEach((b) => b.addEventListener("click", () => {
+    $("#mCount").innerHTML = `<form class="panel mt" id="mCountF"><h2>جرد: ${esc(b.dataset.name)}</h2>
+      <p class="muted">اكتب المبلغ الحقيقي (المعدود في الخزنة، أو رصيد البنك أو المحفظة). — رصيد البرنامج: ${money(+b.dataset.bal)} ج</p>
+      <div class="row"><label class="f">المبلغ الحقيقي (ج) <input name="c" type="number" step="0.01" required></label>
+      <label class="f grow">سبب الفرق (لازم لو فيه فرق) <input name="r"></label><button class="btn">سجّل الجرد</button></div></form>`;
+    $("#mCountF").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await withBusy(e.target.querySelector("button"), async () => {
+        try {
+          const r = await api(`/api/money/accounts/${b.dataset.count}/count`, { method: "POST", body: { counted: toPiasters(e.target.c.value), reason: e.target.r.value || null } });
+          toast(!r.difference ? "✓ الحساب مطابق" : r.against_old_program ? `✓ فرق عن البرنامج القديم: ${money(r.difference)} ج` : `✓ تم تسجيل الفرق: ${money(r.difference)} ج`);
+          viewMoney();
+        } catch (err) { toast(err.message, true); if (err.code === "reason_required") e.target.r.focus(); }
+      });
+    });
+  }));
+  $("#mTr")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await withBusy(f.querySelector("button"), async () => {
+      try { await api("/api/money/transfer", { method: "POST", body: { from: f.from.value, to: f.to.value, amount: toPiasters(f.a.value), note: f.n.value || null } }); toast("✓ تم التحويل"); viewMoney(); }
+      catch (err) { toast(err.message, true); }
+    });
+  });
+  $("#mOwn")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try { await api("/api/money/owner", { method: "POST", body: { account: f.acc.value, kind: ok, amount: toPiasters(f.a.value), note: f.n.value || null } }); toast("✓ تم التسجيل"); viewMoney(); }
+      catch (err) { toast(err.message, true); }
+    });
+  });
+  $("#mNew")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api("/api/money/accounts", { method: "POST", body: { name: e.target.name.value, kind: e.target.kind.value } }); toast("✓ تمت الإضافة"); viewMoney(); }
+    catch (err) { toast(err.message, true); }
+  });
+  const load = async () => {
+    sum = await api(`/api/money/summary?from=${range[0]}&to=${range[1]}&by=${by}`);
+    $("#mSumBox").innerHTML = `<p><b>${esc(rangeText(sum.from, sum.to))}</b> — الدخل: ${money(sum.total_in)} ج · الخرج: ${money(sum.total_out)} ج</p>
+      ${sum.periods.map((p) => `<div class="panel sub"><div class="row between"><h3>${esc(p.period)}</h3><span>الدخل: <b class="ok">${money(p.in)}</b> · الخرج: <b>${money(p.out)}</b> · الصافي: <b>${money(p.net)}</b></span></div>
+        <table><thead><tr><th>البيان</th><th>دخل</th><th>خرج</th></tr></thead><tbody>
+        ${p.by_kind.map((k) => `<tr class="${k.flow ? "" : "muted"}"><td>${esc(k.label)}${k.flow ? "" : " <small>(بين أماكن الصيدلية أو رصيد قديم، مش دخل ولا مصروف)</small>"}</td><td class="num">${k.in ? money(k.in) : ""}</td><td class="num">${k.out ? money(k.out) : ""}</td></tr>`).join("")}</tbody></table>
+        <p class="muted small">${p.by_place.map((x) => `${esc(x.place)}: +${money(x.in)} / −${money(x.out)}`).join(" · ")}</p></div>`).join("") || `<p class="muted">لا توجد حركة في هذه الفترة</p>`}`;
+  };
+  const get = wireRange("mRange", (f, t) => { range = [f, t]; load().catch((e) => toast(e.message, true)); });
+  range = get();
+  document.querySelectorAll("[data-by]").forEach((b) => b.addEventListener("click", () => {
+    by = b.dataset.by;
+    document.querySelectorAll("[data-by]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + (x.dataset.by === "day" ? "يومي" : "شهري"); });
+    load().catch((e) => toast(e.message, true));
+  }));
+  wireTools("msum", () => ({ title: "الفلوس راحت فين", subtitle: rangeText(sum.from, sum.to), el: $("#mSum"), sheets: [
+    { name: "الملخص", columns: [Tx("الفترة"), Tx("البيان"), M("دخل"), M("خرج")],
+      rows: sum.periods.flatMap((p) => p.by_kind.map((k) => [p.period, k.label, k.in, k.out])) }] }));
+}
+
+async function viewMoneyAccount(id) {
+  const owner = isOwnerMe();
+  app.innerHTML = `<section class="panel"><a href="#/money">← الخزنة والحسابات</a><div id="maHead"></div></section>
+    <section class="panel" id="maRep"><div class="row between"><h2>كشف الحساب</h2>${reportTools("mast")}</div>${rangeBar("maRange", "month")}<div id="maBox"></div></section>`;
+  let st = null;
+  const head = (a) => {
+    $("#maHead").innerHTML = `<div class="row between"><h1>${esc(a.name)}</h1><span>${a.is_active ? "" : `<span class="badge b-plain">موقوف</span>`}</span></div>
+      ${owner && a.id !== "treasury" ? `<form class="row" id="maEdit"><label class="f">الاسم <input name="name" value="${esc(a.name)}"></label>
+        <label class="chk"><input type="checkbox" name="neg" ${a.allow_negative ? "checked" : ""}> مسموح بالسالب</label>
+        ${a.kind !== "treasury" ? `<label class="chk"><input type="checkbox" name="act" ${a.is_active ? "checked" : ""}> مفعّل</label>` : ""}
+        <button class="btn small secondary">احفظ</button></form>` : ""}
+      ${owner ? `<form class="row mt" id="maAdj"><label class="f">الرصيد الصحيح (ج) <input name="v" type="number" step="0.01" required></label>
+        <label class="f grow">السبب <input name="r" required placeholder="مثال: رقم البرنامج القديم كان غلط"></label>
+        <button class="btn small secondary">تسوية الرصيد بدون جرد</button></form>` : ""}`;
+    $("#maEdit")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = e.target, body = { name: f.name.value, allow_negative: f.neg.checked };
+      if (f.act) body.is_active = f.act.checked;
+      try { await api(`/api/money/accounts/${id}`, { method: "PATCH", body }); toast("تم الحفظ"); viewMoneyAccount(id); } catch (err) { toast(err.message, true); }
+    });
+    $("#maAdj")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!confirmInline(e.target.querySelector("button"))) return;
+      try { const r = await api(`/api/money/accounts/${id}/adjust`, { method: "POST", body: { correct_balance: toPiasters(e.target.v.value), reason: e.target.r.value } });
+        toast(`✓ الفرق: ${money(r.difference)} ج`); viewMoneyAccount(id); } catch (err) { toast(err.message, true); }
+    });
+  };
+  wireRange("maRange", async (f, t) => {
+    try {
+      st = await api(`/api/money/accounts/${id}/statement?from=${f}&to=${t}`);
+      head(st.account);
+      $("#maBox").innerHTML = `<div class="totals"><div>الرصيد أول الفترة<b>${money(st.opening)}</b></div><div class="t-ok">دخل<b>${money(st.total_in)}</b></div>
+        <div>خرج<b>${money(st.total_out)}</b></div><div>الرصيد آخر الفترة<b>${money(st.closing)}</b></div></div>
+        <div class="tablewrap mt"><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th><th>الرصيد</th><th>بواسطة</th></tr></thead><tbody>
+        ${st.lines.map((l) => `<tr><td>${esc(stamp(l.created_at))}</td><td>${esc(l.kind_label)}${l.note ? ` <small class="muted">${esc(l.note)}</small>` : ""}</td>
+          <td class="num">${MV_SIGN(l.amount)}</td><td class="num">${money(l.balance)}</td><td>${esc(l.by_name || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا توجد حركة في هذه الفترة</td></tr>`}</tbody></table></div>`;
+    } catch (err) { toast(err.message, true); }
+  });
+  wireTools("mast", () => ({ title: `كشف حساب ${st.account.name}`, subtitle: rangeText(st.from, st.to), el: $("#maRep"), sheets: [
+    { name: "كشف الحساب", columns: [Tx("التاريخ"), Tx("البيان"), Tx("ملاحظة"), M("المبلغ"), M("الرصيد")],
+      rows: [["", "الرصيد أول الفترة", "", null, st.opening], ...st.lines.map((l) => [stamp(l.created_at), l.kind_label, l.note || "", l.amount, l.balance])] }] }));
+}
+
+// ------------------------------------------------------------------ balance reconciliation (F108)
+const PARTY_T = { supplier: "مورد", customer: "عميل" };
+async function viewReconcile() {
+  app.innerHTML = `<section class="panel"><h1>مطابقة الأرصدة</h1>
+    <p class="muted">اكتب الرصيد اللي في كشف حساب المورد أو العميل. البرنامج يبيّن الفرق، وتسجّله بنوعه. الصفحة دي برضه بتتكتب فيها أرصدة أول المدة وقت التشغيل.</p>
+    <form class="row" id="rcF"><div class="seg2 small" id="rcP"><button type="button" class="on" data-p="">✓ الكل</button><button type="button" data-p="supplier">الموردين</button><button type="button" data-p="customer">العملاء</button></div>
+      <input name="q" class="grow" placeholder="ابحث بالاسم"><button class="btn small secondary">ابحث</button></form>
+    <div id="rcBox" class="mt"></div></section>`;
+  let party = "", types = {};
+  const load = async () => {
+    const r = await api(`/api/reconcile/parties?party=${party}&q=${encodeURIComponent($("#rcF").q.value)}`);
+    types = r.types;
+    $("#rcBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>الاسم</th><th>رصيد البرنامج</th><th>رصيد الكشف (ج)</th><th>الفرق</th><th>نوع الفرق</th><th>ملاحظة</th><th></th><th>آخر مطابقة</th></tr></thead><tbody>
+      ${r.parties.map((p) => `<tr data-party="${p.party}" data-id="${esc(p.id)}" data-bal="${p.balance}"><td><b>${esc(p.name)}</b> <span class="chip">${PARTY_T[p.party]}</span></td>
+        <td class="num">${money(p.balance)}</td><td><input class="narrow" type="number" step="0.01" data-st></td><td class="num" data-diff></td>
+        <td><select data-type><option value="">—</option>${Object.entries(types).filter(([k]) => !(k === "early_discount" && p.party !== "supplier") && !(k === "claim_discount" && p.party !== "customer")).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></td>
+        <td><input data-note></td><td><button class="btn small" data-save>احفظ</button></td>
+        <td class="muted small">${p.last ? `${esc(dayOf(p.last.at))}${p.last.difference ? ` · الفرق: ${money(p.last.difference)}` : " · مطابق"}` : ""}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></div>`;
+    $("#rcBox").querySelectorAll("[data-st]").forEach((inp) => inp.addEventListener("input", () => {
+      const tr = inp.closest("tr"), v = toPiasters(inp.value);
+      tr.querySelector("[data-diff]").textContent = v == null ? "" : money(v - +tr.dataset.bal);
+    }));
+    $("#rcBox").querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+      const tr = b.closest("tr"), st = toPiasters(tr.querySelector("[data-st]").value);
+      if (st == null) { tr.querySelector("[data-st]").focus(); toast("اكتب رصيد الكشف", true); return; }
+      await withBusy(b, async () => {
+        try {
+          const r2 = await api("/api/reconcile", { method: "POST", body: { party: tr.dataset.party, party_id: tr.dataset.id, statement_balance: st,
+            program_balance: +tr.dataset.bal, adj_type: tr.querySelector("[data-type]").value || null, note: tr.querySelector("[data-note]").value || null } });
+          toast(r2.difference ? `✓ اتسجل الفرق: ${money(r2.difference)} ج` : "✓ مطابق");
+          tr.dataset.bal = r2.balance; tr.children[1].textContent = money(r2.balance); tr.querySelector("[data-diff]").textContent = "";
+        } catch (err) {
+          toast(err.message, true);
+          if (err.code === "type_required") tr.querySelector("[data-type]").focus();
+          if (err.code === "reason_required") tr.querySelector("[data-note]").focus();
+          if (err.code === "balance_changed") load();
+        }
+      });
+    }));
+  };
+  document.querySelectorAll("#rcP [data-p]").forEach((b) => b.addEventListener("click", () => {
+    party = b.dataset.p;
+    document.querySelectorAll("#rcP [data-p]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + { "": "الكل", supplier: "الموردين", customer: "العملاء" }[x.dataset.p]; });
+    load().catch((e) => toast(e.message, true));
+  }));
+  $("#rcF").addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
+  await load();
+}
 
 // ------------------------------------------------------------------ E-Stock history (read only) and old-invoice returns
 // Owner 18/11: the old invoices are usable inside the program, not converted. Every row says it is E-Stock history.
@@ -3685,7 +3955,7 @@ async function estockPanel(kind, id) {
 
 // ------------------------------------------------------------------ suppliers and their accounts
 const PAY_M = { drawer: "نقدًا من الخزينة", cash: "نقدًا من خارج الخزينة", bank: "تحويل بنكي", cheque: "شيك", wallet: "إنستاباي / محفظة" };
-const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتورة شراء", payment: "دفعة", return: "مرتجع", adjustment: "تسوية / إلغاء" };
+const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتورة شراء", payment: "دفعة", return: "مرتجع", adjustment: "تسوية / إلغاء", discount: "خصم" };
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
@@ -3696,7 +3966,8 @@ async function viewSuppliers() {
       <td>${SUP_TYPE[x.supplier_type] ? `<span class="chip">${SUP_TYPE[x.supplier_type]}</span>` : `<span class="badge b-warn">⚠ حدد النوع</span>`}</td>
       <td>${esc(x.last_invoice || "—")}</td>${showBal ? `<td class="num">${x.balance > 0 ? `<b>${money(x.balance)}</b>` : x.balance < 0 ? `<span class="ok">مستحق لنا عنده ${money(-x.balance)}</span>` : "—"}</td>` : ""}</tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد موردون</td></tr>`}</tbody></table>
-    <p class="muted">نوع المورد (شركة أو مخزن) يؤثر في الضرائب، ويُحفظ مع كل فاتورة شراء.</p></section>
+    <p class="muted">نوع المورد (شركة أو مخزن) يؤثر في الضرائب، ويُحفظ مع كل فاتورة شراء.</p>
+    ${ME.permissions.includes("cash.see_expected") ? `<p><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a></p>` : ""}</section>
   ${showBal ? `<section class="panel" id="stRep"><div class="row between"><h2>مطالبات الموردين (تقفيل الحسابات)</h2>${reportTools("stall")}</div>
     <div class="row noprint">${rangeBar("stRange", "last")}<label class="f">النوع <select id="stType"><option value="">الكل</option>${Object.entries(SUP_TYPE).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>
     <div id="stBox"></div></section>` : ""}`;
@@ -3729,7 +4000,7 @@ async function viewSuppliers() {
 }
 
 async function viewSupplier(id) {
-  const a = await api(`/api/suppliers/${id}`), canW = ME.permissions.includes("suppliers.write"), canPay = ME.permissions.includes("suppliers.pay");
+  const [a, accs] = await Promise.all([api(`/api/suppliers/${id}`), moneyAccounts(true)]), canW = ME.permissions.includes("suppliers.write"), canPay = ME.permissions.includes("suppliers.pay");
   app.innerHTML = `<section class="panel"><a href="#/suppliers">← الموردون</a>
     <div class="row between"><h1>${esc(a.name)}</h1>
       <span class="seg2 small" id="supType">${Object.entries(SUP_TYPE).map(([v, t]) => `<button type="button" class="${a.supplier_type === v ? "on" : ""}" data-st="${v}" ${canW ? "" : "disabled"}>${a.supplier_type === v ? "✓ " : ""}${t}</button>`).join("")}</span></div>
@@ -3737,11 +4008,15 @@ async function viewSupplier(id) {
       <label class="f grow">شروط الدفع <input id="supTerms" value="${esc(a.payment_terms || "")}" placeholder="مثال: آجل 30 يومًا" ${canW ? "" : "disabled"}></label>
       ${canW ? `<button class="btn small secondary" id="supSave">احفظ</button>` : ""}</div></section>
   ${a.balance != null ? `<div class="totals"><div class="${a.balance > 0 ? "t-warn" : "t-ok"}">${a.balance > 0 ? "مستحق له علينا" : a.balance < 0 ? "مستحق لنا عنده" : "✓ لا يوجد حساب"}<b>${money(Math.abs(a.balance))} ج</b></div></div>` : ""}
-  ${canPay ? `<form class="panel row" id="supPay"><h2 class="grow">تسجيل دفعة للمورد</h2>
-    <label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
-    <label class="f">طريقة الدفع <select name="m">${Object.entries(PAY_M).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label>
+  ${canPay ? `<form class="panel" id="supPay"><h2>تسجيل دفعة للمورد</h2><div class="formgrid">
+    <label class="f">اتدفع من <select name="src">${srcOptions(accs, "treasury", { ownerOutside: true })}</select></label>
+    <label class="f">المبلغ المدفوع (ج) <input name="a" type="number" step="0.01" min="0" required></label>
+    <label class="f">خصم تعجيل الدفع <select name="dm"><option value="">مفيش</option><option value="amt">مبلغ</option><option value="pct">نسبة من المبلغ المسدد</option></select></label>
+    <label class="f" id="supDisc" hidden><span id="supDiscL">الخصم (ج)</span> <input name="d" type="number" step="0.01" min="0"></label>
+    <label class="chk"><input type="checkbox" name="chq"> بشيك</label>
     <label class="f">رقم الشيك / التحويل <input name="r" placeholder="مطلوب للشيك"></label>
-    <label class="f grow">ملاحظة <input name="n"></label><button class="btn">سجّل الدفعة</button></form>` : ""}
+    <label class="f grow">ملاحظة <input name="n"></label></div>
+    <p class="muted" id="supPayHint"></p><button class="btn">سجّل الدفعة</button></form>` : ""}
   ${a.balance != null ? `<section class="panel" id="ssRep"><div class="row between"><h2>كشف حساب لفترة (للتقفيل مع المورد)</h2>${reportTools("sst")}</div>${rangeBar("ssRange", "last")}<div id="ssBox"></div></section>` : ""}
   <div class="grid2">
     <section class="panel"><h2>الفواتير</h2><table><thead><tr><th>الرقم</th><th>التاريخ</th><th>الحالة</th><th>الإجمالي</th></tr></thead><tbody>
@@ -3752,6 +4027,17 @@ async function viewSupplier(id) {
         <td class="num ${l.amount < 0 ? "ok" : ""}">${l.amount < 0 ? "− " : "+ "}${money(Math.abs(l.amount))}</td><td>${esc(l.by_name || "")}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">لا توجد حركات</td></tr>`}</tbody></table></section>` : ""}
   </div>`;
   document.querySelectorAll("[data-inv]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/purchases/${tr.dataset.inv}`; }));
+  const sp = $("#supPay");
+  const hint = () => {
+    const pct = sp.dm.value === "pct", a = toPiasters(sp.a.value) || 0, d = sp.d.value;
+    $("#supDisc").hidden = !sp.dm.value;
+    $("#supDiscL").textContent = pct ? "النسبة %" : "الخصم (ج)";
+    if (!sp.dm.value || !a || !d) { $("#supPayHint").textContent = ""; return; }
+    const disc = pct ? discountOf(a, toBp(d)) : toPiasters(d);
+    const [paid, off] = pct ? [a - disc, a] : [a, a + disc];
+    $("#supPayHint").textContent = `المدفوع: ${money(paid)} ج · الخصم: ${money(disc)} ج · يقل من حساب المورد: ${money(off)} ج`;
+  };
+  sp?.querySelectorAll("input, select").forEach((x) => x.addEventListener("input", hint));
   document.querySelectorAll("[data-st]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/suppliers/${id}`, { method: "PATCH", body: { supplier_type: b.dataset.st } }); viewSupplier(id); } catch (err) { toast(err.message, true); }
   }));
@@ -3760,9 +4046,13 @@ async function viewSupplier(id) {
   });
   $("#supPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const f = e.target;
+    const f = e.target, body = { source: f.src.value, method: f.chq.checked ? "cheque" : "", ref: f.r.value || null, note: f.n.value || null };
+    // percent: the amount typed is what is cleared from the supplier's balance; the program works out the discount
+    if (f.dm.value === "pct") Object.assign(body, { settle: toPiasters(f.a.value), discount_bp: toBp(f.d.value) || 0 });
+    else Object.assign(body, { amount: toPiasters(f.a.value), discount: f.dm.value === "amt" ? toPiasters(f.d.value) || 0 : 0 });
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
-      try { await api(`/api/suppliers/${id}/pay`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, ref: f.r.value || null, note: f.n.value || null } }); toast("✓ تم تسجيل الدفعة"); viewSupplier(id); }
+      try { const r = await api(`/api/suppliers/${id}/pay`, { method: "POST", body });
+        toast(r.discount ? `✓ اتدفع: ${money(r.paid)} ج · الخصم: ${money(r.discount)} ج` : "✓ تم تسجيل الدفعة"); viewSupplier(id); }
       catch (err) { toast(err.message, true); }
     });
   });
@@ -3789,8 +4079,23 @@ async function viewSupplier(id) {
 }
 
 // ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
+// supplier-return proposals: each answer is for the supplier (and the line's batch) asked about; one that comes back
+// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368).
+// A proposal is only shown: the return sends a value only when the person typed it, and the server prices the
+// others at this supplier's own purchase price. A failed ask clears the old figure instead of keeping it.
+const SR = { gen: 0, busy: false };
+async function srPropose(l, supplier) {
+  if (l.typed) return;                                       // a typed value is the person's, never replaced
+  const gen = SR.gen, ask = (l.ask = (l.ask || 0) + 1);
+  let v = null;
+  try {
+    v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
+  } catch { /* unknown here: the server prices it */ }
+  if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
+}
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
+  SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
   app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
@@ -3805,18 +4110,32 @@ async function viewSupplierReturns(arg) {
   const lines = [];
   const draw = () => {
     if (!$("#srLines")) return;
+    // a redraw while a value field is focused (an answer arriving) puts the focus back, so typing goes on there
+    const focused = document.activeElement?.dataset?.sv;
     $("#srLines").innerHTML = lines.map((l, i) => `<tr><td>${itemHtml(l.item)}</td>
       <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "بدون تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
       <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
       <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
-      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
+      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${l.unit_value == null ? "" : money(l.unit_value)}" placeholder="بسعر الشراء"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
+    if (focused != null) { const x = $(`#srLines [data-sv="${focused}"]`); if (x) x.focus(); }
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
-    const val = async (l) => { try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* keep */ } draw(); };
+    const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
-    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sv].unit_value = toPiasters(x.value) || 0; draw(); }));
+    // each keystroke is the person's value at once: an answer arriving while the field is still focused never
+    // replaces it, whatever the browser does with the field it redraws (#368)
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("input", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") return;
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true;
+    }));
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") { l.typed = false; val(l); return; }     // emptied: back to the purchase price
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true; draw();
+    }));
     document.querySelectorAll("[data-sx]").forEach((x) => x.addEventListener("click", () => { lines.splice(+x.dataset.sx, 1); draw(); }));
   };
   const addItem = async (itemId) => {
@@ -3825,9 +4144,18 @@ async function viewSupplierReturns(arg) {
     if (!batches.length) { toast("هذا الصنف ليس له رصيد", true); return; }
     const b = batches[0], l = { item: c, batches, batch_id: b.batch_id || null, qty_base: Math.min(b.qty, c.pack_size || 1), reason: (b.expiry_date || "9") < isoDay(new Date()) ? "expired" : "near_expiry", unit_value: 0 };
     lines.push(l); draw();
-    try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${c.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* zero */ }
+    await srPropose(l, $("#srSup")?.value);
     draw();
   };
+  // the proposed value is that supplier's price: another supplier, every line asked again (#324 S30)
+  $("#srSup")?.addEventListener("change", async () => {
+    const gen = ++SR.gen;
+    SR.busy = true; $("#srGo").disabled = true;               // the return waits for the new supplier's prices
+    await Promise.all(lines.map((l) => srPropose(l, $("#srSup").value)));
+    if (gen !== SR.gen) return;                                // a newer change is still asking
+    SR.busy = false; $("#srGo").disabled = false;
+    draw();
+  });
   if ($("#srQ")) {
     let t;
     $("#srQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => {
@@ -3837,12 +4165,13 @@ async function viewSupplierReturns(arg) {
       document.querySelectorAll("[data-pick]").forEach((x) => x.addEventListener("click", () => { $("#srRes").innerHTML = ""; $("#srQ").value = ""; addItem(x.dataset.pick).catch((e) => toast(e.message, true)); }));
     }, 250); });
     $("#srGo").addEventListener("click", async () => {
+      if (SR.busy) return;
       if (!$("#srSup").value) { toast("اختر المورد", true); return; }
       if (!lines.length) { toast("أضف صنفًا واحدًا على الأقل", true); return; }
       const w = window.open("", "_blank");
       try {
         const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: $("#srSup").value, note: $("#srNote").value || null,
-          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ ? { unit_value: l.unit_value } : {}) })) } });
+          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ && l.typed ? { unit_value: l.unit_value } : {}) })) } });
         toast(`✓ مرتجع رقم ${r.return_no} تم التسجيل`);
         if (w) w.location = `/supplier-return/${r.id}`;
         location.hash = "#/supplier-returns";
@@ -3958,13 +4287,14 @@ async function viewShortages() {
 }
 
 // ------------------------------------------------------------------ customers
-const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية" };
+const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية", discount: "خصم مطالبة" };
 async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
   app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
     <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم هاتف" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
+  ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
   ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
@@ -3986,6 +4316,14 @@ async function viewCustomers(filter = "") {
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
   };
   if ($("#ktBox")) renderContracts();
+  // one number saved in two forms (010… and +20 10…) before the program kept one form (#324 M2-20)
+  if ($("#cuDup")) api("/api/customers/phone-doubles").then((r) => {
+    if (!r.doubles.length || !$("#cuDup")) return;
+    $("#cuDup").innerHTML = `<h2>⚠ رقم واحد مسجل لأكثر من عميل</h2><p class="muted">الرقم نفسه مكتوب بصيغتين مختلفتين. راجع العملاء واترك الرقم لعميل واحد حتى لا يكون للمشتري الواحد حسابان آجلان.</p>
+      <table><thead><tr><th>الرقم</th><th>العملاء</th></tr></thead><tbody>${r.doubles.map((d) => `<tr><td dir="ltr">${esc(d.phone)}</td>
+      <td>${d.customers.map((c) => `<a href="#/customers/${esc(c.id)}">${esc(c.name)}</a>`).join("، ")}</td></tr>`).join("")}</tbody></table>`;
+    $("#cuDup").hidden = false;
+  }).catch(() => { /* the list stays without the notice */ });
   let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
   const FT = { "": "كل العملاء", debt: "العملاء الذين عليهم مستحقات", refill: "اقترب موعد طلبهم الشهري" };
   wireTools("cust", () => { const { list, f } = cur; return { title: "تقرير العملاء", subtitle: FT[f] + ($("#cuQ").value ? ` — بحث: ${$("#cuQ").value}` : ""), el: $("#cuRep"), sheets: [
@@ -4048,6 +4386,10 @@ async function renderContracts(edit = null) {
 
 async function viewCustomer(id) {
   const c = await api(`/api/customers/${id}`), canM = ME.permissions.includes("customers.manage");
+  // the payment methods list needs the sale permission: without it the collection is still offered, with no method
+  // choice (#348 Codex P2), and nothing asks for an approval PIN just to open the customer
+  const chans = canM && c.balance > 0 && ME.permissions.includes("sales.create")
+    ? (await api("/api/payment-channels")).channels.filter((x) => x.is_active) : [];
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><div class="row between"><h1>${esc(c.name)}</h1>
       ${ME.permissions.includes("sales.create") ? `<button class="btn" id="cuSale">فاتورة له</button>` : ""}</div>
@@ -4067,7 +4409,8 @@ async function viewCustomer(id) {
   <div class="totals"><div class="${c.balance > 0 ? "t-err" : "t-ok"}">${c.balance > 0 ? "✕ عليه" : "✓ لا شيء عليه"}<b>${money(Math.max(0, c.balance))} ج</b><span>الحد المسموح ${money(c.credit_limit)} ج</span></div>
     <div class="${c.whatsapp_ok ? "t-ok" : ""}">${c.whatsapp_ok ? "✓ موافق على واتساب" : "لا يوافق على الرسائل"}<b>${esc(c.phone || "—")}</b></div></div>
   ${canM && c.balance > 0 ? `<form class="panel row" id="cPay"><h2 class="grow">تحصيل من الحساب</h2><label class="f">المبلغ (ج) <input name="a" type="number" step="0.01" min="0" required></label>
-    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">بطاقة</option></select></label><button class="btn">سجّل</button></form>` : ""}
+    <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
+    <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
       ${c.reminded_at ? `<p class="muted small">آخر تذكير أُرسل: ${esc(dayOf(c.reminded_at))}</p>` : ""}
@@ -4091,11 +4434,17 @@ async function viewCustomer(id) {
     try { await api(`/api/customers/${id}`, { method: "PATCH", body: { name: $("#cName").value, name_alt: $("#cName2").value || null, phone: $("#cPhone").value || null, phone2: $("#cPhone2").value || null, phone3: $("#cPhone3").value || null, address1: $("#cAddr1").value || null, address2: $("#cAddr2").value || null, notes: $("#cNotes").value || null, credit_limit: toPiasters($("#cLim").value) || 0, whatsapp_ok: $("#cWa").checked } }); toast("تم الحفظ"); viewCustomer(id); }
     catch (err) { toast(err.message, true); }
   });
+  const cp = $("#cPay");
+  cp?.m.addEventListener("change", () => {
+    const list = chans.filter((x) => x.kind === cp.m.value);
+    $("#cPayCh").hidden = cp.m.value === "cash" || !list.length;
+    cp.ch.innerHTML = list.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("");
+  });
   $("#cPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     await withBusy(f.querySelector("button:not([type=button])"), async () => {
-      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value } }); toast("✓ تم التسجيل"); viewCustomer(id); }
+      try { await api(`/api/customers/${id}/payments`, { method: "POST", body: { amount: toPiasters(f.a.value), method: f.m.value, channel_id: f.ch?.value || null } }); toast("✓ تم التسجيل"); viewCustomer(id); }
       catch (err) { toast(err.message, true); }
     });
   });
@@ -4146,12 +4495,12 @@ async function viewCustomer(id) {
 const EX_ST = { pending: ["b-warn", "⚠ بانتظار الموافقة"], approved: ["b-ok", "✓ معتمد"], rejected: ["b-err", "✕ مرفوض"] };
 async function viewExpenses(period) {
   const pr = periodPresets().month, [pf, pt] = period || [isoDay(pr[1]), isoDay(pr[2])];
-  const r = await api(`/api/expenses?from=${pf}&to=${pt}`), canA = ME.permissions.includes("expenses.approve");
+  const [r, accs] = await Promise.all([api(`/api/expenses?from=${pf}&to=${pt}`), moneyAccounts(true)]), canA = ME.permissions.includes("expenses.approve");
   const pending = r.expenses.filter((e) => e.status === "pending");
   app.innerHTML = `<form class="panel" id="exNew"><h1>تسجيل مصروف</h1>
     <div class="formgrid"><label class="f">البند <select name="cat">${r.categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
       <label class="f">المبلغ (ج) <input name="a" type="number" step="0.25" min="0" required></label>
-      <label class="f">مصدر المبلغ <select name="from"><option value="drawer">من خزينة الشيفت</option><option value="outside">من خارج الخزينة</option></select></label>
+      <label class="f">اتدفع من <select name="from">${srcOptions(accs, "drawer")}</select></label>
       <label class="f">التاريخ <input name="d" type="date" value="${isoDay(new Date())}"></label>
       <label class="f">ملاحظة <input name="n" placeholder="مثال: أكياس + بكرة إيصالات"></label></div>
     <button class="btn mt">سجّل</button>
@@ -4161,9 +4510,9 @@ async function viewExpenses(period) {
   <section class="panel" id="exRep"><div class="row between"><h2>المصروفات — ${esc(rangeText(pf, pt))}</h2>${reportTools("exp")}</div>
     <div class="row between noprint"><div id="exRangeBox"></div>${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${exTable(r.expenses, false)}
-    <p><b>الإجمالي المعتمد: ${money(r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
+    <p><b>الإجمالي المعتمد: ${money(r.totals ? r.totals.approved : r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
     ${canA ? `<form class="row mt" id="exCat"><input name="n" placeholder="بند جديد" required><button class="btn small secondary">أضف بند</button></form>` : ""}</section>`;
-  if (canA) renderSchedules(r.categories);
+  if (canA) renderSchedules(r.categories, null, accs);
   $("#exRangeBox").innerHTML = rangeBar("exRange");
   $("#exRange [data-rf]").value = pf; $("#exRange [data-rt]").value = pt;
   $("#exRange").querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", false));
@@ -4171,7 +4520,7 @@ async function viewExpenses(period) {
   wireRange("exRange", (f, t) => { if (first) { first = false; return; } viewExpenses([f, t]); });
   wireTools("exp", () => ({ title: "المصروفات", subtitle: rangeText(pf, pt), el: $("#exRep"), sheets: [
     { name: "المصروفات", columns: [Dt("التاريخ"), Tx("البند"), Tx("ملاحظة"), M("المبلغ"), Tx("المصدر"), Tx("سجّله"), Tx("الحالة")],
-      rows: r.expenses.map((e) => [e.spent_on, e.category, e.note || "", e.amount, e.paid_from === "drawer" ? "الخزينة" : "خارجها", e.by_name || "", EX_ST[e.status][1]]) }] }));
+      rows: r.expenses.map((e) => [e.spent_on, e.category, e.note || "", e.amount, srcName(e), e.by_name || "", EX_ST[e.status][1]]) }] }));
   $("#exNew").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -4192,7 +4541,8 @@ async function viewExpenses(period) {
 }
 const EVERY_T = { 1: "كل شهر", 2: "كل شهرين", 3: "كل 3 أشهر", 6: "كل 6 أشهر", 12: "كل سنة" };
 const SC_ST = { late: ["b-err", "✕ فات موعده"], soon: ["b-warn", "⚠ اقترب"], later: ["b-ok", "✓"] };
-async function renderSchedules(cats, edit = null) {
+async function renderSchedules(cats, edit = null, accs = null) {
+  accs = accs || await moneyAccounts();
   const list = (await api("/api/expense-schedules")).schedules, box = $("#scBox");
   if (!box) return;
   const e = edit ? list.find((x) => x.id === edit) : null, v = (k, d = "") => esc(e ? e[k] ?? d : d);
@@ -4212,7 +4562,7 @@ async function renderSchedules(cats, edit = null) {
       <label class="f">يوم الاستحقاق في الشهر <input name="day" type="number" min="1" max="31" required value="${v("day_of_month", 1)}"></label>
       <label class="f">يتكرر <select name="every">${Object.entries(EVERY_T).map(([k, t]) => `<option value="${k}" ${e && e.every_months === +k ? "selected" : ""}>${t}</option>`).join("")}</select></label>
       <label class="f">ذكّرني قبله بكم يوم <input name="rd" type="number" min="0" max="60" required value="${v("remind_days", 3)}"></label>
-      <label class="f">يُدفع من <select name="from"><option value="outside">من خارج الخزينة</option><option value="drawer" ${e && e.paid_from === "drawer" ? "selected" : ""}>من الخزينة</option></select></label>
+      <label class="f">يتدفع من <select name="from">${srcOptions(accs, e ? e.account_id || e.paid_from : "treasury")}</select></label>
       <label class="f">أول شهر <input name="start" type="month" value="${v("start_month", isoDay(new Date()).slice(0, 7))}"></label>
       <label class="f">ملاحظة <input name="note" value="${v("note")}"></label></div>
       ${e ? `<label class="chk"><input type="checkbox" name="active" ${e.is_active ? "checked" : ""}> مفعّل</label>` : ""}
@@ -4222,30 +4572,31 @@ async function renderSchedules(cats, edit = null) {
     const f = ev.target, body = { name: f.name.value, category_id: f.cat.value, amount: f.a.value ? toPiasters(f.a.value) : null, day_of_month: +f.day.value,
       every_months: +f.every.value, remind_days: +f.rd.value, paid_from: f.from.value, start_month: f.start.value, note: f.note.value || null };
     if (e) body.is_active = f.active.checked;
-    try { await api(`/api/expense-schedules${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("تم الحفظ"); renderSchedules(cats); }
+    try { await api(`/api/expense-schedules${e ? `/${e.id}` : ""}`, { method: "POST", body }); toast("تم الحفظ"); renderSchedules(cats, null, accs); }
     catch (err) { toast(err.message, true); }
   });
-  $("#scCancel")?.addEventListener("click", () => renderSchedules(cats));
-  box.querySelectorAll("[data-scedit]").forEach((b) => b.addEventListener("click", () => { renderSchedules(cats, b.dataset.scedit).then(() => $("#scForm").scrollIntoView()); }));
+  $("#scCancel")?.addEventListener("click", () => renderSchedules(cats, null, accs));
+  box.querySelectorAll("[data-scedit]").forEach((b) => b.addEventListener("click", () => { renderSchedules(cats, b.dataset.scedit, accs).then(() => $("#scForm").scrollIntoView()); }));
   box.querySelectorAll("[data-scpay]").forEach((b) => b.addEventListener("click", async () => {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
     await withBusy(b, async () => {
-      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null } });
+      const shown = list.find((x) => x.id === b.dataset.scpay)?.amount ?? null;      // the amount this screen showed (M2-11)
+      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null, expected_amount: amt ? null : shown } });
         toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
       catch (err) { toast(err.message, true); }
     });
   }));
   box.querySelectorAll("[data-scskip]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmInline(b)) return;
-    try { await api(`/api/expense-schedules/${b.dataset.scskip}`, { method: "POST", body: { action: "skip", period: b.dataset.p } }); renderSchedules(cats); }
+    try { await api(`/api/expense-schedules/${b.dataset.scskip}`, { method: "POST", body: { action: "skip", period: b.dataset.p } }); renderSchedules(cats, null, accs); }
     catch (err) { toast(err.message, true); }
   }));
 }
 function exTable(list, actions) {
   return `<table><thead><tr><th>التاريخ</th><th>البند</th><th>المبلغ</th><th>المصدر</th><th>سجّله</th><th>الحالة</th>${actions ? "<th></th>" : ""}</tr></thead><tbody>
     ${list.map((e) => `<tr><td>${esc(e.spent_on)}</td><td>${esc(e.category)}${e.note ? `<div class="muted">${esc(e.note)}</div>` : ""}</td><td class="num">${money(e.amount)}</td>
-      <td>${e.paid_from === "drawer" ? "الخزينة" : "خارجها"}</td><td>${esc(e.by_name || "")}</td>
+      <td>${esc(srcName(e))}</td><td>${esc(e.by_name || "")}</td>
       <td><span class="badge ${EX_ST[e.status][0]}">${EX_ST[e.status][1]}</span>${e.reject_reason ? `<div class="muted">${esc(e.reject_reason)}</div>` : ""}</td>
       ${actions ? `<td><button class="btn small" data-exok="${esc(e.id)}">اعتمد</button> <button class="btn small secondary" data-exno="${esc(e.id)}">ارفض</button></td>` : ""}</tr>`).join("")
       || `<tr><td colspan="7" class="muted">لا توجد مصروفات</td></tr>`}</tbody></table>`;
@@ -4258,10 +4609,11 @@ async function viewProfit() {
     try {
       const r = await api(`/api/reports/profit?from=${f}&to=${t}`), sub = rangeText(f, t);
       $("#prBox").innerHTML = `<section class="panel" id="prRep"><div class="row between"><h2>${esc(sub)}</h2>${reportTools("profit")}</div><div class="totals">
-        <div>المبيعات (بعد المرتجع)<b>${money(r.revenue)}</b><span>${r.invoices} فاتورة · خصومات ${money(r.discount)}</span></div>
+        <div>المبيعات (بعد المرتجع)<b>${money(r.revenue)}</b><span>${r.invoices} فاتورة · خصومات ${money(r.discount)}${r.claim_discounts ? ` · خصم المطالبات: ${money(r.claim_discounts)}` : ""}</span></div>
         <div>تكلفة البضاعة المباعة<b>${money(r.cost)}</b></div>
         <div class="${r.gross_profit >= 0 ? "t-ok" : "t-err"}">مجمل الربح<b>${money(r.gross_profit)}</b>${r.gross_margin_pct != null ? `<span>${r.gross_margin_pct}%</span>` : ""}</div>
         <div>المصروفات المعتمدة<b>${money(r.expenses_total)}</b></div>
+        ${r.supplier_discounts ? `<div class="t-ok">خصومات مكتسبة من الموردين<b>${money(r.supplier_discounts)}</b></div>` : ""}
         <div class="${r.net_profit >= 0 ? "t-ok" : "t-err"}">${r.net_profit >= 0 ? "✓ صافي الربح" : "✕ صافي خسارة"}<b>${money(Math.abs(r.net_profit))}</b></div></div>
         ${r.pending_expenses.n ? `<p class="badge b-warn mt">⚠ يوجد ${r.pending_expenses.n} مصروف (${money(r.pending_expenses.a)} ج) بانتظار الموافقة وغير محتسب — <a href="#/expenses">راجعها</a></p>` : ""}
         ${r.unknown_cost_lines ? `<p class="badge b-warn mt">⚠ ${r.unknown_cost_lines} سطر بيع بدون تكلفة مسجلة — قد يكون الربح الحقيقي أقل</p>` : ""}
@@ -4270,7 +4622,8 @@ async function viewProfit() {
         <p class="muted">الرواتب المصروفة من شاشة الرواتب تُسجَّل هنا مصروفًا "رواتب وأجور".</p></section>`;
       wireTools("profit", () => ({ title: "تقرير الربح", subtitle: sub, el: $("#prRep"), sheets: [
         { name: "الملخص", columns: [Tx("البيان"), M("المبلغ")], rows: [["المبيعات بعد المرتجع", r.revenue], ["الخصومات", r.discount], ["تكلفة البضاعة", r.cost],
-          ["مجمل الربح", r.gross_profit], ["المصروفات المعتمدة", r.expenses_total], ["صافي الربح", r.net_profit], ["رسوم التوصيل", r.delivery_fees || 0]] },
+          ["مجمل الربح", r.gross_profit], ["المصروفات المعتمدة", r.expenses_total], ["خصومات مكتسبة من الموردين", r.supplier_discounts || 0],
+          ["خصم المطالبات", r.claim_discounts || 0], ["صافي الربح", r.net_profit], ["رسوم التوصيل", r.delivery_fees || 0]] },
         { name: "المصروفات", columns: [Tx("البند"), M("المبلغ")], rows: r.expenses.map((e) => [e.category, e.amount]), total: ["الإجمالي", r.expenses_total] }] }));
     } catch (err) { $("#prBox").innerHTML = `<p class="badge b-err">✕ ${esc(err.message)}</p>`; }
   });
@@ -4306,12 +4659,21 @@ async function viewHome() {
 // ------------------------------------------------------------------ reports
 // ------------------------------------------------------------------ periods, Excel export, print preview
 const isoDay = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+// the pharmacy's calendar day (Cairo), whatever the device clock's zone; days are counted on the calendar, never as
+// 24 hours, so the night the clocks go back has a yesterday (#324 R24). Noon local keeps isoDay() on that date.
+function cairoDay() {
+  try {
+    const [y, m, d] = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(new Date()).split("-").map(Number);
+    return [y, m - 1, d];
+  } catch { const n = new Date(); return [n.getFullYear(), n.getMonth(), n.getDate()]; }
+}
 function periodPresets() {
-  const now = new Date(), y = now.getFullYear(), m = now.getMonth(), day = 86400000;
+  const [y, m, d] = cairoDay(), at = (yy, mm, dd) => new Date(yy, mm, dd, 12), now = at(y, m, d);
   return {
-    today: ["اليوم", now, now], yesterday: ["أمس", new Date(now - day), new Date(now - day)],
-    week: ["آخر 7 أيام", new Date(now - 6 * day), now], month: ["هذا الشهر", new Date(y, m, 1), now],
-    last: ["الشهر الماضي", new Date(y, m - 1, 1), new Date(y, m, 0)], year: ["هذه السنة", new Date(y, 0, 1), now],
+    today: ["اليوم", now, now], yesterday: ["أمس", at(y, m, d - 1), at(y, m, d - 1)],
+    week: ["آخر 7 أيام", at(y, m, d - 6), now], month: ["هذا الشهر", at(y, m, 1), now],
+    last: ["الشهر الماضي", at(y, m - 1, 1), at(y, m, 0)], year: ["هذه السنة", at(y, 0, 1), now],
   };
 }
 // a "from — to" bar with quick choices; onChange(from, to) runs on every change
@@ -4323,7 +4685,13 @@ function rangeBar(id, preset = "month") {
 }
 function wireRange(id, onChange) {
   const box = $(`#${id}`), f = box.querySelector("[data-rf]"), t = box.querySelector("[data-rt]");
-  const go = () => { if (f.value && t.value) onChange(f.value, t.value); };
+  // each choice is numbered; the reads it starts carry the number, and an answer for an older choice is dropped (#324 R25)
+  const go = () => {
+    if (!(f.value && t.value)) return;
+    const seq = (RANGE_SEQ[id] = (RANGE_SEQ[id] || 0) + 1);
+    RANGE_CALL = { id, seq };
+    try { onChange(f.value, t.value); } finally { RANGE_CALL = null; }
+  };
   box.querySelectorAll("[data-rp]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.rp];
     box.querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", x === b));
@@ -4707,7 +5075,7 @@ async function viewAttendance() {
 }
 async function viewStaff(month) {
   month = month || isoDay(new Date()).slice(0, 7);
-  const r = await api(`/api/staff?month=${month}`);
+  const [r, accs] = await Promise.all([api(`/api/staff?month=${month}`), moneyAccounts(true)]);
   const post = (body, btn) => withBusy(btn, async () => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } });
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
     <p class="muted">الراتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
@@ -4722,9 +5090,9 @@ async function viewStaff(month) {
     ${pr?.status === "paid" ? "" : `<div class="row mt"><label class="f">مكافأة (ج) <input class="narrow" data-f="bonus" type="number" min="0" value="${pr ? money(pr.bonus) : ""}"></label>
       <label class="f">خصم (ج) <input class="narrow" data-f="ded" type="number" min="0" value="${pr ? money(pr.deduction) : ""}"></label>
       <label class="f grow">ملاحظة <input data-f="note" value="${esc(pr?.note || "")}"></label><button class="btn small" data-a="approve">اعتمد الراتب</button>
-      ${pr ? `<select data-f="from"><option value="outside">من خارج الخزينة</option><option value="drawer">من خزينة الشيفت</option></select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
+      ${pr ? `<select data-f="from">${srcOptions(accs, "treasury", { ownerOutside: true })}</select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
     <details class="mt"><summary>سلفة / تعديل حضور / تفاصيل الأيام (${p.attendance.length})</summary>
-      <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom"><option value="drawer">من الخزينة</option><option value="outside">من الخارج</option></select>
+      <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom">${srcOptions(accs, "drawer", { ownerOutside: true })}</select>
         <button class="btn small secondary" data-a="advance">سجّل السلفة</button></div>
       <div class="row mt"><label class="f">اليوم <input type="date" data-f="day"></label><label class="f">حضور <input type="time" data-f="in" value="10:00"></label>
         <label class="f">انصراف <input type="time" data-f="out" value="18:00"></label><label class="f grow">السبب <input data-f="why" placeholder="مثال: نسي التسجيل"></label><button class="btn small secondary" data-a="fix">سجّل اليوم</button></div>
@@ -4741,7 +5109,7 @@ async function viewStaff(month) {
     const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
     if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 }, b);
     if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null }, b);
-    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") }, b);
+    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from"), expected_net: r.people.find((x) => x.id === uid)?.payroll?.net ?? null }, b);
     if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" }, b);
     if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") }, b);
   }));
