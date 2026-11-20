@@ -194,6 +194,24 @@ class TestCodexFindings386(Stage0Base):
         self.assertEqual(releases.resume_journal(self.home), "swapped")        # next start finishes it
         self.assertEqual(self.live.read_bytes(), b"NEW DATABASE")
 
+    def test_sync_error_after_both_moves_restores_the_old_database(self):
+        """Codex P1 on ec061d9: a directory-sync error after both renames must not leave the migrated file
+        live with the old code selected."""
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        real = releases.sync_dir
+        calls = {"n": 0}
+        def failing(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("sync")
+            real(path)
+        with patch.object(releases, "sync_dir", side_effect=failing):
+            self.assertEqual(releases.resume_journal(self.home), "aborted")
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
+        self.assertIsNone(releases.read_state(self.home)["active"])
+        self.assertTrue(releases.settled(self.home))
+
     def test_files_swapped_but_journal_not_updated_is_still_undone(self):
         rid = self.stage_and_select()
         cand, prev = self.prepare_journal(rid)

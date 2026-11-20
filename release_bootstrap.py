@@ -410,12 +410,12 @@ def resume_journal(home: Path) -> str:
             for s in j["swaps"]:
                 _swap_one(s)
         except (ReleaseError, OSError, KeyError, TypeError) as exc:
-            # A half-done swap (first move only) is put back first. If that fails too, the journal stays
+            # Every swap that moved the live file (first move only, or both) is put back first. If that fails too, the journal stays
             # "ready" with the copy kept, and the caller must not start a program (Codex P1 on #386): the
             # next start retries. Only with every live file in place is the update dropped.
             try:
-                for s in j.get("swaps", []):
-                    if not Path(s["live"]).exists():
+                for s in j.get("swaps", []):        # any swap that moved a file (half or whole) goes back
+                    if Path(s["previous"]).exists():
                         _undo_one(s)
             except (ReleaseError, OSError, KeyError) as undo_exc:
                 log_event(home, step="swap", ok=False, release=j.get("release"), reason=f"{exc}; {undo_exc}")
