@@ -505,3 +505,23 @@ class TestBundleBuilder(unittest.TestCase):
                     patch.object(update_sign, "trusted_keys", return_value=[base64.b64decode(pub)]):
                 with self.assertRaises(update_sign.SignatureError):                # secret != committed key
                     build_bundle.main(["--channel", "main", "--out", str(Path(tmp) / "o2")])
+
+
+class TestGitHubSource(unittest.TestCase):
+    def headers_sent(self, token):
+        from unittest.mock import MagicMock
+        src = su.GitHubSource("o/r", "main", token)
+        seen = {}
+        def fake_open(req, timeout=None):
+            seen.update({k.lower(): v for k, v in req.header_items()})
+            resp = MagicMock()
+            resp.__enter__.return_value.read.return_value = b'{"assets": []}'
+            return resp
+        src._open = fake_open
+        src.assets()
+        return seen
+
+    def test_no_key_means_anonymous_not_bearer_none(self):
+        """Codex P2 on 9b006bc: the repository is public; read_token() returns None without a key file."""
+        self.assertNotIn("authorization", self.headers_sent(None))
+        self.assertEqual(self.headers_sent("k")["authorization"], "Bearer k")

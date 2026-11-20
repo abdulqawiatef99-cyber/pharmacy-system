@@ -129,19 +129,23 @@ class _NoAuthOnRedirect(urllib.request.HTTPRedirectHandler):
 
 class GitHubSource:
     """Release `update-<channel>` of the private repository, read with the read-only token."""
-    def __init__(self, repo: str, channel: str, token: str):
+    def __init__(self, repo: str, channel: str, token: str | None):
         self.repo, self.channel, self.token = repo, channel, token
         self._assets: dict | None = None
         self._open = urllib.request.build_opener(_NoAuthOnRedirect()).open
 
     def _request(self, url: str, accept: str, extra: dict | None = None):
-        headers = {"Authorization": f"Bearer {self.token}", "Accept": accept, "User-Agent": "pharmacy-updater",
-                   **(extra or {})}
+        headers = {"Accept": accept, "User-Agent": "pharmacy-updater", **(extra or {})}
+        if self.token:                                   # no key file: anonymous (the repository is public)
+            headers["Authorization"] = f"Bearer {self.token}"
         try:
             return self._open(urllib.request.Request(url, headers=headers), timeout=120)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 raise UpdateError("مفيش حزمة تحديث موقّعة على القناة دي لسه") from e
+            from .updater import _rate_limited
+            if _rate_limited(e):
+                raise UpdateError("GitHub وصل لحد الطلبات المسموح بيه مؤقتًا. انتظر ساعة ثم اضغط «تحديث» مرة أخرى") from e
             if e.code in (401, 403):
                 raise UpdateError("GitHub رفض الطلب: مفتاح القراءة خاطئ أو منتهٍ") from e
             raise UpdateError(f"خطأ من GitHub: {e.code}") from e
