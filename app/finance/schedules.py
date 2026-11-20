@@ -35,7 +35,9 @@ def _add(period: str, months: int) -> str:
 
 # a period counts as paid unless its expense was rejected before any money left: a rejected payment whose
 # cash already left the drawer stays paid, so the same bill is never offered (and paid) a second time (M2-12)
-TAKEN = "(status<>'rejected' OR shift_id IS NOT NULL)"
+# a period is taken unless it was rejected before any money left: a drawer or money-account payment already went
+# out when it waits for approval, so its rejection never reopens the month (M2-12; account: #348 Codex)
+TAKEN = "(status<>'rejected' OR shift_id IS NOT NULL OR account_id IS NOT NULL)"
 
 
 def next_open(db: Database, s: dict, today: date) -> dict | None:
