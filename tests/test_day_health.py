@@ -76,13 +76,13 @@ class TestDayChecks(Base):
     def test_writes_nothing(self):
         n = self.db.one("SELECT count(*) n FROM audit_log")["n"]
         dayhealth.day_checks(self.db, self.ctx, backup=None)
-        dayhealth.pc_checks(self.db, self.tmp)
+        dayhealth.pc_checks(self.db, self.tmp, org_id=self.ctx.org_id)
         self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log")["n"], n)
 
 
 class TestPCChecks(Base):
     def run_pc(self, free=50 * GB, system=("Windows", "10", "AMD64"), now=None):
-        return self.by_key(dayhealth.pc_checks(self.db, self.tmp, disk=lambda p: Usage(100 * GB, 0, free),
+        return self.by_key(dayhealth.pc_checks(self.db, self.tmp, org_id=self.ctx.org_id, disk=lambda p: Usage(100 * GB, 0, free),
                                                system=system, now=now))
 
     def test_healthy_pc(self):
@@ -103,6 +103,23 @@ class TestPCChecks(Base):
     def test_clock_behind_the_newest_record(self):
         past = datetime.now(timezone.utc) - timedelta(days=3)
         self.assertEqual(self.run_pc(now=past)["clock"]["status"], "bad")
+
+
+class TestCodexReview395(Base):
+    def test_money_text_is_exact_for_any_integer(self):
+        self.assertEqual(dayhealth._egp(9007199254740993), "90,071,992,547,409.93")
+        self.assertEqual((dayhealth._egp(5), dayhealth._egp(-150), dayhealth._egp(0)), ("0.05", "-1.50", "0.00"))
+
+    def test_clock_reads_only_this_pharmacys_records(self):
+        _, other = self.second_tenant()
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        row = dict(self.db.one("SELECT * FROM audit_log WHERE org_id=? ORDER BY seq DESC LIMIT 1", (other.org_id,)))
+        row.update(id=row["id"] + "-f", at=future, seq=row["seq"] + 1)      # another pharmacy's record dated ahead
+        with self.db.transaction():
+            self.db.execute(f"INSERT INTO audit_log ({','.join(row)}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
+        got = self.by_key(dayhealth.pc_checks(self.db, self.tmp, org_id=self.ctx.org_id,
+                                              disk=lambda p: Usage(100 * GB, 0, 50 * GB), system=("Windows", "10", "AMD64")))
+        self.assertEqual(got["clock"]["status"], "ok")
 
 
 class TestDayHealthAPI(Base):

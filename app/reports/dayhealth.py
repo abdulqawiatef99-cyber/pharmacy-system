@@ -31,7 +31,9 @@ def _c(key: str, status: str, title: str, text: str, **extra) -> dict:
 
 
 def _egp(p: int) -> str:
-    return f"{p / 100:,.2f}"
+    """Whole piasters as EGP text, integers only (no float on the way, Codex P1 on #395)."""
+    sign, p = ("-", -p) if p < 0 else ("", p)
+    return f"{sign}{p // 100:,}.{p % 100:02d}"
 
 
 def _bounds(day: date) -> tuple[str, str]:
@@ -98,9 +100,10 @@ def _windows_ok(system: str, release: str, machine: str, bits64: bool) -> tuple[
     return ok, f"Windows {release} {'64-bit' if bits64 else '32-bit'}"
 
 
-def pc_checks(db: Database, data_dir: Path, *, now: datetime | None = None, disk=shutil.disk_usage,
+def pc_checks(db: Database, data_dir: Path, *, org_id: str, now: datetime | None = None, disk=shutil.disk_usage,
               system: tuple[str, str, str] | None = None) -> list[dict]:
-    """The PC the program runs on. disk / system are injectable for tests."""
+    """The PC the program runs on. disk / system are injectable for tests. The clock is compared with this
+    pharmacy's own newest record only (Codex P1 on #395)."""
     out: list[dict] = []
     try:
         free = disk(str(data_dir)).free
@@ -118,7 +121,7 @@ def pc_checks(db: Database, data_dir: Path, *, now: datetime | None = None, disk
     out.append(_c("sqlite", "ok" if qc == "ok" else "bad", "سلامة قاعدة البيانات",
                   "سليمة" if qc == "ok" else "فيها مشكلة — متقفلش البرنامج وبلّغ المالك فورًا"))
     now = now or datetime.now(timezone.utc)
-    last = db.one("SELECT max(at) a FROM audit_log")["a"]
+    last = db.one("SELECT max(at) a FROM audit_log WHERE org_id=?", (org_id,))["a"]
     behind = False
     if last:
         try:
