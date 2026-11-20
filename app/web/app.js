@@ -266,7 +266,9 @@ const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
   /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/,
   // money accounts (F105/F108): a transfer, the owner's money in or out, a count, an opening fix, a reconciliation
-  /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/];
+  /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/,
+  // part 3 item 2: an opening balance corrected after the move
+  /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -365,6 +367,7 @@ const routes = [
   [/^#\/money$/, viewMoney],
   [/^#\/money\/([\w-]+)$/, viewMoneyAccount],
   [/^#\/reconcile$/, viewReconcile],
+  [/^#\/opening-fix$/, viewOpeningFix],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
   [/^#\/estock(?:\?.*)?$/, viewEstock],
@@ -496,7 +499,7 @@ const SCREENS = {
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
   customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
-  reconcile: ["مطابقة الأرصدة", "cash.see_expected"], estock: ["تاريخ إي ستوك", "sales.read"],
+  reconcile: ["مطابقة الأرصدة", "cash.see_expected"], "opening-fix": ["تصحيح الأرصدة بعد النقل", "balances.correct"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
@@ -3651,7 +3654,7 @@ const MV_SIGN = (a) => (a < 0 ? `<span class="err">− ${money(-a)}</span>` : `<
 async function viewMoney() {
   const accs = await moneyAccounts(true), owner = isOwnerMe(), canM = ME.permissions.includes("cash.manage");
   const total = accs.reduce((x, a) => x + (a.balance || 0), 0);
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الخزنة والحسابات</h1><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الخزنة والحسابات</h1><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a>${ME.permissions.includes("balances.correct") ? ` · <a href="#/opening-fix">تصحيح الأرصدة بعد النقل ←</a>` : ""}</div>
     <div class="totals"><div>كل الفلوس في البرنامج<b>${money(total)} ج</b><span>عدد الأماكن: ${accs.length}</span></div></div>
     <table><thead><tr><th>المكان</th><th>النوع</th><th>الرصيد</th><th></th></tr></thead><tbody>
     ${accs.map((a) => `<tr><td><b>${esc(a.name)}</b>${a.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}${a.allow_negative ? ` <span class="chip">مسموح بالسالب</span>` : ""}</td>
@@ -3829,6 +3832,50 @@ async function viewReconcile() {
     load().catch((e) => toast(e.message, true));
   }));
   $("#rcF").addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
+  await load();
+}
+
+// ------------------------------------------------------------------ balance correction after the move (part 3 item 2)
+// Owner/manager (balances.correct): the opening balance of a moved supplier or customer is corrected with a written
+// reason. The difference is an opening adjustment (never a payment), in the audit log and the reconciliation history.
+async function viewOpeningFix() {
+  app.innerHTML = `<section class="panel"><h1>تصحيح الأرصدة بعد النقل</h1>
+    <p class="muted">الرصيد الافتتاحي لكل مورد أو عميل اتنقل من إي ستوك. لو الرقم غلط اكتب الصحيح وسبب التصحيح؛ الفرق بيتسجل تسوية افتتاحية (مش دفع ولا مصروف) وبيظهر في سجل العمليات وفي كشف الحساب.</p>
+    <form class="row" id="ofF"><div class="seg2 small" id="ofK"><button type="button" class="on" data-k="supplier">✓ الموردين</button><button type="button" data-k="customer">العملاء</button></div>
+      <input name="q" class="grow" placeholder="ابحث بالاسم أو كود إي ستوك"><button class="btn small secondary">ابحث</button></form>
+    <div id="ofBox" class="mt"></div></section>`;
+  let kind = "supplier";
+  const load = async () => {
+    const r = await api(`/api/opening-balances/${kind}?q=${encodeURIComponent($("#ofF").q.value)}`);
+    $("#ofBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>الاسم</th><th>كود إي ستوك</th><th>رصيد إي ستوك</th><th>الافتتاحي الحالي</th><th>الرصيد النهارده</th><th>الصحيح (ج)</th><th>سبب التصحيح</th><th></th><th>تصحيحات</th></tr></thead><tbody>
+      ${r.parties.map((p) => `<tr data-id="${esc(p.party_id)}" data-open="${p.opening}"><td><b>${esc(p.name)}</b></td><td>${esc(p.estock_code || "")}</td>
+        <td class="num">${money(p.estock_opening)}</td><td class="num" data-o>${money(p.opening)}</td><td class="num" data-now>${money(p.balance_now)}</td>
+        <td><input class="narrow" type="number" step="0.01" data-amt></td><td><input data-why placeholder="مثلًا: كشف حساب المورد"></td>
+        <td><button class="btn small" data-save>صحّح</button></td><td class="num" data-n>${p.corrections || ""}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">مفيش أرصدة منقولة</td></tr>`}</tbody></table></div>
+      <p class="muted small">+ للمورد = علينا له، + للعميل = عليه لنا.</p>`;
+    $("#ofBox").querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+      const tr = b.closest("tr"), amt = toPiasters(tr.querySelector("[data-amt]").value), why = tr.querySelector("[data-why]").value.trim();
+      if (amt == null) { tr.querySelector("[data-amt]").focus(); toast("اكتب الرصيد الصحيح", true); return; }
+      if (why.length < 3) { tr.querySelector("[data-why]").focus(); toast("اكتب سبب التصحيح", true); return; }
+      await withBusy(b, async () => {
+        try {
+          const r2 = await api(`/api/opening-balances/${kind}/${encodeURIComponent(tr.dataset.id)}`, { method: "POST", body: { amount: amt, seen_opening: +tr.dataset.open, reason: why } });
+          toast(`✓ اتصحح: الفرق ${money(r2.opening - +tr.dataset.open)} ج`);
+          tr.dataset.open = r2.opening; tr.querySelector("[data-o]").textContent = money(r2.opening); tr.querySelector("[data-now]").textContent = money(r2.balance_now);
+          tr.querySelector("[data-n]").textContent = r2.history.length; tr.querySelector("[data-amt]").value = ""; tr.querySelector("[data-why]").value = "";
+        } catch (err) {
+          toast(err.message, true);
+          if (err.code === "balance_changed") load();
+        }
+      });
+    }));
+  };
+  document.querySelectorAll("#ofK [data-k]").forEach((b) => b.addEventListener("click", () => {
+    kind = b.dataset.k;
+    document.querySelectorAll("#ofK [data-k]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + { supplier: "الموردين", customer: "العملاء" }[x.dataset.k]; });
+    load().catch((e) => toast(e.message, true));
+  }));
+  $("#ofF").addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
   await load();
 }
 

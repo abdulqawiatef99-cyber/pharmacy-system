@@ -55,6 +55,7 @@ PERMISSIONS: dict[str, str] = {
     "contracts.manage": "التعاقدات وخصوماتها",
     "cash.close": "إغلاق الشيفت (عدّ الخزينة)",
     "cash.see_expected": "معرفة المتوقع في الخزينة",
+    "balances.correct": "تصحيح أرصدة الموردين والعملاء بعد النقل (بسبب مكتوب)",
     "cash.manage": "الصرف والإيداع من الخزينة وفتحها",
     "expenses.record": "تسجيل مصروف (ينتظر الموافقة)",
     "expenses.approve": "اعتماد المصروفات",
@@ -75,7 +76,7 @@ GROUPS: list[tuple[str, list[str]]] = [
                          "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
                          "items.groups", "suppliers.read", "suppliers.write", "suppliers.pay"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
-    ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve"]),
+    ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve", "balances.correct"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
                           "safety.manage", "safety.approve"]),
     ("الإدارة", ["users.manage", "settings.manage", "payroll.manage"]),
@@ -92,7 +93,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
     "manager": ("مدير", _EMPLOYEE + [
         "items.write", "items.price", "items.hidden", "suppliers.write", "suppliers.pay", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
-        "audit.read", "safety.override", "expenses.approve"], 0),
+        "audit.read", "safety.override", "expenses.approve", "balances.correct"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
         "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
     "assistant": ("مساعد", list(_EMPLOYEE), 0),
@@ -100,7 +101,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-10-25f"
+ROLES_VERSION = "2026-11-21a"
 
 
 @dataclass(frozen=True)
