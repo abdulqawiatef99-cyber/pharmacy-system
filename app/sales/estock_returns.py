@@ -150,6 +150,11 @@ def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
         heads = _rows(con, "Sales_header", {"sales_id": sales_id})
         if not heads:
             raise NotFound("الفاتورة دي مش في تاريخ إي ستوك")
+        if len(heads) > 1:
+            # one invoice number twice with different cells (an exact copy is set apart at the move): which
+            # payment the refund follows is not known (Codex on #385)
+            raise Conflict("فاتورة إي ستوك دي متسجلة مرتين ببيانات مختلفة: المرتجع عليها موقوف لحد ما المالك يراجعها",
+                           code="estock_history_duplicate")
         h = heads[0]
         items, customers = _map(con, "items"), _map(con, "customers")
         lines = _local_lines(con, sales_id)
