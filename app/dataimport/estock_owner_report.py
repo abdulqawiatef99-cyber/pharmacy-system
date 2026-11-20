@@ -38,7 +38,11 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
     (r"مش موجود في جدول الأصناف", "رصيد على صنف ممسوح من إي ستوك",
      "قول الرصيد ده يتنقل على صنف جديد ولا يتساب في الأرشيف"),
     (r"مش رقم", "قيمة مكتوبة غلط في إي ستوك", "صحّح القيمة دي في إي ستوك واعمل القراية تاني"),
-    (r"اتقرا مرتين", "القراية اتعملت وإي ستوك شغال", "اقفل إي ستوك خالص واعمل القراية تاني"),
+    (r"رقم التشغيلة موجود .* ببيانات مختلفة \(مكرر\)", "رقم التشغيلة موجود مرتين في إي ستوك نفسه ببيانات مختلفة (مكرر)",
+     "قول أنهي سطر الصح؛ بيتكتب في launch-night\\packs.json كده: {\"duplicates\": {\"<رقم التشغيلة>\": 1 أو 2}}"
+     " (والسطر التاني بيتساب في الأرشيف)"),
+    (r"(أكتر من مرة|مرتين) في إي ستوك نفسه", "الرقم موجود أكتر من مرة في إي ستوك نفسه (مكرر)",
+     "قولّي أنهي واحد الصح قبل النقل"),
     (r"حد آجل أكبر", "حد آجل أكبر من اللي البرنامج يشيله", "قول حد الآجل الحقيقي للعميل ده"),
     (r"كسر قرش", "رصيد فيه كسر قرش", "قول الرصيد الحقيقي بالقرش، أو سيب التقريب نص لفوق (الافتراضي)"),
     (r"confirmed balance", "رصيد اتغيّر في إي ستوك بعد ما أكدته", "أكّد الرصيد تاني على التقرير الجديد"),
@@ -285,6 +289,7 @@ def _group_key(d: dict) -> str:
 
 
 DOUBT_MAX = 200
+SETTLE_CUSTOMERS = 50
 
 
 def write(path: Path, plan, rec: dict) -> Path:
@@ -349,6 +354,18 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines.append(f"  - {key}: {len(ds)} سطر ({kinds})" + (f"، قيمتهم {_money(tot)} ج" if tot else ""))
     if not rest:
         lines.append("  مفيش.")
+    owed = sorted((d for d in plan.suppliers + plan.customers if d.get("estock_balance")),
+                  key=lambda d: -abs(d["estock_balance"]))
+    if owed:
+        sup = [d for d in owed if d["kind"] == "supplier"]
+        cus = [d for d in owed if d["kind"] == "customer"]
+        lines += ["", "  أرصدة للتسوية (الأكبر الأول؛ الكل في openings-to-confirm.xlsx بآخر فاتورة وآخر دفعة):"]
+        for d in sup + cus[:SETTLE_CUSTOMERS]:
+            lines.append(f"    - {'مورد' if d['kind'] == 'supplier' else 'عميل'} «{d['name']}» (كود {d['code'] or '-'}):"
+                         f" رصيد {_money(Decimal(d['estock_balance']) / 100)} ج — آخر فاتورة {d.get('last_invoice') or 'مفيش'}،"
+                         f" آخر دفعة {d.get('last_payment') or 'مفيش'}")
+        if len(cus) > SETTLE_CUSTOMERS:
+            lines.append(f"    والباقي ({len(cus) - SETTLE_CUSTOMERS} عميل) في openings-to-confirm.xlsx")
     refs = [d for d in (plan.checks.get("money_info") or {}).get("cash_depots", []) if d.get("reference_only")]
     if refs:
         lines += ["", "  أرقام مرجع بس (مش فلوس اتنقلت):"]
