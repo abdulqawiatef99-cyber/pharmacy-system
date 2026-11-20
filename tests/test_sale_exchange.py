@@ -197,3 +197,22 @@ class TestPreview(Base):
         r = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, self.draft(self.b, 1), refund_method="cash",
                             reason="استبدال")
         self.assertEqual(v, r["returned"])
+
+
+class TestCodexReview396(Base):
+    def test_a_delivery_replacement_is_refused(self):
+        sid = self.sell(self.a, 2)
+        new = self.draft(self.b, 1)
+        self.s.set_details(self.ctx, new, {"kind": "delivery", "delivery": {"address": "شارع", "phone": "0100"}}) \
+            if True else None
+        with self.assertRaises(ValidationFailed) as e:
+            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
+        self.assertEqual(e.exception.code, "exchange_delivery")
+        self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))
+
+    def test_a_card_refund_is_not_offered_in_an_exchange(self):
+        sid = self.sell(self.a, 2, paid_card=2000)
+        with self.assertRaises(ValidationFailed):
+            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, self.draft(self.b, 1), refund_method="card",
+                            reason="استبدال")
+        self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))

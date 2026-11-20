@@ -70,3 +70,13 @@ class TestManagerSwitches(Case):
     def test_manager_role_template(self):
         self.assertIn("users.permissions", DEFAULT_ROLES["manager"][1])
         self.assertNotIn("users.permissions", DEFAULT_ROLES["pharmacist"][1])
+
+
+class TestCodexReview396(Case):
+    def test_default_cannot_reopen_what_the_manager_does_not_hold(self):
+        people.set_exception(self.db, self.ctx, self.mgr_id, "sales.return", "deny")
+        people.set_exception(self.db, self.ctx, self.ast_id, "sales.return", "deny")
+        mgr = self.login("mgr1", PW)
+        with self.assertRaises(Forbidden):
+            people.set_exception(self.db, mgr, self.ast_id, "sales.return", "default")
+        self.assertNotIn("sales.return", self.perms(self.ast_id))

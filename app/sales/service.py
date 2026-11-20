@@ -1236,7 +1236,10 @@ class Sales:
         sale return (never a purchase). Returns {"returned": R, "new_total": N, "net": N - R, ...}."""
         ctx.require("sales.return")
         ctx.require("sales.create")
-        if pay_method not in ("cash", "card", "transfer", "credit") or refund_method not in ("cash", "card", "credit"):
+        # the refund in an exchange goes back as cash or to the customer's account only: a card refund lands on the
+        # account that took the first payment, the replacement's card on the channel chosen now, and the two would
+        # not cancel (Codex P1 on #396). A card customer gets the net back or pays it by card through pay_method.
+        if pay_method not in ("cash", "card", "transfer", "credit") or refund_method not in ("cash", "credit"):
             raise ValidationFailed("طريقة الدفع غير صحيحة")
         if sid == new_sid:
             raise ValidationFailed("فاتورة الاستبدال لازم تكون فاتورة جديدة")
@@ -1254,6 +1257,8 @@ class Sales:
                 raise NotFound("الفاتورة غير موجودة")
             if new["status"] != "draft":
                 raise Conflict("فاتورة الاستبدال مكتملة أو ملغاة", code="not_draft")
+            if new["kind"] == "delivery":     # the courier would carry the offset as cash due (Codex P1 on #396)
+                raise ValidationFailed("الاستبدال بيكون في الصيدلية بس، مش توصيل", code="exchange_delivery")
             if orig["customer_id"] and new["customer_id"] and orig["customer_id"] != new["customer_id"]:
                 raise ValidationFailed("فاتورة الاستبدال لنفس عميل الفاتورة الأصلية", code="customer_mismatch")
             if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer

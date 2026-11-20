@@ -279,6 +279,9 @@ def create_from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_id
         inv_row = _invoice(db, ctx, supplier_id, invoice_id=invoice_id)
         by_id = {l["id"]: l for l in _invoice_lines(db, ctx, inv_row["id"])}
         plan, partial = [], []
+        ids = [str(ln.get("purchase_line_id") or "") for ln in lines if isinstance(ln, dict)]
+        if len(ids) != len(lines) or len(set(ids)) != len(ids):      # one entry per line (Codex P1 on #396)
+            raise ValidationFailed("كل سطر من الفاتورة مرة واحدة بس", code="duplicate_line")
         for ln in lines:
             l = by_id.get(str(ln.get("purchase_line_id") or ""))
             if not l:

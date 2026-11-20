@@ -110,3 +110,13 @@ class TestFromInvoice(Base):
         r = returns.create(self.db, self.ctx, self.sup, [{"item_id": self.tax, "qty_base": 1, "reason": "damaged",
                                                         "batch_id": self.lines[self.tax]["batch_id"]}])
         self.assertIsNone(r["purchase_invoice_id"])
+
+
+class TestCodexReview396(Base):
+    def test_the_same_line_twice_is_refused(self):
+        lid = self.lines[self.tax]["id"]
+        with self.assertRaises(ValidationFailed):
+            returns.create_from_invoice(self.db, self.ctx, self.sup, self.inv,
+                                        [{"purchase_line_id": lid, "paid_units": 2, "reason": "expired"},
+                                         {"purchase_line_id": lid, "paid_units": 2, "reason": "expired"}])
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))
