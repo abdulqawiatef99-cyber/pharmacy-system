@@ -109,7 +109,8 @@ class TestCodexReview380(Base):
         estock_archive.build(estock_db.Export(folder), path, {}, org_id=self.ctx.org_id)
         with closing(sqlite3.connect(path)) as con:
             self.assertEqual(con.execute('SELECT count(*) FROM "e_Sales_details"').fetchone()[0], 1)
-            self.assertEqual(con.execute("SELECT value FROM meta WHERE key='format'").fetchone()[0], "2")
+            self.assertEqual(con.execute("SELECT value FROM meta WHERE key='format'").fetchone()[0],
+                             estock_archive.FORMAT)
 
 
 class TestCodexReview380b(Base):
