@@ -1,0 +1,260 @@
+"""Second review of #386 and the owner's decision of 20/11 (the pharmacy PC follows the official release, main):
+- a review installer of a work branch follows main once main contains its commit, never an older main;
+- an update never moves a PC back to an older build of its channel (also when no commit time was recorded);
+- only a launcher that can apply a batch is ever asked to (a bootstrap.json left by a newer launcher is not
+  enough once an older installer is back: exit 75 would only restart the program again and again);
+- the bundle build names the committed key that verified its signature, and the owner's keys stay committed.
+Synthetic data only; GitHub is never called (every request is a mock)."""
+import contextlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from app.core import smart_update as su
+from app.core import update_sign, updater
+from app.core.updater import UpdateError
+import launcher
+import release_bootstrap as releases
+from tests.test_api import APICase, H
+from tests.test_smart_update import SHA_NEW, SHA_OLD, SmartUpdateBase
+from tests.test_updater_edges import _Resp
+
+REPO = Path(__file__).resolve().parents[1]
+REVIEW = {"sha": "a" * 40, "source": "installer", "ref": "claude/launch-candidate"}
+
+
+class TestFollowTheOfficialRelease(unittest.TestCase):
+    def setUp(self):
+        updater._contains_seen.clear()
+        self.addCleanup(updater._contains_seen.clear)
+
+    def compare(self, status):
+        return mock.patch("urllib.request.urlopen", return_value=_Resp(json.dumps({"status": status}).encode()))
+
+    def test_channel_installs_never_ask_github(self):
+        with mock.patch.object(updater, "contains") as has:
+            self.assertEqual(updater.follow({"sha": "a" * 40, "ref": "develop"}, "o/r", None), "develop")
+            self.assertEqual(updater.follow({"sha": "a" * 40, "ref": "main"}, "o/r", None), "main")
+            self.assertEqual(updater.follow({}, "o/r", None), "main")
+        has.assert_not_called()
+
+    def test_review_install_follows_main_only_once_main_contains_it(self):
+        for status, expected in (("ahead", "main"), ("identical", "main"), ("behind", None), ("diverged", None)):
+            updater._contains_seen.clear()
+            with self.compare(status) as get:
+                self.assertEqual(updater.follow(REVIEW, "o/r", "t"), expected, status)
+            self.assertIn("/repos/o/r/compare/" + "a" * 40 + "...main", get.call_args[0][0].full_url)
+
+    def test_offline_or_unknown_commit_is_no_channel_not_an_error(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            self.assertIsNone(updater.follow(REVIEW, "o/r", None))
+        with mock.patch("urllib.request.urlopen") as get:
+            self.assertIsNone(updater.follow({**REVIEW, "sha": "local"}, "o/r", None))     # a zip install
+        get.assert_not_called()
+
+    def test_contained_stays_contained_without_asking_again(self):
+        with self.compare("ahead") as get:
+            self.assertTrue(updater.contains("o/r", "a" * 40, "main", None))
+            self.assertTrue(updater.contains("o/r", "a" * 40, "main", None))
+        self.assertEqual(get.call_count, 1)                    # main only moves forward
+        with self.compare("behind") as get:
+            self.assertFalse(updater.contains("o/r", "b" * 40, "main", None))
+            self.assertFalse(updater.contains("o/r", "b" * 40, "main", None))
+        self.assertEqual(get.call_count, 2)                    # not there yet: asked again at the next check
+
+
+class TestReviewInstallOnTheApi(APICase):
+    def test_status_follows_main_once_the_official_release_has_it(self):
+        self.http_login()
+        with mock.patch.object(updater, "installed", return_value=REVIEW), \
+                mock.patch.object(updater, "read_token", return_value="t"), \
+                mock.patch.object(updater, "contains", return_value=True) as has, \
+                mock.patch.object(updater, "latest_sha", return_value="b" * 40) as ls:
+            st = self.c.get("/api/system/update").json()
+        has.assert_called_once_with(updater.DEFAULT_REPO, "a" * 40, "main", "t")
+        self.assertEqual(ls.call_args[0][1], "main")
+        self.assertEqual((st["channel"], st["latest"], st["available"]), ("main", "b" * 40, True))
+        self.assertNotIn("candidate", st)
+
+    def test_button_moves_the_pc_to_main(self):
+        self.http_login()
+        done = mock.Mock(returncode=0, stdout="ok", stderr="")
+        with mock.patch.object(updater, "installed", return_value=REVIEW), \
+                mock.patch.object(updater, "contains", return_value=True), \
+                mock.patch("subprocess.run", return_value=done) as run:
+            r = self.c.post("/api/system/update", headers=H, json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
+
+    def test_smart_status_never_offers_an_older_bundle(self):
+        self.http_login()
+        m = {"sha": "c" * 40, "commit_time": 5, "python": su.python_tag(), "migrations": [], "notes": []}
+        with mock.patch.object(updater, "installed", return_value={"sha": "a" * 40, "ref": "main"}), \
+                mock.patch.object(updater, "read_token", return_value=None), \
+                mock.patch.object(updater, "latest_sha", return_value="a" * 40), \
+                mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(su, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(su, "read_manifest", return_value=m), \
+                mock.patch.object(updater, "contains", return_value=False) as has:
+            st = self.c.get("/api/system/update").json()
+        has.assert_called_once_with(updater.DEFAULT_REPO, "a" * 40, "c" * 40, None)
+        self.assertTrue(st["smart"]["enabled"])
+        self.assertFalse(st["smart"]["available"])             # the bundle lags behind a code-only update
+
+
+class TestCommandLineFollowsMain(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pharm-follow-")).resolve()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PHARM_")}
+        self.env = mock.patch.dict(os.environ, {**env, "PHARM_DATA_DIR": str(self.tmp / "data")}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        import manage
+        self.manage = manage
+
+    def test_update_without_ref_moves_a_review_install_to_main_or_changes_nothing(self):
+        from types import SimpleNamespace
+        from app.core import backup
+        staged = {"release": str(self.tmp), "id": "r1", "files": 1}
+        seen = []
+        with contextlib.ExitStack() as stack:
+            for p in (mock.patch.object(updater, "read_token", return_value=None),
+                      mock.patch.object(updater, "installed", return_value=REVIEW),
+                      mock.patch.object(updater, "download", return_value=b"zip"),
+                      mock.patch.object(updater, "apply_zip", return_value=staged),
+                      mock.patch.object(releases, "check_compatible"),
+                      mock.patch.object(subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+                      mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"),
+                      mock.patch.object(backup, "verify_archive", return_value={"problems": []}),
+                      mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3]))):
+                stack.enter_context(p)
+            latest = stack.enter_context(mock.patch.object(updater, "latest_sha", return_value="b" * 40))
+            with mock.patch.object(updater, "contains", return_value=False):
+                with self.assertRaises(SystemExit) as stop:
+                    self.manage.main(["update"])
+            self.assertIn("النسخة الرسمية main", str(stop.exception.code))
+            latest.assert_not_called()                         # never an older main
+            self.assertEqual(seen, [])
+            with mock.patch.object(updater, "contains", return_value=True):
+                self.manage.main(["update"])
+        self.assertEqual(latest.call_args[0][1], "main")
+        self.assertEqual(seen[0]["ref"], "main")               # from now on the PC is on main
+
+
+class TestNeverBackward(unittest.TestCase):
+    M = {"sha": "b" * 40, "commit_time": 2000}
+
+    def test_known_commit_time_decides(self):
+        self.assertTrue(su.is_forward(self.M, {"sha": "a" * 40, "commit_time": 1000}))
+        self.assertFalse(su.is_forward(self.M, {"sha": "a" * 40, "commit_time": 3000}))
+        self.assertFalse(su.is_forward(self.M, {"sha": "b" * 40, "commit_time": 1000}))   # the installed one
+
+    def test_unknown_time_asks_github_whether_the_bundle_contains_the_install(self):
+        with mock.patch.object(updater, "contains", return_value=False) as has:
+            self.assertFalse(su.is_forward(self.M, {"sha": "a" * 40}, "o/r", "t"))
+        has.assert_called_once_with("o/r", "a" * 40, "b" * 40, "t")
+        with mock.patch.object(updater, "contains", return_value=True):
+            self.assertTrue(su.is_forward(self.M, {"sha": "a" * 40}, "o/r", "t"))
+
+    def test_offline_bundle_with_nothing_to_compare_is_the_owners_choice(self):
+        with mock.patch.object(updater, "contains") as has:
+            self.assertTrue(su.is_forward(self.M, {"sha": "a" * 40}))                    # flash drive
+            self.assertTrue(su.is_forward(self.M, {"sha": "local"}, "o/r"))              # zip install
+        has.assert_not_called()
+
+
+class _GitHubLike(su.FolderSource):
+    """The bundle folder read as if it came from the GitHub release (it has a repository to ask)."""
+    repo, token = "o/r", None
+
+
+class TestPrepareNeverGoesBack(SmartUpdateBase):
+    def test_bundle_behind_the_installed_commit_is_refused_before_any_download(self):
+        self.build()                     # installed_version.json has no commit time (an installer or code-only update)
+        with mock.patch.object(updater, "contains", return_value=False) as has:
+            with self.assertRaisesRegex(UpdateError, "أقدم"):
+                su.prepare(self.s, _GitHubLike(self.bundle), legacy=self.legacy)
+        has.assert_called_once_with("o/r", SHA_OLD, SHA_NEW, None)
+        self.assertFalse((self.home / "downloads").exists())
+        self.assertEqual(su.prepared(self.data), {})
+
+
+class TestOnlyALauncherThatCanApply(SmartUpdateBase):
+    def db(self):
+        from app.db import Database
+        d = Database(self.s.db_path)
+        self.addCleanup(d.close)
+        return d
+
+    def test_older_launcher_never_gets_a_batch_even_with_a_stale_capability_file(self):
+        self.assertTrue((self.home / "bootstrap.json").exists())       # left by a newer launcher (setUp)
+        leave = mock.Mock()
+        with mock.patch.dict(os.environ, {"PHARM_LAUNCHER": "1"}):
+            os.environ.pop("PHARM_BOOTSTRAP", None)                    # what an older launcher passes
+            self.assertEqual(su.bootstrap_level(self.home), 1)
+            with mock.patch.object(su, "due", return_value={"release": "c" * 64, "when": "now", "needs_db": True}):
+                self.assertFalse(su.trigger(self.s, self.db(), in_flight=lambda: 0, exit=leave))
+            self.build()
+            with self.assertRaisesRegex(UpdateError, "المثبّت"):
+                self.prepare()
+        leave.assert_not_called()                                      # no exit 75, so no restart loop
+        self.assertFalse((self.home / "apply-go.json").exists())
+        self.assertFalse((self.home / "downloads").exists())
+
+    def test_the_new_launcher_and_a_command_window(self):
+        with mock.patch.dict(os.environ, {"PHARM_LAUNCHER": "1", "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP)}):
+            self.assertEqual(su.bootstrap_level(self.home), releases.BOOTSTRAP)
+        with mock.patch.dict(os.environ, {"PHARM_LAUNCHER": "1", "PHARM_BOOTSTRAP": "x"}):
+            self.assertEqual(su.bootstrap_level(self.home), 1)
+        os.environ.pop("PHARM_LAUNCHER", None)
+        self.assertEqual(su.bootstrap_level(self.home), releases.BOOTSTRAP)   # no launcher: the file
+
+
+class TestLauncherTellsItsCapability(unittest.TestCase):
+    def test_server_env_carries_the_launcher_capability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            root, app_home = base / "program", base / "home"
+            root.mkdir()
+            proc = mock.Mock()
+            proc.wait.return_value = 0
+            with mock.patch.object(launcher, "ROOT", root), mock.patch.object(launcher, "home", return_value=app_home), \
+                    mock.patch.object(launcher, "running", return_value=False), \
+                    mock.patch.object(launcher.threading, "Thread"), \
+                    mock.patch.object(launcher.subprocess, "Popen", return_value=proc) as popen:
+                self.assertEqual(launcher.main(), 0)
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual((env["PHARM_LAUNCHER"], env["PHARM_BOOTSTRAP"]), ("1", str(releases.BOOTSTRAP)))
+
+
+class TestSigningKeys(unittest.TestCase):
+    def test_owner_keys_stay_committed_and_load(self):
+        names = {p.name for p in (REPO / "release_keys").glob("*.pub")}
+        self.assertLessEqual({"update-1.pub", "update-2-spare.pub"}, names)   # owner, 20/11 (8c67669, 42da1fb)
+        self.assertTrue(all(len(k) == 32 for k in update_sign.trusted_keys(REPO)))
+
+    def test_bundle_build_names_the_committed_key_that_verified(self):
+        from scripts.release import build_bundle
+        a_priv, a_pub = update_sign.generate()
+        b_priv, b_pub = update_sign.generate()
+        raw = b'{"format": 1}'
+        with tempfile.TemporaryDirectory() as tmp:
+            keys = Path(tmp) / "release_keys"
+            keys.mkdir()
+            (keys / "update-1.pub").write_text(a_pub + "\n", encoding="ascii")
+            (keys / "update-2-spare.pub").write_text(b_pub + "\n", encoding="ascii")
+            with mock.patch.object(build_bundle, "REPO", Path(tmp)):
+                self.assertEqual(build_bundle.signing_key_file(raw, update_sign.sign(raw, a_priv)), "update-1.pub")
+                self.assertEqual(build_bundle.signing_key_file(raw, update_sign.sign(raw, b_priv)),
+                                 "update-2-spare.pub")
+                self.assertEqual(build_bundle.signing_key_file(raw, update_sign.sign(raw, update_sign.generate()[0])),
+                                 "?")
+
+
+if __name__ == "__main__":
+    unittest.main()

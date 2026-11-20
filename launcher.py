@@ -141,8 +141,9 @@ def main() -> int:
 def _main(h: Path) -> int:
     for d in ("data", "backups", "logs"):
         (h / d).mkdir(parents=True, exist_ok=True)
+    # PHARM_BOOTSTRAP: what this launcher can apply (docs/SMART_UPDATE.md §1); an older launcher sets none
     env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
-           "PYTHONPATH": str(ROOT)}
+           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PYTHONPATH": str(ROOT)}
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     code_home = releases.code_home(h / "data")

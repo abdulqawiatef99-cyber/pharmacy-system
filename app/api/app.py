@@ -501,15 +501,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        chan = updater.channel(info)
+        token = updater.read_token()
+        # #107: the install's own channel (develop on test PCs); a review installer of a work branch follows the
+        # official release (main) once main contains it (owner 20/11), never an older main
+        chan = updater.follow(info, updater.DEFAULT_REPO, token)
         out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, cur)}
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, info)}
         if chan is None:
-            out["candidate"] = info["ref"]        # a review installer of a work branch: no channel to follow
+            out["candidate"] = info["ref"]        # a review installer main does not contain yet: no channel
             upd_cache.update(at=now, v=out)
             return out
-        try:                                      # #107: the install's own channel (develop on test PCs)
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, updater.read_token())
+        try:
+            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, token)
             out["available"] = out["latest"] != cur
         except updater.UpdateError as e:
             out["error"] = str(e)
@@ -517,9 +520,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return out
 
     upd_root = Path(__file__).resolve().parents[2]
-    smart_cache: dict = {}
 
-    def _smart_status(chan, cur) -> dict:
+    def _smart_status(chan, info) -> dict:
         """docs/SMART_UPDATE.md: signed bundles (migrations and packages too) once this PC trusts a key."""
         from ..core import smart_update as su, update_sign, updater
         out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
@@ -530,12 +532,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             keys = []
         if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
             return out                                # old launcher: today's code-only button
+        token = updater.read_token()
         try:
-            m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, updater.read_token()), keys)
+            m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, token), keys)
+            forward = su.is_forward(m, info, updater.DEFAULT_REPO, token)   # never an older bundle
         except updater.UpdateError as e:
             out["error"] = str(e)
             return out
-        out.update(enabled=True, sha=m["sha"], available=m["sha"] != cur, needs_installer=m["python"] != su.python_tag(),
+        out.update(enabled=True, sha=m["sha"], available=forward, needs_installer=m["python"] != su.python_tag(),
                    notes=[n for n in m.get("notes", []) if n not in set(su.notes_of(upd_root))][:60],
                    database=bool(set(m["migrations"]) - {f.stem for f in (upd_root / "app" / "migrations").glob("*.sql")}))
         if out["request"]:
@@ -582,7 +586,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         import subprocess
         import sys as _sys
         from ..core import updater
-        chan = updater.channel(updater.installed(s.data_dir))
+        chan = updater.follow(updater.installed(s.data_dir), updater.DEFAULT_REPO, updater.read_token())
         if chan is None:
             raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
         root = Path(__file__).resolve().parents[2]

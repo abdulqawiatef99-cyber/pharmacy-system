@@ -76,9 +76,26 @@ def main(argv=None) -> int:
     (out / su.MANIFEST).write_bytes(raw)
     sig = update_sign.sign(raw, key)
     update_sign.verify(raw, sig, update_sign.trusted_keys(REPO))     # the PCs must accept it: refuse otherwise
+    su.parse_manifest(raw, sig, update_sign.trusted_keys(REPO))      # and read it the way the PC does
     (out / su.SIGNATURE).write_text(sig, encoding="ascii")
-    print(f"bundle {a.channel} {sha[:7]}: {m['code']['size']} bytes code, deps {ident[:12]}")
+    print(f"bundle {a.channel} {sha[:7]}: {m['code']['size']} bytes code, deps {ident[:12]}, "
+          f"signed with {KEY_NOTE.format(signing_key_file(raw, sig))}")
     return 0
+
+
+KEY_NOTE = "release_keys/{} (public file name; the secret is never printed)"
+
+
+def signing_key_file(raw: bytes, sig: str) -> str:
+    """Which committed public key verifies this signature: the owner checks the secret is the key meant for
+    signing (update-1), not the spare kept offline for rotation."""
+    for p in sorted((REPO / update_sign.KEY_DIR).glob("*.pub")):
+        try:
+            update_sign.verify(raw, sig, [update_sign.key_of(p)])
+            return p.name
+        except update_sign.SignatureError:
+            continue
+    return "?"
 
 
 if __name__ == "__main__":

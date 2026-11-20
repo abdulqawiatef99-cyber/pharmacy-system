@@ -577,9 +577,14 @@ def cmd_update(a, s):
         if a.from_zip:
             data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
         else:
-            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
-                a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
             token = updater.read_token()
+            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
+                info = updater.installed(s.data_dir)
+                a.ref = updater.follow(info, a.repo, token)      # a review install: main once main has it
+                if a.ref is None:
+                    raise updater.UpdateError(
+                        f"النسخة دي متثبتة من فرع تجربة ({info.get('ref')}) ولسه مش جوه النسخة الرسمية main؛ "
+                        "لم يتغير شيء")
             sha = updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
             if cur == sha and not a.force:
@@ -643,8 +648,11 @@ def _smart_update(a, s, root: Path):
         if a.from_bundle:
             source = su.FolderSource(Path(a.from_bundle))
         else:
-            chan = updater.channel(updater.installed(s.data_dir)) or "main"
-            source = su.GitHubSource(a.repo, chan, updater.read_token())
+            token = updater.read_token()
+            chan = updater.follow(updater.installed(s.data_dir), a.repo, token)
+            if chan is None:
+                raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة ولسه مش جوه النسخة الرسمية main؛ لم يتغير شيء")
+            source = su.GitHubSource(a.repo, chan, token)
         out = su.prepare(s, source, legacy=legacy)
         print("SMART-PREPARE " + json.dumps(out, ensure_ascii=False))
         return

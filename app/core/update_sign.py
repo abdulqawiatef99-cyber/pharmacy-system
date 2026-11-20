@@ -24,15 +24,17 @@ def _b64(text: str) -> bytes:
         raise SignatureError("bad base64") from exc
 
 
+def key_of(path: Path) -> bytes:
+    """One raw 32-byte public key from a .pub file (one base64 line)."""
+    raw = _b64(Path(path).read_text(encoding="ascii"))
+    if len(raw) != 32:
+        raise SignatureError(f"bad public key: {Path(path).name}")
+    return raw
+
+
 def trusted_keys(root: Path) -> list[bytes]:
     """Raw 32-byte public keys from <root>/release_keys/*.pub (one base64 line each)."""
-    out = []
-    for p in sorted((Path(root) / KEY_DIR).glob("*.pub")):
-        raw = _b64(p.read_text(encoding="ascii"))
-        if len(raw) != 32:
-            raise SignatureError(f"bad public key: {p.name}")
-        out.append(raw)
-    return out
+    return [key_of(p) for p in sorted((Path(root) / KEY_DIR).glob("*.pub"))]
 
 
 def verify(message: bytes, signature_b64: str, keys: list[bytes]) -> None:

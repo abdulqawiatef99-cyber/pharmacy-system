@@ -62,8 +62,35 @@ def _json(path: Path) -> dict:
 
 
 def bootstrap_level(home: Path) -> int:
+    """What the launcher that started this program can do. Under a launcher, only its own environment counts
+    (PHARM_BOOTSTRAP): a bootstrap.json left by a newer launcher outlives it when an older installer is put
+    back, and that launcher never applies a batch, so exit 75 would only restart the program again and again
+    (second review of #386). In a command window (no launcher), the file the last launcher wrote."""
+    if os.environ.get("PHARM_LAUNCHER") == "1":
+        try:
+            return int(os.environ.get("PHARM_BOOTSTRAP") or 1)
+        except ValueError:
+            return 1
     v = _json(Path(home) / "bootstrap.json").get("bootstrap")
     return v if isinstance(v, int) else 1
+
+
+def is_forward(m: dict, info: dict, repo: str | None = None, token: str | None = None) -> bool:
+    """The bundle moves this PC forward, never back to an older build of its channel. With the installed
+    commit time known (a smart update recorded it), the times decide. An installer or a code-only update
+    records none: then GitHub must show the bundle's commit containing the installed one (a bundle that lags
+    behind a code-only update is no update). An offline bundle with no time to compare is the owner's own
+    choice; the copy check still refuses a database this code is too old for."""
+    cur = info.get("sha")
+    if m["sha"] == cur:
+        return False
+    known = int(info.get("commit_time") or 0)
+    if known:
+        return m["commit_time"] >= known
+    if repo and re.fullmatch(r"[0-9a-f]{40}", cur or ""):
+        from . import updater
+        return updater.contains(repo, cur, m["sha"], token)
+    return True
 
 
 def notes_of(root: Path) -> list[str]:
@@ -350,7 +377,7 @@ def prepare(settings, source, *, legacy: Path, run=subprocess.run) -> dict:
         raise UpdateError("حزمة التحديث لقناة تانية؛ لم يتغير شيء")
     if m["sha"] == info.get("sha"):
         return {"up_to_date": True, "sha": m["sha"]}
-    if m["commit_time"] < int(info.get("commit_time") or 0):
+    if not is_forward(m, info, getattr(source, "repo", None), getattr(source, "token", None)):
         raise UpdateError("حزمة التحديث أقدم من النسخة المثبتة؛ لم يتغير شيء")
     if m["python"] != python_tag() or m["platform"] != platform_tag():
         raise UpdateError("التحديث ده محتاج نسخة بايثون تانية؛ ينزل بالمثبّت")
