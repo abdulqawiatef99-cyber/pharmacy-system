@@ -107,8 +107,8 @@ def approvers(db: Database, ctx: Context) -> list[dict]:
 # -------------------------------------------------------------------------- owner: users screen
 def _see_people(ctx: Context) -> None:
     """The users screen: the owner (users.manage), or someone who switches staff permissions (part 3, A)."""
-    if not ctx.allowed("users.manage"):
-        ctx.require("users.permissions")
+    if not (ctx.allowed("users.manage") or ctx.allowed("users.permissions")):
+        ctx.require("users.manage")           # the approval box asks for the owner's right, as before
 
 
 def roles(db: Database, ctx: Context) -> list[dict]:

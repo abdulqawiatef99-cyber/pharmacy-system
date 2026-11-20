@@ -2660,7 +2660,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يومًا بهذه الفاتورة"
+            n = return_window_days(db, ctx.org_id)       # Arabic number agreement: 7 أيام, 14 يومًا
+            days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
+            policy = f"<p class='s'>المرتجع خلال {days} بهذه الفاتورة"
             policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
