@@ -5,6 +5,20 @@
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
 
+
+## 20/11 23:00 Cairo — Claude Code session «parts 1–2», part 2 ready for review (READ THIS FIRST)
+Open reminders (from the 18/11 15:45 entry, not re-checked): Codex `@codex` on issues (environment); GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts. **New: the signing secret (below).**
+1. Done, with evidence
+   - #386 (`claude/smart-update` @ `005db1b`) is on top of part 1: develop (#387) merged in with no conflict; the owner's keys `release_keys/update-1.pub` and `update-2-spare.pub` kept (blobs `cd2e114`, `d61835b`, 32 bytes each); a test fails if either is dropped.
+   - Channel = **main** (owner 20/11): `updater.follow()` — a review install (the launch candidate on the cashier PC) follows `main` once `main` contains its commit, never an older main; the first update records `ref=main`. OWNER_RULES §4 line updated.
+   - Second review of #386 (backup/restore/startup) posted on the PR: no P0/P1; fixed test-first R1 stale launcher capability (restart loop after an older installer), R2 no downgrade guard without a commit time, R3 secret scoped to two steps, R4 signing dry run before merge; N1-N7 recorded (P3, after launch). `tests/test_smart_update_review.py` 17 tests (16 errors + 2 failures on the old code).
+   - Full suite on the smart-update tree: Ran 2369, OK (skipped 8, expected failures 2), non-root, browser required.
+2. Not done and why
+   - **`UPDATE_SIGNING_KEY` is not visible to GitHub Actions**: the step "Signing key present?" saw it empty on a PR run (44807875442) and a manual run (44807975171). The step was green only because it is fail-closed. Owner step: Settings → Secrets and variables → Actions → **Repository secrets** → `UPDATE_SIGNING_KEY` = the one line of `update-signing-PRIVATE.txt` (update-1). Then Actions → Update bundle → Run workflow on `claude/smart-update`; the log must say `signed with release_keys/update-1.pub`. Since `005db1b` a dry run without the key is red.
+   - #386 not merged: the owner asked for the PR into develop only; merge when CI + Codex are clean on the final head and the key check is green.
+3. Decisions: dry run of the signing path on labelled PRs (nothing published); review-installs follow main only forward.
+4. Next: owner fixes the secret → re-run the dry run → merge #386 → (with approval) release to main + one installer with the new launcher. Part 3 waits for the E-Stock review results.
+
 ## 20/11 22:30 Cairo — Claude Code session «parts 1–2» (owner OK 21:15), part 1 done (READ THIS FIRST)
 Open reminders (from the 18/11 15:45 entry, not re-checked in this session): Codex `@codex` on issues (environment); GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts.
 1. Done, with evidence
