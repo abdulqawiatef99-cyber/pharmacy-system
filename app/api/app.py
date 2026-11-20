@@ -1274,6 +1274,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 "offsite_error": st.get("offsite_error")}
 
     @handler
+    async def day_health_view(req):
+        """Part 3 item 4: the day's checks at shift close and the PC check, read only."""
+        from ..reports import dayhealth
+        ctx = ctx_of(req)
+
+        def run():
+            return {"day": dayhealth.day_checks(db, ctx, backup=backup_health()),
+                    "pc": dayhealth.pc_checks(db, s.data_dir)}
+        return J(await off_loop(run))
+
+    @handler
     async def backup_health_view(req):
         ctx_of(req).require("settings.manage")
         return J(backup_health())
@@ -2802,6 +2813,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/backup/health", backup_health_view),
+        Route("/api/health/day", day_health_view),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
