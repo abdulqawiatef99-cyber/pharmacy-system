@@ -220,3 +220,18 @@ class TestCodexReview385c(Base):
         self.assertNotIn("1", [r["estock_id"] for r in got])
         cust = self.db.one("SELECT id FROM customers WHERE name LIKE '%أحمد%'")["id"]
         self.assertFalse([r for r in h.customer_items(self.db, self.ctx, cust) if (r.get("qty") or 0) > 1])
+
+
+class TestCodexReview385d(Base):
+    """Codex on #385 @a5d1fe0 (failed before the fix): when every local sales line is set apart, the branch
+    mirror does not bring them back."""
+
+    def test_p2_a_local_table_emptied_by_quarantine_stays_the_source(self):
+        from app.dataimport import estock_history as h
+        t = base_tables()
+        line = {"sales_id": "1", "details_id": "1", "product_id": "1", "amount": "1", "sell_price": "30.0000",
+                "total_sell": "30.0000", "insert_date": SOLD}
+        t["Sales_details"] = [line, dict(line, amount="2", total_sell="60.0000")]   # the whole local table clashes
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        cust = self.db.one("SELECT id FROM customers WHERE name LIKE '%أحمد%'")["id"]
+        self.assertEqual(h.customer_items(self.db, self.ctx, cust), [])
