@@ -7,7 +7,6 @@ Any failure before the swap leaves the selected code and the live database exact
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import re
@@ -17,7 +16,6 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
-import time
 import urllib.error
 import urllib.request
 import zipfile
