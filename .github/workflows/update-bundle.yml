@@ -79,7 +79,11 @@ jobs:
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
-          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+          if [ -z "$UPDATE_SIGNING_KEY" ] && [ "$PUBLISH" != "true" ]; then
+            # a dry run exists to check the key: a missing key is a red check, never a quiet green one
+            echo "::error::UPDATE_SIGNING_KEY is not available to this run: it must be a repository secret (Settings > Secrets and variables > Actions > Repository secrets), named exactly UPDATE_SIGNING_KEY."
+            exit 1
+          elif [ -z "$UPDATE_SIGNING_KEY" ]; then
             echo "::notice::UPDATE_SIGNING_KEY is not set: no smart-update bundle (code-only button path stays)."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
