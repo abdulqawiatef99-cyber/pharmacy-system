@@ -1,8 +1,20 @@
 # HANDOFF — الحالة الحالية
 
-آخر تحقق: 2026-11-11 19:05 · Claude · `develop` @ `d24979e` (قبلها `4a93eb2`) (CI linux + windows أخضر، [run 43001809101](https://github.com/abdulqawiatef99-cyber/pharmacy-system/actions/runs/43001809101)). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
-قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **40%، كل البوابات L1**، مفيش دليل قبول جديد).
+آخر تحقق: 2026-11-20 22:30 · Claude · `develop` @ `dc41794` (#387: launch candidate merged, migrations 0037-0039; CI linux + windows أخضر). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
+قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **73.25%**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
+
+
+## 20/11 22:30 Cairo — Claude Code session «parts 1–2» (owner OK 21:15), part 1 done (READ THIS FIRST)
+Open reminders (from the 18/11 15:45 entry, not re-checked in this session): Codex `@codex` on issues (environment); GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts.
+1. Done, with evidence
+   - Part 1: `claude/launch-candidate` merged into develop through #387 (`claude/merge-launch-candidate`, merge commit `691f0f4`; develop @ `dc41794`). develop now knows **0037, 0038, 0039**, byte-identical to the installed builds `cb68f39` and `81a71c1` (same blob ids), so an installer or update built from develop runs on the pharmacy database (at 0039).
+   - One conflict (`app/dataimport/estock_db.py`, treasury depot): the candidate's lines kept (they contain develop's #384 block + `piasters = 0` + the piaster rule). The merged tree is identical to the candidate @ `6ef1c11`.
+   - Gate on `691f0f4`: full suite as a non-root user with the browser required and a `main` checkout (CI setup): **Ran 2300, OK (skipped 8, expected failures 2)**; CI linux ✅ (PR run 44804346753) and linux + windows ✅ (dispatch run 44804341292); Codex "Didn't find any major issues".
+   - Open PRs whose content is now in develop: #381 and #342 (heads are ancestors of develop: GitHub marks them merged), #348 (head `5533095` in develop; base was #342's branch) and #340 (`c935d29` in develop, its last test fix `231efe2` present as `cdbac37`, identical file): closed with a note.
+2. Not done yet: part 2 (smart update #386 on top of part 1, second review, channel to main) — in progress in this session.
+3. Decisions: merge commit, no rebase of the candidate; no installer built; nothing on main.
+4. Next: part 2 (#386).
 
 ## 18/11 14:45 Cairo — manager chat (READ THIS FIRST)
 - Merged into `develop` today: #318 (docs), #320 (update works without a GitHub key), #321, #322 (launch review fixes P1-1..P1-5, P2-5, P2-7), #323 (launch review money P2-1..P2-3). `develop` @ `db74c3e`.
