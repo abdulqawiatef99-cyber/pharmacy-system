@@ -6,6 +6,11 @@
 
 
 
+
+## 20/11 23:40 Cairo — part 2 closed, part 3 approved (owner 23:18) (READ THIS FIRST)
+- #386 gate met on `77a392a`: CI linux + windows ✅, signing dry run ✅ (run 44818446743), Codex clean (after 1 P1 + 2 P2 fixed test-first: abandoned journal restores the moved DB, classic update keeps the package set, panel keeps the classic button), suite 2375 OK. **Not merged on purpose:** a merge publishes `update-develop`, and the dry run shows the secret is the **spare** key (`signed with release_keys/update-2-spare.pub`). Owner 23:18: nothing published before the key is settled = part 3 item 0.
+- Part 3 (owner 23:18, «موافق، بس عاوزين تبقى آخر مرة نحط مثبت»): 0 key checker + key decision, 1 last-installer rehearsal (migration + package + updater change through the button, auto-rollback), 2 balance correction screen, 3 move report wording + #385 small fixes, 4 day health report + PC health, 5 desktop move buttons, 6a sale return + replacement on one screen, 6b purchase return from invoice. Branches stack on `claude/smart-update` until #386 merges. No main, no installer.
+
 ## 20/11 23:00 Cairo — Claude Code session «parts 1–2», part 2 ready for review (READ THIS FIRST)
 Open reminders (from the 18/11 15:45 entry, not re-checked): Codex `@codex` on issues (environment); GitHub two-step sign-in; repo private 3/12 after the updates repo; USB drive; Windows password + remove remote-control programs; devices on the new Wi-Fi; odd piastres; accountant e-receipt; temperature log; doctor; data export from the 3 accounts. **New: the signing secret (below).**
 1. Done, with evidence
