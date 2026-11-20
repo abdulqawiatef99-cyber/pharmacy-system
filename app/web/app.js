@@ -3848,7 +3848,7 @@ async function viewOpeningFix() {
   const load = async () => {
     const r = await api(`/api/opening-balances/${kind}?q=${encodeURIComponent($("#ofF").q.value)}`);
     $("#ofBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>الاسم</th><th>كود إي ستوك</th><th>رصيد إي ستوك</th><th>الافتتاحي الحالي</th><th>الرصيد النهارده</th><th>الصحيح (ج)</th><th>سبب التصحيح</th><th></th><th>تصحيحات</th></tr></thead><tbody>
-      ${r.parties.map((p) => `<tr data-id="${esc(p.party_id)}" data-open="${p.opening}"><td><b>${esc(p.name)}</b></td><td>${esc(p.estock_code || "")}</td>
+      ${r.parties.map((p) => `<tr data-id="${esc(p.party_id)}" data-open="${p.opening}" data-rev="${p.corrections || 0}"><td><b>${esc(p.name)}</b></td><td>${esc(p.estock_code || "")}</td>
         <td class="num">${money(p.estock_opening)}</td><td class="num" data-o>${money(p.opening)}</td><td class="num" data-now>${money(p.balance_now)}</td>
         <td><input class="narrow" type="number" step="0.01" data-amt></td><td><input data-why placeholder="مثلًا: كشف حساب المورد"></td>
         <td><button class="btn small" data-save>صحّح</button></td><td class="num" data-n>${p.corrections || ""}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">مفيش أرصدة منقولة</td></tr>`}</tbody></table></div>
@@ -3859,10 +3859,10 @@ async function viewOpeningFix() {
       if (why.length < 3) { tr.querySelector("[data-why]").focus(); toast("اكتب سبب التصحيح", true); return; }
       await withBusy(b, async () => {
         try {
-          const r2 = await api(`/api/opening-balances/${kind}/${encodeURIComponent(tr.dataset.id)}`, { method: "POST", body: { amount: amt, seen_opening: +tr.dataset.open, reason: why } });
+          const r2 = await api(`/api/opening-balances/${kind}/${encodeURIComponent(tr.dataset.id)}`, { method: "POST", body: { amount: amt, seen_opening: +tr.dataset.open, seen_revision: +tr.dataset.rev, reason: why } });
           toast(`✓ اتصحح: الفرق ${money(r2.opening - +tr.dataset.open)} ج`);
           tr.dataset.open = r2.opening; tr.querySelector("[data-o]").textContent = money(r2.opening); tr.querySelector("[data-now]").textContent = money(r2.balance_now);
-          tr.querySelector("[data-n]").textContent = r2.history.length; tr.querySelector("[data-amt]").value = ""; tr.querySelector("[data-why]").value = "";
+          tr.dataset.rev = r2.corrections; tr.querySelector("[data-n]").textContent = r2.corrections; tr.querySelector("[data-amt]").value = ""; tr.querySelector("[data-why]").value = "";
         } catch (err) {
           toast(err.message, true);
           if (err.code === "balance_changed") load();

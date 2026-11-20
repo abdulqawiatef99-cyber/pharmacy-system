@@ -140,15 +140,25 @@ def corrections(db: Database, ctx: Context, kind: str, q: str = "") -> list[dict
     return [{**r, "corrections": counts.get(r["party_id"], 0)} for r in rows]
 
 
+def _revision(db: Database, ctx: Context, kind: str, party_id: str) -> int:
+    """How many opening adjustments this party has had in the program: only ever grows (Codex P1 on #394)."""
+    _, ledger, col, _ = _kind(kind)
+    return db.one(f"SELECT count(*) n FROM {ledger} WHERE org_id=? AND {col}=? AND ref_id=?",
+                  (ctx.org_id, party_id, REF))["n"]
+
+
 def correct(db: Database, ctx: Context, kind: str, party_id: str, amount: int, *, seen_opening: int,
-            reason: str) -> dict:
+            reason: str, seen_revision: int) -> dict:
     """Correct one moved party's opening balance to `amount` (piasters). The difference is posted as an
-    opening adjustment with the reason; `seen_opening` is the opening the screen showed. Returns the party's
-    row after it, with its correction history."""
+    opening adjustment with the reason. `seen_opening` and `seen_revision` (the `corrections` count) are what
+    the screen showed: an opening put back to an older figure still has a newer revision, so a stale screen
+    or a replayed request never applies. Returns the party's row after it, with its correction history."""
     ctx.require("balances.correct")
     table, _, _, _ = _kind(kind)
     amount = _amount(amount)
     seen = _amount(seen_opening, "الرصيد اللي ظاهر في الشاشة غير صحيح")
+    if isinstance(seen_revision, bool) or not isinstance(seen_revision, int) or seen_revision < 0:
+        raise ValidationFailed("الشاشة قديمة؛ افتحها تاني")
     said = str(reason or "").strip()[:200]
     if len(said) < 3:
         raise ValidationFailed("اكتب سبب التصحيح", code="reason_required")
@@ -158,19 +168,21 @@ def correct(db: Database, ctx: Context, kind: str, party_id: str, amount: int, *
         if not rows:
             raise NotFound("المورد أو العميل ده مش من نقل إي ستوك")
         before = rows[0]
-        if before["opening"] != seen:
+        if before["opening"] != seen or _revision(db, ctx, kind, party_id) != seen_revision:
             raise Conflict("الرصيد الافتتاحي اتغير من وقت ما فتحت الصفحة؛ راجع الرقم الجديد", code="balance_changed",
                            details={"opening": before["opening"]})
         diff = amount - before["opening"]
         if not diff:
             raise ValidationFailed("الرصيد ده هو نفس الرصيد الحالي؛ مفيش حاجة تتصحح", code="no_change")
+        # both recorded balances on the opening basis: statement = the corrected opening, program = the opening
+        # before it, so the reconciliation row's own difference is statement - program (Codex P2 on #394)
         lid = reconcile.post_adjustment(db, ctx, kind, party_id, diff, "opening", note=said, ref_id=REF,
-                                        statement_balance=amount)
+                                        statement_balance=amount, program_balance=before["opening"])
         audit.record(db, ctx, "estock.opening_correct", table[:-1], party_id,
                      before={"opening": before["opening"], "balance": before["balance_now"]},
                      after={"opening": amount, "adjustment": diff, "reason": said, "ledger_id": lid})
     out = _rows(db, ctx, kind, party_id)[0]
-    return {**out, "history": _history(db, ctx, kind, party_id)}
+    return {**out, "corrections": _revision(db, ctx, kind, party_id), "history": _history(db, ctx, kind, party_id)}
 
 
 def correction_history(db: Database, ctx: Context, kind: str, party_id: str) -> list[dict]:

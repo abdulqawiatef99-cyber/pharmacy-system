@@ -2372,10 +2372,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if req.method == "GET":
             return J({"history": ob.correction_history(db, ctx, kind, pid)})
         b = await body(req)
-        if b.get("amount") in (None, "") or b.get("seen_opening") in (None, ""):
+        if b.get("amount") in (None, "") or b.get("seen_opening") in (None, "") or b.get("seen_revision") in (None, ""):
             raise ValidationFailed("اكتب الرصيد الصحيح")
         return J(ob.correct(db, ctx, kind, pid, _int(b.get("amount"), "amount"),
-                            seen_opening=_int(b.get("seen_opening"), "seen_opening"), reason=b.get("reason")),
+                            seen_opening=_int(b.get("seen_opening"), "seen_opening"), reason=b.get("reason"),
+                            seen_revision=_int(b.get("seen_revision"), "seen_revision")),
                  status_code=201)
 
     @handler
