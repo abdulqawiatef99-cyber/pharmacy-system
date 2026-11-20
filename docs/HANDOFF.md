@@ -12,6 +12,8 @@
 - Item 2 done: #394 `claude/p3-2-balance-correction` @ `f866030` (stacked on #392). Permission `balances.correct` (owner+manager, per person), reason required, `reconcile.post_adjustment` type opening, stale-screen guard. Suite 2382 OK. Codex + CI asked.
 - Items 3–5 done: #395 `claude/p3-3-move-report` (on #394). Suite 2399 OK. Codex P1+P2 on #394 fixed `eb14e6d` (revision guard, opening basis); Codex 2×P1 on #395 fixed `b656278` (clock per org, money without float). Re-review asked.
 - Items 6a, 6b, A, C built on `claude/p3-6-returns-permissions-keys` (local worktree, on #395): exchange (one transaction, net only, preview, find by invoice/item/customer, window default 7 days — was 14), purchase return from invoice (migration 0040, #310 bonus rule, `purchases.return_bonus_part`), `users.permissions` + `docs/PERMISSIONS.md` (48 codes), keyboard map (`POS_KEYS`; F2 new invoice moved to Insert). Next: full suite, push, PR, Codex.
+- Items 6a, 6b, A, C: #396 `claude/p3-6-returns-permissions-keys` @ `63ee783` (on #395, merges #395's fixes). Suite 2430 OK. Codex + CI asked. Two full-suite failures found and fixed before the PR: receipt «7 يومًا» → «7 أيام»; approval box still asks `users.manage`.
+- Next: Codex results on #394/#395/#396 → fix P0/P1 test-first → one Codex review over part 3 → STATUS/HANDOFF → #113 comment → stop.
 - Notes: ideas 28/30/31/32 and "#385 small fixes" have no written list in the repo; items 3–5 are built from the one-line plan below, assumptions stated in each PR.
 
 ## 21/11 00:15 Cairo — part 3 in progress: items 0–1 done (PRs open), items 2–6c for the next sessions (READ THIS FIRST)
