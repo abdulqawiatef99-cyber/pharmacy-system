@@ -182,10 +182,17 @@ class TestPrepare(SmartUpdateBase):
         self.assertEqual(p["deps"], m["deps"]["id"])
         folder = su.deps_dir(self.home, p["deps"])
         su.verify_deps(folder)
-        out = subprocess.run([sys.executable, "-c", "import app.smartprobe_check as c; print(c.VALUE)"],
-                             cwd=str(releases.release_path(self.home, p["release"])), capture_output=True,
-                             text=True, env={**os.environ, "PYTHONPATH": str(folder)})
-        self.assertEqual(out.stdout.strip(), "42")
+        release = releases.release_path(self.home, p["release"])
+        probe = ("import runpy, sys; runpy.run_path(sys.argv[1], run_name='probe'); "
+                 "import smartprobe; print(smartprobe.VALUE)")
+        def run_probe(env):
+            return subprocess.run([sys.executable, "-c", probe, str(release / "manage.py")], cwd=str(release),
+                                  capture_output=True, text=True, env=env)
+        base_env = {k: v for k, v in os.environ.items() if k != "PHARM_DEPS_DIR"}
+        self.assertNotEqual(run_probe(base_env).returncode, 0)                    # not selected: installed set only
+        self.assertEqual(run_probe({**base_env, "PHARM_DEPS_DIR": str(folder)}).stdout.strip(), "42")
+        su.select_code_only(self.s, self.legacy, self.backups)                     # selected: from its state entry
+        self.assertEqual(run_probe(base_env).stdout.strip(), "42")
         (folder / "smartprobe" / "__init__.py").write_text("VALUE = 0\n")
         with self.assertRaises(UpdateError):
             su.verify_deps(folder)
@@ -299,6 +306,20 @@ class TestNeverDuringASale(SmartUpdateBase):
         later = datetime.now(timezone.utc) + timedelta(minutes=5)
         self.assertIsNone(su.busy_reason(self.db(), "now", later))
 
+    def test_due_only_for_the_prepared_batch_and_when_quiet(self):
+        from datetime import datetime, timedelta, timezone
+        db = self.db()
+        releases.atomic_json(self.home / "prepared.json", {"release": "c" * 64, "needs_db": True})
+        self.assertIsNone(su.due(self.s, db))                                      # nothing requested
+        su.request(self.data, "now", "owner")
+        self.assertIsNone(su.due(self.s, db))                                      # init just wrote
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with patch.object(su, "datetime", wraps=datetime) as fake:
+            fake.now.return_value = later
+            self.assertEqual(su.due(self.s, db)["needs_db"], True)
+        releases.atomic_json(self.home / "prepared.json", {"release": "d" * 64})
+        self.assertIsNone(su.due(self.s, db))                                      # request for another batch
+
     def test_recent_write_waits(self):
         self.assertIsNotNone(su.busy_reason(self.db(), "now"))                     # init just wrote
 
@@ -344,3 +365,85 @@ class TestSaleInProgress(DBTestCase):
         s.add_line(self.ctx, sid, item, units=1)
         self.assertEqual(su.busy_reason(self.db, "now", later), "فاتورة بيع مفتوحة")
         self.assertIsNone(su.busy_reason(self.db, "now", later + timedelta(minutes=su.SALE_MINUTES)))
+
+
+from tests.test_api import APICase, H  # noqa: E402
+
+
+class TestSmartUpdateAPI(APICase):
+    def post(self, body):
+        return self.c.post("/api/system/update", headers=H, json=body)
+
+    def test_schedule_needs_a_prepared_batch(self):
+        self.http_login()
+        r = self.post({"action": "schedule", "when": "now"})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("ما اتجهزش", r.text)
+
+    def test_prepare_failure_is_audited_and_changes_nothing(self):
+        from unittest import mock
+        self.http_login()
+        failed = mock.Mock(returncode=1, stdout="", stderr="التحديث فشل: مفيش إنترنت دلوقتي")
+        with mock.patch("subprocess.run", return_value=failed) as run:
+            r = self.post({"action": "prepare"})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("مفيش إنترنت", r.text)
+        self.assertIn("--prepare", run.call_args[0][0])
+        self.assertEqual(self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update.prepare'")[0], 1)
+
+    def test_schedule_and_cancel_are_audited(self):
+        import release_bootstrap as rb
+        self.http_login()
+        home = su.home_of(self.s.data_dir)
+        rb.atomic_json(home / "prepared.json", {"release": "c" * 64, "needs_db": True})
+        r = self.post({"action": "schedule", "when": "after_close"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(su.pending_request(self.s.data_dir)["when"], "after_close")
+        self.assertEqual(self.post({"action": "schedule", "when": "midnight"}).status_code, 422)
+        self.assertEqual(self.post({"action": "cancel"}).status_code, 200)
+        self.assertEqual(su.pending_request(self.s.data_dir), {})
+        actions = {r["action"] for r in self.db.all("SELECT action FROM audit_log")}
+        self.assertTrue({"system.update.schedule", "system.update.cancel"} <= actions)
+
+    def test_status_reports_smart_state_without_a_key(self):
+        self.http_login()
+        st = self.c.get("/api/system/update").json()
+        self.assertIn("smart", st)
+        self.assertFalse(st["smart"]["enabled"])            # no trusted key yet: today's button
+
+    def test_signed_out_cannot_schedule(self):
+        self.assertEqual(self.post({"action": "cancel"}).status_code, 401)
+        self.assertEqual(self.post({"action": "prepare"}).status_code, 401)
+
+
+class TestBundleBuilder(unittest.TestCase):
+    def test_ci_bundle_is_signed_verifiable_and_fails_closed_without_a_key(self):
+        import base64
+        from scripts.release import build_bundle
+        if subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True).returncode:
+            self.skipTest("not a git checkout")
+        priv, pub = update_sign.generate()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            with patch.dict(os.environ, {"UPDATE_SIGNING_KEY": ""}):
+                self.assertEqual(build_bundle.main(["--channel", "main", "--out", str(out)]), 0)
+            self.assertFalse(out.exists())                                         # no key: nothing published
+            site = Path(tmp) / "site"
+            (site / "pkg").mkdir(parents=True)
+            (site / "pkg" / "__init__.py").write_text("X = 1\n")
+            with patch.dict(os.environ, {"UPDATE_SIGNING_KEY": priv}), \
+                    patch.object(update_sign, "trusted_keys", return_value=[base64.b64decode(pub)]):
+                self.assertEqual(build_bundle.main(["--channel", "develop", "--out", str(out),
+                                                    "--site-packages", str(site)]), 0)
+            m = su.parse_manifest((out / su.MANIFEST).read_bytes(), (out / su.SIGNATURE).read_text(),
+                                  [base64.b64decode(pub)])
+            self.assertEqual(m["channel"], "develop")
+            self.assertIn("0001_core", m["migrations"])
+            with zipfile.ZipFile(out / m["code"]["name"]) as z:
+                self.assertIn("program/manage.py", z.namelist())
+            with zipfile.ZipFile(out / m["deps"]["name"]) as z:
+                self.assertEqual(z.namelist(), ["pkg/__init__.py"])
+            with patch.dict(os.environ, {"UPDATE_SIGNING_KEY": update_sign.generate()[0]}), \
+                    patch.object(update_sign, "trusted_keys", return_value=[base64.b64decode(pub)]):
+                with self.assertRaises(update_sign.SignatureError):                # secret != committed key
+                    build_bundle.main(["--channel", "main", "--out", str(Path(tmp) / "o2")])

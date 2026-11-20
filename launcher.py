@@ -103,10 +103,15 @@ def main() -> int:
     while True:
         # Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, then run a prepared
         # apply once if the program asked for it, then swap the checked copy in. Nothing here migrates.
-        releases.resume_journal(code_home)
-        if (code_home / "apply-go.json").exists():
-            releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+        try:
             releases.resume_journal(code_home)
+            if (code_home / "apply-go.json").exists():
+                releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+                releases.resume_journal(code_home)
+        except (releases.ReleaseError, OSError) as exc:
+            with open(h / "logs" / "update.log", "a", encoding="utf-8") as log:
+                log.write(f"Update journal could not be completed: {exc}\n")
+            (code_home / "apply-go.json").unlink(missing_ok=True)   # then start what is selected (logged above)
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
         try:

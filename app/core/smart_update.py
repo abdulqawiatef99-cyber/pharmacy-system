@@ -84,14 +84,15 @@ def new_notes(active_root: Path, candidate_root: Path) -> list[str]:
 
 # --------------------------------------------------------------------------- manifest
 def make_manifest(*, channel: str, sha: str, commit_time: int, version: str, python: str, platform: str,
-                  code_zip: Path, deps_zip: Path | None, deps: str, migrations: list[str]) -> bytes:
+                  code_zip: Path, deps_zip: Path | None, deps: str, migrations: list[str],
+                  notes: list[str] | None = None) -> bytes:
     def asset(p: Path, name: str) -> dict:
         return {"name": name, "sha256": releases.file_sha256(p), "size": p.stat().st_size}
     value = {"format": FORMAT, "channel": channel, "sha": sha, "commit_time": int(commit_time),
              "version": version, "python": python, "platform": platform,
              "code": asset(code_zip, f"code-{sha}.zip"),
              "deps": {"id": deps, **(asset(deps_zip, f"deps-{deps}.zip") if deps_zip else {})},
-             "migrations": sorted(migrations)}
+             "migrations": sorted(migrations), "notes": list(notes or [])[:500]}
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=1).encode("utf-8")
 
 
@@ -112,6 +113,7 @@ def parse_manifest(raw: bytes, signature: str, keys: list[bytes]) -> dict:
             assert re.fullmatch(r"[0-9a-f]{64}", m["deps"]["sha256"]) and isinstance(m["deps"]["size"], int)
             assert re.fullmatch(r"[A-Za-z0-9_.-]+", m["deps"]["name"])
         assert isinstance(m["migrations"], list) and isinstance(m["channel"], str)
+        assert all(isinstance(n, str) for n in m.setdefault("notes", []))
     except (ValueError, KeyError, TypeError, AssertionError, UnicodeDecodeError) as exc:
         raise UpdateError("ملف وصف التحديث غير صالح") from exc
     return m
