@@ -56,6 +56,11 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):     # Arabic output even without -X utf8 (a cp1252 console)
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     try:
         sys.exit(main())
     except Exception as exc:
