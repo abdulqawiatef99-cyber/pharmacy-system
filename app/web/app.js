@@ -380,6 +380,7 @@ const routes = [
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
   [/^#\/audit$/, viewAudit],
+  [/^#\/supplier-returns\/invoice$/, viewSupplierReturnInvoice],
   [/^#\/supplier-returns(?:\/(new|[\w-]+))?(?:\?.*)?$/, viewSupplierReturns],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
@@ -4269,12 +4270,55 @@ async function srPropose(l, supplier) {
   } catch { /* unknown here: the server prices it */ }
   if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
 }
+// Part 3 item 6b: a purchase return from its invoice. Supplier + invoice number load the lines with paid and bonus
+// units; paid units are credited at the net invoice price plus their tax, bonus units go back on their own line at 0;
+// settlement on the supplier's account; a line that came with bonus goes back whole (owner #310) unless the person
+// may return part of it and writes why.
+async function viewSupplierReturnInvoice() {
+  const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
+  const money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
+  app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><h1>مرتجع من فاتورة شراء</h1>
+    <form class="row" id="siF"><label class="f">المورد <select name="sup" required><option value="">— اختر —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
+      <label class="f">رقم الفاتورة <input name="no" required></label><button class="btn small">هات الفاتورة</button></form><div id="siBox" class="mt"></div></section>`;
+  $("#siF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const sup = e.target.sup.value;
+    try {
+      const d = await api(`/api/supplier-returns/invoice?supplier=${encodeURIComponent(sup)}&no=${encodeURIComponent(e.target.no.value.trim())}`);
+      $("#siBox").innerHTML = `<p>فاتورة ${esc(d.invoice_no)} — ${esc(d.invoice_date || "")}</p><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>المدفوع (وحدة)</th><th>البونص (وحدة)</th><th>اترجع قبل كده</th>${money_ ? "<th>صافي العلبة</th><th>الضريبة</th>" : ""}<th>الموجود</th><th>يرجع مدفوع</th><th>يرجع بونص</th><th>السبب</th></tr></thead><tbody>
+        ${d.lines.map((l) => `<tr data-pl="${esc(l.id)}"><td>${esc(l.name)}${l.bonus_units ? ` <span class="chip">عليه بونص: بيرجع كله</span>` : ""}</td><td>${esc(l.batch_no || "")}</td><td>${l.paid_units}</td><td>${l.bonus_units}</td><td>${l.paid_returned + l.bonus_returned}</td>
+          ${money_ ? `<td class="num">${money(l.unit_net_price || 0)}</td><td class="num">${money(l.tax_amount || 0)}</td>` : ""}<td>${l.on_hand}</td>
+          <td><input class="narrow" type="number" min="0" max="${l.paid_units - l.paid_returned}" step="1" data-pu value="${l.bonus_units ? l.paid_units - l.paid_returned : ""}"></td>
+          <td><input class="narrow" type="number" min="0" max="${l.bonus_units - l.bonus_returned}" step="1" data-bu value="${l.bonus_units ? l.bonus_units - l.bonus_returned : ""}" ${l.bonus_units ? "" : "disabled"}></td>
+          <td><select data-rs>${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table></div>
+        <div class="row mt"><label class="f">رقم إشعار المورد <input id="siCn"></label><label class="f grow">ملاحظة <input id="siNote"></label></div>
+        <label class="f mt">سبب المرتجع الجزئي من سطر عليه بونص (لو فيه) <input id="siWhy"></label>
+        <p class="muted">التسوية: على حساب المورد. المدفوع بسعر الفاتورة الصافي ومعاه الضريبة، والبونص بيرجع لوحده بصفر.</p>
+        <button class="btn" id="siGo">سجّل المرتجع واطبع الإذن</button>`;
+      $("#siGo").addEventListener("click", async (ev) => {
+        const lines = [...document.querySelectorAll("[data-pl]")].map((tr) => ({ purchase_line_id: tr.dataset.pl,
+          paid_units: +typedWhole(tr.querySelector("[data-pu]").value) || 0, bonus_units: +typedWhole(tr.querySelector("[data-bu]").value) || 0,
+          reason: tr.querySelector("[data-rs]").value })).filter((l) => l.paid_units || l.bonus_units);
+        if (!lines.length) { toast("اكتب كمية المرتجع", true); return; }
+        await withBusy(ev.currentTarget, async () => {
+          try {
+            const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: sup, invoice_id: d.invoice_id, lines,
+              credit_note_no: $("#siCn").value || null, note: $("#siNote").value || null, partial_bonus_reason: $("#siWhy").value || null } });
+            toast(`✓ مرتجع رقم ${r.return_no}`);
+            location.hash = `#/supplier-returns/${r.id}`;
+          } catch (err) { toast(err.message, true); if (err.code === "bonus_line_whole") $("#siWhy").focus(); }
+        });
+      });
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
   SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
-  app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
+  app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><div class="row between"><h1>مرتجع جديد للمورد</h1><a class="btn secondary" href="#/supplier-returns/invoice">مرتجع من فاتورة شراء ←</a></div>
       <div class="row"><label class="f">المورد <select id="srSup"><option value="">— اختر —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
         <label class="f grow">الصنف <input id="srQ" placeholder="اسم أو باركود" autocomplete="off"></label></div>
       <div id="srRes" class="cands"></div>

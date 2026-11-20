@@ -916,10 +916,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if rid == "suggest":
                 return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None,
                                                               qp.get("supplier") or None)})
+            if rid == "invoice":        # part 3 item 6b: load an approved purchase invoice to return from
+                return J(returns.from_invoice(db, ctx, qp.get("supplier", ""), qp.get("no", "")))
             if rid:
                 return J(returns.get(db, ctx, rid))
             return J(returns.listing(db, ctx, qp.get("from", ""), qp.get("to", ""), qp.get("supplier") or None))
         b = await body(req)
+        if b.get("invoice_id"):
+            return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
+                                                 b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
+                                                 note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
         return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
 
     @handler

@@ -34,6 +34,7 @@ PERMISSIONS: dict[str, str] = {
     "purchases.edit": "مراجعة وتعديل فواتير الشراء",
     "purchases.approve": "اعتماد فواتير الشراء وإضافتها للمخزون",
     "purchases.cancel": "إلغاء فاتورة شراء معتمدة",
+    "purchases.return_bonus_part": "مرتجع جزئي لسطر شراء عليه بونص (بسبب مكتوب)",
     "inventory.read": "عرض المخزون",
     "inventory.adjust": "تسويات المخزون",
     "inventory.count": "تسجيل الجرد",
@@ -73,7 +74,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("المرتجع", ["sales.return", "sales.return_others", "sales.return_late", "sales.return_restricted"]),
     ("ما يراه", ["sales.totals", "costs.read", "cash.see_expected", "notifications.read", "audit.read"]),
     ("الشراء والأصناف", ["purchases.create", "purchases.read", "purchases.edit", "purchases.approve",
-                         "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
+                         "purchases.cancel", "purchases.return_bonus_part", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
                          "items.groups", "suppliers.read", "suppliers.write", "suppliers.pay"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
     ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve", "balances.correct"]),
@@ -101,7 +102,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-11-21a"
+ROLES_VERSION = "2026-11-21b"
 
 
 @dataclass(frozen=True)
