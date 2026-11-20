@@ -137,7 +137,7 @@ class TestCommandLineFollowsMain(unittest.TestCase):
             with mock.patch.object(updater, "contains", return_value=False):
                 with self.assertRaises(SystemExit) as stop:
                     self.manage.main(["update"])
-            self.assertIn("النسخة الرسمية main", str(stop.exception.code))
+            self.assertIn("النسخة الرسمية لسه ما وصلتلهاش", str(stop.exception.code))
             latest.assert_not_called()                         # never an older main
             self.assertEqual(seen, [])
             with mock.patch.object(updater, "contains", return_value=True):

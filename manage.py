@@ -582,9 +582,8 @@ def cmd_update(a, s):
                 info = updater.installed(s.data_dir)
                 a.ref = updater.follow(info, a.repo, token)      # a review install: main once main has it
                 if a.ref is None:
-                    raise updater.UpdateError(
-                        f"النسخة دي متثبتة من فرع تجربة ({info.get('ref')}) ولسه مش جوه النسخة الرسمية main؛ "
-                        "لم يتغير شيء")
+                    raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ "
+                                              "لم يتغير شيء")
             sha = updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
             if cur == sha and not a.force:
@@ -651,7 +650,7 @@ def _smart_update(a, s, root: Path):
             token = updater.read_token()
             chan = updater.follow(updater.installed(s.data_dir), a.repo, token)
             if chan is None:
-                raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة ولسه مش جوه النسخة الرسمية main؛ لم يتغير شيء")
+                raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ لم يتغير شيء")
             source = su.GitHubSource(a.repo, chan, token)
         out = su.prepare(s, source, legacy=legacy)
         print("SMART-PREPARE " + json.dumps(out, ensure_ascii=False))
