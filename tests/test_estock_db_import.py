@@ -150,8 +150,11 @@ class Base(DBTestCase):
         return self.db.one("SELECT * FROM items WHERE code=?", (code,))
 
     def units(self, code):
-        return self.db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE item_id=?",
-                           (self.item(code)["id"],))["q"]
+        """The pharmacy's own units of the item (with 0039 a hospital-owned batch is not the pharmacy's)."""
+        own = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if any(
+            r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)")) else ""
+        return self.db.one("SELECT coalesce(sum(m.qty_delta),0) q FROM stock_movements m LEFT JOIN batches b ON"
+                           f" b.id=m.batch_id WHERE m.item_id=?{own}", (self.item(code)["id"],))["q"]
 
 
 class TestFullMove(Base):

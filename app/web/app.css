@@ -424,3 +424,7 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .tour-bub[data-side="none"] .tour-arrow { display: none; }
 .tourbtn { margin-inline-start: 8px; vertical-align: middle; }
 @media print { .tour-bub, .tour-ring, .tourbtn { display: none !important; } }
+
+/* money accounts (F105) */
+.err { color: var(--err, #b42318); }
+.panel.sub { box-shadow: none; border: 1px solid var(--line, #ddd); margin-top: .5rem; }
