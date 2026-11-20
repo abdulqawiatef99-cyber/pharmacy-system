@@ -2930,4 +2930,5 @@ window.I18N_EN = {
 "صحة اليوم والجهاز": "Day and PC health",
 "⚠ 0 محتاجين نظرة": "⚠ 0 need a look",
 "✓ كله تمام": "✓ All fine",
+"اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)": "Type the correct balance in EGP (at most two digits after the point)",
 };

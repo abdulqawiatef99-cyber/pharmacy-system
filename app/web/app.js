@@ -17,6 +17,14 @@ const fmtStock = (q, it) => {
   return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
+// exact piasters from the typed text, never rounded: "475.5" -> 47550, "-20" -> -2000; "475.005" or "1e3" -> null
+// (Codex P1 on #394: a fraction of a piaster is refused, not rounded)
+function exactPiasters(v) {
+  const m = /^\s*(-?)(\d+)(?:[.,](\d{1,2}))?\s*$/.exec(String(v ?? ""));
+  if (!m) return null;
+  const n = Number(m[2]) * 100 + Number((m[3] || "").padEnd(2, "0"));
+  return Number.isSafeInteger(n) ? (m[1] ? -n : n) : null;
+}
 // a typed whole number; "2.5" goes to the server as typed and is refused there, never cut to 2 by parseInt
 const typedWhole = (v) => { const t = String(v ?? "").trim(); if (t === "") return null; const n = Number(t); return Number.isInteger(n) ? n : t; };
 const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
@@ -3862,12 +3870,12 @@ async function viewOpeningFix() {
     $("#ofBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>الاسم</th><th>كود إي ستوك</th><th>رصيد إي ستوك</th><th>الافتتاحي الحالي</th><th>الرصيد النهارده</th><th>الصحيح (ج)</th><th>سبب التصحيح</th><th></th><th>تصحيحات</th></tr></thead><tbody>
       ${r.parties.map((p) => `<tr data-id="${esc(p.party_id)}" data-open="${p.opening}" data-rev="${p.corrections || 0}"><td><b>${esc(p.name)}</b></td><td>${esc(p.estock_code || "")}</td>
         <td class="num">${money(p.estock_opening)}</td><td class="num" data-o>${money(p.opening)}</td><td class="num" data-now>${money(p.balance_now)}</td>
-        <td><input class="narrow" type="number" step="0.01" data-amt></td><td><input data-why placeholder="مثلًا: كشف حساب المورد"></td>
+        <td><input class="narrow" inputmode="decimal" data-amt></td><td><input data-why placeholder="مثلًا: كشف حساب المورد"></td>
         <td><button class="btn small" data-save>صحّح</button></td><td class="num" data-n>${p.corrections || ""}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">مفيش أرصدة منقولة</td></tr>`}</tbody></table></div>
       <p class="muted small">+ للمورد = علينا له، + للعميل = عليه لنا.</p>`;
     $("#ofBox").querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
-      const tr = b.closest("tr"), amt = toPiasters(tr.querySelector("[data-amt]").value), why = tr.querySelector("[data-why]").value.trim();
-      if (amt == null) { tr.querySelector("[data-amt]").focus(); toast("اكتب الرصيد الصحيح", true); return; }
+      const tr = b.closest("tr"), amt = exactPiasters(tr.querySelector("[data-amt]").value), why = tr.querySelector("[data-why]").value.trim();
+      if (amt == null) { tr.querySelector("[data-amt]").focus(); toast("اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)", true); return; }
       if (why.length < 3) { tr.querySelector("[data-why]").focus(); toast("اكتب سبب التصحيح", true); return; }
       await withBusy(b, async () => {
         try {
