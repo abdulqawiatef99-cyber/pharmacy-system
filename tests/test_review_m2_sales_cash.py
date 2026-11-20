@@ -111,7 +111,7 @@ class TestM2_06OldCountScreen(ApiBase):
 
     def test_the_screen_sends_the_shift_it_shows(self):
         at = JS.index('await api("/api/cash/close"')
-        self.assertIn("shift_id: sh.id", JS[at:at + 200])
+        self.assertIn("shift_id: sh.id", JS[at - 400:at + 200])          # in the request body, built just before
 
 
 class TestM2_07OffsettingPriceChanges(Base):

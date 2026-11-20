@@ -150,8 +150,11 @@ class Base(DBTestCase):
         return self.db.one("SELECT * FROM items WHERE code=?", (code,))
 
     def units(self, code):
-        return self.db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE item_id=?",
-                           (self.item(code)["id"],))["q"]
+        """The pharmacy's own units of the item (with 0039 a hospital-owned batch is not the pharmacy's)."""
+        own = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if any(
+            r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)")) else ""
+        return self.db.one("SELECT coalesce(sum(m.qty_delta),0) q FROM stock_movements m LEFT JOIN batches b ON"
+                           f" b.id=m.batch_id WHERE m.item_id=?{own}", (self.item(code)["id"],))["q"]
 
 
 class TestFullMove(Base):
@@ -895,7 +898,9 @@ class TestManagerSchemaReview(Base):
 
     def test_a_row_read_twice_blocks(self):
         t = base_tables()
-        t["Product_Amount"].append(dict(t["Product_Amount"][0]))           # pa_id 1 twice
+        # manager 20/11 15:15: an exact copy counts once (tests/test_estock_duplicates.py); two different rows
+        # with one stock number still stop the move
+        t["Product_Amount"].append(dict(t["Product_Amount"][0], amount="3"))     # pa_id 1 twice, other cells
         res = self.run_import(tables=t)
         self.assertIn(("Product_Amount", "pa_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
@@ -906,7 +911,7 @@ class TestManagerSchemaReview(Base):
         t["Sales_header"][0]["gf_id"] = "7"
         res = self.run_import(tables=t)
         got = {(d["field"], d["severity"]) for d in res["plan"].dq}
-        self.assertIn(("insert_date", "review"), got)
+        self.assertIn(("insert_date", "info"), got)          # manager 20/11 15:15: what it is, for information
         self.assertIn(("gf_id", "review"), got)
 
     def test_branch_mirror_rows_of_the_other_pharmacy_are_left_out(self):

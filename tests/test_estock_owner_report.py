@@ -146,7 +146,10 @@ class TestCodexReview361b(_R):
         tb = base_tables()
         tb["Cash_depots"] = [{"cd_id": "1", "cd_name": "الخزنة الرئيسية", "cd_class": "1", "cd_balance": "1200.0000"},
                              {"cd_id": "2", "cd_name": "فودافون كاش", "cd_class": "1", "cd_balance": "500.0000"}]
-        t = self.report(tables=tb)
+        from unittest import mock
+        from app.dataimport import estock_db
+        with mock.patch.object(estock_db, "_has_money", return_value=False):    # the schema before 0038
+            t = self.report(tables=tb)
         self.assertTrue(self.res["ok"])
         first = t.splitlines()[1]
         self.assertNotIn("كل حاجة اتنقلت", first)
