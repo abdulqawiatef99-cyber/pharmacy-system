@@ -36,7 +36,7 @@ with this file, this file wins. Change it only through a PR, after the owner agr
 ## 4. Merging
 - `develop` only when `CI / linux` is green on the PR's latest head AND Codex reviewed that same head
   with no unresolved P0/P1 (AGENTS.md §2, §2a). Merge commit. Never `main` without the owner.
-- `develop` is the pharmacy PC's update channel. The in-app «تحديث» button works since 12/11 (#158);
+- `main` (the official release) is the pharmacy PC's update channel (owner 20/11); `develop` is for test PCs. A review installer follows `main` once `main` contains it (`docs/SMART_UPDATE.md`). The in-app «تحديث» button works since 12/11 (#158);
   use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
   keep them grouped.
 - After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
