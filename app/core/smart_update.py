@@ -336,6 +336,8 @@ def prepare(settings, source, *, legacy: Path, run=subprocess.run) -> dict:
     from . import updater
     from ..db import Database
     home = home_of(settings.data_dir)
+    if bootstrap_level(home) < releases.BOOTSTRAP:     # every smart batch is applied by the new launcher
+        raise UpdateError("التحديث الذكي محتاج المثبّت الجديد مرة واحدة الأول؛ لم يتغير شيء")
     active_root = releases.current_root(legacy, home)
     m = read_manifest(source, update_sign.trusted_keys(active_root))
     info = updater.installed(settings.data_dir)
@@ -377,8 +379,6 @@ def prepare(settings, source, *, legacy: Path, run=subprocess.run) -> dict:
                 db.close()
             report = check_copy(candidate, snap, deps, run)
     needs_db = bool(report.get("migrated"))
-    if needs_db and bootstrap_level(home) < releases.BOOTSTRAP:
-        raise UpdateError("التحديث ده فيه تعديل على قاعدة البيانات ومحتاج المثبّت الجديد مرة واحدة الأول")
     prepared = {"release": staged["id"], "sha": m["sha"], "commit_time": m["commit_time"], "version": m["version"],
                 "channel": m["channel"], "deps": m["deps"]["id"] if deps else None, "needs_db": needs_db,
                 "migrations": report.get("migrated", []), "notes": new_notes(active_root, candidate),
@@ -458,6 +458,43 @@ def due(settings, db) -> dict | None:
     if busy_reason(db, req.get("when", "now")):
         return None
     return {**req, "needs_db": bool(p.get("needs_db"))}
+
+
+class InFlight:
+    """ASGI middleware: how many HTTP requests are being handled right now (the update never cuts one)."""
+    count = 0
+    _lock = __import__("threading").Lock()
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        with InFlight._lock:
+            InFlight.count += 1
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            with InFlight._lock:
+                InFlight.count -= 1
+
+
+def trigger(settings, db, in_flight=lambda: InFlight.count, exit=os._exit) -> bool:
+    """Leave for the launcher (exit 75), which applies the batch with the program stopped. The gate is checked
+    again while holding the database write lock: no transaction can start or be half-written, no request is
+    being handled, no sale is in progress (Codex P1 on #386)."""
+    req = due(settings, db)
+    home = home_of(settings.data_dir)
+    if not req or bootstrap_level(home) < releases.BOOTSTRAP:
+        return False
+    with db._write_lock:
+        if busy_reason(db, req.get("when", "now")) or in_flight() > 0:
+            return False
+        releases.atomic_json(home / "apply-go.json", {"release": req["release"]})
+        releases.log_event(home, step="trigger", ok=True, release=req["release"], when=req.get("when"))
+        exit(75)
+    return True
 
 
 # --------------------------------------------------------------------------- apply

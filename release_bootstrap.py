@@ -410,13 +410,16 @@ def resume_journal(home: Path) -> str:
             for s in j["swaps"]:
                 _swap_one(s)
         except (ReleaseError, OSError, KeyError, TypeError) as exc:
-            # a half-done swap (first move only) is put back by the undo below, then everything is dropped
+            # A half-done swap (first move only) is put back first. If that fails too, the journal stays
+            # "ready" with the copy kept, and the caller must not start a program (Codex P1 on #386): the
+            # next start retries. Only with every live file in place is the update dropped.
             try:
                 for s in j.get("swaps", []):
                     if not Path(s["live"]).exists():
                         _undo_one(s)
-            except (ReleaseError, OSError, KeyError):
-                pass
+            except (ReleaseError, OSError, KeyError) as undo_exc:
+                log_event(home, step="swap", ok=False, release=j.get("release"), reason=f"{exc}; {undo_exc}")
+                raise ReleaseError(f"Live database could not be put back yet: {undo_exc}") from exc
             return _abort(home, j, "aborted", str(exc))
         write_journal(home, {**j, "state": "swapped"})
         log_event(home, step="swap", ok=True, release=j.get("release"))
@@ -437,6 +440,23 @@ def resume_journal(home: Path) -> str:
     return state
 
 
+def _swapped_files(j: dict) -> bool:
+    try:
+        return any(Path(s["previous"]).exists() or (Path(s["live"]).exists() and not Path(s["candidate"]).exists()
+                                                    and file_sha256(Path(s["live"])) == s["candidate_sha256"])
+                   for s in j.get("swaps", []))
+    except (OSError, KeyError, TypeError):
+        return True                                         # unsure: undo (it checks every hash itself)
+
+
+def settled(home: Path) -> bool:
+    """True when no program may be harmed by starting now: no swap half-done or awaiting its undo."""
+    j = read_journal(home)
+    if j.get("state") in ("ready", "undoing"):
+        return False
+    return all(Path(s.get("live", "")).exists() for s in j.get("swaps", [])) if j.get("state") == "swapped" else True
+
+
 def finish_journal(home: Path, release_id: str) -> None:
     j = read_journal(home)
     if j.get("state") == "swapped" and j.get("release") == release_id:
@@ -449,7 +469,8 @@ def recover_failed_start(home: Path, release_id: str | None) -> None:
     then the previous code. Idempotent."""
     home = Path(home)
     j = read_journal(home)
-    ours = j.get("release") == release_id and j.get("state") in ("swapped", "undoing")
+    ours = j.get("release") == release_id and (j.get("state") in ("swapped", "undoing") or (
+        j.get("state") == "ready" and _swapped_files(j)))      # files moved, journal write lost
     if ours:
         write_journal(home, {**j, "state": "undoing"})
         for s in j["swaps"]:

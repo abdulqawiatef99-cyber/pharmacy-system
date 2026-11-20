@@ -173,6 +173,72 @@ class TestJournalSwap(Stage0Base):
         self.assertEqual(json.loads(lines[-1])["step"], "swap")
 
 
+class TestCodexFindings386(Stage0Base):
+    """Codex P1s on #386: never start a program over a journal that is not settled."""
+
+    def test_failed_restore_keeps_recovery_pending(self):
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        real = releases._replace
+        def flaky(src, dst):
+            if Path(src) == cand or Path(src) == prev:       # candidate in, then the restore: both locked
+                raise PermissionError("locked")
+            real(src, dst)
+        with patch.object(releases, "_replace", side_effect=flaky):
+            with self.assertRaises(releases.ReleaseError):
+                releases.resume_journal(self.home)
+        self.assertFalse(self.live.exists())                  # the moment Codex describes
+        self.assertEqual(releases.read_journal(self.home)["state"], "ready")   # not "aborted"
+        self.assertTrue(cand.exists())                        # not deleted
+        self.assertTrue(releases.read_state(self.home)["pending"])
+        self.assertEqual(releases.resume_journal(self.home), "swapped")        # next start finishes it
+        self.assertEqual(self.live.read_bytes(), b"NEW DATABASE")
+
+    def test_files_swapped_but_journal_not_updated_is_still_undone(self):
+        rid = self.stage_and_select()
+        cand, prev = self.prepare_journal(rid)
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.live, prev)
+        os.replace(cand, self.live)                           # both moves done, journal still "ready"
+        releases.recover_failed_start(self.home, rid)
+        self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
+        self.assertIsNone(releases.read_state(self.home)["active"])
+
+    def launch(self, journal_error):
+        rid = self.stage_and_select()
+        self.prepare_journal(rid)
+        real = releases.write_journal
+        calls = {"n": 0}
+        def failing(home, value):
+            if value.get("state") == "swapped":
+                calls["n"] += 1
+                if journal_error == "always" or calls["n"] == 1:
+                    raise OSError("disk")
+            real(home, value)
+        proc = Mock()
+        proc.wait.return_value = 0
+        with patch.object(launcher, "ROOT", self.root), patch.object(launcher, "home", return_value=self.app_home), \
+                patch.object(launcher, "running", return_value=False), \
+                patch.object(launcher, "candidate_ready", return_value=True), \
+                patch.object(launcher.threading, "Thread"), patch.object(launcher.time, "sleep"), \
+                patch.object(releases, "write_journal", side_effect=failing), \
+                patch.object(launcher.subprocess, "Popen", return_value=proc) as spawn:
+            code = launcher.main()
+        return code, spawn
+
+    def test_unsettled_journal_never_starts_a_program(self):
+        code, spawn = self.launch("always")
+        self.assertNotEqual(code, 0)
+        spawn.assert_not_called()
+        self.assertIn("could not be completed", (self.app_home / "logs" / "update.log").read_text(encoding="utf-8"))
+
+    def test_transient_journal_error_is_retried(self):
+        code, spawn = self.launch("once")
+        self.assertEqual(code, 0)
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(self.live.read_bytes(), b"NEW DATABASE")
+
+
 class TestLauncherApply(Stage0Base):
     def run_launcher(self, *, healthy, apply_writes_journal=True):
         rid_box = {}

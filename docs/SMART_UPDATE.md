@@ -17,7 +17,8 @@ future change to the update logic lives in stage 1 and ships by the button. A ne
 before it is selected: the candidate's own `update --self-check` (keys load, signature verify, deps
 path) must pass. Recovery never depends on stage 1: stage 0 can always undo, and the installer
 remains the last resort. Stage 0 writes `code-releases/bootstrap.json` (`{"bootstrap": 2}`); stage 1
-refuses a database update when that capability is missing (old launcher: installer first).
+refuses every smart batch when that capability is missing (old launcher: installer first; the
+button keeps today's code-only path there).
 The state file `active-release.json` keeps format 1 (installed launchers keep reading it);
 `release_protocol.json` stays `{"protocol": 1}` (today's installed updater requires it).
 
@@ -45,17 +46,20 @@ downloaded one; a new key ships inside a release signed by the old key.
    stock balances, audit chain, row counts, app start + `/api/health`. Result: `prepared.json`.
    No network needed after this point.
 3. **Choose**: «حدّث دلوقتي» or «حدّث بعد قفل الوردية». Recorded in `apply-request.json` and audited.
-4. **Trigger** (server, every 30 s): never during a sale — no request in flight, no write in the last
-   60 s, no draft sale with lines from the last 30 min; «بعد القفل» also waits until no shift is open.
-   Code-only batch: verified backup, select the pointer (pending), restart (exit 75).
-   Database batch: write `apply-go.json`, restart (exit 75).
-5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min): verified backup of the live DB →
+4. **Trigger** (server, every 30 s): never during a sale — no write in the last 60 s, no draft sale with
+   lines from the last 30 min; «بعد القفل» also waits until no shift is open. The last check runs while
+   holding the database write lock and with no HTTP request in flight; then `apply-go.json`, exit 75.
+5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min). Code-only batch: verified backup,
+   select the pointer (pending), done. Database batch: verified backup of the live DB →
    copy (backup API) to `data/update-candidate/pharmacy.db` → candidate code migrates **the copy** and
    runs the same checks as the rehearsal → journal `update-journal.json` (`ready`: live, candidate,
    previous path, sha256 of both) → select the pointer (pending).
 6. **Swap** (stage 0): only when the journal is `ready`, its release is the pending pointer, both sha256
    match and the live DB has no `-wal`. `live → data/update-previous/…`, `candidate → live`
    (`os.replace`, same folder). Journal `swapped`.
+   If a move fails and the live file cannot be put back at once, the journal stays `ready`, the copy is
+   kept and **no program starts** (retried at the next start; the old program could otherwise create an
+   empty database).
 7. **First start** (stage 0): health check with boot id (existing). OK → confirm, journal `done`.
    Fail → stop the process, move the new DB (+ `-wal`/`-shm`) aside, put the previous DB back, roll the
    pointer back, journal `rolled_back`, start the old version. A power cut at any step is resumed from

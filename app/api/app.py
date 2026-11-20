@@ -467,8 +467,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             keys = update_sign.trusted_keys(upd_root)
         except (OSError, update_sign.SignatureError):
             keys = []
-        if not keys or chan is None:
-            return out
+        if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
+            return out                                # old launcher: today's code-only button
         try:
             m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, updater.read_token()), keys)
         except updater.UpdateError as e:
@@ -488,27 +488,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                               env={**os.environ, "PYTHONUTF8": "1"})
 
-    def _smart_restart(due: dict) -> bool:
-        """Leave for the launcher (exit 75) with no write in flight; the database step runs with the program stopped."""
-        from ..core import smart_update as su
-        if os.environ.get("PHARM_LAUNCHER") != "1":
-            return False
-        if due["needs_db"]:
-            if su.bootstrap_level(su.home_of(s.data_dir)) < 2:
-                return False
-            import release_bootstrap as rb
-            rb.atomic_json(su.home_of(s.data_dir) / "apply-go.json", {"release": due["release"]})
-        else:
-            proc = _manage("--select-prepared")
-            if proc.returncode:
-                su.cancel(s.data_dir)
-                import release_bootstrap as rb
-                rb.log_event(su.home_of(s.data_dir), step="select", ok=False,
-                             reason=((proc.stdout or "") + (proc.stderr or ""))[-400:])
-                return False
-        db._write_lock.acquire()                      # no transaction can start or be half-written now
-        os._exit(75)
-
     def _smart_loop():
         from ..core import smart_update as su
         try:
@@ -518,9 +497,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         while True:
             time.sleep(30)
             try:
-                due = su.due(s, db)
-                if due:
-                    _smart_restart(due)
+                if os.environ.get("PHARM_LAUNCHER") == "1":
+                    su.trigger(s, db)
             except Exception:
                 logging.getLogger(__name__).exception("smart update check failed")
 
@@ -2632,8 +2610,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 await run_in_threadpool(autob.stop)
 
     from .hostcheck import HostAllowlist
+    from ..core.smart_update import InFlight
     app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
-                                               Middleware(SecurityHeaders)], lifespan=lifespan)
+                                               Middleware(SecurityHeaders), Middleware(InFlight)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app

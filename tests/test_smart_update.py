@@ -204,12 +204,12 @@ class TestPrepare(SmartUpdateBase):
         with self.assertRaisesRegex(UpdateError, "غير آمن"):
             self.prepare()
 
-    def test_database_batch_needs_the_new_launcher(self):
+    def test_every_smart_batch_needs_the_new_launcher(self):
         (self.home / "bootstrap.json").unlink()                                     # old installed launcher
-        self.add_migration()
-        self.build()
+        self.build()                                                                # code only, too
         with self.assertRaisesRegex(UpdateError, "المثبّت"):
             self.prepare()
+        self.assertFalse((self.home / "downloads").exists())
 
 
 class TestApply(SmartUpdateBase):
@@ -231,6 +231,17 @@ class TestApply(SmartUpdateBase):
         self.assertNotIn("smart_update_probe", self.tables())
         self.assertEqual(self.live_bytes(), before)
         self.assertIsNone(releases.read_state(self.home)["active"])
+
+    def test_code_only_apply_selects_with_a_backup(self):
+        self.build()
+        p = self.prepare()
+        before = self.live_bytes()
+        su.apply_prepared(self.s, self.legacy, p["release"], self.backups)
+        st = releases.read_state(self.home)
+        self.assertEqual((st["active"]["id"], st["pending"]), (p["release"], True))
+        self.assertEqual(self.live_bytes(), before)
+        self.assertEqual(releases.read_journal(self.home), {})                      # no database step
+        self.assertTrue(list(self.backups.glob("*pre-update*.zip")))
 
     def test_write_after_prepare_is_kept(self):
         """The apply copies the database as it is when the program stops, not the rehearsal snapshot."""
@@ -319,6 +330,34 @@ class TestNeverDuringASale(SmartUpdateBase):
             self.assertEqual(su.due(self.s, db)["needs_db"], True)
         releases.atomic_json(self.home / "prepared.json", {"release": "d" * 64})
         self.assertIsNone(su.due(self.s, db))                                      # request for another batch
+
+    def test_trigger_rechecks_the_gate_and_never_cuts_a_request(self):
+        """Codex P1 on #386: the last check happens under the write lock, with no request in flight."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import Mock
+        db = self.db()
+        releases.atomic_json(self.home / "prepared.json", {"release": "c" * 64, "needs_db": False})
+        su.request(self.data, "now", "owner")
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        leave = Mock()
+        with patch.object(su, "datetime", wraps=datetime) as fake:
+            fake.now.return_value = later
+            self.assertFalse(su.trigger(self.s, db, in_flight=lambda: 1, exit=leave))     # a request running
+            leave.assert_not_called()
+            self.assertFalse((self.home / "apply-go.json").exists())
+            seen = []
+            def locked_check():
+                seen.append(db._write_lock._is_owned())
+                return 0
+            su.trigger(self.s, db, in_flight=locked_check, exit=leave)
+        leave.assert_called_once_with(75)
+        self.assertEqual(seen, [True])
+        self.assertEqual(json.loads((self.home / "apply-go.json").read_text())["release"], "c" * 64)
+
+    def test_code_only_batch_is_also_applied_with_the_program_stopped(self):
+        (self.home / "bootstrap.json").unlink()
+        with patch.object(su, "due", return_value={"release": "c" * 64, "when": "now", "needs_db": False}):
+            self.assertFalse(su.trigger(self.s, self.db(), in_flight=lambda: 0, exit=lambda c: None))
 
     def test_recent_write_waits(self):
         self.assertIsNotNone(su.busy_reason(self.db(), "now"))                     # init just wrote
