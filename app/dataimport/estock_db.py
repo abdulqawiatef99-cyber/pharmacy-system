@@ -790,11 +790,17 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
             o = others[ident(r.get("store_id"))]
             o[0] += 1
             o[1] += (dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)
-            p.hospital.append({"store_id": ident(r.get("store_id")), "pa_id": ident(r.get("pa_id")),
-                               "product_id": ident(r.get("product_id")), "amount": r.get("amount"),
-                               "expiry": iso_day(r.get("exp_date")), "buy_price": r.get("buy_price"),
-                               "sell_price": r.get("sell_price"),
-                               "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0))})
+            h = {"store_id": ident(r.get("store_id")), "pa_id": ident(r.get("pa_id")),
+                 "product_id": ident(r.get("product_id")), "amount": r.get("amount"),
+                 "expiry": iso_day(r.get("exp_date")), "buy_price": r.get("buy_price"),
+                 "sell_price": r.get("sell_price"),
+                 "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)),
+                 "batch_no": (f"{ident(r.get('store_id'))}-{ident(r.get('counter_id'))}"
+                              if ident(r.get("counter_id")) else f"{ident(r.get('store_id'))}-{ident(r.get('pa_id'))}"),
+                 "raw": {"vendor_id": ident(r.get("vendor_id")) or None, "tax_price": r.get("tax_price") or None,
+                         "counter_id": ident(r.get("counter_id")) or None}}
+            _plan_hospital_row(p, items.get(h["product_id"]), h, chosen["table"])
+            p.hospital.append(h)
             continue
         by_item[ident(r.get("product_id"))].append(r)
     names = {s["id"]: s["name"] for s in allst}
@@ -921,6 +927,26 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
                 tot["planned_units"] += row["units"]
                 tot["planned_cost"] += row["units"] * (row["unit_cost"] or 0)
     _unit_evidence(ex, p)
+
+
+def _plan_hospital_row(p: Plan, it: dict | None, h: dict, table: str) -> None:
+    """A row of the hospital's own store: whole base units at a cost per base unit, as the pharmacy's rows; one
+    that cannot be (an unknown item, a fraction, nothing or less) stays listed in hospital-stock.csv only."""
+    h["units"] = h["unit_cost"] = None
+    amt, bp = dec(h["amount"]), dec(h["buy_price"])
+    if not it or amt is None or amt <= 0:
+        return
+    pack = it["pack_size"]
+    exact = amt * pack
+    whole = exact.to_integral_value(ROUND_HALF_UP)
+    tol = max(Decimal("0.0006") * pack, DRIFT) if pack > 1 else Decimal("0.0006")
+    if whole <= 0 or abs(exact - whole) > tol:
+        p.issue(table, h["pa_id"], it["code"], "amount", h["amount"],
+                f"كمية في مخزن المستشفى مش عدد صحيح من الوحدات (العبوة {pack}): اتسابت في hospital-stock.csv بس",
+                kind="review")
+        return
+    h["units"] = int(whole)
+    h["unit_cost"] = (bp / pack).quantize(COST_Q, ROUND_HALF_UP) if bp is not None and bp >= 0 else None
 
 
 def local_branch(ex: Export) -> str | None:
@@ -1680,14 +1706,15 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
             d = {"source": "Cash_depots", "estock_id": ident(r.get(idc)), "name": name, "role": role,
                  "class": (r.get(classc) or "").strip() if classc else "",
                  "balance": egp(bal) if bal is not None else None, "balance_column": balc,
-                 "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal}
+                 "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal,
+                 "_raw": r.get(balc) if balc else None}
             if role == "drawer":
                 d["last_close"] = closes.get(d["estock_id"]) or None
             depots.append(d)
         # owner 19/11: what each depot becomes (F105 / #342 posts it; nothing here posts money)
         used = [d for d in depots if d["role"] == "drawer" and d.get("last_close")]
         for d in depots:
-            bal, name = d.pop("_bal"), d["name"]
+            bal, name, raw_bal = d.pop("_bal"), d["name"], d.pop("_raw", None)
             if d["role"] == "junk":
                 d["action"] = "no_account"          # «0000»: almost nothing; its history stays in the archive
                 if bal:
@@ -1710,12 +1737,17 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
             d["action"] = "account_stopped" if "موقوف" in name else "account"
             if d["role"] == "treasury":
                 d["reference_only"] = True      # owner 20/11 00:50: not real cash; the account starts at zero
+                d["piasters"] = 0               # the account is made, no opening is posted
                 p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                         f"«{name}» (خزنة): رصيدها في إي ستوك {d['balance']} ج مرجع بس — قرار المالك: مش فلوس حقيقية"
                         " (مدفوعات الموردين والمخازن اتسجلت منها، والإيداعات والإيجار والمرتبات ما اتسجلتش)؛"
                         " حسابها في البرنامج بيبدأ بصفر، ودرج أول شيفت = اللي المالك يعدّه ليلة النقل",
                         kind="info")
                 continue
+            # what the account opens with: a fraction of a piaster is rounded half up and listed (owner 19/11),
+            # or stops the move with --no-round-piastres; never rounded silently (Codex on #381)
+            d["piasters"] = _balance_piastres(p, "Cash_depots", d["estock_id"], name, balc or "balance",
+                                              raw_bal, bal) if bal is not None else None    # unknown: never a zero
             p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                     f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
                     + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
@@ -1801,6 +1833,26 @@ def read_confirm(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------- applying
+# Codex on #381: inventory adjustments, counts and the average cost do not tell the hospital's batches from the
+# pharmacy's yet, so for launch the hospital's own store stays out of operational stock (listed in full in
+# hospital-stock.csv, as before). 0039 and the sale guard are in place; switch on when those paths filter by owner.
+HOSPITAL_BATCHES = False
+
+
+def _has_money(db: Database) -> bool:
+    """The candidate schema (0038, money accounts) and its service: E-Stock's money places become accounts."""
+    try:
+        from ..finance import money  # noqa: F401
+    except ImportError:
+        return False
+    return bool(db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='money_accounts'"))
+
+
+def _has_batch_owner(db: Database) -> bool:
+    """0039: batches carry who owns them, so the hospital's own stock can move as hospital-owned batches."""
+    return any(r["name"] == "owner" for r in db.all("PRAGMA table_info(batches)"))
+
+
 def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
     """Only into a new database (launch night), or the same export again (resume after a failure)."""
     if db.one("SELECT 1 FROM sales WHERE org_id=? LIMIT 1", (ctx.org_id,)):
@@ -1822,6 +1874,9 @@ def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
         if db.one(f"SELECT 1 FROM {table} WHERE org_id=?{mine} LIMIT 1",
                   (ctx.org_id, ctx.org_id) if mine else (ctx.org_id,)):
             return f"قاعدة البيانات فيها حركات فلوس ({table}): النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
+    if _has_money(db) and db.one("SELECT 1 FROM money_movements WHERE org_id=? AND NOT (kind='opening' AND"
+                                 " coalesce(ref_id,'') LIKE 'Cash_depots:%') LIMIT 1", (ctx.org_id,)):
+        return "قاعدة البيانات فيها حركات في حسابات الفلوس مش من النقل ده: النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
     for table in ("items", "customers", "suppliers"):
         if db.one(f"SELECT 1 FROM {table} t WHERE t.org_id=? AND t.id NOT IN (SELECT target_id FROM import_rows"
                   f" WHERE target_id IS NOT NULL AND run_id IN {ours}) LIMIT 1", (ctx.org_id, ctx.org_id)):
@@ -2013,6 +2068,56 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
             import logging
             logging.getLogger("pharm.recalls").exception("recall matching failed")
 
+    # 4b) the hospital's own store (owner 19/11): hospital-owned batches, never the pharmacy's stock (0039)
+    hosp = [h for h in plan.hospital if h.get("units")]
+    if hosp and HOSPITAL_BATCHES and _has_batch_owner(db):
+        def do_hospital(run_id):
+            rows, units = [], 0
+            for h in hosp:
+                iid = item_map[h["product_id"]]
+                bid = inventory.get_or_create_batch(db, ctx, iid, h["batch_no"], h["expiry"],
+                                                    "day" if h["expiry"] else None)
+                db.execute("UPDATE batches SET owner='hospital' WHERE id=? AND org_id=?", (bid, ctx.org_id))
+                inventory.post_movement(db, ctx, item_id=iid, qty_delta=h["units"], movement_type="opening",
+                                        batch_id=bid, unit_cost=h["unit_cost"], ref_type="import_run", ref_id=run_id,
+                                        ref_line_id=h["pa_id"], note="رصيد افتتاحي من إي ستوك: ملك المستشفى")
+                units += h["units"]
+                rows.append(({"pa_id": h["pa_id"], "product_id": h["product_id"], "store_id": h["store_id"],
+                              "owner": "hospital", **h.get("raw", {})}, iid))
+            return rows, {"hospital_rows": len(rows), "units": units}
+        runs["hospital"], r = _step(db, ctx, "opening_stock", "hospital_stock",
+                                    H("hospital", ex.sha(src.split(":")[0]), items_sha), esha, label, do_hospital)
+        resumed += ["hospital"] if r else []
+
+    # 4c) E-Stock's money places (owner 19/11, F105): each account place becomes an account with its opening
+    depots = [d for d in (plan.checks.get("money_info") or {}).get("cash_depots", [])
+              if d.get("action") in ("account", "account_stopped")]
+    if depots and _has_money(db):
+        from ..finance import money
+
+        def do_money(run_id):
+            rows, total, treasury = [], 0, False
+            for d in depots:
+                role = d.get("role")
+                kind = {"treasury": "treasury", "bank": "bank", "wallet": "wallet"}.get(role, "other")
+                if kind == "treasury":
+                    kind, treasury = ("other", True) if treasury else ("treasury", True)   # one main treasury
+                aid = money.ensure_account(db, ctx, kind=kind, name=d["name"], source_ref=f"estock:{d['estock_id']}",
+                                           is_active=d["action"] != "account_stopped")
+                if d.get("reference_only"):               # the treasury: E-Stock's figure is a reference only
+                    rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": 0,
+                                  "reference_only": True}, aid))
+                    continue
+                if d.get("piasters") is None:            # run() blocks this before anything is written
+                    raise ValidationFailed(f"رصيد «{d['name']}» مش مقروء", code="blocking")
+                money.post_opening(db, ctx, f"estock:{d['estock_id']}", d["piasters"], source="estock",
+                                   source_ref=f"Cash_depots:{d['estock_id']}", note=f"«{d['name']}» في إي ستوك")
+                total += d["piasters"]
+                rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": d["piasters"]}, aid))
+            return rows, {"accounts": len(rows), "opening_total": total}
+        runs["money"], r = _step(db, ctx, "customers", "money", H("money", ex.sha("Cash_depots")), esha, label, do_money)
+        resumed += ["money"] if r else []
+
     # 5) the owner's confirmed balances: difference = opening adjustment
     adj = [d for d in plan.suppliers + plan.customers if d["adjustment"] or (d["kind"] == "customer" and confirm_sha)]
     if confirm_sha:
@@ -2129,6 +2234,32 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
                      "confirmed_balance_total": egp(Decimal(sum(d["balance"] for d in parties)) / 100),
                      "opening_adjustment_total": egp(Decimal(sum(d["adjustment"] for d in parties)) / 100),
                      "program_balance_total": egp(Decimal(sum(bal.values())) / 100)}
+    if runs.get("money"):
+        bad = 0
+        for raw, aid in ((json.loads(r["raw"]), r["target_id"]) for r in
+                         db.all("SELECT raw, target_id FROM import_rows WHERE run_id=?", (runs["money"],))):
+            got = db.one("SELECT coalesce(sum(amount),0) b FROM money_movements WHERE org_id=? AND account_id=?",
+                         (ctx.org_id, aid))["b"]
+            if got != raw["piasters"]:
+                bad += 1
+                mm.append({"what": "money", "code": raw["estock_id"], "name": raw["name"],
+                           "detail": f"الحساب في البرنامج {egp(Decimal(got) / 100)}، إي ستوك {egp(Decimal(raw['piasters']) / 100)}",
+                           "value": abs(Decimal(got - raw["piasters"]) / 100)})
+        n = db.one("SELECT count(*) n FROM import_rows WHERE run_id=?", (runs["money"],))["n"]
+        tot = db.one("SELECT coalesce(sum(m.amount),0) b FROM money_movements m JOIN import_rows i ON i.target_id="
+                     "m.account_id AND i.run_id=? WHERE m.org_id=?", (runs["money"], ctx.org_id))["b"]
+        out["money"] = {"accounts": n, "mismatches": bad, "program_total": egp(Decimal(tot) / 100)}
+    if runs.get("hospital"):
+        want = {h["pa_id"]: h for h in plan.hospital if h.get("units")}
+        got = {r["ref_line_id"]: r["q"] for r in db.all(
+            "SELECT ref_line_id, sum(qty_delta) q FROM stock_movements WHERE org_id=? AND ref_type='import_run'"
+            " AND ref_id=? GROUP BY ref_line_id", (ctx.org_id, runs["hospital"]))}
+        bad = [k for k, h in want.items() if got.get(k) != h["units"]] + [k for k in got if k not in want]
+        for k in bad:
+            mm.append({"what": "hospital", "code": k, "name": "", "value": Decimal(0),
+                       "detail": f"مخزن المستشفى: البرنامج {got.get(k)}، المفروض {want[k]['units'] if k in want else 0}"})
+        out["hospital"] = {"rows": len(want), "units": sum(h["units"] for h in want.values()), "mismatches": len(bad),
+                           "cost": egp(sum(h["units"] * (h["unit_cost"] or 0) for h in want.values()))}
     counts = {}
     for t in ex.tables.values():
         _, rows = ex.raw(t["name"])
@@ -2292,6 +2423,13 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")
+    if _has_money(db):        # the money step will post these openings: an unknown balance is never a zero opening
+        for d in (plan.checks.get("money_info") or {}).get("cash_depots", []):
+            if d.get("action") in ("account", "account_stopped") and d.get("piasters") is None:
+                plan.issue("Cash_depots", d["estock_id"], d["name"], d.get("balance_column") or "balance",
+                           d.get("balance") or "(مش مقروء)",
+                           "رصيد مكان الفلوس ده مش مقروء من إي ستوك: الرصيد الافتتاحي لحسابه محتاج قرار قبل النقل",
+                           block=True)
     if write_archive and archive_path.exists() and (estock_archive.source_sha(archive_path) != ex.source_sha()
                                                     or estock_archive.owner_org(archive_path) != ctx.org_id):
         raise Conflict(f"فيه أرشيف إي ستوك من تصدير تاني: {archive_path}. مفيش أي حاجة اتكتبت", code="estock_db_refused")

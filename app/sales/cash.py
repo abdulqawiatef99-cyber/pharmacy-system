@@ -75,6 +75,12 @@ def _returns_of(db: Database, s) -> dict:
     return by
 
 
+def handover_pin_on(db: Database, org_id: str) -> bool:
+    """Owner setting: the person who receives the shift's cash confirms with his PIN (default on)."""
+    r = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='shift_handover_pin'", (org_id,))
+    return not r or r["value"] not in ("0", "false", "off")
+
+
 # Egyptian notes and coins, in piasters
 DENOMINATIONS = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25]
 
@@ -172,16 +178,34 @@ class CashDrawer:
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
     def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
-              denominations: dict | None = None, shift_id: str | None = None) -> dict:
-        """shift_id: the shift the count screen showed. A count made for a shift another till has closed
-        since never closes the next one (#324 M2-06)."""
+              denominations: dict | None = None, shift_id: str | None = None, *, float_left: int | None = None,
+              to_account: str | None = None, handover: bool | None = None) -> dict:
+        """Close the open shift. Like E-Stock's «تقفيل درج الكاشير»: the counted cash minus the float left for
+        the next shift (default: this shift's opening cash) moves to a money account (default the main
+        treasury) in the same transaction (F105). When the money is handed to another person, he confirms
+        with his own PIN (the approval on this request); the closer keeps it only if he may manage cash.
+        shift_id: the shift the count screen showed. A count made for a shift another till has closed since
+        never closes the next one (#324 M2-06)."""
         ctx.require("cash.close")
         detail = None
         if denominations is not None:
             counted_cash, detail = count_total(denominations)
         if not isinstance(counted_cash, int) or counted_cash < 0:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
+        from ..finance import money
         with self.db.transaction():
+            sid0 = require_open_shift(self.db, ctx)
+            s0 = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=?", (sid0, ctx.org_id))
+            if float_left is None and handover is None and not ctx.can("cash.manage"):
+                left = counted_cash          # nobody received it: everything stays in the drawer for the next shift
+            else:
+                left = min(s0["opening_cash"], counted_cash) if float_left is None else float_left
+            if not isinstance(left, int) or isinstance(left, bool) or left < 0:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج غير صحيحة")
+            if left > counted_cash:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large",
+                                       details={"counted": counted_cash, "float_left": left})
+            receiver = self._receiver(ctx, counted_cash - left, handover)
             sid = require_open_shift(self.db, ctx)
             if shift_id is not None and shift_id != sid:
                 raise Conflict("أُغلق هذا الشيفت وفُتح شيفت جديد بعده. حدّث الشاشة وعُدّ الخزينة من جديد",
@@ -197,6 +221,7 @@ class CashDrawer:
                              json.dumps(detail) if detail else None, sid))
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
                          after={"expected": expected, "counted": counted_cash, "difference": diff})
+            money.shift_close_transfer(self.db, ctx, sid, left, to_account=to_account, received_by=receiver)
             if diff:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
@@ -207,6 +232,25 @@ class CashDrawer:
         autobackup.trigger("shift_close")
         return self.close_result(ctx, sid)
 
+    def _receiver(self, ctx: Context, moved: int, handover: bool | None) -> str:
+        """Who takes the cash moved out at close. The closer keeps it only with cash.manage; anyone else hands
+        it over, and the receiver types his own PIN (owner setting 'shift_handover_pin', on by default). A
+        cashier who closes with no float and no hand-over leaves all the cash in the drawer (nothing moves)."""
+        if moved <= 0:
+            return ctx.user_id
+        if handover is None:
+            handover = not ctx.can("cash.manage")      # a float given by a cashier means the cash is handed over
+        if not handover:
+            if not ctx.can("cash.manage"):
+                raise ValidationFailed("سلّم النقدية لمدير أو للمالك", code="handover_required")
+            return ctx.user_id
+        if not handover_pin_on(self.db, ctx.org_id):
+            return ctx.approver_id or ctx.user_id
+        if not ctx.approver_id or ctx.approver_id == ctx.user_id or "cash.manage" not in ctx.approver_permissions:
+            raise Forbidden("اللي هيستلم النقدية يكتب الرقم السري بتاعه", code="approval_required",
+                            details={"permission": "cash.manage", "label": "استلام نقدية الشيفت"})
+        return ctx.approver_id
+
     def close_result(self, ctx: Context, shift_id: str) -> dict:
         """What the closer is shown after the close, by his permissions now: the full report with
         sales.read, else only his count against the drawer. Never a refusal after the close committed
@@ -215,11 +259,11 @@ class CashDrawer:
         ctx.require("cash.close")
         if ctx.can("sales.read"):
             return self.report(ctx, shift_id)
-        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by FROM cash_shifts"
+        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by, float_left FROM cash_shifts"
                         " WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s or s["status"] != "closed" or s["closed_by"] != ctx.user_id:
             raise NotFound("الشيفت غير موجود")
-        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference")}
+        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference", "float_left")}
 
     def report(self, ctx: Context, shift_id: str) -> dict:
         """Closing report. The person who closed sees the result (shortage / surplus) only after

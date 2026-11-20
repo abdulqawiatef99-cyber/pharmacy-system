@@ -33,6 +33,8 @@ from pathlib import Path
 FULL = {"items": 30000, "batches": 14000, "sales": 27000, "sale_lines": 52000, "purchases": 3000,
         "purchase_lines": 24000, "customer_rows": 15000, "journal_rows": 27000, "customers": 1400, "suppliers": 62}
 BRANCH = "3"
+DEPOTS = ("نقطة بيع 1", "خزينة 1", "حساب بنك مصر", "نقطة بيع 2", "نقطة بيع 3", "0000", "انستا باي",
+          "فودافون كاش", "اتصالات كاش", "فيزا باى موب - موقوف", "امان")
 PACKS = (1, 1, 1, 2, 3, 3, 5, 10, 14, 20, 30)
 _AR = "ابتثجحخدذرزسشصضطظعغفقكلمنهوي"
 _EN = "abcdefghijklmnopqrstuvwxyz"
@@ -186,7 +188,11 @@ def tables(scale: float = 1.0, seed: int = 1, wide: bool = True) -> dict[str, li
                             "gf_for_him": "0", "insert_date": _at(now, rnd, 600)}
                            for i in range(1, n["journal_rows"] + 1)]
     t["Shortcoming"] = []
-    t["Cash_disk_close"] = [{"cdc_id": "1", "cdc_curr_cash": "1000.0000", "cdc_act_cash": "1000.0000"}]
+    t["Cash_disk_close"] = [{"cdc_id": "1", "cdc_cash_id": "1", "cdc_curr_cash": "1000.0000", "cdc_act_cash": "1000.0000",
+                             "insert_date": now.strftime("%Y-%m-%dT%H:%M:%S.000")}]
+    # E-Stock's money places as «النقدية المتاحة» shows them (names as on the screen, invented balances)
+    t["Cash_depots"] = [{"cd_id": str(i), "cd_name": name, "cd_class": "1", "cd_balance": _money(rnd, 0, 50000)}
+                        for i, name in enumerate(DEPOTS, start=1)]
     if wide:
         _widen(t, rnd)
     return t
@@ -301,6 +307,19 @@ def bench(scale: float = 1.0, keep: Path | None = None, repo: Path | None = None
             out["steps"][name] = res
         db = work / "data" / "pharmacy.db"
         out["db_mb"] = round(db.stat().st_size / 2 ** 20, 1) if db.exists() else None
+        if db.exists():
+            import sqlite3
+            from contextlib import closing
+            with closing(sqlite3.connect(db)) as con:
+                has = lambda t: con.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone()   # noqa: E731
+                out["landed"] = {
+                    "money_accounts_from_estock": con.execute(
+                        "SELECT count(*) FROM money_accounts WHERE source_ref LIKE 'estock:%'").fetchone()[0]
+                    if has("money_accounts") else "no 0038",
+                    "money_openings": con.execute("SELECT count(*) FROM money_movements WHERE kind='opening'").fetchone()[0]
+                    if has("money_movements") else "no 0038",
+                    "hospital_batches": con.execute("SELECT count(*) FROM batches WHERE owner='hospital'").fetchone()[0]
+                    if any(r[1] == "owner" for r in con.execute("PRAGMA table_info(batches)")) else "no 0039"}
         arch = work / "data" / "estock-archive.sqlite"
         out["archive_mb"] = round(arch.stat().st_size / 2 ** 20, 1) if arch.exists() else None
     finally:

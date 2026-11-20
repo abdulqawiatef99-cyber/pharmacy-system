@@ -37,6 +37,7 @@ from ..catalog import service as catalog
 from ..core import accounts, approvals, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..core.numbers import whole_number
+from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
@@ -920,8 +921,45 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..procurement import suppliers as sup
         ctx = ctx_of(req)
         b = await body(req)
-        return J(sup.pay(db, ctx, req.path_params["id"], _int(b.get("amount"), "amount"), str(b.get("method", "")),
-                         b.get("note"), b.get("ref")))
+        sid = req.path_params["id"]
+        method = str(b.get("method", ""))
+        source = b.get("source")
+        disc = b.get("discount")
+        disc_bp = b.get("discount_bp")
+        if source in (None, "") and disc in (None, "", 0) and disc_bp in (None, ""):
+            # an older screen: the drawer, or (owner only) outside the program's accounts
+            if method not in ("drawer", ""):
+                money.check_source(db, ctx, money.OUTSIDE)
+            return J(sup.pay(db, ctx, sid, _int(b.get("amount"), "amount"), method, b.get("note"), b.get("ref")))
+        if disc_bp not in (None, ""):
+            paid, discount = reconcile.split_payment(settle=_int(b.get("settle"), "settle"),
+                                                     percent_bp=_int(disc_bp, "discount_bp"))
+        else:
+            paid, discount = reconcile.split_payment(paid=_int(b.get("amount"), "amount"),
+                                                     discount=_int(disc or 0, "discount"))
+        ctx.require("suppliers.pay")
+        src = money.check_source(db, ctx, source or money.OUTSIDE)
+        if src == money.DRAWER:
+            method = "drawer"
+        elif src == money.OUTSIDE:
+            method = method if method in ("cash", "cheque") else "cash"
+        else:
+            kind = money.get_account(db, ctx, src)["kind"] if ctx.can("cash.see_expected") else "other"
+            method = method if method == "cheque" else {"bank": "bank", "wallet": "wallet"}.get(kind, "cash")
+        with db.transaction():
+            if src == money.DRAWER:
+                money.drawer_check(db, ctx, paid)        # the drawer never goes below zero (F105)
+            sup.pay(db, ctx, sid, paid, method, b.get("note"), b.get("ref"))
+            lid = db.one("SELECT id FROM supplier_ledger WHERE org_id=? AND supplier_id=? AND kind='payment'"
+                         " ORDER BY rowid DESC LIMIT 1", (ctx.org_id, sid))["id"]
+            if src not in (money.DRAWER, money.OUTSIDE):
+                name = db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))["name"]
+                money.pay_out(db, ctx, src, paid, "supplier_payment", ref_type="supplier_ledger", ref_id=lid,
+                              note=f"دفع للمورد {name}")
+            if discount:
+                reconcile.supplier_discount(db, ctx, sid, discount, payment_id=lid, note=b.get("discount_note"))
+        out = sup.account(db, ctx, sid) if ctx.can("suppliers.read") else {"id": sid}
+        return J({**out, "paid": paid, "discount": discount, "payment_id": lid})
 
     @handler
     async def export_xlsx(req):
@@ -953,7 +991,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def attachment_review(req):
         from ..sales import attachments as att
         b = await body(req)
-        return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note")))
+        amount = b.get("amount")
+        if amount is not None:                      # part of the transfer arrived (#324 M2-01)
+            amount = _int(amount, "amount")
+        return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note"), amount=amount))
 
     # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
     @handler
@@ -2066,7 +2107,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         def perform():
             resp = J({"balance": Sales(db).customer_payment(
                 ctx, req.path_params["id"], _int(b.get("amount"), "amount"), b.get("note"),
-                method=str(b.get("method", "cash")))})
+                method=str(b.get("method", "cash")), channel_id=b.get("channel_id") or None)})
             return resp.status_code, resp.body.decode("utf-8")
 
         # Database-only operation; no await or external effect inside this transaction.
@@ -2124,6 +2165,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def cash_close(req):
         ctx = ctx_of(req)
         b = await body(req)
+        more = {"float_left": _int(b["float_left"], "float_left") if b.get("float_left") not in (None, "") else None,
+                "to_account": b.get("to_account") or None,
+                "handover": b["handover"] if isinstance(b.get("handover"), bool) else None}
         shift = b.get("shift_id")
         if shift is not None and not isinstance(shift, str):
             raise ValidationFailed("الشيفت غير صحيح")
@@ -2131,10 +2175,103 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if "denominations" in b:
             if not isinstance(b["denominations"], dict):
                 raise ValidationFailed("عدد الفئات غير صحيح")
-            return J(CashDrawer(db).close(ctx, note=b.get("note"), denominations=b["denominations"], shift_id=shift))
+            return J(CashDrawer(db).close(ctx, note=b.get("note"), denominations=b["denominations"], shift_id=shift,
+                                            **more))
         if b.get("counted_cash") in (None, ""):
             raise ValidationFailed("اكتب المبلغ المعدود في الخزينة")
-        return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note"), shift_id=shift))
+        return J(CashDrawer(db).close(ctx, _int(b.get("counted_cash"), "counted_cash"), b.get("note"), shift_id=shift, **more))
+
+    # ------------------------------------------------------------- money accounts (F105) and reconciliation (F108)
+    @handler
+    async def money_accounts_view(req):
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            b = await body(req)
+            return J(money.create_account(db, ctx, str(b.get("name", "")), str(b.get("kind", "")),
+                                          allow_negative=b.get("allow_negative") is True), status_code=201)
+        return J({"accounts": await off_loop(money.accounts, db, ctx,
+                                             include_inactive=req.query_params.get("all") == "1"),
+                  "kinds": money.ACCOUNT_KINDS, "movement_kinds": money.KINDS})
+
+    @handler
+    async def money_account_one(req):
+        ctx = ctx_of(req)
+        if req.method == "PATCH":
+            return J(money.update_account(db, ctx, req.path_params["id"], await body(req)))
+        return J(money.get_account(db, ctx, req.path_params["id"]))
+
+    @handler
+    async def money_movements_view(req):
+        qp = req.query_params
+        return J(await off_loop(money.movements, db, ctx_of(req), account_id=qp.get("account") or None,
+                                kind=qp.get("kind") or None, date_from=qp.get("from") or None,
+                                date_to=qp.get("to") or None, limit=_int(qp.get("limit") or 500, "limit")))
+
+    @handler
+    async def money_statement_view(req):
+        qp = req.query_params
+        return J(await off_loop(money.statement, db, ctx_of(req), req.path_params["id"], qp.get("from") or None,
+                                qp.get("to") or None))
+
+    @handler
+    async def money_summary_view(req):
+        qp = req.query_params
+        return J(await off_loop(money.summary, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
+                                qp.get("by") or "day"))
+
+    @handler
+    async def money_transfer_view(req):
+        b = await body(req)
+        return J(money.transfer(db, ctx_of(req), str(b.get("from", "")), str(b.get("to", "")),
+                                _int(b.get("amount"), "amount"), b.get("note")), status_code=201)
+
+    @handler
+    async def money_owner_view(req):
+        b = await body(req)
+        return J(money.owner_movement(db, ctx_of(req), str(b.get("account", "")), _int(b.get("amount"), "amount"),
+                                      str(b.get("kind", "")), b.get("note")), status_code=201)
+
+    @handler
+    async def money_count_view(req):
+        b = await body(req)
+        return J(money.count(db, ctx_of(req), req.path_params["id"], _int(b.get("counted"), "counted"),
+                             b.get("reason")), status_code=201)
+
+    @handler
+    async def money_adjust_view(req):
+        b = await body(req)
+        return J(money.adjust_opening(db, ctx_of(req), req.path_params["id"], _int(b.get("correct_balance"), "amount"),
+                                      str(b.get("reason") or "")), status_code=201)
+
+    @handler
+    async def money_routes_view(req):
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            b = await body(req)
+            return J({"routes": money.set_route(db, ctx, str(b.get("method", "")), b.get("channel_id") or None,
+                                                b.get("account_id") or None)})
+        return J({"routes": money.routes(db, ctx)})
+
+    @handler
+    async def reconcile_parties_view(req):
+        qp = req.query_params
+        return J({"parties": await off_loop(reconcile.parties, db, ctx_of(req), qp.get("party") or None,
+                                            qp.get("q", "")), "types": reconcile.TYPES})
+
+    @handler
+    async def reconcile_record_view(req):
+        b = await body(req)
+        ctx = ctx_of(req)
+        party, pid = str(b.get("party", "")), str(b.get("party_id", ""))
+        if b.get("check"):
+            return J(reconcile.check(db, ctx, party, pid, _int(b.get("statement_balance"), "statement_balance")))
+        return J(reconcile.record(db, ctx, party, pid, _int(b.get("statement_balance"), "statement_balance"),
+                                  program_balance=_int(b.get("program_balance"), "program_balance"),
+                                  adj_type=b.get("adj_type") or None, note=b.get("note")), status_code=201)
+
+    @handler
+    async def reconcile_history_view(req):
+        return J({"history": reconcile.history(db, ctx_of(req), req.path_params["party"], req.path_params["id"])})
 
     @handler
     async def cash_shifts(req):
@@ -2685,6 +2822,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
+        Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
+        Route("/api/money/accounts/{id}/statement", money_statement_view),
+        Route("/api/money/accounts/{id}/count", money_count_view, methods=["POST"]),
+        Route("/api/money/accounts/{id}/adjust", money_adjust_view, methods=["POST"]),
+        Route("/api/money/movements", money_movements_view),
+        Route("/api/money/summary", money_summary_view),
+        Route("/api/money/transfer", money_transfer_view, methods=["POST"]),
+        Route("/api/money/owner", money_owner_view, methods=["POST"]),
+        Route("/api/money/routes", money_routes_view, methods=["GET", "PUT"]),
+        Route("/api/reconcile/parties", reconcile_parties_view),
+        Route("/api/reconcile", reconcile_record_view, methods=["POST"]),
+        Route("/api/reconcile/{party}/{id}", reconcile_history_view),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
