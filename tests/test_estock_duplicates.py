@@ -131,3 +131,53 @@ class TestMasterDuplicates(Base):
         res = self.run_import(tables=t)
         self.assertIn(("Products", "product_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
+
+
+class TestCodexReview385(Base):
+    """Codex on #385 @051f7af (each failed before the fix)."""
+
+    def test_p1_a_line_twice_never_refunds_what_was_already_returned(self):
+        from app.core.errors import Conflict
+        from app.sales import estock_returns as er
+        from app.sales.cash import CashDrawer
+        t = base_tables()
+        line = {"sales_id": "1", "details_id": "1", "product_id": "1", "amount": "1", "sell_price": "30.0000",
+                "total_sell": "30.0000", "insert_date": SOLD}
+        t["Sales_details"] = [line, dict(line)]                           # E-Stock holds the same line twice
+        # the base fixture's return document takes back product 1 of invoice 1 (Back_Sales_details back_amount 1)
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        CashDrawer(self.db).open(self.ctx, 0)
+        lines = er.invoice_lines(self.db, self.ctx, "1")
+        self.assertEqual(len(lines), 1)                                    # one line, not two
+        self.assertEqual(lines[0]["returned_units"], lines[0]["sold_units"])   # E-Stock's return still counts
+        with self.assertRaises(Conflict):                                  # nothing left to refund
+            er.return_items(self.db, self.ctx, "1", {"1": 1}, reason="مرتجع عميل", key="k1")
+
+    def test_p1_a_line_number_twice_with_other_cells_holds_returns_on_that_invoice(self):
+        from app.core.errors import Conflict
+        from app.sales import estock_returns as er
+        t = base_tables()
+        line = {"sales_id": "1", "details_id": "1", "product_id": "1", "amount": "1", "sell_price": "30.0000",
+                "total_sell": "30.0000", "insert_date": SOLD}
+        t["Sales_details"] = [line, dict(line, amount="2", total_sell="60.0000")]
+        t["Back_Sales_details"] = []
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        with self.assertRaises(Conflict) as e:
+            er.return_items(self.db, self.ctx, "1", {"1": 1}, reason="مرتجع عميل", key="k2")
+        self.assertEqual(e.exception.code, "estock_history_duplicate")
+
+    def test_p1_a_stale_duplicate_choice_stops_instead_of_dropping_a_row(self):
+        t = base_tables()                                                  # pa_id 1 is once in this read
+        dec = self.tmp / "packs.json"
+        dec.write_text(json.dumps({"duplicates": {"1": 2}}), encoding="utf-8")
+        res = self.run_import(tables=t, packs_file=dec)
+        self.assertFalse(res["ok"])
+        self.assertTrue([b for b in res["plan"].blocking if b["field"] == "duplicates"], res["plan"].blocking)
+
+    def test_p1_a_choice_beyond_the_rows_stops(self):
+        t = base_tables()
+        t["Product_Amount"].append(stock_row(1, 1, 1, "4", "22.0000", "2027-09-01T00:00:00"))
+        dec = self.tmp / "packs.json"
+        dec.write_text(json.dumps({"duplicates": {"1": 3}}), encoding="utf-8")
+        res = self.run_import(tables=t, packs_file=dec)
+        self.assertFalse(res["ok"])

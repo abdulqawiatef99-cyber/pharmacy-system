@@ -65,7 +65,7 @@ def open_for(path: Path, org_id: str) -> sqlite3.Connection:
     return open_ro(path)
 
 
-FORMAT = "2"            # 2: rows with impossible values are kept apart in q_<table> (#380)
+FORMAT = "3"            # 2: rows with impossible values are kept apart in q_<table> (#380); 3: an exact second copy of a history row too (#385)
 
 
 def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True, org_id: str | None = None) -> dict[str, int]:
