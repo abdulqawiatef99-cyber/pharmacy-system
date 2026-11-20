@@ -2181,7 +2181,7 @@ function smartUpdateHtml(u) {
   const last = res.state === "rolled_back" ? `<p class="badge b-warn">آخر تحديث ما اشتغلش، فالبرنامج رجع لوحده للنسخة اللي قبله وبياناتك زي ما هي.</p>`
     : res.state === "aborted" ? `<p class="badge b-warn">آخر تحديث اتلغى قبل ما يغيّر حاجة: ${esc(res.reason || "")}</p>` : "";
   if (u.request) {
-    return `${last}<p class="badge b-ok">✓ التحديث جاهز ومستني ${u.request.when === "after_close" ? "قفل الوردية" : "أول دقيقة هادية"}</p>
+    return `${last}<p class="badge b-ok">✓ التحديث جاهز ومستني <b>${u.request.when === "after_close" ? "قفل الوردية" : "أول دقيقة هادية"}</b></p>
       ${u.waiting ? `<p class="muted">مستني: ${esc(u.waiting)}</p>` : ""}
       <p class="muted">البرنامج هيقفل ويفتح لوحده (دقيقة تقريبًا)، ومش هيحصل وانت بتبيع.</p>
       <button class="btn secondary" id="updCancel">إلغاء الميعاد</button>`;
