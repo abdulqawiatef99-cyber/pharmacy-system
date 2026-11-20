@@ -69,6 +69,9 @@ ID_MAX = Decimal(2) ** 53                      # beyond this an id is not a coun
 HISTORY_KEYS = {"sales_details": ("sales_id", "details_id"), "sales_header": ("sales_id",),
                 "gedo_financial": ("gf_id",), "gedo_customers": ("gc_id",), "gedo_vendors": ("gv_id",)}
 COPY_REASON = "نسخة مكررة بالظبط من سطر تاني بنفس الرقم"
+# one id with different rows: none of them is known to be the right one, so all are set apart (kept for review),
+# out of every report, claim and return (Codex on #385)
+CONFLICT_REASON = "رقم مكرر ببيانات مختلفة"
 QTY_MAX = Decimal(1_000_000)                   # units or packs on one line
 MONEY_MAX = Decimal(1_000_000_000)             # pounds on one line or one invoice
 _MONEY_WORDS = ("price", "money", "total", "disc", "cash", "net", "value", "for_me", "for_him", "balance")
@@ -310,13 +313,18 @@ class Export:
                         if n in out:
                             continue
                         k = tuple(ident(r[i]) if i < len(r) else "" for i in at)
-                        if not all(k):
+                        if all(k):
+                            seen.setdefault(k, []).append(n)
+                    for ns in seen.values():
+                        if len(ns) < 2:
                             continue
-                        same = seen.setdefault(k, [])
-                        if any(x == r for x in same):
-                            out[n] = COPY_REASON
+                        distinct = {tuple(data[n]) for n in ns}
+                        if len(distinct) > 1:
+                            for n in ns:
+                                out[n] = CONFLICT_REASON
                         else:
-                            same.append(r)
+                            for n in ns[1:]:
+                                out[n] = COPY_REASON
             self._quarantine[key] = out
         return self._quarantine[key]
 
@@ -969,7 +977,14 @@ def _plan_quarantine(ex: Export, p: Plan) -> None:
         name = ex.tables[t.lower()]["name"]
         q = ex.quarantined(t)
         copies = sum(1 for v in q.values() if v == COPY_REASON)
-        bad = {n: v for n, v in q.items() if v != COPY_REASON}
+        clash = sum(1 for v in q.values() if v == CONFLICT_REASON)
+        bad = {n: v for n, v in q.items() if v not in (COPY_REASON, CONFLICT_REASON)}
+        if clash:
+            p.issue(name, "", "", "same id, other cells", f"{clash} سطر",
+                    "رقم موجود أكتر من مرة في تاريخ إي ستوك ببيانات مختلفة (مكرر): السطور اتحفظت لوحدها في الأرشيف"
+                    f" (q_{name}) ومش داخلة في أي تقرير ولا مطالبة"
+                    + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
+                    kind="review")
         if copies:
             p.issue(name, "", "", "exact copy", f"{copies} سطر",
                     "سطر موجود مرتين في تاريخ إي ستوك نفسه بنفس الرقم ونفس البيانات بالظبط: اتحسب مرة واحدة"
