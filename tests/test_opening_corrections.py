@@ -145,3 +145,21 @@ class TestCorrectionAPI(Case):
         bad = self.c.post(f"/api/opening-balances/supplier/{self.v1}", json={"amount": 1, "reason": "x y z"}, headers=H)
         self.assertGreaterEqual(bad.status_code, 400)
         self.assertEqual(self.db.one("SELECT count(*) n FROM supplier_ledger WHERE ref_id=?", (ob.REF,))["n"], 1)
+
+
+class TestExactPiastersOnTheScreen(__import__("unittest").TestCase):
+    """Codex P1 on #394: the correction screen sends exact piasters and refuses a fraction of a piaster."""
+
+    def test_exact_parse(self):
+        import json, re, shutil, subprocess
+        from pathlib import Path
+        if not shutil.which("node"):
+            self.skipTest("Node not available")
+        js = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        fn = re.search(r"\nfunction exactPiasters\(.*?\n\}\n", js, re.S).group(0)
+        cases = ["475.5", "475.50", "-20", "0", "1.005", "475.005", "1e3", "", "abc", "12,5", "9007199254740993"]
+        r = subprocess.run([shutil.which("node"), "-e", fn + f"console.log(JSON.stringify({json.dumps(cases)}.map(exactPiasters)))"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [47550, 47550, -2000, 0, None, None, None, None, None, 1250, None])
+        self.assertIn("exactPiasters(tr.querySelector(\"[data-amt]\")", js)

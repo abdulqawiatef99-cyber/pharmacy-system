@@ -2980,4 +2980,5 @@ window.I18N_EN = {
 "كل أجهزة الفرع بتشوف نفس الرصيد.": "Every PC of the branch sees the same stock.",
 "لما تخلص دوس هنا أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم.": "When done press here or F10 (first to the payment, second saves) or F9: the invoice is saved and the stock goes down.",
 "مفيش صنف في الفاتورة": "No item on the invoice",
+"اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)": "Type the correct balance in EGP (at most two digits after the point)",
 };
