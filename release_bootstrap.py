@@ -15,7 +15,8 @@ import runpy
 import sys
 import tempfile
 
-PROTOCOL = 1
+PROTOCOL = 1        # format of active-release.json and release_protocol.json (installed launchers read it)
+BOOTSTRAP = 2       # stage-0 capability: journal-driven database swap + undo (docs/SMART_UPDATE.md)
 
 
 class ReleaseError(RuntimeError):
@@ -144,19 +145,21 @@ def _contract(root: Path) -> tuple[bytes, dict]:
              for p in sorted((root / "app" / "migrations").glob("*.sql"))})
 
 
-def check_compatible(current: Path, candidate: Path) -> None:
+def check_compatible(current: Path, candidate: Path, *, coordinated: bool = False) -> None:
+    """coordinated=True: a signed smart-update bundle whose migrations ran on a copy of the database and whose
+    packages ship with it (stage 1 checked both); only the bootstrap marker is required then."""
     try:
         marker = json.loads((candidate / "release_protocol.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ReleaseError("This update needs the protocol-1 installer first") from exc
     if marker != {"protocol": PROTOCOL} or not (candidate / "release_bootstrap.py").is_file():
         raise ReleaseError("Unsupported release bootstrap")
-    if _contract(current) != _contract(candidate):
+    if not coordinated and _contract(current) != _contract(candidate):
         raise ReleaseError("Dependencies or database migrations changed; a coordinated upgrade is required")
 
 
 def activate(legacy: Path, home: Path, release_id: str, metadata: dict,
-             expected_active: str | None) -> None:
+             expected_active: str | None, *, coordinated: bool = False) -> None:
     with locked(home):
         state = read_state(home)
         active = state.get("active")
@@ -166,7 +169,7 @@ def activate(legacy: Path, home: Path, release_id: str, metadata: dict,
             raise ReleaseError("Release changed or is awaiting its first healthy startup")
         candidate = release_path(home, release_id)
         verify_release(candidate)
-        check_compatible(current_root(legacy, home), candidate)
+        check_compatible(current_root(legacy, home), candidate, coordinated=coordinated)
         atomic_json(home / "active-release.json",
                     {"protocol": PROTOCOL, "legacy_root": state.get("legacy_root", str(legacy.resolve())),
                      "active": {**metadata, "id": release_id}, "previous": active, "pending": True})
@@ -237,12 +240,16 @@ def data_dir() -> Path:
 
 
 def run_selected(root: Path) -> None:
+    """Direct `python manage.py …` on the installed program: run the selected release instead."""
     # Explicit candidate checks must not redirect back to the currently active code.
     # Recovery must remain callable even if the selected release was damaged.
     if os.environ.get("PHARM_RELEASE_CANDIDATE") == "1" or (
             len(sys.argv) > 1 and sys.argv[1] == "update" and "--rollback" in sys.argv):
         return
     home = code_home(data_dir())        # the installed program's release state too (Codex on #91)
+    if read_journal(home).get("state") in ("ready", "undoing"):
+        # the new code would open (and migrate) the live database before the checked copy is swapped in
+        raise ReleaseError("A program update is being applied; start the program from its icon to finish it")
     if (len(sys.argv) > 1 and sys.argv[1] == "serve"
             and read_state(home).get("pending")
             and os.environ.get("PHARM_LAUNCHER") != "1"):
@@ -252,3 +259,233 @@ def run_selected(root: Path) -> None:
         sys.path.insert(0, str(selected))
         runpy.run_path(str(selected / "manage.py"), run_name="__main__")
         raise SystemExit(0)
+
+
+# --------------------------------------------------------------------------- smart update, stage 0
+# The journal (written by stage 1 `update --apply-prepared`) lists file swaps: a checked, migrated copy of the
+# database replaces the live file. Every step is idempotent, decided from the files and their sha256, so a
+# power cut at any point is finished (or undone) on the next start. Stage 0 never migrates anything.
+
+def journal_path(home: Path) -> Path:
+    return Path(home) / "update-journal.json"
+
+
+def read_journal(home: Path) -> dict:
+    p = journal_path(home)
+    try:
+        value = json.loads(p.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_journal(home: Path, value: dict) -> None:
+    atomic_json(journal_path(home), value)
+
+
+def log_event(home: Path, **fields) -> None:
+    """Append-only update log; the next start of the program copies it into the audit log."""
+    from datetime import datetime, timezone
+    Path(home).mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **fields},
+                      ensure_ascii=False)
+    with open(Path(home) / "update-log.jsonl", "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def write_capability(home: Path) -> None:
+    try:
+        if json.loads((Path(home) / "bootstrap.json").read_text(encoding="utf-8")).get("bootstrap") == BOOTSTRAP:
+            return
+    except (OSError, ValueError, AttributeError):
+        pass
+    atomic_json(Path(home) / "bootstrap.json", {"bootstrap": BOOTSTRAP})
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """os.replace with a few retries: on Windows an antivirus scan can hold a just-closed file for a moment."""
+    import time
+    for attempt in range(6):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
+def _sidecars(db: Path) -> list[Path]:
+    return [Path(str(db) + "-wal"), Path(str(db) + "-shm")]
+
+
+def _discard(path: Path) -> None:
+    for p in [path, *_sidecars(path)]:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _swap_one(s: dict) -> None:
+    live, cand, prev = Path(s["live"]), Path(s["candidate"]), Path(s["previous"])
+    if not cand.exists():
+        if live.exists() and file_sha256(live) == s["candidate_sha256"]:
+            return                                          # already swapped
+        raise ReleaseError("Update copy is missing")
+    if file_sha256(cand) != s["candidate_sha256"] or any(p.exists() for p in _sidecars(cand)):
+        raise ReleaseError("Update copy changed after its checks")
+    if live.exists():
+        wal = _sidecars(live)[0]
+        if wal.exists() and wal.stat().st_size:
+            raise ReleaseError("Live database has unmerged changes (-wal); not swapped")
+        if file_sha256(live) != s["live_sha256"]:
+            raise ReleaseError("Live database changed after the copy; not swapped")
+        for side in _sidecars(live):
+            side.unlink(missing_ok=True)                    # empty WAL / stale shared memory, no open connection
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        _replace(live, prev)
+    elif not (prev.exists() and file_sha256(prev) == s["live_sha256"]):
+        raise ReleaseError("Live database is missing")
+    _replace(cand, live)
+    sync_dir(live.parent)
+
+
+def _undo_one(s: dict) -> None:
+    live, prev = Path(s["live"]), Path(s["previous"])
+    if not prev.exists():
+        if live.exists() and file_sha256(live) == s["live_sha256"]:
+            return                                          # already undone
+        raise ReleaseError("Previous database is missing; restore the pre-update backup")
+    if file_sha256(prev) != s["live_sha256"]:
+        raise ReleaseError("Previous database changed; restore the pre-update backup")
+    failed = Path(str(prev) + ".failed")
+    if live.exists():
+        _discard(failed)
+        _replace(live, failed)
+    for side, dest in zip(_sidecars(live), _sidecars(failed)):
+        if side.exists():                                   # the failed version's WAL belongs to the new file
+            _replace(side, dest)
+    _replace(prev, live)
+    sync_dir(live.parent)
+
+
+def _abort(home: Path, j: dict, state: str, reason: str) -> str:
+    for s in j.get("swaps", []):
+        cand = Path(s.get("candidate", ""))
+        if cand.name and cand.exists():
+            _discard(cand)
+    with locked(home):
+        st = read_state(home)
+        if (st.get("active") or {}).get("id") == j.get("release") and st.get("pending"):
+            atomic_json(home / "active-release.json",
+                        {**st, "active": st.get("previous"), "previous": None, "pending": False})
+    write_journal(home, {**j, "state": state, "reason": reason})
+    log_event(home, step="swap", ok=False, state=state, release=j.get("release"), reason=reason)
+    return state
+
+
+def resume_journal(home: Path) -> str:
+    """Bring the journal to a stable state before any program starts. Returns the state."""
+    home = Path(home)
+    j = read_journal(home)
+    state = j.get("state")
+    if not state:
+        return "none"
+    if state == "ready":
+        st = read_state(home)
+        if (st.get("active") or {}).get("id") != j.get("release") or not st.get("pending"):
+            return _abort(home, j, "abandoned", "the update was not selected")
+        try:
+            for s in j["swaps"]:
+                _swap_one(s)
+        except (ReleaseError, OSError, KeyError, TypeError) as exc:
+            # a half-done swap (first move only) is put back by the undo below, then everything is dropped
+            try:
+                for s in j.get("swaps", []):
+                    if not Path(s["live"]).exists():
+                        _undo_one(s)
+            except (ReleaseError, OSError, KeyError):
+                pass
+            return _abort(home, j, "aborted", str(exc))
+        write_journal(home, {**j, "state": "swapped"})
+        log_event(home, step="swap", ok=True, release=j.get("release"))
+        return "swapped"
+    if state == "swapped":
+        st = read_state(home)
+        active = (st.get("active") or {}).get("id")
+        if active == j.get("release") and not st.get("pending"):
+            finish_journal(home, active)                    # confirmed, then the power went
+            return "done"
+        if active != j.get("release"):                      # pointer rolled back, files not yet
+            recover_failed_start(home, j.get("release"))
+            return "rolled_back"
+        return "swapped"                                    # first start still to be supervised
+    if state == "undoing":
+        recover_failed_start(home, j.get("release"))
+        return "rolled_back"
+    return state
+
+
+def finish_journal(home: Path, release_id: str) -> None:
+    j = read_journal(home)
+    if j.get("state") == "swapped" and j.get("release") == release_id:
+        write_journal(home, {**j, "state": "done"})
+        log_event(home, step="confirm", ok=True, release=release_id)
+
+
+def recover_failed_start(home: Path, release_id: str | None) -> None:
+    """The selected release did not start: put the previous database back (if this release swapped one),
+    then the previous code. Idempotent."""
+    home = Path(home)
+    j = read_journal(home)
+    ours = j.get("release") == release_id and j.get("state") in ("swapped", "undoing")
+    if ours:
+        write_journal(home, {**j, "state": "undoing"})
+        for s in j["swaps"]:
+            _undo_one(s)
+    with locked(home):
+        st = read_state(home)
+        if st.get("active") and st["active"]["id"] == release_id:
+            previous = st.get("previous")
+            if previous:
+                verify_release(release_path(home, previous["id"]))
+            atomic_json(home / "active-release.json",
+                        {**st, "active": previous, "previous": None, "pending": False})
+    if ours:
+        write_journal(home, {**j, "state": "rolled_back"})
+    log_event(home, step="rollback", ok=True, release=release_id, database=ours)
+
+
+def run_apply(home: Path, program: Path, env: dict, logs: Path, creationflags: int = 0) -> None:
+    """Run stage 1's prepared apply once (requested by the running program through apply-go.json)."""
+    import subprocess
+    go = Path(home) / "apply-go.json"
+    if not go.exists():
+        return
+    try:
+        release = json.loads(go.read_text(encoding="utf-8")).get("release", "")
+    except (OSError, ValueError, AttributeError):
+        release = ""
+    go.unlink(missing_ok=True)                              # one shot: a crash here never loops
+    rc = None
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        with open(logs / "update.log", "a", encoding="utf-8") as log:
+            rc = subprocess.run([sys.executable, str(program / "manage.py"), "update", "--apply-prepared",
+                                 str(release)], cwd=str(Path(home).parent.parent), env=env, stdout=log,
+                                stderr=subprocess.STDOUT, timeout=1800, creationflags=creationflags).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        log_event(home, step="apply", ok=False, release=release, reason=f"{type(exc).__name__}: {exc}")
+        return
+    log_event(home, step="apply", ok=rc == 0, release=release, rc=rc)

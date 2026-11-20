@@ -99,7 +99,14 @@ def main() -> int:
     if build:
         (h / "data" / "installed_version.json").write_text(json.dumps({**build, "source": "installer"}),
                                                            encoding="utf-8")
+    releases.write_capability(code_home)                    # stage 1 may now offer database updates
     while True:
+        # Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, then run a prepared
+        # apply once if the program asked for it, then swap the checked copy in. Nothing here migrates.
+        releases.resume_journal(code_home)
+        if (code_home / "apply-go.json").exists():
+            releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+            releases.resume_journal(code_home)
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
         try:
@@ -107,7 +114,7 @@ def main() -> int:
         except releases.ReleaseError:
             if not state.get("pending"):
                 raise
-            releases.rollback(code_home, expected_id=selected_id)
+            releases.recover_failed_start(code_home, selected_id)
             continue
         pending = h / "data" / "pending_restore.zip"
         if pending.exists():                     # restore asked from the first-run screen
@@ -131,10 +138,11 @@ def main() -> int:
                         except subprocess.TimeoutExpired:
                             p.kill()
                             p.wait(timeout=10)
-                    releases.rollback(code_home, expected_id=selected_id)
-                    log.write("Candidate startup failed; previous complete code selected.\n")
+                    releases.recover_failed_start(code_home, selected_id)
+                    log.write("Candidate startup failed; previous complete code (and database) selected.\n")
                     continue
                 releases.confirm(code_home, selected_id)
+                releases.finish_journal(code_home, selected_id)
             if first:
                 threading.Thread(target=open_when_ready, daemon=True).start()
                 first = False
