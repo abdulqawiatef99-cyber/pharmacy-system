@@ -64,6 +64,11 @@ DEFAULT_STORE = "الصيدلية"
 # (Shortcoming is not checked: E-Stock keeps barcodes in its product_id, listed for the owner as they are)
 SANITY_TABLES = tuple(t for t in HISTORY_TABLES if t != "Shortcoming") + ("Sales_details", "Gedo_Financial")
 ID_MAX = Decimal(2) ** 53                      # beyond this an id is not a counter any more
+# history tables whose rows have an id: an exact second copy of a row is set apart (q_<table>) with this reason, so
+# every reader of the archive sees the row once (Codex on #385); E-Stock's own copy is kept there as it was
+HISTORY_KEYS = {"sales_details": ("sales_id", "details_id"), "sales_header": ("sales_id",),
+                "gedo_financial": ("gf_id",), "gedo_customers": ("gc_id",), "gedo_vendors": ("gv_id",)}
+COPY_REASON = "نسخة مكررة بالظبط من سطر تاني بنفس الرقم"
 QTY_MAX = Decimal(1_000_000)                   # units or packs on one line
 MONEY_MAX = Decimal(1_000_000_000)             # pounds on one line or one invoice
 _MONEY_WORDS = ("price", "money", "total", "disc", "cash", "net", "value", "for_me", "for_him", "balance")
@@ -296,6 +301,22 @@ class Export:
                     why = [w for w in (implausible(h, r[i]) for i, h in cols if i < len(r)) if w]
                     if why:
                         out[n] = "؛ ".join(why)
+                low = [h.strip().lower() for h in head]
+                kc = HISTORY_KEYS.get(key)
+                if kc and all(c in low for c in kc):
+                    at = [low.index(c) for c in kc]
+                    seen: dict[tuple, list] = {}
+                    for n, r in enumerate(data):
+                        if n in out:
+                            continue
+                        k = tuple(ident(r[i]) if i < len(r) else "" for i in at)
+                        if not all(k):
+                            continue
+                        same = seen.setdefault(k, [])
+                        if any(x == r for x in same):
+                            out[n] = COPY_REASON
+                        else:
+                            same.append(r)
             self._quarantine[key] = out
         return self._quarantine[key]
 
@@ -684,17 +705,29 @@ def _variants(rows: list, cols: tuple[str, ...]) -> dict[tuple, list]:
 
 
 def _owner_duplicate_choice(rows: list, p: Plan) -> list:
-    """A stock number E-Stock holds with different cells: the row the owner chose (packs.json duplicates)."""
+    """A stock number E-Stock holds with different cells: the row the owner chose (packs.json duplicates). A choice
+    this read does not fit (the number is once now, or there is no such row) stops the move: no row is left out
+    on an old answer (Codex on #385). Exact copies were already counted once (_stock_groups)."""
     pick = p.rules.get("duplicates") or {}
     if not pick:
         return rows
+    count: dict[str, int] = defaultdict(int)
+    for r in rows:
+        count[ident(r.get("pa_id"))] += 1
+    use = {}
+    for k, n in sorted(pick.items()):
+        if count.get(k, 0) < 2 or n > count[k]:
+            p.issue("Product_Amount", k, "", "duplicates", f"{k}: السطر {n} (في القراية دي {count.get(k, 0)} سطر)",
+                    "اختيار التشغيلة المكررة في packs.json مش مطابق للقراية دي: امسحه أو صحّحه", block=True)
+        else:
+            use[k] = n
     seen: dict[str, int] = defaultdict(int)
     out = []
     for r in rows:
         k = ident(r.get("pa_id"))
-        if k in pick:
+        if k in use:
             seen[k] += 1
-            if seen[k] != pick[k]:
+            if seen[k] != use[k]:
                 continue
         out.append(r)
     return out
@@ -933,13 +966,20 @@ def _plan_quarantine(ex: Export, p: Plan) -> None:
     for t in SANITY_TABLES:
         if not ex.has(t):
             continue
+        name = ex.tables[t.lower()]["name"]
         q = ex.quarantined(t)
-        if q:
-            sample = "؛ ".join(sorted({w.split("=")[0] + "=" + w.split("=", 1)[1][:20] for v in q.values()
-                                       for w in v.split("؛ ")})[:5])
-            p.issue(ex.tables[t.lower()]["name"], "", "", "impossible values", f"{len(q)} سطر؛ مثلًا {sample}",
+        copies = sum(1 for v in q.values() if v == COPY_REASON)
+        bad = {n: v for n, v in q.items() if v != COPY_REASON}
+        if copies:
+            p.issue(name, "", "", "exact copy", f"{copies} سطر",
+                    "سطر موجود مرتين في تاريخ إي ستوك نفسه بنفس الرقم ونفس البيانات بالظبط: اتحسب مرة واحدة"
+                    f" (النسخة التانية محفوظة لوحدها في الأرشيف q_{name})", kind="info")
+        if bad:
+            sample = "؛ ".join(sorted({w.split("=")[0] + "=" + w.split("=", 1)[1][:20] for v in bad.values()
+                                       for w in v.split("؛ ") if "=" in w})[:5])
+            p.issue(name, "", "", "impossible values", f"{len(bad)} سطر؛ مثلًا {sample}",
                     "OWNER: سطور بقيم مستحيلة في إي ستوك نفسه (أرقام بايظة في الجدول): اتحفظت لوحدها في الأرشيف"
-                    f" (q_{ex.tables[t.lower()]['name']}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير"
+                    f" (q_{name}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير"
                     + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
                     kind="review")
 

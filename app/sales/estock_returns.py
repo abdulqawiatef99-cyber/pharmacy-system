@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from ..core import audit
+from ..dataimport.estock_db import COPY_REASON
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
@@ -124,7 +125,8 @@ def _quarantine_guard(con, sales_id: str) -> None:
             continue
         mirror = t == "Branches_sales_details" and branch is not None and "branch_id" in cols
         sel = f'"{cols["sales_id"]}"' + (f', "{cols["branch_id"]}"' if mirror else ", NULL")
-        for v, b in con.execute(f'SELECT {sel} FROM "q_{t}"'):
+        # an exact second copy of a row (Codex on #385) is set apart and read once: it hides nothing
+        for v, b in con.execute(f'SELECT {sel} FROM "q_{t}" WHERE coalesce(_reason, \'\') <> ?', (COPY_REASON,)):
             if mirror and _ident(b) != branch:
                 bd = _dec(b)
                 # a readable other branch is not ours; an impossible id (the importer's rule, #383 review) keeps the hold
@@ -161,6 +163,11 @@ def _invoice(db: Database, ctx: Context, sales_id: str) -> dict:
     for l in lines:
         extra[_ident(l.get("product_id"))] -= _dec(l.get("back_amount")) or 0
     out_lines = {}
+    keys = [_ident(l.get("details_id")) or str(n) for n, l in enumerate(lines, start=1)]
+    if len(set(keys)) != len(keys):
+        # E-Stock holds one line number of this invoice twice with different cells: what was sold is not known
+        raise Conflict("فاتورة إي ستوك دي فيها سطرين بنفس الرقم وبيانات مختلفة: المرتجع عليها موقوف لحد ما المالك"
+                       " يراجعها", code="estock_history_duplicate")
     for n, l in enumerate(lines, start=1):
         key = _ident(l.get("details_id")) or str(n)
         pid = _ident(l.get("product_id"))
