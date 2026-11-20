@@ -49,6 +49,34 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
             self.assertTrue(launcher.settle(self.home, self.app_home, env, 0))
         self.assertFalse((self.home / "apply-go.json").exists())            # one shot
 
+    def launcher_starts(self, *, healthy: bool):
+        """The installed launcher's main(): it applies (the real `--apply-prepared`), swaps, starts the program
+        and supervises its first start; on a failed start it rolls back and starts the previous version
+        itself (Codex P2 on #392). Only the server process is faked: healthy or not."""
+        from unittest.mock import Mock
+        procs = []
+        real_popen = subprocess.Popen
+        def popen(cmd, *a, **kw):
+            if "serve" not in cmd:                 # the real apply (`--apply-prepared`) and its checks run for real
+                return real_popen(cmd, *a, **kw)
+            p = Mock()
+            p.wait.return_value = 0
+            p.poll.return_value = None if healthy or procs else 1
+            procs.append((cmd, kw.get("env", {})))
+            return p
+        states = []
+        def ready(p, boot_id, timeout=60):
+            states.append(releases.read_state(self.home).get("active", {}) or {})
+            return healthy
+        with patch.object(launcher, "ROOT", self.legacy), patch.object(launcher, "home", return_value=self.app_home), \
+                patch.object(launcher, "running", return_value=False), \
+                patch.object(launcher, "candidate_ready", side_effect=ready), \
+                patch.object(launcher.threading, "Thread"), \
+                patch.object(launcher.subprocess, "Popen", side_effect=popen):
+            self.assertEqual(launcher.main(), 0)
+        self.assertFalse((self.home / "apply-go.json").exists())            # one shot
+        return procs
+
     def tables(self):
         con = sqlite3.connect(self.s.db_path)
         try:
@@ -72,12 +100,14 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         self.assertEqual(p["deps"], m["deps"]["id"])
         self.assertEqual(self.s.db_path.read_bytes(), before)               # prepare only reads the live file
         self.press_update_now()
-        self.launcher_settles()
+        procs = self.launcher_starts(healthy=True)
+        self.assertEqual(len(procs), 1)                                     # the new version, supervised
+        self.assertEqual(procs[0][1].get("PHARM_BOOTSTRAP"), str(releases.BOOTSTRAP))
         st = releases.read_state(self.home)
         self.assertEqual((st["active"]["id"], st["pending"], st["active"]["deps"]),
-                         (p["release"], True, m["deps"]["id"]))
+                         (p["release"], False, m["deps"]["id"]))                 # confirmed by the launcher
         self.assertIn("smart_update_probe", self.tables())                  # the migrated copy is live
-        self.assertEqual(releases.read_journal(self.home)["state"], "swapped")
+        self.assertEqual(releases.read_journal(self.home)["state"], "done")
         release = releases.release_path(self.home, p["release"])
         self.assertIn("REHEARSAL_UPDATER = 2", (release / "app" / "core" / "smart_update.py").read_text())
         probe = ("import runpy, sys; runpy.run_path(sys.argv[1], run_name='probe'); "
@@ -94,9 +124,6 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         self.assertIn(("swap", True), {(e.get("step"), e.get("ok")) for e in events})
         self.assertTrue(list(self.backups.glob("*pre-update*.zip")))       # verified backup first
         self.assertIn("SMART-APPLY", (self.app_home / "logs" / "update.log").read_text(encoding="utf-8"))
-        releases.confirm(self.home, p["release"])                            # healthy first start
-        releases.finish_journal(self.home, p["release"])
-        self.assertEqual(releases.read_journal(self.home)["state"], "done")
         good = self.s.db_path.read_bytes()
 
         # --- batch 2: a later batch whose first start fails -> old database and code come back by themselves
@@ -111,9 +138,8 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         p2 = su.prepare(self.s, su.FolderSource(self.bundle), legacy=self.legacy)
         self.assertTrue(p2["needs_db"])
         self.press_update_now()
-        self.launcher_settles()
-        self.assertIn("rehearsal_two", self.tables())
-        releases.recover_failed_start(self.home, p2["release"])              # the new version did not start
+        procs = self.launcher_starts(healthy=False)                          # its first start fails
+        self.assertEqual(len(procs), 2)                                      # the launcher started batch 1 again
         self.assertNotIn("rehearsal_two", self.tables())
         self.assertEqual(self.s.db_path.read_bytes(), good)
         st = releases.read_state(self.home)
