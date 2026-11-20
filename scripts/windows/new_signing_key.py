@@ -35,15 +35,18 @@ def main(argv=None) -> int:
         print(f"RESULT: FAIL - الفلاشة مش ظاهرة ({out.anchor}). حطها وجرّب تاني.")
         return 3
     out.mkdir(parents=True, exist_ok=True)
-    priv_file = out / PRIVATE
-    if priv_file.exists():
-        print(f"RESULT: فيه مفتاح خاص موجود بالفعل هنا، ماغيرتش حاجة:\n  {priv_file}")
-        return 1
+    priv_file, pub_file = out / PRIVATE, out / PUBLIC
+    for f in (priv_file, pub_file):          # either one already there: an earlier pair, never replaced
+        if f.exists():
+            print(f"RESULT: فيه مفتاح موجود بالفعل هنا، ماغيرتش حاجة:\n  {f}")
+            return 1
     priv, pub = generate()
+    fd = os.open(pub_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(pub + "\n")
     fd = os.open(priv_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="ascii") as f:
         f.write(priv + "\n")
-    (out / PUBLIC).write_text(pub + "\n", encoding="ascii")
     print("RESULT: اتعمل مفتاح احتياطي جديد.")
     print("المفتاح الخاص (يفضل على الفلاشة بس، ماتبعتوش لحد):")
     print(f"  {priv_file}")

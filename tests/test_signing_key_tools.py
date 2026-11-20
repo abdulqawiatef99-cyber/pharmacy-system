@@ -77,6 +77,10 @@ class TestNewKey(Base):
         update_sign.verify(msg, update_sign.sign(msg, priv), [base64.b64decode(pub)])
         self.assertEqual(nsk.main([str(out)]), 1)                                 # never overwrites
         self.assertEqual((out / "update-signing-PRIVATE.txt").read_text(encoding="ascii").strip(), priv)
+        (out / "update-signing-PRIVATE.txt").rename(out / "moved-offline.txt")   # private moved, public stays
+        self.assertEqual(nsk.main([str(out)]), 1)                                 # the public key is not replaced
+        self.assertEqual((out / "update-3.pub").read_text(encoding="ascii").strip(), pub)
+        self.assertFalse((out / "update-signing-PRIVATE.txt").exists())
 
 
 class TestToolsFolder(unittest.TestCase):
