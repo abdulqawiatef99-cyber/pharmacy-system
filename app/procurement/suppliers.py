@@ -91,7 +91,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
     ctx.require("suppliers.pay")
     if method == "outside":                      # older screens
         method = "cash"
-    if not isinstance(amount, int) or amount <= 0:
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:      # true is not 1 piastre
         raise ValidationFailed("المبلغ غير صحيح")
     if method not in PAY_METHODS:
         raise ValidationFailed("اختر طريقة الدفع")
@@ -112,6 +112,10 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
         audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method, "ref": ref})
         notify.emit(db, ctx, "supplier_payment", "info", f"دفع {amount / 100:,.2f} ج إلى {s['name']}",
                     PAY_METHODS[method] + (f" {ref}" if ref else ""), "supplier", sid)
+    if not ctx.can("suppliers.read"):
+        # the payment is saved: answer with what this person may see, never a 403 after the commit,
+        # which freed the retry key and let the same click pay a second time (#324 S6)
+        return {"ok": True, "supplier_id": sid, "payment_id": lid, "amount": amount, "method": method}
     return account(db, ctx, sid)
 
 

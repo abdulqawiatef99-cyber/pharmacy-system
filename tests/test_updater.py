@@ -61,8 +61,7 @@ class TestUpdater(unittest.TestCase):
         with mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": str(self.root / "none.txt")}, clear=False):
             with mock.patch.dict("os.environ", {}, clear=False) as env:
                 env.pop("PHARM_GITHUB_TOKEN", None)
-                with self.assertRaises(updater.UpdateError):
-                    updater.read_token()
+                self.assertIsNone(updater.read_token())   # public repo: no key means anonymous, not an error
         import urllib.error
         err = urllib.error.HTTPError("u", 401, "x", {}, None)
         with mock.patch("urllib.request.urlopen", side_effect=err):
@@ -84,8 +83,11 @@ class TestUpdateAPI(APICase):
         with _mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": "/nonexistent/t.txt"}):
             os_env = __import__("os").environ
             os_env.pop("PHARM_GITHUB_TOKEN", None)
-            st = self.c.get("/api/system/update").json()
-        self.assertIn("error", st)                                  # clear message, no crash
+            import urllib.error
+            gone = urllib.error.HTTPError("u", 404, "x", {}, None)   # repository private again
+            with _mock.patch("urllib.request.urlopen", side_effect=gone):
+                st = self.c.get("/api/system/update").json()
+        self.assertIn("بدون مفتاح", st["error"])                    # clear message, no crash
         done = _mock.Mock(returncode=0, stdout="التحديث خلص بنجاح", stderr="")
         with _mock.patch("subprocess.run", return_value=done) as run:
             r = self.c.post("/api/system/update", headers=_H, json={})
@@ -94,6 +96,24 @@ class TestUpdateAPI(APICase):
         self.assertIn("update", run.call_args[0][0])
         n = self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update'")[0]
         self.assertEqual(n, 1)
+
+
+class TestUpdateWithoutKey(APICase):
+    def test_a_pc_without_a_key_file_still_sees_updates(self):
+        """Heikal PC: no %USERPROFILE%\\.pharmacy\\github_token.txt; the public repository is read anonymously."""
+        from tests.test_updater_edges import _Resp
+        seen = []
+
+        def fake(req, timeout):
+            seen.append(req.get_header("Authorization"))
+            return _Resp(b"e" * 40)
+        self.http_login()
+        with _mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": "/nonexistent/t.txt"}) as env, \
+                _mock.patch("urllib.request.urlopen", side_effect=fake):
+            env.pop("PHARM_GITHUB_TOKEN", None)
+            st = self.c.get("/api/system/update").json()
+        self.assertNotIn("error", st)
+        self.assertEqual((st["latest"], st["available"], seen), ("e" * 40, True, [None]))
 
 
 class TestUpdateChannel(APICase):

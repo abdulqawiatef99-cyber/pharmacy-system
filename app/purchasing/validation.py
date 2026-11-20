@@ -114,8 +114,10 @@ def effective_amount(line: dict) -> int | None:
         return None if net is None or not qty else net * qty + tax
     if net is not None and qty and tax:
         pre = net * qty
-        if abs(total - pre) <= line_tolerance(pre, qty) < abs(total - (pre + tax)):
-            return total + tax        # printed total excludes tax
+        # printed total excludes tax: it is within tolerance of the pre-tax amount and closer to it than to the
+        # taxed one (a small tax inside the tolerance of both was dropped from the invoice, #324 S26)
+        if abs(total - pre) <= line_tolerance(pre, qty) and abs(total - pre) < abs(total - (pre + tax)):
+            return total + tax
     return total
 
 
@@ -232,10 +234,11 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "total_mismatch", None, "declared_total", declared=declared,
                 computed=comp, difference=declared - comp)
 
-    acks = {a["code"] + "|" + (a.get("line_id") or "") for a in
+    # an acceptance covers the figures it accepted: a changed difference needs a new one (#324 S25)
+    acks = {(a["code"], a.get("line_id") or "", json.dumps(a.get("details"), sort_keys=True)) for a in
             json.loads(invoice.get("acknowledged_issues") or "[]")}
     for i in issues:
-        if i.code in ACKNOWLEDGEABLE and f"{i.code}|{i.line_id or ''}" in acks:
+        if i.code in ACKNOWLEDGEABLE and (i.code, i.line_id or "", json.dumps(i.details, sort_keys=True)) in acks:
             i.acknowledged = True
     return issues
 

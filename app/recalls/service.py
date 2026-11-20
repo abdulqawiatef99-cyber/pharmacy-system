@@ -52,8 +52,13 @@ def extract_batches(text: str) -> list[str]:
 
 
 def _now() -> str:
-    from ..core.accounts import iso, utcnow
-    return iso(utcnow())
+    """Now, cut down to the millisecond like the stock ledger's own clock. The sale screen holds a recalled
+    lot received after its recall was handled by comparing this time with the receipt's; SQLite rounds a
+    microsecond time to the NEAREST millisecond, so a decision at .1236 s read as .124 and a receipt at
+    .1238 s (stored as .123) looked older than the decision and stayed sellable."""
+    from ..core import accounts
+    t = accounts.utcnow()
+    return accounts.iso(t.replace(microsecond=t.microsecond // 1000 * 1000))
 
 
 class Recalls:
@@ -128,6 +133,18 @@ class Recalls:
                         " batch_id, match_basis, qty_in_stock) VALUES (?,?,?,?,?,?,?)",
                         (new_id(), ctx.org_id, ni["id"], b["item_id"], b["id"], basis, qty))
                     new += cur.rowcount
+                    if not cur.rowcount and qty > 0:
+                        # a lot whose recall was handled has stock again (received after the alert was closed):
+                        # it is the same recalled lot, so the alert opens again as confirmed (#324 S1)
+                        again = self.db.execute(
+                            "UPDATE recall_matches SET status='confirmed', qty_in_stock=?, decided_at=?,"
+                            " note=trim(coalesce(note,'') || ' — رجع رصيد من التشغيلة بعد المعالجة')"
+                            " WHERE org_id=? AND notice_item_id=? AND batch_id=? AND status='handled'",
+                            (qty, _now(), ctx.org_id, ni["id"], b["id"])).rowcount
+                        if again:
+                            audit.record(self.db, ctx, "recall.reopened", "regulatory_notice", notice_id,
+                                         after={"batch_id": b["id"], "qty": qty})
+                            new += again
             if new:
                 audit.record(self.db, ctx, "recall.matched", "regulatory_notice", notice_id,
                              after={"new_matches": new})

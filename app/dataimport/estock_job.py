@@ -36,7 +36,7 @@ def read_packs(path: Path) -> dict[str, int]:
     header contains 'القرار' or 'عدد الوحدات' (the review sheet we send)."""
     if path.suffix.lower() == ".json":
         raw = json.loads(path.read_text(encoding="utf-8"))
-        raw = raw.get("packs", raw)
+        raw = raw.get("packs", {} if "classes" in raw else raw)    # the same file may hold only the class answers
         out = {}
         for k, v in raw.items():
             if not v:
@@ -110,13 +110,15 @@ def run(db: Database, ctx: Context, *, catalog_file: Path, stock_file: Path, pac
                         source_system="estock",
                         options={"estock_stores": stores, "max_unit_error": max_unit_error})
     listed = {"skipped_unknown_pack": [], "skipped_zero_cost": [], "posted_zero_cost": [],
-              "rounded": [], "no_expiry": 0}
+              "rounded": [], "rounded_to_zero": [], "no_expiry": 0}
     for r in db.all("SELECT id, action, data, issues FROM import_rows WHERE run_id=?", (run_id,)):
         d, iss = json.loads(r["data"]), {i["code"]: i for i in json.loads(r["issues"])}
         line = {"code": d.get("code"), "name": d.get("_name"), "qty": d.get("qty")}
         if "rounded_units" in iss:
             listed["rounded"].append({**line, "from": iss["rounded_units"]["from"],
                                       "to": iss["rounded_units"]["to"]})
+        if "rounded_to_zero" in iss:        # a residue under half a unit: nothing to post, listed (#324 S12)
+            listed["rounded_to_zero"].append({**line, "from": iss["rounded_to_zero"]["from"]})
         if "no_batch_or_expiry" in iss:
             listed["no_expiry"] += 1
         if r["action"] == "error":

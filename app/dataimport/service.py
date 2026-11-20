@@ -493,10 +493,12 @@ class DataImport:
                   "batch_no", "location"):
             d[k] = txt(k)
         bc = raw.get("barcode")
-        if isinstance(bc, float):
+        fraction = isinstance(bc, float) and not bc.is_integer()
+        if isinstance(bc, float) and not fraction:
             bc = str(int(bc))
         d["barcode"] = normalize_barcode(bc) if bc not in (None, "") else None
-        if bc not in (None, "") and (not d["barcode"] or len(d["barcode"]) < 6):
+        # 123456.7 is not a barcode: int() cut it to 123456 and matched (and renamed) another item (#324 S33)
+        if bc not in (None, "") and (fraction or not d["barcode"] or len(d["barcode"]) < 6):
             issues.append({"code": "invalid_barcode", "value": str(bc)})
             d["barcode"] = None
         d["dosage_form"] = normalize_form(txt("dosage_form")) if txt("dosage_form") else None
@@ -612,11 +614,14 @@ class DataImport:
         if (options or {}).get("qty_unit", "pack") == "pack":
             pack = self.db.one("SELECT pack_size FROM items WHERE id=?", (item_id,))["pack_size"]
             mue = Decimal(str((options or {}).get("max_unit_error", 0)))
-            if _whole_units(Decimal(d["qty"]), pack, mue) is None:
+            units = _whole_units(Decimal(d["qty"]), pack, mue)
+            if units is None:
                 return "error", item_id, [{"code": "fractional_qty_needs_pack_size",
                                            "qty": d["qty"], "pack_size": pack,
                                            "hint": "حدد عدد الوحدات (الشرايط) في العلبة لهذا الصنف أولًا"}]
             exact = Decimal(d["qty"]) * pack
+            if units == 0:       # an E-Stock residue (0.001 pack): nothing to post; a zero movement used to
+                return "skip", item_id, [{"code": "rounded_to_zero", "from": str(exact), "to": 0}]  # abort all (#324 S12)
             if abs(exact - exact.to_integral_value(ROUND_HALF_UP)) > Decimal("0.0006") * pack:
                 issues.append({"code": "rounded_units", "from": str(exact),
                                "to": int(exact.to_integral_value(ROUND_HALF_UP))})
@@ -805,6 +810,14 @@ class DataImport:
                              run_id))
             audit.record(self.db, ctx, "import.apply", "import_run", run_id, after=done)
         matching.invalidate(ctx.org_id)
+        if run["kind"] == "opening_stock":
+            # a recalled lot in the opening stock must raise its alert like a purchase does (#324 S2)
+            try:
+                from ..recalls.service import Recalls
+                Recalls(self.db).match_new_batches(ctx)
+            except Exception:   # alerting must never undo an applied import
+                import logging
+                logging.getLogger("pharm.recalls").exception("recall matching failed")
         return report
 
     def _stale_rows(self, ctx: Context, run, rows: list[dict]) -> list[int]:
@@ -928,22 +941,25 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     """Data portability: full item list with barcodes and current stock as .xlsx."""
     ctx.require("items.read")
     from openpyxl import Workbook
+    # what this person may see elsewhere: hidden items only with items.hidden, stock only with
+    # inventory.read (#324 S8 / X12)
+    hidden_ok, stock_ok = ctx.can("items.hidden"), ctx.can("inventory.read")
     wb = Workbook()
     ws = wb.active
     ws.title = "items"
     ws.append(["id", "code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
-               "manufacturer", "pack_size", "public_price_egp", "barcodes", "stock_base_units",
-               "status"])
-    for it in db.all("SELECT * FROM items WHERE org_id=? ORDER BY coalesce(name_en,name_ar)",
-                     (ctx.org_id,)):
+               "manufacturer", "pack_size", "public_price_egp", "barcodes"] + (["stock_base_units"] if stock_ok else [])
+              + ["status"])
+    for it in db.all("SELECT * FROM items WHERE org_id=? AND (hidden=0 OR ?) ORDER BY coalesce(name_en,name_ar)",
+                     (ctx.org_id, int(hidden_ok))):
         bcs = ",".join(r["barcode"] for r in db.all(
             "SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, it["id"])))
         q = db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND item_id=?",
-                   (ctx.org_id, it["id"]))["q"]
+                   (ctx.org_id, it["id"]))["q"] if stock_ok else None
         ws.append([it["id"], it["code"], it["name_en"], it["name_ar"], it["active_ingredient"],
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
-                   bcs, q, it["status"]])
+                   bcs] + ([q] if stock_ok else []) + [it["status"]])
     from ..core.xlsx_safe import as_text
     as_text(wb)
     buf = io.BytesIO()
@@ -956,10 +972,15 @@ def _whole_units(qty: Decimal, pack: int, max_unit_error: Decimal | None = None)
     so a rounding error up to 0.0006 pack per unit of pack size is accepted.
     E-Stock also accumulates drift on split items (0.336 for 1/3); the caller
     may allow a larger error in base units (options['max_unit_error']) — each
-    such row is reported as 'rounded_units'. Anything else returns None."""
+    such row is reported as 'rounded_units'. Anything else returns None.
+    The larger error is for split items only (pack > 1): with pack 1 (the default when the pack size is
+    not known) 2.1 or 2.9 packs is a real fraction of a pack, not drift, and rounding it would post a
+    guessed quantity; it stays None (listed as unknown pack size)."""
     base = qty * pack
     whole = base.to_integral_value(ROUND_HALF_UP)
-    tol = max(Decimal("0.0006") * pack, max_unit_error or Decimal(0))
+    tol = Decimal("0.0006") * pack
+    if pack > 1:
+        tol = max(tol, max_unit_error or Decimal(0))
     return int(whole) if abs(base - whole) <= tol else None
 
 

@@ -52,23 +52,30 @@ def attach(db: Database, upload_dir: Path, ctx: Context, sale_id: str, data: byt
         tmp = path.with_suffix(ext + ".part")
         tmp.write_bytes(data)
         tmp.replace(path)
-    if db.one("SELECT 1 FROM sale_attachments a JOIN source_files f ON f.id=a.file_id WHERE a.sale_id=? AND f.sha256=?",
-              (sale_id, sha)):
-        raise Conflict("هذه الصورة مسجلة مع هذه الفاتورة من قبل")
-    other = db.one("SELECT s.sale_no FROM sale_attachments a JOIN source_files f ON f.id=a.file_id JOIN sales s ON s.id=a.sale_id"
-                   " WHERE a.org_id=? AND f.sha256=? AND a.sale_id<>?", (ctx.org_id, sha, sale_id))
     aid, fid = new_id(), new_id()
+    # the duplicate checks, the save and the alert in one write: two tills saving the same screenshot at the
+    # same moment cannot both find nothing (#324 M2-24)
     with db.transaction():
+        if db.one("SELECT 1 FROM sale_attachments a JOIN source_files f ON f.id=a.file_id WHERE a.sale_id=? AND f.sha256=?"
+                  " AND a.org_id=?", (sale_id, sha, ctx.org_id)):
+            raise Conflict("هذه الصورة مسجلة مع هذه الفاتورة من قبل")
+        other = db.one("SELECT s.id, s.sale_no FROM sale_attachments a JOIN source_files f ON f.id=a.file_id"
+                       " JOIN sales s ON s.id=a.sale_id WHERE a.org_id=? AND f.sha256=? AND a.sale_id<>?"
+                       " ORDER BY s.sale_no IS NULL, a.created_at LIMIT 1", (ctx.org_id, sha, sale_id))
         db.execute("INSERT INTO source_files (id, org_id, sha256, filename, mime_type, size_bytes, storage_path, uploaded_by)"
                    " VALUES (?,?,?,?,?,?,?,?)", (fid, ctx.org_id, sha, Path(filename or "transfer").name[:200], mime,
                                                 len(data), str(path), ctx.user_id))
         db.execute("INSERT INTO sale_attachments (id, org_id, sale_id, file_id, kind, note, created_by) VALUES (?,?,?,?,?,?,?)",
                    (aid, ctx.org_id, sale_id, fid, "transfer", (note or "").strip()[:200] or None, ctx.user_id))
         audit.record(db, ctx, "sale.attach", "sale", sale_id, after={"file": fid, "size": len(data)})
-        if other:   # the same screenshot used for two invoices
-            notify.emit(db, ctx, "transfer_duplicate", "error", f"صورة التحويل نفسها سُجّلت مع فاتورتين ({other['sale_no']} و{s['sale_no']})",
+        if other:   # the same screenshot used for two invoices; one still open has no number yet
+            name = lambda no: str(no) if no else "لم تكتمل بعد"  # noqa: E731
+            notify.emit(db, ctx, "transfer_duplicate", "error",
+                        f"صورة التحويل نفسها سُجّلت مع فاتورتين ({name(other['sale_no'])} و{name(s['sale_no'])})",
                         "راجع التحويل: قد يكون المبلغ نفسه محسوبًا مرتين", "sale", sale_id)
-    return {"attachments": listing(db, ctx, sale_id), "duplicate_of": other["sale_no"] if other else None}
+    return {"attachments": listing(db, ctx, sale_id),
+            "duplicate_of": (other["sale_no"] or "(لم تكتمل بعد)") if other else None,
+            "duplicate_sale_id": other["id"] if other else None}
 
 
 def listing(db: Database, ctx: Context, sale_id: str) -> list[dict]:
@@ -86,9 +93,8 @@ def file(db: Database, upload_dir: Path, ctx: Context, att_id: str) -> tuple[byt
     if not r:
         raise NotFound("المرفق غير موجود")
     _sale(db, ctx, r["sale_id"])
-    p = Path(r["storage_path"])
-    if not p.exists():
-        p = upload_dir / r["org_id"] / "transfers" / p.name
+    # only the current upload folder, by the file's own name: a path saved elsewhere is never read (#324 X26)
+    p = upload_dir / r["org_id"] / "transfers" / Path(r["storage_path"]).name
     if not p.exists():
         raise NotFound("ملف الصورة غير موجود على هذا الجهاز")
     return p.read_bytes(), r["mime_type"]
@@ -126,9 +132,9 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"
         "   WHERE p.sale_id=s.id AND p.method='transfer') channel,"
-        " (SELECT count(*) FROM sale_attachments a WHERE a.sale_id=s.id) proofs,"
+        " (SELECT count(*) FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) proofs,"   # #324 B8
         " (SELECT CASE WHEN sum(a.review='problem') THEN 'problem' WHEN sum(a.review='pending') THEN 'pending'"
-        "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.sale_id=s.id) review"
+        "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) review"
         " FROM sales s LEFT JOIN users u ON u.id=s.created_by WHERE s.org_id=? AND s.paid_transfer>0 AND s.status<>'draft'"
         " AND s.completed_at>=? AND s.completed_at<? ORDER BY s.completed_at DESC",
         (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))]

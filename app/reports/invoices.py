@@ -6,13 +6,13 @@
 والربح للصاحب (costs.read بس). وسطر إجماليات تحت."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import kept_value, line_gross_as_sold
+from ..sales.service import line_gross_as_sold, outstanding_value, returns_history
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -20,14 +20,22 @@ _F = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def _utc(local: str, end: bool = False) -> str:
-    """'2026-10-25T14:30' (pharmacy local time) -> UTC ISO. A bare date means the whole day."""
+    """'2026-10-25T14:30' (pharmacy local time) -> UTC ISO. A bare date means the whole day.
+
+    The night the clock goes back (Cairo, end of October) one local hour happens twice. The end of a period
+    takes the later pass and its start the earlier one, and a whole day ends where the next day begins:
+    23:59:59 read as the first pass dropped every sale of the repeated hour from that day (#324 R3)."""
     try:
         if len(local) == 10:
-            d = datetime.fromisoformat(local + ("T23:59:59.999999" if end else "T00:00"))
+            if end:      # the last instant before the next local day starts, whatever the day's length
+                nxt = datetime.combine(date.fromisoformat(local) + timedelta(days=1), time.min)
+                return (nxt.astimezone().astimezone(timezone.utc) - timedelta(microseconds=1)).strftime(_F)
+            d = datetime.fromisoformat(local + "T00:00")
         else:
             d = datetime.fromisoformat(local)
             if end:
                 d = d.replace(second=59, microsecond=999999)
+        d = d.replace(fold=1 if end else 0)
     except (TypeError, ValueError):
         raise ValidationFailed("التاريخ أو الساعة غير صحيحين")
     return d.astimezone().astimezone(timezone.utc).strftime(_F)
@@ -51,7 +59,7 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
             line_ids.append(l["id"])
     for k in range(0, len(line_ids), _CHUNK):
         part = line_ids[k:k + _CHUNK]
-        for a in db.all("SELECT sale_line_id, id, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
+        for a in db.all("SELECT sale_line_id, id, rowid rid, qty_base, returned_qty, unit_price, pack_price, pack_size, unit_cost"
                         f" FROM sale_allocations WHERE sale_line_id IN ({','.join('?' * len(part))}) ORDER BY rowid", tuple(part)):
             a = dict(a)
             allocs_of.setdefault(a.pop("sale_line_id"), []).append(a)
@@ -115,10 +123,15 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     show_cost = ctx.can("costs.read")
     hidden_ok = ctx.can("items.hidden")
     lines_of, allocs_of = _lines_and_allocations(db, [r["id"] for r in rows])
+    # the returns of the invoices that have any: their profit uses what each line still holds, as a return does
+    history = returns_history(db, ctx.org_id, [sid for sid, ls in lines_of.items() if any(
+        a["returned_qty"] for l in ls for a in allocs_of.get(l["id"], []))]) if show_cost else {}
+    exact: dict[str, tuple[int, Decimal]] = {}
     for r in rows:
         r["item_discount"] = r["customer_discount"] = 0
         r["profit"] = 0 if show_cost else None
         r["unknown_cost"] = False
+        value_sum, cost_sum = 0, Decimal(0)
         lines = []
         for l in lines_of.get(r["id"], []):
             allocs = allocs_of.get(l["id"], [])
@@ -132,16 +145,22 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
             returned = sum(a["returned_qty"] for a in allocs)
             if show_cost and r["status"] == "completed":
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                value = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
+                                          history.get(r["id"], []))
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
-                cost = sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
-                r["profit"] += value - int(cost.to_integral_value(ROUND_HALF_UP))
+                value_sum += value
+                cost_sum += sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
             if with_lines:
                 lines.append({"item_id": l["item_id"], "name_en": l["name_en"], "name_ar": l["name_ar"], "pack_size": l["pack_size"],
                               "base_unit_name": l["base_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,
                               "discount_bp": l["discount_bp"], "net": net, "contract": l["discount_source"] == "contract",
                               "hidden": bool(l["hidden"]) and not hidden_ok})
+        if show_cost:
+            # exact costs are added up and rounded once, per invoice here and for the period below: rounding
+            # each line made two sales costing 5.005 each lose a piastre against Profit and Top Items (#324 R5)
+            r["profit"] = value_sum - int(cost_sum.to_integral_value(ROUND_HALF_UP))
+            exact[r["id"]] = (value_sum, cost_sum)
         if r["status"] == "draft":           # not priced yet: what the open invoice would come to is shown on the cashier
             r["item_discount"] = r["customer_discount"] = 0
         r["net"] = r["total"] - r["returned_total"] if r["status"] == "completed" else 0
@@ -160,7 +179,8 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     tot["returned_n"] = sum(1 for r in done if r["returned_total"])
     tot["discounted_n"] = sum(1 for r in done if r["discount_total"])
     if show_cost:
-        tot["profit"] = sum(r["profit"] for r in done)
+        tot["profit"] = sum(exact[r["id"]][0] for r in done) - int(
+            sum((exact[r["id"]][1] for r in done), Decimal(0)).to_integral_value(ROUND_HALF_UP))
         tot["unknown_cost_n"] = sum(1 for r in done if r["unknown_cost"])
     sellers = [dict(u) for u in db.all("SELECT u.id, u.full_name name FROM memberships m JOIN users u ON u.id=m.user_id"
                                          " WHERE m.org_id=? ORDER BY u.full_name", (ctx.org_id,))]

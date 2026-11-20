@@ -14,6 +14,7 @@ class TestTransferProof(Base):
     def test_attach_review_duplicate_and_report(self):
         people.add_user(self.db, self.ctx, username="asst", full_name="A", password=PW, role_code="assistant")
         a = self.login("asst", PW)
+        self.cd.open(self.ctx, 0)  # every store sale needs an open shift (final review P2-2)
         s1 = self.sell(ctx=a, cash=0, card=4000)
         with self.db.transaction():                                  # make it a transfer sale
             self.db.execute("UPDATE sales SET paid_card=0, paid_transfer=4000 WHERE id=?", (s1["id"],))

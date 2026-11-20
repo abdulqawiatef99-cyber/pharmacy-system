@@ -134,7 +134,7 @@ class TestReportApi(ReportCase):
         self.assertEqual((r["counts"]["sales"], r["counts"]["batches"]), (1, 0))
         self.assertTrue(backup.create(self.db, self.tmp / "up", self.tmp / "bk").exists())
         js = (api.WEB_DIR / "app.js").read_text(encoding="utf-8")
-        self.assertIn("${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف", js)
+        self.assertIn("${r.counts.batches ? `<li>تتوقف النسخ الاحتياطية", js)
 
     def test_a_sale_mismatch_is_cleared_only_by_the_owners_review(self):
         """Codex P2 on #213: a count corrects the shelf but can never make the sale's own movements equal its

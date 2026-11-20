@@ -151,7 +151,13 @@ class World:
         if self.model.qty.get(item, 0) < 3:
             return
         n = self.rng.randint(1, 2)
-        returns.create(self.db, self.ctx, self.case.sup, [{"item_id": item, "qty_base": n, "reason": "overstock"}])
+        # a return names its lot (no lot = the stock kept without one, #324 S29): the fullest row of the item
+        row = self.db.one("SELECT batch_key, qty FROM stock_balances WHERE org_id=? AND branch_id=? AND item_id=?"
+                          " ORDER BY qty DESC, batch_key LIMIT 1", (self.ctx.org_id, self.ctx.branch_id, item))
+        if not row or row["qty"] < n:
+            return
+        returns.create(self.db, self.ctx, self.case.sup, [{"item_id": item, "batch_id": row["batch_key"] or None,
+                                                           "qty_base": n, "reason": "overstock"}])
         self.model.add(item, -n)
         self.tick("supplier_return")
 
@@ -258,6 +264,9 @@ class LongRun(DBTestCase):
         errors: list[BaseException] = []
         lock = threading.Lock()
         items = self.multi[:3]                      # the same few items: real contention on the same batches
+        from app.sales import cash
+        if not cash.open_shift_id(w.db, w.ctx):  # every store sale needs an open shift (final review P2-2)
+            cash.CashDrawer(w.db).open(w.ctx, 0)
 
         def work(ctx, seed):
             rng = random.Random(seed)

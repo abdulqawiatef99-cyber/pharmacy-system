@@ -62,6 +62,13 @@ function trString(s) {
   const lead = s.match(/^\s*/)[0], trail = s.match(/\s*$/)[0];
   return lead + out + trail;
 }
+const I18N_BEFORE = { "ملف": "File", "سطر": "Line", "العبوة": "Pack", "ربح": "profit", "كود": "Code", "حركة": "Movements", "اليوم": "Today",
+  "رقم": "No.", "فواتير": "Invoices", "طُبع": "Printed", "صرف": "Pay", "شهر": "Month", "إلى": "to", "العميل": "Customer", "رصيده": "Balance",
+  "عجز": "Shortage", "زيادة": "Surplus", "لم يُجرد": "Not counted", "سيُصفَّر": "Will be set to zero:", "الإجمالي": "Total",
+  "(المُرتجع": "(returned", "(الفرق": "(difference", "(المتوقع": "(expected", "معروض أول": "Showing the first", "يظهر أول": "Showing the first",
+  "أُرسل": "Sent", "حد الآجل": "credit limit" };
+const I18N_AFTER = { "صورة": "pictures", "اختلاف": "differences", "تعديل": "edits", "جنيه": "EGP", "عجز": "short", "ملصق": "labels",
+  "يومًا": "days", "فقط": "only", "والتكلفة": "and the cost" };
 // words that come next to numbers ("3 فاتورة", "76.45 ج", "5 يوم") and a few fixed bits
 const NUM = "(\\d[\\d.,]*)";
 const I18N_PATTERNS = [
@@ -80,6 +87,12 @@ const I18N_PATTERNS = [
   [/(?<![\u0600-\u06FF])من (\S+) إلى (\S+)/g, "from $1 to $2"], [/(?<![\u0600-\u06FF])يوم (\d+)/g, "day $1"],
   [/(?<![\u0600-\u06FF])بعد (\d+ days)/g, "in $1"],
   [/(?<![\u0600-\u06FF])فاتورة (\d+)/g, "Invoice $1"],
+  [/(?<![\u0600-\u06FF])Hello يا /g, "Hello, "],
+  [/(\d{1,2}(?::\d\d)?)\s*ص(?![\u0600-\u06FF])/g, "$1 AM"], [/(\d{1,2}(?::\d\d)?)\s*م(?![\u0600-\u06FF])/g, "$1 PM"],
+  [/(?<![\u0600-\u06FF])(\d[\d.,]*) من (\d[\d.,]*)/g, "$1 of $2"], [/(?<![\u0600-\u06FF])من (?=\d)/g, "from "],
+  // a short word right before or after a number ("ملف 2", "3 صورة"): one table each, so a name is never touched
+  [new RegExp(`(?<![\\u0600-\\u06FF])(${Object.keys(I18N_BEFORE).map((k) => k.replace(/[()]/g, "\\$&")).join("|")})(?=\\s*\\d)`, "g"), (m) => I18N_BEFORE[m]],
+  [new RegExp(`(\\d[\\d.,]*\\s*)(${Object.keys(I18N_AFTER).join("|")})(?![\\u0600-\\u06FF])`, "g"), (m, n, w) => n + I18N_AFTER[w]],
 ];
 const SKIP = new Set(["SCRIPT", "STYLE", "TEXTAREA", "INPUT"]);
 function trNode(root) {
@@ -236,16 +249,24 @@ async function askApproval(details, message, method, path) {
 }
 
 const API = { busy: 0, last: 0 };
+// set by wireRange() while a period change starts its reads: a GET answered after a newer choice is dropped (#324 R25)
+let RANGE_CALL = null;
+const RANGE_SEQ = {};
 const API_MAX_APPROVALS = 8;                    // more than any action needs; stops a loop
 // Money forms: the same POST (path + body) sent again within 4 seconds is a double click or a double
 // Enter, so it carries the SAME Idempotency-Key and the server replays or refuses it instead of posting
 // twice. Only these routes: repeating a cashier action on purpose (the same item scanned twice) stays two.
 const ONCE_MS = 4000, ONCE_SENT = new Map();
+// A money form whose every attempt lost its answer has an UNKNOWN outcome: sent again unchanged, however much
+// later, it carries the same key, so the server replays it or says it is unconfirmed instead of posting a second
+// time. The key is dropped once any answer comes back (#324 M2-10).
+const UNSURE = new Map();
 const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, /^\/api\/expense-schedules\/[^/]+$/,
-  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/];
+  /^\/api\/staff$/, /^\/api\/suppliers\/[^/]+\/pay$/, /^\/api\/cash\/movements$/, /^\/api\/estock\/sales\/[^/]+\/return$/];
 function onceKey(method, apiPath, bodyText) {
-  if (method !== "POST" || bodyText === undefined || !ONCE_PATHS.some((re) => re.test(apiPath))) return null;
+  if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
+  if (UNSURE.has(sig)) return UNSURE.get(sig);
   for (const [k, v] of ONCE_SENT) if (now - v.at >= ONCE_MS) ONCE_SENT.delete(k);
   const hit = ONCE_SENT.get(sig);
   if (hit) return hit.key;
@@ -253,14 +274,17 @@ function onceKey(method, apiPath, bodyText) {
   ONCE_SENT.set(sig, { key, at: now });
   return key;
 }
+onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
-  const apiPath = path.split("?")[0];
+  const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
+  let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
     _key = _key || onceKey(method, apiPath, opts.body);
+    if (onceKey.applies(method, apiPath, opts.body)) sig = `${method} ${apiPath} ${opts.body}`;
   }
   // every POST carries an idempotency key; on a network failure it is retried with
   // the SAME key, so the server either replays the first result or runs it once.
@@ -272,11 +296,17 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
-        if (attempt >= 2) throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        if (attempt >= 2) {
+          if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
+          throw new Error("لا يوجد اتصال بالخادم — لم يتأكد حفظ العملية، راجعها قبل التكرار");
+        }
         await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
       }
     }
     data = await r.json().catch(() => ({}));
+    if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
+    // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
+    if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
@@ -320,16 +350,20 @@ function printInFrame(url) {
 const routes = [
   [/^#\/login$/, viewLogin],
   [/^#\/setup$/, viewSetup],
-  [/^#\/purchases$/, viewPurchases],
+  [/^#\/purchases$/, async () => { await viewPurchases(); estockPanel("list", "purchase"); }],
   [/^#\/purchases\/([\w-]+)$/, viewInvoice],
   [/^#\/items$/, viewItems],
   [/^#\/items\/([\w-]+)\/edit$/, viewItemEdit],
-  [/^#\/items\/([\w-]+)$/, viewItem],
+  [/^#\/items\/([\w-]+)$/, async (id) => { await viewItem(id); estockPanel("item", id); }],
   [/^#\/categories$/, viewCategories],
   [/^#\/groups$/, viewGroups],
   [/^#\/shift$/, viewShift],
   [/^#\/suppliers$/, viewSuppliers],
-  [/^#\/suppliers\/([\w-]+)$/, viewSupplier],
+  [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
+  [/^#\/estock(?:\?.*)?$/, viewEstock],
+  [/^#\/estock\/(sale|sale_return|purchase)\/([^/?]+)$/, viewEstockInvoice],
+  [/^#\/estock-statement\/(customer|supplier)\/([\w-]+)$/, viewEstockStatement],
+  [/^#\/estock-item\/([\w-]+)$/, viewEstockItem],
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
   [/^#\/audit$/, viewAudit],
@@ -344,14 +378,14 @@ const routes = [
   [/^#\/owner-reports$/, viewOwnerReports],
   [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
-  [/^#\/customers\/([\w-]+)$/, viewCustomer],
+  [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
   [/^#\/deadstock$/, viewDeadstock],
-  [/^#\/sales$/, viewSales],
+  [/^#\/sales$/, async () => { await viewSales(); estockPanel("list", "sale"); }],
   [/^#\/system$/, viewSystem],
   [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
@@ -393,15 +427,42 @@ async function route() {
   else if (ME.stock_alert !== undefined) { showStockAlert(ME.stock_alert); delete ME.stock_alert; }
   else refreshStockAlert();
   if (ME && !route.alertTimer) route.alertTimer = setInterval(refreshStockAlert, 60000);
+  // per signed-in person: after a logout and another login in the same tab, the new person's view is read now
+  if (!ME) { showBackupAlert(null); clearInterval(route.backupTimer); route.backupTimer = null; route.backupUser = null; }
+  else if (route.backupUser !== ME.user.id) {
+    route.backupUser = ME.user.id; clearInterval(route.backupTimer);
+    refreshBackupAlert(); route.backupTimer = setInterval(refreshBackupAlert, 300000);
+  }
   if (ME && !route.badgeChecked) { route.badgeChecked = true; checkUpdateBadge(); }
   document.querySelectorAll("[data-nav]").forEach((a) =>
     a.classList.toggle("active", hash.startsWith("#/" + a.dataset.nav)));
   $("#navMore")?.classList.toggle("active", !!$("#navMore .menu a.active"));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
-    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } return; }
+    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } setTimeout(tourAuto, 400); return; }
   }
   location.hash = "#/home";
+}
+// the last good automatic backup in the top bar; red under it when the last run failed or it is late (two intervals)
+async function refreshBackupAlert() {
+  if (!ME?.permissions?.includes("settings.manage") || document.hidden) { if (!ME) showBackupAlert(null); return; }
+  try { showBackupAlert(await api("/api/backup/health")); } catch { /* offline: keep what is shown */ }
+}
+function backupText(h) {
+  if (h.failed) return `✕ آخر نسخة احتياطية تلقائية فشلت${h.last_good_at ? ` — آخر نسخة سليمة: ${stamp(h.last_good_at)}` : ""}. افتح «البرنامج والنسخ الاحتياطي».`;
+  return `⚠ النسخة الاحتياطية التلقائية متأخرة — آخر نسخة سليمة: ${stamp(h.last_good_at)}. افتح «البرنامج والنسخ الاحتياطي».`;
+}
+function showBackupAlert(h) {
+  const bar = $("#backupAlert"), when = $("#backupWhen");
+  if (!bar || !when) return;
+  bar.hidden = !(h && h.warn);
+  when.hidden = !h || !("ok" in h);
+  if (h && "ok" in h) when.textContent = `آخر نسخة احتياطية: ${h.last_good_at ? stamp(h.last_good_at) : "لا توجد بعد"}`;
+  if (h && h.warn) bar.textContent = backupText(h);
+  // the same warning on «المزيد» and on «البرنامج والنسخ الاحتياطي», so it is seen from any screen
+  for (const id of ["#bkBadge", "#bkBadgeSys"]) { const x = $(id); if (x) x.hidden = !(h && h.warn); }
+  const bk = $("#bkBadge");
+  if (bk) bk.title = h && h.warn ? (h.failed ? "النسخة الاحتياطية فشلت" : "النسخة الاحتياطية متأخرة") : "";
 }
 // #202: red banner while the last stock integrity check found balances that do not match the stock ledger
 async function refreshStockAlert() {
@@ -419,7 +480,7 @@ function showStockAlert(a) {
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
   pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], purchases: ["الشراء", "purchases.read"],
-  items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الوردية والخزينة", "sales.create"],
+  items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
   expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
@@ -427,7 +488,7 @@ const SCREENS = {
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
-  customize: ["تخصيص الواجهة", "settings.manage"],
+  customize: ["تخصيص الواجهة", "settings.manage"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
@@ -439,7 +500,7 @@ const HELP = {
   "items/1": ["بطاقة الصنف: الرصيد والتشغيلات والأسعار والحركة والمثيل والبديل.", ["التسوية تحتاج إلى سبب، وتظهر في تقرير خسائر المخزون.", "المثيل يظهر عند كتابة المادة الفعالة والتركيز والشكل في تعديل الصنف."]],
   categories: ["الأقسام تنظّم الأصناف وتحدد ما لا يُقبل إرجاعه.", ["\"اقتراح\" يقترح قسمًا للأصناف التي بدون قسم، وأنت من يعتمد."]],
   groups: ["المجموعات العلاجية: أنت من يحدد ما هو بديل لما.", ["أضف مواد فعالة أو أصنافًا بعينها إلى المجموعة.", "البرنامج لا يخمّن أي بديل من تلقاء نفسه."]],
-  shift: ["الوردية والخزينة: افتح الوردية برصيد البداية، وأغلقها بعدّ النقدية فئةً فئة.", ["لا يظهر المتوقع للموظف إلا بعد الإغلاق.", "أي فرق يحتاج إلى سبب مكتوب."]],
+  shift: ["الشيفت والخزينة: افتح الشيفت برصيد البداية، وأغلقه بعدّ النقدية فئةً فئة.", ["لا يظهر المتوقع للموظف إلا بعد الإغلاق.", "أي فرق يحتاج إلى سبب مكتوب."]],
   suppliers: ["الموردون: الحسابات والدفعات وكشف الحساب.", ["اضغط على المورد لعرض كشف حسابه وتسجيل دفعة."]],
   shortages: ["النواقص: ما سُجّل ناقصًا، أو وصل إلى حد الطلب، أو نفد وكان يُباع.", ["تُزال العلامة تلقائيًا عند اعتماد فاتورة شراء الصنف."]],
   transfers: ["مراجعة التحويلات: قارن كل تحويل برسائل البنك أو المحفظة.", ["حدد \"وصل المبلغ\" أو \"بها مشكلة\" من الفاتورة."]],
@@ -483,7 +544,9 @@ function showHelp() {
     ${line ? `<p>${esc(line)}</p>` : ""}${tips.length ? `<ul>${tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
     <h3>الاختصارات</h3><ul class="plain">${sc.map(([n, s]) => `<li><kbd>Alt+${n}</kbd> ${esc(SCREENS[s][0])}</li>`).join("")}<li><kbd>Alt+0</kbd> هذه المساعدة</li></ul>
     <label class="chk mt"><input type="checkbox" id="helpLineTgl" ${PREFS.help === "off" ? "" : "checked"}> إظهار سطر المساعدة أعلى كل شاشة</label>
-    <div class="row mt">${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/customize">تخصيص الواجهة</a>` : ""}<button class="btn">إغلاق</button></div></form>`;
+    <div class="row mt"><button type="button" class="btn secondary" data-tour-dlg="main">جولة في القوائم</button>${tourScreen() ? `<button type="button" class="btn secondary" data-tour-dlg="${tourScreen()}">اشرح الشاشة دي</button>` : ""}
+      ${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/customize">تخصيص الواجهة</a>` : ""}<button class="btn">إغلاق</button></div></form>`;
+  dlg.querySelectorAll("[data-tour-dlg]").forEach((b) => b.addEventListener("click", () => { dlg.close(); tourStart(b.dataset.tourDlg); }));
   dlg.querySelector("#helpLineTgl").addEventListener("change", async (e) => {
     try { await savePrefs({ help: e.target.checked ? "on" : "off" }); $("#app .helpline")?.remove(); addHelpLine(); } catch (er) { toast(er.message, true); }
   });
@@ -498,6 +561,195 @@ document.addEventListener("keydown", (e) => {
   const s = ME.ui?.shortcuts?.[n];
   if (s && canScreen(s)) { e.preventDefault(); location.hash = `#/${s}`; }
 });
+// ------------------------------------------------------------------ F36 guided tour (#247) — BEGIN
+// First sign-in of every user (after first-run setup too): a bubble with an arrow walks through the top bar,
+// then each main screen explains itself the first time it opens. «اشرح الشاشة دي» replays a screen.
+// Never blocks a sale: no backdrop, the ring ignores the mouse, and on the sale screen the focus stays in the
+// search box (a scan still lands there). Esc closes. "Seen" is kept per pharmacy + user in this browser
+// (the server's per-user prefs accept only known keys, and a migration is not worth it for this).
+// A step is [selectors, title, text, permission?]; "a|b" means: a if it is on screen, else b.
+const TOUR_MORE = "#navMore > summary";
+const TOUR = {
+  main: [
+    [".brand", "الصفحة الرئيسية", "من هنا ترجع للصفحة الرئيسية: ملخص اليوم والتنبيهات اللي محتاجة تتشاف."],
+    ["a[data-nav=pos]|" + TOUR_MORE, "شاشة البيع", "هنا بتبيع للعميل: تمسح الباركود أو تكتب اسم الصنف، تختار طريقة الدفع وتقفل الفاتورة.", "sales.create"],
+    ["a[data-nav=sales]|" + TOUR_MORE, "فواتير البيع", "كل الفواتير اللي اتباعت: تدور على فاتورة، تطبعها تاني، أو تعمل منها مرتجع.", "sales.read"],
+    ["a[data-nav=purchases]|" + TOUR_MORE, "الشراء", "لما بضاعة توصل من المورد: ترفع فاتورته أو تدخلها بإيدك، تراجعها وتعتمدها. المخزون يزيد بعد الاعتماد بس.", "purchases.read"],
+    ["a[data-nav=items]|" + TOUR_MORE, "الأصناف", "كل الأصناف: تدور على صنف، تشوف رصيده وصلاحيته، وتعدّل سعره.", "items.read"],
+    ["a[data-nav=counts]|" + TOUR_MORE, "الجرد", "لما تعد البضاعة اللي على الرف وتقارنها برصيد البرنامج.", "inventory.count"],
+    ["a[data-nav=shift]|" + TOUR_MORE, "الشيفت والخزينة", "أول اليوم تفتح الشيفت بالفلوس اللي في الدرج، وآخره تقفلها وتعد الفلوس فئة فئة.", "sales.create"],
+    ["a[data-nav=reports]|" + TOUR_MORE, "التقارير", "مبيعات اليوم والشهر، والصلاحية، والخسائر. كل تقرير له زرار Excel وزرار طباعة."],
+    ["a[data-nav=system]|" + TOUR_MORE, "البرنامج والنسخ الاحتياطي", "النسخة الاحتياطية بتحفظ بياناتك لو الجهاز باظ، ومن هنا كمان زرار تحديث البرنامج.", "settings.manage"],
+    [TOUR_MORE, "المزيد", "باقي الشاشات هنا: العملاء والآجل، والمصروفات، والموردين، والطلبية، وغيرهم."],
+    ["#helpBtn", "المساعدة", "لو تهت في أي شاشة دوس هنا (أو Alt+0) تلاقي شرحها واختصاراتها، وتقدر تعيد الجولة دي."],
+    ["#fbBtn", "ملاحظة", "لقيت مشكلة أو عندك اقتراح للبرنامج؟ اكتبه من هنا."],
+    ["#logout", "خروج", "لما تسيب الجهاز اعمل خروج، عشان محدش يشتغل باسمك."],
+  ],
+  pos: [
+    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة."],
+    ["#posRes [data-add]|#posQ", "علبة ولا شريط؟", "تحت البحث بيظهر زرار «علبة» وزرار الوحدة (شريط أو قرص). Shift+Enter يضيف وحدة بدل العلبة."],
+    ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
+    ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
+    ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
+    ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
+  ],
+  purchases: [
+    ["#upForm", "قراءة فاتورة المورد", "ارفع ملف الفاتورة (Excel أو PDF أو صورة) والبرنامج يقراها، وانت تراجعها قبل الاعتماد."],
+    ["#manForm", "فاتورة بإيدك", "مفيش ملف؟ اختار المورد واكتب رقم الفاتورة، وابدأ تدخل الأصناف بإيدك."],
+    ["#puRep", "الفواتير", "كل فواتير الشراء. المسودة لسه ماغيّرتش المخزون؛ المعتمدة بس هي اللي زوّدته."],
+  ],
+  items: [
+    ["#q", "البحث", "دوّر بالاسم العربي أو الإنجليزي أو الكود أو الباركود."],
+    ["a[href='#/items/new']", "صنف جديد", "لو صنف مش موجود، ضيفه من هنا بسعره وعدد الوحدات في العلبة.", "items.write"],
+    ["#app table|#itemsHint", "بطاقة الصنف", "اضغط على أي صنف تفتح بطاقته: الرصيد والتشغيلات والسعر والحركة."],
+  ],
+  shift: [
+    ["#shOpen", "فتح الشيفت", "اكتب الفلوس اللي في الدرج دلوقتي وافتح الشيفت. من غيره البيع النقدي واقف."],
+    ["#shPay", "مصروف من الخزينة", "لو طلّعت فلوس من الدرج لمصروف، سجّلها هنا بالسبب عشان الحساب يطابق."],
+    ["#shClose", "قفل الشيفت", "آخر الشيفت عد الفلوس فئة فئة واكتب العدد. أي فرق محتاج سبب مكتوب."],
+    ["#shHist", "آخر الشيفتات", "الشيفتات اللي فاتت: المتوقع والمعدود والفرق، وتقرير كل شيفت."],
+  ],
+  reports: [
+    ["#rRange", "الفترة", "اختار النهارده أو الأسبوع أو الشهر، أو حدد من تاريخ لتاريخ."],
+    ["#rSales", "المبيعات", "إجمالي المبيعات والمرتجع والخصومات، يوم بيوم وحسب الموظف."],
+    ["#app [data-xl]", "Excel والطباعة", "كل تقرير ليه زرار يطلّعه ملف Excel وزرار يطبعه أو يحفظه PDF."],
+    ["#app a[href='#/owner-reports']", "تقارير المالك", "تقارير أعمق: الموظفين، والعملاء، والخزينة، والمرتجعات، والأسعار.", "sales.totals"],
+  ],
+  system: [
+    ["#bkBox", "النسخة الاحتياطية", "البرنامج بيعمل نسخة لوحده. تقدر تعمل نسخة دلوقتي، وخلّي نسخة على فلاشة برّه الجهاز."],
+    ["#rcBox", "شكل الإيصال", "اسم الصيدلية وهاتفها على الإيصال، ومقاس الورق، والملصقات."],
+    ["#chBox", "البطاقات والتحويل", "أجهزة الفيزا والمحافظ اللي بتستلم عليها، عشان تظهر في شاشة البيع."],
+    ["#sysBox", "تحديث البرنامج", "زرار التحديث بياخد نسخة احتياطية الأول، وبعدين يحدّث من غير ما يلمس بياناتك."],
+  ],
+};
+const TOUR_ANCHOR = { pos: "#app p.keys" };              // screens without a heading: where the replay button goes
+const tourScreen = () => { const h = location.hash || "#/home"; const m = h.match(/^#\/([\w-]+)$/); return m && TOUR[m[1]] && m[1] !== "main" ? m[1] : null; };
+const TOUR_MEM = {};                                      // when the browser storage is blocked: seen for this tab only
+const tourStoreKey = () => `tour:${ME?.organization?.id || ""}:${ME?.user?.id || ""}`;
+function tourSeen() {
+  let s = TOUR_MEM[tourStoreKey()] || {};
+  try { s = { ...JSON.parse(localStorage.getItem(tourStoreKey()) || "{}"), ...s }; } catch { /* storage blocked */ }
+  return s;
+}
+function tourMark(part) {
+  const s = { ...tourSeen(), [part]: 1 };
+  TOUR_MEM[tourStoreKey()] = s;
+  try { localStorage.setItem(tourStoreKey(), JSON.stringify(s)); } catch { /* storage blocked: kept for this tab */ }
+}
+const tourVisible = (el) => !!el && el.getClientRects().length > 0 && !el.closest("[hidden]");
+function tourTarget(step) {
+  for (const sel of step[0].split("|")) { const el = [...document.querySelectorAll(sel)].find(tourVisible); if (el) return el; }
+  return null;
+}
+const tourAllowed = (step) => !step[3] || !!ME?.permissions?.includes(step[3]);
+let TOUR_RUN = null;   // { part, steps, i, then }
+function tourStart(part, then = null) {
+  tourClose(false);
+  const steps = (TOUR[part] || []).filter(tourAllowed);
+  if (!ME || !steps.some((s) => tourTarget(s))) return false;
+  TOUR_RUN = { part, steps, i: -1, then };
+  tourGo(1);
+  return true;
+}
+function tourGo(d) {
+  const r = TOUR_RUN;
+  if (!r) return;
+  let i = r.i + d;
+  while (i >= 0 && i < r.steps.length && !tourTarget(r.steps[i])) i += d;   // a control not on screen: skip it
+  if (i >= r.steps.length) { const then = r.then; tourClose(true); if (then) tourStart(then); return; }
+  if (i < 0) return;
+  r.i = i;
+  tourDraw();
+}
+function tourClose(markSeen = true) {
+  const r = TOUR_RUN;
+  TOUR_RUN = null;
+  $("#tourBub")?.remove(); $("#tourRing")?.remove();
+  if (r && markSeen) tourMark(r.part);
+}
+function tourSkip() {            // «تخطّي»: no more automatic parts for this person; the buttons still replay them
+  if (!TOUR_RUN) return;
+  tourClose(true); tourMark("all");
+  toast("تقدر تشوف الشرح تاني من زرار «اشرح الشاشة دي» أو من «؟»");
+}
+function tourDraw() {
+  const r = TOUR_RUN, step = r.steps[r.i], el = tourTarget(step);
+  if (!el) { tourGo(1); return; }
+  let bub = $("#tourBub"), ring = $("#tourRing");
+  if (!bub) {
+    ring = document.createElement("div"); ring.id = "tourRing"; ring.className = "tour-ring noprint";
+    bub = document.createElement("div"); bub.id = "tourBub"; bub.className = "tour-bub noprint";
+    bub.setAttribute("role", "dialog"); bub.setAttribute("aria-modal", "false"); bub.setAttribute("aria-labelledby", "tourT");
+    // sale screen: pressing a tour button never takes the focus from the search box (the next scan lands there)
+    bub.addEventListener("mousedown", (e) => { if (location.hash.startsWith("#/pos")) e.preventDefault(); });
+    bub.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-tour-go]");
+      if (!b) return;
+      if (b.dataset.tourGo === "skip") tourSkip(); else tourGo(+b.dataset.tourGo);
+    });
+    document.body.append(ring, bub);
+  }
+  const n = r.steps.filter((s) => tourTarget(s)).length, at = r.steps.slice(0, r.i + 1).filter((s) => tourTarget(s)).length;
+  const last = !r.steps.slice(r.i + 1).some((s) => tourTarget(s));
+  const more = el.matches(TOUR_MORE) && step[0] !== TOUR_MORE ? "موجودة تحت «المزيد». " : "";
+  bub.innerHTML = `<span class="tour-arrow" aria-hidden="true"></span>
+    <p class="tour-n muted small">${at} من ${n}</p><h3 id="tourT">${esc(step[1])}</h3><p>${esc(more + step[2])}</p>
+    <div class="row tour-btns"><button type="button" class="btn small" data-tour-go="1">${last ? (r.then ? "التالي" : "تمام، فهمت") : "التالي"}</button>
+      <button type="button" class="btn small secondary" data-tour-go="-1" ${at > 1 ? "" : "disabled"}>السابق</button>
+      <button type="button" class="link" data-tour-go="skip">تخطّي</button></div>`;
+  el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  tourPlace();
+  // keyboard: on the sale screen the focus stays where it is (the scanner types into the search box)
+  if (!location.hash.startsWith("#/pos")) bub.querySelector("[data-tour-go='1']").focus({ preventScroll: true });
+}
+function tourPlace() {
+  const r = TOUR_RUN, bub = $("#tourBub"), ring = $("#tourRing");
+  if (!r || !bub) return;
+  const el = tourTarget(r.steps[r.i]);
+  if (!el) { tourGo(1); return; }
+  const t = el.getBoundingClientRect(), W = innerWidth, H = innerHeight, gap = 12;
+  Object.assign(ring.style, { top: `${t.top - 4}px`, left: `${t.left - 4}px`, width: `${t.width + 8}px`, height: `${t.height + 8}px` });
+  const bw = bub.offsetWidth, bh = bub.offsetHeight;
+  let top, side;
+  if (t.bottom + gap + bh <= H - 8) { top = t.bottom + gap; side = "up"; }               // under the control, arrow up
+  else if (t.top - gap - bh >= 8) { top = t.top - gap - bh; side = "down"; }             // over it, arrow down
+  else { top = Math.max(8, H - bh - 8); side = "none"; }                                   // a tall control: bottom of the window
+  const left = Math.min(Math.max(8, t.left + t.width / 2 - bw / 2), Math.max(8, W - bw - 8));
+  Object.assign(bub.style, { top: `${top}px`, left: `${left}px` });
+  bub.dataset.side = side;
+  bub.style.setProperty("--ax", `${Math.min(Math.max(16, t.left + t.width / 2 - left), bw - 16)}px`);
+}
+addEventListener("resize", () => tourPlace());
+addEventListener("scroll", () => tourPlace(), true);
+addEventListener("hashchange", () => tourClose(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && TOUR_RUN && !$("dialog[open]")) { e.preventDefault(); tourClose(true); }
+}, true);
+// after a screen opens: the top-bar part on a person's first sign-in, then each screen's part once
+function tourAuto() {
+  if (!ME || TOUR_RUN || $("dialog[open]")) return;
+  const seen = tourSeen(), k = tourScreen();
+  if (seen.all) return;
+  const pending = k && !seen[k] && !(k === "pos" && SALE?.lines?.length) ? k : null;   // never over a sale in progress
+  if (!seen.main) tourStart("main", pending);
+  else if (pending) tourStart(pending);
+}
+function addTourBtn() {
+  const k = tourScreen();
+  if (!ME || !k || $("#app [data-tour-replay]")) return;
+  const at = $(TOUR_ANCHOR[k] || "#app h1");
+  if (!at) return;
+  const html = `<button type="button" class="btn small secondary tourbtn noprint" data-tour-replay="${k}">❓ اشرح الشاشة دي</button>`;
+  if (TOUR_ANCHOR[k]) at.insertAdjacentHTML("beforeend", " " + html); else at.insertAdjacentHTML("afterend", html);
+  const btn = $("#app [data-tour-replay]");
+  // sale screen: the button never keeps the focus, so the next scan (and its Enter) lands in the search box
+  btn.addEventListener("mousedown", (e) => { if (k === "pos") e.preventDefault(); });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); tourStart(k); if (k === "pos") $("#posQ")?.focus(); });
+}
+new MutationObserver(addTourBtn).observe(app, { childList: true });
+// ------------------------------------------------------------------ F36 guided tour — END
 // top bar: the pharmacy's chosen screens first, in its order; the rest stay under "المزيد"
 let NAV_ORDER = null;
 function applyNav() {
@@ -606,14 +858,14 @@ function viewSetup() {
     <label class="f">اسم الصيدلية <input name="pharmacy" required minlength="2" placeholder="مثال: صيدلية الشفاء"></label><br>
     <label class="f">اسمك <input name="full_name" placeholder="مثال: د. أحمد محمود"></label><br>
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
-    <label class="f">كلمة السر (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
-    <label class="f">أعد كتابة كلمة السر <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <label class="f">كلمة المرور (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <label class="f">أعد كتابة كلمة المرور <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <button class="btn" type="submit">ابدأ</button>
-    <p class="muted">احفظ كلمة السر في مكان آمن، فبدونها لن تستطيع الدخول.</p>
+    <p class="muted">احفظ كلمة المرور في مكان آمن، فبدونها لن تستطيع الدخول.</p>
   </form>
   <form class="panel login" id="restoreForm">
     <h2>أو: هل لديك بيانات سابقة؟</h2>
-    <p class="muted">إذا كان البرنامج يعمل من قبل (على هذا الجهاز أو جهاز آخر)، فاختر آخر نسخة احتياطية، وهي ملف يبدأ اسمه بـ pharmacy-backup. ستدخل بنفس اسم المستخدم وكلمة السر القديمة.</p>
+    <p class="muted">إذا كان البرنامج يعمل من قبل (على هذا الجهاز أو جهاز آخر)، فاختر آخر نسخة احتياطية، وهي ملف يبدأ اسمه بـ pharmacy-backup. ستدخل بنفس اسم المستخدم وكلمة المرور القديمة.</p>
     <input type="file" name="file" accept=".zip" required><br>
     <button class="btn secondary" type="submit">استرجع بياناتي</button>
   </form>`;
@@ -766,7 +1018,7 @@ async function viewPurchases() {
   $("#upForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector("button");
-    btn.disabled = true; btn.textContent = "جاري القراءة…";
+    btn.disabled = true; btn.textContent = "جارٍ القراءة…";
     try {
       const d = await api("/api/purchases/import", { method: "POST", form: new FormData(e.target) });
       location.hash = `#/purchases/${d.invoice.id}`;
@@ -870,7 +1122,7 @@ function renderInvoice() {
   <div class="${fileUrl ? "review" : ""}">
     ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
     <section class="panel">
-      <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج مراجعة</span>
+      <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج إلى مراجعة</span>
         <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
       <div class="tablewrap"><table class="lines">
         <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
@@ -1160,7 +1412,11 @@ async function printLabels(list) {
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
-  catch (er) { toast(er.message, true); if (er.code === "print_failed") page(); }
+  catch (er) {
+    // the owner switched labels to the browser after this tab read the setting: print there, read it again next time (#324 R16)
+    if (er.code === "labels_in_browser") { LABEL_CFG = null; return page(); }
+    toast(er.message, true); if (er.code === "print_failed") page();
+  }
 }
 
 async function viewItems() {
@@ -1574,7 +1830,7 @@ const ISSUE_AR = {
   item_has_history: "الصنف له حركات سابقة", no_batch_or_expiry: "بدون تشغيلة/صلاحية (سيُسجَّل بدونها)",
   cost_missing: "بدون تكلفة", matched_by_name_only: "طوبق بالاسم فقط — أكّد",
   price_below_cost: "سعر البيع أقل من التكلفة", party_has_history: "له حركات سابقة — قد يتكرر الرصيد الافتتاحي",
-  same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم تليفون غير صحيح",
+  same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم هاتف غير صحيح",
   invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
 };
@@ -1644,7 +1900,7 @@ async function viewImportRun(id) {
     <div class="row">${open ? `<button class="btn" id="impApply">تطبيق الاستيراد</button>
       <button class="btn secondary" id="impDiscard">إلغاء</button>` : ""}</div>
   </section>
-  <section class="panel"><h2>أسطر تحتاج قرار (${attention.length})</h2><div class="tablewrap"><table>
+  <section class="panel"><h2>أسطر تحتاج إلى قرار (${attention.length})</h2><div class="tablewrap"><table>
     <thead><tr><th>سطر</th><th>البيانات</th><th>الحالة</th><th>المشكلة</th><th>القرار</th></tr></thead>
     <tbody>${attention.map((x) => `<tr><td>${x.row_no}</td>
       <td>${esc([x.data.code, x.data.name_en || x.data.name_ar, x.data.qty].filter(Boolean).join(" · "))}</td>
@@ -1679,7 +1935,7 @@ async function viewRecalls() {
   app.innerHTML = `
   <section class="panel">
     <h1>تنبيهات سحب هيئة الدواء</h1>
-    <p class="muted">الصق نص المنشور، وراجع أرقام التشغيلات المقترحة قبل الحفظ. يقارنها النظام بالتشغيلات المسجلة لديك من فواتير الشراء، ولا يحرّك المخزون من تلقاء نفسه.</p>
+    <p class="muted">الصق نص المنشور، وراجع أرقام التشغيلات المقترحة قبل الحفظ. يقارنها البرنامج بالتشغيلات المسجلة لديك من فواتير الشراء، ولا يحرّك المخزون من تلقاء نفسه.</p>
     <form id="rcForm">
       <div class="row">
         <label class="f grow">عنوان المنشور <input name="title" required></label>
@@ -1693,7 +1949,7 @@ async function viewRecalls() {
       <button class="btn" type="submit">حفظ ومطابقة</button>
     </form>
   </section>
-  <section class="panel"><h2>تشغيلات مطابقة تحتاج قرار (${alerts.length})</h2><div class="tablewrap"><table>
+  <section class="panel"><h2>تشغيلات مطابقة تحتاج إلى قرار (${alerts.length})</h2><div class="tablewrap"><table>
     <thead><tr><th>الصنف لديك</th><th>التشغيلة</th><th>الكمية في المخزون</th><th>المنشور</th><th>أساس المطابقة</th><th>القرار</th></tr></thead>
     <tbody>${alerts.map((a) => `<tr class="${a.qty_in_stock > 0 ? "has-err" : ""}">
       <td>${esc(a.item_label)}</td><td>${esc(a.batch_no)}</td><td>${a.qty_in_stock}</td>
@@ -1771,8 +2027,8 @@ async function viewCountSession(id) {
     <div id="cntPick"></div>
     <div id="cntItem" class="mt"></div>
   </section>
-  ${canManage ? `<section class="panel"><div class="row between"><h2>الفروقات</h2>
-    <button class="btn secondary" id="cntVar">تحديث الفروقات</button></div><div id="cntVarBox" class="muted">اضغط تحديث لعرض الفروقات</div></section>` : ""}`;
+  ${canManage ? `<section class="panel"><div class="row between"><h2>الفروق</h2>
+    <button class="btn secondary" id="cntVar">تحديث الفروق</button></div><div id="cntVarBox" class="muted">اضغط «تحديث الفروق» لعرضها</div></section>` : ""}`;
   const q = $("#cntQ");
   const chooseItem = (it) => {
     COUNT_ITEM = it;
@@ -1826,7 +2082,7 @@ async function viewCountSession(id) {
         requestAnimationFrame(tick);
       };
       tick();
-    } catch { toast("تعذر فتح الكاميرا (تحتاج HTTPS أو تصريح الكاميرا)", true); }
+    } catch { toast("تعذر فتح الكاميرا (تحتاج إلى HTTPS أو تصريح الكاميرا)", true); }
   });
   $("#cntVar")?.addEventListener("click", async () => {
     try {
@@ -1836,16 +2092,16 @@ async function viewCountSession(id) {
       box.innerHTML = `<div class="row between"><h2>تقرير الجرد والفروق</h2>${reportTools("count")}</div><div class="totals"><div>أصناف مجرودة<b>${v.summary.counted_lines}</b></div>
         <div>عجز (وحدات)<b>${v.summary.shortage_units}</b></div><div>زيادة (وحدات)<b>${v.summary.excess_units}</b></div>
         <div>أصناف لم تُجرد ولها رصيد<b>${v.summary.uncounted_items}</b></div></div>
-        <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد بالنظام</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
+        <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الرصيد في البرنامج</th><th>المجرود</th><th>مباع أثناء الجرد</th><th>الفرق</th><th>القيمة</th><th></th></tr></thead>
         <tbody>${v.lines.map((l) => `<tr class="${l.difference ? "has-err" : ""}"><td>${esc(l.label)}</td><td>${l.system_qty}</td>
           <td>${l.counted}</td><td>${l.moves_after_count}</td><td>${l.difference}</td><td>${esc(l.value ?? "")}</td>
-          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : l.problem === "adjusted_since_count" ? "اتعدّل بعد العدّ: أعد عدّه" : "رصيد سالب"}</span>`
+          <td>${l.problem ? `<span class="badge b-err">${l.problem === "mixed_levels" ? "جرد بالتشغيلة وبدونها معًا" : l.problem === "adjusted_since_count" ? "اتعدّل بعد العدّ: أعد عدّه" : l.problem === "moved_between_counts" ? "اتباع بين عدّتين: أعد عدّه" : "رصيد سالب"}</span>`
             : l.difference < 0 ? `<select data-why="${esc(l.item_id)}|${esc(l.batch_key || "")}" class="noprint"><option value="">السبب: مثل الافتراضي</option>${reasonOpts(R.adjust, null, false)}</select>` : l.difference > 0 ? "زيادة وُجدت" : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="row mt noprint"><label class="f">سبب العجز (الافتراضي لكل الأصناف) <select id="cntWhy">${reasonOpts(R.adjust, "lost", false)}</select></label>
           ${v.summary.uncounted_items ? `<label class="f">الأصناف التي لم تُجرد (${v.summary.uncounted_items}) <select id="cntZero"><option value="">اتركها كما هي</option>${reasonOpts(R.adjust, null, false).replace(/<option value="/g, '<option value="zero:')}</select></label>` : ""}
           <button class="btn" id="cntApprove">اعتماد التسويات</button></div>`;
       wireTools("count", () => ({ title: "تقرير الجرد", subtitle: `عجز ${v.summary.shortage_units} وحدة · زيادة ${v.summary.excess_units} وحدة · لم يُجرد ${v.summary.uncounted_items} صنف`, el: box, sheets: [
-        { name: "الجرد", columns: [Tx("الصنف"), N("الرصيد بالنظام"), N("المجرود"), N("مباع أثناء الجرد"), N("الفرق"), { label: "القيمة (ج)", type: "num" }, Tx("ملاحظة")],
+        { name: "الجرد", columns: [Tx("الصنف"), N("الرصيد في البرنامج"), N("المجرود"), N("مباع أثناء الجرد"), N("الفرق"), { label: "القيمة (ج)", type: "num" }, Tx("ملاحظة")],
           rows: v.lines.map((l) => [l.label, l.system_qty, l.counted, l.moves_after_count, l.difference, l.value ?? "", l.problem || ""]) }] }));
       $("#cntApprove").addEventListener("click", async () => {
         const reasons = {};
@@ -1855,7 +2111,8 @@ async function viewCountSession(id) {
         if (zero) { reason = prompt(`سيُصفَّر ${v.summary.uncounted_items} صنف لم يُجرد. اكتب ملاحظة (5 حروف على الأقل):`); if (!reason) return; }
         if (!confirm("اعتماد الجرد وتسجيل التسويات في المخزون؟")) return;
         try {
-          await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason, reasons, shortage_reason: $("#cntWhy").value, zero_reason: zero ? z.slice(5) : "lost" } });
+          await api(`/api/counts/${id}/approve`, { method: "POST", body: { zero_uncounted: zero, reason, reasons, shortage_reason: $("#cntWhy").value, zero_reason: zero ? z.slice(5) : "lost",
+            uncounted_item_ids: zero ? v.uncounted_with_stock.map((u) => u.item_id) : undefined } });
           toast("تم اعتماد الجرد"); location.hash = "#/counts";
         } catch (err) { toast(err.message, true); }
       });
@@ -1889,7 +2146,7 @@ async function viewSystem() {
   $("#sysBox").innerHTML = `
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
       <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
-      <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `مفيش (فرع ${esc(st.candidate || "?")})`}</b></div></div>
+      <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `لا توجد (فرع ${esc(st.candidate || "?")})`}</b></div></div>
     ${smartUpdateHtml(st.smart || {}) || (st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
       ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
          <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
@@ -2021,13 +2278,13 @@ async function renderReceiptCfg(c) {
     <label class="f">مقدمة الفاتورة (أول سطر، اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
     <label class="f">اسم الصيدلية على الفاتورة (فارغ = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
     <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
-    <label class="f">سطر 2 (التليفون) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
+    <label class="f">سطر 2 (الهاتف) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
     <label class="f">آخر سطر <input name="footer" value="${esc(c.footer)}"></label>
     <label class="f">رقم التسجيل الضريبي (اختياري) <input name="tax_no" dir="ltr" value="${esc(c.tax_no || "")}"></label>
     <label class="f">رقم السجل التجاري (اختياري) <input name="cr_no" dir="ltr" value="${esc(c.cr_no || "")}"></label>
     <label class="f">شكل الوقت (في كل الشاشات والإيصال) <select name="time_format"><option value="12" ${c.time_format !== "24" ? "selected" : ""}>12 ساعة (10:06 م) — الافتراضي</option><option value="24" ${c.time_format === "24" ? "selected" : ""}>24 ساعة (22:06)</option></select></label>
     <fieldset class="lblp"><legend>الإيصال والدرج عند إتمام البيع</legend>
-      <p class="muted">الافتراضي: بدون إيصال، والكاشير يختار «🧾 إيصال» (F4) بجانب زر الإتمام. فاتورة التوصيل تطبع إيصالًا واحدًا تلقائيًا.</p>
+      <p class="muted">الافتراضي: بدون إيصال، والبائع يختار «🧾 إيصال» (F4) بجانب زر الإتمام. فاتورة التوصيل تطبع إيصالًا واحدًا تلقائيًا.</p>
       ${chk("auto_receipt", "اختيار الإيصال تلقائيًا حسب قيمة الفاتورة")}
       <label class="f">من مبلغ (ج) — صفر = كل الفواتير <input name="auto_receipt_min" type="number" min="0" step="0.01" value="${money(c.auto_receipt_min || 0)}"></label>
       <label class="f">عدد النسخ (الطباعة المباشرة) <select name="copies">${[1, 2, 3].map((n) => `<option value="${n}" ${c.copies === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
@@ -2040,50 +2297,50 @@ async function renderReceiptCfg(c) {
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
       <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
-      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: الإيصال سيُطبع من المتصفح، والدرج سيُفتح فقط لو الطابعة مختارة. الحل: إعادة التثبيت بآخر مثبّت.</b></p>`}
+      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة. الحل: أعد التثبيت بآخر نسخة من المثبّت.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
       <label class="f">المقاس <select name="label_preset">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}<option value="custom" ${["38x25", "50x30", "58x40"].includes(c.label_size) ? "" : "selected"}>مقاس آخر (اكتبه)</option></select></label>
       <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.1" value="${esc(c.label_size.split("x")[0])}"></label>
         <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.1" value="${esc(c.label_size.split("x")[1])}"></label></div>
-      <p class="muted">قِس ملصقًا واحدًا من البكرة (بدون المسافة بينه وبين اللي بعده). المسافة بين الملصقات تحت في «طابعة الملصقات».</p>
-      <div>${[["pharmacy", "اسم الصيدلية"], ["phone", "التليفون"], ["name", "اسم الصنف"], ["barcode", "الباركود"], ["digits", "أرقام الباركود"], ["code", "كود الصنف الداخلي"], ["expiry", "الصلاحية (أقرب تشغيلة)"], ["price", "السعر"]]
+      <p class="muted">قِس ملصقًا واحدًا من البكرة (دون المسافة بينه وبين الملصق التالي). تُضبط المسافة بين الملصقات في «طابعة الملصقات» أدناه.</p>
+      <div>${[["pharmacy", "اسم الصيدلية"], ["phone", "الهاتف"], ["name", "اسم الصنف"], ["barcode", "الباركود"], ["digits", "أرقام الباركود"], ["code", "كود الصنف الداخلي"], ["expiry", "الصلاحية (أقرب تشغيلة)"], ["price", "السعر"]]
         .map(([k, t]) => `<label class="chk"><input type="checkbox" data-lf="${k}" ${c.label_fields[k] ? "checked" : ""}> ${t}</label>`).join("")}</div>
       <label class="f">اسم الصيدلية على الملصق (فارغ = اسمها في الإيصال) <input name="label_pharmacy" value="${esc(c.label_pharmacy || "")}"></label>
-      <label class="f">التليفون على الملصق (فارغ = سطر التليفون في الإيصال) <input name="label_phone" dir="ltr" value="${esc(c.label_phone || "")}"></label>
+      <label class="f">الهاتف على الملصق (فارغ = سطر الهاتف في الإيصال) <input name="label_phone" dir="ltr" value="${esc(c.label_phone || "")}"></label>
       <label class="f">شبكة ورق A4 (أعمدة × صفوف) <input name="label_a4" dir="ltr" value="${esc(c.label_a4 || "6x24")}" placeholder="6x24"></label>
-      <p class="muted">لو المقاس صغير على الحقول المختارة، التليفون يتشال الأول ثم اسم الصيدلية؛ الباركود لا يصغر عن الحد المقروء.</p>
+      <p class="muted">إذا كان المقاس أصغر من الحقول المختارة، يُحذف الهاتف أولًا ثم اسم الصيدلية؛ ولا يصغر الباركود عن الحد المقروء.</p>
       <div class="lbprev"><img id="lbPrev" alt="معاينة الملصق"><p id="lbPrevMsg" class="muted small"></p></div></fieldset>
     <fieldset class="lblp"><legend>طابعة الملصقات</legend>
       <label class="f">النوع <select name="label_lang"><option value="browser" ${c.label_lang === "browser" ? "selected" : ""}>من المتصفح (أي طابعة)</option><option value="a4" ${c.label_lang === "a4" ? "selected" : ""}>من المتصفح على ورق A4 (شبكة)</option>
-        <option value="driver" ${c.label_lang === "driver" ? "selected" : ""}>عن طريق تعريف الطابعة في ويندوز (زي إي ستوك) — الأنسب</option>
+        <option value="driver" ${c.label_lang === "driver" ? "selected" : ""}>عن طريق تعريف الطابعة في ويندوز (مثل إي ستوك) — الأنسب</option>
         <option value="tspl" ${c.label_lang === "tspl" ? "selected" : ""}>Xprinter / TSC (TSPL)</option><option value="zpl" ${c.label_lang === "zpl" ? "selected" : ""}>Zebra (ZPL)</option></select></label>
       <label class="f">مكان الطابعة <input name="label_target" list="prnList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B  أو  tcp:192.168.1.50:9100"></label>
-      <label class="chk lbDrv"><input type="checkbox" name="label_flip" ${c.label_flip ? "checked" : ""}> اقلب الملصق (لو بيطلع مقلوب)</label>
+      <label class="chk lbDrv"><input type="checkbox" name="label_flip" ${c.label_flip ? "checked" : ""}> اقلب الملصق (إذا طُبع مقلوبًا)</label>
       <label class="f">لغة بيانات الملصق <select name="label_text_lang"><option value="en" ${(c.label_text_lang || "en") === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.label_text_lang === "ar" ? "selected" : ""}>عربي</option></select></label>
       <label class="f">اسم الصيدلية بالإنجليزي (للملصق) <input name="label_pharmacy_en" dir="ltr" maxlength="40" value="${esc(c.label_pharmacy_en || "")}" placeholder="Abdul Qawi Pharmacy"></label>
-      <label class="f lbDrv">عدد الملصقات في صفحة ويندوز (لو الصفحة فيها ملصقين فوق بعض اختار 2) <select name="label_rows">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(c.label_rows || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-      <p class="muted lbDrv">البرنامج بيطبع عن طريق تعريف الطابعة في ويندوز، زي إي ستوك بالظبط: مقاس الملصق والمسافة بين الملصقات والاتجاه بتتاخد من «تفضيلات الطباعة» للطابعة في ويندوز (نفس اللي إي ستوك بيطبع بيه). المقاس اللي فوق بيُستخدم بس لو اتطبع من المتصفح.</p>
+      <label class="f lbDrv">عدد الملصقات في صفحة ويندوز (إذا كانت الصفحة تضم ملصقين فوق بعضهما فاختر 2) <select name="label_rows">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(c.label_rows || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <p class="muted lbDrv">يطبع البرنامج عن طريق تعريف الطابعة في ويندوز، تمامًا مثل إي ستوك: يُؤخذ مقاس الملصق والمسافة بين الملصقات والاتجاه من «تفضيلات الطباعة» للطابعة في ويندوز (وهي نفسها التي يطبع بها إي ستوك). ولا يُستخدم المقاس أعلاه إلا عند الطباعة من المتصفح.</p>
       <label class="f lbRaw">دقة الطابعة <select name="label_dpi"><option value="203" ${c.label_dpi === 203 ? "selected" : ""}>203 (الأشهر)</option><option value="300" ${c.label_dpi === 300 ? "selected" : ""}>300</option></select></label>
       <label class="f">المسافة بين الملصقات (مم) <input name="label_gap" type="number" min="0" max="10" step="1" value="${c.label_gap ?? 2}"></label>
-      <label class="f lbRaw">تحريك الطباعة لفوق/لتحت (مم): سالب = لفوق، موجب = لتحت <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
-      <p class="muted lbRaw">لو الطباعة نازلة لتحت أو فيه ملصق فاضي بين كل ملصقين: اكتب رقم سالب (ابدأ بـ -2)، ودوس «اطبع 3 ملصقات تجربة» — بتطبع بالأرقام اللي على الشاشة من غير حفظ. لما الثلاثة يطلعوا كاملين ورا بعض دوس «احفظ».</p>
+      <label class="f lbRaw">تحريك الطباعة لأعلى/لأسفل (مم): سالب = لأعلى، موجب = لأسفل <input name="label_shift" type="number" min="-10" max="10" step="0.5" value="${c.label_shift ?? 0}"></label>
+      <p class="muted lbRaw">إذا نزلت الطباعة لأسفل أو ظهر ملصق فارغ بين كل ملصقين: اكتب رقمًا سالبًا (ابدأ بـ -2)، واضغط «اطبع 3 ملصقات تجربة»، فتُطبع بالأرقام الظاهرة على الشاشة دون حفظ. عندما تخرج الثلاثة كاملة ومتتالية اضغط «احفظ».</p>
       <label class="f lbRaw">طريقة إرسال الملصق (للتجربة؛ الافتراضي current) <select name="label_variant" dir="ltr">${["current", "tear", "clamp", "tear_clamp", "per_label", "tear_clamp_per_label", "home", "all"]
         .map((v) => `<option value="${v}" ${(c.label_variant || "current") === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
       <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
-    <fieldset class="lblp"><legend>اللوجو والكود (QR) أعلى الإيصال</legend>
+    <fieldset class="lblp"><legend>اللوجو والكود المربع (QR) أعلى الإيصال</legend>
       <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
       <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
         <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
-        <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>شيل اللوجو</button></div>
-      <p class="muted">في كل كود: اكتب <b>رقم موبايل الصيدلية</b> (للواتساب — البرنامج يحوّله لوحده)، أو الصق لينك صفحة الفيسبوك، أو لينك اللوكيشن من خرائط جوجل (مشاركة ← نسخ اللينك)، أو لينك الدفع من أبلكيشن إنستاباي. الكلمة اللي تحت الكود بتتكتب لوحدها حسب اللينك، أو اكتبها بنفسك.</p>
-      <label class="f">الكود اللي فوق (جنب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+        <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>احذف اللوجو</button></div>
+      <p class="muted">في كل كود: اكتب <b>رقم الهاتف المحمول للصيدلية</b> (للواتساب — يحوّله البرنامج تلقائيًا)، أو الصق رابط صفحة الفيسبوك، أو رابط الموقع من خرائط جوجل (مشاركة ← نسخ الرابط)، أو رابط الدفع من تطبيق إنستاباي. تُكتب الكلمة التي تحت الكود تلقائيًا حسب الرابط، أو اكتبها بنفسك.</p>
+      <label class="f">الكود العلوي (بجانب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
-      <label class="f">كود تاني تحت الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
+      <label class="f">كود ثانٍ أسفل الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
-      <p class="muted">الطابعة الحرارية أبيض وأسود بس: الرمادي الفاتح بيختفي والغامق بيبقى أسود. بعد الحفظ اطبع «آخر فاتورة كتجربة» وجرّب تقرا الكود بالموبايل.</p></fieldset>
+      <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
@@ -2092,11 +2349,11 @@ async function renderReceiptCfg(c) {
     const file = e.target.files[0]; if (!file) return;
     try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
     $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
-    $("#rcLogoMsg").textContent = "ده شكله على الورق بالظبط (أبيض وأسود). لو جزء اختفى أو بقى أسود، ارفع نسخة أبيض وأسود من اللوجو. يتحفظ لما تدوس «احفظ»";
+    $("#rcLogoMsg").textContent = "هذا شكله على الورق تمامًا (أبيض وأسود). إذا اختفى جزء منه أو صار أسود، فارفع نسخة أبيض وأسود من اللوجو. يُحفظ عند الضغط على «احفظ»";
   });
   $("#rcLogoDel").addEventListener("click", () => {
     RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
-    $("#rcLogoMsg").textContent = "هيتشال لما تدوس «احفظ»";
+    $("#rcLogoMsg").textContent = "سيُحذف عند الضغط على «احفظ»";
   });
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
@@ -2112,7 +2369,7 @@ async function renderReceiptCfg(c) {
       prevUrl = URL.createObjectURL(await r.blob());
       $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
       const fromWin = r.headers.get("X-Label-Source") === "windows" ? ` على مقاس ويندوز ${(r.headers.get("X-Label-Size") || "").replace("x", " × ")} مم` : "";
-      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: اتشال ${dropped.map((k) => ({ phone: "التليفون", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
+      $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: حُذف ${dropped.map((k) => ({ phone: "الهاتف", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
     } catch { /* preview only */ }
   }, 300); };
   // #100: through the Windows driver, size, gap and direction come from Windows: the raw-printer fields hide
@@ -2149,7 +2406,7 @@ async function renderReceiptCfg(c) {
       const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
         label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked, label_rows: +lf.label_rows.value, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() } });
-      toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — لو تمام دوس «احفظ»`);
+      toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — إذا خرجت سليمة فاضغط «احفظ»`);
     } catch (err) { toast(err.message, true); }
   });
   $("#lbCal").addEventListener("click", async () => {
@@ -2157,7 +2414,7 @@ async function renderReceiptCfg(c) {
     try {
       await api("/api/print/label-calibrate", { method: "POST", body: { label_size: labelSize(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0 } });
-      toast("أُرسل أمر المعايرة — الطابعة هتسحب كام ملصق فاضي وتقف لوحدها");
+      toast("أُرسل أمر المعايرة — ستسحب الطابعة بضعة ملصقات فارغة ثم تتوقف تلقائيًا");
     } catch (err) { toast(err.message, true); }
   });
   $("#rcTest").addEventListener("click", async () => {
@@ -2166,13 +2423,13 @@ async function renderReceiptCfg(c) {
   });
   $("#rcKick").addEventListener("click", async () => {
     // the drawer opens on the SAVED printer (the one the cashier will use)
-    try { await api("/api/print/drawer", { method: "POST", body: { reason: "تجربة الدرج من الإعدادات" } }); toast("تم إرسال أمر فتح الدرج"); }
+    try { await api("/api/print/drawer", { method: "POST", body: { reason: "تجربة الدرج من صفحة البرنامج" } }); toast("تم إرسال أمر فتح الدرج"); }
     catch (err) { toast(err.message, true); }
   });
 }
 function renderChannels(list) {
   CHANNELS = null;
-  $("#chBox").innerHTML = `<p class="muted">ما يُضاف هنا يظهر في شاشة البيع عند اختيار بطاقة أو تحويل، ويُجمَع تلقائيًا عند إغلاق الوردية.</p>
+  $("#chBox").innerHTML = `<p class="muted">ما يُضاف هنا يظهر في شاشة البيع عند اختيار بطاقة أو تحويل، ويُجمَع تلقائيًا عند إغلاق الشيفت.</p>
     <table><thead><tr><th>النوع</th><th>الاسم</th><th>مفعّل</th><th></th></tr></thead><tbody>
     ${list.map((c) => `<tr data-id="${esc(c.id)}"><td>${c.kind === "card" ? "جهاز بطاقات" : "تحويل / محفظة"}</td><td><input name="name" value="${esc(c.name)}"></td>
       <td><input type="checkbox" name="is_active" ${c.is_active ? "checked" : ""}></td><td><button class="btn small secondary" data-chsave>احفظ</button></td></tr>`).join("")}</tbody></table>
@@ -2189,9 +2446,9 @@ function renderChannels(list) {
     catch (err) { toast(err.message, true); }
   });
 }
-const MB = (b) => (b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} ك.ب` : `${(b / 1048576).toFixed(1)} م.ب`);
+const MB = (b) => (b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} ك.ب` : `${(b / 1048576).toFixed(1)} ميجا`);
 const BK_INT = [[15, "ربع ساعة"], [30, "نصف ساعة"], [60, "ساعة"], [360, "6 ساعات"]];
-const BK_REASON = { schedule: "في موعدها", manual: "يدوي", shift_close: "إغلاق الوردية", shutdown: "إغلاق البرنامج" };
+const BK_REASON = { schedule: "في موعدها", manual: "يدوي", shift_close: "إغلاق الشيفت", shutdown: "إغلاق البرنامج" };
 function renderBackup(b) {
   const c = b.settings, st = b.state, ago = st.last_at ? Math.round((Date.now() - new Date(st.last_at)) / 60000) : null;
   $("#bkBox").innerHTML = `
@@ -2200,7 +2457,7 @@ function renderBackup(b) {
       : `<p class="badge b-warn">⚠ لم تُعمل أي نسخة تلقائية بعد</p>`}
     <form id="bkForm" class="bk">
       <div><b>كل كم من الوقت</b><div class="seg" role="radiogroup">${BK_INT.map(([v, t]) => `<label><input type="radio" name="interval_min" value="${v}" ${c.interval_min === v ? "checked" : ""}> ${t}${v === 60 ? " (الافتراضي)" : ""}</label>`).join("")}</div>
-        <label class="chk"><input type="checkbox" name="on_shift_close" ${c.on_shift_close ? "checked" : ""}> ونسخة أيضًا عند إغلاق الوردية</label>
+        <label class="chk"><input type="checkbox" name="on_shift_close" ${c.on_shift_close ? "checked" : ""}> ونسخة أيضًا عند إغلاق الشيفت</label>
         <p class="muted">إذا لم يحدث أي تغيير منذ آخر نسخة، لا تُعمل نسخة جديدة.</p></div>
       <div><b>عدد النسخ المحفوظة</b>
         <label class="f">آخر <input class="narrow" type="number" name="keep_last" min="1" max="100" value="${c.keep_last}"> نسخ — تُحذف الأقدم تلقائيًا</label>
@@ -2314,6 +2571,8 @@ async function viewSalesAdvanced() {
     draw();
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
+  // a file or a printout of a capped list says so, as the screen does (#324 R22)
+  const subOut = () => sub() + (R.truncated ? " — ⚠ أول 3000 فاتورة فقط من الفترة" : "");
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -2351,7 +2610,7 @@ async function viewSalesAdvanced() {
     }));
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
-    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", sub(), sheets()));
+    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -2399,7 +2658,7 @@ async function viewSalesAdvanced() {
       if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); }
       box.append(copy);
     }
-    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", sub());
+    printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", subOut());
   };
   document.querySelectorAll("[data-ip]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.ip];
@@ -2525,7 +2784,7 @@ async function viewSale(id) {
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
     ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${esc(fq(l.qty_base, l))}</td><td>${money(l.net)}</td>
       <td class="muted">${l.allocations.map((a) => `${esc(a.expiry_date ? a.expiry_date.slice(0, 7) : "—")}: ${a.qty}${a.returned_qty ? ` (المُرتجع ${a.returned_qty})` : ""}`).join("، ")}</td>
-      ${s.status === "completed" && can("sales.return") ? `<td>${returnable(l) ? `<input type="number" min="0" max="${returnable(l)}" step="1" value="0" data-ret="${l.id}" class="narrow">
+      ${s.status === "completed" && can("sales.return") ? `<td>${returnable(l) ? `<input type="number" min="0" max="${returnable(l)}" step="1" value="" placeholder="0" inputmode="numeric" data-ret="${l.id}" class="narrow">
         <span class="muted">من ${returnable(l)}</span>` : `<span class="muted">إرجاع الكل</span>`}</td>` : ""}</tr>`).join("")}
     </tbody></table></div>
     ${s.status === "completed" && can("sales.return") ? `<div class="row mt"><label class="f">طريقة الاسترداد<select id="rMethod">
@@ -2535,6 +2794,8 @@ async function viewSale(id) {
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
       <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
   </section>`;
+  // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
+  app.querySelectorAll("[data-ret]").forEach((i) => i.addEventListener("focus", () => i.select()));
   $("#rGo")?.addEventListener("click", async (ev) => {
     const btn = ev.currentTarget;
     if (btn.disabled) return;                 // a second click while the first return is saving (#114)
@@ -2636,7 +2897,7 @@ async function viewProcurement() {
   app.innerHTML = `
   <section class="panel">
     <h1>اقتراح الطلبية</h1>
-    <p class="muted">الحساب: متوسط الاستهلاك × (أيام التوريد + أيام التغطية + أيام الأمان) − الرصيد − ما هو في الطريق. كل سطر مكتوب معه سببه. ولا يطلب النظام أي شيء من تلقاء نفسه.</p>
+    <p class="muted">الحساب: متوسط الاستهلاك × (أيام التوريد + أيام التغطية + أيام الأمان) − الرصيد − ما هو في الطريق. كل سطر مكتوب معه سببه. ولا يطلب البرنامج أي شيء من تلقاء نفسه.</p>
     <form id="prForm" class="row">
       <label class="f">تغطية (يوم) <input name="cover_days" type="number" value="30" min="1"></label>
       <label class="f">مدة التوريد (يوم) <input name="lead_days" type="number" value="2" min="0"></label>
@@ -2648,7 +2909,7 @@ async function viewProcurement() {
   </section>
   <section class="panel"><div class="tablewrap"><table>
     <thead><tr><th>الصنف</th><th>الرصيد</th><th>استهلاك/يوم</th><th>يكفي (يوم)</th><th>المقترح (علبة)</th><th>الثقة</th><th>الأسباب</th></tr></thead>
-    <tbody id="prBody"><tr><td colspan="7" class="muted">جاري الحساب…</td></tr></tbody></table></div></section>
+    <tbody id="prBody"><tr><td colspan="7" class="muted">جارٍ الحساب…</td></tr></tbody></table></div></section>
   <section class="panel"><h2>صحة المخزون</h2><div id="prHealth" class="muted">…</div></section>
   <section class="panel"><h2>رفع مبيعات شهر من البرنامج القديم</h2>
     <p class="muted">المطابقة بالكود أو الباركود فقط. الأصناف غير المتطابقة تظهر في تقرير ولا تُخمَّن.</p>
@@ -2874,7 +3135,7 @@ function drawerDialog() {
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>فتح الدرج بدون بيع</h2>
     <label class="f">السبب <select name="reason"><option value="change">فكة</option><option value="cash_check">مراجعة النقدية</option><option value="other">أخرى</option></select></label>
     <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»"></label>
-    <p class="muted small">يُسجَّل باسمك مع الوردية والوقت والنتيجة. الطابعة لا تؤكد فتح الدرج فعليًا: المسجَّل هو «أمر فتح».</p>
+    <p class="muted small">يُسجَّل باسمك مع الشيفت والوقت والنتيجة. الطابعة لا تؤكد فتح الدرج فعليًا: المسجَّل هو «أمر فتح».</p>
     <div class="row"><button class="btn" value="ok">إرسال أمر الفتح</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
   const f = d.querySelector("form");
@@ -3153,12 +3414,19 @@ async function complete(findings) {
     if (f.requires === "acknowledge") decisions[inp.dataset.dec] = inp.value || "تمت المراجعة";
     else if (inp.value.trim()) decisions[inp.dataset.dec] = inp.value.trim();
   });
+  // F27: what the customer handed over — printed with the change due, never stored
+  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
+  // a typed amount below the cash part is a short tender, not a full payment (#324 M2-03)
+  const cashPart = payments.filter((p) => p.method === "cash").reduce((t, p) => t + (p.amount || 0), 0);
+  if (given && given < cashPart) {
+    toast(`المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع (${money(given)} / ${money(cashPart)})`, true);
+    $("#payGiven")?.focus();
+    return;
+  }
   const btn = $("#posDone");
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
-  // F27: what the customer handed over — printed with the change due, never stored
-  const gv = toPiasters($("#payGiven")?.value), given = Number.isFinite(gv) && gv > 0 ? gv : 0;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
@@ -3176,7 +3444,7 @@ async function complete(findings) {
     const warn = [];
     if (dv.receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
     if (dv.drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
-    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة في الإعدادات");
+    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»");
     if (warn.length) toast(warn.join("\n"), true, 15000);
     SALE = null; viewPos();
   } catch (er) {
@@ -3246,25 +3514,25 @@ async function viewShift() {
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
   const seeAll = ME.permissions.includes("cash.see_expected");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
-  const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الورديات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المفروض</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
+  const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
       <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
   if (!sh) {
-    app.innerHTML = `<section class="panel narrowpanel"><h1>الوردية</h1><p class="badge b-warn">⚠ لا توجد وردية مفتوحة — البيع النقدي متوقف</p>
+    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="0" class="big"></label>
-      <button class="btn">افتح الوردية</button></form></section>${hist}`;
+      <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
     $("#shOpen").addEventListener("submit", async (e) => {
       e.preventDefault();
-      try { await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(e.target.v.value) || 0 } }); toast("✓ تم فتح الوردية"); viewShift(); }
+      try { await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(e.target.v.value) || 0 } }); toast("✓ تم فتح الشيفت"); viewShift(); }
       catch (err) { toast(err.message, true); }
     });
     return;
   }
   const k = sh.cash_by_kind || {};
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الوردية المفتوحة</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
@@ -3274,12 +3542,12 @@ async function viewShift() {
     ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
       <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
   </section>
-  ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>إغلاق الوردية — عدّ الخزينة</h2>
+  ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>إغلاق الشيفت — عدّ الخزينة</h2>
     <table class="denoms"><thead><tr><th>الفئة</th><th>العدد</th><th>المبلغ</th></tr></thead><tbody>
     ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
     <tfoot><tr><th>الإجمالي المعدود</th><th></th><th class="num big" id="dTotal">0.00</th></tr></tfoot></table>
     <label class="f mt">ملاحظة (اختياري) <input name="note"></label>
-    <button class="btn big">إغلاق الوردية وطباعة التقرير</button></form>` : ""}
+    <button class="btn big">إغلاق الشيفت وطباعة التقرير</button></form>` : ""}
   ${hist}`;
   const recalc = () => {
     let t = 0;
@@ -3288,8 +3556,8 @@ async function viewShift() {
   };
   document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
   wireHist();
-  function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الورديات", subtitle: "", el: $("#shHist"), sheets: [
-    { name: "الورديات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
+  function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الشيفتات", subtitle: "", el: $("#shHist"), sheets: [
+    { name: "الشيفتات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
       rows: recent.map((r) => [stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",
         r.expected_cash, r.counted_cash, r.difference, r.close_note || ""]) }] })); }
   $("#shPay")?.addEventListener("submit", async (e) => {
@@ -3303,18 +3571,169 @@ async function viewShift() {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
     try {
-      const r = await api("/api/cash/close", { method: "POST", body: { denominations: den, note: e.target.note.value || null } });
+      const r = await api("/api/cash/close", { method: "POST", body: { shift_id: sh.id, denominations: den, note: e.target.note.value || null } });
       const d = r.difference;
-      app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الوردية</h1>
+      app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1>
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
-        <div class="totals"><div>المفروض<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
-        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح وردية جديدة</a></div></section>`;
+        <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div></div>
+        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح شيفت جديدًا</a></div></section>`;
       printInFrame(`/shift-report/${r.id}`);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
       if (err.code === "difference_note_required") e.target.note.focus();
     }
   });
+}
+
+// ------------------------------------------------------------------ E-Stock history (read only) and old-invoice returns
+// Owner 18/11: the old invoices are usable inside the program, not converted. Every row says it is E-Stock history.
+let ESTOCK_ON = null;
+async function estockOn() {
+  if (ESTOCK_ON === null) { try { ESTOCK_ON = (await api("/api/estock/available")).available; } catch { ESTOCK_ON = false; } }
+  return ESTOCK_ON;
+}
+const ES_KIND = { sale: "مبيعات", sale_return: "مرتجعات", purchase: "مشتريات" };
+const ES_BADGE = `<span class="badge b-info">من إي ستوك</span>`;
+const esMoney = (v) => (v == null ? "" : esc(v));          // E-Stock's amounts come as EGP text, shown as they are
+function hashQuery() {
+  const i = location.hash.indexOf("?");
+  return new URLSearchParams(i < 0 ? "" : location.hash.slice(i + 1));
+}
+
+async function viewEstock() {
+  if (!(await estockOn())) { app.innerHTML = `<section class="panel"><h1>تاريخ إي ستوك</h1><p class="muted">مفيش تاريخ إي ستوك في البرنامج ده (النقل ماتعملش).</p></section>`; return; }
+  const qp = hashQuery(), can = (p) => ME.permissions.includes(p);
+  const kinds = Object.keys(ES_KIND).filter((k) => can(k === "purchase" ? "purchases.read" : "sales.totals"));
+  let kind = kinds.includes(qp.get("kind")) ? qp.get("kind") : kinds[0];
+  if (!kind) { app.innerHTML = `<section class="panel"><h1>تاريخ إي ستوك</h1><p class="muted">مش مسموح لك تشوف الفواتير القديمة.</p></section>`; return; }
+  const party = qp.get("party") || "", item = qp.get("item") || "";
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>تاريخ إي ستوك</h1>${ES_BADGE}</div>
+    <p class="muted">فواتير البرنامج القديم كما هي، للبحث والفتح والمرتجع. مبالغها لا تدخل في حسابات البرنامج.</p>
+    <div class="seg2 small" id="esK">${kinds.map((k) => `<button type="button" data-k="${k}" class="${k === kind ? "on" : ""}">${k === kind ? "✓ " : ""}${ES_KIND[k]}</button>`).join("")}</div>
+    <form class="row mt" id="esF"><label class="f">رقم الفاتورة <input name="q"></label>
+      <label class="f">من <input type="date" name="from"></label><label class="f">إلى <input type="date" name="to"></label>
+      <label class="f" id="esTicket">رقم التذكرة <input name="ticket"></label><button class="btn small">ابحث</button></form>
+    ${party || item ? `<p class="muted">${party ? "الفواتير دي لعميل أو مورد واحد" : "الفواتير دي لصنف واحد"} — <a href="#/estock?kind=${kind}">اعرض الكل</a></p>` : ""}
+    <div id="esBox" class="mt"></div></section>`;
+  const f = $("#esF");
+  const load = async () => {
+    $("#esTicket").hidden = kind !== "sale";
+    const p = new URLSearchParams({ kind });
+    for (const k of ["q", "from", "to"]) if (f[k].value) p.set(k, f[k].value);
+    if (kind === "sale" && f.ticket.value) p.set("ticket", f.ticket.value);
+    if (party) p.set("party", party);
+    if (item) p.set("item", item);
+    const rows = (await api(`/api/estock/invoices?${p}`)).invoices;
+    $("#esBox").innerHTML = `<div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>الرقم</th><th>${kind === "purchase" ? "المورد" : "العميل"}</th><th>الإجمالي</th>${kind === "purchase" ? "" : "<th>نقدي</th><th>فيزا ومحفظة</th>"}${kind === "sale" ? "<th>التذكرة</th>" : ""}<th></th></tr></thead><tbody>
+      ${rows.map((r) => `<tr class="clickable" data-go="${esc(r.estock_id)}"><td>${esc(r.day)}</td><td>${esc(r.bill_number || r.estock_id)}</td><td>${esc(r.party || "—")}</td>
+        <td class="num">${esMoney(r.total)}</td>${kind === "purchase" ? "" : `<td class="num">${esMoney(r.cash)}</td><td class="num">${esMoney(r.network)}</td>`}
+        ${kind === "sale" ? `<td>${esc([r.ticket_name, r.ticket_no].filter(Boolean).join(" "))}</td>` : ""}<td>${ES_BADGE}</td></tr>`).join("")
+        || `<tr><td colspan="8" class="muted">مفيش فواتير بالبحث ده</td></tr>`}</tbody></table></div>
+      ${rows.length >= 200 ? `<p class="muted">معروض أول 200 — ضيّق البحث بالتاريخ أو الرقم.</p>` : ""}`;
+    $("#esBox").querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${kind}/${tr.dataset.go}`; }));
+  };
+  document.querySelectorAll("#esK [data-k]").forEach((b) => b.addEventListener("click", () => {
+    kind = b.dataset.k;
+    document.querySelectorAll("#esK [data-k]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = (x === b ? "✓ " : "") + ES_KIND[x.dataset.k]; });
+    load().catch((e) => toast(e.message, true));
+  }));
+  f.addEventListener("submit", (e) => { e.preventDefault(); load().catch((err) => toast(err.message, true)); });
+  await load();
+}
+
+async function viewEstockInvoice(kind, id) {
+  const inv = await api(`/api/estock/invoices/${kind}/${id}`), canRet = ME.permissions.includes("sales.return");
+  const cost = inv.lines.some((l) => "cost" in l);
+  app.innerHTML = `<section class="panel"><a href="#/estock?kind=${kind}">← تاريخ إي ستوك</a>
+    <div class="row between"><h1>فاتورة قديمة: ${ES_KIND[kind]} — رقم ${esc(inv.bill_number || inv.estock_id)}</h1>${ES_BADGE}</div>
+    <div class="totals"><div>التاريخ<b>${esc(inv.day)}</b></div><div>${kind === "purchase" ? "المورد" : "العميل"}<b>${esc(inv.party || "—")}</b></div>
+      <div>الإجمالي<b>${esMoney(inv.total)}</b></div>${kind === "purchase" ? "" : `<div>نقدي<b>${esMoney(inv.cash)}</b></div><div>فيزا ومحفظة<b>${esMoney(inv.network)}</b></div>`}
+      ${inv.ticket_no || inv.ticket_name ? `<div>التذكرة<b>${esc([inv.ticket_name, inv.ticket_no].filter(Boolean).join(" "))}</b></div>` : ""}</div>
+    <div class="tablewrap mt"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المرتجع منها</th><th>السعر</th><th>الخصم</th><th>الإجمالي</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
+    ${inv.lines.map((l) => `<tr><td>${l.item_id ? `<a href="#/items/${esc(l.item_id)}">${esc(l.item)}</a>` : `<span class="badge b-warn">⚠ صنف مش مربوط</span>`}</td>
+      <td class="num">${esc(l.qty ?? "")}</td><td class="num">${esc(l.returned ?? "")}</td><td class="num">${esMoney(l.price)}</td><td class="num">${esMoney(l.discount)}</td>
+      <td class="num">${esMoney(l.total)}</td>${cost ? `<td class="num">${esMoney(l.cost)}</td>` : ""}<td>${esc(l.expiry || "")}</td></tr>`).join("")}</tbody></table></div>
+    <p class="muted">الكميات بوحدات إي ستوك زي ما هي. فاتورة من البرنامج القديم: مبالغها لا تدخل في حسابات البرنامج.</p>
+    ${kind === "sale" && canRet ? `<button class="btn mt" id="esRet">مرتجع من فاتورة إي ستوك قديمة</button>` : ""}
+    <div id="esRetBox"></div></section>`;
+  $("#esRet")?.addEventListener("click", () => estockReturnForm(id).catch((e) => toast(e.message, true)));
+}
+
+async function estockReturnForm(id) {
+  const lines = (await api(`/api/estock/sales/${id}/return-lines`)).lines;
+  $("#esRet").hidden = true;
+  $("#esRetBox").innerHTML = `<form class="panel mt" id="esRetF"><h2>مرتجع من فاتورة إي ستوك قديمة</h2>
+    <p class="muted">الفلوس بترجع بنفس الطريقة اللي اتدفعت بيها وبحد أقصى اللي اتدفع فعلًا: الآجل يقل من حساب العميل الأول، وبعدين النقدي من الدرج، وبعدين الفيزا والمحفظة.</p>
+    <table><thead><tr><th>الصنف</th><th>المباع (وحدة)</th><th>رجع قبل كده</th><th>المرتجع الآن (وحدة)</th></tr></thead><tbody>
+    ${lines.map((l) => { const left = (l.sold_units ?? 0) - l.returned_units; return `<tr><td>${esc(l.item || "—")}</td><td class="num">${l.sold_units ?? "—"}</td><td class="num">${l.returned_units}</td>
+      <td>${l.item_id && l.sold_units != null && left > 0 ? `<input class="narrow" type="number" min="0" max="${left}" step="1" data-line="${esc(l.line_key)}" value="0">` : `<span class="muted">—</span>`}</td></tr>`; }).join("")}</tbody></table>
+    <label class="f mt">سبب المرتجع <input name="reason" required></label>
+    <div class="row mt"><button class="btn">سجّل المرتجع</button><button type="button" class="btn secondary" id="esRetNo">إلغاء</button></div></form>`;
+  $("#esRetNo").addEventListener("click", () => { $("#esRetBox").innerHTML = ""; $("#esRet").hidden = false; });
+  $("#esRetF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, body = { lines: {}, reason: f.reason.value };
+    f.querySelectorAll("[data-line]").forEach((inp) => { if (+inp.value > 0) body.lines[inp.dataset.line] = +inp.value; });
+    if (!Object.keys(body.lines).length) { toast("اختر الكمية المرتجعة", true); return; }
+    await withBusy(f.querySelector("button:not([type=button])"), async () => {
+      try {
+        const r = await api(`/api/estock/sales/${id}/return`, { method: "POST", body });
+        const p = r.parts;
+        $("#esRetBox").innerHTML = "";             // gone at once: a second press cannot send it again (#358 Codex P1)
+        toast(`✓ اتسجل المرتجع: ${money(r.refund)} ج · من الحساب: ${money(p.account)} ج · نقدي: ${money(p.cash)} ج · فيزا ومحفظة: ${money(p.card)} ج`);
+        await viewEstockInvoice("sale", id);
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
+async function viewEstockStatement(kind, id) {
+  const st = await api(`/api/estock/statement/${kind}/${id}`);
+  const items = kind === "customer" ? (await api(`/api/estock/customers/${id}/items`)).items : [];
+  const back = kind === "customer" ? `#/customers/${id}` : `#/suppliers/${id}`;
+  app.innerHTML = `<section class="panel"><a href="${back}">← ${kind === "customer" ? "العميل" : "المورد"}</a>
+    <div class="row between"><h1>كشف الحساب القديم</h1>${ES_BADGE}</div>
+    <p class="muted">كشف الحساب زي ما كان في إي ستوك قبل سطر رصيد أول المدة في البرنامج.</p>
+    <div class="totals"><div>آخر رصيد في إي ستوك<b>${esMoney(st.estock_last_total) || "—"}</b></div>
+      <div>رصيد أول المدة في البرنامج<b>${money(st.program_opening_total)}</b></div></div>
+    <div class="tablewrap mt"><table><thead><tr><th>التاريخ</th><th>النوع</th><th>له</th><th>عليه</th><th>الرصيد</th><th>ملاحظات</th><th></th></tr></thead><tbody>
+    ${st.lines.map((l) => `<tr><td>${esc(l.day)}</td><td>${esc(l.type || "")}</td><td class="num">${esMoney(l.for_him)}</td><td class="num">${esMoney(l.for_me)}</td>
+      <td class="num">${esMoney(l.total)}</td><td>${esc(l.notes || "")}</td><td>${ES_BADGE}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">مفيش حركات قديمة</td></tr>`}</tbody></table></div>
+    ${kind === "customer" ? `<h2 class="mt">اشترى إيه في إي ستوك</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>عدد الفواتير</th><th>أول مرة</th><th>آخر مرة</th></tr></thead><tbody>
+      ${items.map((i) => `<tr><td>${i.item_id ? `<a href="#/items/${esc(i.item_id)}">${esc(i.item)}</a>` : "—"}</td><td class="num">${esc(i.qty)}</td><td class="num">${i.invoices}</td><td>${esc(i.first_day)}</td><td>${esc(i.last_day)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">مفيش</td></tr>`}</tbody></table>` : ""}
+    <p class="mt"><a href="#/estock?kind=${kind === "customer" ? "sale" : "purchase"}&party=${esc(id)}">فواتيره القديمة في إي ستوك ←</a></p></section>`;
+}
+
+async function viewEstockItem(id) {
+  const rows = (await api(`/api/estock/items/${id}/history`)).history, cost = rows.some((r) => "cost" in r);
+  app.innerHTML = `<section class="panel"><a href="#/items/${esc(id)}">← الصنف</a><div class="row between"><h1>حركة الصنف في إي ستوك</h1>${ES_BADGE}</div>
+    <div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>النوع</th><th>الفاتورة</th><th>العميل أو المورد</th><th>الكمية</th><th>السعر</th>${cost ? "<th>التكلفة</th>" : ""}<th>الصلاحية</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr class="clickable" data-go="${esc(r.kind)}/${esc(r.estock_id)}"><td>${esc(r.day)}</td><td>${ES_KIND[r.kind]}</td><td>${esc(r.bill_number || r.estock_id)}</td><td>${esc(r.party || "—")}</td>
+      <td class="num">${esc(r.qty ?? "")}</td><td class="num">${esMoney(r.price)}</td>${cost ? `<td class="num">${esMoney(r.cost)}</td>` : ""}<td>${esc(r.expiry || "")}</td></tr>`).join("")
+      || `<tr><td colspan="8" class="muted">مفيش حركة قديمة للصنف ده</td></tr>`}</tbody></table></div></section>`;
+  app.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
+}
+
+// a small «تاريخ إي ستوك» panel at the end of a customer, supplier or item page (only when there is history)
+async function estockPanel(kind, id) {
+  if (!id || id === "new" || !(await estockOn())) return;
+  const can = (p) => ME.permissions.includes(p), links = [];
+  if (kind === "list") {                    // the sales and purchases lists: the way into the old invoices
+    if (can(id === "purchase" ? "purchases.read" : "sales.totals")) links.push(`<a class="btn small secondary" href="#/estock?kind=${id}">فواتير إي ستوك القديمة</a>`);
+  } else if (kind === "customer") {
+    if (can("sales.totals")) links.push(`<a class="btn small secondary" href="#/estock?kind=sale&party=${esc(id)}">فواتيره القديمة</a>`);
+    if (can("sales.read")) links.push(`<a class="btn small secondary" href="#/estock-statement/customer/${esc(id)}">كشف حسابه القديم واللي اشتراه</a>`);
+  } else if (kind === "supplier") {
+    if (can("purchases.read")) links.push(`<a class="btn small secondary" href="#/estock?kind=purchase&party=${esc(id)}">مشترياته القديمة</a>`);
+    if (can("suppliers.read")) links.push(`<a class="btn small secondary" href="#/estock-statement/supplier/${esc(id)}">كشف حسابه القديم</a>`);
+  } else if (kind === "item" && can("items.read")) {
+    links.push(`<a class="btn small secondary" href="#/estock-item/${esc(id)}">حركته في إي ستوك</a>`);
+  }
+  if (!links.length || !app.isConnected) return;
+  const sec = document.createElement("section");
+  sec.className = "panel"; sec.id = "esPanel";
+  sec.innerHTML = `<div class="row between"><h2>تاريخ إي ستوك</h2>${ES_BADGE}</div><div class="row">${links.join("")}</div>`;
+  app.appendChild(sec);
 }
 
 // ------------------------------------------------------------------ suppliers and their accounts
@@ -3324,7 +3743,7 @@ async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
     ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
-      <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف مورد</button></form>` : ""}</div>
+      <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
       <td>${SUP_TYPE[x.supplier_type] ? `<span class="chip">${SUP_TYPE[x.supplier_type]}</span>` : `<span class="badge b-warn">⚠ حدد النوع</span>`}</td>
@@ -3367,8 +3786,8 @@ async function viewSupplier(id) {
   app.innerHTML = `<section class="panel"><a href="#/suppliers">← الموردون</a>
     <div class="row between"><h1>${esc(a.name)}</h1>
       <span class="seg2 small" id="supType">${Object.entries(SUP_TYPE).map(([v, t]) => `<button type="button" class="${a.supplier_type === v ? "on" : ""}" data-st="${v}" ${canW ? "" : "disabled"}>${a.supplier_type === v ? "✓ " : ""}${t}</button>`).join("")}</span></div>
-    <div class="row"><label class="f">التليفون <input id="supPhone" value="${esc(a.phone || "")}" ${canW ? "" : "disabled"}></label>
-      <label class="f grow">شروط الدفع <input id="supTerms" value="${esc(a.payment_terms || "")}" placeholder="مثال: آجل 30 يوم" ${canW ? "" : "disabled"}></label>
+    <div class="row"><label class="f">الهاتف <input id="supPhone" value="${esc(a.phone || "")}" ${canW ? "" : "disabled"}></label>
+      <label class="f grow">شروط الدفع <input id="supTerms" value="${esc(a.payment_terms || "")}" placeholder="مثال: آجل 30 يومًا" ${canW ? "" : "disabled"}></label>
       ${canW ? `<button class="btn small secondary" id="supSave">احفظ</button>` : ""}</div></section>
   ${a.balance != null ? `<div class="totals"><div class="${a.balance > 0 ? "t-warn" : "t-ok"}">${a.balance > 0 ? "مستحق له علينا" : a.balance < 0 ? "مستحق لنا عنده" : "✓ لا يوجد حساب"}<b>${money(Math.abs(a.balance))} ج</b></div></div>` : ""}
   ${canPay ? `<form class="panel row" id="supPay"><h2 class="grow">تسجيل دفعة للمورد</h2>
@@ -3423,8 +3842,23 @@ async function viewSupplier(id) {
 }
 
 // ------------------------------------------------------------------ returns to suppliers (مرتجعات للموردين)
+// supplier-return proposals: each answer is for the supplier (and the line's batch) asked about; one that comes back
+// after the supplier or the batch changed is dropped, so an older supplier's price never lands on the line (#368).
+// A proposal is only shown: the return sends a value only when the person typed it, and the server prices the
+// others at this supplier's own purchase price. A failed ask clears the old figure instead of keeping it.
+const SR = { gen: 0, busy: false };
+async function srPropose(l, supplier) {
+  if (l.typed) return;                                       // a typed value is the person's, never replaced
+  const gen = SR.gen, ask = (l.ask = (l.ask || 0) + 1);
+  let v = null;
+  try {
+    v = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}&supplier=${encodeURIComponent(supplier || "")}`)).unit_value;
+  } catch { /* unknown here: the server prices it */ }
+  if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
+}
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
+  SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
   app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
@@ -3439,18 +3873,32 @@ async function viewSupplierReturns(arg) {
   const lines = [];
   const draw = () => {
     if (!$("#srLines")) return;
+    // a redraw while a value field is focused (an answer arriving) puts the focus back, so typing goes on there
+    const focused = document.activeElement?.dataset?.sv;
     $("#srLines").innerHTML = lines.map((l, i) => `<tr><td>${itemHtml(l.item)}</td>
       <td><select data-sb="${i}">${l.batches.map((b) => `<option value="${esc(b.batch_id || "")}" ${b.batch_id === l.batch_id ? "selected" : ""}>${esc(b.batch_no || "بدون تشغيلة")} — ${esc((b.expiry_date || "").slice(0, 7))} — متاح ${b.qty}</option>`).join("")}</select></td>
       <td><input class="narrow" type="number" min="1" step="1" data-sq="${i}" value="${l.qty_base}"></td>
       <td><select data-sw="${i}">${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}" ${k === l.reason ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
-      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${money(l.unit_value)}"></td>` : ""}
+      ${money_ ? `<td><input class="narrow" type="number" min="0" step="0.01" data-sv="${i}" value="${l.unit_value == null ? "" : money(l.unit_value)}" placeholder="بسعر الشراء"></td>` : ""}
       <td><button class="btn small danger" data-sx="${i}" aria-label="إزالة">✕</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">ابحث عن الصنف وأضفه</td></tr>`;
+    if (focused != null) { const x = $(`#srLines [data-sv="${focused}"]`); if (x) x.focus(); }
     if ($("#srTot")) $("#srTot").textContent = money_ && lines.length ? `الإجمالي: ${money(lines.reduce((a, l) => a + l.qty_base * (l.unit_value || 0), 0))} ج` : "";
-    const val = async (l) => { try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${l.item.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* keep */ } draw(); };
+    const val = async (l) => { await srPropose(l, $("#srSup")?.value); draw(); };
     document.querySelectorAll("[data-sb]").forEach((x) => x.addEventListener("change", () => { const l = lines[x.dataset.sb]; l.batch_id = x.value || null; val(l); }));
     document.querySelectorAll("[data-sq]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sq].qty_base = +x.value || 1; draw(); }));
     document.querySelectorAll("[data-sw]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sw].reason = x.value; }));
-    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => { lines[x.dataset.sv].unit_value = toPiasters(x.value) || 0; draw(); }));
+    // each keystroke is the person's value at once: an answer arriving while the field is still focused never
+    // replaces it, whatever the browser does with the field it redraws (#368)
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("input", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") return;
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true;
+    }));
+    document.querySelectorAll("[data-sv]").forEach((x) => x.addEventListener("change", () => {
+      const l = lines[x.dataset.sv];
+      if (x.value.trim() === "") { l.typed = false; val(l); return; }     // emptied: back to the purchase price
+      l.unit_value = toPiasters(x.value) || 0; l.typed = true; draw();
+    }));
     document.querySelectorAll("[data-sx]").forEach((x) => x.addEventListener("click", () => { lines.splice(+x.dataset.sx, 1); draw(); }));
   };
   const addItem = async (itemId) => {
@@ -3459,9 +3907,18 @@ async function viewSupplierReturns(arg) {
     if (!batches.length) { toast("هذا الصنف ليس له رصيد", true); return; }
     const b = batches[0], l = { item: c, batches, batch_id: b.batch_id || null, qty_base: Math.min(b.qty, c.pack_size || 1), reason: (b.expiry_date || "9") < isoDay(new Date()) ? "expired" : "near_expiry", unit_value: 0 };
     lines.push(l); draw();
-    try { l.unit_value = (await api(`/api/supplier-returns/suggest?item=${c.id}&batch=${l.batch_id || ""}`)).unit_value; } catch { /* zero */ }
+    await srPropose(l, $("#srSup")?.value);
     draw();
   };
+  // the proposed value is that supplier's price: another supplier, every line asked again (#324 S30)
+  $("#srSup")?.addEventListener("change", async () => {
+    const gen = ++SR.gen;
+    SR.busy = true; $("#srGo").disabled = true;               // the return waits for the new supplier's prices
+    await Promise.all(lines.map((l) => srPropose(l, $("#srSup").value)));
+    if (gen !== SR.gen) return;                                // a newer change is still asking
+    SR.busy = false; $("#srGo").disabled = false;
+    draw();
+  });
   if ($("#srQ")) {
     let t;
     $("#srQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => {
@@ -3471,12 +3928,13 @@ async function viewSupplierReturns(arg) {
       document.querySelectorAll("[data-pick]").forEach((x) => x.addEventListener("click", () => { $("#srRes").innerHTML = ""; $("#srQ").value = ""; addItem(x.dataset.pick).catch((e) => toast(e.message, true)); }));
     }, 250); });
     $("#srGo").addEventListener("click", async () => {
+      if (SR.busy) return;
       if (!$("#srSup").value) { toast("اختر المورد", true); return; }
       if (!lines.length) { toast("أضف صنفًا واحدًا على الأقل", true); return; }
       const w = window.open("", "_blank");
       try {
         const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: $("#srSup").value, note: $("#srNote").value || null,
-          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ ? { unit_value: l.unit_value } : {}) })) } });
+          lines: lines.map((l) => ({ item_id: l.item.id, batch_id: l.batch_id, qty_base: l.qty_base, reason: l.reason, ...(money_ && l.typed ? { unit_value: l.unit_value } : {}) })) } });
         toast(`✓ مرتجع رقم ${r.return_no} تم التسجيل`);
         if (w) w.location = `/supplier-return/${r.id}`;
         location.hash = "#/supplier-returns";
@@ -3599,6 +4057,7 @@ async function viewCustomers(filter = "") {
     <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم هاتف" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
+  ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
   ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
@@ -3620,6 +4079,14 @@ async function viewCustomers(filter = "") {
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
   };
   if ($("#ktBox")) renderContracts();
+  // one number saved in two forms (010… and +20 10…) before the program kept one form (#324 M2-20)
+  if ($("#cuDup")) api("/api/customers/phone-doubles").then((r) => {
+    if (!r.doubles.length || !$("#cuDup")) return;
+    $("#cuDup").innerHTML = `<h2>⚠ رقم واحد مسجل لأكثر من عميل</h2><p class="muted">الرقم نفسه مكتوب بصيغتين مختلفتين. راجع العملاء واترك الرقم لعميل واحد حتى لا يكون للمشتري الواحد حسابان آجلان.</p>
+      <table><thead><tr><th>الرقم</th><th>العملاء</th></tr></thead><tbody>${r.doubles.map((d) => `<tr><td dir="ltr">${esc(d.phone)}</td>
+      <td>${d.customers.map((c) => `<a href="#/customers/${esc(c.id)}">${esc(c.name)}</a>`).join("، ")}</td></tr>`).join("")}</tbody></table>`;
+    $("#cuDup").hidden = false;
+  }).catch(() => { /* the list stays without the notice */ });
   let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
   const FT = { "": "كل العملاء", debt: "العملاء الذين عليهم مستحقات", refill: "اقترب موعد طلبهم الشهري" };
   wireTools("cust", () => { const { list, f } = cur; return { title: "تقرير العملاء", subtitle: FT[f] + ($("#cuQ").value ? ` — بحث: ${$("#cuQ").value}` : ""), el: $("#cuRep"), sheets: [
@@ -3785,7 +4252,7 @@ async function viewExpenses(period) {
   app.innerHTML = `<form class="panel" id="exNew"><h1>تسجيل مصروف</h1>
     <div class="formgrid"><label class="f">البند <select name="cat">${r.categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
       <label class="f">المبلغ (ج) <input name="a" type="number" step="0.25" min="0" required></label>
-      <label class="f">مصدر المبلغ <select name="from"><option value="drawer">من خزينة الوردية</option><option value="outside">من خارج الخزينة</option></select></label>
+      <label class="f">مصدر المبلغ <select name="from"><option value="drawer">من خزينة الشيفت</option><option value="outside">من خارج الخزينة</option></select></label>
       <label class="f">التاريخ <input name="d" type="date" value="${isoDay(new Date())}"></label>
       <label class="f">ملاحظة <input name="n" placeholder="مثال: أكياس + بكرة إيصالات"></label></div>
     <button class="btn mt">سجّل</button>
@@ -3795,7 +4262,7 @@ async function viewExpenses(period) {
   <section class="panel" id="exRep"><div class="row between"><h2>المصروفات — ${esc(rangeText(pf, pt))}</h2>${reportTools("exp")}</div>
     <div class="row between noprint"><div id="exRangeBox"></div>${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</div>
     ${exTable(r.expenses, false)}
-    <p><b>الإجمالي المعتمد: ${money(r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
+    <p><b>الإجمالي المعتمد: ${money(r.totals ? r.totals.approved : r.expenses.filter((e) => e.status === "approved").reduce((a, e) => a + e.amount, 0))} ج</b></p>
     ${canA ? `<form class="row mt" id="exCat"><input name="n" placeholder="بند جديد" required><button class="btn small secondary">أضف بند</button></form>` : ""}</section>`;
   if (canA) renderSchedules(r.categories);
   $("#exRangeBox").innerHTML = rangeBar("exRange");
@@ -3865,7 +4332,8 @@ async function renderSchedules(cats, edit = null) {
     const amt = box.querySelector(`[data-scamt="${b.dataset.scpay}"]`);
     if (amt && !amt.value) { amt.focus(); toast("اكتب المبلغ هذه المرة", true); return; }
     await withBusy(b, async () => {
-      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null } });
+      const shown = list.find((x) => x.id === b.dataset.scpay)?.amount ?? null;      // the amount this screen showed (M2-11)
+      try { const x = await api(`/api/expense-schedules/${b.dataset.scpay}`, { method: "POST", body: { action: "pay", period: b.dataset.p, amount: amt ? toPiasters(amt.value) : null, expected_amount: amt ? null : shown } });
         toast(x.status === "approved" ? "✓ سُجّل واعتُمد" : "سُجّل — بانتظار الموافقة"); viewExpenses(); }
       catch (err) { toast(err.message, true); }
     });
@@ -3913,7 +4381,6 @@ async function viewProfit() {
 // ------------------------------------------------------------------ home
 async function viewHome() {
   const [h, att] = await Promise.all([api("/api/home"), api("/api/attendance")]);
-  const hour = new Date().getHours(), greet = hour < 12 ? "صباح الخير" : "مساء الخير";
   const lvl = { error: ["b-err", "✕"], warning: ["b-warn", "⚠"], info: ["b-info", "ℹ"] };
   setTimeout(() => $("#attBtn")?.addEventListener("click", async () => {
     try { await api("/api/attendance", { method: "POST", body: { action: att.open ? "out" : "in" } }); toast(att.open ? "✓ تم تسجيل الانصراف" : "✓ تم تسجيل الحضور"); viewHome(); }
@@ -3921,7 +4388,7 @@ async function viewHome() {
   }), 0);
   const can = (p) => ME.permissions.includes(p);
   const diff = h.sales && h.sales_week_ago ? Math.round((h.sales.total - h.sales_week_ago) / h.sales_week_ago * 100) : null;
-  app.innerHTML = `<section class="panel"><h1>${greet} يا ${esc(ME.user.full_name)}</h1>
+  app.innerHTML = `<section class="panel"><h1>السلام عليكم يا ${esc(ME.user.full_name)}</h1>
     <div class="quick">
       ${(ME.ui?.home || []).filter(canScreen).map((k, i) => `<a class="btn ${i === 0 ? "big" : "secondary"}" href="#/${k}">${esc(SCREENS[k][0])}</a>`).join("")}
       ${ME.role !== "owner" ? `<button class="btn ${att.open ? "danger" : ""}" id="attBtn">${att.open ? "سجّل انصراف" : "سجّل حضور"}</button>
@@ -3929,8 +4396,8 @@ async function viewHome() {
   <div class="totals">
     ${h.sales ? `<div>مبيعات اليوم<b>${money(h.sales.total)}</b><span>${h.sales.n} فاتورة${diff != null ? ` · ${diff >= 0 ? "▲" : "▼"} ${Math.abs(diff)}% عن اليوم نفسه من الأسبوع الماضي` : ""}</span></div>` : ""}
     <div>فواتيرك اليوم<b>${h.mine.n}</b><span>${money(h.mine.t)} ج</span></div>
-    <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الوردية مفتوحة" : "⚠ الوردية مغلقة"}<b>${h.shift_open ? "جارية" : "افتحها"}</b></div>
-    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.ok ? "t-ok" : "t-err"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.ok ? "✓ آخر نسخة احتياطية" : "✕ النسخة الاحتياطية فشلت"}<b>${h.backup.last_at ? esc(hhmm(h.backup.last_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : ""}</span></div>` : ""}
+    <div class="${h.shift_open ? "t-ok" : "t-warn"}">${h.shift_open ? "✓ الشيفت مفتوح" : "⚠ الشيفت مغلق"}<b>${h.shift_open ? "شغّال" : "افتحه"}</b></div>
+    ${h.backup ? `<div class="${!h.backup.last_at && h.backup.ok == null ? "t-warn" : h.backup.warn ? "t-err" : "t-ok"}">${!h.backup.last_at && h.backup.ok == null ? "⚠ لا توجد نسخة تلقائية بعد" : h.backup.failed ? "✕ النسخة الاحتياطية فشلت" : h.backup.late ? "⚠ النسخة الاحتياطية متأخرة" : "✓ آخر نسخة احتياطية"}<b>${h.backup.last_good_at ? esc(stamp(h.backup.last_good_at)) : "—"}</b><span>${h.backup.offsite_error ? "⚠ النسخة خارج الجهاز بها مشكلة" : h.backup.warn ? `<a href="#/system">افتح «البرنامج والنسخ الاحتياطي»</a>` : ""}</span></div>` : ""}
   </div>
   <section class="panel mt"><h2>يحتاج إلى انتباهك</h2>
     <ul class="notes">${h.alerts.map((a) => `<li><span class="badge ${lvl[a.level][0]}">${lvl[a.level][1]}</span><div>${esc(a.text)} ${a.link ? `<a href="${a.link}">افتح</a>` : ""}</div></li>`).join("")
@@ -3941,12 +4408,21 @@ async function viewHome() {
 // ------------------------------------------------------------------ reports
 // ------------------------------------------------------------------ periods, Excel export, print preview
 const isoDay = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+// the pharmacy's calendar day (Cairo), whatever the device clock's zone; days are counted on the calendar, never as
+// 24 hours, so the night the clocks go back has a yesterday (#324 R24). Noon local keeps isoDay() on that date.
+function cairoDay() {
+  try {
+    const [y, m, d] = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(new Date()).split("-").map(Number);
+    return [y, m - 1, d];
+  } catch { const n = new Date(); return [n.getFullYear(), n.getMonth(), n.getDate()]; }
+}
 function periodPresets() {
-  const now = new Date(), y = now.getFullYear(), m = now.getMonth(), day = 86400000;
+  const [y, m, d] = cairoDay(), at = (yy, mm, dd) => new Date(yy, mm, dd, 12), now = at(y, m, d);
   return {
-    today: ["اليوم", now, now], yesterday: ["أمس", new Date(now - day), new Date(now - day)],
-    week: ["آخر 7 أيام", new Date(now - 6 * day), now], month: ["هذا الشهر", new Date(y, m, 1), now],
-    last: ["الشهر الماضي", new Date(y, m - 1, 1), new Date(y, m, 0)], year: ["هذه السنة", new Date(y, 0, 1), now],
+    today: ["اليوم", now, now], yesterday: ["أمس", at(y, m, d - 1), at(y, m, d - 1)],
+    week: ["آخر 7 أيام", at(y, m, d - 6), now], month: ["هذا الشهر", at(y, m, 1), now],
+    last: ["الشهر الماضي", at(y, m - 1, 1), at(y, m, 0)], year: ["هذه السنة", at(y, 0, 1), now],
   };
 }
 // a "from — to" bar with quick choices; onChange(from, to) runs on every change
@@ -3958,7 +4434,13 @@ function rangeBar(id, preset = "month") {
 }
 function wireRange(id, onChange) {
   const box = $(`#${id}`), f = box.querySelector("[data-rf]"), t = box.querySelector("[data-rt]");
-  const go = () => { if (f.value && t.value) onChange(f.value, t.value); };
+  // each choice is numbered; the reads it starts carry the number, and an answer for an older choice is dropped (#324 R25)
+  const go = () => {
+    if (!(f.value && t.value)) return;
+    const seq = (RANGE_SEQ[id] = (RANGE_SEQ[id] || 0) + 1);
+    RANGE_CALL = { id, seq };
+    try { onChange(f.value, t.value); } finally { RANGE_CALL = null; }
+  };
   box.querySelectorAll("[data-rp]").forEach((b) => b.addEventListener("click", () => {
     const [, a, z] = periodPresets()[b.dataset.rp];
     box.querySelectorAll("[data-rp]").forEach((x) => x.classList.toggle("on", x === b));
@@ -4024,7 +4506,7 @@ const itq = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name }
 const OWNER_REPORTS = [
   { key: "staff", title: "أداء الموظفين", perm: "sales.totals",
     html: (r) => `<div class="tablewrap"><table><thead><tr><th>الموظف</th><th>الفواتير</th><th>المبيعات</th><th>متوسط الفاتورة</th><th>أصناف/فاتورة</th>
-      <th>الخصم</th><th>نسبة الخصم</th><th>مرتجعات سجّلها</th><th>مرتجعات من فواتيره</th><th>فواتير ألغاها</th><th>ورديات أغلقها</th>${r.see_cash ? "<th>فرق الخزينة</th>" : ""}
+      <th>الخصم</th><th>نسبة الخصم</th><th>مرتجعات سجّلها</th><th>مرتجعات من فواتيره</th><th>فواتير ألغاها</th><th>شيفتات أغلقها</th>${r.see_cash ? "<th>فرق الخزينة</th>" : ""}
       <th>تحذيرات أكّدها</th><th>تجاوز سلامة</th><th>ساعات الحضور</th><th>مبيعات/ساعة</th></tr></thead><tbody>
       ${r.rows.map((x) => `<tr><td><b>${esc(x.name)}</b> <span class="muted">${esc(x.role || "")}</span></td><td>${x.n}</td><td class="num"><b>${money(x.total)}</b></td>
         <td class="num">${money(x.avg)}</td><td>${x.items_per_sale}</td><td class="num">${money(x.discount)}</td><td>${pctTxt(x.discount_bp)}</td>
@@ -4035,7 +4517,7 @@ const OWNER_REPORTS = [
         || `<tr><td colspan="16" class="muted">لا يوجد عمل في هذه الفترة</td></tr>`}</tbody></table></div>
       <p class="muted">"مرتجعات من فواتيره" = ما أُرجع من فواتير باعها هو (أيًّا كان من سجّل الإرجاع). ساعات الحضور من شاشة الحضور. الفرق السالب = عجز في الخزينة.</p>`,
     sheets: (r) => [{ name: "أداء الموظفين", columns: [Tx("الموظف"), N("الفواتير"), M("المبيعات"), M("متوسط الفاتورة"), Pc("أصناف/فاتورة"), M("الخصم"), Pc("نسبة الخصم %"),
-      N("مرتجعات سجّلها"), M("قيمتها"), M("مرتجعات من فواتيره"), N("فواتير ألغاها"), M("قيمتها"), N("ورديات أغلقها"), ...(r.see_cash ? [M("فرق الخزينة")] : []), N("تحذيرات أكّدها"), N("تجاوز سلامة"), Pc("ساعات الحضور")],
+      N("مرتجعات سجّلها"), M("قيمتها"), M("مرتجعات من فواتيره"), N("فواتير ألغاها"), M("قيمتها"), N("شيفتات أغلقها"), ...(r.see_cash ? [M("فرق الخزينة")] : []), N("تحذيرات أكّدها"), N("تجاوز سلامة"), Pc("ساعات الحضور")],
       rows: r.rows.map((x) => [x.name, x.n, x.total, x.avg, x.items_per_sale, x.discount, x.discount_bp / 100, x.returns_n, x.returns, x.returned_on_his, x.voids_n, x.voids, x.shifts, ...(r.see_cash ? [x.difference] : []), x.warnings, x.overrides, x.hours]) }] },
   { key: "customers", title: "مبيعات العملاء", perm: "sales.totals",
     html: (r) => `<div class="totals"><div>عملاء اشتروا<b>${r.totals.customers}</b></div><div>صافي المبيعات<b>${money(r.totals.net)}</b></div>
@@ -4050,15 +4532,15 @@ const OWNER_REPORTS = [
         ...(r.walk_in ? [["بدون عميل", "", r.walk_in.n, r.walk_in.gross, r.walk_in.discount, r.walk_in.returns, r.walk_in.net, 0, "", null]] : [])],
       total: ["الإجمالي", "", r.totals.n, r.totals.gross, r.totals.discount, r.totals.returns, r.totals.net, r.totals.credit, "", null] }] },
   { key: "shifts", title: "إغلاقات الخزينة", perm: "cash.see_expected",
-    html: (r) => `<div class="totals"><div>ورديات أُغلقت<b>${r.totals.n}</b></div><div class="${r.totals.short ? "t-err" : ""}">العجز<b>${money(r.totals.short)}</b><span>${r.totals.short_n} <span>وردية</span></span></div>
-      <div>الزيادة<b>${money(r.totals.over)}</b><span>${r.totals.over_n} <span>وردية</span></span></div><div>الصافي<b>${money(r.totals.net)}</b></div></div>
-      <div class="tablewrap mt"><table><thead><tr><th>فُتحت</th><th>أُغلقت</th><th>فتحها</th><th>أغلقها</th><th>البداية</th><th>فواتير</th><th>بيع نقدي</th><th>مرتجع/إلغاء</th><th>مصروف من الخزينة</th><th>المفروض</th><th>المعدود</th><th>الفرق</th><th>السبب</th></tr></thead><tbody>
+    html: (r) => `<div class="totals"><div>شيفتات أُغلقت<b>${r.totals.n}</b></div><div class="${r.totals.short ? "t-err" : ""}">العجز<b>${money(r.totals.short)}</b><span>${r.totals.short_n} <span>شيفت</span></span></div>
+      <div>الزيادة<b>${money(r.totals.over)}</b><span>${r.totals.over_n} <span>شيفت</span></span></div><div>الصافي<b>${money(r.totals.net)}</b></div></div>
+      <div class="tablewrap mt"><table><thead><tr><th>فُتحت</th><th>أُغلقت</th><th>فتحها</th><th>أغلقها</th><th>البداية</th><th>فواتير</th><th>بيع نقدي</th><th>مرتجع/إلغاء</th><th>مصروف من الخزينة</th><th>المتوقع</th><th>المعدود</th><th>الفرق</th><th>السبب</th></tr></thead><tbody>
       ${r.rows.map((x) => `<tr><td>${esc(stamp(x.opened_at))}</td><td>${esc(stamp(x.closed_at))}</td><td>${esc(x.opened_by_name || "")}</td><td>${esc(x.closed_by_name || "")}</td>
         <td class="num">${money(x.opening_cash)}</td><td>${x.sales_n}</td><td class="num">${money(x.cash_sales)}</td><td class="num">${money(x.refunds)}</td><td class="num">${money(x.payouts)}</td>
         <td class="num">${money(x.expected_cash)}</td><td class="num">${money(x.counted_cash)}</td>
         <td class="num">${x.difference ? `<span class="badge ${x.difference < 0 ? "b-err" : "b-warn"}">${money(x.difference)}</span>` : `<span class="badge b-ok">✓ مطابق</span>`}</td><td>${esc(x.close_note || "")}</td></tr>`).join("")
-        || `<tr><td colspan="13" class="muted">لا توجد ورديات أُغلقت في هذه الفترة</td></tr>`}</tbody></table></div>`,
-    sheets: (r) => [{ name: "إغلاقات الخزينة", columns: [Tx("فُتحت"), Tx("أُغلقت"), Tx("فتحها"), Tx("أغلقها"), M("البداية"), N("فواتير"), M("بيع نقدي"), M("مرتجع/إلغاء"), M("مصروف من الخزينة"), M("المفروض"), M("المعدود"), M("الفرق"), Tx("السبب")],
+        || `<tr><td colspan="13" class="muted">لا توجد شيفتات أُغلقت في هذه الفترة</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "إغلاقات الخزينة", columns: [Tx("فُتحت"), Tx("أُغلقت"), Tx("فتحها"), Tx("أغلقها"), M("البداية"), N("فواتير"), M("بيع نقدي"), M("مرتجع/إلغاء"), M("مصروف من الخزينة"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("السبب")],
       rows: r.rows.map((x) => [stamp(x.opened_at), stamp(x.closed_at), x.opened_by_name || "", x.closed_by_name || "", x.opening_cash, x.sales_n, x.cash_sales, x.refunds, x.payouts, x.expected_cash, x.counted_cash, x.difference, x.close_note || ""]),
       total: ["الإجمالي", "", "", "", null, null, null, null, null, null, null, r.totals.net, ""] }] },
   { key: "returns", title: "المرتجعات", perm: "sales.totals",
@@ -4134,7 +4616,7 @@ async function viewStockCheck() {
   if (!ME.permissions.includes("audit.read")) { app.innerHTML = `<section class="panel"><p>هذا التقرير للمالك والمدير.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><div class="row between"><div><a href="#/reports">← التقارير</a><h1>مطابقة الأرصدة</h1></div>
     <span class="row noprint"><button type="button" class="btn" id="scRun">افحص الآن</button><button type="button" class="btn small secondary" id="scPrint">🖨 طباعة</button></span></div>
-    <p class="muted">البرنامج يحسب رصيد كل صنف وكل تشغيلة من جديد من سجل حركات المخزون ويقارنه بالرصيد المعروض. الفحص ده بيحصل لوحده عند تشغيل البرنامج وبعد كل نسخة احتياطية. التقرير ده ما بيغيّرش أي رصيد.</p>
+    <p class="muted">يحسب البرنامج رصيد كل صنف وكل تشغيلة من جديد من سجل حركات المخزون ويقارنه بالرصيد المعروض. يجري هذا الفحص تلقائيًا عند تشغيل البرنامج وبعد كل نسخة احتياطية. ولا يغيّر هذا التقرير أي رصيد.</p>
     <div id="scBox"><p class="muted">جارٍ الفحص…</p></div></section>`;
   const load = async () => {
     $("#scBox").innerHTML = `<p class="muted">جارٍ الفحص…</p>`;
@@ -4144,23 +4626,23 @@ async function viewStockCheck() {
     let html = `<div class="totals"><div>الحالة<b><span class="badge ${r.ok ? "b-ok" : "b-err"}">${r.ok ? "✔ كل الأرصدة مطابقة" : `✖ ${n} اختلاف`}</span></b></div>
       <div>أصناف تم فحصها<b>${r.items_checked}</b></div><div>حركات مخزون<b>${r.movements}</b></div><div>وقت الفحص<b>${esc(when(r.checked_at))}</b></div></div>`;
     if (!r.ok) {
-      html += `<p class="mt"><b>لم يُصلَّح أي رصيد تلقائيًا.</b> اطبع التقرير ده واتبع الخطوات في «ماذا أفعل عند ظهور اختلاف» تحت.</p>`;
+      html += `<p class="mt"><b>لم يُصلَّح أي رصيد تلقائيًا.</b> اطبع هذا التقرير واتبع الخطوات في «ماذا أفعل عند ظهور اختلاف» أدناه.</p>`;
       for (const [k, [title, cols]] of Object.entries(STOCK_KINDS)) {
         if (!r.counts[k]) continue;
         const ack = k === "sales" && ME.permissions.includes("settings.manage");
         html += `<h2 class="mt">${title} (${r.counts[k]})</h2><table><thead><tr><th>الصنف</th><th>الكود</th><th>التشغيلة / الفاتورة</th><th>${k === "sales" ? "خرج من المخزون" : "حسب الحركات"}</th><th>${k === "sales" ? "حسب الفاتورة" : "المعروض"}</th>${ack ? "<th class=\"noprint\">بعد الجرد</th>" : ""}</tr></thead><tbody>
           ${r[k].map((x) => { const [a, b, c] = cols(x); return `<tr class="has-err"><td>${esc(x.name || x.item_id)}</td><td>${esc(x.code || "")}</td><td>${esc(a)}</td><td>${esc(b)}</td><td>${esc(c)}</td>${ack ? `<td class="noprint"><input data-ackn="${esc(x.sale_id)}|${esc(x.item_id)}" placeholder="ملاحظة: جرد الصنف بتاريخ…" maxlength="300"> <button type="button" class="btn small" data-ack="${esc(x.sale_id)}|${esc(x.item_id)}" data-moved="${x.moved}" data-expected="${x.expected}">تمت المراجعة</button></td>` : ""}</tr>`; }).join("")}</tbody></table>
-          ${ack ? `<p class="muted noprint">فاتورة بيع حركتها مختلفة عن الفاتورة بتفضل مختلفة في السجل للأبد. صحّح الرف بجرد الصنف الأول، وبعدين «تمت المراجعة» بملاحظة: السطر ده بس يختفي، ويرجع لو أرقامه اتغيّرت.</p>` : ""}
+          ${ack ? `<p class="muted noprint">فاتورة البيع التي تختلف حركتها عن الفاتورة تبقى مختلفة في السجل دائمًا. صحّح الرف بجرد الصنف أولًا، ثم اضغط «تمت المراجعة» مع ملاحظة: يختفي هذا السطر وحده، ويعود إذا تغيّرت أرقامه.</p>` : ""}
           ${r.counts[k] > r[k].length ? `<p class="muted">معروض أول ${r[k].length} فقط.</p>` : ""}`;
       }
       html += `<section class="panel mt"><h2>ماذا أفعل عند ظهور اختلاف</h2><ol>
-        <li>ما تعدّلش أي رصيد بإيدك وما تمسحش البرنامج. سجل الحركات هو الأصل ومحفوظ.</li>
-        <li>اطبع التقرير ده وابعته للدعم، ومعاه آخر نسخة احتياطية سليمة.</li>
-        ${r.counts.batches ? `<li>النسخ الاحتياطية بتتوقف لحد ما اختلاف أرصدة التشغيلات يتحل، عشان ما نحفظش بيانات فيها مشكلة. النسخ القديمة السليمة موجودة.</li>` : `<li>النسخ الاحتياطية شغالة عادي، لأن الاختلاف ده مش في أرصدة التشغيلات.</li>`}
-        <li>الإصلاح بيتعمل بأمر مسجّل من الدعم بعد مراجعة السبب، وبعده افتح التقرير تاني: لازم يطلع «كل الأرصدة مطابقة».</li></ol></section>`;
+        <li>لا تعدّل أي رصيد يدويًا ولا تحذف البرنامج. سجل الحركات هو الأصل، وهو محفوظ.</li>
+        <li>اطبع هذا التقرير وأرسله إلى الدعم، ومعه آخر نسخة احتياطية سليمة.</li>
+        ${r.counts.batches ? `<li>تتوقف النسخ الاحتياطية حتى يُحل اختلاف أرصدة التشغيلات، حتى لا تُحفظ بيانات بها مشكلة. والنسخ القديمة السليمة موجودة.</li>` : `<li>النسخ الاحتياطية تعمل كالمعتاد، لأن هذا الاختلاف ليس في أرصدة التشغيلات.</li>`}
+        <li>يجري الإصلاح بأمر مسجّل من الدعم بعد مراجعة السبب، ثم افتح التقرير مرة أخرى: يجب أن يظهر «كل الأرصدة مطابقة».</li></ol></section>`;
     }
     if (r.history.length) {
-      html += `<h2 class="mt">آخر الفحوصات اللي لقت اختلاف أو رجعت سليمة</h2><table><thead><tr><th>الوقت</th><th>النتيجة</th><th>الفحص</th><th>بواسطة</th></tr></thead><tbody>
+      html += `<h2 class="mt">آخر الفحوص التي وجدت اختلافًا أو عادت سليمة</h2><table><thead><tr><th>الوقت</th><th>النتيجة</th><th>الفحص</th><th>بواسطة</th></tr></thead><tbody>
         ${r.history.map((h) => `<tr${h.ok || h.ack ? "" : ` class="has-err"`}><td>${esc(when(h.at))}</td><td>${h.ack ? `مراجعة فاتورة ${esc(h.sale_no)}: ${esc(h.note)}` : h.ok ? "مطابقة" : `${Object.values(h.counts || {}).reduce((a, b) => a + b, 0)} اختلاف`}</td><td>${h.ack ? "" : esc(CHECK_REASONS[h.reason] || h.reason || "")}</td><td>${esc(h.who)}</td></tr>`).join("")}</tbody></table>`;
     }
     $("#scBox").innerHTML = html;
@@ -4315,7 +4797,7 @@ function openFeedback() {
 }
 async function viewFeedback() {
   const items = (await api("/api/feedback")).items, owner = ME.permissions.includes("users.manage");
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشكاوي والمقترحات</h1>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشكاوى والمقترحات</h1>
       <div class="row"><button class="btn" id="fbNew">+ ملاحظة جديدة</button>${owner && items.length ? `<button class="btn secondary" id="fbDl">نزّلها (لإرسالها إلى التطوير)</button>` : ""}</div></div>
     <ul class="notes">${items.map((f) => `<li><span class="badge ${FB_ST[f.status][0]}">${FB_ST[f.status][1]}</span><div class="grow"><b>${FB_KIND[f.kind]}</b> — ${esc(f.by_name || "")} · ${esc(stamp(f.created_at))}${f.screen ? ` · <span class="muted">${esc(f.screen)}</span>` : ""}
       <div>${esc(f.text)}</div>${f.reply ? `<div class="muted">الرد: ${esc(f.reply)}</div>` : ""}</div>
@@ -4345,26 +4827,26 @@ async function viewStaff(month) {
   const r = await api(`/api/staff?month=${month}`);
   const post = (body, btn) => withBusy(btn, async () => { try { await api("/api/staff", { method: "POST", body: { month, ...body } }); toast("تم الحفظ"); viewStaff(month); } catch (err) { toast(err.message, true); } });
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الحضور والرواتب</h1><span class="row"><label class="f">الشهر <input type="month" id="stM" value="${month}"></label>${reportTools("pay")}</span></div>
-    <p class="muted">المرتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
+    <p class="muted">الراتب = الأساسي − الغياب (الأساسي ÷ أيام العمل × الأيام الناقصة) − السلف + المكافأة − الخصم. تراجع كل راتب وتعتمده، ويُسجَّل الصرف مصروفًا "رواتب وأجور".</p></section>
   ${r.people.map((p) => { const pr = p.payroll, sg = p.suggested; return `<section class="panel staff" data-u="${esc(p.id)}">
     <div class="row between"><h2>${esc(p.full_name)} <span class="chip">${esc(p.role_name)}</span></h2>
       ${pr ? `<span class="badge ${pr.status === "paid" ? "b-ok" : "b-info"}">${pr.status === "paid" ? "✓ صُرف" : "✓ معتمد — لم يُصرف بعد"}: ${money(pr.net)} ج</span>` : ""}</div>
-    <div class="row"><label class="f">المرتب الأساسي (ج) <input class="narrow" data-f="sal" type="number" min="0" value="${money(p.monthly_salary)}"></label>
+    <div class="row"><label class="f">الراتب الأساسي (ج) <input class="narrow" data-f="sal" type="number" min="0" value="${money(p.monthly_salary)}"></label>
       <label class="f">أيام العمل في الشهر <input class="narrow" data-f="wd" type="number" min="1" max="31" value="${p.work_days}"></label>
       <button class="btn small secondary" data-a="pay_settings">احفظ</button></div>
     <div class="totals mt"><div>حضر<b>${p.days_present} يوم</b><span>${p.hours} ساعة</span></div><div>غياب<b>${sg.missing_days} يوم</b><span>− ${money(sg.absence_deduction)}</span></div>
       <div>سلف الشهر<b>${money(p.advances)}</b></div><div class="t-ok">المقترح<b>${money(sg.net)}</b></div></div>
     ${pr?.status === "paid" ? "" : `<div class="row mt"><label class="f">مكافأة (ج) <input class="narrow" data-f="bonus" type="number" min="0" value="${pr ? money(pr.bonus) : ""}"></label>
       <label class="f">خصم (ج) <input class="narrow" data-f="ded" type="number" min="0" value="${pr ? money(pr.deduction) : ""}"></label>
-      <label class="f grow">ملاحظة <input data-f="note" value="${esc(pr?.note || "")}"></label><button class="btn small" data-a="approve">اعتمد المرتب</button>
-      ${pr ? `<select data-f="from"><option value="outside">من خارج الخزينة</option><option value="drawer">من خزينة الوردية</option></select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
+      <label class="f grow">ملاحظة <input data-f="note" value="${esc(pr?.note || "")}"></label><button class="btn small" data-a="approve">اعتمد الراتب</button>
+      ${pr ? `<select data-f="from"><option value="outside">من خارج الخزينة</option><option value="drawer">من خزينة الشيفت</option></select><button class="btn small" data-a="pay">صرف ${money(pr.net)} ج</button>` : ""}</div>`}
     <details class="mt"><summary>سلفة / تعديل حضور / تفاصيل الأيام (${p.attendance.length})</summary>
       <div class="row mt"><label class="f">سلفة (ج) <input class="narrow" data-f="adv" type="number" min="0"></label><select data-f="advfrom"><option value="drawer">من الخزينة</option><option value="outside">من الخارج</option></select>
         <button class="btn small secondary" data-a="advance">سجّل السلفة</button></div>
       <div class="row mt"><label class="f">اليوم <input type="date" data-f="day"></label><label class="f">حضور <input type="time" data-f="in" value="10:00"></label>
         <label class="f">انصراف <input type="time" data-f="out" value="18:00"></label><label class="f grow">السبب <input data-f="why" placeholder="مثال: نسي التسجيل"></label><button class="btn small secondary" data-a="fix">سجّل اليوم</button></div>
       <table class="mt"><tbody>${p.attendance.map((x) => `<tr><td>${esc(x.day)}</td><td>${tm(x.check_in)} ← ${tm(x.check_out)}</td><td>${x.source === "owner" ? `<span class="badge b-warn">⚠ تعديل: ${esc(x.note || "")}</span>` : x.source === "phone" ? "هاتف" : "الكمبيوتر"}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table></details>
-  </section>`; }).join("") || `<section class="panel"><p class="muted">لا يوجد موظفون — أضفهم من "المستخدمين".</p></section>`}`;
+  </section>`; }).join("") || `<section class="panel"><p class="muted">لا يوجد موظفون — أضفهم من «المستخدمون».</p></section>`}`;
   $("#stM").addEventListener("change", (e) => viewStaff(e.target.value));
   wireTools("pay", () => ({ title: "الحضور والرواتب", subtitle: `شهر ${month}`, el: app, sheets: [
     { name: "الرواتب", columns: [Tx("الموظف"), Tx("النوع"), M("الأساسي"), N("أيام العمل"), N("حضر (يوم)"), { label: "ساعات", type: "num" }, N("غياب (يوم)"), M("خصم الغياب"), M("السلف"), M("المكافأة"), M("الخصم"), M("الصافي"), Tx("الحالة")],
@@ -4376,7 +4858,7 @@ async function viewStaff(month) {
     const box = b.closest(".staff"), f = (n) => box.querySelector(`[data-f="${n}"]`)?.value, uid = box.dataset.u, a = b.dataset.a;
     if (a === "pay_settings") post({ action: a, user_id: uid, monthly_salary: toPiasters(f("sal")) || 0, work_days: +f("wd") || 26 }, b);
     if (a === "approve") post({ action: a, user_id: uid, bonus: toPiasters(f("bonus")) || 0, deduction: toPiasters(f("ded")) || 0, note: f("note") || null }, b);
-    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from") }, b);
+    if (a === "pay" && confirmInline(b)) post({ action: a, user_id: uid, paid_from: f("from"), expected_net: r.people.find((x) => x.id === uid)?.payroll?.net ?? null }, b);
     if (a === "advance") post({ action: a, user_id: uid, amount: toPiasters(f("adv")) || 0, paid_from: f("advfrom"), note: "سلفة" }, b);
     if (a === "fix") post({ action: a, user_id: uid, day: f("day"), check_in: f("in"), check_out: f("out") || null, note: f("why") }, b);
   }));
@@ -4477,7 +4959,7 @@ const pctOf = (bp) => (bp == null ? "" : String(bp / 100));
 async function viewUsers() {
   if (!ME.permissions.includes("users.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمين</h1></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
     <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
       <td><span class="badge ${ROLE_CLS[u.role] || ""}">${esc(u.role_name)}</span></td>
@@ -4540,7 +5022,7 @@ async function viewUser(id) {
     </select>`;
   };
   app.innerHTML = `<section class="panel"><div class="row between">
-      <div><a href="#/users">← المستخدمين</a><h1>${esc(u.full_name)} <span class="badge ${ROLE_CLS[u.role] || ""}">${esc(u.role_name)}</span></h1>
+      <div><a href="#/users">← المستخدمون</a><h1>${esc(u.full_name)} <span class="badge ${ROLE_CLS[u.role] || ""}">${esc(u.role_name)}</span></h1>
       <p class="muted">${owner ? "للمالك كل الصلاحيات، ولا يستطيع أحد منعه من شيء." : "صلاحياته مأخوذة من نوعه. أي تعديل هنا يخصه وحده."}</p></div>
       ${owner ? "" : `<button class="btn secondary" id="uReset">↺ أعده إلى الافتراضي</button>`}</div>
     ${owner ? "" : `<div class="row">

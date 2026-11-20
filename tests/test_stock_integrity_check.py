@@ -60,6 +60,9 @@ class Base(DBTestCase):
 
     def sell(self, units):
         s = Sales(self.db)
+        from app.sales import cash
+        if not cash.open_shift_id(self.db, self.ctx):  # every store sale needs an open shift (final review P2-2)
+            cash.CashDrawer(self.db).open(self.ctx, 0)
         sid = s.create(self.ctx)
         d = s.add_line(self.ctx, sid, self.pan, units=units)
         f = s.safety_check(self.ctx, sid)
@@ -239,7 +242,7 @@ class TestScale(Base):
             integrity._sales(self.db, self.ctx.org_id)
         finally:
             self.db.conn.set_trace_callback(None)
-        plan = [r[3] for q in sql if q.lstrip().upper().startswith("WITH")
+        plan = [r[3] for q in sql if "stock_movements" in q          # the one statement of the sales check
                 for r in self.db.conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()]
         self.assertTrue(plan)
         self.assertEqual([d for d in plan if "CORRELATED" in d], [], plan)

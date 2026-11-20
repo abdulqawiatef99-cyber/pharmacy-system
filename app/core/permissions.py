@@ -53,7 +53,7 @@ PERMISSIONS: dict[str, str] = {
     "sales.return_restricted": "مرتجع أصناف لا ترتجع (ثلاجة واستعمال شخصي)",
     "customers.manage": "إدارة العملاء والآجل",
     "contracts.manage": "التعاقدات وخصوماتها",
-    "cash.close": "إغلاق الوردية (عدّ الخزينة)",
+    "cash.close": "إغلاق الشيفت (عدّ الخزينة)",
     "cash.see_expected": "معرفة المتوقع في الخزينة",
     "cash.manage": "الصرف والإيداع من الخزينة وفتحها",
     "expenses.record": "تسجيل مصروف (ينتظر الموافقة)",

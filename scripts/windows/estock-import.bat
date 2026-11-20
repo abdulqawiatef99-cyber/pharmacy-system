@@ -24,6 +24,9 @@ set "SRC_DIR=C:\estock"
 set "OUT=%USERPROFILE%\Documents\launch-night"
 if not exist "%OUT%" mkdir "%OUT%"
 set "LOG=%OUT%\estock-import.txt"
+REM the port the launcher serves on (launcher.py reads PHARM_PORT, default 8000)
+set "PORT=%PHARM_PORT%"
+if not defined PHARM_PORT set "PORT=8000"
 set "DRY=%OUT%\import-dry-run.txt"
 set "APPLIED=%OUT%\import-apply.txt"
 set "STAMP="
@@ -101,6 +104,10 @@ if errorlevel 1 (set "MSG=stock check after the import found problems (see the l
 call :log PASS "stock check after the import: OK"
 set "PHARM_DATA_DIR="
 start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
+REM PASS only once the program answers its health check (nothing else listens: checked when it was stopped)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 90; $i++){ try { $h=Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:%PORT%/api/health'; if($h.ok -eq $true){ $ok=$true; break } } catch { }; Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Output 'the program did not answer on port %PORT% within 90 seconds'; exit 1 }; Write-Output ('program answers, version ' + $h.version); exit 0" <nul >> "%LOG%" 2>&1
+if errorlevel 1 (set "MSG=the import is done but the program did not answer after it (see the log)" & goto fail)
+call :log PASS "program started again and answers on port %PORT%"
 call :log PASS "ALL DONE - program started again"
 echo.
 echo DONE.
@@ -127,5 +134,5 @@ exit /b 0
 
 :stopprog
 REM Only python.exe / pythonw.exe whose executable is inside this program's python folder (same rule as the installer).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" <nul >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; $c=New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1', %PORT%) } catch { exit 0 }; $c.Close(); Write-Output 'another program still listens on port %PORT% (not stopped: not ours)'; exit 2" <nul >> "%LOG%" 2>&1
 exit /b

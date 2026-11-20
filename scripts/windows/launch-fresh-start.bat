@@ -5,7 +5,8 @@ REM      (E-Stock and every other program are never touched);
 REM   2) take a backup of the current data and verify it (also copied to D:\PharmacyPlatform-backups when D: exists);
 REM   3) RENAME (never delete) %LOCALAPPDATA%\PharmacyPlatform\data to data-trial-DATE-TIME;
 REM      the program code chosen by the update button (data\code-releases) and the small settings files are
-REM      copied into the new empty data folder, so the same program version keeps running;
+REM      copied into the new empty data folder (installed_version, network, backup_settings: the backup
+REM      folder and schedule chosen by the owner), so the same program version keeps running;
 REM   4) start the program again: it shows the first-run setup screen.
 REM Every step is logged PASS/FAIL to %USERPROFILE%\Documents\launch-night\fresh-start.txt.
 REM The first FAIL stops the script; nothing after it runs. A FAIL before step 3 leaves the data folder untouched;
@@ -39,6 +40,9 @@ set "DATA=%HOMEDIR%\data"
 set "OUT=%USERPROFILE%\Documents\launch-night"
 if not exist "%OUT%" mkdir "%OUT%"
 set "LOG=%OUT%\fresh-start.txt"
+REM the port the launcher serves on (launcher.py reads PHARM_PORT, default 8000)
+set "PORT=%PHARM_PORT%"
+if not defined PHARM_PORT set "PORT=8000"
 set "STAMP="
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" ^<nul') do set "STAMP=%%t"
 set "TRIAL=data-trial-%STAMP%"
@@ -59,12 +63,13 @@ call :log PASS "program and data found"
 echo.
 echo This keeps today's data in a folder named %TRIAL% and starts the program EMPTY.
 echo E-Stock is not touched.
-set "ANS="
-set /p "ANS=Type YES to continue: "
-REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the answer is typed
-if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
-if /i not "%ANS%"=="YES" (set "MSG=not confirmed, nothing was changed" & goto fail)
-call :log PASS "confirmed by the user"
+REM refused once the database has a sale after the E-Stock import (the live data after launch); otherwise the
+REM pharmacy name must be typed, not just YES. Python asks: set /p cannot read Arabic typing (#324 R2)
+set "PHARM_DATA_DIR=%DATA%"
+"%PY%" "%MANAGE%" fresh-start-check
+if errorlevel 1 (set "MSG=refused or the pharmacy name was not typed: nothing was changed" & goto fail)
+set "PHARM_DATA_DIR="
+call :log PASS "confirmed by the user (pharmacy name typed, no sale after an import)"
 
 REM 1) stop the program
 set "STOPPED=1"
@@ -117,7 +122,8 @@ mkdir "%DATA%"
 if errorlevel 1 (set "MSG=could not create the new data folder" & goto fail)
 if exist "%HOMEDIR%\%TRIAL%\code-releases" robocopy "%HOMEDIR%\%TRIAL%\code-releases" "%DATA%\code-releases" /E /R:2 /W:1 /NFL /NDL /NP >> "%LOG%" 2>&1
 if errorlevel 8 (set "MSG=copy of the program version folder failed" & goto fail)
-for %%n in (installed_version.json network.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul
+REM a settings file that cannot be copied is a FAIL: the program would start with the default backup folder (#324 R13)
+for %%n in (installed_version.json network.json backup_settings.json) do if exist "%HOMEDIR%\%TRIAL%\%%n" copy /y "%HOMEDIR%\%TRIAL%\%%n" "%DATA%\%%n" >nul || (set "MSG=could not copy the settings file %%n" & goto fail)
 "%PY%" -I -c "import sys,pathlib as p; sys.path.insert(0, sys.argv[1]); import release_bootstrap as r; print(r.current_root(p.Path(sys.argv[1]), p.Path(sys.argv[2])).name)" "%INST%\program" "%DATA%\code-releases" > "%TEMP%\pharm-code-after.txt" 2>> "%LOG%"
 if errorlevel 1 (set "MSG=the copied program version did not pass its check" & goto fail)
 fc "%TEMP%\pharm-code-before.txt" "%TEMP%\pharm-code-after.txt" >nul
@@ -126,7 +132,7 @@ call :log PASS "same program version kept in the new data folder"
 
 REM 4) start the program on the empty data: it must answer and show the first-run setup screen
 start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 90; $i++){ try { $s=Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/setup'; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ Write-Output 'the program did not answer within 90 seconds'; exit 1 }; Write-Output ('first-run setup needed: ' + $s.needed); if($s.needed -ne $true){ exit 2 }; exit 0" <nul >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 90; $i++){ try { $s=Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:%PORT%/api/setup'; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ Write-Output 'the program did not answer within 90 seconds'; exit 1 }; Write-Output ('first-run setup needed: ' + $s.needed); if($s.needed -ne $true){ exit 2 }; exit 0" <nul >> "%LOG%" 2>&1
 if errorlevel 1 (set "MSG=the program did not start on the empty data with the setup screen" & goto fail)
 call :log PASS "program started on an empty database: first-run setup screen"
 call :log PASS "ALL DONE - old data kept in %HOMEDIR%\%TRIAL%, backup %ZIP%"
@@ -168,5 +174,5 @@ exit /b 0
 
 :stopprog
 REM Only python.exe / pythonw.exe whose executable is inside this program's python folder (same rule as the installer).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8000/api/health' | Out-Null; Write-Output 'another program still answers on port 8000 (not stopped: not ours)'; exit 2 } catch { exit 0 }" <nul >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=('%INST%\python\').ToLower(); $own={ @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d) }) }; for($i=0; $i -lt 20; $i++){ $l=& $own; if($l.Count -eq 0){ break }; foreach($p in $l){ Write-Output ('stopping pid ' + $p.ProcessId + ' ' + $p.ExecutablePath); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 500 }; if((& $own).Count -gt 0){ Write-Output 'the program is still running'; exit 1 }; $c=New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1', %PORT%) } catch { exit 0 }; $c.Close(); Write-Output 'another program still listens on port %PORT% (not stopped: not ours)'; exit 2" <nul >> "%LOG%" 2>&1
 exit /b

@@ -52,6 +52,8 @@ class TypedCustomer(APICase):
             batch = inv.get_or_create_batch(self.db, self.ctx, self.pan, "B1", (date.today() + timedelta(days=400)).isoformat())
             inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=20, batch_id=batch, movement_type="purchase",
                               unit_cost=Decimal("5"))
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 0)  # every store sale needs an open shift (final review P2-2)
         sid = self.sales.create(self.ctx, self.a)
         self.sales.add_line(self.ctx, sid, self.pan, packs=1)
 

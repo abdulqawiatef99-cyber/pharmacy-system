@@ -13,39 +13,82 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestScale(unittest.TestCase):
+    def tiny_run(self, tmp: Path) -> tuple[dict, str]:
+        """One tiny scale run, checked for everything that does not depend on the machine's speed."""
+        tmp.mkdir()
+        work = tmp / "work"
+        work.mkdir()
+        out = tmp / "scale.txt"
+        sql = tmp / "proposed.sql"       # a second pass on every snapshot with a proposed index
+        sql.write_text("CREATE INDEX IF NOT EXISTS ix_test_alloc_line ON sale_allocations(sale_line_id);\n")
+        r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/scale.py"), "--profile", "", "--days", "2,3",
+                            "--items", "60", "--customers", "4", "--suppliers", "2", "--per-day", "8-12",
+                            "--transfer-share", "0.3", "--attachment-kb", "2", "--repeat", "1", "--end", "2026-01-15",
+                            "--out-txt", str(out), "--work", str(work), "--turns", str(tmp / "turns"),
+                            "--indexes-sql", str(sql)],
+                           capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(list(work.iterdir()), [])
+        self.assertEqual(list((tmp / "turns").iterdir()), [])
+        data = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(data["status"], "finished")
+        self.assertEqual([s["label"] for s in data["snapshots"]],
+                         ["custom - 2 days", "custom - 2 days + indexes", "custom - 3 days", "custom - 3 days + indexes"])
+        for s in data["snapshots"]:
+            self.assertNotIn("error", s)
+            self.assertTrue(s["stock_check"]["ok"], s["stock_check"])
+            self.assertGreater(s["stock_check"]["movements"], 60)
+            if not s["label"].endswith("indexes"):
+                self.assertEqual(s["backup"]["verify_problems"], [])
+            self.assertIn("complete sale", s["cashier"])
+            for name in ("unsold items (all years)", "order suggestions", "stock check (run now)",
+                         "transfers (month)", "expenses (all years)"):
+                self.assertEqual(s["requests"][name]["status"], 200, name)
+        self.assertIn("stock check: all balances match", out.read_text(encoding="utf-8"))
+        return data, out.read_text(encoding="utf-8")
+
     def test_tiny_run_measures_every_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            work = tmp / "work"
-            work.mkdir()
-            out = tmp / "scale.txt"
-            sql = tmp / "proposed.sql"       # a second pass on every snapshot with a proposed index
-            sql.write_text("CREATE INDEX IF NOT EXISTS ix_test_alloc_line ON sale_allocations(sale_line_id);\n")
-            r = subprocess.run([sys.executable, str(ROOT / "scripts/perf/scale.py"), "--profile", "", "--days", "2,3",
-                                "--items", "60", "--customers", "4", "--suppliers", "2", "--per-day", "8-12",
-                                "--transfer-share", "0.3", "--attachment-kb", "2", "--repeat", "1", "--end", "2026-01-15",
-                                "--out-txt", str(out), "--work", str(work), "--turns", str(tmp / "turns"),
-                                "--indexes-sql", str(sql)],
-                               capture_output=True, text=True, timeout=600, cwd=str(ROOT))
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(list(work.iterdir()), [])
-            self.assertEqual(list((tmp / "turns").iterdir()), [])
-            data = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
-            self.assertEqual(data["status"], "finished")
-            self.assertEqual([s["label"] for s in data["snapshots"]],
-                             ["custom - 2 days", "custom - 2 days + indexes", "custom - 3 days", "custom - 3 days + indexes"])
-            for s in data["snapshots"]:
-                self.assertNotIn("error", s)
-                self.assertTrue(s["stock_check"]["ok"], s["stock_check"])
-                self.assertGreater(s["stock_check"]["movements"], 60)
-                if not s["label"].endswith("indexes"):
-                    self.assertEqual(s["backup"]["verify_problems"], [])
-                self.assertIn("complete sale", s["cashier"])
-                for name in ("unsold items (all years)", "order suggestions", "stock check (run now)",
-                             "transfers (month)", "expenses (all years)"):
-                    self.assertEqual(s["requests"][name]["status"], 200, name)
-            self.assertEqual([l.split(": ")[1] for l in data["summary"]], ["ALL PASS"] * 4)
-            self.assertIn("stock check: all balances match", out.read_text(encoding="utf-8"))
+            data, _ = self.tiny_run(Path(tmp) / "first")
+            verdicts = [l.split(": ")[1] for l in data["summary"]]
+            first = None
+            if verdicts != ["ALL PASS"] * 4 and all(v == "ALL PASS" or v.endswith(" SLOW") for v in verdicts):
+                # Only timings over their limits, nothing failed: the machine may have been busy (this failed on
+                # develop / windows on 19/11 with "2 SLOW" and every request answered). Measured once more; the
+                # gate stays what it was, every timing on this tiny pharmacy within its limit. A real regression
+                # is slow both times.
+                first = data["summary"]
+                data, _ = self.tiny_run(Path(tmp) / "second")
+            self.assertEqual([l.split(": ")[1] for l in data["summary"]], ["ALL PASS"] * 4,
+                             f"over the limits twice: first {first}, then {data['summary']}" if first else data["summary"])
+
+
+class TestScaleGate(unittest.TestCase):
+    """The decision of the test above, without running anything: slow once is measured again, slow twice or
+    anything failed is a failure."""
+
+    @staticmethod
+    def run_with(*summaries):
+        from unittest import mock
+        t = TestScale("test_tiny_run_measures_every_snapshot")
+        runs = [({"summary": [f"s{i}: {v}" for i, v in enumerate(vs)]}, "") for vs in summaries]
+        with mock.patch.object(TestScale, "tiny_run", side_effect=runs) as m:
+            t.test_tiny_run_measures_every_snapshot()
+        return m.call_count
+
+    def test_all_pass_is_measured_once(self):
+        self.assertEqual(self.run_with(["ALL PASS"] * 4), 1)
+
+    def test_slow_once_is_measured_again_and_must_then_pass(self):
+        self.assertEqual(self.run_with(["ALL PASS", "ALL PASS", "2 SLOW", "ALL PASS"], ["ALL PASS"] * 4), 2)
+
+    def test_slow_twice_fails(self):
+        with self.assertRaises(AssertionError):
+            self.run_with(["ALL PASS", "ALL PASS", "2 SLOW", "ALL PASS"], ["1 SLOW", "ALL PASS", "ALL PASS", "ALL PASS"])
+
+    def test_a_failed_request_is_not_measured_again(self):
+        with self.assertRaises(AssertionError):
+            self.run_with(["ALL PASS", "INCOMPLETE", "ALL PASS", "ALL PASS"], ["ALL PASS"] * 4)
 
 
 TURNS_WORKER = r"""

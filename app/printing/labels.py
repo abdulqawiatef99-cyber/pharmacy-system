@@ -286,7 +286,7 @@ def calibrate_job(w_mm: float, h_mm: float, gap_mm: int, dpi: int, mode: str = "
     if mode == "auto":
         return b"GAPDETECT\r\n"
     if gap_mm < 1:
-        raise PrinterError("المعايرة تحتاج مسافة بين الملصقات 1 مم على الأقل")
+        raise PrinterError("المعايرة تحتاج إلى مسافة بين الملصقات 1 مم على الأقل")
     return (f"SIZE {w_mm:g} mm,{h_mm:g} mm\r\nGAP {gap_mm} mm,0 mm\r\n"
             f"GAPDETECT {dots(h_mm, dpi)},{dots(gap_mm, dpi)}\r\n").encode("ascii")
 

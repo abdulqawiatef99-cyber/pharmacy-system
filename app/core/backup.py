@@ -6,6 +6,7 @@ A backup is ONE zip file containing:
                 (safe while the program runs — never copy the .db file by hand:
                 recent changes may still sit in the -wal file)
   uploads/...   the original invoice files (needed for audits)
+  estock-archive.sqlite.xz  the read-only E-Stock history next to the database, when there is one (F91)
   manifest.json counts + sha256 of the snapshot, for verification
 
 Restore refuses a backup that fails verification, always keeps the current
@@ -18,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import lzma
+import os
 import re
 import shutil
 import sqlite3
@@ -55,6 +57,64 @@ def _counts(db: Database) -> dict:
 
 
 XZ_PRESET = 1          # measured on a real pharmacy: 102 MB -> ~14 MB in ~4 s
+ESTOCK_ARCHIVE = "estock-archive.sqlite"     # owner data next to the database: it goes into every backup
+ARCHIVE_MEMBER = ESTOCK_ARCHIVE + ".xz"
+
+
+def _estock_archive_of(db_path) -> Path | None:
+    if str(db_path) == ":memory:":
+        return None
+    p = Path(db_path).parent / ESTOCK_ARCHIVE
+    return p if p.is_file() else None
+
+
+def _archive_xz(archive: Path, tmp: str) -> tuple[Path, str, int]:
+    """The compressed archive for a backup. It never changes after the move, so the .xz is made once and
+    kept next to it (checked by the archive's sha256 each time), not recompressed every hour."""
+    sha = _sha256(archive)
+    cache, mark = archive.with_name(ARCHIVE_MEMBER), archive.with_name(ARCHIVE_MEMBER + ".sha256")
+    try:
+        if cache.is_file() and mark.is_file() and mark.read_text(encoding="ascii").strip() == sha:
+            return cache, sha, archive.stat().st_size
+    except OSError:
+        pass
+    out = Path(tmp) / ARCHIVE_MEMBER
+    with open(archive, "rb") as src, lzma.open(out, "wb", preset=XZ_PRESET) as dst:
+        shutil.copyfileobj(src, dst, 1 << 20)
+    try:                                   # the cache is only a speed-up: a read-only folder does not stop a backup
+        shutil.copy2(out, cache.with_suffix(".part"))
+        cache.with_suffix(".part").replace(cache)
+        mark.write_text(sha, encoding="ascii")
+    except OSError:
+        pass
+    return out, sha, archive.stat().st_size
+
+
+def _extract_archive(z: zipfile.ZipFile, tmp: str) -> Path:
+    target = Path(tmp) / ESTOCK_ARCHIVE
+    with z.open(ARCHIVE_MEMBER) as member, lzma.open(member) as src, open(target, "wb") as out:
+        n = 0
+        while chunk := src.read(1 << 20):
+            n += len(chunk)
+            if n > MAX_DB_BYTES:
+                raise RuntimeError("E-Stock archive larger than the limit; not extracted")
+            out.write(chunk)
+    return target
+
+
+def _archive_problems(z: zipfile.ZipFile, manifest: dict, tmp: str) -> list[str]:
+    want = manifest.get("estock_archive")
+    if not want:
+        return []
+    if ARCHIVE_MEMBER not in z.namelist():
+        return ["the E-Stock archive is missing from the backup"]
+    try:
+        got = _extract_archive(z, tmp)
+    except (lzma.LZMAError, RuntimeError) as e:
+        return [f"E-Stock archive unreadable: {e}"]
+    if _sha256(got) != want.get("sha256"):
+        return ["E-Stock archive checksum does not match the manifest"]
+    return []
 
 
 def _sha256(path: Path) -> str:
@@ -65,16 +125,36 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+MAX_DB_BYTES = 8 * 1024 ** 3     # far above one pharmacy's database; a bigger expansion is refused (#324 X18)
+
+
 def _extract_db(z: zipfile.ZipFile, tmp: str) -> Path:
-    """Write the database of a backup (either format) to tmp/pharmacy.db."""
+    """Write the database of a backup (either format) to tmp/pharmacy.db, never more than MAX_DB_BYTES
+    (a small archive could otherwise expand until the disk is full)."""
     names = set(z.namelist())
     target = Path(tmp) / "pharmacy.db"
-    if "pharmacy.db.xz" in names:
-        with z.open("pharmacy.db.xz") as src, lzma.open(src) as xz, open(target, "wb") as out:
-            shutil.copyfileobj(xz, out, 1 << 20)
-    else:
-        z.extract("pharmacy.db", tmp)
+    with (z.open("pharmacy.db.xz") if "pharmacy.db.xz" in names else z.open("pharmacy.db")) as member, \
+            (lzma.open(member) if "pharmacy.db.xz" in names else member) as src, open(target, "wb") as out:
+        n = 0
+        while chunk := src.read(1 << 20):
+            n += len(chunk)
+            if n > MAX_DB_BYTES:
+                raise RuntimeError("backup database larger than the limit; not extracted")
+            out.write(chunk)
     return target
+
+
+def _member_of(row: dict) -> str | None:
+    """The archive member of a registered original (the layout _attachment_checks accepts), or None."""
+    org = str(row["org_id"])
+    stored = PurePosixPath(str(row["storage_path"]).replace("\\", "/"))
+    if not org or org in (".", "..") or "/" in org or "\\" in org or stored.name in ("", ".", ".."):
+        return None
+    if stored.parent.name == org:
+        return f"uploads/{org}/{stored.name}"
+    if stored.parent.name == "transfers" and stored.parent.parent.name == org:
+        return f"uploads/{org}/transfers/{stored.name}"
+    return None
 
 
 def _attachment_checks(db: Database, z: zipfile.ZipFile) -> list[tuple[dict, str | None]]:
@@ -138,7 +218,61 @@ def _attachment_problems(db: Database, z: zipfile.ZipFile) -> list[str]:
     names = z.namelist()
     if len(names) != len(set(names)):
         return ["duplicate members in backup archive"]
+    if len(names) != len({n.casefold() for n in names}):
+        # on Windows both names are one file: the checked copy could be overwritten by the other (#324 X15)
+        return ["duplicate members (differing only in letter case) in backup archive"]
     return [p for _, p in _attachment_checks(db, z) if p]
+
+
+SNAPSHOT_STEP_PAGES = 2048        # pages copied per step: 8 MB at the usual 4 KB page
+
+
+def snapshot(db: Database, dest: Path, *, pages: int = SNAPSHOT_STEP_PAGES, on_step=None) -> None:
+    """A consistent copy of the live database for a backup, written so that nobody waits for it.
+
+    Measured on a 1 GB database (scale.py, medium, one year): the one-step copy ended with a single flush of
+    the whole file, and a sale committed at that moment waited about a second for the disk (#304, F59). Here
+    the copy is made `pages` at a time and each step is flushed by itself, so no flush is big.
+    - One read snapshot is held for the whole copy. A stepped SQLite backup otherwise starts again from the
+      first page every time another connection writes, and would never finish in a working pharmacy; under
+      the snapshot it sees the database as it was at the start and sales simply go on.
+    - The copy is a temporary file that is checked (integrity_check, sha256) right after it is written, so it
+      has no journal and no forced syncs of its own; the per-step flush only keeps dirty data small.
+    `on_step(remaining, total)` is called after each step (tests)."""
+    src = db.conn
+    if src.in_transaction:            # the caller's own transaction or read snapshot: one step, as before
+        db.backup_to(dest)
+        return
+    target = sqlite3.connect(str(dest))
+    fd = None
+    try:
+        target.execute("PRAGMA journal_mode = OFF")
+        target.execute("PRAGMA synchronous = OFF")
+
+        def step(status, remaining, total):
+            nonlocal fd
+            try:
+                if fd is None:
+                    fd = os.open(str(dest), os.O_RDWR | getattr(os, "O_BINARY", 0))
+                os.fsync(fd)
+            except OSError:           # a file system that cannot flush on demand: the copy is still good
+                pass
+            if on_step:
+                on_step(remaining, total)
+
+        src.execute("BEGIN")
+        src.execute("SELECT count(*) FROM sqlite_master").fetchone()      # the read snapshot starts here
+        src.backup(target, pages=pages, progress=step)
+    finally:
+        if src.in_transaction:
+            src.execute("ROLLBACK")
+        target.close()
+        if fd is not None:
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+            os.close(fd)
 
 
 def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> Path:
@@ -152,7 +286,7 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
         n += 1
     with tempfile.TemporaryDirectory() as tmp:
         snap = Path(tmp) / "pharmacy.db"
-        db.backup_to(snap)
+        snapshot(db, snap)
         check = Database(snap)
         try:
             problems = integrity_problems(check)
@@ -163,6 +297,11 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
             raise RuntimeError("the live database failed verification; backup NOT written: " + "; ".join(problems))
         manifest = {"created_at": datetime.now().isoformat(timespec="seconds"), "counts": counts,
                     "db_sha256": _sha256(snap), "db_bytes": snap.stat().st_size, "format": 2}
+        arch = _estock_archive_of(db.path)
+        arch_xz = None
+        if arch:
+            arch_xz, arch_sha, arch_bytes = _archive_xz(arch, tmp)
+            manifest["estock_archive"] = {"sha256": arch_sha, "bytes": arch_bytes}
         xz = Path(tmp) / "pharmacy.db.xz"
         with open(snap, "rb") as src, lzma.open(xz, "wb", preset=XZ_PRESET) as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
@@ -170,6 +309,8 @@ def create(db: Database, upload_dir: Path, dest_dir: Path, *, tag: str = "") -> 
         try:
             with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(xz, "pharmacy.db.xz", compress_type=zipfile.ZIP_STORED)
+                if arch_xz:
+                    z.write(arch_xz, ARCHIVE_MEMBER, compress_type=zipfile.ZIP_STORED)
                 if upload_dir.exists():
                     for f in sorted(upload_dir.rglob("*")):
                         if f.is_file() and not f.name.endswith(".part"):
@@ -214,6 +355,7 @@ def _verify_archive(archive: Path) -> dict:
         problems = []
         if _sha256(snap) != manifest.get("db_sha256"):
             problems.append("database checksum does not match the manifest")
+        problems += _archive_problems(z, manifest, tmp)
         try:
             db = Database(snap)
             try:
@@ -287,41 +429,88 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
             shutil.rmtree(raw, ignore_errors=True)      # the verified backup replaces it
         except (RuntimeError, sqlite3.Error) as e:      # damaged live data must not block its own repair
             pre, pre_kind, pre_error = raw, "raw_copy", str(e)
+    bad = {attachment_source(p) for p in soft}
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(archive) as z:
-        for name in z.namelist():
-            if name.startswith("uploads/") and ".." not in name.split("/"):
-                z.extract(name, tmp)
+        # 1) the database is staged next to the live one and checked there; the live one is untouched so far
         src = Database(_extract_db(z, tmp))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        for suffix in ("-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-        tmp_target = db_path.with_suffix(".restoring")
-        tmp_target.unlink(missing_ok=True)
         try:
-            src.backup_to(tmp_target)
+            skip = {_member_of(dict(r)) for r in src.all("SELECT id, org_id, storage_path FROM source_files")
+                    if r["id"] in bad}
         finally:
             src.close()
-        tmp_target.replace(db_path)
-        up_src = Path(tmp) / "uploads"
-        if up_src.exists():
-            for f in up_src.rglob("*"):
-                if f.is_file():
-                    target = upload_dir / f.relative_to(up_src)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, target)
-    restored = Database(db_path)
-    try:
-        problems = integrity_problems(restored)
-        missing = []
-        for p in soft:
-            row = restored.one("SELECT filename FROM source_files WHERE id=?", (attachment_source(p),))
-            missing.append({"source_id": attachment_source(p), "filename": row["filename"] if row else None,
-                            "problem": p})
-    finally:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = db_path.with_suffix(".restoring")
+        staged.unlink(missing_ok=True)
+        src = Database(Path(tmp) / "pharmacy.db")
+        try:
+            src.backup_to(staged)
+        finally:
+            src.close()
+        restored = Database(staged)
+        try:
+            problems = integrity_problems(restored)
+            if problems:
+                raise RuntimeError("restored database failed verification: " + "; ".join(problems)
+                                   + f" — nothing replaced; previous data kept in {pre}")
+            # sessions saved in the backup (taken before a logout or a password change) would sign in
+            # again: everyone signs in anew after a restore (#324 X17)
+            with restored.transaction():
+                restored.execute("UPDATE sessions SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+                                 " WHERE revoked_at IS NULL")
+            restored.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")    # into the file that is moved below
+            missing = []
+            for p in soft:
+                row = restored.one("SELECT filename FROM source_files WHERE id=?", (attachment_source(p),))
+                missing.append({"source_id": attachment_source(p), "filename": row["filename"] if row else None,
+                                "problem": p})
+        except BaseException:
+            restored.close()
+            staged.unlink(missing_ok=True)
+            raise
         restored.close()
-    if problems:
-        raise RuntimeError("restored database failed verification: " + "; ".join(problems)
-                           + f" — previous data kept in {pre}")
+        for suffix in ("-wal", "-shm"):
+            Path(str(staged) + suffix).unlink(missing_ok=True)
+        # 2) attachments before the database: a copy that fails (locked file, full disk) leaves the live
+        # database as it was, never a restored database without its files (#324 X16). A file that failed
+        # its checksum is never installed, even when missing ones are allowed (#324 X15).
+        try:
+            for name in z.namelist():
+                if name.startswith("uploads/") and ".." not in name.split("/") and name not in skip:
+                    z.extract(name, tmp)
+            up_src = Path(tmp) / "uploads"
+            if up_src.exists():
+                for f in up_src.rglob("*"):
+                    if f.is_file():
+                        target = upload_dir / f.relative_to(up_src)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(f, target)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+        # the E-Stock history goes back with its database; one that the backup does not have is kept aside,
+        # renamed, never deleted (it is in the pre-restore backup too)
+        live_arch = db_path.parent / ESTOCK_ARCHIVE
+        try:
+            arch_new = _extract_archive(z, tmp) if info.get("estock_archive") else None
+            if arch_new and live_arch.exists() and _sha256(live_arch) == _sha256(arch_new):
+                arch_new = None                         # the same history: nothing to move
+            elif live_arch.exists():
+                live_arch.chmod(0o644)
+                aside = live_arch.with_name(f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+                live_arch.replace(aside)
+            for f in (live_arch.with_name(ARCHIVE_MEMBER), live_arch.with_name(ARCHIVE_MEMBER + ".sha256")):
+                f.unlink(missing_ok=True)
+            if arch_new:
+                shutil.copy2(arch_new, live_arch.with_suffix(".part"))
+                live_arch.with_suffix(".part").replace(live_arch)
+                live_arch.chmod(0o444)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+        # 3) only now the database itself
+        for suffix in ("-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+        staged.replace(db_path)
     return {"pre_restore_backup": str(pre) if pre else None, "pre_restore_kind": pre_kind,
             "pre_restore_error": pre_error, "missing_attachments": missing, "manifest": info}
 
@@ -343,6 +532,9 @@ def _quick_check(archive: Path) -> list[str]:
         snap = _extract_db(z, tmp)
         if _sha256(snap) != manifest.get("db_sha256"):
             return ["database checksum does not match the manifest"]
+        arch = _archive_problems(z, manifest, tmp)
+        if arch:
+            return arch
         db = Database(snap)
         try:
             return _attachment_problems(db, z)

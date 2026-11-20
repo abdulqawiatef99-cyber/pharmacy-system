@@ -95,10 +95,13 @@ class TestBackupRestore(DBTestCase):
             backup.create(self.db, self.up, self.tmp / "bk")
 
     def test_cli_backup_verify_restore(self):
-        env = {**os.environ, "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
+        # never the runner's own PHARM_DB_PATH & co. (scripts/validate_local_release.py sets them, #307)
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith("PHARM_")},
+               "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
         run = lambda *a: subprocess.run([sys.executable, "manage.py", *a], cwd=ROOT, env=env,  # noqa: E731
                                         capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026").returncode, 0)
+        r = run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         r = run("backup", "--dest", str(self.tmp / "clibk"))
         self.assertEqual(r.returncode, 0, r.stderr)
         arch = next((self.tmp / "clibk").glob("*.zip"))

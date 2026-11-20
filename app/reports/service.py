@@ -8,7 +8,8 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import cost_piasters, kept_value, local_day_bounds, local_today, retail_value
+from ..sales.service import (cost_piasters, local_day_bounds, local_today, outstanding_value, retail_value,
+                             returns_history)
 
 
 def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
@@ -65,65 +66,83 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
             "by_hour": by_hour, "top_items": top}
 
 
+# a completed sale of the period, through ix_sales_completed. CROSS JOIN keeps the invoices of the period as the
+# outer loop: left to itself the planner may start from every line an item ever had (ix_sale_lines_item)
+_SOLD = (" FROM sales s CROSS JOIN sale_lines l ON l.sale_id=s.id{allocations}"
+         " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
+         " AND s.completed_at>=? AND s.completed_at<?")
+_ALLOCATIONS = " CROSS JOIN sale_allocations a ON a.sale_line_id=l.id"
+# an invoice something was returned from. A return always writes its `sale_returns` row with the returned
+# quantities, in one transaction, also when it refunds 0.00 (a 0.01 strip), so `returned_total` alone is not enough
+_RETURNED = ("(s.returned_total > 0 OR EXISTS (SELECT 1 FROM sale_returns r WHERE r.sale_id=s.id"
+             " AND r.org_id=s.org_id))")
+
+
 def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[dict]:
     """Best-selling items: what the customers kept and what it brought in, priced the way each line was
     sold (#145). A line nothing was returned from is worth exactly its recorded total; a line with returns
-    is valued like the return screen values it (`kept_value`), so the items add up to the invoices."""
+    is valued like the return screen values it (`outstanding_value`), so the items add up to the invoices.
+
+    The database adds up per item (#304 B11: one row per sale line was a million rows for a year of a large
+    pharmacy). Only the lines of invoices with a return, and lines from before `line_total` was recorded, are
+    read one by one: only they need the return rule."""
     show_cost = ctx.can("costs.read")
     by_item: dict[str, dict] = {}
-    partial: list[tuple[dict, dict]] = []
-    for r in db.all(
-            "SELECT l.id, l.item_id, l.discount_bp, l.line_total, sum(a.qty_base - a.returned_qty) qty,"
-            " sum(a.returned_qty) returned, sum(a.unit_cost IS NULL) unknown"
-            " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
-            " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
-            " AND s.completed_at>=? AND s.completed_at<? GROUP BY l.id", p):
-        d = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "qty": 0, "revenue": 0, "unknown": 0})
-        d["qty"] += r["qty"]
-        d["unknown"] += r["unknown"]
-        if r["returned"] == 0 and r["line_total"] is not None:
-            d["revenue"] += r["line_total"]
+
+    def of(item_id: str) -> dict:
+        return by_item.setdefault(item_id, {"item_id": item_id, "qty": 0, "revenue": 0, "unknown": 0, "costs": []})
+
+    # 1. what was kept and at which recorded cost: one row per item and cost (exact: the stored decimal unit
+    #    costs, never SQLite REAL). Every completed line has at least one allocation, so every item sold is here
+    for r in db.all("SELECT l.item_id, a.unit_cost, sum(a.qty_base - a.returned_qty) q, count(*) n"
+                    + _SOLD.format(allocations=_ALLOCATIONS) + " GROUP BY l.item_id, a.unit_cost", p):
+        d = of(r["item_id"])
+        d["qty"] += r["q"]
+        if r["unit_cost"] is None:
+            d["unknown"] += r["n"]
         else:
-            partial.append((d, dict(r)))
-    if partial:              # one read for the sales with returns (same period and organization), not one per line
-        want = {l["id"] for _, l in partial}
-        cols = "a.sale_line_id, a.id, a.qty_base, a.returned_qty, a.unit_price, a.pack_price, a.pack_size"
-        allocs_of: dict[str, list[dict]] = {}
-        for a in db.all(
-                f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
-                " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
-                " AND s.completed_at>=? AND s.completed_at<? AND (s.returned_total > 0 OR l.line_total IS NULL)", p):
-            if a["sale_line_id"] in want:
-                allocs_of.setdefault(a["sale_line_id"], []).append(dict(a))
-        for lid in want - allocs_of.keys():  # a return that refunded nothing (a 0.01 strip): rare, read it alone
-            allocs_of[lid] = [dict(a) for a in db.all(
-                f"SELECT {cols} FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
-                " WHERE a.sale_line_id=? AND l.org_id=?", (lid, ctx.org_id))]
-        for d, l in partial:
-            allocs = allocs_of[l["id"]]
-            kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-            d["revenue"] += kept_value(allocs, kept, l["discount_bp"], l["line_total"])
-    ranked = sorted(by_item.values(), key=lambda d: d["revenue"], reverse=True)[:limit]
+            d["costs"].append((r["unit_cost"], r["q"]))
+    # 2. the money of the invoices nothing was returned from: their lines' recorded totals, one row per item
+    legacy = False
+    for r in db.all("SELECT l.item_id, sum(l.line_total) revenue, sum(l.line_total IS NULL) no_total"
+                    + _SOLD.format(allocations="") + f" AND NOT {_RETURNED} GROUP BY l.item_id", p):
+        of(r["item_id"])["revenue"] += r["revenue"] or 0
+        legacy = legacy or bool(r["no_total"])
+    # 3. line by line: the invoices with a return, and (rare, sales from before 0.4) lines without a recorded total
+    cols = ("l.id line_id, l.sale_id, l.item_id, l.discount_bp, l.line_total, a.id, a.rowid rid, a.qty_base,"
+            " a.returned_qty, a.unit_price, a.pack_price, a.pack_size")
+    one_by_one = [f" AND {_RETURNED}"] + ([f" AND NOT {_RETURNED} AND l.line_total IS NULL"] if legacy else [])
+    lines: dict[str, list[dict]] = {}
+    for where in one_by_one:
+        for a in db.all(f"SELECT {cols}" + _SOLD.format(allocations=_ALLOCATIONS) + where, p):
+            lines.setdefault(a["line_id"], []).append(dict(a))
+    partial = [allocs for allocs in lines.values()
+               if allocs[0]["line_total"] is None or any(a["returned_qty"] for a in allocs)]
+    history = returns_history(db, ctx.org_id, {allocs[0]["sale_id"] for allocs in partial}) if partial else {}
+    for allocs in lines.values():
+        l = allocs[0]
+        if l["line_total"] is not None and not any(a["returned_qty"] for a in allocs):
+            of(l["item_id"])["revenue"] += l["line_total"]     # an untouched line of an invoice with a return
+            continue
+        kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+        of(l["item_id"])["revenue"] += outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["line_id"],
+                                                         history.get(l["sale_id"], []))
+    # equal money: by item id, so the fiftieth place does not depend on the order the database answered in
+    ranked = sorted(by_item.values(), key=lambda d: (-d["revenue"], d["item_id"]))[:limit]
     names = {r["id"]: dict(r) for r in db.all(
-        "SELECT id, name_en, name_ar, pack_size, base_unit_name FROM items WHERE org_id=? AND id IN (%s)"
+        "SELECT id, name_en, name_ar, pack_size, base_unit_name, hidden FROM items WHERE org_id=? AND id IN (%s)"
         % ",".join("?" * len(ranked)), (ctx.org_id, *[d["item_id"] for d in ranked]))} if ranked else {}
-    cost: dict[str, Decimal] = {}
-    if show_cost and ranked:     # exact: the stored decimal unit costs, one row per item and cost, never SQLite REAL
-        for r in db.all(
-                "SELECT l.item_id, a.unit_cost, sum(a.qty_base - a.returned_qty) q"
-                " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
-                " WHERE s.org_id=? AND l.org_id=s.org_id AND s.branch_id=? AND s.status='completed'"
-                " AND s.completed_at>=? AND s.completed_at<? AND a.unit_cost IS NOT NULL AND l.item_id IN (%s)"
-                " GROUP BY l.item_id, a.unit_cost" % ",".join("?" * len(ranked)), (*p, *[d["item_id"] for d in ranked])):
-            cost[r["item_id"]] = cost.get(r["item_id"], Decimal(0)) + Decimal(r["unit_cost"]) * r["q"] * 100
     top = []
     for d in ranked:
         i = names.get(d["item_id"], {})
+        if i.get("hidden") and not ctx.can("items.hidden"):
+            i = {**i, "name_en": "—", "name_ar": None}       # masked as in Invoices (#324 R7)
         out = {"item_id": d["item_id"], "name_en": i.get("name_en"), "name_ar": i.get("name_ar"),
                "pack_size": i.get("pack_size"), "base_unit_name": i.get("base_unit_name"),
                "qty": d["qty"], "revenue": d["revenue"]}
         if show_cost and not d["unknown"]:
-            out["profit"] = d["revenue"] - cost_piasters(cost.get(d["item_id"], Decimal(0)))
+            cost = sum((Decimal(c) * q * 100 for c, q in d["costs"]), Decimal(0))
+            out["profit"] = d["revenue"] - cost_piasters(cost)
         top.append(out)
     return top
 
@@ -149,9 +168,13 @@ def stock_report(db: Database, ctx: Context, today: date | None = None) -> dict:
         # cost summed in Decimal from the stored decimal cost (not SQLite REAL) and rounded once per category
         # by the sale's cost rule; retail priced per balance row by the sale's own pricing rule (exact integers)
         cats: dict[str, list] = {}
+        # the price of the lot when it has its own (an older pack bought before a price rise is still sold at
+        # its printed price): the item's current price for every pack overstated the stock against the sale
+        # screen and the expiry list above (#324 R4)
         for r in db.all("SELECT coalesce(c.name, 'بدون قسم') category, i.id item_id, sb.qty, ic.avg_cost,"
-                        " coalesce(i.public_price,0) price, i.pack_size"
+                        " coalesce(b.public_price, i.public_price, 0) price, i.pack_size"
                         " FROM stock_balances sb JOIN items i ON i.id=sb.item_id LEFT JOIN categories c ON c.id=i.category_id"
+                        " LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
                         " LEFT JOIN item_costs ic ON ic.item_id=i.id AND ic.org_id=sb.org_id AND ic.branch_id=sb.branch_id"
                         " WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0", (ctx.org_id, ctx.branch_id)):
             g = cats.setdefault(r["category"], [Decimal(0), {}])
@@ -188,7 +211,7 @@ def home(db: Database, ctx: Context) -> dict:
     sh = db.one("SELECT id, opened_at FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'", (ctx.org_id, ctx.branch_id))
     out["shift_open"] = bool(sh)
     if not sh:
-        out["alerts"].append({"level": "warning", "text": "لا توجد وردية مفتوحة — البيع النقدي متوقف", "link": "#/shift"})
+        out["alerts"].append({"level": "warning", "text": "لا يوجد شيفت مفتوح — البيع النقدي متوقف", "link": "#/shift"})
     if ctx.can("inventory.read"):
         soon = (today + timedelta(days=30)).isoformat()
         n = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=? AND sb.branch_id=?"

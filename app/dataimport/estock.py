@@ -83,7 +83,7 @@ def _whole(v) -> int | None:
 def _check(label: str, got: Decimal, printed) -> None:
     if printed is None or abs(got - _dec(printed)) > _TOL:
         raise ValidationFailed(f"إجمالي {label} في الملف ({printed}) لا يساوي مجموع الأسطر ({got})؛"
-                               " الملف ناقص أو متعدل", code="estock_totals_mismatch")
+                               " الملف ناقص أو معدَّل", code="estock_totals_mismatch")
 
 
 def parse_catalog(rows: list[list]) -> list[list]:
@@ -100,15 +100,26 @@ def parse_catalog(rows: list[list]) -> list[list]:
     return out
 
 
+def store_key(name) -> str:
+    """Store names compared the way people write them: «الصيدلية» = «الصيدليه» = « الصــيدليّة »
+    (ta marbuta / ha, alef and ya forms, tatweel, diacritics, spaces; #324 S10)."""
+    return _n(name).replace(" ", "")
+
+
 def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[list], dict]:
     """Stock-by-expiry report → one row per batch. Returns (table, summary).
-    `stores`: store names to keep (None = all). Totals are verified per store
-    and for the whole file before filtering."""
+    `stores`: store names to keep (None = all), compared by `store_key`. Totals are verified per store
+    and for the whole file before filtering. A selection that keeps no row of a file that has stock, or
+    names a store the file does not have, is refused (it used to import zero stock and pass, #324 S10).
+    The same batch (code, expiry, cost) in two selected stores is one batch on our shelf: the rows are
+    added together (the second one was dropped as a duplicate, #324 S11)."""
     out = [STOCK_HEADER]
     summary: dict = {"stores": {}}
     store = None
     acc: dict[str, dict] = {}
     grand = None
+    wanted = {store_key(x) for x in stores} if stores is not None else None
+    merged: dict[tuple, int] = {}          # (code, expiry, cost) -> index in out, across stores only
     for r in rows:
         r = list(r) + [None] * 15
         if _n(r[1]) == _n("اسم المخزن"):
@@ -124,8 +135,15 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
             a["items"].add(code)
             a["cost"] += _dec(r[2])
             a["sale"] += _dec(r[1])
-            if stores is None or store in stores:
-                out.append([store, code, r[9], r[8], qty, cost, _expiry(r[6])])
+            if wanted is None or store_key(store) in wanted:
+                key = (code, _expiry(r[6]), _dec(cost) if _is_num(cost) else cost)
+                i = merged.get(key)
+                if i is not None and store not in out[i][0].split(" + "):
+                    out[i][0] += " + " + store
+                    out[i][4] = str(_dec(out[i][4]) + _dec(qty))
+                else:
+                    merged[key] = len(out)
+                    out.append([store, code, r[9], r[8], qty, cost, _expiry(r[6])])
         elif _n(r[1]) == _n("إجمالى البيع") and store:
             acc[store]["closed"] = True
             _check(f"بيع مخزن {store}", acc[store]["sale"], r[0])
@@ -135,7 +153,7 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
         elif _n(r[0]) == _n("إجمالى جميع المخازن"):
             grand = r
     if not acc:
-        raise ValidationFailed("مفيش مخازن في الملف", code="estock_layout")
+        raise ValidationFailed("لا توجد مخازن في الملف", code="estock_layout")
     # a file cut off at the end has no total line for its last store and no grand total (#116)
     open_ = [s for s, a in acc.items() if not a.get("closed")]
     if open_:
@@ -144,6 +162,15 @@ def parse_stock(rows: list[list], stores: set[str] | None = None) -> tuple[list[
         raise ValidationFailed("سطر «إجمالى جميع المخازن» ناقص؛ الملف ناقص", code="estock_totals_mismatch")
     _check("بيع كل المخازن", sum((a["sale"] for a in acc.values()), Decimal(0)), grand[1])
     _check("تكلفة كل المخازن", sum((a["cost"] for a in acc.values()), Decimal(0)), grand[3])
+    if wanted is not None:
+        in_file = "، ".join(acc)
+        if len(out) == 1 and any(a["rows"] for a in acc.values()):
+            raise ValidationFailed(f"مفيش ولا تشغيلة في المخزن المختار؛ المخازن اللي في الملف: {in_file}",
+                                   code="estock_no_rows_for_store", details={"stores_in_file": list(acc)})
+        missing = [x for x in stores if store_key(x) not in {store_key(k) for k in acc}]
+        if missing:
+            raise ValidationFailed(f"المخزن «{missing[0]}» مش موجود في الملف؛ المخازن اللي في الملف: {in_file}",
+                                   code="estock_store_not_in_file", details={"stores_in_file": list(acc)})
     for s, a in acc.items():
         summary["stores"][s] = {"batches": a["rows"], "items": len(a["items"]),
                                 "cost": str(a["cost"].quantize(Decimal("0.01"), ROUND_HALF_UP)),
@@ -186,12 +213,12 @@ def parse_purchases(rows: list[list]) -> tuple[list[dict], dict]:
             sup = str(r[0]).strip()
         elif r[0] == "الموظف":
             if not isinstance(r[13], (datetime, date)):
-                raise ValidationFailed("تاريخ فاتورة مش مفهوم في تقرير المشتريات", code="estock_layout")
+                raise ValidationFailed("تاريخ فاتورة غير مفهوم في تقرير المشتريات", code="estock_layout")
             when = r[13] if isinstance(r[13], datetime) else datetime(r[13].year, r[13].month, r[13].day)
             inv = (sup, str(r[22]))
             n = _whole(r[20] if r[20] is not None else 0)
             if n is None:
-                raise ValidationFailed("عدد أصناف فاتورة مش مفهوم في تقرير المشتريات", code="estock_layout")
+                raise ValidationFailed("عدد أصناف فاتورة غير مفهوم في تقرير المشتريات", code="estock_layout")
             expected[inv] = n
         elif isinstance(r[12], int) and _is_num(r[8]):
             if inv is None:
@@ -200,10 +227,10 @@ def parse_purchases(rows: list[list]) -> tuple[list[dict], dict]:
             lines.append({"supplier": sup, "date": when, "invoice": inv[1], "code": r[12], "name": r[11],
                           "qty": r[8], "bonus": r[7], "cost": r[3], "adjustment": sup == "جرد"})
     if not expected:
-        raise ValidationFailed("مفيش فواتير في الملف", code="estock_layout")
+        raise ValidationFailed("لا توجد فواتير في الملف", code="estock_layout")
     bad = [k for k, n in expected.items() if got.get(k, 0) != n]
     if bad:
-        raise ValidationFailed(f"عدد أصناف {len(bad)} فاتورة مش مطابق لرأسها؛ الملف ناقص",
+        raise ValidationFailed(f"عدد أصناف {len(bad)} فاتورة لا يطابق رأسها؛ الملف ناقص",
                                code="estock_totals_mismatch")
     dates = [x["date"] for x in lines]              # always datetime (a date-only cell is widened above)
     return lines, {"invoices": len(expected), "lines": len(lines),           # invoices may all be empty
@@ -220,7 +247,7 @@ def normalize(rows: list[list], kind: str, options: dict | None = None) -> list[
         stores = (options or {}).get("estock_stores")
         return parse_stock(rows, set(stores) if stores else None)[0]
     if rep is not None:
-        raise ValidationFailed("تقرير E-Stock ده مش مناسب لنوع الاستيراد المختار",
+        raise ValidationFailed("تقرير E-Stock هذا غير مناسب لنوع الاستيراد المختار",
                                code="estock_wrong_report", details={"report": rep, "kind": kind})
     return None
 
