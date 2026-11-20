@@ -119,3 +119,78 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         st = releases.read_state(self.home)
         self.assertEqual((st["active"]["id"], st["pending"]), (p["release"], False))   # batch 1's code again
         self.assertEqual(releases.read_journal(self.home)["state"], "rolled_back")
+
+
+class TestCleanInstallThenUpdate(TestLastInstallerRehearsal):
+    """Owner 20/11 23:54 (D): a friend installs the same installer as a model customer, with no data at all.
+    The installed program starts on an empty data folder, the first-run screen creates a new pharmacy, and the
+    button then delivers a batch with a migration to that fresh pharmacy the same way."""
+
+    def test_migration_package_and_updater_change_through_the_button_then_auto_rollback(self):
+        pass                                     # the parent's scenario; not repeated here
+
+    def serve_fresh(self):
+        import socket
+        import time
+        import urllib.request
+        for f in list(self.data.iterdir()):      # nothing from setUp's init: a PC that never had the program
+            if f.is_file():
+                f.unlink()
+            else:
+                import shutil
+                shutil.rmtree(f)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {**os.environ, "PHARM_DATA_DIR": str(self.data), "PYTHONUTF8": "1"}
+        for k in ("PHARM_DB_PATH", "PHARM_UPLOAD_DIR", "PHARM_BACKUP_DIR", "PHARM_DEPS_DIR", "PHARM_LAUNCHER"):
+            env.pop(k, None)
+        proc = subprocess.Popen([sys.executable, str(self.legacy / "manage.py"), "serve", "--port", str(port),
+                                 "--host", "127.0.0.1"], cwd=str(self.app_home), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (proc.poll() is None and proc.terminate(), proc.wait(timeout=30)))
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(240):
+            try:
+                with urllib.request.urlopen(base + "/api/health", timeout=2) as r:
+                    if r.status == 200:
+                        break
+            except OSError:
+                time.sleep(0.25)
+        else:
+            self.fail("the fresh install did not start")
+        return proc, base
+
+    def test_empty_install_creates_a_pharmacy_then_takes_a_database_update(self):
+        import http.cookiejar
+        import urllib.request
+        proc, base = self.serve_fresh()
+        jar = http.cookiejar.CookieJar()
+        web = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        def call(method, path, body=None):
+            req = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body else None,
+                                         headers={"Content-Type": "application/json", "X-Requested-With": "pharm"})
+            with web.open(req, timeout=30) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        self.assertTrue(call("GET", "/api/setup")[1]["needed"])                     # first run screen
+        status, _ = call("POST", "/api/setup", {"pharmacy": "صيدلية العميل النموذجي", "username": "owner",
+                                                "password": "Model-Customer-2026"})
+        self.assertEqual(status, 201)
+        self.assertEqual(call("GET", "/api/me")[0], 200)                             # signed in
+        self.assertFalse(call("GET", "/api/setup")[1]["needed"])
+        proc.terminate()
+        proc.wait(timeout=30)
+        (self.app_home / "logs").mkdir(exist_ok=True)
+        releases.write_capability(self.home)                 # what the installed launcher writes at each start
+        self.add_migration()
+        self.build()
+        p = su.prepare(self.s, su.FolderSource(self.bundle), legacy=self.legacy)
+        self.assertTrue(p["needs_db"])
+        self.press_update_now()
+        self.launcher_settles()
+        self.assertIn("smart_update_probe", self.tables())
+        con = sqlite3.connect(self.s.db_path)
+        try:
+            self.assertEqual(con.execute("SELECT name FROM organizations").fetchone()[0], "صيدلية العميل النموذجي")
+        finally:
+            con.close()
