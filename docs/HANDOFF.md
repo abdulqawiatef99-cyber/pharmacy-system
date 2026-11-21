@@ -8,6 +8,14 @@
 
 
 
+## 22/11 night — UPDATE-2 worker session (READ THIS FIRST; newest line last)
+Base develop @ `88cb658`. One PR per group, independent agent review before Codex (OWNER_RULES §12). Nothing merged into main, no installer.
+- U2-36 smart order: PR #402 `claude/u2-36-smart-order`. Independent review: no P0, P1 + P2s fixed. Full suite running.
+- U2-0 refusals + OWNER_RULES §13: PR #403 `claude/u2-0-refusals`. Independent review: 3 P1 fixed (`7f47a38`). Two new permissions (`sales.refund_other_method`, `suppliers.pay_advance`).
+- Shift U2-26/28/29/30: branch `claude/u2-shift` (local worktree /home/user/wt-shift, not pushed yet). Independent review running. U2-27 (silent printing) not started: it touches `app/printing/`, which a session must not merge (OWNER_RULES §10). U2-31 (two drawers, each with its own shift) not started: today one open shift per branch (unique index), so it needs a migration.
+- POS U2-11/12/13/18/25/32/34/35: branch `claude/u2-pos` (worktree /home/user/wt-pos). Independent review running. U2-23/U2-24 (receipt) touch `app/printing/`. U2-14 rounding and U2-33 (below cost refused) change money rules: not started.
+- Git note: commits work only with short one-line messages (the auto-mode check refused long multi-line messages and `--amend`). Push one branch per command.
+
 ## 21/11 Cairo — update 1 (launch-day fixes, through the «تحديث» button) (READ THIS FIRST)
 State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and installed, E-Stock moved, the pharmacy is LIVE since 18:04. Owner 19:14 «توكل على الله ونفذ» + 19:39 additions (8b, 10). Branch `claude/update-1`, one PR into develop, then a release PR into main (the owner merges; he stops selling for the 1-2 minutes of the update).
 1. E-Stock import: `Products.deleted='1'` is normal on live rows (30,269 of 30,508): inactive = active '0' OR deleted '0'; reconciliation also compares active counts. The live PC was already fixed by a one-off script (same result). This most likely also explains «3796 found nothing» (the item was inactive then). Customers/suppliers still read `deleted` the old way (no data says otherwise): check on the PC.
