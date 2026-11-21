@@ -8,6 +8,13 @@
 
 
 
+## 21/11 15:00 Cairo — signing key settled (outcome b), all of part 3 merged into develop (READ THIS FIRST)
+1. Key: the owner's 10:28 "primary" line matched no committed key (run 44896903157 attempt 1: `signature does not match a trusted key`). He put the spare back at 13:16; attempt 2: `signed with release_keys/update-2-spare.pub`. Owner's choice: the spare becomes the signing key. #391 `29fae69`/`46c86ec`: `update-2-spare.pub` → `release_keys/update-2.pub` (same key), `update-1.pub` removed; dry run on #391: `signed with release_keys/update-2.pub` (run 44900092464).
+2. Merged into develop in order (merge commits, CI linux green and Codex clean on each head; independent agent review before each new Codex request): #386 `0de88f1` → #391 `d5780f8` → #392 `46dd9dd` → #394 `bed7f10` → #395 `64046ae` → #396 `17a8079`. #397 closed (review only). Nothing on main, no installer.
+3. Return window back to **14 days** (owner 10:17), inside #396 `4da91a7` (+`77e8ffb` texts); Settings still changes it.
+4. **Before any main merge or installer:** owner runs `new-signing-key.bat` (new spare to `F:\pharmacy-update-keys`), an agent commits `release_keys/update-3.pub`; add a CI guard refusing main with fewer than 2 keys (independent review P2). Installer PR: `MinVersion=10.0`, `ArchitecturesAllowed=x64compatible`.
+5. Open P2s (after launch): #392 rehearsal test gaps (listed on #392); same-item replacement beyond stock (#397); old by-lot bonus partial return (#310); Chrome Ctrl+Tab/F11 (P3-K1).
+
 ## 21/11 06:10 Cairo — part 3 done in code, waiting for the key and the merges (READ THIS FIRST)
 Stack (nothing merged, nothing published, no main, no installer): develop ← #386 `claude/smart-update` ← #391 ← #392 `claude/p3-1-last-installer-rehearsal` ← **#394** `claude/p3-2-balance-correction` @ `7bdd8e4` ← **#395** `claude/p3-3-move-report` @ `d5cf5a4` ← **#396** `claude/p3-6-returns-permissions-keys` @ `973ea72`. #397 = the same top as one diff, **review only, close it after #396 merges**. Merge order: #386 → #391 → #392 → #394 → #395 → #396 (re-target each to develop as the one below merges; merge commits).
 1. Done, with evidence
