@@ -319,9 +319,11 @@ def add_user(db: Database, ctx: Context, *, username: str, full_name: str, passw
 
 
 # -------------------------------------------------------------------------- screen preferences
-PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both", "help": "on"}
+PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both", "help": "on",
+                 "logout_confirm": "on"}
 _PREF_CHOICES = {"theme": ("light", "dark", "contrast"), "font": ("s", "m", "l", "xl"),
-                 "lang": ("ar", "en"), "names": ("both", "en", "ar"), "help": ("on", "off")}
+                 "lang": ("ar", "en"), "names": ("both", "en", "ar"), "help": ("on", "off"),
+                 "logout_confirm": ("on", "off")}
 
 
 def _luminance(hex6: str) -> float:

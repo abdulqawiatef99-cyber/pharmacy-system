@@ -641,6 +641,9 @@ class Sales:
                          "sale_note": item.get("sale_note"), "is_service": bool(item.get("is_service")),
                          "hide_on_receipt": bool(item.get("hide_on_receipt")),
                          "mark": cat["mark"] if cat else None, "no_return": bool(cat["no_return"]) if cat else False}
+            if s["status"] == "draft" and not item["is_service"] and ctx.can("inventory.read"):
+                # U2-12: what the shelf holds now (sellable units), shown plain on the line
+                l["item"]["stock"] = self._held(ctx, s["branch_id"], l["item_id"])[0]
             if s["status"] == "draft":
                 try:
                     plan = self._plan(ctx, s, l, item, used)
