@@ -148,6 +148,7 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
     if len(found) < limit and "%" not in q:
         exact = bool(found)
         for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
+            row["match"] = "spelling"            # per row: the hint is decided again after a stock filter (Codex #400)
             found.setdefault(row["id"], row)
         if found and not exact:
             hint = {"kind": "spelling"}          # a guess by spelling: Enter on the sale screen never adds it alone

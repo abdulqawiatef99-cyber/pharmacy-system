@@ -141,3 +141,18 @@ class CodexStockBeyondTheFirstMatches(APICase):
         self.http_login()
         r = self.c.get("/api/items?q=testzz&limit=8&meta=1&stock=only", headers=H).json()
         self.assertEqual([i["id"] for i in r["items"]], [far])
+
+
+class CodexReview400Round2(APICase):
+    def test_spelling_hint_survives_the_stock_filter(self):
+        exact = cat.create_item(self.db, self.ctx, {"name_ar": "بيكتول 250 كريم", "name_en": "Testbek A", "public_price": 1000})
+        guess = cat.create_item(self.db, self.ctx, {"name_ar": "بكتول 250 كريم", "name_en": "Testbek B", "public_price": 1000})
+        with self.db.transaction():
+            bt = inv.get_or_create_batch(self.db, self.ctx, guess, "B1", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=guess, qty_delta=4, batch_id=bt, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        self.http_login()
+        r = self.c.get("/api/items?q=بيكتول 250&limit=8&meta=1&stock=only", headers=H).json()
+        self.assertEqual([i["id"] for i in r["items"]], [guess])
+        self.assertEqual(r["hint"], {"kind": "spelling"})
+        self.assertNotIn(exact, [i["id"] for i in r["items"]])

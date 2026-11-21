@@ -1592,8 +1592,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 hidden_no_stock = sum(not has(r) for r in rows)
                 rows = [r for r in rows if has(r)]
         rows = rows[:limit]
+        hint = res["hint"]
+        if not hint and rows and all(r.get("match") == "spelling" for r in rows):
+            hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
         if req.query_params.get("meta") == "1":
-            return J({"items": rows, "hint": res["hint"], "hidden_no_stock": hidden_no_stock})
+            return J({"items": rows, "hint": hint, "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler
