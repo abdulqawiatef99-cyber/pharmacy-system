@@ -1,12 +1,24 @@
 # HANDOFF — الحالة الحالية
 
-آخر تحقق: 2026-11-21 · Claude · `develop` @ `17a8079` (part 3 merged: #386 #391 #392 #394 #395 #396; CI linux + windows أخضر). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
+آخر تحقق: 2026-11-21 · Claude · `develop` @ `6e48238`, `main` @ `f2af5bd` (v0.4.0 released, the pharmacy is live; update 1 in progress). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **73.25%**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
 
 
 
+
+## 21/11 Cairo — update 1 (launch-day fixes, through the «تحديث» button) (READ THIS FIRST)
+State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and installed, E-Stock moved, the pharmacy is LIVE since 18:04. Owner 19:14 «توكل على الله ونفذ» + 19:39 additions (8b, 10). Branch `claude/update-1`, one PR into develop, then a release PR into main (the owner merges; he stops selling for the 1-2 minutes of the update).
+1. E-Stock import: `Products.deleted='1'` is normal on live rows (30,269 of 30,508): inactive = active '0' OR deleted '0'; reconciliation also compares active counts. The live PC was already fixed by a one-off script (same result). This most likely also explains «3796 found nothing» (the item was inactive then). Customers/suppliers still read `deleted` the old way (no data says otherwise): check on the PC.
+2. A number field showing 0 is selected on focus (every screen). 3. POS line price = the sold unit's price. 7. «العميل دفع» disabled on an empty invoice.
+4. Fixed EGP line discount + one invoice discount (EGP or %), largest remainder, shares stored; returns/reports use them; limits as for % (checked again at completion). **Migration 0041** (sale_lines.discount_amount / invoice_share, sales.invoice_discount_*, purchase_invoices.serial_no + backfill): ships through the smart update.
+5. Search: exact code / E<code> first; Arabic spelling key (بكتول/بيكتول, ى/ي, ة/ه) for items and customers; POS stock first, zero stock hidden with «اعرض» (per PC); empty search box after reload.
+6. Safety: a strip of a box is a normal sale; «no data» notes never stop the sale.
+8/8b. Purchases: «رقم فاتورة المورد», program serial, «تاريخ فاتورة المورد» (starts today) + «تاريخ الإدخال على السيستم» (+ approval time), Cairo time, list search/sort.
+9. Launch scripts: password asked once (env var, never the command line), a stray Enter asks again, English console prompts (Arabic in Notepad), fresh start lists the sales after an import and goes on only on YES.
+10. «اشرح الشاشة دي» on every screen (tour or help text), test fails on a route without help.
+Not done / for the device check: the cmd `???` fix is by design (English console, Arabic in Notepad), not seen on the PC yet; Uninstall once on the device test (#18).
 
 ## 21/11 Cairo — launch-final session: last installer guard, spare key, release PR (READ THIS FIRST)
 1. State: part 3 merged into develop: #386 → #391 → #392 → #394 → #395 → #396, develop @ `17a8079`, CI linux + windows green on it (checked by the manager). #397 closed (review only).
