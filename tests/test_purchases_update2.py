@@ -99,3 +99,40 @@ class TestQuickAddKeyboard(APICase):
         self.assertEqual((out["f1"], out["f2"], out["f3"]), ("qaQty", "qaBonus", "qaBatch"))
         self.assertIn("11/2028", out["see"])
         self.assertEqual(out["rows"], 1)
+
+
+class TestDuplicates(PurchaseBase):
+    def add(self, inv_id, **kw):
+        line = {"item_id": self.item, "qty": 2, "public_price": "10", "discount_pct": "20", "unit_net_price": "8",
+                "batch_no": "B1", "expiry_date": (date.today() + timedelta(days=700)).isoformat(), **kw}
+        return self.p.add_line(self.ctx, inv_id, line, None)
+
+    def issue(self, d, code):
+        return next((i for i in d["issues"] if i["code"] == code), None)
+
+    def test_kinds_and_merge(self):
+        inv_id = self.draft(qty=3, expiry=(date.today() + timedelta(days=700)).isoformat())
+        d = self.add(inv_id)
+        dup = self.issue(d, "duplicate_line")
+        self.assertTrue(dup["details"]["mergeable"])
+        d = self.p.merge_lines(self.ctx, inv_id, dup["details"]["other_line"], dup["line_id"], None)
+        self.assertEqual([(l["qty"], l["bonus_qty"]) for l in d["lines"]], [(5, 0)])
+        self.assertIsNone(self.issue(d, "duplicate_line"))
+
+    def test_other_expiry_is_information_only(self):
+        inv_id = self.draft(qty=3, expiry=(date.today() + timedelta(days=700)).isoformat())
+        d = self.add(inv_id, expiry_date=(date.today() + timedelta(days=800)).isoformat(), batch_no="B2")
+        i = self.issue(d, "same_item_other_expiry")
+        self.assertEqual(i["level"], "info")
+        from app.core.errors import ValidationFailed
+        with self.assertRaises(ValidationFailed):                    # two real lots are never merged
+            self.p.merge_lines(self.ctx, inv_id, i["details"]["other_line"], i["line_id"], None)
+
+    def test_no_batch_wording_and_price_difference_not_mergeable(self):
+        inv_id = self.p.create_manual(self.ctx)
+        exp = (date.today() + timedelta(days=700)).isoformat()
+        self.add(inv_id, batch_no=None, expiry_date=exp)
+        d = self.add(inv_id, batch_no=None, expiry_date=exp, discount_pct="25", unit_net_price="7")
+        i = self.issue(d, "duplicate_line_no_batch")
+        self.assertIn("من غير تشغيلة", i["message"])
+        self.assertFalse(i["details"]["mergeable"])

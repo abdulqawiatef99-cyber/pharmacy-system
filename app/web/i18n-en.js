@@ -3045,4 +3045,10 @@ window.I18N_EN = {
 "اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف": "Type the total printed at the bottom of the supplier's paper; the program compares it with the lines",
 "الفرق 0 قرش (0 ج)": "Difference 0 piasters (0 EGP)",
 "✓ مطابق بالقرش": "✓ Matches to the piaster",
+"دمج السطرين": "Merge the two lines",
+"(صلاحية 0/00)": "(expiry 0/00)",
+"· ⚠ الصنف ده موجود في 0: لو نفس الصلاحية والتشغيلة زوّد الكمية هناك": "· ⚠ This item is already on 0: if it is the same expiry and batch, raise the quantity there",
+"، تشغيلة 0": ", batch 0",
+"، من غير تشغيلة": ", no batch",
+"دمج السطرين في سطر واحد؟ الكميات والبونص بيتجمعوا.": "Merge the two lines into one? Quantities and bonus are added.",
 };

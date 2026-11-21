@@ -578,6 +578,34 @@ class Purchasing:
                          before=dict(line))
         return self.get(ctx, inv_id)
 
+    def merge_lines(self, ctx: Context, inv_id: str, line_id: str, other_id: str, version: int | None) -> dict:
+        """U2-3: two lines of the same item, batch, expiry and prices become one (quantities, bonus, totals and
+        tax added). Anything that differs is refused: those are two real lots, not a duplicate."""
+        ctx.require("purchases.edit")
+        with self.db.transaction():
+            self._draft_for_update(ctx, inv_id, version)
+            a, b = (self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=? AND org_id=?",
+                                (x, inv_id, ctx.org_id)) for x in (line_id, other_id))
+            if not a or not b or line_id == other_id:
+                raise NotFound("السطر غير موجود")
+            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date")
+            if not a["item_id"] or any(a[k] != b[k] for k in keys) or \
+                    (a["batch_no"] or "").strip().upper() != (b["batch_no"] or "").strip().upper():
+                raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر): مينفعش يتدمجوا",
+                                       code="not_mergeable")
+            add = lambda x, y: None if x is None or y is None else x + y   # noqa: E731
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=? WHERE id=?",
+                            (add(a["qty"], b["qty"]), (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0),
+                             add(a["line_total"], b["line_total"]),
+                             None if a["tax_amount"] is None and b["tax_amount"] is None
+                             else (a["tax_amount"] or 0) + (b["tax_amount"] or 0), line_id))
+            self.db.execute("DELETE FROM purchase_invoice_lines WHERE id=?", (other_id,))
+            self._refresh_totals(ctx, inv_id)
+            self._bump(inv_id)
+            audit.record(self.db, ctx, "purchase.line_merge", "purchase_invoice", inv_id,
+                         before={"kept": dict(a), "merged": dict(b)})
+        return self.get(ctx, inv_id)
+
     def create_item_from_line(self, ctx: Context, inv_id: str, line_id: str, item: dict,
                               version: int | None, force: bool = False) -> dict:
         """New product the pharmacy never stocked: create it and link the line."""

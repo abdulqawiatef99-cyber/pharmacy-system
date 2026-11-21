@@ -46,7 +46,9 @@ MESSAGES = {
     "expiry_missing": "تاريخ الصلاحية غير موجود",
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
-    "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
+    "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة والصلاحية",
+    "duplicate_line_no_batch": "الصنف مكرر في الفاتورة بنفس الصلاحية (من غير تشغيلة)",
+    "same_item_other_expiry": "الصنف موجود في سطر تاني بصلاحية مختلفة (عادي: تشغيلتين)",
     "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
     "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
@@ -150,7 +152,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
     if not lines:
         add("error", "no_lines")
 
-    seen: dict[tuple, str] = {}
+    seen: dict[str, list] = {}
     for l in lines:
         lid = l["id"]
         src, conf = _j(l.get("field_sources")), _j(l.get("field_confidence"))
@@ -211,10 +213,20 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
                 add("error", "short_expiry", lid, "expiry_date", days=(d - today).days)
         elif item is None or item.get("is_drug") != 0:
             add("warning", "expiry_missing", lid, "expiry_date")
-        key = (l.get("item_id"), (l.get("batch_no") or "").upper(), exp_date)
-        if l.get("item_id") and key in seen:
-            add("warning", "duplicate_line", lid, None, other_line=seen[key])
-        seen[key] = lid
+        # U2-3: the same item twice. Same batch and expiry: a real duplicate (merge it when the prices match too);
+        # no batch on either: said so; another expiry: normal (two lots), information only
+        if l.get("item_id"):
+            batch = (l.get("batch_no") or "").strip().upper()
+            for o in seen.get(l["item_id"], []):
+                ob = (o.get("batch_no") or "").strip().upper()
+                if o.get("expiry_date") != exp_date:
+                    add("info", "same_item_other_expiry", lid, None, other_line=o["id"])
+                elif ob == batch:
+                    same = all(o.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price"))
+                    add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
+                        other_line=o["id"], mergeable=same)
+                break
+            seen.setdefault(l["item_id"], []).append(l)
 
     for f in ("extra_discount", "extra_tax", "declared_total"):
         if (invoice.get(f) or 0) < 0:
