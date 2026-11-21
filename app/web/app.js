@@ -276,7 +276,11 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // money accounts (F105/F108): a transfer, the owner's money in or out, a count, an opening fix, a reconciliation
   /^\/api\/money\/transfer$/, /^\/api\/money\/owner$/, /^\/api\/money\/accounts\/[^/]+\/(count|adjust)$/, /^\/api\/reconcile$/,
   // part 3 item 2: an opening balance corrected after the move
-  /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/];
+  /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/,
+  // part 3 item 6a: a return with its replacement sale
+  /^\/api\/sales\/[^/]+\/exchange$/,
+  // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
+  /^\/api\/supplier-returns$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -375,6 +379,7 @@ const routes = [
   [/^#\/money$/, viewMoney],
   [/^#\/money\/([\w-]+)$/, viewMoneyAccount],
   [/^#\/reconcile$/, viewReconcile],
+  [/^#\/exchange$/, viewExchange],
   [/^#\/opening-fix$/, viewOpeningFix],
   [/^#\/suppliers$/, viewSuppliers],
   [/^#\/suppliers\/([\w-]+)$/, async (id) => { await viewSupplier(id); estockPanel("supplier", id); }],
@@ -385,6 +390,7 @@ const routes = [
   [/^#\/shortages$/, viewShortages],
   [/^#\/transfers$/, viewTransfers],
   [/^#\/audit$/, viewAudit],
+  [/^#\/supplier-returns\/invoice$/, viewSupplierReturnInvoice],
   [/^#\/supplier-returns(?:\/(new|[\w-]+))?(?:\?.*)?$/, viewSupplierReturns],
   [/^#\/customers$/, viewCustomers],
   [/^#\/expenses$/, viewExpenses],
@@ -427,7 +433,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
-    $("#navUsers").hidden = !ME.permissions.includes("users.manage");
+    $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
     $("#navTransfers").hidden = !ME.permissions.includes("sales.totals");
@@ -497,13 +503,13 @@ function showStockAlert(a) {
 }
 // ------------------------------------------------------------------ help, top bar, shortcuts, columns (Task 8)
 const SCREENS = {
-  pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], purchases: ["الشراء", "purchases.read"],
+  pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], exchange: ["مرتجع واستبدال", "sales.return"], purchases: ["الشراء", "purchases.read"],
   items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
   expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
   procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
-  import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.manage"], audit: ["سجل العمليات", "audit.read"],
+  import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.permissions"], audit: ["سجل العمليات", "audit.read"],
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
   customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
@@ -512,7 +518,7 @@ const SCREENS = {
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
-  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة، وF9 يتمم البيع، وF4 يختار طباعة الإيصال أو لا، وF2 يفتح فاتورة جديدة، وF8 يفتح الدرج بسبب (لمن له صلاحية الخزينة).", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
   sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
@@ -610,7 +616,7 @@ const TOUR = {
     ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
     ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
     ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
-    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
     ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
     ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
   ],
@@ -2788,6 +2794,130 @@ function refundOptions(s) {
   return opts.map(([v, t, off]) => ({ value: v, label: t, disabled: off, selected: v === pick }));
 }
 
+// ------------------------------------------------------------------ return + replacement in one operation (part 3 item 6a)
+// Search the invoice by its number, an item code / barcode, or the customer's phone or name; type the quantities
+// coming back; add the replacement items; the three totals (returned, new, net) come from the server before saving.
+// Only the net is paid or given back. The returned goods go back to stock as a sale return, never a purchase.
+// after an exchange: a receipt the printer did not take (or browser printing) prints in the page, as at checkout
+function exchangeDevices(r) {
+  const dv = (r && r.devices) || {};
+  if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${r.sale_id}`);
+  if (dv.message) toast(dv.message, dv.receipt === "failed");
+  return dv.receipt || "none";
+}
+async function viewExchange() {
+  app.innerHTML = `<section class="panel"><h1>مرتجع واستبدال</h1>
+    <form class="row" id="exF"><input name="q" class="grow" placeholder="رقم الفاتورة أو كود الصنف أو الباركود أو تليفون العميل أو اسمه" autofocus><button class="btn small">ابحث</button></form>
+    <div id="exList" class="mt"></div></section><div id="exSale"></div>`;
+  let sale = null, draft = null, findings = [];
+  CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);   // card devices (Codex P2 on #396)
+  const H = (t) => `<span class="muted small">${t}</span>`;
+  const totals = async () => {
+    const lines = {};
+    document.querySelectorAll("[data-xr]").forEach((i) => { const v = typedWhole(i.value); if (Number(v) > 0) lines[i.dataset.xr] = v; });
+    const box = $("#exTot");
+    if (!box) return null;
+    if (!Object.keys(lines).length || !draft) { box.innerHTML = H("اكتب كمية المرتجع وضيف صنف الاستبدال"); return null; }
+    try {
+      const t = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { preview: true, lines, new_sale_id: draft.id, draft_version: draft.version, refund_method: $("#exRm").value } });
+      box.innerHTML = `<div class="totals"><div>قيمة المرتجع<b>${money(t.returned)}</b></div><div>فاتورة الاستبدال<b>${money(t.new_total)}</b></div>
+        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>`;
+      return { lines, t };
+    } catch (e) { box.innerHTML = `<p class="badge b-err">${esc(e.message)}</p>`; return null; }
+  };
+  const drawDraft = () => {
+    // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
+    findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+      <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
+    $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
+      try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
+    }));
+  };
+  const open = async (id) => {
+    sale = (await api(`/api/returns/find?q=${encodeURIComponent($("#exF").q.value)}`)).sales.find((x) => x.id === id);
+    const full = await api(`/api/sales/${id}`);
+    $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
+      ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
+      <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
+      ${sale.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+        <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
+      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
+        <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
+      <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
+      <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div><div id="exSafe" class="mt"></div>
+      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+        <label class="f" id="exChW" hidden>الجهاز<select id="exCh">${(CHANNELS || []).filter((c) => c.kind === "card").map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
+        <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
+    $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
+    draft = null; drawDraft(); totals();
+    // safety findings of the replacement items: shown here, decided here, sent with the exchange (Codex P2 on #396)
+    const showFindings = (fs) => {
+      findings = fs || [];
+      $("#exSafe").innerHTML = findings.length ? `<div class="panel"><h3>فحص السلامة الدوائية</h3>${findings.map((f, i) => `<div class="mt"><b>${esc(f.message || f.title || "")}</b>
+        ${["override", "block", "acknowledge"].includes(f.requires) ? `<input data-xdec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("")}</div>` : "";
+    };
+    const decisions = () => {
+      const d = {};
+      document.querySelectorAll("[data-xdec]").forEach((inp) => {
+        const f = findings[+inp.dataset.xdec];
+        if (!f) return;
+        if (f.requires === "acknowledge") d[inp.dataset.xdec] = inp.value || "تمت المراجعة";
+        else if (inp.value.trim()) d[inp.dataset.xdec] = inp.value.trim();
+      });
+      return d;
+    };
+    document.querySelectorAll("[data-xr]").forEach((i) => i.addEventListener("input", () => totals()));
+    $("#exRm").addEventListener("change", () => totals());
+    $("#exAdd").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const q = e.target.q.value.trim(), n = typedWhole(e.target.n.value) || 1;
+      if (!q) return;
+      try {
+        const r = await findItems(q, 1), it = (r.items || r)[0];
+        if (!it) { toast("الصنف مش موجود", true); return; }
+        if (!draft) draft = await api("/api/sales", { method: "POST", body: { customer_id: sale.customer_id || null } });
+        draft = await api(`/api/sales/${draft.id}/lines`, { method: "POST", body: { item_id: it.id, units: n, client_ref: newKey() } });
+        e.target.q.value = ""; drawDraft(); totals();
+      } catch (err) { toast(err.message, true); }
+    });
+    $("#exGo").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget, got = await totals();
+      if (!got) { toast("اكتب كمية المرتجع وضيف صنف الاستبدال", true); return; }
+      await withBusy(btn, async () => {
+        try {
+          const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, confirm_below_cost: !!draft.confirm_below_cost, receipt: true } });
+          exchangeDevices(r);
+          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
+          location.hash = `#/sales/${r.sale_id}`;
+        } catch (err) {
+          if (err.code === "below_cost_confirm") {          // as at checkout: an explicit yes, then save again
+            const ls = (err.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
+            if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${ls}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { draft.confirm_below_cost = true; setTimeout(() => btn.click(), 0); }
+            return;
+          }
+          toast(err.message, true);
+          if (err.code === "safety_unresolved") showFindings(err.details?.findings);
+          if (["price_changed", "stale_version"].includes(err.code)) {   // the server repriced it: show the new draft
+            try { draft = await api(`/api/sales/${draft.id}`); drawDraft(); totals(); } catch { /* the toast says why */ }
+          }
+        }
+      });
+    });
+  };
+  $("#exF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api(`/api/returns/find?q=${encodeURIComponent(e.target.q.value)}`);
+      $("#exList").innerHTML = r.sales.length ? `<table><thead><tr><th>الفاتورة</th><th>اليوم</th><th>العميل</th><th>الإجمالي</th><th></th></tr></thead><tbody>
+        ${r.sales.map((x) => `<tr class="clickable" data-xs="${esc(x.id)}"><td>${x.sale_no}</td><td>${esc(dayOf(x.completed_at))}</td><td>${esc(x.customer || "")}</td><td class="num">${money(x.total)}</td>
+          <td>${x.in_window ? "" : `<span class="badge b-warn">بعد المدة</span>`}</td></tr>`).join("")}</tbody></table>` : H("مفيش فواتير بالبحث ده");
+      $("#exList").querySelectorAll("[data-xs]").forEach((tr) => tr.addEventListener("click", () => open(tr.dataset.xs).catch((err) => toast(err.message, true))));
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
 async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
@@ -3042,7 +3172,7 @@ async function viewPos() {
   <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
       <span class="x" data-close="${esc(d.id)}" title="أغلق هذه الفاتورة" aria-label="إغلاق">✕</span></button>`).join("")}
-    <button class="tab add" id="tabNew" title="فاتورة جديدة (F2)">+ فاتورة <kbd>F2</kbd></button></nav>
+    <button class="tab add" id="tabNew" title="فاتورة جديدة (Insert)">+ فاتورة <kbd>Insert</kbd></button></nav>
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
@@ -3050,7 +3180,7 @@ async function viewPos() {
       <div id="posRes" class="results"></div>
       <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>F9</kbd> دفع · <kbd>F4</kbd> إيصال · <kbd>F2</kbd> فاتورة جديدة${ME.permissions.includes("cash.manage") ? ` · <kbd>F8</kbd> فتح الدرج` : ""}</p>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · ${posKeysHtml()}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
@@ -3160,12 +3290,79 @@ document.addEventListener("keydown", (e) => {
     if (location.hash.startsWith("#/pos") && !$("dialog[open]")) $("#posQ")?.focus();
   }
 }, true);
-document.addEventListener("keydown", (e) => {
+// Part 3 (owner C): selling by keyboard only. Fixed defaults in this table; changing them from Settings comes later
+// (the same table, so nothing else moves). F1 on the empty line searches, F2/F3/F6/Delete act on the chosen line
+// (↑ ↓ choose it), F10 goes to the payment first and saves on the second press, F11 opens the drawer.
+const POS_KEYS = [["F1", "بحث عن صنف"], ["↑ ↓", "اختار صنف"], ["F2", "رصيد الصنف في الفروع"], ["F3", "كارت الصنف"],
+  ["F6", "الكمية"], ["Delete", "شيل الصنف"], ["F4", "إيصال"], ["F10", "الدفع ثم الحفظ"], ["F11", "فتح الدرج"],
+  ["F7", "مرتجع واستبدال"], ["Insert", "فاتورة جديدة"], ["Ctrl+Tab", "الفاتورة اللي بعدها"], ["Ctrl+Delete", "إلغاء الفاتورة"],
+  ["Esc", "رجوع للبحث"]];
+let POS_SEL = -1;                 // the chosen cart line; -1 = the empty search line
+function posKeysHtml() {
+  return POS_KEYS.filter(([k]) => k !== "F11" || ME.permissions.includes("cash.manage"))
+    .map(([k, t]) => `<kbd>${esc(k)}</kbd> ${esc(t)}`).join(" · ");
+}
+function posMark() {
+  const rows = [...document.querySelectorAll("#posCart tbody tr")].filter((r) => !r.querySelector("td[colspan]"));
+  if (POS_SEL >= rows.length) POS_SEL = rows.length - 1;
+  rows.forEach((r, i) => r.classList.toggle("sel", i === POS_SEL));
+  if (POS_SEL >= 0) rows[POS_SEL]?.scrollIntoView({ block: "nearest" });
+}
+function posLine() {
+  if (!SALE || !SALE.lines.length) return null;
+  const rows = [...document.querySelectorAll("#posCart tbody tr")];
+  const id = rows[POS_SEL]?.querySelector("[data-rm]")?.dataset.rm;
+  return SALE.lines.find((l) => l.id === id) || (POS_SEL < 0 ? SALE.lines[SALE.lines.length - 1] : null);
+}
+async function posBranchStock(l) {
+  const r = await api(`/api/items/${l.item_id || l.item.id}/branch-stock`);
+  const d = document.createElement("dialog");
+  d.innerHTML = `<form method="dialog"><h2>${esc(itemText(r.item))}</h2><table><tbody>${r.branches.map((b) => `<tr><td>${esc(b.name)}${b.here ? " (هنا)" : ""}</td>
+    <td class="num"><b>${esc(fmtStock(b.qty, { pack_size: r.item.pack_size }))}</b></td></tr>`).join("")}</tbody></table>
+    <p class="muted small">كل أجهزة الفرع بتشوف نفس الرصيد.</p><button class="btn">تمام</button></form>`;
+  document.body.appendChild(d); d.addEventListener("close", () => { d.remove(); $("#posQ")?.focus(); }); d.showModal();
+}
+document.addEventListener("keydown", async (e) => {
   if (!location.hash.startsWith("#/pos") || $("dialog[open]")) return;
-  if (e.key === "F2") { e.preventDefault(); newTab(); }
-  if (e.key === "F9") { e.preventDefault(); $("#posDone")?.click(); }
-  if (e.key === "F4") { e.preventDefault(); $("#posRcpt")?.click(); }
-  if (e.key === "F8" && ME.permissions.includes("cash.manage")) { e.preventDefault(); drawerDialog(); }
+  const k = (e.ctrlKey ? "Ctrl+" : "") + e.key, typing = e.target.matches?.("input, select, textarea") && e.target.id !== "posQ";
+  const go = (fn) => { e.preventDefault(); Promise.resolve().then(fn).catch((er) => toast(er.message, true)); };
+  if (k === "F1") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
+  if (k === "F2" || k === "F3" || k === "F6") {
+    const l = posLine();
+    if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
+    if (k === "F2") return go(() => posBranchStock(l));
+    if (k === "F3") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
+    return go(() => {
+      const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
+      const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
+      if (Number(v) > 0) patchLine(l.id, { qty_base: packs ? Number(v) * l.item.pack_size : Number(v) });
+    });
+  }
+  if (k === "F4") return go(() => $("#posRcpt")?.click());
+  if (k === "F9") return go(() => $("#posDone")?.click());
+  if (k === "F10") return go(() => {
+    if ($("#posSide")?.contains(document.activeElement)) { $("#posDone")?.click(); return; }
+    ($("#posSide select, #posSide input:not([type=hidden]), #posSide button") || $("#posDone"))?.focus();
+  });
+  if ((k === "F11" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
+  if (k === "F7") return go(() => { location.hash = "#/exchange"; });
+  if (k === "Insert") return go(() => newTab());
+  if (k === "Ctrl+Tab") return go(() => {
+    const tabs = [...document.querySelectorAll("[data-tab]")], i = tabs.findIndex((t) => t.classList.contains("on"));
+    if (tabs.length > 1) tabs[(i + 1) % tabs.length].click();
+  });
+  if (k === "Ctrl+Delete") return go(() => document.querySelector(`[data-close="${SALE?.id}"]`)?.click());
+  if (typing) return;
+  const q = $("#posQ"), onEmptySearch = !q || document.activeElement !== q || !q.value;
+  if ((k === "ArrowUp" || k === "ArrowDown") && onEmptySearch && SALE?.lines.length) {
+    return go(() => {
+      const n = SALE.lines.length;
+      POS_SEL = k === "ArrowUp" ? (POS_SEL < 0 ? n - 1 : Math.max(0, POS_SEL - 1)) : (POS_SEL < 0 || POS_SEL >= n - 1 ? -1 : POS_SEL + 1);
+      posMark(); if (POS_SEL < 0) q?.focus(); else q?.blur();
+    });
+  }
+  if (k === "Delete" && POS_SEL >= 0) return go(() => document.querySelectorAll("#posCart tbody tr")[POS_SEL]?.querySelector("[data-rm]")?.click());
+  if (k === "Escape" && POS_SEL >= 0) return go(() => { POS_SEL = -1; posMark(); q?.focus(); });
 });
 
 // Manual drawer opening (#81): cash.manage (checked by the server too), a reason, recorded with the shift.
@@ -3231,6 +3428,7 @@ function renderCart(findings = null) {
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
+  posMark();
   const line = (id) => s.lines.find((l) => l.id === id);
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
   $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
@@ -4190,12 +4388,55 @@ async function srPropose(l, supplier) {
   } catch { /* unknown here: the server prices it */ }
   if (gen === SR.gen && ask === l.ask && !l.typed) l.unit_value = v;   // typed meanwhile: the person's value stays
 }
+// Part 3 item 6b: a purchase return from its invoice. Supplier + invoice number load the lines with paid and bonus
+// units; paid units are credited at the net invoice price plus their tax, bonus units go back on their own line at 0;
+// settlement on the supplier's account; a line that came with bonus goes back whole (owner #310) unless the person
+// may return part of it and writes why.
+async function viewSupplierReturnInvoice() {
+  const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
+  const money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
+  app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><h1>مرتجع من فاتورة شراء</h1>
+    <form class="row" id="siF"><label class="f">المورد <select name="sup" required><option value="">— اختر —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
+      <label class="f">رقم الفاتورة <input name="no" required></label><button class="btn small">هات الفاتورة</button></form><div id="siBox" class="mt"></div></section>`;
+  $("#siF").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const sup = e.target.sup.value;
+    try {
+      const d = await api(`/api/supplier-returns/invoice?supplier=${encodeURIComponent(sup)}&no=${encodeURIComponent(e.target.no.value.trim())}`);
+      $("#siBox").innerHTML = `<p>فاتورة ${esc(d.invoice_no)} — ${esc(d.invoice_date || "")}</p><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>المدفوع (وحدة)</th><th>البونص (وحدة)</th><th>اترجع قبل كده</th>${money_ ? "<th>صافي العلبة</th><th>الضريبة</th>" : ""}<th>الموجود</th><th>يرجع مدفوع</th><th>يرجع بونص</th><th>السبب</th></tr></thead><tbody>
+        ${d.lines.map((l) => `<tr data-pl="${esc(l.id)}"><td>${esc(l.name)}${l.bonus_units ? ` <span class="chip">عليه بونص: بيرجع كله</span>` : ""}</td><td>${esc(l.batch_no || "")}</td><td>${l.paid_units}</td><td>${l.bonus_units}</td><td>${l.paid_returned + l.bonus_returned}</td>
+          ${money_ ? `<td class="num">${money(l.unit_net_price || 0)}</td><td class="num">${money(l.tax_amount || 0)}</td>` : ""}<td>${l.on_hand}</td>
+          <td><input class="narrow" type="number" min="0" max="${l.paid_units - l.paid_returned}" step="1" data-pu value="${l.bonus_units ? l.paid_units - l.paid_returned : ""}"></td>
+          <td><input class="narrow" type="number" min="0" max="${l.bonus_units - l.bonus_returned}" step="1" data-bu value="${l.bonus_units ? l.bonus_units - l.bonus_returned : ""}" ${l.bonus_units ? "" : "disabled"}></td>
+          <td><select data-rs>${Object.entries(R.supplier_return).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table></div>
+        <div class="row mt"><label class="f">رقم إشعار المورد <input id="siCn"></label><label class="f grow">ملاحظة <input id="siNote"></label></div>
+        <label class="f mt">سبب المرتجع الجزئي من سطر عليه بونص (لو فيه) <input id="siWhy"></label>
+        <p class="muted">التسوية: على حساب المورد. المدفوع بسعر الفاتورة الصافي ومعاه الضريبة، والبونص بيرجع لوحده بصفر.</p>
+        <button class="btn" id="siGo">سجّل المرتجع واطبع الإذن</button>`;
+      $("#siGo").addEventListener("click", async (ev) => {
+        const lines = [...document.querySelectorAll("[data-pl]")].map((tr) => ({ purchase_line_id: tr.dataset.pl,
+          paid_units: +typedWhole(tr.querySelector("[data-pu]").value) || 0, bonus_units: +typedWhole(tr.querySelector("[data-bu]").value) || 0,
+          reason: tr.querySelector("[data-rs]").value })).filter((l) => l.paid_units || l.bonus_units);
+        if (!lines.length) { toast("اكتب كمية المرتجع", true); return; }
+        await withBusy(ev.currentTarget, async () => {
+          try {
+            const r = await api("/api/supplier-returns", { method: "POST", body: { supplier_id: sup, invoice_id: d.invoice_id, lines,
+              credit_note_no: $("#siCn").value || null, note: $("#siNote").value || null, partial_bonus_reason: $("#siWhy").value || null } });
+            toast(`✓ مرتجع رقم ${r.return_no}`);
+            location.hash = `#/supplier-returns/${r.id}`;
+          } catch (err) { toast(err.message, true); if (err.code === "bonus_line_whole") $("#siWhy").focus(); }
+        });
+      });
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
 async function viewSupplierReturns(arg) {
   if (arg && arg !== "new") return viewSupplierReturn(arg);
   SR.gen++; SR.busy = false;                                   // a new screen: nothing asked before counts
   const canNew = ME.permissions.includes("purchases.approve"), money_ = ME.permissions.includes("suppliers.pay") || ME.permissions.includes("costs.read");
   const [sups, R] = await Promise.all([api("/api/suppliers"), stockReasons()]);
-  app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><h1>مرتجع جديد للمورد</h1>
+  app.innerHTML = `${canNew ? `<section class="panel" id="srNew"><div class="row between"><h1>مرتجع جديد للمورد</h1><a class="btn secondary" href="#/supplier-returns/invoice">مرتجع من فاتورة شراء ←</a></div>
       <div class="row"><label class="f">المورد <select id="srSup"><option value="">— اختر —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
         <label class="f grow">الصنف <input id="srQ" placeholder="اسم أو باركود" autocomplete="off"></label></div>
       <div id="srRes" class="cands"></div>
@@ -4298,9 +4539,10 @@ async function viewSupplierReturn(id) {
   app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><div class="row between"><h1>مرتجع رقم ${r.return_no} — ${esc(r.supplier)}</h1>
     <a class="btn secondary" href="/supplier-return/${esc(r.id)}" target="_blank">🖨 اطبع الإذن</a></div>
     <p class="muted">${esc(dayOf(r.created_at))} ${hhmm(r.created_at)} · سجّله ${esc(r.by_name || "")}${r.note ? ` · ${esc(r.note)}` : ""}</p>
-    <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>السبب</th>${r.total != null ? "<th>قيمة الوحدة</th><th>القيمة</th>" : ""}</tr></thead><tbody>
-    ${r.lines.map((l) => `<tr><td>${itemHtml(l)}</td><td>${esc(l.batch_no || "")}</td><td>${esc((l.expiry_date || "").slice(0, 7))}</td><td>${esc(fmtStock(l.qty_base, l))}</td><td>${esc(l.reason_label)}</td>
-      ${r.total != null ? `<td class="num">${money(l.unit_value)}</td><td class="num">${money(l.unit_value * l.qty_base)}</td>` : ""}</tr>`).join("")}</tbody></table>
+    ${r.credit_note_no ? `<p>إشعار المورد: <b>${esc(r.credit_note_no)}</b></p>` : ""}
+    <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>السبب</th>${r.total != null ? `<th>قيمة الوحدة</th>${r.tax_total ? "<th>الضريبة</th>" : ""}<th>القيمة</th>` : ""}</tr></thead><tbody>
+    ${r.lines.map((l) => `<tr><td>${itemHtml(l)}</td><td>${esc(l.batch_no || "")}</td><td>${esc((l.expiry_date || "").slice(0, 7))}</td><td>${esc(fmtStock(l.qty_base, l))}${l.is_bonus ? ` <span class="chip">بونص</span>` : ""}</td><td>${esc(l.reason_label)}</td>
+      ${r.total != null ? `<td class="num">${money(l.unit_value)}</td>${r.tax_total ? `<td class="num">${money(l.tax_value || 0)}</td>` : ""}<td class="num">${money(l.unit_value * l.qty_base + (l.tax_value || 0))}</td>` : ""}</tr>`).join("")}</tbody></table>
     ${r.total != null ? `<p><b>الإجمالي المخصوم من حساب المورد: ${money(r.total)} ج</b></p>` : ""}</section>`;
 }
 
@@ -5305,7 +5547,8 @@ function viewMe() {
 const ROLE_CLS = { owner: "b-brand", manager: "b-ok", pharmacist: "b-info", assistant: "b-plain" };
 const pctOf = (bp) => (bp == null ? "" : String(bp / 100));
 async function viewUsers() {
-  if (!ME.permissions.includes("users.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
+  // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
+  if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
@@ -5352,7 +5595,7 @@ async function viewUsers() {
 }
 
 async function viewUser(id) {
-  if (!ME.permissions.includes("users.manage")) { location.hash = "#/users"; return; }
+  if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { location.hash = "#/users"; return; }
   const [m, { roles }] = await Promise.all([api(`/api/users/${id}`), api("/api/users")]);
   const u = m.user, owner = u.role === "owner", mine = String(u.id) === String(ME.user.id);
   // #131: changing one's own sign-in needs the current password (an open session alone is not enough)
@@ -5361,7 +5604,7 @@ async function viewUser(id) {
   const cell = (v) => (v ? `<span class="ok">✓ مسموح</span>` : `<span class="muted">✕ ممنوع</span>`);
   const pick = (it) => {
     if (owner) return `<span class="ok">✓ مسموح</span>`;
-    if (it.code === "users.manage") return `<span class="muted">للمالك فقط</span>`;
+    if (it.code === "users.manage" || (!ME.permissions.includes("users.manage") && it.code === "users.permissions")) return `<span class="muted">للمالك فقط</span>`;
     const def = it.roles[u.role];
     return `<select data-perm="${it.code}" class="${it.exception === "grant" ? "ex-grant" : it.exception === "deny" ? "ex-deny" : ""}">
       <option value="default" ${!it.exception ? "selected" : ""}>${def ? "✓ مسموح" : "✕ ممنوع"} (الافتراضي)</option>

@@ -2285,7 +2285,7 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
 # E-Stock settings seen on its screens (manager's tour 18/11 22:45) and what the program has for each:
 # listed in the report, never applied by the move (returns and printing are the owner's rules).
 ESTOCK_SETTINGS = (       # (E-Stock's setting, what the program has, recommended value) - none applied
-    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 7 زي إي ستوك"),
+    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 14 (قرار المالك 21/11)"),
     ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية", "المقترح: زي ما هو"),
     ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده", "المقترح: مش محتاج"),
     ("شريط الصلاحية 6 شهور", "إعداد تشغيل (PHARM_SHORT_EXPIRY_DAYS=180)", "المقترح: 180 يوم زي ما هو"),

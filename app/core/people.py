@@ -105,8 +105,14 @@ def approvers(db: Database, ctx: Context) -> list[dict]:
 
 
 # -------------------------------------------------------------------------- owner: users screen
+def _see_people(ctx: Context) -> None:
+    """The users screen: the owner (users.manage), or someone who switches staff permissions (part 3, A)."""
+    if not (ctx.allowed("users.manage") or ctx.allowed("users.permissions")):
+        ctx.require("users.manage")           # the approval box asks for the owner's right, as before
+
+
 def roles(db: Database, ctx: Context) -> list[dict]:
-    ctx.require("users.manage")
+    _see_people(ctx)
     rows = {r["code"]: dict(r) for r in db.all(
         "SELECT code, name, permissions, max_discount_bp FROM roles WHERE org_id=?", (ctx.org_id,))}
     out = []
@@ -119,7 +125,7 @@ def roles(db: Database, ctx: Context) -> list[dict]:
 
 
 def list_users(db: Database, ctx: Context) -> list[dict]:
-    ctx.require("users.manage")
+    _see_people(ctx)
     out = []
     for m in db.all("SELECT m.user_id id, u.username, u.full_name, u.is_active AND m.is_active active,"
                     " r.code role, r.name role_name, m.perm_grants, m.perm_denies, m.max_discount_bp,"
@@ -136,7 +142,7 @@ def list_users(db: Database, ctx: Context) -> list[dict]:
 
 def access_matrix(db: Database, ctx: Context, user_id: str) -> dict:
     """Every permission with: role default, this person's value, and whether it is an exception."""
-    ctx.require("users.manage")
+    _see_people(ctx)
     m = _member(db, ctx, user_id)
     role_perms = {r["code"]: set(r["permissions"]) for r in roles(db, ctx)}
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
@@ -163,19 +169,35 @@ def _guard_owner(m: dict) -> None:
 
 
 def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str) -> dict:
-    """mode: 'grant' (open for this person), 'deny' (close for this person), 'default'."""
-    ctx.require("users.manage")
+    """mode: 'grant' (open for this person), 'deny' (close for this person), 'default'.
+    Every permission can be switched per person; the role is only the starting template (owner, part 3 A).
+    The owner (users.manage) switches anything for anyone but himself. Someone with users.permissions (the
+    manager by default) switches a staff member's permissions, not his own, not the owner's or another
+    manager's, never the two people rights, and opens only what he holds himself."""
     if perm not in PERMISSIONS or mode not in ("grant", "deny", "default"):
         raise ValidationFailed("بيانات غير صحيحة")
     if perm == "users.manage" and mode == "grant":
         raise Forbidden("إدارة المستخدمين للمالك فقط", code="owner_only")
     m = _member(db, ctx, user_id)
     _guard_owner(m)
+    if not ctx.allowed("users.manage"):
+        ctx.require("users.permissions")
+        if user_id == ctx.user_id:
+            raise Forbidden("مينفعش تغيّر صلاحياتك بنفسك", code="self_permissions")
+        if m["role_code"] in APPROVER_ROLES:
+            raise Forbidden("صلاحيات المدير يغيّرها المالك بس", code="owner_only")
+        if perm in ("users.manage", "users.permissions"):
+            raise Forbidden("الصلاحية دي يغيّرها المالك بس", code="owner_only")
+        role_has_it = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                                     (m["role_id"], ctx.org_id))["permissions"]))
+        opens = mode == "grant" or (mode == "default" and role_has_it)     # 'default' can lift a deny (Codex P1 on #396)
+        if opens and not ctx.can(perm):
+            raise Forbidden("مينفعش تفتح صلاحية إنت نفسك معندكش", code="beyond_own")
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
     grants.discard(perm)
     denies.discard(perm)
-    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=?",
-                                             (m["role_id"],))["permissions"]))
+    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                             (m["role_id"], ctx.org_id))["permissions"]))
     if mode == "grant" and not role_has:
         grants.add(perm)
     elif mode == "deny" and role_has:

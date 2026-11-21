@@ -163,7 +163,8 @@ class TestReturns(People):
         self.assertEqual(json.loads(audit_row["after_json"])["approved_by"], self.ids["owner"])
         self.s.return_items(self.ph, sale["id"], self._line(sale), refund_method="cash", reason="مش محتاجه")
 
-    def test_window_14_days(self):
+    def test_window_14_days_by_default(self):
+        """Owner 21/11 10:17: «مدة المرتجع 14 يوم» (part 3 had made it 7); Settings still changes it."""
         sale = self.sell(ctx=self.ph)
         later = Sales(self.db, today=T + timedelta(days=15))
         with self.assertRaises(Forbidden) as e:
@@ -288,3 +289,16 @@ class TestRoleChange(People):
         with self.assertRaises(Forbidden):
             people.set_role_discount(self.db, self.mgr, "assistant", 100)
         self.assertEqual(self.login("pharmacist", PW).max_discount_bp, 300)
+
+
+class TestReturnWindowSetting(People):
+    """The 14-day default stays a default: the owner's saved value wins, both ways (owner 21/11 10:17)."""
+
+    def test_saved_window_wins_over_the_default(self):
+        from app.sales.service import DEFAULT_RETURN_DAYS, return_window_days
+        self.assertEqual((DEFAULT_RETURN_DAYS, return_window_days(self.db, self.ctx.org_id)), (14, 14))
+        for days in (7, 30):
+            with self.db.transaction():
+                self.db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
+                                " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (self.ctx.org_id, str(days)))
+            self.assertEqual(return_window_days(self.db, self.ctx.org_id), days)

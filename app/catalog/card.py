@@ -239,3 +239,20 @@ def movements(db: Database, ctx: Context, item_id: str, date_from: str, date_to:
         by[r["movement_type"]] = by.get(r["movement_type"], 0) + r["qty_delta"]
     return {"item": dict(it), "from": d1.isoformat(), "to": d2.isoformat(), "opening": opening, "closing": bal,
             "rows": out, "totals": [{"type": k, "label": MOVE_LABELS.get(k, k), "qty": v} for k, v in by.items()]}
+
+
+def branch_stock(db: Database, ctx: Context, item_id: str) -> dict:
+    """F2 on a sale line (part 3, C): the item's sellable stock in every branch of the pharmacy, base units,
+    the pharmacy's own batches only (a hospital-owned batch is not ours to sell). One branch today; the same
+    answer lists the others when they exist. Every PC of a branch shares its stock."""
+    ctx.require("items.read")
+    it = db.one("SELECT id, name_en, name_ar, pack_size FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
+    if not it:
+        raise NotFound("الصنف غير موجود")
+    own = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if any(
+        r["name"] == "owner" for r in db.all("PRAGMA table_info(batches)")) else ""
+    rows = db.all(
+        "SELECT br.id, br.name, coalesce((SELECT sum(sb.qty) FROM stock_balances sb LEFT JOIN batches b"
+        f" ON b.id=nullif(sb.batch_key,'') WHERE sb.org_id=br.org_id AND sb.branch_id=br.id AND sb.item_id=?{own}), 0) qty"
+        " FROM branches br WHERE br.org_id=? AND br.is_active=1 ORDER BY br.name", (item_id, ctx.org_id))
+    return {"item": dict(it), "branches": [{**dict(r), "here": r["id"] == ctx.branch_id} for r in rows]}

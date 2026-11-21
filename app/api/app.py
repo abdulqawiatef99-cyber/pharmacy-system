@@ -916,10 +916,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if rid == "suggest":
                 return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None,
                                                               qp.get("supplier") or None)})
+            if rid == "invoice":        # part 3 item 6b: load an approved purchase invoice to return from
+                return J(returns.from_invoice(db, ctx, qp.get("supplier", ""), qp.get("no", "")))
             if rid:
                 return J(returns.get(db, ctx, rid))
             return J(returns.listing(db, ctx, qp.get("from", ""), qp.get("to", ""), qp.get("supplier") or None))
         b = await body(req)
+        if b.get("invoice_id"):
+            return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
+                                                 b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
+                                                 note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
         return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
 
     @handler
@@ -932,21 +938,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
+        taxed = show and bool(r.get("tax_total"))       # part 3 item 6b: the tax credited back, on its own column
         from ..printing import settings as rs
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
-            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
-            + (f"<td>{m(l['unit_value'])}</td><td>{m(l['unit_value'] * l['qty_base'])}</td>" if show else "") + "</tr>"
+            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}{' (بونص)' if l.get('is_bonus') else ''}</td><td>{e(l['reason_label'])}</td>"
+            + (f"<td>{m(l['unit_value'])}</td>" + (f"<td>{m(l.get('tax_value'))}</td>" if taxed else "")
+               + f"<td>{m(l['unit_value'] * l['qty_base'] + (l.get('tax_value') or 0))}</td>" if show else "") + "</tr>"
             for i, l in enumerate(r["lines"], 1))
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع للمورد {r['return_no']}</title>
 <link rel="stylesheet" href="/static/doc.css"></head><body><main class="doc">
 <header><h1>{e(org)}</h1><h2>إذن مرتجع للمورد رقم {r['return_no']}</h2>
-<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}</p></header>
+<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}{f" · إشعار المورد: {e(r['credit_note_no'])}" if r.get('credit_note_no') else ''}</p></header>
 <table><thead><tr><th>#</th><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية (وحدة)</th><th>السبب</th>
-{'<th>سعر الوحدة</th><th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
-{f'<tfoot><tr><th colspan="7">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
+{'<th>سعر الوحدة</th>' + ('<th>الضريبة</th>' if taxed else '') + '<th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
+{f'<tfoot><tr><th colspan="{8 if taxed else 7}">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
 {f'<p>ملاحظة: {e(r["note"])}</p>' if r.get('note') else ''}
 <div class="sign"><p>توقيع الصيدلية: ................</p><p>توقيع مندوب المورد: ................</p></div>
 </main><script src="/static/print.js"></script></body></html>"""
@@ -2166,6 +2174,50 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                         reason=str(b.get("reason", ""))))
 
     @handler
+    async def sales_exchange(req):
+        """Part 3 item 6a: a return and its replacement sale in one operation."""
+        ctx = ctx_of(req)
+        b = await body(req)
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
+        if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
+            sales = Sales(db)
+            if b.get("new_sale_id"):          # both totals in one simulation, the returned units back first
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines, new_sid=str(b["new_sale_id"]),
+                                                      refund_method=str(b.get("refund_method", "")))
+            else:
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines,
+                                                      refund_method=str(b.get("refund_method", ""))), 0
+            return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
+        decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
+        done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
+                                  refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
+                                  reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
+                                  version=b.get("version"),
+                                  request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
+                                                      if b.get("expected_new_total") is not None else None))
+        if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
+            sale = done["sale"]
+            if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
+                    done["settled"]["refund"] and done["refund_method"] == "cash"):
+                sale = {**sale, "paid_cash": 0}
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, sale, b.get("receipt") is True, 0)
+        return J(done)
+
+    @handler
+    async def item_branch_stock(req):
+        from ..catalog import card as _card
+        return J(_card.branch_stock(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def returns_find(req):
+        return J({"sales": await off_loop(Sales(db).find_for_return, ctx_of(req), req.query_params.get("q", ""))})
+
+    @handler
     async def sales_void(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2616,7 +2668,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يومًا بهذه الفاتورة"
+            n = return_window_days(db, ctx.org_id)       # Arabic number agreement: 7 أيام, 14 يومًا
+            days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
+            policy = f"<p class='s'>المرتجع خلال {days} بهذه الفاتورة"
             policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
@@ -2820,6 +2874,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
         Route("/api/stock/reasons", stock_reasons),
@@ -2908,6 +2963,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
+        Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
+        Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
