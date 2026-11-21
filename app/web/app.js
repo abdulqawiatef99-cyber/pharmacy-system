@@ -2155,11 +2155,9 @@ async function viewSystem() {
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
       <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
       <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `لا توجد (فرع ${esc(st.candidate || "?")})`}</b></div></div>
-    ${st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
-      ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
-         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
-      : `<p class="badge b-ok">البرنامج محدّث</p>`}
+    ${updatePanelHtml(st)}
     <pre id="updOut" class="muted" hidden></pre>`;
+  bindSmartUpdate();
   api("/api/system/storage").then((x) => {
     const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} ميجا`;
     $("#stoBox").innerHTML = `<div class="totals"><div>قاعدة البيانات<b>${mb(x.db)}</b><span>${x.since ? `تحتوي على مبيعات منذ ${esc(x.since)}` : ""}</span></div>
@@ -2180,6 +2178,51 @@ async function viewSystem() {
         setTimeout(wait, 4000);
       } else { b.textContent = "اكتمل. أغلق البرنامج وافتحه مرة أخرى"; }
     } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج الآن"; toast(e.message, true); }
+  });
+}
+// docs/SMART_UPDATE.md: one batch, plain Arabic list, «now» or «after closing», never during a sale.
+// the last smart result is shown on its own: it never hides the classic button (Codex P2 on e9f9f20)
+function updatePanelHtml(st) {
+  return smartLastHtml(st.smart || {}) + (smartUpdateHtml(st.smart || {}) || (st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
+    ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
+         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
+    : `<p class="badge b-ok">البرنامج محدّث</p>`));
+}
+function smartLastHtml(u) {
+  const res = u.result || {};
+  return res.state === "rolled_back" ? `<p class="badge b-warn">آخر تحديث ما اشتغلش، فالبرنامج رجع لوحده للنسخة اللي قبله وبياناتك زي ما هي.</p>`
+    : res.state === "aborted" ? `<p class="badge b-warn">آخر تحديث اتلغى قبل ما يغيّر حاجة: ${esc(res.reason || "")}</p>` : "";
+}
+function smartUpdateHtml(u) {
+  const last = "";
+  if (u.request) {
+    return `${last}<p class="badge b-ok">✓ التحديث جاهز ومستني <b>${u.request.when === "after_close" ? "قفل الوردية" : "أول دقيقة هادية"}</b></p>
+      ${u.waiting ? `<p class="muted">مستني: ${esc(u.waiting)}</p>` : ""}
+      <p class="muted">البرنامج هيقفل ويفتح لوحده (دقيقة تقريبًا)، ومش هيحصل وانت بتبيع.</p>
+      <button class="btn secondary" id="updCancel">إلغاء الميعاد</button>`;
+  }
+  if (!u.enabled || !u.available) return last;
+  const notes = (u.notes || []).length ? `<ul>${u.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : `<p class="muted">تحسينات وتصليحات صغيرة.</p>`;
+  if (u.needs_installer) return `${last}<p>فيه تحديث محتاج المثبّت الجديد (نسخة بايثون جديدة).</p>${notes}`;
+  return `${last}<p><b>فيه تحديث جديد، اللي اتغيّر:</b></p>${notes}
+    ${u.database ? `<p class="muted">فيه تعديل على قاعدة البيانات: هيتجرّب الأول على نسخة منها، وبياناتك الأصلية مش بتتلمس إلا لو كل الفحوص نجحت.</p>` : ""}
+    <p class="muted">بياخد نسخة احتياطية الأول. لو أي حاجة فشلت، البرنامج بيرجع لوحده للنسخة القديمة.</p>
+    <div class="row"><button class="btn" id="updNow">حدّث دلوقتي</button>
+      <button class="btn secondary" id="updClose">حدّث بعد قفل الوردية</button></div>`;
+}
+function bindSmartUpdate() {
+  const schedule = async (when, b) => {
+    const label = b.textContent; b.disabled = true; b.textContent = "جارٍ تنزيل التحديث وفحصه… (البرنامج شغال عادي)";
+    try {
+      await api("/api/system/update", { method: "POST", body: { action: "prepare" } });
+      await api("/api/system/update", { method: "POST", body: { action: "schedule", when } });
+      viewSystem();
+    } catch (e) { b.disabled = false; b.textContent = label; toast(e.message, true); }
+  };
+  $("#updNow")?.addEventListener("click", (e) => schedule("now", e.target));
+  $("#updClose")?.addEventListener("click", (e) => schedule("after_close", e.target));
+  $("#updCancel")?.addEventListener("click", async () => {
+    try { await api("/api/system/update", { method: "POST", body: { action: "cancel" } }); viewSystem(); } catch (e) { toast(e.message, true); }
   });
 }
 function renderLan(n) {

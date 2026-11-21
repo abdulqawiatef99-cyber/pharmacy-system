@@ -28,6 +28,36 @@ if __name__ == "__main__":
     from release_bootstrap import run_selected
     run_selected(Path(__file__).resolve().parent)
 
+
+def _use_packages() -> None:
+    """Smart update (docs/SMART_UPDATE.md): a release that brought its own package set (verified when it was
+    staged) puts it before the installed one. No pip on the pharmacy PC."""
+    import site
+    here = Path(__file__).resolve().parent
+    folder = os.environ.get("PHARM_DEPS_DIR")
+    if not folder:
+        try:
+            import release_bootstrap as rb
+            home = rb.code_home(rb.data_dir())
+            active = rb.read_state(home).get("active") or {}
+            if active.get("id") == here.name and active.get("deps"):
+                folder = str(home / "deps" / active["deps"])
+        except Exception:                       # no state / old bootstrap: the installed packages
+            return
+    if not folder:
+        return
+    if not (Path(folder) / ".deps-files.json").is_file():
+        sys.exit(f"package set missing: {folder}")
+    before = list(sys.path)
+    site.addsitedir(folder)
+    added = [x for x in sys.path if x not in before]
+    for x in added:
+        sys.path.remove(x)
+    sys.path[1:1] = added
+
+
+_use_packages()
+
 from app import config
 from app.core import accounts
 from app.db import Database
@@ -528,9 +558,17 @@ def cmd_update(a, s):
     root = Path(__file__).resolve().parent
     home = releases.code_home(s.data_dir)
     try:
+        if a.candidate_check or a.self_check or a.prepare or a.apply_prepared or a.select_prepared:
+            return _smart_update(a, s, root)
         if a.rollback:
             if a.from_zip or a.check:
                 raise updater.UpdateError("--rollback cannot be combined with --from-zip or --check")
+            state = releases.read_state(home)
+            journal = releases.read_journal(home)
+            if (state.get("active") or {}).get("needs_db") and journal.get("release") == state["active"]["id"]:
+                raise updater.UpdateError(
+                    "النسخة دي غيّرت قاعدة البيانات؛ الرجوع للكود القديم وحده مش آمن. استرجع النسخة الاحتياطية "
+                    f"اللي اتعملت قبل التحديث: {journal.get('backup', '')}")
             releases.rollback(home)
             print("Previous code selected. Restart the program; no database restore was performed.")
             return
@@ -539,9 +577,13 @@ def cmd_update(a, s):
         if a.from_zip:
             data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
         else:
-            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
-                a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
             token = updater.read_token()
+            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
+                info = updater.installed(s.data_dir)
+                a.ref = updater.follow(info, a.repo, token)      # a review install: main once main has it
+                if a.ref is None:
+                    raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ "
+                                              "لم يتغير شيء")
             sha = updater.latest_sha(a.repo, a.ref, token)
             cur = updater.installed(s.data_dir).get("sha")
             if cur == sha and not a.force:
@@ -554,6 +596,9 @@ def cmd_update(a, s):
         staged = updater.apply_zip(data, root, code_home=home)
         candidate = Path(staged["release"])
         releases.check_compatible(releases.current_root(root, home), candidate)
+        # Same requirements as the active release (checked just above): a package set a smart update brought
+        # stays selected, or the code would fall back to the installer's older packages (Codex P2 on 89907fe)
+        deps = (state.get("active") or {}).get("deps")
         # A candidate check must not open/migrate the real pharmacy database.
         with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
             isolated = Path(tmp)
@@ -561,6 +606,9 @@ def cmd_update(a, s):
                    "PHARM_DB_PATH": str(isolated / "test.db"), "PHARM_UPLOAD_DIR": str(isolated / "uploads"),
                    "PHARM_BACKUP_DIR": str(isolated / "backups"), "PHARM_PRINTER": "none",
                    "PYTHONUTF8": "1"}
+            env.pop("PHARM_DEPS_DIR", None)
+            if deps:                       # the candidate is checked with the packages it will run with
+                env["PHARM_DEPS_DIR"] = str(home / "deps" / deps)
             check = subprocess.run([sys.executable, str(candidate / "manage.py"), "selftest", "--quick"],
                                    cwd=candidate, env=env, timeout=120)
             if check.returncode:
@@ -577,13 +625,57 @@ def cmd_update(a, s):
         # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
         ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
         releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat()},
+                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat(),
+                           **({"deps": deps} if deps else {})},
                           expected_active=expected_active)
         print(f"Prepared {staged['files']} files; restart to check the selected release.")
         print("Previous code is retained. No pip install or database migration was run.")
     except (updater.UpdateError, releases.ReleaseError, OSError, zipfile.BadZipFile,
             subprocess.TimeoutExpired) as exc:
         sys.exit(f"التحديث فشل: {exc}")
+
+
+def _smart_update(a, s, root: Path):
+    """Stage-1 steps of the smart update (docs/SMART_UPDATE.md); every failure keeps code and data as they are."""
+    import json
+    from app.core import smart_update as su, update_sign, updater
+    if a.candidate_check:                       # runs inside the NEW code, on a COPY of the database
+        report = su.candidate_check(s, _db)
+        print("CANDIDATE-CHECK " + json.dumps(report, ensure_ascii=False))
+        sys.exit(0 if report["ok"] else 1)
+    if a.self_check:
+        update_sign.self_check(root)
+        su.deps_id(b"x", su.python_tag(), su.platform_tag())
+        print("SELF-CHECK OK")
+        return
+    legacy = Path(releases_legacy_root(s))
+    backups = _backups(a.backup_dir, s)
+    if a.prepare:
+        if a.from_bundle:
+            source = su.FolderSource(Path(a.from_bundle))
+        else:
+            token = updater.read_token()
+            chan = updater.follow(updater.installed(s.data_dir), a.repo, token)
+            if chan is None:
+                raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ لم يتغير شيء")
+            source = su.GitHubSource(a.repo, chan, token)
+        out = su.prepare(s, source, legacy=legacy)
+        print("SMART-PREPARE " + json.dumps(out, ensure_ascii=False))
+        return
+    if a.select_prepared:
+        out = su.select_code_only(s, legacy, backups)
+        print(f"Selected {out['sha'][:7]}; restart to check it.")
+        return
+    out = su.apply_prepared(s, legacy, a.apply_prepared, backups)
+    print("SMART-APPLY " + json.dumps({k: out.get(k) for k in ("release", "sha", "migrated", "backup")},
+                                      ensure_ascii=False))
+
+
+def releases_legacy_root(s) -> str:
+    """The installed program folder (stage 0's root), as recorded in the release state; else this folder."""
+    import release_bootstrap as releases
+    state = releases.read_state(releases.code_home(s.data_dir))
+    return state.get("legacy_root") or str(Path(__file__).resolve().parent)
 
 
 def cmd_reset_owner_password(a, s):
@@ -705,6 +797,12 @@ def main(argv=None):
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
+    up.add_argument("--prepare", action="store_true", help="smart update: download, verify and rehearse (no change)")
+    up.add_argument("--from-bundle", help="smart update from a folder (flash drive): same signature checks")
+    up.add_argument("--select-prepared", action="store_true", help="smart update without database change")
+    up.add_argument("--apply-prepared", metavar="RELEASE_ID", help="(run by the launcher, program stopped)")
+    up.add_argument("--candidate-check", metavar="DB_COPY", help="(inside a candidate) migrate and check a copy")
+    up.add_argument("--self-check", action="store_true", help="(inside a candidate) the updater's own check")
     rp = sub.add_parser("reset-owner-password", help="forgotten owner password: set a new one on this PC (#151)")
     rp.add_argument("--username", help="needed only when there is more than one owner")
     a = p.parse_args(argv)

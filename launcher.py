@@ -83,15 +83,67 @@ def candidate_ready(process, boot_id: str, timeout: float = 60) -> bool:
     return False
 
 
+def _log_update(h: Path, text: str) -> None:
+    with open(h / "logs" / "update.log", "a", encoding="utf-8") as log:
+        log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+
+
+def settle(code_home: Path, h: Path, env: dict, flags: int, attempts: int = 3) -> bool:
+    """Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, run a prepared apply once
+    if the program asked for it, swap the checked copy in. Nothing here migrates. False = do not start."""
+    for attempt in range(attempts):
+        try:
+            releases.resume_journal(code_home)
+            if (code_home / "apply-go.json").exists():
+                releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+                releases.resume_journal(code_home)
+            if releases.settled(code_home):
+                return True
+            error = "journal not settled"
+        except (releases.ReleaseError, OSError) as exc:
+            error = str(exc)
+        (code_home / "apply-go.json").unlink(missing_ok=True)
+        _log_update(h, f"Update journal could not be completed (attempt {attempt + 1}): {error}")
+        time.sleep(2 * (attempt + 1))        # a Windows file lock (antivirus) usually clears in seconds
+    _log_update(h, "Program not started; it retries on the next start. Data and the previous copy are kept.")
+    return False
+
+
+def recover(code_home: Path, h: Path, selected_id, attempts: int = 3) -> bool:
+    for attempt in range(attempts):
+        try:
+            releases.recover_failed_start(code_home, selected_id)
+            return True
+        except (releases.ReleaseError, OSError) as exc:
+            _log_update(h, f"Rollback could not be completed (attempt {attempt + 1}): {exc}")
+            time.sleep(2 * (attempt + 1))
+    _log_update(h, "Program not started; the rollback is retried on the next start.")
+    return False
+
+
 def main() -> int:
     if running():
         webbrowser.open(URL)
         return 0
     h = home()
+    lock = releases.stage0_lock(releases.code_home(h / "data"))
+    try:
+        lock.__enter__()
+    except releases.ReleaseError:            # another launcher is starting the program (or updating it)
+        open_when_ready(timeout=600)
+        return 0
+    try:
+        return _main(h)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _main(h: Path) -> int:
     for d in ("data", "backups", "logs"):
         (h / d).mkdir(parents=True, exist_ok=True)
+    # PHARM_BOOTSTRAP: what this launcher can apply (docs/SMART_UPDATE.md §1); an older launcher sets none
     env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
-           "PYTHONPATH": str(ROOT)}
+           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PYTHONPATH": str(ROOT)}
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     code_home = releases.code_home(h / "data")
@@ -99,7 +151,12 @@ def main() -> int:
     if build:
         (h / "data" / "installed_version.json").write_text(json.dumps({**build, "source": "installer"}),
                                                            encoding="utf-8")
+    releases.write_capability(code_home)                    # stage 1 may now offer database updates
     while True:
+        # Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, then run a prepared
+        # apply once if the program asked for it, then swap the checked copy in. Nothing here migrates.
+        if not settle(code_home, h, env, flags):
+            return 1                         # never start a program over an unsettled swap (Codex P1, #386)
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
         try:
@@ -107,7 +164,8 @@ def main() -> int:
         except releases.ReleaseError:
             if not state.get("pending"):
                 raise
-            releases.rollback(code_home, expected_id=selected_id)
+            if not recover(code_home, h, selected_id):
+                return 1
             continue
         pending = h / "data" / "pending_restore.zip"
         if pending.exists():                     # restore asked from the first-run screen
@@ -131,10 +189,12 @@ def main() -> int:
                         except subprocess.TimeoutExpired:
                             p.kill()
                             p.wait(timeout=10)
-                    releases.rollback(code_home, expected_id=selected_id)
-                    log.write("Candidate startup failed; previous complete code selected.\n")
+                    if not recover(code_home, h, selected_id):
+                        return 1
+                    log.write("Candidate startup failed; previous complete code (and database) selected.\n")
                     continue
                 releases.confirm(code_home, selected_id)
+                releases.finish_journal(code_home, selected_id)
             if first:
                 threading.Thread(target=open_when_ready, daemon=True).start()
                 first = False

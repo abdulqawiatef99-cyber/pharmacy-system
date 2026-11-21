@@ -172,10 +172,14 @@ class TestUpdateChannel(APICase):
         self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
 
     def test_work_branch_install_has_no_channel(self):
+        """Until the official release (main) contains a review installer's commit, it follows nothing."""
+        from app.core import updater
         self.http_login()
-        st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
+        with _mock.patch.object(updater, "contains", return_value=False) as has:
+            st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
+            r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
+        self.assertEqual(has.call_args_list[0][0][1:3], ("a" * 40, "main"))
         self.assertFalse(ls.called)
         self.assertEqual((st["channel"], st["candidate"], st["available"]), (None, "claude/x", False))
-        r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
         self.assertEqual(r.status_code, 422)
         self.assertFalse(run.called)

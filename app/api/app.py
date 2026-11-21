@@ -501,20 +501,74 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        chan = updater.channel(info)
+        token = updater.read_token()
+        # #107: the install's own channel (develop on test PCs); a review installer of a work branch follows the
+        # official release (main) once main contains it (owner 20/11), never an older main
+        chan = updater.follow(info, updater.DEFAULT_REPO, token)
         out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, info)}
         if chan is None:
-            out["candidate"] = info["ref"]        # a review installer of a work branch: no channel to follow
+            out["candidate"] = info["ref"]        # a review installer main does not contain yet: no channel
             upd_cache.update(at=now, v=out)
             return out
-        try:                                      # #107: the install's own channel (develop on test PCs)
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, updater.read_token())
+        try:
+            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, token)
             out["available"] = out["latest"] != cur
         except updater.UpdateError as e:
             out["error"] = str(e)
         upd_cache.update(at=now, v=out)
         return out
+
+    upd_root = Path(__file__).resolve().parents[2]
+
+    def _smart_status(chan, info) -> dict:
+        """docs/SMART_UPDATE.md: signed bundles (migrations and packages too) once this PC trusts a key."""
+        from ..core import smart_update as su, update_sign, updater
+        out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
+               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
+        try:
+            keys = update_sign.trusted_keys(upd_root)
+        except (OSError, update_sign.SignatureError):
+            keys = []
+        if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
+            return out                                # old launcher: today's code-only button
+        token = updater.read_token()
+        try:
+            m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, token), keys)
+            forward = su.is_forward(m, info, updater.DEFAULT_REPO, token)   # never an older bundle
+        except updater.UpdateError as e:
+            out["error"] = str(e)
+            return out
+        out.update(enabled=True, sha=m["sha"], available=forward, needs_installer=m["python"] != su.python_tag(),
+                   notes=[n for n in m.get("notes", []) if n not in set(su.notes_of(upd_root))][:60],
+                   database=bool(set(m["migrations"]) - {f.stem for f in (upd_root / "app" / "migrations").glob("*.sql")}))
+        if out["request"]:
+            out["waiting"] = su.busy_reason(db, out["request"].get("when", "now"))
+        return out
+
+    def _manage(*args, timeout=1800):
+        import subprocess
+        import sys as _sys
+        return subprocess.run([_sys.executable, str(upd_root / "manage.py"), "update", *args], cwd=os.getcwd(),
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                              env={**os.environ, "PYTHONUTF8": "1"})
+
+    def _smart_loop():
+        from ..core import smart_update as su
+        try:
+            su.import_log(db, s.data_dir)
+        except Exception:                             # the audit copy is retried on the next start
+            logging.getLogger(__name__).exception("update log import failed")
+        while True:
+            time.sleep(30)
+            try:
+                if os.environ.get("PHARM_LAUNCHER") == "1":
+                    su.trigger(s, db)
+            except Exception:
+                logging.getLogger(__name__).exception("smart update check failed")
+
+    if auto_backup and os.environ.get("PHARM_LAUNCHER") == "1":
+        threading.Thread(target=_smart_loop, daemon=True, name="smart-update").start()
 
     @handler
     async def system_update_status(req):
@@ -525,10 +579,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def system_update_run(req):
         ctx = ctx_of(req)
         ctx.require("settings.manage")
+        b = await body(req)
+        action = (b or {}).get("action") or "classic"
+        if action != "classic":
+            return J(await _smart_action(ctx, action, b))
         import subprocess
         import sys as _sys
         from ..core import updater
-        chan = updater.channel(updater.installed(s.data_dir))
+        chan = updater.follow(updater.installed(s.data_dir), updater.DEFAULT_REPO, updater.read_token())
         if chan is None:
             raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
         root = Path(__file__).resolve().parents[2]
@@ -546,6 +604,37 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             threading.Timer(1.5, lambda: os._exit(75)).start()
         return J({"ok": ok, "restarting": restart,
                   "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
+
+    async def _smart_action(ctx, action: str, b: dict) -> dict:
+        """prepare (download, verify, rehearse) / schedule (now | after_close) / cancel; each one audited."""
+        from ..core import smart_update as su, updater
+        if action == "prepare":
+            proc = await run_in_threadpool(_manage, "--prepare")
+            ok = proc.returncode == 0
+            text = (proc.stdout or "") + (proc.stderr or "")
+            with db.transaction():
+                audit.record(db, ctx, "system.update.prepare", "system", None, after={"ok": ok, "tail": text[-500:]})
+            upd_cache.clear()
+            if not ok:
+                raise ValidationFailed(text.strip().splitlines()[-1] if text.strip() else "التجهيز فشل", code="update_failed")
+            return {"ok": True, "prepared": su.prepared(s.data_dir) or None}
+        if action == "schedule":
+            when = b.get("when")
+            try:
+                value = su.request(s.data_dir, when, ctx.user_id)
+            except updater.UpdateError as e:
+                raise ValidationFailed(str(e), code="update_failed") from e
+            with db.transaction():
+                audit.record(db, ctx, "system.update.schedule", "system", None, after=value)
+            upd_cache.clear()
+            return {"ok": True, "request": value, "waiting": su.busy_reason(db, when)}
+        if action == "cancel":
+            su.cancel(s.data_dir)
+            with db.transaction():
+                audit.record(db, ctx, "system.update.cancel", "system", None)
+            upd_cache.clear()
+            return {"ok": True}
+        raise ValidationFailed("أمر تحديث غير معروف", code="bad_action")
 
     @handler
     async def setup_restore(req):
@@ -2871,8 +2960,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 await run_in_threadpool(autob.stop)
 
     from .hostcheck import HostAllowlist
+    from ..core.smart_update import InFlight
     app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
-                                               Middleware(SecurityHeaders)], lifespan=lifespan)
+                                               Middleware(SecurityHeaders), Middleware(InFlight)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app
