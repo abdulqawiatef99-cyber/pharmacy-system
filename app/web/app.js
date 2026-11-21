@@ -1271,6 +1271,8 @@ function purchaseLabels(cur) {
       .map((c) => ({ id: rows[+c.dataset.i].id, count: Math.max(1, Math.min(500, parseInt(d.querySelector(`[data-n="${c.dataset.i}"]`).value, 10) || 1)) }));
     if (!pick.length) { toast("علّم صنف واحد على الأقل", true); return; }
     const n = pick.reduce((a, x) => a + x.count, 0);
+    // the label printer takes 500 labels a job: say so here, the dialog stays open (Codex P2 on #406)
+    if (n > 500) { toast(`أقصى عدد في المرة 500 ملصق؛ المختار ${n}. قلّل العدد أو اطبع على دفعات`, true); return; }
     if (!confirm(`هتطبع ${n} ملصق لـ ${pick.length} صنف؟`)) return;
     const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
     try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
