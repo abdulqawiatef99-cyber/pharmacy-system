@@ -111,6 +111,8 @@ def record_split(db: Database, ctx: Context, shift_id: str, counted: dict | None
             sp = split_float(counted, _target_for(counted, float_left, largest_first=order))
             if sp["float_left"] == float_left:
                 break
+        else:                            # no notes make that amount exactly: the report shows the amount only
+            sp = {"keep": {}, "move": {}}
     audit.record(db, ctx, "cash.float_split", "cash_shift", shift_id, after={"keep": sp["keep"], "move": sp["move"],
                                                                               "float_left": float_left})
 
@@ -139,13 +141,27 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
     from .cash import _sales_of
     where, args = _sales_of(s)
     sales = [dict(r) for r in db.all(
-        "SELECT x.id, x.sale_no, x.total, x.paid_cash, x.paid_card, x.paid_transfer, x.on_credit, x.completed_at"
+        "SELECT x.id, x.sale_no, x.kind, x.total, x.paid_cash, x.paid_card, x.paid_transfer, x.on_credit, x.completed_at"
         f" FROM sales x WHERE {where} AND x.status='completed' ORDER BY x.sale_no", args)]
     fractions = [x for x in sales if x["paid_cash"] % 25]
-    mismatch = [x for x in sales if x["paid_cash"] + x["paid_card"] + x["paid_transfer"] + x["on_credit"] != x["total"]]
-    opened = {r["entity_id"] for r in db.all(
-        "SELECT a.entity_id FROM audit_log a JOIN sales x ON x.id=a.entity_id WHERE a.org_id=? AND"
-        " a.entity_type='sale' AND a.action='cash.drawer_auto' AND x.shift_id=?", (ctx.org_id, shift_id))}
+    # paid in cash on the invoice vs what really reached this drawer for it (the completion refuses paid != total,
+    # so the useful check is the drawer's own movement)
+    in_drawer = {r["ref_id"]: r["t"] for r in db.all(
+        "SELECT ref_id, sum(amount) t FROM cash_movements WHERE shift_id=? AND org_id=? AND kind='sale' GROUP BY ref_id",
+        (shift_id, ctx.org_id))}
+    mismatch = [x for x in sales if x["kind"] != "delivery"           # a courier's cash arrives when it is handed in
+                and x["paid_cash"] != in_drawer.get(x["id"], 0)]
+    # from this shift's sales to their audit rows (the #113 pattern), and only pulses really sent to the drawer:
+    # a failed pulse never opened it
+    audits = [dict(r) for r in db.all(
+        "SELECT x.id sale_id, x.completed_at, a.action, a.at, a.after_json FROM sales x CROSS JOIN audit_log a"
+        " ON a.org_id=x.org_id AND a.entity_type='sale' AND a.entity_id=x.id"
+        " WHERE +x.org_id=? AND x.shift_id=?", (ctx.org_id, shift_id))]
+    opened = {a["sale_id"] for a in audits if a["action"] == "cash.drawer_auto"
+              and json.loads(a["after_json"] or "{}").get("outcome") == "sent"}
+    edited = sorted({a["sale_id"] for a in audits if a["completed_at"] and a["at"] > a["completed_at"]
+                     and a["action"] not in ("sale.complete", "cash.drawer_auto", "sale.return", "sale.void")})
+    edits = [x for x in sales if x["id"] in edited]
     noncash_open = [x for x in sales if x["id"] in opened and x["paid_cash"] == 0]
     manual = [dict(r) for r in db.all(
         "SELECT a.at, a.after_json, u.full_name by_name FROM audit_log a LEFT JOIN users u ON u.id=a.user_id"
@@ -157,14 +173,16 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
         "SELECT m.kind, m.amount, m.note, m.created_at, u.full_name by_name FROM cash_movements m LEFT JOIN users u"
         " ON u.id=m.created_by WHERE m.shift_id=? AND m.org_id=? AND m.kind IN ('refund','void','payout','deposit')"
         " ORDER BY m.created_at", (shift_id, ctx.org_id))]
-    frac_total = sum(x["paid_cash"] % 100 for x in sales)
+    frac_total = sum(x["paid_cash"] % 25 for x in sales)          # the part no coin can pay
     hints = []
     if fractions:
         hints.append(f"{len(fractions)} فاتورة نقدي فيها قروش مالهاش عملة (زي 1249.01): الفرق ده طبيعي ومش سرقة")
     if noncash_open:
         hints.append(f"{len(noncash_open)} فاتورة اتدفعت ببطاقة أو تحويل أو آجل والدرج اتفتح: اتأكد إن محدش أخد منها فكة")
     if mismatch:
-        hints.append(f"{len(mismatch)} فاتورة المدفوع فيها مش زي الإجمالي")
+        hints.append(f"{len(mismatch)} فاتورة النقدي فيها مش زي اللي دخل الدرج")
+    if edits:
+        hints.append(f"{len(edits)} فاتورة اتعدلت بعد الدفع: راجعها")
     if manual:
         hints.append(f"الدرج اتفتح باليد {len(manual)} مرة: راجع الأسباب")
     if moves:
@@ -172,5 +190,5 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
     if not hints:
         hints.append("مفيش سبب ظاهر في السيستم: غالبًا فكة اتدّت غلط أو فلوس اتحطت في الدرج من غير ما تتسجل")
     return {"shift_id": shift_id, "difference": s["difference"], "fractions": fractions,
-            "fractions_piasters": frac_total, "noncash_drawer_open": noncash_open, "mismatch": mismatch,
+            "fractions_piasters": frac_total, "noncash_drawer_open": noncash_open, "mismatch": mismatch, "edited_after_payment": edits,
             "manual_openings": manual, "movements": moves, "hints": hints}

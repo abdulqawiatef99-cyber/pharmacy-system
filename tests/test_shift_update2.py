@@ -40,6 +40,11 @@ class TestFloatTarget(SalesCase):
         self.assertEqual(st.get_target(self.db, self.ctx.org_id)["10000"], 20000)
         self.assertEqual(st.get_target(self.db, self.ctx.org_id)["5000"], 0)
 
+    def test_float_no_notes_can_make_is_shown_as_amount_only(self):
+        cd = CashDrawer(self.db)
+        r = cd.close(self.ctx, denominations={"10000": 1, "5000": 1, "2000": 3}, note="عدّ تجربة", float_left=16000)
+        self.assertEqual(r["float_split"]["keep"], {})
+
     def test_close_records_the_notes_kept(self):
         cd = CashDrawer(self.db)
         r = cd.close(self.ctx, denominations={"10000": 5, "5000": 1}, note="عدّ تجربة", float_left=30000)
@@ -72,7 +77,15 @@ class TestReportAndHunt(SalesCase):
             self.db.execute("UPDATE sales SET paid_cash=paid_cash+1, total=total+1 WHERE shift_id=?", (shift,))
             from app.core import audit
             audit.record(self.db, self.ctx, "cash.drawer_open", "cash_shift", shift, after={"reason": "فكة"})
+            sale = self.db.one("SELECT id, completed_at FROM sales WHERE shift_id=?", (shift,))
+            # a pulse that failed never opened the drawer; an edit after payment is listed
+            self.db.execute("INSERT INTO audit_log (id, org_id, user_id, action, entity_type, entity_id, after_json, at)"
+                            " VALUES ('a1', ?, ?, 'sale.details', 'sale', ?, '{}', '9999-01-01T00:00:00Z')",
+                            (self.ctx.org_id, self.ctx.user_id, sale["id"]))
         h = st.difference_hunt(self.db, self.ctx, shift)
+        self.assertEqual(len(h["mismatch"]), 1)               # 1 piaster on the invoice never reached the drawer
+        self.assertEqual(len(h["edited_after_payment"]), 1)
+        self.assertEqual(h["fractions_piasters"], 1)
         self.assertEqual(len(h["fractions"]), 1)
         self.assertEqual(len(h["manual_openings"]), 1)
         self.assertEqual(h["manual_openings"][0]["reason"], "فكة")

@@ -3913,7 +3913,8 @@ function wireHunt() {
       $("#shHuntOut").innerHTML = `<section class="panel"><h3>دوّر على الفرق (${money(h.difference || 0)} ج)</h3><ul>${h.hints.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
         ${h.fractions.length ? `<h4>فواتير فيها قروش (${money(h.fractions_piasters)} ج قروش)</h4><ul>${h.fractions.slice(0, 50).map(row).join("")}</ul>` : ""}
         ${h.noncash_drawer_open.length ? `<h4>دفع غير نقدي والدرج اتفتح</h4><ul>${h.noncash_drawer_open.map(row).join("")}</ul>` : ""}
-        ${h.mismatch.length ? `<h4>المدفوع مش زي الإجمالي</h4><ul>${h.mismatch.map(row).join("")}</ul>` : ""}
+        ${h.mismatch.length ? `<h4>النقدي مش زي اللي دخل الدرج</h4><ul>${h.mismatch.map(row).join("")}</ul>` : ""}
+        ${h.edited_after_payment.length ? `<h4>اتعدلت بعد الدفع</h4><ul>${h.edited_after_payment.map(row).join("")}</ul>` : ""}
         ${h.manual_openings.length ? `<h4>فتح الدرج من غير بيع</h4><ul>${h.manual_openings.map((m) => `<li>${esc(stamp(m.at))} ${esc(m.by_name || "")} — ${esc(m.reason || "")}</li>`).join("")}</ul>` : ""}
         ${h.movements.length ? `<h4>مرتجعات وإلغاء وصرف وإيداع</h4><ul>${h.movements.map((m) => `<li>${esc(stamp(m.created_at))} ${esc(m.by_name || "")}: ${money(m.amount)} ${esc(m.note || "")}</li>`).join("")}</ul>` : ""}</section>`;
     } catch (err) { toast(err.message, true); }

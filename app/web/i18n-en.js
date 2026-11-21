@@ -3060,4 +3060,6 @@ window.I18N_EN = {
 "⚠ الفكة ناقصة 0 ج عن المطلوب": "⚠ The float is 0 EGP short of the target",
 "سيب في الدرج:": "Keep in the drawer:",
 "حوّل للخزنة:": "Move to the treasury:",
+"النقدي مش زي اللي دخل الدرج": "Cash on the invoice is not what reached the drawer",
+"اتعدلت بعد الدفع": "Changed after payment",
 };
