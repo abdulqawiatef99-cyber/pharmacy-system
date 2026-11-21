@@ -304,3 +304,14 @@ class TestCodexRound5(Base):
         with self.assertRaises(Conflict):
             self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
         self.assertIsNone(self.db.one("SELECT customer_id FROM sales WHERE id=?", (new,))["customer_id"])
+
+    def test_an_exchange_across_branches_is_refused(self):
+        sid = self.sell(self.a, 2)
+        new = self.draft(self.b, 1)
+        with self.db.transaction():
+            self.db.execute("INSERT INTO branches (id, org_id, name) VALUES ('b2', ?, 'فرع تاني')", (self.ctx.org_id,))
+            self.db.execute("UPDATE sales SET branch_id='b2' WHERE id=?", (new,))
+        with self.assertRaises(ValidationFailed) as e:
+            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
+        self.assertEqual(e.exception.code, "exchange_branch")
+        self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))

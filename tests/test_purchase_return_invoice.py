@@ -260,3 +260,20 @@ class TestCodexRound5(TestCodexReview397):
         self.assertEqual(self.balance() - bal, 680)
         self.assertEqual(self.full_return(inv, "X-1")["total"], 680)
         self.assertEqual(self.balance(), bal)
+
+
+class TestCodexRound6(__import__("unittest").TestCase):
+    def test_spread_adds_up_and_no_line_goes_negative(self):
+        import random
+        got = returns._spread(-2, [1000, 1000, 1000, 1000, 1])
+        self.assertEqual(sum(got), -2)
+        self.assertTrue(all(a + g >= 0 for a, g in zip([1000, 1000, 1000, 1000, 1], got)))
+        rnd = random.Random(7)
+        for _ in range(3000):
+            amounts = [rnd.randint(0, 5000) for _ in range(rnd.randint(1, 8))]
+            adj = rnd.randint(-sum(amounts), 3000)
+            got = returns._spread(adj, amounts)
+            self.assertEqual(sum(got), adj, (adj, amounts))
+            self.assertTrue(all(isinstance(g, int) for g in got))
+            if adj < 0:
+                self.assertTrue(all(a + g >= 0 for a, g in zip(amounts, got)), (adj, amounts, got))

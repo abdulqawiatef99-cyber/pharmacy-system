@@ -215,12 +215,7 @@ def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
         "SELECT l.*, i.name_en, i.name_ar, i.pack_size FROM purchase_invoice_lines l JOIN items i ON i.id=l.item_id"
         " WHERE l.invoice_id=? AND l.org_id=? ORDER BY l.line_no", (inv_id, ctx.org_id))]
     amounts = [effective_amount(l) or 0 for l in rows]
-    adj, whole = (head["extra_tax"] or 0) - (head["extra_discount"] or 0), sum(amounts)
-    shares, given = [], 0
-    for k, a in enumerate(amounts):
-        part = adj - given if k == len(amounts) - 1 else (_share(adj, a, whole) if adj >= 0 else -_share(-adj, a, whole))
-        shares.append(part)
-        given += part
+    shares = _spread((head["extra_tax"] or 0) - (head["extra_discount"] or 0), amounts)
     out = []
     for l, amount, share in zip(rows, amounts, shares):
         mv = db.one("SELECT id, batch_id, branch_id FROM stock_movements WHERE org_id=? AND ref_type='purchase_invoice'"
@@ -263,6 +258,33 @@ def from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str) 
                 l.pop(k, None)
     return {"invoice_id": inv_row["id"], "invoice_no": inv_row["invoice_no"], "invoice_date": inv_row["invoice_date"],
             "lines": lines}
+
+
+def _spread(adj: int, amounts: list[int]) -> list[int]:
+    """The invoice-level tax (+) or discount (-) over the lines by amount, integers that add up to adj exactly:
+    each line its floor share, the leftover piasters one by one to the largest remainders, and a discount never
+    takes a line below zero while another line can carry it (Codex P1 round 6: [1000 x4, 1] with a 2-piaster
+    discount gave the last line -1)."""
+    n, whole = len(amounts), sum(max(0, a) for a in amounts)
+    if not n or not adj:
+        return [0] * n
+    if whole <= 0:
+        return [adj] + [0] * (n - 1)
+    size, sign = abs(adj), (1 if adj > 0 else -1)
+    base = [size * max(0, a) // whole for a in amounts]
+    rest = size - sum(base)
+    order = sorted(range(n), key=lambda i: (-(size * max(0, amounts[i]) % whole), i))
+    while rest:
+        moved = False
+        for i in order:
+            if rest and (sign > 0 or amounts[i] - base[i] - 1 >= 0):
+                base[i] += 1
+                rest -= 1
+                moved = True
+        if not moved:                      # a discount bigger than the lines: the rest on the first line
+            base[0] += rest
+            rest = 0
+    return [sign * b for b in base]
 
 
 def _share(amount: int, part: int, whole: int) -> int:
