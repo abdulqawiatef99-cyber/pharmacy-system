@@ -46,9 +46,10 @@ reads it) and publishes nothing, so a missing or wrong key shows before the merg
 **Settled 21/11 (owner 13:16): outcome (b).** update-1's private file was not found (the secret set at 10:28
 matched no committed key: run 44896903157 attempt 1). The owner put the spare back; attempt 2 logged `signed
 with release_keys/update-2-spare.pub`. So `update-2-spare.pub` is now `release_keys/update-2.pub` (same key,
-blob `d61835b`) and `update-1.pub` is removed. **Before any merge to `main` (and before the next installer):**
-the owner runs `new-signing-key.bat` (new spare to `F:\pharmacy-update-keys`) and an agent commits its
-`update-3.pub`, so the PCs always trust a second key.
+blob `d61835b`) and `update-1.pub` is removed. **Spare done 21/11 14:41:** the owner ran `new-signing-key.bat`
+on the cashier PC (private half only on the flash drive `F:\pharmacy-update-keys-3`); its public half is
+`release_keys/update-3.pub`. So **update-2 signs, update-3 is the spare**, and the PCs trust both from the next
+installer on.
 
 **Which key signs (part 3 item 0, owner 20/11 23:18): settle before anything is published.** The dry run on
 `77a392a` signed with `update-2-spare.pub`: the secret holds the **spare**. Tools (folder «أدوات الصيدلية», or

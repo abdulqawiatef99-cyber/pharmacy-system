@@ -27,6 +27,9 @@ If something here conflicts with an older document, this file wins.
   branch protection or an outside watcher covers it, which is the owner's decision (#12).
 
 ## 2a. Review loop (Claude Code implements, Codex reviews)
+0. Before any `@codex review` (owner 21/11, OWNER_RULES §12): an independent review by a separate agent with a
+   fresh context (only the diff + the item's spec), focused on what breaks money/stock; fix its P0/P1 test-first.
+   Codex stays the final reviewer. Before launch: one final full review by the strongest suitable Claude model + Codex.
 1. The implementing agent opens a PR into `develop` (template: `.github/pull_request_template.md`)
    and comments `@codex review` on it. GitHub CI runs only once the PR has the label `ci`: add it when the
    head is final and the full suite passed locally (OWNER_RULES §4, GitHub minutes).

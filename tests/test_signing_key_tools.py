@@ -105,7 +105,8 @@ class TestToolsFolder(unittest.TestCase):
             names = set(os.listdir(Path(tmp) / "tools"))
             self.assertLessEqual({"signing-key-check.bat", "signing_key_check.py", "new-signing-key.bat",
                                   "new_signing_key.py"}, names, out)
-            self.assertEqual({"update-2.pub"}, set(os.listdir(Path(tmp) / "tools" / "keys")))     # outcome (b), 21/11
+            self.assertEqual({"update-2.pub", "update-3.pub"},                                    # outcome (b) + spare, 21/11
+                             set(os.listdir(Path(tmp) / "tools" / "keys")))
 
 
 if __name__ == "__main__":
