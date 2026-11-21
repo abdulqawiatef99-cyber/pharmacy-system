@@ -562,6 +562,8 @@ class TestBat(unittest.TestCase):
         for l in L[:L.index(":fail")]:
             if l == 'if "%RC%"=="4" goto rehearsal':      # not a failure: the database holds trial data (#362)
                 continue
+            if re.fullmatch(r'if (not )?defined \w+ goto (haveowner|havepw|haveyes)', l):   # update 1: re-asks
+                continue
             if l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
         self.assertIn('call :log FAIL "%MSG%"', L)

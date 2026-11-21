@@ -324,18 +324,48 @@ def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
     return None
 
 
-def fresh_start_refusal(db, answer: str | None) -> str | None:
+def _owner_password(username: str) -> str:
+    """The password: from estock-db-import.bat's single prompt (PHARM_OWNER_PASSWORD, set for this run only,
+    never on the command line), else asked here. The prompt is English: an old cmd window shows Arabic as ???."""
+    pw = os.environ.get("PHARM_OWNER_PASSWORD")
+    if pw:
+        return pw
+    return getpass.getpass(f"Password for {username} (typing is hidden): ")
+
+
+def cmd_ask_password(a, s):
+    """estock-db-import.bat asks the password ONCE (update 1): the prompt goes to the console itself (getpass),
+    so it is seen even when the output is captured, and an empty answer asks again. Prints it for the .bat."""
+    for _ in range(5):
+        pw = getpass.getpass(f"Password for {a.username} (typing is hidden): ")
+        if pw:
+            print(pw)
+            return
+        print("Nothing typed; type the password and press Enter.", file=sys.stderr)
+    sys.exit(1)
+
+
+def sales_after_import(db) -> list[dict]:
+    """The sales made after an applied opening-stock import (the Excel one or the E-Stock database move): what
+    a fresh start would archive. Oldest first."""
+    return [dict(r) for r in db.all(
+        "SELECT DISTINCT s.id, s.sale_no, coalesce(s.completed_at, s.created_at) at, s.total, s.status FROM sales s"
+        " JOIN import_runs r ON r.org_id=s.org_id WHERE r.kind='opening_stock' AND r.status='applied'"
+        " AND s.status IN ('completed','voided')"
+        " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at) ORDER BY at")]
+
+
+def fresh_start_refusal(db, answer: str | None, sales_confirmed: bool = False) -> str | None:
     """launch-fresh-start.bat archives the whole database. After launch that is the live data, and the
-    runbook used to send the operator back to it whenever the import refused (#324 R2). Refused once any
-    sale was made after an applied opening-stock import; otherwise the pharmacy's name must be typed
-    (not just YES). Spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter."""
+    runbook used to send the operator back to it whenever the import refused (#324 R2). The pharmacy's name
+    must be typed (not just YES); spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter. Once sales were
+    made after an applied opening-stock import, the owner must also see them and type YES (update 1, owner 21/11:
+    a list with dates and totals instead of a flat refusal): until then it is refused."""
     from app.catalog.normalize import normalize_text
-    sold = db.one("SELECT count(*) n FROM sales s JOIN import_runs r ON r.org_id=s.org_id"
-                  " WHERE r.kind='opening_stock' AND r.status='applied' AND s.status IN ('completed','voided')"
-                  " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at)")["n"]
-    if sold:
+    sold = len(sales_after_import(db))
+    if sold and not sales_confirmed:
         return (f"البرنامج اتشغل فعلًا: فيه {sold} فاتورة بيع بعد استيراد الأرصدة من E-Stock. "
-                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت. كلمني قبل أي خطوة")
+                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت إلا لو كتبت YES بعد ما تشوفها")
     key = lambda v: normalize_text(v or "").replace(" ", "")
     names = [r["name"] for r in db.all("SELECT name FROM organizations")]
     if not answer or key(answer) not in {key(n) for n in names}:
@@ -348,19 +378,47 @@ def cmd_fresh_start_check(a, s):
     cannot read Arabic typing reliably). Exit 0 = go on, 1 = refused (reason printed)."""
     db = _db(s)
     names = [r["name"] for r in db.all("SELECT name FROM organizations")]
-    print("الصيدلية في البرنامج:", "، ".join(names))
+    sold = sales_after_import(db)
+    # update 1: an old cmd window shows Arabic as ???: the Arabic (the name, the sales) also goes to a text file
+    # opened in Notepad, and the console lines are English
+    lines = ["الصيدلية في البرنامج: " + "، ".join(names), ""]
+    if sold:
+        lines.append(f"فواتير بيع بعد استيراد الأرصدة ({len(sold)}، إجمالي {sum(r['total'] or 0 for r in sold) / 100:,.2f} ج):")
+        lines += [f"  رقم {r['sale_no'] or '-'}  {(r['at'] or '')[:16].replace('T', ' ')}  {(r['total'] or 0) / 100:,.2f} ج"
+                  + ("  (ملغاة)" if r["status"] == "voided" else "") for r in sold]
+        lines += ["", "البداية من الصفر هتحفظ الفواتير دي في فولدر data-trial (مش هتتمسح)، والبرنامج يبدأ فاضي."]
+    note = s.data_dir.parent / "fresh-start-check.txt"
+    try:
+        note.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+        if os.name == "nt" and not os.environ.get("PHARM_E2E_PHARMACY"):
+            os.startfile(str(note))                                   # noqa: S606 (Notepad, the owner's own file)
+    except OSError:
+        pass
+    print("Pharmacy in the program (the name is in Notepad too):", ", ".join(names))
+    if sold:
+        print(f"Sales after the E-Stock import: {len(sold)}, total {sum(r['total'] or 0 for r in sold) / 100:,.2f} EGP")
+        for r in sold[:50]:
+            print(f"  no. {r['sale_no'] or '-'}  {(r['at'] or '')[:16].replace('T', ' ')}  {(r['total'] or 0) / 100:,.2f}"
+                  + ("  (voided)" if r["status"] == "voided" else ""))
     answer = os.environ.get("PHARM_E2E_PHARMACY")   # automated check on synthetic data only (CI)
     if answer is None:
-        why = fresh_start_refusal(db, "-")
-        if why and "اسم الصيدلية" not in why:   # refused whatever is typed: do not ask
-            sys.exit("FAIL: " + why)
         try:
-            answer = input("اكتب اسم الصيدلية زي ما هو مكتوب فوق علشان تكمل: ")
+            answer = input("Type the pharmacy name exactly as shown (Notepad), then Enter: ")
         except EOFError:
             answer = ""
-    why = fresh_start_refusal(db, answer)
+    why = fresh_start_refusal(db, answer, sales_confirmed=True)        # the name first
     if why:
         sys.exit("FAIL: " + why)
+    if sold:
+        yes = os.environ.get("PHARM_E2E_SALES_YES")
+        while yes is None or not yes.strip():                         # a stray Enter is not an answer: ask again
+            try:
+                yes = input(f"These {len(sold)} sales will be kept in the trial folder and the program starts EMPTY."
+                            " Type YES to go on, NO to stop: ")
+            except EOFError:
+                yes = "NO"
+        if yes.strip().upper() != "YES":
+            sys.exit("FAIL: " + fresh_start_refusal(db, answer))
     print("OK")
 
 
@@ -372,7 +430,7 @@ def cmd_import_estock(a, s):
     from app.core import backup
     from app.dataimport import estock_job
     db = _db(s)
-    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    pw = a.password or _owner_password(a.username)
     tok = accounts.login(db, a.username, pw)["token"]
     files = {k: Path(getattr(a, k)) for k in ("catalog", "stock")}
     packs = Path(a.packs) if a.packs else None
@@ -448,7 +506,7 @@ def cmd_import_estock_db(a, s):
     if not a.username:
         sys.exit("FAIL: --username is required")
     db = _db(s)
-    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    pw = a.password or _owner_password(a.username)
     tok = accounts.login(db, a.username, pw)["token"]
     for f in [a.dir, *([a.confirm] if a.confirm else []), *([a.packs] if a.packs else [])]:
         if not Path(f).exists():
@@ -803,6 +861,8 @@ def main(argv=None):
     up.add_argument("--apply-prepared", metavar="RELEASE_ID", help="(run by the launcher, program stopped)")
     up.add_argument("--candidate-check", metavar="DB_COPY", help="(inside a candidate) migrate and check a copy")
     up.add_argument("--self-check", action="store_true", help="(inside a candidate) the updater's own check")
+    ap = sub.add_parser("ask-password", help="for estock-db-import.bat: ask a password once (prints it)")
+    ap.add_argument("--username", required=True)
     rp = sub.add_parser("reset-owner-password", help="forgotten owner password: set a new one on this PC (#151)")
     rp.add_argument("--username", help="needed only when there is more than one owner")
     a = p.parse_args(argv)
@@ -811,7 +871,7 @@ def main(argv=None):
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
      "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
-     "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
+     "reset-owner-password": cmd_reset_owner_password, "ask-password": cmd_ask_password}[a.cmd](a, s)
 
 
 if __name__ == "__main__":

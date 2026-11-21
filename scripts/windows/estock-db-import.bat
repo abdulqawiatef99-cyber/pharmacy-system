@@ -36,6 +36,7 @@ set "REP=%OUT%\reports-%STAMP%"
 REM never show an earlier run's owner report as this one's
 if exist "%OUT%\owner-report.txt" del /q "%OUT%\owner-report.txt"
 set "OWNERSHOWN="
+set "SHOW="
 set "STOPPED=0"
 echo ==== estock db import %DATE% %TIME% ==== >> "%LOG%"
 echo program: %INST% >> "%LOG%"
@@ -71,14 +72,28 @@ echo options:%EXTRA% >> "%LOG%"
 
 echo.
 set "OWNER="
-set /p "OWNER=Owner user name (the one made on the setup screen): "
 REM automated check on synthetic data only (CI): never set on the pharmacy PC
 if defined PHARM_E2E_OWNER set "OWNER=%PHARM_E2E_OWNER%"
-if "%OWNER%"=="" (set "MSG=no user name given" & goto fail)
+set "TRIES=0"
+:askowner
+if defined OWNER goto haveowner
+set /a TRIES+=1
+if %TRIES% gtr 5 (set "MSG=no user name given" & goto fail)
+REM update 1: a stray Enter is not an answer: ask again
+set /p "OWNER=Owner user name (the one made on the setup screen): "
+goto askowner
+:haveowner
 set "PWARG="
-REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the program asks
+REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the password is asked below
 if defined PHARM_IMPORT_PASSWORD set "PWARG=--password "%PHARM_IMPORT_PASSWORD%""
-echo The program asks for that user's password twice (dry run, then apply); typing is hidden.
+REM update 1: the password is asked ONCE, here, before anything runs; the prompt goes to this window itself
+REM (Python's hidden prompt), and the dry run and the move read it from PHARM_OWNER_PASSWORD, never from the
+REM command line. Cleared on every way out.
+set "PHARM_OWNER_PASSWORD="
+if defined PHARM_IMPORT_PASSWORD goto havepw
+for /f "usebackq delims=" %%p in (`""%PY%" -X utf8 "%MANAGE%" ask-password --username "%OWNER%""`) do set "PHARM_OWNER_PASSWORD=%%p"
+if not defined PHARM_OWNER_PASSWORD (set "MSG=no password given" & goto fail)
+:havepw
 
 set "STOPPED=1"
 call :stopprog
@@ -90,10 +105,10 @@ REM dry run: on a copy of the database, nothing is written to the real one; owne
 REM owner first, how much matched, the rest by kind) is copied next to the balances file and opened
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-dry" --username "%OWNER%" %PWARG% > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
-type "%DRY%" & type "%DRY%" >> "%LOG%"
+type "%DRY%" >> "%LOG%"
 if exist "%REP%-dry\openings-to-confirm.xlsx" copy /y "%REP%-dry\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
 if "%RC%"=="4" goto rehearsal
-if not "%RC%"=="0" (set "MSG=dry run failed, exit %RC%: nothing was moved (reports in %REP%-dry)" & goto fail)
+if not "%RC%"=="0" (set "SHOW=%DRY%" & set "MSG=dry run failed, exit %RC%: nothing was moved (reports in %REP%-dry)" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%DRY%" >nul
 if errorlevel 1 (set "MSG=dry run: the reconciliation is not OK: nothing was moved (reports in %REP%-dry)" & goto fail)
 call :log PASS "dry run on a copy: reconciliation OK (reports %REP%-dry)"
@@ -101,10 +116,15 @@ call :owner "%REP%-dry"
 
 echo.
 echo Read the owner report first: %OUT%\owner-report.txt (opened in Notepad).
-echo The dry run is above (also in %DRY%). Balances to confirm: %OUT%\openings-to-confirm.xlsx
+echo The dry run is in %DRY%. Balances to confirm: %OUT%\openings-to-confirm.xlsx
 set "ANS="
-set /p "ANS=Type YES to apply the move to the real database: "
 if defined PHARM_E2E_ANSWER set "ANS=%PHARM_E2E_ANSWER%"
+:askyes
+REM update 1: a stray Enter is not "no": ask again; anything typed other than YES stops
+if defined ANS goto haveyes
+set /p "ANS=Type YES to apply the move to the real database (NO to stop): "
+goto askyes
+:haveyes
 if /i not "%ANS%"=="YES" (set "MSG=not confirmed: nothing was moved" & goto fail)
 call :log PASS "apply confirmed by the user"
 set "NOWSTAMP=none"
@@ -114,9 +134,8 @@ if not "%NOWSTAMP%"=="%CONFSTAMP%" (set "MSG=openings-confirmed.xlsx appeared or
 REM the real move: import-estock-db --apply takes its own verified backup first
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%" --username "%OWNER%" %PWARG% --apply > "%APPLIED%" 2>&1
 set "RC=%ERRORLEVEL%"
-type "%APPLIED%"
 type "%APPLIED%" >> "%LOG%"
-if not "%RC%"=="0" (set "MSG=move failed, exit %RC%: restore the backup named in %APPLIED% before any sale" & goto fail)
+if not "%RC%"=="0" (set "SHOW=%APPLIED%" & set "MSG=move failed, exit %RC%: restore the backup named in %APPLIED% before any sale" & goto fail)
 findstr /c:"RECONCILIATION: OK" "%APPLIED%" >nul
 if errorlevel 1 (set "MSG=move: the reconciliation is not OK: restore the backup named in %APPLIED%" & goto fail)
 call :owner "%REP%" quiet
@@ -130,6 +149,7 @@ start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 90; $i++){ try { $h=Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:%PORT%/api/health'; if($h.ok -eq $true){ $ok=$true; break } } catch { }; Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Output 'the program did not answer on port %PORT% within 90 seconds'; exit 1 }; Write-Output ('program answers, version ' + $h.version); exit 0" <nul >> "%LOG%" 2>&1
 if errorlevel 1 (set "MSG=the move is done but the program did not answer after it (see the log)" & goto fail)
 call :log PASS "program started again and answers on port %PORT%"
+set "PHARM_OWNER_PASSWORD="
 call :log PASS "ALL DONE - program started again"
 echo.
 echo DONE.
@@ -144,10 +164,12 @@ REM and there is no YES. Tonight: launch-fresh-start.bat first, then this again 
 call :log NOTE "the program's database holds trial data: rehearsal on a new empty database (nothing is written)"
 "%PY%" "%MANAGE%" import-estock-db --dir "%READS%" %EXTRA% --out "%REP%-rehearsal" --rehearsal > "%DRY%" 2>&1
 set "RC=%ERRORLEVEL%"
-type "%DRY%" & type "%DRY%" >> "%LOG%"
+type "%DRY%" >> "%LOG%"
+findstr /b /c:"RECONCILIATION" "%DRY%"
 if exist "%REP%-rehearsal\openings-to-confirm.xlsx" copy /y "%REP%-rehearsal\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
 call :owner "%REP%-rehearsal"
 if not "%RC%"=="0" (set "MSG=rehearsal failed, exit %RC%: nothing was moved (reports in %REP%-rehearsal)" & goto fail)
+set "PHARM_OWNER_PASSWORD="
 call :log PASS "REHEARSAL ONLY: nothing was moved (reports %REP%-rehearsal). Tonight: launch-fresh-start.bat first, then this again"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
@@ -162,6 +184,9 @@ call :log FAIL "%MSG%"
 REM the real move's own report when it ran (a failed apply must never show the trial's 100%), else the trial's
 if exist "%REP%\owner-report.txt" call :owner "%REP%"
 if not exist "%REP%\owner-report.txt" if not defined OWNERSHOWN call :owner "%REP%-dry"
+set "PHARM_OWNER_PASSWORD="
+REM update 1: the program's own words (Arabic) in Notepad, which shows them; an old cmd window shows ???
+if defined SHOW if exist "%SHOW%" if not defined PHARM_E2E_ANSWER start "" notepad "%SHOW%"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 echo.
