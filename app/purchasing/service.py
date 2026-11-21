@@ -131,8 +131,9 @@ class Purchasing:
 
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
-        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual"), "manual",
-                                            None, supplier_id)
+        from ..sales.service import local_today       # update 1 (owner): the supplier invoice date starts as today
+        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual", invoice_date=local_today().isoformat()),
+                                            "manual", None, supplier_id)
 
     def _create_from_extraction(self, ctx: Context, ex: ExtractedInvoice, kind: str,
                                 file_id: str | None, supplier_id: str | None) -> str:
@@ -303,7 +304,7 @@ class Purchasing:
              date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
         ctx.require("purchases.read")
         q = ("SELECT pi.id, pi.serial_no, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
-             " pi.declared_total, pi.computed_total, pi.created_at, s.name supplier_name,"
+             " pi.declared_total, pi.computed_total, pi.created_at, pi.approved_at, s.name supplier_name,"
              " (SELECT count(*) FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id) lines"
              " FROM purchase_invoices pi LEFT JOIN suppliers s ON s.id=pi.supplier_id"
              " WHERE pi.org_id=?")
