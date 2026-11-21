@@ -1205,7 +1205,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def customers_all(req):
         from ..sales import customers as cu
         qp = req.query_params
-        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None)})
+        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None,
+                                          sort=qp.get("sort") or None)})
 
     @handler
     async def customers_phone_doubles(req):
@@ -2260,7 +2261,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         where, wp, rank, rp = cu.search_clause(req.query_params.get("q", ""))   # update 1: code, titles, spelling
         # every customer, none hidden for E-Stock's flags (owner 21/11); a deleted one is tagged
         rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit,"
-                      f" instr(coalesce(c.notes,''), '{cu.DELETED_TAG}') > 0 estock_deleted FROM customers c"
+                      f" {cu.CODE_SQL} estock_code FROM customers c"
                       f" WHERE c.org_id=? AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
                       (ctx.org_id, *wp, *rp))
         sales = Sales(db)

@@ -3644,7 +3644,7 @@ function renderSide() {
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
     const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
-    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}${c.estock_deleted ? ` <span class="badge">محذوف في إي ستوك</span>` : ""}</button>`).join("") || `<p class="muted">لا يوجد عميل بهذا الاسم</p>`;
+    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}${c.estock_code != null ? ` <span class="muted">كود ${esc(c.estock_code)}</span>` : ""}</button>`).join("") || `<p class="muted">لا يوجد عميل بهذا الاسم</p>`;
     $("#posCustRes").querySelectorAll("[data-cust]").forEach((b) => b.addEventListener("click", async () => {
       SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } });
       const fill = {};
@@ -4769,7 +4769,8 @@ async function viewCustomers(filter = "") {
   app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
     <div class="row"><input id="cuQ" class="grow" placeholder="الاسم أو الموبايل أو الكود" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
-    <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
+    <label class="f small">الترتيب <select id="cuSort"><option value="code">بالكود</option><option value="name">بالاسم</option><option value="balance">بالرصيد (الأكبر أولًا)</option></select></label>
+    <table class="mt"><thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
   ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
@@ -4781,14 +4782,14 @@ async function viewCustomers(filter = "") {
   let cur = { list: [], f: "" };
   const load = async () => {
     const f = $("#cuF .on").dataset.f;
-    const list = (await api(`/api/customers/all?q=${encodeURIComponent($("#cuQ").value)}${f ? `&only=${f}` : ""}`)).customers;
+    const list = (await api(`/api/customers/all?q=${encodeURIComponent($("#cuQ").value)}${f ? `&only=${f}` : ""}&sort=${$("#cuSort").value}`)).customers;
     const debt = list.reduce((a, c) => a + Math.max(0, c.balance), 0);
     $("#cuSum").innerHTML = `<b>${list.length} عميل${debt ? ` — عليهم ${money(debt)} ج` : ""}</b>${list.length >= 300 ? ` <span class="muted">(أول 300 — ابحث بالاسم عن الباقي)</span>` : ""}`;
     cur = { list, f };
-    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b>${c.estock_deleted ? ` <span class="badge" title="اتنقل من إي ستوك وهو محذوف هناك">محذوف في إي ستوك</span>` : ""}${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
+    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td class="num">${esc(c.estock_code ?? "")}</td><td><b>${esc(c.name)}</b>${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
       <td>${c.balance > 0 ? `<span class="badge b-err">✕ ${money(c.balance)}</span>` : `<span class="ok">✓ لا يوجد</span>`}</td>
       <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ فات موعده" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="muted">لا يوجد عملاء</td></tr>`;
+      || `<tr><td colspan="5" class="muted">لا يوجد عملاء</td></tr>`;
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
 
   };
@@ -4802,6 +4803,7 @@ async function viewCustomers(filter = "") {
     $("#cuDup").hidden = false;
   }).catch(() => { /* the list stays without the notice */ });
   let t; $("#cuQ").addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
+  $("#cuSort").addEventListener("change", load);
   const FT = { "": "كل العملاء", debt: "العملاء الذين عليهم مستحقات", refill: "اقترب موعد طلبهم الشهري" };
   wireTools("cust", () => { const { list, f } = cur; return { title: "تقرير العملاء", subtitle: FT[f] + ($("#cuQ").value ? ` — بحث: ${$("#cuQ").value}` : ""), el: $("#cuRep"), sheets: [
     { name: "العملاء", columns: [Tx("الاسم"), Tx("اسم آخر"), Tx("هاتف"), Tx("هاتف 2"), Tx("هاتف 3"), Tx("العنوان"), Tx("العنوان 2"), M("عليه"), M("حد الآجل"), Dt("الطلب الشهري"), Tx("واتساب")],

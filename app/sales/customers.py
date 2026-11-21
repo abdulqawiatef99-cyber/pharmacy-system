@@ -55,8 +55,11 @@ def search_terms(q: str) -> list[str]:
 
 # update 1 (owner 21/11: «د محمد الشربيني», E-Stock code 335, not found): titles are not part of the name
 _TITLES = {"د", "دكتر", "لدكتر", "دكتره", "لدكتره", "دك", "ا", "استاذ", "ستاذ", "استذ", "ستذ", "م", "مهندس", "مهندسه"}
+_TITLE_PREFIXES = ("", "د/ ", "د/", "د ", "د. ", "د.", "دكتر ", "لدكتر ", "دكتره ")   # in spelling_sql form
 ESTOCK_TAG = "كود إي ستوك: "
-DELETED_TAG = "محذوف في إي ستوك"          # estock_db.DELETED_TAG: the move tags, never hides (owner 21/11)
+# the E-Stock code as a number, for sorting (the move writes «كود إي ستوك: N» first in the notes)
+CODE_SQL = (f"CASE WHEN substr(coalesce(c.notes,''), 1, {len(ESTOCK_TAG)}) = '{ESTOCK_TAG}'"
+            f" THEN CAST(substr(c.notes, {len(ESTOCK_TAG) + 1}) AS INTEGER) END")
 
 
 def search_clause(q: str) -> tuple[str, list, str, list]:
@@ -78,7 +81,17 @@ def search_clause(q: str) -> tuple[str, list, str, list]:
     code_params = [ESTOCK_TAG + code, ESTOCK_TAG + code + "؛", ESTOCK_TAG + code + "؛"]
     parts.append(code_sql)
     params += code_params
-    return " OR ".join(f"({p})" for p in parts), params, f"CASE WHEN {code_sql} THEN 0 ELSE 1 END", code_params
+    # owner 21/11: the exact code first, then names starting with what was typed (a title before it allowed),
+    # then the rest
+    key = " ".join(words)
+    pre_sql, pre_params = ["substr(c.name, 1, length(?)) = ?"], [q, q]
+    if key:
+        name_key = spelling_sql("c.name")
+        for t in _TITLE_PREFIXES:
+            pre_sql.append(f"substr({name_key}, 1, length(?)) = ?")
+            pre_params += [t + key, t + key]
+    rank = f"CASE WHEN {code_sql} THEN 0 WHEN ? <> '' AND ({' OR '.join(pre_sql)}) THEN 1 ELSE 2 END"
+    return " OR ".join(f"({p})" for p in parts), params, rank, code_params + [q] + pre_params
 
 
 def phone_forms(ph: str) -> list[str]:
@@ -140,16 +153,17 @@ def _bal_sql() -> str:
     return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.org_id=c.org_id AND l.customer_id=c.id),0)"
 
 
-def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
-    """only: debt / refill. Every customer is listed (owner 21/11: none hidden for E-Stock's flags); one deleted in
-    E-Stock carries `estock_deleted` (its notes tag) for a grey tag on the screen."""
+def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None,
+            sort: str | None = None) -> list[dict]:
+    """only: debt / refill. Every customer is listed (owner 21/11: none hidden for E-Stock's flags). sort: code (the
+    E-Stock code, default) / name / balance; a search puts the exact code first, then names starting with it."""
     ctx.require("sales.read")
     today = today or date.today()
     rank, rank_params = "1", []
     sql = (f"SELECT c.*, {_bal_sql()} balance,"
            " (SELECT min(date(coalesce(r.last_at, r.created_at), '+' || r.every_days || ' days')) FROM customer_refills r"
            "  WHERE r.customer_id=c.id) next_refill, {rank} rank,"
-           f" instr(coalesce(c.notes,''), '{DELETED_TAG}') > 0 estock_deleted"
+           f" {CODE_SQL} estock_code"
            " FROM customers c WHERE c.org_id=?")
     params: list = [ctx.org_id]
     if q.strip():
@@ -165,7 +179,11 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     elif only == "refill":
         sql += " AND next_refill IS NOT NULL AND next_refill <= ?"
         params.append((today + timedelta(days=5)).isoformat())
-    sql += " ORDER BY rank, " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
+    order = {"name": "name", "balance": "balance DESC, name",
+             "code": "estock_code IS NULL, estock_code, name"}.get(sort or ("balance" if only == "debt" else "code"))
+    if order is None:
+        raise ValidationFailed("ترتيب غير معروف")
+    sql += f" ORDER BY rank, {order} LIMIT 300"
     return [dict(r) for r in db.all(sql, tuple(params))]
 
 

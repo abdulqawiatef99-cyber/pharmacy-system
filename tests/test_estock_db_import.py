@@ -182,26 +182,38 @@ class TestProductActiveFlags(Base):
         self.assertEqual(rec["program_active"],
                          self.db.one("SELECT count(*) n FROM items WHERE status='active'")["n"])
 
-    def test_customers_and_suppliers_follow_the_same_rule_and_are_never_hidden(self):
-        # owner 21/11 20:34: «الشربيني» (code 335, not deleted in E-Stock) was hidden: live rows have deleted='1'
+    def test_parties_never_take_a_state_from_estock_flags(self):
+        # owner 21/11 20:59: «ماحذفتش ولا بيانات عميل»: the old rule hid a party whenever `active` was empty, NULL or
+        # missing (flag() reads those as False) or `deleted` was '1' (normal on live rows)
         tb = base_tables()
-        tb["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "مورد محذوف", "vendor_current_money": "0",
-                             "deleted": "0", "active": "0"})
-        tb["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "عميل محذوف عليه رصيد",
-                               "customer_current_money": "150.0000", "customer_max_money": "0", "deleted": "0", "active": "1"})
+        odd = [("", ""), (None, None), ("0", "0"), ("1", "0"), ("True", "False"), ("False", "True"), ("1", "1")]
+        for n, (active, deleted) in enumerate(odd, start=10):
+            row = {"customer_id": str(n), "customer_code": str(330 + n), "customer_name_ar": f"عميل علم {n}",
+                   "customer_current_money": "0", "customer_max_money": "0", "active": active, "deleted": deleted}
+            tb["Customer"].append({k: v for k, v in row.items() if v is not None})          # None = the column missing
+            tb["Vendor"].append({k: v for k, v in {"vendor_id": str(n), "vendor_code": f"V{n}", "vendor_name_ar": f"مورد علم {n}",
+                                 "vendor_current_money": "0", "active": active, "deleted": deleted}.items() if v is not None})
+        tb["Customer"].append({"customer_id": "335", "customer_code": "335", "customer_name_ar": "دكتور محمد الشربيني",
+                               "customer_current_money": "0", "customer_max_money": "0"})   # no flag columns at all
         res = self.run_import(tables=tb)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM customers")}, {1})
         self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM suppliers")}, {1})
-        notes = {r["name"]: r["notes"] or "" for r in self.db.all("SELECT name, notes FROM customers")}
-        self.assertNotIn("محذوف في إي ستوك", notes["أحمد تجربة"])            # deleted='1' active='1': a live one
-        self.assertIn("محذوف في إي ستوك", notes["عميل C3"])                  # active='0': tagged, still shown
-        self.assertIn("محذوف في إي ستوك", notes["عميل محذوف عليه رصيد"])     # with a balance too (review)
+        self.assertFalse(self.db.one("SELECT 1 FROM customers WHERE notes LIKE '%محذوف%'"))
+        from app.sales import customers as cu
+        self.assertEqual(cu.listing(self.db, self.ctx, "335")[0]["name"], "دكتور محمد الشربيني")
         import json as _j
-        flags = {_j.loads(r["raw"])["code"]: _j.loads(r["raw"])["deleted"] for r in self.db.all(
-            "SELECT ir.raw FROM import_rows ir JOIN import_runs r ON r.id=ir.run_id WHERE r.kind='suppliers'"
-            " AND r.options LIKE '%\"step\": \"suppliers\"%'")}
-        self.assertEqual((flags["V1"], flags["V3"]), (False, True))
+        raw = [_j.loads(r["raw"]) for r in self.db.all("SELECT ir.raw FROM import_rows ir JOIN import_runs r ON r.id=ir.run_id"
+                                                        " WHERE r.kind='customers' AND r.options LIKE '%\"step\": \"customers\"%'")]
+        self.assertIn({"active": "0", "deleted": "0"}, [x["estock_flags"] for x in raw])  # kept for a later look
+
+    def test_product_flags_on_odd_values(self):
+        from app.dataimport.estock_db import product_inactive
+        cases = {(None, None): False, ("", ""): False, ("True", "True"): False, ("False", "True"): True,
+                 ("True", "False"): True, (" 1 ", " 1 "): False, ("0", None): True}
+        for (active, deleted), want in cases.items():
+            self.assertIs(product_inactive({k: v for k, v in (("active", active), ("deleted", deleted)) if v is not None}),
+                          want, (active, deleted))
 
     def test_an_active_count_difference_is_a_mismatch(self):
         res = self.run_import()
@@ -253,9 +265,9 @@ class TestFullMove(Base):
         self.assertIn("01012345678", c["منى تجربة"]["notes"])
         # E-Stock's 9,999,999,999,999 = no limit there: kept as-is, never 0 (0 = no credit at all here)
         self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (999999999999900, 50000))
-        # owner 21/11: never hidden for its E-Stock flags, only tagged (and the import row keeps the flag)
+        # owner 21/11 20:59: E-Stock has no stopped or deleted customer: never hidden, never tagged
         self.assertEqual(c["عميل C3"]["is_active"], 1)
-        self.assertIn("محذوف في إي ستوك", c["عميل C3"]["notes"])
+        self.assertNotIn("محذوف", c["عميل C3"]["notes"] or "")
         bal = {r["customer_id"]: (r["amount"], r["kind"]) for r in self.db.all("SELECT * FROM customer_ledger")}
         self.assertEqual(bal, {c["أحمد تجربة"]["id"]: (12000, "adjustment"), c["منى تجربة"]["id"]: (-1550, "adjustment")})
         s = {r["name"]: r for r in self.db.all("SELECT * FROM suppliers")}

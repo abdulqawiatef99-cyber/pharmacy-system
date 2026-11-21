@@ -40,13 +40,24 @@ class Search(DBTestCase):
         self.assertNotEqual(self.ids("3%")[:1], ["c3350"])                   # % and _ are not wildcards (review)
         self.assertNotIn("c335", self.ids("33_"))
 
-    def test_nobody_is_hidden_and_a_deleted_one_is_tagged(self):
-        # owner 21/11 20:34: «الشربيني» and his mobile found nothing: an E-Stock flag must never hide a customer
+    def test_nobody_is_hidden(self):
+        # owner 21/11 20:34 / 20:59: «الشربيني» and his mobile found nothing: E-Stock flags never hide a customer
         self.assertIn("off", self.ids("الشربيني"))
-        add(self.db, self.ctx, "del", "سامي تجربة", "كود إي ستوك: 901؛ محذوف في إي ستوك")
-        row = next(c for c in cu.listing(self.db, self.ctx, "سامي") if c["id"] == "del")
-        self.assertTrue(row["estock_deleted"])
-        self.assertFalse(next(c for c in cu.listing(self.db, self.ctx, "335") if c["id"] == "c335")["estock_deleted"])
+
+    def test_order_code_then_name_start_then_rest_and_sorts(self):
+        add(self.db, self.ctx, "a1", "أحمد الشربيني", "كود إي ستوك: 12")
+        add(self.db, self.ctx, "m2", "محمد سامي", "كود إي ستوك: 7")
+        found = self.ids("محمد")                                               # names starting with it (title allowed)
+        self.assertEqual(set(found[:3]), {"c335", "m2", "cx"})
+        self.assertEqual(found[:2], ["m2", "c335"])                            # among them: by E-Stock code
+        self.assertIn("a1", self.ids("الشربيني"))
+        self.assertEqual(self.ids("12")[0], "a1")                              # the exact code first
+        codes = [c["estock_code"] for c in cu.listing(self.db, self.ctx, "")]  # default: by E-Stock code
+        known = [x for x in codes if x is not None]
+        self.assertEqual(known, sorted(known))
+        self.assertEqual(codes[-1:], [None])                                   # no code: last
+        names = [c["name"] for c in cu.listing(self.db, self.ctx, "", sort="name")]
+        self.assertEqual(names, sorted(names))
 
 
 class PosSearchApi(APICase):
@@ -66,7 +77,8 @@ class Screens(DBTestCase):
     def test_wording_and_placeholders(self):
         self.assertEqual(JS.count('placeholder="الاسم أو الموبايل أو الكود"'), 2)
         self.assertNotIn('data-f="inactive"', JS)                          # owner: no «موقوف/نشط» wording
-        self.assertIn("محذوف في إي ستوك</span>", JS)
+        self.assertNotIn("محذوف في إي ستوك", JS)                         # owner 20:59: nothing is deleted there
+        self.assertIn('<select id="cuSort"><option value="code">', JS)
         self.assertNotIn('<span class="badge b-err">✕ ناقص</span>', JS)
         self.assertNotIn('<span class="badge b-err">ناقص</span>', JS)
         self.assertIn('<span class="badge b-warn">⚠ في النواقص</span>', JS)

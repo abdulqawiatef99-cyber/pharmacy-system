@@ -415,7 +415,12 @@ def flag(v) -> bool | None:
     return True if s in _TRUE else False if s in _FALSE else None
 
 
-DELETED_TAG = "محذوف في إي ستوك"
+def party_flags(r: dict) -> dict:
+    """E-Stock's raw active / deleted values of a Customer or Vendor row, kept in the import row only. The owner
+    (21/11 20:59): E-Stock has no stopped, cancelled or deleted customer or supplier, and none was ever deleted. The
+    old rule made a party inactive whenever `active` was empty, NULL or missing (flag() reads those as False) or
+    `deleted` was '1' (normal on live rows), so live customers were hidden. A party never takes a state from them."""
+    return {"active": r.get("active"), "deleted": r.get("deleted")}
 
 
 def product_inactive(r: dict) -> bool:
@@ -1263,7 +1268,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
                                   phones=phones, notes="؛ ".join(notes),
                                   address=(r.get("address") or "").strip() or None,
-                                  inactive=product_inactive(r)))     # the same flags as Products (owner 21/11)
+                                  inactive=False, flags=party_flags(r)))     # never from E-Stock's flags (owner 21/11)
     names: dict[str, str] = {}
     for r in sorted(ex.rows("Vendor"), key=lambda r: (dec(r.get("vendor_id")) or 0)):
         vid = ident(r.get("vendor_id"))
@@ -1290,7 +1295,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         c = crows.get(("supplier", vid), {})
         p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
-                                  inactive=product_inactive(r)))
+                                  inactive=False, flags=party_flags(r)))
     _balance_sign_check(ex, p)
 
 
@@ -1367,7 +1372,6 @@ def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: d
                     value_egp=Decimal(d["adjustment"]) / 100, kind="info")
     if kind == "customer" and conf.get("limit") is not None:
         d["limit"] = conf["limit"]
-    d["deleted"] = bool(d.get("inactive"))            # E-Stock's own flag, for the tag (review of update 1)
     if d.get("inactive") and d["balance"]:
         d["inactive"] = False
         p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "deleted/active", "محذوف",
@@ -1992,19 +1996,16 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                 else:
                     from ..sales.service import Sales
                     ph = d["phones"] + [None, None, None]
-                    notes = d["notes"] + (f"؛ {DELETED_TAG}" if d.get("deleted", d["inactive"]) else "")
                     pid = Sales(db).create_customer(ctx, name=d["name"], phone=ph[0], phone2=ph[1], phone3=ph[2],
-                                                    credit_limit=d["limit"], notes=notes, name_alt=d["alt"],
+                                                    credit_limit=d["limit"], notes=d["notes"], name_alt=d["alt"],
                                                     address1=d["address"])
                     if d["estock_balance"]:
                         db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'adjustment', ?, 'رصيد افتتاحي من إي ستوك', ?)",
                                    (new_id(), ctx.org_id, pid, d["estock_balance"], run_id, ctx.user_id))
                 total += d["estock_balance"]
-                # owner 21/11: a party is never hidden for its E-Stock flags; a deleted one is only tagged (the import
-                # row keeps the flag for both kinds, a customer's notes say so too)
-                rows.append(({"estock_id": d["estock_id"], "code": d["code"],
-                              "deleted": bool(d.get("deleted", d["inactive"]))}, pid))
+                # owner 21/11: a party is never hidden for E-Stock's flags; their raw values stay in the import row
+                rows.append(({"estock_id": d["estock_id"], "code": d["code"], "estock_flags": d.get("flags") or {}}, pid))
             return rows, {"parties": len(rows), "balance_total": total}
         return fn
     runs["suppliers"], r = _step(db, ctx, "suppliers", "suppliers", H("suppliers", ex.sha("Vendor")), esha, label,
