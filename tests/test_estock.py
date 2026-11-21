@@ -80,6 +80,22 @@ class TestAdapters(unittest.TestCase):
         with self.assertRaises(ValidationFailed):
             estock.parse_stock(stock_rows(store2_cost=25.0))
 
+    def test_stock_cut_off_file_refused(self):
+        rows = stock_rows()
+        # cut inside the last store: its batch is there, its total line and the grand total are not (#116)
+        with self.assertRaises(ValidationFailed) as e:
+            estock.parse_stock(rows[:7])
+        self.assertEqual(e.exception.code, "estock_totals_mismatch")
+        # cut right after a store's total line: the next store and the grand total are gone
+        with self.assertRaises(ValidationFailed):
+            estock.parse_stock(rows[:5])
+        # complete stores but no grand-total line
+        with self.assertRaises(ValidationFailed):
+            estock.parse_stock(rows[:8])
+        # also when only one store is kept: the whole file is checked before filtering
+        with self.assertRaises(ValidationFailed):
+            estock.parse_stock(rows[:7], {"الصيدلية"})
+
     def test_pack_size_is_only_suggested(self):
         table = estock.parse_stock(stock_rows())[0]
         sug = estock.suggest_pack_sizes(table)

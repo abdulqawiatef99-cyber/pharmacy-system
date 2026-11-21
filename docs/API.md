@@ -54,7 +54,7 @@ while no approved interaction data exists.
 
 **Procurement** — `GET /api/procurement/suggestions?cover_days&lead_days&safety_days&window_days` (+ `.xlsx`) ·
 `GET /api/procurement/health` · `GET /api/procurement/suppliers/{item_id}` ·
-`POST /api/procurement/offer {item_id, packs, discount_pct, expiry_date?, cash_available?}` ·
+`POST /api/procurement/offer {item_id, packs, discount_pct, expiry_date?, cash_available?}` (whole packs; percent and pounds with at most two decimals; answers `cost` in piasters) ·
 `POST /api/procurement/consumption` (multipart, `period_start`, `period_end`, `apply=1` to save)
 
 **Recalls** — `POST /api/recalls/extract {text}` → proposed batch numbers · `POST /api/recalls {title, items:[{product_name, batch_numbers}], notice_no?, notice_date?}` ·
@@ -80,20 +80,12 @@ per invoice: item vs contract discount, after-return net, payments, `profit` for
 `{nav_main: [screen…≤8], home: [screen…≤8], shortcuts: {"1".."9": screen}, columns: {invoices|items: [hidden column index]}, reset?}`.
 Stored as one JSON value in `org_settings` (key `ui`); audit `settings.ui`. Per person: `PUT /api/me/prefs {help: on|off}`.
 
-**Label printers** — `PUT /api/settings/receipt {label_lang: browser|tspl|zpl, label_target: "tcp:IP:PORT"|"win:NAME", label_dpi: 203|300, label_gap: 0..10}`
+**Label printers** — `PUT /api/settings/receipt {label_lang: browser|tspl|zpl, label_target: "tcp:IP:PORT"|"win:NAME", label_dpi: 203|300, label_gap: 0..10, label_shift: -10..10 (mm, + = lower; TSPL `SHIFT` / ZPL `^LT`, #100)}`
 (`settings.manage`; never a file path from the screen) · `POST /api/print/labels {items:[{id, count}], size?}` (`items.read`, ≤500 labels):
 each label drawn as a 1-bit image and sent as TSPL `BITMAP` or ZPL `^GFA`; `labels_in_browser` when not set up, `print_failed` → browser page.
+`POST /api/print/label-test {label_lang?, label_target?, label_size?, label_gap?, label_shift?, label_dpi?, label_fields?}` (`settings.manage`, #100):
+3 sample labels with the values on the screen, nothing saved; audited `print.label_test`.
 
 ## Stability
 v0: may change until the first external client ships. Before the mobile app, endpoints will be frozen
 as `/api/v1/…` and an OpenAPI file generated.
-
-**Reference catalog** (`docs/CATALOG_DATA_PLAN.md`; nothing here changes an item without approval) —
-`GET /api/reference/summary` (items.read) · `POST /api/reference/import-file` (multipart `file`, `label`; items.import) ·
-`POST /api/reference/links/suggest {source?}` (items.write) · `GET /api/reference/links?status=suggested|approved|rejected&strength=strong|weak&limit=&offset=` ·
-`POST /api/reference/links/decide {item_id, ref_id, decision: approve|reject, fill_empty_details?}` ·
-`POST /api/reference/links/unlink {item_id, ref_id}` · `POST /api/reference/links/approve-strong {source?}` ·
-`POST /api/reference/prices/propose` (items.price) · `GET /api/reference/prices/pending` ·
-`POST /api/reference/prices/apply {ids, accept_conflicts?}` → `{batch_id, applied, skipped_changed, skipped_conflict}` ·
-`POST /api/reference/prices/reject {ids}` · `GET /api/reference/prices/batches` ·
-`POST /api/reference/prices/batches/{id}/rollback` · `GET /api/reference/prices/stale?days=30` (items.read)

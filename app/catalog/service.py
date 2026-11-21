@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core import audit, notify
 from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id, row_to_dict
 from . import matching
@@ -89,7 +90,7 @@ def _clean_item(data: dict) -> dict:
     for k in ("vat_bp", "pack_size", "public_price", "min_stock", "max_stock"):
         if k in out and out[k] is not None:
             try:
-                out[k] = int(out[k])
+                out[k] = whole_number(out[k])
             except (TypeError, ValueError):
                 raise ValidationFailed(f"قيمة غير صحيحة في الحقل {k}")
     for k in ("rx_required", "misuse_risk", "is_service", "hide_on_receipt", "hidden", "quick_pin"):
@@ -193,6 +194,13 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
                        " أو أنشئ صنفًا جديدًا", code="pack_size_locked")
     if "public_price" in d and d["public_price"] != before.get("public_price"):
         ctx.require("items.price")
+    if "hidden" in d and bool(d["hidden"]) != bool(before.get("hidden")):
+        ctx.require("items.hidden")          # hiding or showing an item is the hidden-items right (#324 X12)
+    if d.get("is_service") and not before.get("is_service") and db.one(
+            "SELECT 1 FROM stock_movements WHERE org_id=? AND item_id=? LIMIT 1", (ctx.org_id, item_id)):
+        # a service sells with no batch, expiry, recall hold or stock movement, and its past sales would be
+        # reversed without stock (#324 S17 / X10)
+        raise Conflict("الصنف ده ليه حركات مخزون؛ مايتحولش لخدمة. اعمل صنف خدمة جديد", code="service_has_stock")
     merged = {**before, **d}
     name = merged.get("name_en") or merged.get("name_ar")
     if not name:

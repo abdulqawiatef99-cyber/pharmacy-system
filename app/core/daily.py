@@ -27,11 +27,16 @@ def run(db: Database, today: date | None = None) -> int:
     from ..sales.service import local_day_bounds, local_today
     today = today or local_today()
     sent = 0
-    from . import retention
+    from . import dbhealth, retention
     try:
         retention.clean(db)
     except Exception:
         log.exception("cleanup failed")
+    try:                                  # once a day: WAL checkpoint, log trim, sizes (dbhealth.py)
+        from pathlib import Path
+        dbhealth.daily_maintenance(db, log_dir=Path(db.path).parent.parent / "logs")
+    except Exception:
+        log.exception("database maintenance failed")
     for o in db.all("SELECT id FROM organizations WHERE status='active'"):
         st = _state(db, o["id"])
         if st.get("last") == today.isoformat():

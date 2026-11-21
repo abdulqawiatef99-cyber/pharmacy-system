@@ -8,6 +8,7 @@
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
+  <meta name="i18n-src" content="/static/i18n-en.js">
 </head>
 <body>
   <header class="topbar" id="topbar" hidden>
@@ -18,9 +19,9 @@
       <a href="#/purchases" data-nav="purchases">الشراء</a>
       <a href="#/items" data-nav="items">الأصناف</a>
       <a href="#/counts" data-nav="counts">الجرد</a>
-      <details class="more" id="navMore"><summary>المزيد <span id="updBadge" class="badge b-warn" hidden>تحديث</span></summary>
+      <details class="more" id="navMore"><summary>المزيد <span id="updBadge" class="badge b-warn" hidden>تحديث</span><span id="bkBadge" class="badge b-err" hidden>النسخة</span></summary>
         <div class="menu">
-          <a href="#/shift" data-nav="shift">الوردية والخزينة</a>
+          <a href="#/shift" data-nav="shift">الشيفت والخزينة</a>
           <a href="#/customers" data-nav="customers">العملاء والآجل</a>
           <a href="#/reports" data-nav="reports">التقارير</a>
           <a href="#/owner-reports" data-nav="owner-reports" id="navOwnerRep" hidden>تقارير المالك</a>
@@ -34,20 +35,24 @@
           <a href="#/deadstock" data-nav="deadstock">الرواكد</a>
           <a href="#/recalls" data-nav="recalls">تنبيهات السحب</a>
           <a href="#/import" data-nav="import">نقل البيانات</a>
-          <a href="#/users" data-nav="users" id="navUsers" hidden>المستخدمين</a>
+          <a href="#/users" data-nav="users" id="navUsers" hidden>المستخدمون</a>
           <a href="#/audit" data-nav="audit" id="navAudit" hidden>سجل العمليات</a>
           <a href="#/staff" data-nav="staff" id="navStaff" hidden>الحضور والرواتب</a>
-          <a href="#/system" data-nav="system" id="navSystem">البرنامج والنسخ الاحتياطي</a>
+          <a href="#/system" data-nav="system" id="navSystem">البرنامج والنسخ الاحتياطي <span id="bkBadgeSys" class="badge b-err" hidden>⚠</span></a>
           <a href="#/customize" data-nav="customize" id="navCustomize" hidden>تخصيص الواجهة</a>
           <a href="#/me" data-nav="me">المظهر واللغة ورقمي السري</a>
-          <a href="#/feedback" data-nav="feedback">الشكاوي والمقترحات</a>
+          <a href="#/feedback" data-nav="feedback">الشكاوى والمقترحات</a>
         </div></details>
     </nav>
+    <a href="#/system" id="backupWhen" class="muted small" hidden></a>
     <a href="#/notifications" data-nav="notifications" id="bell" class="bell" hidden aria-label="الإشعارات">🔔 <span id="bellN" class="badge b-err" hidden></span></a>
     <button type="button" id="helpBtn" class="helpbtn" title="مساعدة هذه الشاشة (Alt+0)" aria-label="مساعدة">؟</button>
     <a href="#" id="fbBtn" class="fb" title="اقتراح أو شكوى عن البرنامج">💬 ملاحظة</a>
     <div class="who"><a href="#/me" id="who" title="حسابي"></a> <button class="link" id="logout">خروج</button></div>
   </header>
+  <button type="button" id="staleBar" class="stale-bar" role="alert" hidden>فيه نسخة جديدة من البرنامج — اضغط هنا لتحديث الشاشة</button>
+  <a href="#/stock-check" id="stockAlert" class="stock-alert" role="alert" hidden></a>
+  <a href="#/system" id="backupAlert" class="stock-alert" role="alert" hidden></a>
   <main id="app" aria-live="polite"></main>
   <div id="toast" role="status" hidden></div>
   <script src="/static/app.js" type="module"></script>

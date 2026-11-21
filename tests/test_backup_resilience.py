@@ -95,10 +95,13 @@ class TestBackupRestore(DBTestCase):
             backup.create(self.db, self.up, self.tmp / "bk")
 
     def test_cli_backup_verify_restore(self):
-        env = {**os.environ, "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
+        # never the runner's own PHARM_DB_PATH & co. (scripts/validate_local_release.py sets them, #307)
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith("PHARM_")},
+               "PHARM_DATA_DIR": str(self.tmp / "cli"), "PYTHONPATH": str(ROOT)}
         run = lambda *a: subprocess.run([sys.executable, "manage.py", *a], cwd=ROOT, env=env,  # noqa: E731
                                         capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026").returncode, 0)
+        r = run("init", "--pharmacy", "x", "--username", "cli", "--password", "Cli-Pass-2026")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         r = run("backup", "--dest", str(self.tmp / "clibk"))
         self.assertEqual(r.returncode, 0, r.stderr)
         arch = next((self.tmp / "clibk").glob("*.zip"))
@@ -155,3 +158,75 @@ class TestPowerLoss(DBTestCase):
         self.assertEqual(self.db.one("SELECT count(*) FROM stock_movements")[0], 138)
         self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.item)["total_qty"], 138)
         self.assertEqual(backup.integrity_problems(self.db), [])
+
+
+class TestTamperedInside(DBTestCase):
+    """A backup edited inside and re-sealed (checksum and counts recomputed, so the zip and manifest look
+    right) is still refused: the database's own invariants are checked, and live data is never touched."""
+
+    def setUp(self):
+        super().setUp()
+        self.up = self.tmp / "uploads"
+        self.pan = cat.create_item(self.db, self.ctx, {"name_en": "Panadol 500mg 24 tab", "pack_size": 2})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, self.pan, "B1", "2030-05-31")
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=20, batch_id=b, movement_type="opening",
+                              unit_cost=Decimal("15"))
+        self.arch = backup.create(self.db, self.up, self.tmp / "bk")
+
+    def resealed(self, sql):
+        import hashlib
+        import json
+        import lzma
+        work = self.tmp / "work"
+        work.mkdir(exist_ok=True)
+        with zipfile.ZipFile(self.arch) as z:
+            members = {n: z.read(n) for n in z.namelist()}
+        raw = work / "pharmacy.db"
+        raw.write_bytes(lzma.decompress(members["pharmacy.db.xz"]))
+        c = sqlite3.connect(raw)
+        for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+            c.execute(f'DROP TRIGGER "{name}"')                       # whoever edits a copy can drop them
+        c.executescript(sql)
+        c.commit()
+        counts = {t: c.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in json.loads(members["manifest.json"])["counts"]}
+        c.close()
+        data = raw.read_bytes()
+        manifest = json.loads(members["manifest.json"])
+        manifest["db_sha256"] = hashlib.sha256(data).hexdigest()
+        manifest["counts"] = counts
+        members["manifest.json"] = json.dumps(manifest).encode()
+        members["pharmacy.db.xz"] = lzma.compress(data)
+        out = self.tmp / f"resealed-{len(list(self.tmp.glob('resealed-*')))}.zip"
+        with zipfile.ZipFile(out, "w") as w:
+            for n, b in members.items():
+                w.writestr(n, b)
+        return out
+
+    def refused(self, archive, expect):
+        problems = backup.verify_archive(archive)["problems"]
+        self.assertTrue(any(expect in p for p in problems), problems)
+        live_before = Path(self.db.path).read_bytes()
+        with self.assertRaises(RuntimeError):
+            backup.restore(archive, Path(self.db.path), self.up, self.tmp / "pre")
+        self.assertEqual(Path(self.db.path).read_bytes(), live_before)
+
+    def test_untampered_reseal_passes(self):
+        self.assertEqual(backup.verify_archive(self.resealed("SELECT 1;"))["problems"], [])
+
+    def test_stock_edited_without_a_movement_is_refused(self):
+        self.refused(self.resealed("UPDATE stock_balances SET qty = qty + 50;"), "stock balance differences")
+
+    def test_an_edited_audit_row_is_refused(self):
+        self.refused(self.resealed("UPDATE audit_log SET after_json = '{}' WHERE seq = (SELECT max(seq) FROM audit_log);"),
+                     "audit chain broken")
+
+    def test_a_deleted_audit_row_is_refused(self):
+        self.refused(self.resealed("DELETE FROM audit_log WHERE seq = (SELECT min(seq) FROM audit_log);"),
+                     "audit chain broken")
+
+    def test_a_zip_that_is_not_a_backup_is_refused(self):
+        other = self.tmp / "photos.zip"
+        with zipfile.ZipFile(other, "w") as w:
+            w.writestr("photo.jpg", b"jpeg")
+        self.refused(other, "not a pharmacy backup")

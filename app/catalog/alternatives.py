@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..core import audit
 from ..core.errors import NotFound, ValidationFailed
@@ -39,13 +41,19 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
     soon = (today + timedelta(days=SOON_DAYS)).isoformat()
     ids = [r["id"] for r in rows]
     marks = ",".join("?" * len(ids))
-    stock, expiry, cost = {}, {}, {}
+    stock, expiry, cost, gone = {}, {}, {}, {}
     if ctx.branch_id:
-        for s in db.all(f"SELECT sb.item_id, sum(sb.qty) q, min(CASE WHEN sb.qty>0 THEN b.expiry_date END) e"
+        # stock = what can be sold: a lot past its date is refused at the sale screen, so an equivalent with only
+        # expired stock is not "in stock" and never outranks one that can be handed over (#324 S40)
+        day = today.isoformat()
+        for s in db.all(f"SELECT sb.item_id, sum(sb.qty) q,"
+                        f" sum(CASE WHEN b.expiry_date IS NOT NULL AND b.expiry_date<? THEN sb.qty ELSE 0 END) x,"
+                        f" min(CASE WHEN sb.qty>0 AND b.expiry_date>=? THEN b.expiry_date END) e"
                         f" FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'')"
                         f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id IN ({marks}) GROUP BY sb.item_id",
-                        (ctx.org_id, ctx.branch_id, *ids)):
-            stock[s["item_id"]], expiry[s["item_id"]] = s["q"] or 0, s["e"]
+                        (day, day, ctx.org_id, ctx.branch_id, *ids)):
+            gone[s["item_id"]] = s["x"] or 0
+            stock[s["item_id"]], expiry[s["item_id"]] = (s["q"] or 0) - gone[s["item_id"]], s["e"]
         for c in db.all(f"SELECT item_id, avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id IN ({marks})",
                         (ctx.org_id, ctx.branch_id, *ids)):
             if c["avg_cost"] is not None:
@@ -58,11 +66,11 @@ def rank(db: Database, ctx: Context, rows: list[dict], today: date | None = None
         margin = None
         if r["id"] in cost and price:
             pack_cost = cost[r["id"]] * r["pack_size"] * 100
-            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value())
+            margin = int(((Decimal(price) - pack_cost) / Decimal(price) * 10000).to_integral_value(ROUND_HALF_UP))
         is_soon = bool(e and q > 0 and e <= soon)
         r["next_expiry"], r["expiry_soon"] = e, is_soon
         if show_stock:
-            r["stock_qty"] = q
+            r["stock_qty"], r["expired_qty"] = q, gone.get(r["id"], 0)
         if show_cost:
             r["margin_bp"] = margin
         has = q > 0 or r.get("is_service")
@@ -92,7 +100,9 @@ def for_item(db: Database, ctx: Context, item_id: str) -> dict:
         for x in _visible(ctx, db.all(f"SELECT {_COLS} FROM items WHERE org_id=? AND ingredient_key=? AND id<>?"
                                       " AND status='active'", (ctx.org_id, key, item_id))):
             xg = FORM_GROUP.get(x["dosage_form"] or "", x["dosage_form"])
-            exact = x["strength_norm"] == it["strength_norm"] and xg == grp
+            # an unknown strength is not "the same strength": two cards with the field empty were listed as
+            # exact equivalents (#324 S4)
+            exact = bool(it["strength_norm"]) and x["strength_norm"] == it["strength_norm"] and xg == grp
             (same if exact else other).append(x)
     groups = _groups_of(db, ctx, it)
     alts: dict[str, dict] = {}
@@ -227,6 +237,45 @@ def delete_group(db: Database, ctx: Context, gid: str) -> list[dict]:
 
 
 # ------------------------------------------------------------------ quick sale
+# The best-seller count reads every sale line of the last 30 days (0.4 s on a large pharmacy, #253) each time a
+# sale screen opens. The ranking is kept for a few minutes; the items themselves (active, hidden, names) are
+# read fresh every time, so a stopped or hidden item never stays on a button.
+_TOP_TTL = 600.0
+_top_cache: dict[tuple, tuple[float, list[str]]] = {}
+_top_lock = threading.Lock()
+
+
+def _best_sellers(db: Database, ctx: Context, start: str) -> list[dict]:
+    key = (ctx.org_id, ctx.branch_id, start)
+    now = time.monotonic()
+    with _top_lock:
+        hit = _top_cache.get(key)
+    if hit and now - hit[0] < _TOP_TTL:
+        ids = hit[1]
+    else:
+        ids = [r["item_id"] for r in db.all(
+            "SELECT l.item_id, count(DISTINCT s.id) n FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+            " JOIN items i ON i.id=l.item_id"
+            " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
+            " GROUP BY l.item_id ORDER BY n DESC, coalesce(i.name_en, i.name_ar) LIMIT ?",
+            (ctx.org_id, ctx.branch_id, start, QUICK_LIMIT * 2))]
+        with _top_lock:
+            if len(_top_cache) > 200:
+                _top_cache.clear()
+            _top_cache[key] = (now, ids)
+    if not ids:
+        return []
+    rows = {r["id"]: dict(r) for r in db.all(
+        f"SELECT {_COLS} FROM items WHERE org_id=? AND status='active' AND id IN ({','.join('?' * len(ids))})",
+        (ctx.org_id, *ids))}
+    return [rows[i] for i in ids if i in rows]
+
+
+def forget_best_sellers() -> None:
+    with _top_lock:
+        _top_cache.clear()
+
+
 def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
     """Buttons for the cashier: items the owner pinned, then the best sellers of the last 30 days
     (by number of sales), up to QUICK_LIMIT."""
@@ -238,12 +287,7 @@ def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
     start = local_day_bounds(today - timedelta(days=QUICK_DAYS - 1))[0]
     seen = {p["id"] for p in pinned}
     top = []
-    for r in db.all(f"SELECT {', '.join('i.' + c.strip() for c in _COLS.split(','))}, count(DISTINCT s.id) n FROM sale_lines l"
-                    " JOIN sales s ON s.id=l.sale_id JOIN items i ON i.id=l.item_id"
-                    " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
-                    " GROUP BY i.id ORDER BY n DESC, coalesce(i.name_en, i.name_ar) LIMIT ?",
-                    (ctx.org_id, ctx.branch_id, start, QUICK_LIMIT * 2)):
-        d = dict(r)
+    for d in _best_sellers(db, ctx, start):
         if d["id"] in seen or (d["hidden"] and not ctx.can("items.hidden")):
             continue
         top.append(d)
@@ -260,24 +304,6 @@ def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
         for r in rows:
             r["stock_qty"] = q.get(r["id"], 0)
     return {"items": rows, "days": QUICK_DAYS, "limit": QUICK_LIMIT}
-
-
-def refresh_group_ingredient_refs(db: Database) -> int:
-    """Owner-defined groups store the ingredient key computed when they were saved. When the key rules
-    get stricter (e.g. Omega-3 vs Omega-6), recompute from the label the owner wrote."""
-    rows = db.all("SELECT group_id, ref, label FROM therapeutic_group_members WHERE kind='ingredient'"
-                  " AND label IS NOT NULL AND label <> ''")
-    n = 0
-    with db.transaction():
-        for r in rows:
-            k = ingredient_key(r["label"])
-            if k and k != r["ref"]:
-                db.execute("DELETE FROM therapeutic_group_members WHERE group_id=? AND kind='ingredient' AND ref=?",
-                           (r["group_id"], r["ref"]))
-                db.execute("INSERT OR IGNORE INTO therapeutic_group_members (group_id, kind, ref, label)"
-                           " VALUES (?, 'ingredient', ?, ?)", (r["group_id"], k, r["label"]))
-                n += 1
-    return n
 
 
 def backfill_ingredient_keys(db: Database) -> int:

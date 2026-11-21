@@ -21,6 +21,7 @@ class Settings:
     short_expiry_days: int
     total_tolerance_piasters: int
     backup_dir: Path | None = None
+    allowed_hosts: tuple[str, ...] = ()        # extra Host names the owner allows (LAN name), #136
 
     @property
     def backup_path(self) -> Path:
@@ -28,8 +29,17 @@ class Settings:
         return self.backup_dir or self.data_dir.parent / "backups"
 
 
+def default_data_dir() -> Path:
+    """Without PHARM_DATA_DIR: the installed program's data folder on Windows (#80), so a maintenance command
+    run from any folder reaches the real data instead of a new empty one; elsewhere ./data as before."""
+    local = os.environ.get("LOCALAPPDATA")
+    if os.name == "nt" and local:
+        return Path(local) / "PharmacyPlatform" / "data"
+    return Path("data")
+
+
 def load() -> Settings:
-    data = Path(os.environ.get("PHARM_DATA_DIR", "data")).resolve()
+    data = (Path(os.environ["PHARM_DATA_DIR"]) if os.environ.get("PHARM_DATA_DIR") else default_data_dir()).resolve()
     return Settings(
         data_dir=data,
         db_path=Path(os.environ.get("PHARM_DB_PATH", data / "pharmacy.db")),
@@ -42,4 +52,5 @@ def load() -> Settings:
         short_expiry_days=int(os.environ.get("PHARM_SHORT_EXPIRY_DAYS", "180")),
         total_tolerance_piasters=int(os.environ.get("PHARM_TOTAL_TOLERANCE", "100")),
         backup_dir=Path(os.environ["PHARM_BACKUP_DIR"]).resolve() if os.environ.get("PHARM_BACKUP_DIR") else None,
+        allowed_hosts=tuple(h.strip() for h in os.environ.get("PHARM_ALLOWED_HOSTS", "").split(",") if h.strip()),
     )

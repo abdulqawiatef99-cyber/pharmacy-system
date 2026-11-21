@@ -105,9 +105,17 @@ of service, credential exposure). Therefore: an internal inbox (photo/file uploa
 optional import of WhatsApp's own "Export chat" file) turns items into drafts routed to the right
 module for human review.
 
-## ADR-017 External reference catalog is separate from pharmacy items (2026-10-30)
-Outside drug data (first: Dwaprice) goes into platform-wide `ref_*` tables with source, source id, raw record and
-price history. It never edits a pharmacy's items, prices, stock or invoices; linking (M2) and price proposals (M3)
-need human approval. The API key stays on the syncing machine (env var), never in the database, and is not copied
-to other pharmacies' machines (licence: no key sharing) — multi-pharmacy sync goes through a server later.
-Plan and timeline: `docs/CATALOG_DATA_PLAN.md`.
+## ADR-017 No SQLite planner statistics; reports run off the event loop (2026-11-15)
+Found on the pharmacy PC after the real E-Stock import (30,472 items): the stock report took 118 s and
+`/api/health` stopped answering for the whole time. `PRAGMA optimize` (daily clean) had stored
+statistics while the tables were tiny; after the bulk load SQLite trusted them and scanned whole
+tables per row. Decision:
+- No `ANALYZE` / `PRAGMA optimize`. Every start (`Database.migrate`) drops `sqlite_stat1`/`sqlite_stat4`
+  if present (a restored backup or a manual ANALYZE); dropping changes the schema, so every open
+  connection re-plans. The queries are written and benchmarked for SQLite's default plans (keys and
+  indexes), which do not depend on table sizes. If a query ever needs statistics, fix the query or
+  add an index instead.
+- Reports (`/api/home`, sales, stock, profit, transfers, item warnings, invoices, losses, owner reports)
+  run in a worker thread on that thread's own connection inside one read snapshot (`Database.read_snapshot`,
+  writes refused inside it), so a long report never stops the cashier screen.
+Tests: `tests/test_report_freeze_249.py` (fail before the change).

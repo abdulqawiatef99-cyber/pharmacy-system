@@ -56,9 +56,9 @@ class TestInvoices(Base):
         self.assertEqual(ids(item_id=self.other), set())
         self.assertEqual(len(ids(item_id=self.pan)), 3)
         self.assertEqual(ids(q="100%_"), set())                                # LIKE wildcards are literal
-        later = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
-        self.assertEqual(ids(f=later, t=later[:10]), set())                    # from a time after every sale
-        # (t=later's own date: near midnight "now + 1h" is already tomorrow, so t=today would be before f)
+        # from a time after every sale; the range ends on that time's own day, so it stays valid near midnight
+        later = datetime.now() + timedelta(minutes=1)
+        self.assertEqual(ids(f=later.strftime("%Y-%m-%dT%H:%M"), t=later.date().isoformat()), set())
         sid = self.s.create(self.ctx)
         self.s.add_line(self.ctx, sid, self.pan, units=1)
         self.assertEqual(ids(types=["draft"]), {sid})                          # open (held) invoices

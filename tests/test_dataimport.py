@@ -54,7 +54,8 @@ class TestItemsImport(DBTestCase):
         self.assertEqual(by_no["101"]["data"]["barcode"], "6221025012345")   # float-safe
 
     def test_review_required_then_apply_is_atomic_and_once(self):
-        run = self.di.analyze(self.ctx, sheet(ITEMS), "estock_items.xlsx")
+        data = sheet(ITEMS)          # one file: openpyxl stamps the second it was written
+        run = self.di.analyze(self.ctx, data, "estock_items.xlsx")
         with self.assertRaises(Conflict) as e:
             self.di.apply(self.ctx, run)
         self.assertEqual(e.exception.code, "pending_review")
@@ -72,7 +73,7 @@ class TestItemsImport(DBTestCase):
         with self.assertRaises(Conflict):
             self.di.apply(self.ctx, run)
         with self.assertRaises(Conflict):        # same file again
-            self.di.analyze(self.ctx, sheet(ITEMS), "again.xlsx")
+            self.di.analyze(self.ctx, data, "again.xlsx")
 
     def test_reimport_updates_by_code_never_duplicates(self):
         run = self.di.analyze(self.ctx, sheet(ITEMS[:3]), "a.xlsx")
@@ -162,6 +163,29 @@ class TestOpeningStock(DBTestCase):
         cs = inv.stock_for_item(self.db, self.ctx, caf)
         self.assertIsNone(cs["batches"][0]["expiry_date"])
 
+    def test_a_ledger_that_does_not_match_the_file_undoes_the_whole_import(self):
+        """If what reached the stock ledger differs from the file (a posting bug), nothing stays: no movement,
+        no balance, the run can be applied again once fixed (coverage 12/11: the reconciliation refusal never ran)."""
+        from unittest import mock
+        data = self.stock_sheet([[101, "Panadol", 5, 32, "P1", "05/2028"], [103, "Augmentin", 3, 120, "A1", "01/2029"]])
+        run = self.di.analyze(self.ctx, data, "stock.xlsx", kind="opening_stock")
+        real = inv.post_movement
+
+        def short(db, ctx, **kw):                       # the second row posts one unit less than the file says
+            if kw.get("qty_delta") == 6:
+                kw["qty_delta"] = 5
+            return real(db, ctx, **kw)
+        with mock.patch("app.dataimport.service.inventory.post_movement", side_effect=short):
+            with self.assertRaises(Conflict) as e:
+                self.di.apply(self.ctx, run)
+        self.assertEqual(e.exception.code, "reconciliation_failed")
+        self.assertEqual(self.db.one("SELECT count(*) FROM stock_movements")[0], 0)
+        self.assertEqual(self.db.one("SELECT count(*) FROM stock_balances WHERE qty <> 0")[0], 0)
+        self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (run,))[0], "analyzed")
+        rep = self.di.apply(self.ctx, run)              # the same run applies once the posting is right
+        self.assertTrue(rep["reconciliation"]["ok"])
+        self.assertEqual(rep["applied"]["posted_base_units"], 16)
+
     def test_fractional_units_rejected_atomically(self):
         data = self.stock_sheet([[101, "Panadol", 5, 32, None, None],
                                  [102, "Cataflam", 1.3, 49.2, None, None]])  # 2.6 strips
@@ -196,3 +220,34 @@ class TestOpeningStock(DBTestCase):
         rows = list(ws.iter_rows(values_only=True))
         self.assertEqual(rows[0][1], "code")
         self.assertEqual(len(rows) - 1, 3)
+
+
+class TestYesNoColumns(DBTestCase):
+    """«محلي/مستورد» and «دواء/غير دواء» as old programs write them (coverage 12/11: never run by a test).
+    Before: "مستوردة", "محلية" and a number written as 1.0 / 0.0 came out unknown."""
+
+    def test_values(self):
+        from app.dataimport.service import _bool
+        for v in ("نعم", "مستورد", "مستوردة", "مستورده", "Imported", "TRUE", True, 1, "1", "1.0", 1.0, "دواء", " yes "):
+            with self.subTest(v=v):
+                self.assertEqual(_bool(v), 1)
+        for v in ("لا", "محلي", "محلى", "محلية", "محليه", "Local", "false", False, 0, "0", "0.0", 0.0, "غير دواء"):
+            with self.subTest(v=v):
+                self.assertEqual(_bool(v), 0)
+        for v in ("x", "2", "ربما", None, ""):
+            with self.subTest(v=v):
+                self.assertIsNone(_bool(v))
+
+    def test_through_an_import_file(self):
+        di = DataImport(self.db)
+        rows = [["كود الصنف", "اسم الصنف", "سعر الجمهور", "محلي/مستورد", "دواء/غير دواء"],
+                [201, "Synthetic Imported 10 tab", 50, "مستوردة", "دواء"],
+                [202, "Synthetic Local 10 tab", 20, "محلية", "غير دواء"],
+                [203, "Synthetic Unknown 10 tab", 20, "؟", 1.0]]
+        r = di.get(self.ctx, di.analyze(self.ctx, sheet(rows), "flags.xlsx"))
+        by = {x["data"]["code"]: x for x in r["rows"]}
+        self.assertEqual((by["201"]["data"]["is_imported"], by["201"]["data"]["is_drug"]), (1, 1))
+        self.assertEqual((by["202"]["data"]["is_imported"], by["202"]["data"]["is_drug"]), (0, 0))
+        self.assertIsNone(by["203"]["data"]["is_imported"])
+        self.assertIn("unknown_is_imported", [i["code"] for i in by["203"]["issues"]])    # shown, never guessed
+        self.assertEqual(by["203"]["data"]["is_drug"], 1)

@@ -3,6 +3,7 @@ import json
 import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from app.catalog import service as cat
 from app.core import autobackup, backup, notify, people
@@ -95,6 +96,30 @@ class TestAutoBackup(DBTestCase):
         self.assertEqual(kinds.count("backup"), 1)                          # once a day, not every run
         self.assertTrue(self.ab.status(self.ctx)["offsite_stale"])
 
+    def test_offsite_copy_is_verified_and_a_bad_copy_is_not_kept(self):
+        """A failing USB stick must not leave a broken file that looks like a good backup."""
+        usb = self.tmp / "usb"
+        usb.mkdir()
+        self.ab.update_settings(self.ctx, {"offsite_dir": str(usb)})
+        real_copy = autobackup.shutil.copyfile
+
+        def corrupting_copy(src, dst):
+            real_copy(src, dst)
+            with open(dst, "r+b") as f:          # one flipped byte, as a bad flash cell would do
+                f.seek(100)
+                b = f.read(1)
+                f.seek(100)
+                f.write(bytes([b[0] ^ 0xFF]))
+
+        with patch.object(autobackup.shutil, "copyfile", side_effect=corrupting_copy):
+            st = self.ab.run(force=True)
+        self.assertTrue(st["last_ok"])                       # the backup on the PC itself is fine
+        self.assertIn("تطابق", st["offsite_error"])
+        self.assertEqual(list(usb.iterdir()), [])            # neither the bad copy nor a .part remains
+        st = self.ab.run(force=True)                         # a healthy drive works again
+        self.assertIsNone(st["offsite_error"])
+        self.assertEqual(backup._sha256(usb / st["last_file"]), backup._sha256(self.bdir / st["last_file"]))
+
     def test_settings_validation_and_owner_only(self):
         for bad in ({"interval_min": 45}, {"keep_last": 0}, {"offsite_dir": "relative/path"},
                     {"offsite_dir": str(self.bdir)}):
@@ -131,3 +156,129 @@ class TestBackupAPI(APICase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(r.json()["state"]["last_ok"])
         self.assertEqual(len(r.json()["files"]), 1)
+
+
+class TestAutoBackupFailures(DBTestCase):
+    """A failed backup never takes the program down, tells the owner once (not every attempt), and is
+    retried after one interval; settings refuse what they cannot honour."""
+
+    def setUp(self):
+        super().setUp()
+        self.bdir, self.sdir = self.tmp / "backups", self.tmp / "state"
+        self.ab = AutoBackup(self.db, self.tmp / "uploads", self.bdir, self.sdir)
+
+    def fails(self):
+        from app.core import notify
+        return [n for n in notify.listing(self.db, self.ctx)["items"] if n["title"] == "فشلت النسخة الاحتياطية التلقائية"]
+
+    def test_a_failure_is_recorded_and_told_once_then_cleared_by_a_success(self):
+        from unittest import mock
+        with mock.patch("app.core.backup.create", side_effect=OSError("disk full")), \
+                self.assertLogs("pharm.backup", level="ERROR"):
+            st = self.ab.run()
+            self.assertEqual((st["last_ok"], st["last_error"]), (False, "disk full"))
+            self.ab.run(force=True)                                   # fails again within 6 hours
+        self.assertEqual(len(self.fails()), 1)
+        st = self.ab.run(force=True)
+        self.assertTrue(st["last_ok"])
+        self.assertIsNone(st["last_error"])
+        self.assertIsNone(st.get("fail_notified"))                    # the next failure is told again
+
+    def test_a_backup_that_fails_its_own_check_is_deleted(self):
+        from unittest import mock
+        with mock.patch("app.core.backup.quick_check", return_value=["damaged archive"]), \
+                self.assertLogs("pharm.backup", level="ERROR"):
+            st = self.ab.run()
+        self.assertFalse(st["last_ok"])
+        self.assertIn("damaged archive", st["last_error"])
+        self.assertEqual(list(self.bdir.glob("*.zip")), [])           # no half-good file left to restore from
+
+    def test_when_a_backup_is_due(self):
+        from datetime import datetime, timedelta
+        self.assertTrue(self.ab._due())                               # never ran
+        self.ab.run()
+        self.assertFalse(self.ab._due())
+        st = self.ab.state()
+        old = (datetime.now() - timedelta(minutes=61)).isoformat(timespec="seconds")
+        st.update(last_at=old, last_check_at=old)
+        self.ab._write(self.ab.state_path, st)
+        self.assertTrue(self.ab._due())                               # default interval: 60 minutes
+        st.update(last_ok=False, last_fail_at=datetime.now().isoformat(timespec="seconds"))
+        self.ab._write(self.ab.state_path, st)
+        self.assertFalse(self.ab._due())                              # a failure is retried after one interval
+
+    def test_settings_refuse_what_they_cannot_honour(self):
+        before = self.ab.settings()
+        for changes in ({"interval_min": 7}, {"keep_last": "x"}, {"keep_last": 0}, {"keep_last": 101},
+                        {"keep_daily": -1}, {"keep_weekly": 53}, {"keep_last": 2.5}, {"keep_last": True},
+                        {"offsite_dir": "relative/folder"}, {"offsite_dir": str(self.bdir)}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValidationFailed):
+                    self.ab.update_settings(self.ctx, changes)
+                self.assertEqual(self.ab.settings(), before)
+        new = self.ab.update_settings(self.ctx, {"keep_last": 5, "on_shift_close": False, "offsite_dir": ""})
+        self.assertEqual((new["keep_last"], new["on_shift_close"], new["offsite_dir"]), (5, False, ""))
+
+
+class TestScheduler(DBTestCase):
+    """The scheduler thread itself (coverage 12/11: never run by a test)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ab = AutoBackup(self.db, self.tmp / "uploads", self.tmp / "backups", self.tmp / "state")
+        self.ab.stop_event.wait = lambda timeout=None: self.ab.stop_event.is_set()   # skip the 20 s start delay
+        self.runs = []
+        self.ab.run = lambda reason="manual": self.runs.append(reason) or {}
+
+    def tearDown(self):
+        autobackup._instance = None
+        super().tearDown()
+
+    def until(self, cond, seconds=5):
+        import time
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not cond():
+            time.sleep(0.01)
+        return cond()
+
+    def test_a_trigger_runs_with_its_reason_and_stop_makes_a_last_backup(self):
+        with patch.object(self.ab, "_due", return_value=False):
+            self.ab.start()
+            autobackup.trigger("manual_test")
+            self.assertTrue(self.until(lambda: self.runs == ["manual_test"]), self.runs)
+            self.ab.stop()
+        self.assertFalse(self.ab.thread.is_alive())
+        self.assertEqual(self.runs, ["manual_test", "shutdown"])
+        self.assertIsNone(autobackup._instance)
+
+    def test_a_due_backup_runs_on_schedule(self):
+        with patch.object(self.ab, "_due", side_effect=[True] + [False] * 1000):
+            self.ab.start()
+            self.ab.wake.set()
+            self.assertTrue(self.until(lambda: self.runs == ["schedule"]), self.runs)
+            self.ab.stop()
+
+    def test_the_thread_survives_a_bad_check(self):
+        # e.g. a state file edited by hand: fromisoformat("garbage") raised and the thread died silently,
+        # so no automatic backup ran again until the program was restarted
+        with patch.object(self.ab, "_due", side_effect=[ValueError("bad state")] + [False] * 1000):
+            self.ab.start()
+            self.ab.wake.set()
+            self.assertTrue(self.until(lambda: not self.ab.wake.is_set()))
+            autobackup.trigger("after_error")
+            self.assertTrue(self.until(lambda: self.runs == ["after_error"]), self.runs)
+            self.assertTrue(self.ab.thread.is_alive())
+            self.ab.stop()
+
+    def test_a_state_file_with_a_bad_date_does_not_stop_the_schedule(self):
+        self.ab.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ab.state_path.write_text(json.dumps({"last_ok": True, "last_at": "garbage"}), encoding="utf-8")
+        self.assertTrue(self.ab._due())                   # unreadable date: back up now, never raise
+        self.ab.cfg_path.write_text(json.dumps({"interval_min": "60"}), encoding="utf-8")
+        self.ab.state_path.write_text(json.dumps({"last_ok": True, "last_at": "2026-11-12T10:00:00"}), encoding="utf-8")
+        self.assertTrue(self.ab._due())
+        self.ab.start()
+        self.ab.wake.set()
+        self.assertTrue(self.until(lambda: "schedule" in self.runs), self.runs)
+        self.assertTrue(self.ab.thread.is_alive())
+        self.ab.stop()

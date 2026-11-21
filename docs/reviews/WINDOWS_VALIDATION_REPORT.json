@@ -1,0 +1,38 @@
+{
+  "platform": "Windows-2025Server-10.0.26100-SP0",
+  "python": "3.13.16",
+  "source": "D:\\a\\pharmacy-system\\pharmacy-system",
+  "scope": "synthetic automated checks only",
+  "windows_hardware_accepted": false,
+  "ok": true,
+  "steps": [
+    {
+      "name": "tests",
+      "returncode": 0,
+      "error": null,
+      "seconds": 212.65,
+      "log": "tests.log"
+    },
+    {
+      "name": "selftest",
+      "returncode": 0,
+      "error": null,
+      "seconds": 0.519,
+      "log": "selftest.log"
+    },
+    {
+      "name": "init",
+      "returncode": 0,
+      "error": null,
+      "seconds": 0.273,
+      "log": "init.log"
+    },
+    {
+      "name": "verify",
+      "returncode": 0,
+      "error": null,
+      "seconds": 0.164,
+      "log": "verify.log"
+    }
+  ]
+}

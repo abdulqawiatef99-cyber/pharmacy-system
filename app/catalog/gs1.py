@@ -3,7 +3,7 @@
 A 2D scanner types the code like a keyboard. Two shapes exist:
 - Element string: 01<GTIN-14> 17<YYMMDD expiry> 10<batch> 21<serial>, variable fields
   separated by the GS character (often lost by keyboard scanners; then we use the usual
-  field order and lengths as a best effort).
+  field order and lengths as a best effort, and say so: 'guessed' is set when a lot could be read two ways).
 - GS1 Digital Link URL: https://<any host>/01/<GTIN>/10/<batch>/21/<serial>?17=<YYMMDD>
 Nothing here is guessed silently: the caller shows what was read.
 """
@@ -15,6 +15,7 @@ from datetime import date
 from urllib.parse import parse_qs, unquote, urlparse
 
 GS = "\x1d"
+MIN_SERIAL = 6           # without a separator, fewer characters than this after a "21" are part of the lot
 _PREFIX = re.compile(r"^(\]d2|\]Q3|\]C1)")
 
 
@@ -40,6 +41,27 @@ def gtin_keys(gtin: str) -> list[str]:
     return keys
 
 
+def _split_without_gs(body: str, ai: str, have_expiry: bool) -> int:
+    """Where a variable field (10 batch / 21 serial) ends when the scanner dropped the GS separator.
+
+    Best effort, in this order: while no expiry was read yet, a 17<YYMMDD> that is a real date and is
+    followed by the end or by the other variable field (a batch or serial that happens to contain "21" is
+    not cut there); then, for a batch only, the first "21" followed by at least MIN_SERIAL characters (a
+    serial): lot LOT21ABC used to be saved as lot LOT, and a recall of LOT21ABC then missed it (#324 S3);
+    otherwise the field runs to the end.
+    Once the code carried its expiry, digits like 17<YYMMDD> inside a later field are that field's own.
+    """
+    other = "21" if ai == "10" else "10"
+    for m in ([] if have_expiry else re.finditer(r"17(\d{6})", body)):
+        if m.start() >= 1 and _expiry(m.group(1)) and (m.end() == len(body) or body.startswith(other, m.end())):
+            return m.start()
+    if ai == "10":
+        i = body.find("21", 1)
+        if 0 < i and len(body) - (i + 2) >= MIN_SERIAL:     # a short tail after "21" is part of the batch, not a serial
+            return i
+    return len(body)
+
+
 def parse(raw: str) -> dict | None:
     """{'gtin', 'expiry', 'batch', 'serial'} or None if this is not a GS1 2D code."""
     s = (raw or "").strip()
@@ -61,7 +83,8 @@ def parse(raw: str) -> dict | None:
         if "17" in q:
             out["expiry"] = _expiry(q["17"][0])
         return out if "gtin" in out else None
-    s = re.sub(r"\((\d{2})\)", GS + r"\1", s)       # "(01)...(17)..." as printed under the code
+    bracketed = bool(re.search(r"\(\d{2}\)", s))   # "(01)...(17)..." as printed under the code: every field is marked
+    s = re.sub(r"\((\d{2})\)", GS + r"\1", s)
     s = s.lstrip(GS)
     if not re.match(r"^01\d{14}", s):
         return None
@@ -78,13 +101,13 @@ def parse(raw: str) -> dict | None:
             body = rest[2:]
             if GS in body:
                 val, rest = body.split(GS, 1)
+            elif bracketed:                          # the last bracketed field: it runs to the end, no guess
+                val, rest = body, ""
             else:
-                # no separator: a batch is usually followed by 21 (serial) or 17 (expiry)
-                m = re.search(r"(?:21|17\d{6})", body[1:]) if ai == "10" else None
-                if m:
-                    val, rest = body[:m.start() + 1], body[m.start() + 1:]
-                else:
-                    val, rest = body, ""
+                cut = _split_without_gs(body, ai, "expiry" in out)
+                val, rest = body[:cut], body[cut:]
+                if ai == "10" and "21" in body[1:]:  # "LOT21..." reads as one lot or as lot + serial
+                    out["guessed"] = True
             out["batch" if ai == "10" else "serial"] = val[:20]
         else:
             break

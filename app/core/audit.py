@@ -60,12 +60,26 @@ def record(db: Database, ctx: Context | None, action: str, entity_type: str | No
         (*fields, prev, _row_hash(prev, fields)))
 
 
+CHAIN_BLOCK = 2000
+
+
+def _blocks(cur):
+    while True:
+        rows = cur.fetchmany(CHAIN_BLOCK)
+        if not rows:
+            return
+        yield from rows
+
+
 def verify_chain(db: Database) -> list[dict]:
     """Returns problems found in the audit chain (empty list = intact)."""
     problems = []
     prev = "GENESIS"
     expected_seq = 1
-    for r in db.all("SELECT * FROM audit_log WHERE seq IS NOT NULL ORDER BY seq"):
+    # read a block at a time: the whole log in memory was 100 MB of rows for one year of a medium pharmacy,
+    # on every backup, and grows with every year kept (the log is never trimmed)
+    cur = db.conn.execute("SELECT * FROM audit_log WHERE seq IS NOT NULL ORDER BY seq")
+    for r in _blocks(cur):
         if r["seq"] != expected_seq:
             problems.append({"seq": expected_seq, "problem": "missing_row"})
             expected_seq = r["seq"]
@@ -95,8 +109,8 @@ def list_for_entity(db: Database, ctx: Context, entity_type: str, entity_id: str
 
 ACTION_LABELS = {
     "attendance.fix": "تعديل حضور", "auth.login_failed": "دخول فشل", "auth.pin_failed": "رقم سري خاطئ",
-    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_open": "فتح الخزينة", "cash.shift_close": "إغلاق وردية",
-    "cash.shift_open": "فتح وردية", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
+    "backup.settings": "إعدادات النسخ الاحتياطي", "cash.drawer_auto": "فتح الدرج مع البيع", "cash.drawer_open": "فتح الدرج بدون بيع", "cash.shift_close": "إغلاق شيفت",
+    "cash.shift_open": "فتح شيفت", "category.save": "حفظ قسم", "count.approve": "اعتماد جرد", "count.cancel": "إلغاء جرد",
     "count.create": "بدء جرد", "customer.create": "عميل جديد", "customer.payment": "تحصيل من عميل",
     "customer.refill_remove": "إزالة من الطلب الشهري", "customer.refill_save": "طلب شهري", "customer.update": "تعديل عميل",
     "customer.whatsapp_reminder": "تذكير واتساب", "customer.contract": "ربط عميل بتعاقد",
@@ -107,7 +121,7 @@ ACTION_LABELS = {
     "item.barcode_add": "إضافة باركود", "item.barcode_remove": "إزالة باركود", "item.category": "تغيير قسم صنف",
     "item.create": "صنف جديد", "item.flags": "علامات أصناف", "item.shortage": "علامة ناقص", "item.update": "تعديل صنف", "org.create": "إنشاء الصيدلية",
     "payment_channel.save": "جهاز / محفظة", "payroll.advance": "سلفة", "payroll.approve": "اعتماد مرتب", "payroll.pay": "صرف مرتب",
-    "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال",
+    "payroll.set_pay": "إعداد مرتب", "print.labels": "طباعة ملصقات", "print.receipt": "طباعة إيصال", "print.test": "تجربة طابعة",
     "procurement.consumption_import": "رفع مبيعات للطلبية", "procurement.offer_eval": "تقييم عرض", "purchase.approve": "اعتماد فاتورة شراء",
     "purchase.cancel": "إلغاء فاتورة شراء", "purchase.header_edit": "تعديل رأس فاتورة شراء", "purchase.import": "رفع فاتورة شراء",
     "purchase.issue_ack": "قبول فرق في فاتورة شراء", "purchase.line_add": "إضافة سطر شراء", "purchase.line_delete": "حذف سطر شراء",
@@ -121,10 +135,10 @@ ACTION_LABELS = {
     "therapeutic_group.delete": "حذف مجموعة بدائل",
     "supplier.create": "مورد جديد", "supplier.return": "مرتجع للمورد", "stock.adjust": "تسوية رصيد", "supplier.payment": "دفعة لمورد", "supplier.update": "تعديل مورد", "system.network": "الهاتف على الشبكة",
     "system.update": "تحديث البرنامج", "user.active": "إيقاف/تشغيل مستخدم", "user.create": "مستخدم جديد",
-    "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة السر", "user.password_reset": "إعادة كلمة السر",
+    "user.discount_limit": "حد خصم شخص", "user.password_change": "تغيير كلمة المرور", "user.password_reset": "إعادة تعيين كلمة المرور",
     "user.permission": "صلاحية شخص", "user.pin_set": "رقم سري", "user.reset_permissions": "رجوع الصلاحيات للافتراضي", "user.role": "تغيير النوع",
 }
-GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الوردية والخزينة", "user": "المستخدمين", "settings": "الإعدادات",
+GROUPS = {"sale": "البيع", "purchase": "الشراء", "cash": "الشيفت والخزينة", "user": "المستخدمون", "settings": "الإعدادات",
           "item": "الأصناف", "expense": "المصروفات", "supplier": "الموردون", "customer": "العملاء", "count": "الجرد",
           "payroll": "الرواتب", "auth": "الدخول", "stock": "تسويات المخزون"}
 

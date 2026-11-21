@@ -69,9 +69,14 @@ def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None
     for p in pats:
         params += [p, p]
     first = pats[0].lstrip("%")
+    # the name typed in full comes first, then names that start with what was typed: on the sale screen
+    # Enter adds the first row, so «صنف ب» typed in full must not offer «صنف أ» above it
+    whole = normalize_text(q)
     rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
-                  " ORDER BY (name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?) DESC, length(name_norm)"
-                  " LIMIT ?", (org_id, *params, *cparams, first, first, limit))
+                  " ORDER BY (name_norm=? OR coalesce(name_ar_norm,'')=?) DESC,"
+                  " (substr(name_norm,1,length(?))=? OR substr(coalesce(name_ar_norm,''),1,length(?))=?) DESC,"
+                  " (name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?) DESC, length(name_norm)"
+                  " LIMIT ?", (org_id, *params, *cparams, whole, whole, whole, whole, whole, whole, first, first, limit))
     return [dict(r) for r in rows]
 
 

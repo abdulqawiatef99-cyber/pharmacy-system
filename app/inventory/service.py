@@ -25,6 +25,8 @@ def get_or_create_batch(db: Database, ctx: Context, item_id: str, batch_no: str 
                         expiry_date: str | None, expiry_precision: str | None = None) -> str | None:
     """Returns a batch id, or None when neither batch number nor expiry is known
     (untracked stock)."""
+    if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
+        raise NotFound("الصنف غير موجود")
     batch_no = (batch_no or "").strip().upper()
     if not batch_no and not expiry_date:
         return None
@@ -68,12 +70,15 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     branch_id = branch_id or ctx.branch_id
     if not branch_id:
         raise ValidationFailed("لا يوجد فرع محدد")
-    if not isinstance(qty_delta, int) or qty_delta == 0:
+    if not isinstance(qty_delta, int) or isinstance(qty_delta, bool) or qty_delta == 0:     # true is not 1 unit
         raise ValidationFailed("الكمية يجب أن تكون عددًا صحيحًا غير صفري")
     if not db.one("SELECT 1 FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id)):
         raise NotFound("الصنف غير موجود")
     if not db.one("SELECT 1 FROM branches WHERE id=? AND org_id=?", (branch_id, ctx.org_id)):
         raise NotFound("الفرع غير موجود")
+    if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND org_id=? AND item_id=?",
+                               (batch_id, ctx.org_id, item_id)):
+        raise NotFound("التشغيلة لا تخص هذا الصنف")
     current_batch = batch_qty(db, ctx.org_id, branch_id, item_id, batch_id)
     if qty_delta < 0 and current_batch + qty_delta < 0 and not allow_negative:
         raise Conflict("الكمية غير متاحة في المخزون (ربما بيعت)", code="insufficient_stock",
@@ -145,11 +150,13 @@ def stock_for_item(db: Database, ctx: Context, item_id: str, branch_id: str | No
 def verify_balances(db: Database, org_id: str) -> list[dict]:
     """Returns every (branch,item,batch) whose cached balance differs from the
     ledger. Empty list == consistent."""
+    # One pass over both sides grouped together: the old FULL OUTER JOIN of the grouped ledger with the balances
+    # had no index on either side and compared every pair, ~100 s after a year of sales (#113, PERFORMANCE.md).
+    # ledger_qty / balance_qty stay NULL when that side has no row, as before.
     return [dict(r) for r in db.all(
-        "WITH ledger AS (SELECT branch_id, item_id, coalesce(batch_id,'') bk, sum(qty_delta) q"
-        "  FROM stock_movements WHERE org_id=? GROUP BY 1,2,3)"
-        " SELECT coalesce(l.branch_id, b.branch_id) branch_id, coalesce(l.item_id, b.item_id) item_id,"
-        "  coalesce(l.bk, b.batch_key) batch_key, l.q ledger_qty, b.qty balance_qty"
-        " FROM ledger l FULL OUTER JOIN (SELECT * FROM stock_balances WHERE org_id=?) b"
-        "  ON b.branch_id=l.branch_id AND b.item_id=l.item_id AND b.batch_key=l.bk"
-        " WHERE coalesce(l.q,0) <> coalesce(b.qty,0)", (org_id, org_id))]
+        "SELECT branch_id, item_id, bk batch_key,"
+        "  CASE WHEN sum(nl) > 0 THEN sum(lq) END ledger_qty, CASE WHEN sum(nb) > 0 THEN sum(bq) END balance_qty"
+        " FROM (SELECT branch_id, item_id, coalesce(batch_id,'') bk, qty_delta lq, 1 nl, 0 bq, 0 nb"
+        "       FROM stock_movements WHERE org_id=?"
+        "       UNION ALL SELECT branch_id, item_id, batch_key, 0, 0, qty, 1 FROM stock_balances WHERE org_id=?)"
+        " GROUP BY branch_id, item_id, bk HAVING sum(lq) <> sum(bq)", (org_id, org_id))]

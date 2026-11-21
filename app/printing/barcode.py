@@ -26,10 +26,18 @@ _EAN_PARITY = ["LLLLLL", "LLGLGG", "LLGGLG", "LLGGGL", "LGLLGG", "LGGLLG", "LGGG
 
 
 def code128_modules(text: str) -> str:
-    """Bar/space pattern as a string of '1' (bar) and '0' (space)."""
+    """Bar/space pattern as a string of '1' (bar) and '0' (space). Digits use set C, anything else set B."""
     if not text or any(not 32 <= ord(c) <= 126 for c in text):
-        raise ValueError("Code 128 B: printable ASCII only")
-    codes = [104] + [ord(c) - 32 for c in text]
+        raise ValueError("Code 128: printable ASCII only")
+    if text.isdigit() and len(text) >= 4:
+        # Code set C packs two digits per symbol: a 13-digit code fits a small label with bars wide enough to
+        # scan (#84). An odd digit count ends with one digit in set B (code 100 switches C -> B).
+        even = len(text) - len(text) % 2
+        codes = [105] + [int(text[i:i + 2]) for i in range(0, even, 2)]
+        if even < len(text):
+            codes += [100, ord(text[-1]) - 32]
+    else:
+        codes = [104] + [ord(c) - 32 for c in text]
     check = (codes[0] + sum(i * c for i, c in enumerate(codes[1:], 1))) % 103
     out = ""
     for c in codes + [check, 106]:

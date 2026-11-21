@@ -163,7 +163,8 @@ class TestReturns(People):
         self.assertEqual(json.loads(audit_row["after_json"])["approved_by"], self.ids["owner"])
         self.s.return_items(self.ph, sale["id"], self._line(sale), refund_method="cash", reason="مش محتاجه")
 
-    def test_window_14_days(self):
+    def test_window_14_days_by_default(self):
+        """Owner 21/11 10:17: «مدة المرتجع 14 يوم» (part 3 had made it 7); Settings still changes it."""
         sale = self.sell(ctx=self.ph)
         later = Sales(self.db, today=T + timedelta(days=15))
         with self.assertRaises(Forbidden) as e:
@@ -239,3 +240,65 @@ class TestPeopleAPI(APICase):
         self.assertEqual((me["role"], me["role_name"]), ("owner", "المالك"))
         r = self.c.put("/api/settings/sales", json={"return_window_days": 7}, headers=H)
         self.assertEqual(r.json()["return_window_days"], 7)
+
+
+class TestRoleChange(People):
+    """Changing someone's role (coverage 12/11: never run by a test)."""
+
+    def test_a_new_role_starts_clean_and_is_audited(self):
+        uid = self.ids["assistant"]
+        people.set_exception(self.db, self.ctx, uid, "sales.return_others", "grant")
+        people.set_discount(self.db, self.ctx, uid, 500)
+        m = people.set_role(self.db, self.ctx, uid, "pharmacist")
+        self.assertEqual(m["user"]["role"], "pharmacist")
+        self.assertEqual([i["code"] for g in m["groups"] for i in g["items"] if i["exception"]], [])
+        self.assertIsNone(m["max_discount_bp"])                              # back to the role's limit
+        row = self.db.one("SELECT before_json, after_json FROM audit_log WHERE action='user.role' AND entity_id=?", (uid,))
+        self.assertEqual((json.loads(row["before_json"]), json.loads(row["after_json"])),
+                         ({"role": "assistant"}, {"role": "pharmacist"}))
+        p = self.login("assistant", PW)
+        self.assertTrue(p.can("items.write") and not p.can("sales.return_others"))
+
+    def test_an_open_session_follows_the_new_role_at_once(self):
+        tok = accounts.login(self.db, "manager", PW)["token"]
+        self.assertTrue(accounts.resolve_session(self.db, tok).can("sales.totals"))
+        people.set_role(self.db, self.ctx, self.ids["manager"], "assistant")
+        after = accounts.resolve_session(self.db, tok)
+        self.assertFalse(after.can("sales.totals") or after.can("audit.read"))   # no stale manager rights
+
+    def test_refusals(self):
+        with self.assertRaises(Forbidden):                                   # the owner's own role is locked
+            people.set_role(self.db, self.ctx, self.ids["owner"], "manager")
+        with self.assertRaises(Forbidden):                                   # only the owner manages people
+            people.set_role(self.db, self.mgr, self.ids["assistant"], "manager")
+        from app.core.errors import NotFound
+        with self.assertRaises(NotFound):
+            people.set_role(self.db, self.ctx, self.ids["assistant"], "director")
+        _, other = self.second_tenant()
+        with self.assertRaises((NotFound, Forbidden)):                       # another pharmacy's owner
+            people.set_role(self.db, other, self.ids["assistant"], "manager")
+        self.assertEqual(people.access_matrix(self.db, self.ctx, self.ids["assistant"])["user"]["role"], "assistant")
+
+    def test_role_discount_limit(self):
+        people.set_role_discount(self.db, self.ctx, "pharmacist", 300)
+        self.assertEqual(self.login("pharmacist", PW).max_discount_bp, 300)
+        for code, v in (("owner", 100), ("director", 100), ("pharmacist", None), ("pharmacist", True),
+                        ("pharmacist", 10001), ("pharmacist", -1), ("pharmacist", 2.5)):
+            with self.subTest(code=code, v=v), self.assertRaises(ValidationFailed):
+                people.set_role_discount(self.db, self.ctx, code, v)
+        with self.assertRaises(Forbidden):
+            people.set_role_discount(self.db, self.mgr, "assistant", 100)
+        self.assertEqual(self.login("pharmacist", PW).max_discount_bp, 300)
+
+
+class TestReturnWindowSetting(People):
+    """The 14-day default stays a default: the owner's saved value wins, both ways (owner 21/11 10:17)."""
+
+    def test_saved_window_wins_over_the_default(self):
+        from app.sales.service import DEFAULT_RETURN_DAYS, return_window_days
+        self.assertEqual((DEFAULT_RETURN_DAYS, return_window_days(self.db, self.ctx.org_id)), (14, 14))
+        for days in (7, 30):
+            with self.db.transaction():
+                self.db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
+                                " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (self.ctx.org_id, str(days)))
+            self.assertEqual(return_window_days(self.db, self.ctx.org_id), days)

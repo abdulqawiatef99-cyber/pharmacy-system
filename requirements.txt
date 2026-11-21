@@ -1,10 +1,32 @@
-# Versions verified in the build environment (2026-10-24)
-starlette>=1.7
-uvicorn>=0.54
-python-multipart>=0.0.9
-openpyxl>=3.1.5
-pdfplumber>=0.11
-pillow>=12.0
-requests>=2.32
-# test client dependency used by starlette.testclient
-httpx>=0.27
+# Exact, complete set for the program (direct + transitive). Verified 2026-10-29:
+# full suite on Linux/Python 3.13 in a clean venv; every package has a cp313 win_amd64 wheel.
+# Changing ANY line ships only through the installer: the in-app updater (protocol 1)
+# refuses a release whose requirements.txt differs from the installed one (docs/UPDATE.md).
+# Test-only extras are in requirements-dev.txt.
+anyio==4.15.1
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+colorama==0.4.6; sys_platform == "win32"
+cryptography==50.0.2
+et_xmlfile==2.0.0
+h11==0.16.0
+httpcore==1.0.9
+# starlette.testclient, used by `manage.py selftest`
+httpx==0.28.1
+idna==3.20
+openpyxl==3.1.5
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==13.0.0
+pycparser==3.12
+pypdfium2==5.14.0
+python-multipart==0.0.32
+# direct printing to a Windows print queue (win:<printer name>)
+pywin32==312; sys_platform == "win32"
+requests==2.34.2
+starlette==1.10.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0

@@ -2,7 +2,8 @@
 
 Never deleted: invoices (sales and purchases), customer and supplier accounts, cash drawer,
 expenses, stock movements, the audit log — the law requires keeping the books for years and
-they are small (a busy pharmacy adds roughly 20-40 MB a year; backups are compressed ~10x).
+they stay manageable (measured on a synthetic year of a mid-size pharmacy, 80,000 invoices: under 1 GB of
+database, docs/specs/09 section 4; backups are compressed).
 
 Cleaned once a day: notifications older than 180 days, expired or closed sign-in sessions after
 30 days, and the short-lived retry cache. Old automatic backups are pruned by the backup job.
@@ -18,6 +19,13 @@ from ..db import Database
 log = logging.getLogger("pharm.retention")
 NOTIFICATION_DAYS = 180
 SESSION_DAYS = 30
+# the books: no cleanup job may ever name these tables (the first three also refuse DELETE by trigger)
+KEPT_FOR_EVER = ("audit_log", "safety_events", "stock_movements", "sales", "purchase_invoices")
+
+
+def _log_max_mb() -> int:
+    from . import dbhealth
+    return dbhealth.LOG_MAX_BYTES // (1024 * 1024)
 
 
 def clean(db: Database) -> dict:
@@ -32,10 +40,11 @@ def clean(db: Database) -> dict:
             "DELETE FROM sessions WHERE (expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?) OR"
             " (revoked_at IS NOT NULL AND revoked_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?)))",
             (f"-{SESSION_DAYS} days", f"-{SESSION_DAYS} days")).rowcount
-    try:
-        db.conn.execute("PRAGMA optimize")          # statistics for the query planner; changes no data
-    except Exception:   # noqa: BLE001 - only a hint to SQLite
-        pass
+        # the retry cache: the requests clean it at most once an hour themselves; here whatever the hour
+        from . import idempotency
+        out["retry_cache"] = idempotency.prune(db, force=True)
+    # No PRAGMA optimize / ANALYZE: statistics gathered on a small database go stale after a bulk load
+    # and made the planner scan whole tables (#249); the queries are built for SQLite's default plans.
     return out
 
 
@@ -64,4 +73,5 @@ def sizes(db: Database, db_path: Path, upload_dir: Path, backup_dir: Path) -> di
             "rows": {t: db.one(f"SELECT count(*) c FROM {t}")["c"] for t in ("sales", "sale_lines", "purchase_invoices",
                                                                            "stock_movements", "audit_log", "notifications")},
             "since": first[:10] if first else None,
-            "policy": {"notifications_days": NOTIFICATION_DAYS, "sessions_days": SESSION_DAYS}}
+            "policy": {"notifications_days": NOTIFICATION_DAYS, "sessions_days": SESSION_DAYS,
+                       "kept_for_ever": list(KEPT_FOR_EVER), "server_log_max_mb": _log_max_mb()}}

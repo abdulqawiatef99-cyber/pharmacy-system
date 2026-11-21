@@ -157,5 +157,5 @@ class TestShiftAPI(APICase):
         r = self.c.post("/api/cash/close", json={"denominations": {"5000": 1}}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         page = self.c.get(f"/shift-report/{r.json()['id']}")
-        self.assertIn("تقرير إغلاق الوردية", page.text)
+        self.assertIn("تقرير إغلاق الشيفت", page.text)
         self.assertIn("مطابق", page.text)

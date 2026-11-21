@@ -50,9 +50,13 @@ class TestReceiptAndLabelsAPI(APICase):
                                                                  "safety_decisions": {str(i): "ok" for i in range(n)}}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         page = self.c.get(f"/receipt/{sid}").text
-        for s in ("شارع الجلاء", "البائع", "صلاحية", "المرتجع خلال 14 يوم", "نقدي"):
+        for s in ("شارع الجلاء", "البائع", "صلاحية", "المرتجع خلال 14 يومًا", "نقدي"):
             self.assertIn(s, page)
         self.assertIn("receipt-58.css", self.c.get(f"/receipt/{sid}?w=58").text)
+        import hashlib
+        from app.api.app import WEB_DIR
+        v = hashlib.sha256((WEB_DIR / "receipt.css").read_bytes()).hexdigest()[:10]
+        self.assertIn(f"/static/receipt.css?v={v}", page)                  # no stale cached copy after an update
         lab = self.c.get("/labels", params={"items": f"{self.pan}:3", "size": "50x30"}).text
         self.assertEqual(lab.count('class="lb"'), 3)
         self.assertIn("6221043010359", lab)

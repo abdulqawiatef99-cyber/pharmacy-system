@@ -1,29 +1,38 @@
-"""Code update from the private GitHub repository, without touching pharmacy data.
+"""Code update from the GitHub repository, without touching pharmacy data.
 
-Flow (manage.py update): read-only token -> latest commit of the branch ->
+Flow (manage.py update): optional read-only token -> latest commit of the branch ->
 verified database backup -> snapshot of the current code (for rollback) ->
 download + check the archive -> copy the new files over the program folder,
 never into data/, backups/ or the virtual environment -> record the installed
 commit. Installing packages and migrating the database happen afterwards in a
 fresh process (the new code), see manage.py.
 
-The token is a GitHub *fine-grained, read-only* token stored on the pharmacy PC
-outside the program folder (never in the repository, never in backups).
+The repository is public, so no token is needed: without one the GitHub API is called
+anonymously (60 requests an hour per address). When present, the token is a GitHub
+*fine-grained, read-only* token stored on the PC outside the program folder (never in the
+repository, never in backups); it is still used, e.g. if the repository becomes private again.
 """
 from __future__ import annotations
 
 import io
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+import hashlib
+import release_bootstrap as releases
 
 DEFAULT_REPO = "abdulqawiatef99-cyber/pharmacy-system"
-PROTECTED = {"data", "backups", ".venv", "venv", ".git", "__pycache__"}
+PROTECTED = {"data", "backups", ".venv", "venv", ".git", "__pycache__", ".code-releases",
+             ".release-source.json"}
 API = "https://api.github.com"
 
 
@@ -36,23 +45,36 @@ def token_path() -> Path:
                                Path.home() / ".pharmacy" / "github_token.txt"))
 
 
-def read_token() -> str:
-    t = os.environ.get("PHARM_GITHUB_TOKEN")
+def read_token() -> str | None:
+    """The optional read-only key; None (anonymous access, the repository is public) when there is none."""
+    t = os.environ.get("PHARM_GITHUB_TOKEN", "").strip()
     if t:
-        return t.strip()
+        return t
     p = token_path()
-    if not p.exists():
-        raise UpdateError(f"مفتاح GitHub غير موجود. احفظه في الملف: {p}")
-    return p.read_text(encoding="utf-8").strip()
+    if not p.is_file():
+        return None
+    return p.read_text(encoding="utf-8").strip() or None
 
 
-def _get(url: str, token: str, accept: str) -> bytes:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": accept,
-                                               "User-Agent": "pharmacy-updater"})
+def _rate_limited(e: urllib.error.HTTPError) -> bool:
+    return e.code == 429 or (e.code == 403 and (e.headers or {}).get("X-RateLimit-Remaining") == "0")
+
+
+def _get(url: str, token: str | None, accept: str) -> bytes:
+    headers = {"Accept": accept, "User-Agent": "pharmacy-updater"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.read()
     except urllib.error.HTTPError as e:
+        if _rate_limited(e) or (not token and e.code == 403):
+            raise UpdateError("GitHub وصل لحد الطلبات المسموح بيه مؤقتًا. انتظر ساعة ثم اضغط «تحديث» مرة أخرى") from e
+        if not token and e.code in (401, 404):
+            raise UpdateError("مستودع البرنامج غير متاح للتحميل بدون مفتاح (قد يكون أصبح خاصًا). "
+                              f"اطلب ملف مفتاح التحديث من الدعم واحفظه في: {token_path()} "
+                              "أو حدّث البرنامج بملف تثبيت جديد") from e
         if e.code in (401, 403, 404):
             raise UpdateError("GitHub رُفض الطلب: المفتاح خاطئ أو منتهٍ أو ليس له صلاحية على المستودع") from e
         raise UpdateError(f"خطأ من GitHub: {e.code}") from e
@@ -60,18 +82,65 @@ def _get(url: str, token: str, accept: str) -> bytes:
         raise UpdateError(f"لا يوجد اتصال بـ GitHub: {e}") from e
 
 
-def latest_sha(repo: str, ref: str, token: str) -> str:
+def latest_sha(repo: str, ref: str, token: str | None) -> str:
     sha = _get(f"{API}/repos/{repo}/commits/{ref}", token, "application/vnd.github.sha").decode().strip()
     if len(sha) != 40:
         raise UpdateError("رد غير متوقع من GitHub")
     return sha
 
 
-def download(repo: str, sha: str, token: str) -> bytes:
+def download(repo: str, sha: str, token: str | None) -> bytes:
     return _get(f"{API}/repos/{repo}/zipball/{sha}", token, "application/vnd.github+json")
 
 
+CHANNELS = ("main", "develop")      # #107: main = the pharmacy; develop = test installs
+OFFICIAL = "main"                   # the official release: the pharmacy PC's channel (owner 20/11)
+_contains_seen: set = set()
+
+
+def channel(info: dict) -> str | None:
+    """The branch this install updates from (#107): the ref it was installed or last updated from, main when
+    unknown. None for any other branch (a review installer of a work branch): no update offered."""
+    ref = info.get("ref") or "main"
+    return ref if ref in CHANNELS else None
+
+
+def contains(repo: str, sha: str, head: str, token: str | None) -> bool:
+    """True when `head` (a branch or a commit) already contains commit `sha` (GitHub compare: ahead or
+    identical). An update only ever moves forward: an older commit of a branch is never an update."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or "") or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._/-]{0,199}",
+                                                                       head or ""):
+        return False
+    if (repo, sha, head) in _contains_seen:      # branches only move forward (no force push): stays true
+        return True
+    raw = _get(f"{API}/repos/{repo}/compare/{sha}...{head}?per_page=1", token, "application/vnd.github+json")
+    try:
+        status = json.loads(raw).get("status")
+    except (ValueError, AttributeError) as e:
+        raise UpdateError("رد غير متوقع من GitHub") from e
+    if status in ("ahead", "identical"):
+        _contains_seen.add((repo, sha, head))
+        return True
+    return False
+
+
+def follow(info: dict, repo: str, token: str | None) -> str | None:
+    """The channel this install takes updates from: its own (main or develop, #107). A review installer of a
+    work branch (the launch candidate on the pharmacy PC) follows the official release, main, once main
+    contains its commit (owner 20/11), never an older main; until then None (no update offered)."""
+    chan = channel(info)
+    if chan is not None:
+        return chan
+    try:
+        return OFFICIAL if contains(repo, info.get("sha") or "", OFFICIAL, token) else None
+    except UpdateError:              # offline or rate-limited: no channel this time, asked again on the next check
+        return None
+
+
 def installed(data_dir: Path) -> dict:
+    state = releases.read_state(releases.code_home(data_dir))
+    if state.get("active"):
+        return {**state["active"], "pending": state.get("pending", False)}
     p = data_dir / "installed_version.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
@@ -82,18 +151,38 @@ def _members(z: zipfile.ZipFile) -> tuple[str, list[zipfile.ZipInfo]]:
     if len(tops) != 1:
         raise UpdateError("ملف التحديث بصيغة غير صحيحة (أكثر من مجلد رئيسي)")
     top = tops.pop()
+    if top in (".", "..") or "\\" in top or ":" in top:
+        raise UpdateError("Unsafe archive root")
     names = set(z.namelist())
     if f"{top}/manage.py" not in names or not any(n.startswith(f"{top}/app/") for n in names):
         raise UpdateError("ملف التحديث لا يخص هذا البرنامج")
-    out = []
+    if len(z.infolist()) > 15000 or sum(i.file_size for i in z.infolist()) > 256 * 1024 * 1024:
+        raise UpdateError("Source archive exceeds the safety limit")
+    out, seen, prefixes = [], set(), {}
+    devices = {"con", "prn", "aux", "nul"} | {f"{kind}{n}" for kind in ("com", "lpt") for n in range(1, 10)}
     for info in z.infolist():
+        # ZipInfo may normalize Windows separators before filename is inspected.
+        if "\\" in info.orig_filename or "\x00" in info.orig_filename:
+            raise UpdateError("Unsafe original update member name")
         rel = info.filename[len(top) + 1:]
         if not rel or info.is_dir():
             continue
-        parts = Path(rel).parts
-        if rel.startswith(("/", "\\")) or ".." in parts or ":" in parts[0]:
+        parts = PurePosixPath(rel).parts
+        if (not parts or "\\" in rel or ":" in rel or rel.startswith("/") or ".." in parts
+                or PurePosixPath(rel).as_posix() != rel
+                or any(p.rstrip(" .") != p for p in parts)
+                or any(p.split(".", 1)[0].casefold() in devices for p in parts)
+                or stat.S_ISLNK(info.external_attr >> 16)):
             raise UpdateError(f"مسار غير آمن في ملف التحديث: {rel}")
-        if parts[0] in PROTECTED:
+        canonical = rel.casefold()
+        if canonical in seen or canonical == ".release-source.json":
+            raise UpdateError("Duplicate/reserved update member")
+        seen.add(canonical)
+        for i in range(1, len(parts)):
+            prefix = "/".join(parts[:i])
+            if prefixes.setdefault(prefix.casefold(), prefix) != prefix:
+                raise UpdateError("Inconsistent directory casing in archive")
+        if parts[0].casefold() in PROTECTED:
             continue                      # never overwrite data, backups or the environment
         out.append(info)
     return top, out
@@ -106,34 +195,55 @@ def snapshot(root: Path, dest_dir: Path) -> Path:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p in root.rglob("*"):
             rel = p.relative_to(root)
-            if p.is_file() and rel.parts[0] not in PROTECTED and "__pycache__" not in rel.parts:
+            if (p.is_file() and not p.is_symlink() and rel.parts[0].casefold() not in PROTECTED
+                    and "__pycache__" not in rel.parts):
                 z.write(p, f"program/{rel.as_posix()}")
     return out
 
 
-def apply_zip(data: bytes, root: Path) -> dict:
-    """Copies the archive's files over `root`. Validates everything before writing."""
+def apply_zip(data: bytes, root: Path, *, code_home: Path | None = None) -> dict:
+    """Stage a complete release; NEVER overwrite the running program or activate it.
+
+    Returns files, release directory and archive digest. Activation is a separate
+    checked pointer operation after compatibility checks and candidate selftest.
+    """
+    home = code_home or root / ".code-releases"
+    folder = home / "releases"
+    folder.mkdir(parents=True, exist_ok=True)
+    release_id = hashlib.sha256(data).hexdigest()
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as e:
         raise UpdateError("ملف التحديث تالف") from e
     with z:
         top, members = _members(z)
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        with tempfile.TemporaryDirectory(dir=home, prefix="staging-", ignore_cleanup_errors=True) as tmp:
             staged = Path(tmp)
+            hashes = {}
             for info in members:                 # stage first: a broken archive changes nothing
                 target = staged / info.filename[len(top) + 1:]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
-            written = 0
-            for f in staged.rglob("*"):
-                if f.is_file():
-                    dest = root / f.relative_to(staged)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, dest)
-                    written += 1
-    return {"files": written}
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                hashes[target.relative_to(staged).as_posix()] = hashlib.sha256(target.read_bytes()).hexdigest()
+            releases.atomic_json(staged / ".release-source.json", {"id": release_id, "files": hashes})
+            for directory in sorted((p for p in staged.rglob("*") if p.is_dir()),
+                                    key=lambda p: len(p.parts), reverse=True):
+                releases.sync_dir(directory)
+            releases.sync_dir(staged)
+            dest = releases.release_path(home, release_id)
+            with releases.locked(home):
+                if dest.exists():
+                    releases.verify_release(dest)
+                    existing = json.loads((dest / ".release-source.json").read_text(encoding="utf-8"))
+                    if existing["files"] != hashes:
+                        raise UpdateError("Existing release does not match this archive")
+                else:
+                    os.replace(staged, dest)
+                    releases.sync_dir(folder)
+    return {"files": len(hashes), "release": str(dest), "id": release_id}
 
 
 def record(data_dir: Path, sha: str, source: str) -> None:
