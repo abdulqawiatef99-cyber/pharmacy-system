@@ -154,3 +154,46 @@ class TestCodexReview396(Base):
         self.assertIn("CN-9", page)
         self.assertIn("45.60", page)
         self.assertIn("5.60", page)
+
+
+class TestCancelAfterInvoiceReturn(Base):
+    """Codex P1 x2 on #396: cancelling an invoice after a return from it credits nothing twice and takes no
+    other invoice's units."""
+
+    def invoice(self, no, qty):
+        inv = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.update_header(self.ctx, inv, {"invoice_no": no, "invoice_date": date.today().isoformat()}, v)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.add_line(self.ctx, inv, {"item_id": self.tax, "qty": qty, "bonus_qty": 0, "unit_net_price": 4000,
+                                        "line_total": 4000 * qty, "batch_no": "T1", "expiry_date": FUT}, v)
+        self.p.approve(self.ctx, inv, self.p.get(self.ctx, inv)["invoice"]["version"])
+        return inv
+
+    def cancel(self, inv):
+        self.p.cancel(self.ctx, inv, "إلغاء تجربة", self.p.get(self.ctx, inv)["invoice"]["version"])
+
+    def qty(self):
+        return self.db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE item_id=?", (self.tax,))["q"]
+
+    def test_tax_already_credited_is_not_credited_again(self):
+        bal = self.balance()
+        self.ret(self.tax, 1)                                   # 40.00 + 5.60 tax
+        self.cancel(self.inv)
+        posted = self.db.one("SELECT coalesce(sum(amount),0) a FROM supplier_ledger WHERE ref_id=? AND kind='purchase'",
+                             (self.inv,))["a"]
+        moved = self.db.one("SELECT coalesce(sum(amount),0) a FROM supplier_ledger WHERE supplier_id=? AND"
+                            " (ref_id=? OR ref_id IN (SELECT id FROM supplier_returns WHERE purchase_invoice_id=?))",
+                            (self.sup, self.inv, self.inv))["a"]
+        self.assertEqual((posted > 0, moved), (True, 0))        # invoice + its return + its cancellation = 0
+
+    def test_a_linked_return_is_taken_from_its_own_invoice(self):
+        second = self.invoice("F-79", 3)
+        before = self.qty()
+        line = returns.from_invoice(self.db, self.ctx, self.sup, "F-79")["lines"][0]
+        returns.create_from_invoice(self.db, self.ctx, self.sup, second,
+                                    [{"purchase_line_id": line["id"], "paid_units": 3, "reason": "expired"}])
+        bal = self.balance()
+        self.cancel(second)                                     # everything of it already went back
+        self.assertEqual(self.qty(), before - 3)                # the first invoice's 3 units stay
+        self.assertEqual(self.balance(), bal)                   # and nothing is credited again

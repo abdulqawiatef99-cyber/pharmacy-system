@@ -717,7 +717,7 @@ class Purchasing:
                     receipts = self._lot_receipts(ctx, m["branch_id"], m["item_id"], m["batch_id"])
                     me = next(p for p in receipts if p["id"] == m["id"])
                     returned_units += sum(q for q, _ in me["took"])
-                    credited += sum(q * v for q, v in me["took"])
+                    credited += sum(v for _, v in me["took"])
                     if me["left"] <= 0:           # every unit of this line already went back to the supplier
                         continue
                     # what later deliveries of the same lot brought in is theirs: without this, cancelling took
@@ -761,13 +761,15 @@ class Purchasing:
     def _lot_receipts(self, ctx: Context, branch_id: str, item_id: str, batch_id: str | None) -> list[dict]:
         """Every receipt of one lot in ledger order, with what is still its own: `left` = received, minus what
         its cancellation reversed, minus what went back to its supplier; `took` = those returns as
-        (units, piasters credited per unit). A return to a supplier is taken from that supplier's receipts of
-        the lot, oldest first: a return slip names the supplier and the lot, not the invoice."""
+        (units, piasters credited for them, tax included). A return made from an invoice (part 3 item 6b) names
+        its purchase line and is taken from that receipt first; a return by item and lot is taken from that
+        supplier's receipts of the lot, oldest first (Codex P1 x2 on #396)."""
         receipts: list[dict] = []
         by_line: dict[tuple, dict] = {}
         for r in self.db.all(
                 "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
-                " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value"
+                " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value,"
+                " coalesce(sl.tax_value, 0) tax_value, sl.purchase_line_id, sr.purchase_invoice_id"
                 " FROM stock_movements m"
                 " LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice' AND pi.id=m.ref_id AND pi.org_id=m.org_id"
                 " LEFT JOIN supplier_returns sr ON m.movement_type='supplier_return' AND sr.id=m.ref_id AND sr.org_id=m.org_id"
@@ -787,13 +789,15 @@ class Purchasing:
                 if p:
                     p["left"] = max(p["left"] + r["qty_delta"], 0)
             elif r["returned_to"]:
-                n = -r["qty_delta"]
-                for p in receipts:
+                n, tax = -r["qty_delta"], r["tax_value"]
+                named = by_line.get((r["purchase_invoice_id"], r["purchase_line_id"])) if r["purchase_line_id"] else None
+                for p in ([named] if named else []) + receipts:
                     if n <= 0:
                         break
                     if p["supplier_id"] == r["returned_to"] and p["left"] > 0:
                         t = min(n, p["left"])
                         p["left"] -= t
-                        p["took"].append((t, r["unit_value"] or 0))
+                        p["took"].append((t, t * (r["unit_value"] or 0) + tax))
+                        tax = 0                   # the row's tax is credited once, with its first units
                         n -= t
         return receipts
