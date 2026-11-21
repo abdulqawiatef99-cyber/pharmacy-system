@@ -216,3 +216,47 @@ class TestCodexReview396(Base):
             self.s.exchange(self.ctx, sid, {self.line(sid): 1}, self.draft(self.b, 1), refund_method="card",
                             reason="استبدال")
         self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))
+
+
+class TestCodexReview397(Base):
+    def test_preview_totals_come_from_one_simulation_and_match_the_exchange(self):
+        sid = self.sell(self.a, 2)
+        new = self.draft(self.a, 1)                       # the returned item is also the replacement
+        r, n = self.s.return_value(self.ctx, sid, {self.line(sid): 1}, refund_method="cash", new_sid=new)
+        done = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال",
+                               expected_new_total=n)
+        self.assertEqual((done["returned"], done["new_total"]), (r, n))
+
+    def test_a_replacement_total_other_than_the_one_shown_is_refused(self):
+        sid = self.sell(self.a, 2)
+        new = self.draft(self.b, 1)
+        with self.assertRaises(Conflict) as e:
+            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال",
+                            expected_new_total=1499)
+        self.assertEqual(e.exception.code, "price_changed")
+        self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))
+
+
+class TestExchangeReceiptFallback(__import__("unittest").TestCase):
+    """Codex on #396: after an exchange a browser / failed receipt prints in the page (the receipt URL)."""
+
+    def test_browser_and_failed_print_in_the_page(self):
+        import json, re, shutil, subprocess
+        from pathlib import Path
+        if not shutil.which("node"):
+            self.skipTest("Node not available")
+        js = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        fn = re.search(r"\nfunction exchangeDevices\(.*?\n\}\n", js, re.S).group(0)
+        run = fn + """
+const printed = [], toasts = [];
+function printInFrame(u) { printed.push(u); }
+function toast(m, bad) { toasts.push([m, !!bad]); }
+for (const st of ["browser", "failed", "sent", undefined]) exchangeDevices({ sale_id: "S1", devices: st ? { receipt: st, message: st === "failed" ? "x" : null } : undefined });
+console.log(JSON.stringify({ printed, toasts }));
+"""
+        r = subprocess.run([shutil.which("node"), "-e", run], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"printed": ["/receipt/S1", "/receipt/S1"], "toasts": [["x", True]]})
+        self.assertIn("exchangeDevices(r);", js)
+        self.assertIn("expected_new_total: got.t.new_total", js)
+        self.assertIn("findings = []; if ($(\"#exSafe\")) $(\"#exSafe\").innerHTML = \"\";", js)   # cleared on a change

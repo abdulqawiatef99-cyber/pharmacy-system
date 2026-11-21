@@ -197,3 +197,41 @@ class TestCancelAfterInvoiceReturn(Base):
         self.cancel(second)                                     # everything of it already went back
         self.assertEqual(self.qty(), before - 3)                # the first invoice's 3 units stay
         self.assertEqual(self.balance(), bal)                   # and nothing is credited again
+
+
+class TestCodexReview397(Base):
+    def invoice(self, no, qty, net, *, extra_discount=0, extra_tax=0):
+        inv = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.update_header(self.ctx, inv, {"invoice_no": no, "invoice_date": date.today().isoformat(),
+                                             "extra_discount": extra_discount, "extra_tax": extra_tax}, v)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.add_line(self.ctx, inv, {"item_id": self.tax, "qty": qty, "bonus_qty": 0, "unit_net_price": net,
+                                        "line_total": net * qty, "batch_no": "T1", "expiry_date": FUT}, v)
+        self.p.approve(self.ctx, inv, self.p.get(self.ctx, inv)["invoice"]["version"])
+        return inv
+
+    def full_return(self, inv, no):
+        line = returns.from_invoice(self.db, self.ctx, self.sup, no)["lines"][0]
+        return returns.create_from_invoice(self.db, self.ctx, self.sup, inv,
+                                           [{"purchase_line_id": line["id"], "paid_units": line["paid_units"]
+                                             - line["paid_returned"], "reason": "expired"}])
+
+    def test_the_invoice_discount_and_tax_are_part_of_the_credit(self):
+        for no, d, t, want in (("D-1", 1000, 0, 11000), ("D-2", 0, 700, 12700)):
+            bal = self.balance()
+            inv = self.invoice(no, 3, 4000, extra_discount=d, extra_tax=t)
+            self.assertEqual(self.balance() - bal, want)                   # what approval charged
+            self.assertEqual(self.full_return(inv, no)["total"], want)      # comes back exactly
+            self.assertEqual(self.balance(), bal)
+
+    def test_units_returned_earlier_by_lot_are_not_returned_again_from_the_invoice(self):
+        batch = self.lines[self.tax]["batch_id"]
+        returns.create(self.db, self.ctx, self.sup, [{"item_id": self.tax, "qty_base": 3, "reason": "damaged",
+                                                      "batch_id": batch}])
+        self.invoice("R-2", 3, 3000)                                         # the same lot comes in again
+        line = returns.from_invoice(self.db, self.ctx, self.sup, "F-77")["lines"][1]
+        self.assertEqual((line["paid_returned"], line["receipt_left"]), (3, 0))
+        with self.assertRaises(Conflict):
+            returns.create_from_invoice(self.db, self.ctx, self.sup, self.inv,
+                                        [{"purchase_line_id": line["id"], "paid_units": 3, "reason": "expired"}])

@@ -2798,11 +2798,18 @@ function refundOptions(s) {
 // Search the invoice by its number, an item code / barcode, or the customer's phone or name; type the quantities
 // coming back; add the replacement items; the three totals (returned, new, net) come from the server before saving.
 // Only the net is paid or given back. The returned goods go back to stock as a sale return, never a purchase.
+// after an exchange: a receipt the printer did not take (or browser printing) prints in the page, as at checkout
+function exchangeDevices(r) {
+  const dv = (r && r.devices) || {};
+  if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${r.sale_id}`);
+  if (dv.message) toast(dv.message, dv.receipt === "failed");
+  return dv.receipt || "none";
+}
 async function viewExchange() {
   app.innerHTML = `<section class="panel"><h1>مرتجع واستبدال</h1>
     <form class="row" id="exF"><input name="q" class="grow" placeholder="رقم الفاتورة أو كود الصنف أو الباركود أو تليفون العميل أو اسمه" autofocus><button class="btn small">ابحث</button></form>
     <div id="exList" class="mt"></div></section><div id="exSale"></div>`;
-  let sale = null, draft = null;
+  let sale = null, draft = null, findings = [];
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);   // card devices (Codex P2 on #396)
   const H = (t) => `<span class="muted small">${t}</span>`;
   const totals = async () => {
@@ -2819,6 +2826,8 @@ async function viewExchange() {
     } catch (e) { box.innerHTML = `<p class="badge b-err">${esc(e.message)}</p>`; return null; }
   };
   const drawDraft = () => {
+    // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
+    findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
     $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
@@ -2842,7 +2851,6 @@ async function viewExchange() {
         <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
     $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
     draft = null; drawDraft(); totals();
-    let findings = [];
     // safety findings of the replacement items: shown here, decided here, sent with the exchange (Codex P2 on #396)
     const showFindings = (fs) => {
       findings = fs || [];
@@ -2879,10 +2887,8 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), receipt: true } });
-          const dv = r.devices || {};
-          if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${r.sale_id}`);    // Codex P2 on #396
-          if (dv.message) toast(dv.message, dv.receipt === "failed");
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, receipt: true } });
+          exchangeDevices(r);
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) { toast(err.message, true); if (err.code === "safety_unresolved") showFindings(err.details?.findings); }

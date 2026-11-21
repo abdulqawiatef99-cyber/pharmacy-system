@@ -204,24 +204,47 @@ def _invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str | Non
 
 
 def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
+    """Each line of an approved invoice with what is still returnable of it. Two rules from the Codex reviews of
+    part 3 (#396, #397): the line's amount is what approval charged for it, the invoice-level discount and tax
+    spread over the lines by amount (half up, the last line takes the rest, so the lines add up to the
+    supplier's charge); and a return made earlier by item and lot that took this receipt's units counts as
+    returned from this line (paid units first), so the same units are never returned twice."""
+    from ..purchasing.service import lot_receipts
+    head = db.one("SELECT extra_discount, extra_tax FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id))
+    rows = [dict(l) for l in db.all(
+        "SELECT l.*, i.name_en, i.name_ar, i.pack_size FROM purchase_invoice_lines l JOIN items i ON i.id=l.item_id"
+        " WHERE l.invoice_id=? AND l.org_id=? ORDER BY l.line_no", (inv_id, ctx.org_id))]
+    amounts = [effective_amount(l) or 0 for l in rows]
+    adj, whole = (head["extra_tax"] or 0) - (head["extra_discount"] or 0), sum(amounts)
+    shares, given = [], 0
+    for k, a in enumerate(amounts):
+        part = adj - given if k == len(amounts) - 1 else (_share(adj, a, whole) if adj >= 0 else -_share(-adj, a, whole))
+        shares.append(part)
+        given += part
     out = []
-    for l in db.all("SELECT l.*, i.name_en, i.name_ar, i.pack_size FROM purchase_invoice_lines l JOIN items i ON i.id=l.item_id"
-                    " WHERE l.invoice_id=? AND l.org_id=? ORDER BY l.line_no", (inv_id, ctx.org_id)):
-        l = dict(l)
-        mv = db.one("SELECT batch_id, branch_id FROM stock_movements WHERE org_id=? AND ref_type='purchase_invoice'"
+    for l, amount, share in zip(rows, amounts, shares):
+        mv = db.one("SELECT id, batch_id, branch_id FROM stock_movements WHERE org_id=? AND ref_type='purchase_invoice'"
                     " AND ref_id=? AND ref_line_id=? AND movement_type='purchase' ORDER BY rowid LIMIT 1",
                     (ctx.org_id, inv_id, l["id"]))
         back = {r["is_bonus"]: r["q"] for r in db.all(
-            "SELECT is_bonus, coalesce(sum(qty_base),0) q FROM supplier_return_lines WHERE purchase_line_id=? GROUP BY is_bonus",
-            (l["id"],))}
+            "SELECT r.is_bonus, coalesce(sum(r.qty_base),0) q FROM supplier_return_lines r JOIN supplier_returns h"
+            " ON h.id=r.return_id AND h.org_id=? WHERE r.purchase_line_id=? GROUP BY r.is_bonus", (ctx.org_id, l["id"]))}
         ps = l["pack_size"] or 1
         paid_units, bonus_units = (l["qty"] or 0) * ps, (l["bonus_qty"] or 0) * ps
+        paid_back, bonus_back, left = back.get(0, 0), back.get(1, 0), paid_units + bonus_units
+        if mv:
+            me = next((p for p in lot_receipts(db, ctx, mv["branch_id"], l["item_id"], mv["batch_id"]) if p["id"] == mv["id"]), None)
+            if me:
+                by_lot = sum(t[0] for t in me["took"] if not t[2])        # earlier returns by item and lot
+                take = min(by_lot, paid_units - paid_back)
+                paid_back, bonus_back = paid_back + take, bonus_back + (by_lot - take)
+                left = me["left"]
         out.append({"id": l["id"], "line_no": l["line_no"], "item_id": l["item_id"], "name": l["name_en"] or l["name_ar"],
                     "pack_size": ps, "batch_id": mv["batch_id"] if mv else None, "batch_no": l["batch_no"],
                     "expiry_date": l["expiry_date"], "paid_units": paid_units, "bonus_units": bonus_units,
-                    "paid_returned": back.get(0, 0), "bonus_returned": back.get(1, 0),
+                    "paid_returned": paid_back, "bonus_returned": min(bonus_back, bonus_units), "receipt_left": left,
                     "qty_packs": l["qty"] or 0, "unit_net_price": l["unit_net_price"], "tax_amount": l["tax_amount"] or 0,
-                    "amount": effective_amount(l),
+                    "amount": amount + share, "invoice_adjustment": share,
                     "line_total": l["line_total"], "on_hand": inv.batch_qty(db, ctx.org_id, mv["branch_id"], l["item_id"],
                                                                             mv["batch_id"]) if mv else 0})
     return out
@@ -236,7 +259,7 @@ def from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str) 
     show = ctx.can("suppliers.pay") or ctx.can("costs.read")
     if not show:
         for l in lines:
-            for k in ("unit_net_price", "tax_amount", "line_total", "amount"):
+            for k in ("unit_net_price", "tax_amount", "line_total", "amount", "invoice_adjustment"):
                 l.pop(k, None)
     return {"invoice_id": inv_row["id"], "invoice_no": inv_row["invoice_no"], "invoice_date": inv_row["invoice_date"],
             "lines": lines}
@@ -297,7 +320,8 @@ def create_from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_id
                 continue
             if reason not in REASONS:
                 raise ValidationFailed("اختر سبب المرتجع لكل صنف")
-            if pu > l["paid_units"] - l["paid_returned"] or bu > l["bonus_units"] - l["bonus_returned"]:
+            if (pu > l["paid_units"] - l["paid_returned"] or bu > l["bonus_units"] - l["bonus_returned"]
+                    or pu + bu > l["receipt_left"]):
                 raise Conflict(f"«{l['name']}»: الكمية أكبر من اللي فاضل من السطر ده", code="return_exceeds")
             if l["bonus_units"] and (pu != l["paid_units"] - l["paid_returned"] or bu != l["bonus_units"] - l["bonus_returned"]):
                 partial.append(l["name"])

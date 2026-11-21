@@ -1208,9 +1208,12 @@ class Sales:
         return out
 
     # ------------------------------------------------------------ part 3 item 6a: return + replacement in one go
-    def return_value(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str) -> int:
+    def return_value(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
+                     new_sid: str | None = None) -> int | tuple[int, int]:
         """What a return would pay back, after the discount and every return rule, WITHOUT writing anything:
-        the return runs inside a transaction that is rolled back (part 3 item 6a, the three totals)."""
+        the return runs inside a transaction that is rolled back (part 3 item 6a, the three totals). With
+        new_sid, also the replacement's total read in the same simulation, after the returned units are back in
+        stock, as the real exchange prices it (Codex P1 on #397). Returns R, or (R, N) with new_sid."""
         if self.db.conn.in_transaction:
             raise RuntimeError("return_value runs only at the top level")
 
@@ -1219,14 +1222,14 @@ class Sales:
         try:
             with self.db.transaction():
                 r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع")
-                raise _Undo(r["refund"])
+                raise _Undo(r["refund"] if new_sid is None else (r["refund"], self.get(ctx, new_sid)["total"]))
         except _Undo as u:
             return u.args[0]
 
     def exchange(self, ctx: Context, sid: str, lines: dict[str, int], new_sid: str, *, refund_method: str,
                  pay_method: str = "cash", reason: str, channel_id: str | None = None, version: int | None = None,
                  request_id: str | None = None, safety_decisions: dict[int, str] | None = None,
-                 confirm_below_cost: bool = False) -> dict:
+                 confirm_below_cost: bool = False, expected_new_total: int | None = None) -> dict:
         """A sale return and its replacement sale as ONE operation (one transaction: both or neither).
 
         The returned value R follows every rule of `return_items` (window, who sold it, no-return sections, the
@@ -1250,6 +1253,12 @@ class Sales:
                 a = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
                                 " AND action='sale.exchange'", (ctx.org_id, new_sid))
                 return {**json.loads(a["after_json"]), "sale": self.get(ctx, new_sid), "replayed": True}
+        # a contract that changed since the draft was priced: reprice it for good (outside the exchange's
+        # transaction, which would roll the new price back) and let the cashier confirm (Codex P2 on #397)
+        if self.db.one("SELECT 1 FROM sales WHERE id=? AND org_id=? AND status='draft'", (new_sid, ctx.org_id)) \
+                and self._reprice_contract(ctx, new_sid):
+            raise Conflict("تغيّر خصم التعاقد على فاتورة الاستبدال، راجع الإجمالي الجديد", code="price_changed",
+                           details={"reason": "contract"})
         with self.db.transaction():
             orig = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
             new = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (new_sid, ctx.org_id))
@@ -1262,11 +1271,15 @@ class Sales:
             if orig["customer_id"] and new["customer_id"] and orig["customer_id"] != new["customer_id"]:
                 raise ValidationFailed("فاتورة الاستبدال لنفس عميل الفاتورة الأصلية", code="customer_mismatch")
             if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer
-                self.db.execute("UPDATE sales SET customer_id=? WHERE id=?", (orig["customer_id"], new_sid))
+                self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
+                                (orig["customer_id"], new_sid, ctx.org_id))
             ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
                                     reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
+            if expected_new_total is not None and n_total != expected_new_total:   # not what the screen showed
+                raise Conflict("إجمالي فاتورة الاستبدال اتغير؛ راجع الأرقام", code="price_changed",
+                               details={"new_total": n_total})
             offset = min(r_value, n_total)
             payments = []
             if offset:

@@ -2184,9 +2184,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
             sales = Sales(db)
-            r_value = sales.return_value(ctx, req.path_params["id"], lines,
-                                         refund_method=str(b.get("refund_method", "")))
-            n_total = sales.get(ctx, str(b.get("new_sale_id", "")))["total"] if b.get("new_sale_id") else 0
+            if b.get("new_sale_id"):          # both totals in one simulation, the returned units back first
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines, new_sid=str(b["new_sale_id"]),
+                                                      refund_method=str(b.get("refund_method", "")))
+            else:
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines,
+                                                      refund_method=str(b.get("refund_method", ""))), 0
             return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
@@ -2194,7 +2197,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")))
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
+                                                      if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
             sale = done["sale"]
             if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
