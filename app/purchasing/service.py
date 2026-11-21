@@ -313,7 +313,7 @@ class Purchasing:
                     continue
                 # the match keeps only what the person accepted (this expiry, this quantity): the sales of the day
                 # and the date moving on do not undo the acceptance (independent review)
-                details = {"expiry": l["expiry_date"], "qty": qty}
+                details = {"item_id": item_id, "expiry": l["expiry_date"], "qty": qty}   # a re-matched item re-asks
                 i = validation.Issue("error", "slow_before_expiry",
                                      f"هتبيع حوالي {min(will, qty)} من {qty} وحدة قبل ما يقرب ينتهي (البيع حوالي"
                                      f" {daily * 30:.0f} في الشهر، والصلاحية بعد {days // 30} شهر): اكتب السبب",
@@ -606,6 +606,8 @@ class Purchasing:
             keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision")
             # a value still waiting for a person (low-confidence reading, unconfirmed match) is never merged away
             # (Codex P1 on #406): it is confirmed first
+            if a["qty"] is None or b["qty"] is None:
+                raise ValidationFailed("اكتب كمية السطرين الأول وبعدين ادمج", code="not_mergeable")
             for ln in (a, b):
                 src, conf = json.loads(ln["field_sources"] or "{}"), json.loads(ln["field_confidence"] or "{}")
                 if ln["match_status"] == "suggested" or any(c < validation.LOW_CONFIDENCE and src.get(f) != "user"

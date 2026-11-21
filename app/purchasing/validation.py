@@ -224,7 +224,8 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
                          and (o.get("batch_no") or "").strip().upper() == batch), None)
             if twin:
                 same = all(twin.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price",
-                                                             "expiry_precision"))
+                                                             "expiry_precision")) \
+                    and twin.get("qty") is not None and l.get("qty") is not None
                 add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
                     other_line=twin["id"], mergeable=same)
             elif earlier and all(o.get("expiry_date") != exp_date for o in earlier):

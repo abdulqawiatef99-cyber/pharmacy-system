@@ -339,3 +339,35 @@ class TestCodexRound3(PurchaseBase):
         inv_id = self.draft(qty=300, expiry=(date.today() + timedelta(days=300)).isoformat())
         self.assertIn("slow_before_expiry", self.issues(inv_id))
         self.assertIn("slow_before_expiry", self.issues(inv_id, there))   # reviewed from the other branch: same answer
+
+
+class TestCodexRound4(PurchaseBase):
+    def test_acceptance_does_not_follow_a_rematched_item(self):
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.item, qty_delta=-90, movement_type="sale",
+                              ref_type="sale", ref_id=new_id(), allow_negative=True)
+        other = cat.create_item(self.db, self.ctx, {"name_en": "Other Tab", "public_price": 1000})
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=other, qty_delta=-1, movement_type="sale",
+                              ref_type="sale", ref_id=new_id(), allow_negative=True)
+        inv_id = self.draft(qty=300, expiry=(date.today() + timedelta(days=300)).isoformat())
+        d = self.p.get(self.ctx, inv_id)
+        i = next(x for x in d["issues"] if x["code"] == "slow_before_expiry")
+        self.p.acknowledge(self.ctx, inv_id, "slow_before_expiry", "عرض من المورد", i["line_id"], None)
+        self.p.update_line(self.ctx, inv_id, i["line_id"], {"item_id": other}, None)
+        d = self.p.get(self.ctx, inv_id)
+        self.assertTrue([x for x in d["issues"] if x["code"] == "slow_before_expiry" and not x["acknowledged"]])
+
+    def test_merge_with_a_missing_quantity_is_refused_cleanly(self):
+        inv_id = self.p.create_manual(self.ctx)
+        base = {"item_id": self.item, "qty": 1, "public_price": "1000", "discount_pct": "20", "unit_net_price": "800",
+                "batch_no": "B", "expiry_date": (date.today() + timedelta(days=700)).isoformat()}
+        self.p.add_line(self.ctx, inv_id, base, None)
+        d = self.p.add_line(self.ctx, inv_id, base, None)
+        a, b = d["lines"][0]["id"], d["lines"][1]["id"]
+        d = self.p.update_line(self.ctx, inv_id, b, {"qty": None}, None)
+        dup = next((x for x in d["issues"] if x["code"] == "duplicate_line"), None)
+        self.assertFalse(dup and dup["details"]["mergeable"])
+        from app.core.errors import ValidationFailed
+        with self.assertRaises(ValidationFailed):
+            self.p.merge_lines(self.ctx, inv_id, a, b, None)
