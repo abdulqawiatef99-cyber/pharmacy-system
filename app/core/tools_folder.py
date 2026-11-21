@@ -17,7 +17,8 @@ import os
 from pathlib import Path
 
 TOOLS = ("estock-db-read.bat", "estock-db-read.ps1", "estock-db-read-one.bat", "estock-db-import.bat",
-         "estock-import.bat", "launch-fresh-start.bat", "estock-backups.bat", "estock-backups.py")
+         "estock-import.bat", "launch-fresh-start.bat", "estock-backups.bat", "estock-backups.py",
+         "signing-key-check.bat", "signing_key_check.py", "new-signing-key.bat", "new_signing_key.py")
 SHORTCUT = "أدوات الصيدلية.url"
 README = "اقرأني.txt"
 README_TEXT = (
@@ -28,7 +29,9 @@ README_TEXT = (
     "estock-db-import.bat     نقل إي ستوك كله للبرنامج (تجربة الأول، وبعدين YES)\r\n"
     "estock-import.bat        النقل القديم من ملفات إكسيل\r\n"
     "launch-fresh-start.bat   بداية من الصفر قبل الإطلاق بس\r\n"
-    "estock-backups.bat       عرض نسخ إي ستوك الاحتياطية اللي على الجهاز وعمر أحدث نسخة (قراية بس)\r\n")
+    "estock-backups.bat       عرض نسخ إي ستوك الاحتياطية اللي على الجهاز وعمر أحدث نسخة (قراية بس)\r\n"
+    "signing-key-check.bat    أنهي مفتاح توقيع التحديث في أنهي ملف على الفلاشة (قراية بس، المفتاح مابيظهرش)\r\n"
+    "new-signing-key.bat      مفتاح توقيع احتياطي جديد على الفلاشة (بس لو الوكيل قال كده)\r\n")
 log = logging.getLogger("pharm.tools")
 
 
@@ -73,6 +76,16 @@ def refresh(release_root: Path, home: Path, desktop: Path | None = None) -> dict
             f = src / name
             if f.is_file() and _write_if_changed(tools / name, f.read_bytes()):
                 out["written"].append(name)
+        keys = tools / "keys"           # public keys only, for signing-key-check.bat: exactly the release's set
+        wanted = {f.name: f for f in sorted((Path(release_root) / "release_keys").glob("*.pub"))}
+        for name, f in wanted.items():
+            keys.mkdir(exist_ok=True)
+            if _write_if_changed(keys / name, f.read_bytes()):
+                out["written"].append(f"keys/{name}")
+        for old in keys.glob("*.pub") if keys.is_dir() else []:
+            if old.name not in wanted:  # a key the release retired (a lost private key) is never recognised again
+                old.unlink()
+                out["written"].append(f"keys/{old.name} (removed)")
         if _write_if_changed(tools / README, b"\xef\xbb\xbf" + README_TEXT.encode("utf-8")):
             out["written"].append(README)
         desk = desktop if desktop is not None else desktop_dir()

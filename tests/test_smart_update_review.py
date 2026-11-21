@@ -235,7 +235,11 @@ class TestLauncherTellsItsCapability(unittest.TestCase):
 class TestSigningKeys(unittest.TestCase):
     def test_owner_keys_stay_committed_and_load(self):
         names = {p.name for p in (REPO / "release_keys").glob("*.pub")}
-        self.assertLessEqual({"update-1.pub", "update-2-spare.pub"}, names)   # owner, 20/11 (8c67669, 42da1fb)
+        # owner 21/11 13:16, outcome (b): update-1's private half is not found, so it is no longer trusted; the
+        # former spare signs (update-2.pub, same blob d61835b); a new spare update-3.pub comes before any main merge
+        self.assertIn("update-2.pub", names)
+        self.assertNotIn("update-1.pub", names)
+        self.assertNotIn("update-2-spare.pub", names)
         self.assertTrue(all(len(k) == 32 for k in update_sign.trusted_keys(REPO)))
 
     def test_bundle_build_names_the_committed_key_that_verified(self):

@@ -36,12 +36,33 @@ On a push to `main` or `develop`, CI publishes release `update-<channel>` with:
 Signing key: repository secret `UPDATE_SIGNING_KEY`; public keys in `release_keys/*.pub`. No secret →
 CI publishes nothing (fail closed). Trust root = the keys in the **active** release, never the
 downloaded one; a new key ships inside a release signed by the old key. The secret reaches only the two
-steps that read it. The build log names the committed key that verified the signature (`update-1.pub`;
-the spare `update-2-spare.pub` stays offline for rotation and must never be the one signing).
+steps that read it. The build log names the committed key that verified the signature (`update-2.pub`
+since 21/11; the next spare, `update-3.pub`, stays offline for rotation and must never be the one signing).
 **Dry run:** a PR labelled `ci` that touches the signing path (this workflow, `scripts/release/`,
 `release_keys/`, `update_sign.py`, `smart_update.py`, `requirements.txt`), or a manual run on a work
 branch, goes through the same steps (key present, package set, build, sign, verify the way the PC
 reads it) and publishes nothing, so a missing or wrong key shows before the merge.
+
+**Settled 21/11 (owner 13:16): outcome (b).** update-1's private file was not found (the secret set at 10:28
+matched no committed key: run 44896903157 attempt 1). The owner put the spare back; attempt 2 logged `signed
+with release_keys/update-2-spare.pub`. So `update-2-spare.pub` is now `release_keys/update-2.pub` (same key,
+blob `d61835b`) and `update-1.pub` is removed. **Before any merge to `main` (and before the next installer):**
+the owner runs `new-signing-key.bat` (new spare to `F:\pharmacy-update-keys`) and an agent commits its
+`update-3.pub`, so the PCs always trust a second key.
+
+**Which key signs (part 3 item 0, owner 20/11 23:18): settle before anything is published.** The dry run on
+`77a392a` signed with `update-2-spare.pub`: the secret holds the **spare**. Tools (folder «أدوات الصيدلية», or
+`scripts\windows\` of a downloaded copy of the repository, which finds `release_keys\` itself):
+`signing-key-check.bat` names, for every small `.txt` on the flash drive, the committed key it matches
+(update-1 / update-2-spare / none); it never prints or copies a key. Then:
+- **(a) update-1's private file is found:** the owner puts that one line in the secret `UPDATE_SIGNING_KEY`
+  (Settings → Secrets and variables → Actions → Repository secrets → Update); the spare goes back offline.
+  Re-run the dry run: the log must say `signed with release_keys/update-1.pub`. No code change.
+- **(b) not found:** update-2 becomes the signing key (the secret stays as it is). `new-signing-key.bat`
+  writes a NEW spare to `F:\pharmacy-update-keys` (`update-signing-PRIVATE.txt` stays there, offline;
+  `update-3.pub` is sent to an agent). The agent's PR adds `release_keys/update-3.pub`, removes
+  `release_keys/update-1.pub` (a lost private key must not stay trusted), and updates this paragraph.
+  Done before the first installer with these keys, so no PC ever trusts the lost key.
 
 **Channels (owner 20/11):** the pharmacy PC follows the official release, `main`; `develop` is for test
 PCs. An install from a work branch (a review installer, like the launch candidate on the pharmacy PC)
