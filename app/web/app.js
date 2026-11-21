@@ -31,7 +31,7 @@ const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
   const t = String(v || "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/\s+/g, "-");
-  const m = t.match(/^(\d{1,2})(\d{2})$/);
+  const m = t.match(/^(\d{1,2})(\d{2}|\d{4})$/);              // 628, 1128, 112028 (U2-2)
   return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
 };
 // ------------------------------------------------------------------ person's screen preferences
@@ -1157,7 +1157,7 @@ function renderInvoice() {
   const { invoice: inv, lines, issues } = CUR;
   const draft = inv.status === "draft";
   const errs = issues.filter((i) => i.level === "error" && !i.acknowledged);
-  const warns = issues.filter((i) => i.level === "warning");
+  const warns = issues.filter((i) => i.level === "warning" || i.level === "info");
   const lineNo = Object.fromEntries(lines.map((l) => [l.id, l.line_no]));
   const fileUrl = inv.source_file_id ? `/api/files/${encodeURIComponent(inv.source_file_id)}` : null;
   let doc = `<p class="muted">لا يوجد ملف مرفق (إدخال يدوي)</p>`;
@@ -1183,14 +1183,16 @@ function renderInvoice() {
       <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">تاريخ الإدخال على السيستم <input id="pinEntered" value="${esc(cairoWhen(inv.created_at))}" readonly disabled></label>
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
-      <label class="f">الإجمالي المطبوع (ج) <input data-h="declared_total" type="number" step="0.01" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}></label>
+      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
+        <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
+        ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
     </div>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
   </section>
   <section class="panel">
     <div class="totals">
-      <div>الإجمالي المطبوع<b>${money(inv.declared_total) || "—"}</b></div>
+      <div>إجمالي فاتورة المورد<b>${money(inv.declared_total) || "—"}</b></div>
       <div>الإجمالي المحسوب<b>${money(inv.computed_total) || "—"}</b></div>
       <div class="${diff == null ? "" : diff === 0 ? "t-ok" : totalErr ? "t-err" : "t-warn"}">${diff == null ? "الفرق" : diff === 0 ? "✓ الإجماليان متطابقان" : totalErr ? "✕ الفرق" : "⚠ الفرق (مقبول)"}<b>${diff == null ? "—" : money(diff)}</b>
         ${totalErr ? `<span>سطر زائد أو سطر ناقص؟ راجع قبل الاعتماد</span>` : ""}</div>
@@ -1203,15 +1205,17 @@ function renderInvoice() {
         ${i.details?.expected != null ? ` (المتوقع ${money(i.details.expected)})` : ""}
         ${i.code === "low_confidence" && draft ? ` [${esc(FIELD_AR[i.field] || i.field)}] <button class="btn small secondary" data-confirm="${esc(i.line_id)}" data-cfield="${esc(i.field)}">القيمة صحيحة</button>` : ""}
         ${i.code === "unreadable" ? ` [${esc(FIELD_AR[i.field] || i.field)}]` : ""}
-        ${["total_mismatch", "line_total_mismatch", "net_price_mismatch"].includes(i.code) && draft && ME.permissions.includes("purchases.approve")
+        ${["total_mismatch", "line_total_mismatch", "net_price_mismatch", "short_expiry", "slow_before_expiry"].includes(i.code) && draft && ME.permissions.includes("purchases.approve")
           ? `<button class="btn small secondary" data-ack="${esc(i.code)}" data-ackline="${esc(i.line_id || "")}">قبول الفرق مع ذكر السبب</button>` : ""}</li>`).join("")}
-      ${warns.map((i) => `<li class="warn">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
+      ${warns.map((i) => `<li class="${i.level === "info" ? "muted" : "warn"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}${i.details?.other_line ? ` (سطر ${lineNo[i.details.other_line]})` : ""}
+        ${i.details?.mergeable && draft ? `<button class="btn small secondary" data-merge="${esc(i.details.other_line)}" data-mergewith="${esc(i.line_id)}">دمج السطرين</button>` : ""}
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
-        ${i.code === "short_expiry" ? ` (${i.details.days} يوم)` : ""}</li>`).join("")}
+</li>`).join("")}
     </ul>
     <div class="row">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && ME.permissions.includes("purchases.approve") ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>
         ${fileUrl ? `<button class="btn secondary" id="addLine">إضافة سطر ناقص من الملف</button>` : ""}` : ""}
+      ${inv.status === "approved" ? `<button class="btn secondary" id="invLabels">اطبع ملصقات الفاتورة</button>` : ""}
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
@@ -1233,6 +1237,48 @@ function renderInvoice() {
   purchaseTabs(inv.id);
 }
 
+// U2-5: labels after approval (or from any approved invoice). Nothing ticked except the items labelled the last
+// time they were bought (remembered on this PC); counts editable; Enter never prints; one confirm with the totals.
+const LBL_KEY = "lblItems";
+const lblRemembered = () => { try { return new Set(JSON.parse(localStorage.getItem(LBL_KEY) || "[]")); } catch { return new Set(); } };
+function purchaseLabels(cur) {
+  const seen = new Set(), rows = [];
+  for (const l of cur.lines || []) {
+    if (!l.item_id || seen.has(l.item_id)) continue;
+    seen.add(l.item_id);
+    const boxes = (cur.lines || []).filter((x) => x.item_id === l.item_id).reduce((n, x) => n + (x.qty || 0) + (x.bonus_qty || 0), 0);
+    rows.push({ id: l.item_id, name: l.item && typeof l.item === "object" ? itemText(l.item) : (l.item || l.raw_name), boxes });
+  }
+  if (!rows.length) return;
+  const mem = lblRemembered(), d = document.createElement("dialog");
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>ملصقات الفاتورة</h2>
+    <p class="muted">متعلّم بس الأصناف اللي اتعملها ملصقات آخر مرة اتشرت.</p>
+    <div class="row"><button type="button" class="btn small secondary" data-all="1">علّم الكل</button><button type="button" class="btn small secondary" data-all="0">شيل الكل</button></div>
+    <table><tbody>${rows.map((r, i) => `<tr><td><label class="chk"><input type="checkbox" data-i="${i}" ${mem.has(r.id) ? "checked" : ""}> ${esc(r.name || "")}</label></td>
+      <td><input type="number" min="1" max="500" step="1" class="narrow" data-n="${i}" value="${r.boxes || 1}"></td></tr>`).join("")}</tbody></table>
+    <div class="row"><button type="button" class="btn" data-go="1">اطبع</button><button type="button" class="btn secondary" data-go="0">مش دلوقتي</button></div></form>`;
+  document.body.append(d);
+  d.querySelector("form").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  d.addEventListener("close", () => d.remove());
+  d.addEventListener("click", async (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.all) { d.querySelectorAll("[data-i]").forEach((c) => { c.checked = b.dataset.all === "1"; }); return; }
+    if (b.dataset.go === "0") { d.close(); return; }
+    if (b.dataset.go !== "1") return;
+    const pick = [...d.querySelectorAll("[data-i]")].filter((c) => c.checked)
+      .map((c) => ({ id: rows[+c.dataset.i].id, count: Math.max(1, Math.min(500, parseInt(d.querySelector(`[data-n="${c.dataset.i}"]`).value, 10) || 1)) }));
+    if (!pick.length) { toast("علّم صنف واحد على الأقل", true); return; }
+    const n = pick.reduce((a, x) => a + x.count, 0);
+    if (!confirm(`هتطبع ${n} ملصق لـ ${pick.length} صنف؟`)) return;
+    const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
+    try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
+    d.close();
+    // the program's own label path: label printer, or the browser / A4 page (Codex P2 on #406)
+    await printLabels(pick.map((x) => [x.id, x.count]));
+  });
+  d.showModal();
+}
+
 // fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
 function quickAddHtml() {
   return `<section class="panel" id="qa"><h2>إضافة صنف للفاتورة</h2>
@@ -1242,7 +1288,7 @@ function quickAddHtml() {
       <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
       <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
-      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="6-29" class="narrow"></label>
+      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>
       <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
@@ -1258,6 +1304,9 @@ function bindQuickAdd() {
     $("#qaRes").innerHTML = "";
     q.value = itemText(it);
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
+    // U2-3: said at once, not after saving: the item is already on the invoice
+    const twins = (CUR?.lines || []).filter((l) => l.item_id === it.id);
+    if (twins.length) $("#qaPicked").textContent += ` · ⚠ الصنف ده موجود في ${twins.map((l) => `سطر ${l.line_no}${l.expiry_date ? ` (صلاحية ${l.expiry_date.slice(5, 7)}/${l.expiry_date.slice(0, 4)}${l.batch_no ? `، تشغيلة ${l.batch_no}` : "، من غير تشغيلة"})` : ""}`).join("، ")}: لو نفس الصلاحية والتشغيلة زوّد الكمية هناك`;
     if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
     $("#qaQty").focus();
   };
@@ -1298,8 +1347,25 @@ function bindQuickAdd() {
     $("#qaQ")?.focus();
   };
   $("#qaAdd").addEventListener("click", add);
-  ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"].forEach((s) =>
-    $(s).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }));
+  // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
+  // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
+  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"];
+  order.forEach((sel, i) => {
+    const el = $(sel);
+    el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); if (i === order.length - 1 || e.ctrlKey) add(); else $(order[i + 1]).focus(); return; }
+      const back = e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft"), fwd = e.key === (document.dir === "rtl" ? "ArrowLeft" : "ArrowRight");
+      if ((back || fwd) && (el.type === "number" || el.selectionStart === (back ? 0 : el.value.length))) {
+        const j = i + (fwd ? 1 : -1);
+        if (j >= 0 && j < order.length) { e.preventDefault(); $(order[j]).focus(); }
+      }
+    });
+  });
+  $("#qaExp").addEventListener("input", (e) => {
+    const m = normExpiry(e.target.value).match(/^(\d{1,2})-(\d{2}|\d{4})$/);
+    $("#qaExpSee").textContent = m && +m[1] >= 1 && +m[1] <= 12 ? `← ${String(+m[1]).padStart(2, "0")}/${m[2].length === 2 ? `20${m[2]}` : m[2]}` : "";
+  });
 }
 
 function renderLine(l) {
@@ -1330,7 +1396,8 @@ function renderLine(l) {
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
     <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_date ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : "", { type: "text" })}</td>
-    <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>` : ""}</td>
+    <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>
+      ${l.item_id && l.qty > 1 ? `<button class="btn small secondary" data-split="${esc(l.id)}" title="جزء من الكمية بصلاحية تانية">+ صلاحية</button>` : ""}` : ""}</td>
   </tr>`;
 }
 
@@ -1407,6 +1474,9 @@ app.addEventListener("click", async (e) => {
     if (!confirm("اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.")) return;
     await save(`${base}/approve`, {}, "POST");
     toast("تم اعتماد الفاتورة وإضافتها للمخزون");
+    if (CUR?.invoice?.status === "approved") purchaseLabels(CUR);
+  } else if (t.id === "invLabels") {
+    purchaseLabels(CUR);
   } else if (t.id === "cancelInv") {
     const reason = prompt("سبب الإلغاء:");
     if (reason) await save(`${base}/cancel`, { reason }, "POST");
@@ -1417,6 +1487,16 @@ app.addEventListener("click", async (e) => {
     await save(`${base}/lines/${t.dataset.confirm}`, { changes: { confirm_fields: [t.dataset.cfield] } });
   } else if (t.dataset.del) {
     if (confirm("حذف السطر؟")) await save(`${base}/lines/${t.dataset.del}`, {}, "DELETE");
+  } else if (t.dataset.split) {
+    // U2-9: part of this line has another expiry -> its own lot; the quantity of the line is the sum
+    const q = typedWhole(prompt("كام علبة من السطر ده صلاحيتها مختلفة؟") || "");
+    if (!(Number(q) > 0)) return;
+    const exp = prompt("الصلاحية التانية (مثال 1128 أو 11/2028):");
+    if (!exp) return;
+    const batch = prompt("التشغيلة (اختياري):") || null;
+    await save(`${base}/lines/${t.dataset.split}/split`, { qty: Number(q), expiry_date: normExpiry(exp), batch_no: batch }, "POST");
+  } else if (t.dataset.merge) {
+    if (confirm("دمج السطرين في سطر واحد؟ الكميات والبونص بيتجمعوا.")) await save(`${base}/lines/${t.dataset.merge}/merge`, { other_line: t.dataset.mergewith }, "POST");
   } else if (t.dataset.ack) {
     const reason = prompt("اكتب سبب قبول الفرق (يُسجَّل باسمك):");
     if (reason) await save(`${base}/acknowledge`, { code: t.dataset.ack, line_id: t.dataset.ackline || null, reason }, "POST");
