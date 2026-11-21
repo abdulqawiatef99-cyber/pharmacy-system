@@ -3140,10 +3140,10 @@ async function viewDayReview() {
   const load = async () => {
     const v = $("#drDay").value, r = await api(`/api/reports/day-review${v ? `?day=${encodeURIComponent(v)}` : ""}`);
     if (!v) $("#drDay").value = r.day;
-    const row = (t, m) => `<tr><td>${t}</td><td class="num">${money(m)}</td></tr>`, s = r.sales, mth = r.by_method;
+    const row = (t, m) => `<tr><td>${t}</td><td class="num">${m == null ? "—" : money(m)}</td></tr>`, s = r.sales, mth = r.by_method;
     $("#drOut").className = "";
     $("#drOut").innerHTML = `<div class="totals"><div>صافي المبيعات<b>${money(r.net_sales)}</b></div><div>عدد الفواتير<b>${s.n}</b></div>
-        <div>الشراء<b>${money(r.purchases.total)}</b></div><div class="${r.drawer.difference ? (r.drawer.difference < 0 ? "t-err" : "t-warn") : "t-ok"}">فرق الخزينة<b>${money(r.drawer.difference)}</b></div></div>
+        <div>الشراء<b>${r.purchases.total == null ? "—" : money(r.purchases.total)}</b></div><div class="${r.drawer.difference ? (r.drawer.difference < 0 ? "t-err" : "t-warn") : "t-ok"}">فرق الخزينة<b>${money(r.drawer.difference)}</b></div></div>
       <div class="grid2"><table><tbody>
         ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${row("المرتجعات", r.returns.total)}
         ${row(`ملغاة النهارده (${s.voided_count})`, s.voided_total)}${row("نقدي (بعد المرتجع والإلغاء)", mth.cash)}${row("بطاقة (بعد المرتجع والإلغاء)", mth.card)}

@@ -52,3 +52,13 @@ class TestDayReviewDeliveryVoid(SalesCase):
         r = day_review(self.db, self.ctx, today())
         self.assertEqual(r["by_method"]["cash"], 0)
         self.assertEqual(r["by_method"]["delivery_cash"], 0)
+
+
+class TestDayReviewPurchaseValues(SalesCase):
+    def test_purchase_and_supplier_return_values_hidden_without_cost_rights(self):
+        from dataclasses import replace
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read", "suppliers.pay"})
+        r = day_review(self.db, staff, today())
+        self.assertNotIn("total", r["purchases"])
+        self.assertNotIn("total", r["supplier_returns"])
+        self.assertIn("total", day_review(self.db, self.ctx, today())["purchases"])

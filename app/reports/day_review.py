@@ -57,6 +57,11 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
                        " AND created_at>=? AND created_at<?", (o, lo, hi))["t"]
     refunded = sum(v["total"] for v in rets.values())
     ret = lambda m: rets.get(m, {}).get("total", 0)        # noqa: E731
+    if not (ctx.can("costs.read") or ctx.can("suppliers.pay")):
+        # purchase and supplier-return values are the owner's (as in procurement/returns.py and the item card):
+        # counts stay, money goes (Codex P1 on #407)
+        pur = {"n": pur["n"], "by_supplier": [{"supplier": x["supplier"], "n": x["n"]} for x in pur["by_supplier"]]}
+        sret = {"n": sret["n"]}
     return {
         "day": d.isoformat(),
         "sales": {**s, "voided_count": voids["n"], "voided_total": voids["t"]},
