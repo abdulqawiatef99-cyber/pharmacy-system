@@ -2822,6 +2822,7 @@ window.I18N_EN = {
 "⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»": "⚠ Browser printing cannot open the drawer — open it by hand or choose a direct printer in «Program → Receipt printer and drawer»",
 "تغيّر إجمالي الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع": "The invoice total changed; check the new total, then complete the sale",
 "✓ أُرسل الإيصال للطابعة": "✓ Receipt sent to the printer",
+"✓ أُرسل تقرير الشيفت للطابعة": "✓ Shift report sent to the printer",
 "أضف موردًا": "Add supplier",
 "مثال: آجل 30 يومًا": "e.g. credit 30 days",
 "له (دفع/مرتجع)": "in their favour (payment/return)",
