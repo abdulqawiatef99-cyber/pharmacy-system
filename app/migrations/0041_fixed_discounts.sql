@@ -9,6 +9,8 @@ ALTER TABLE sales ADD COLUMN invoice_discount_bp INTEGER NOT NULL DEFAULT 0
 ALTER TABLE sales ADD COLUMN invoice_discount_amount INTEGER NOT NULL DEFAULT 0 CHECK (invoice_discount_amount >= 0);
 ALTER TABLE sales ADD COLUMN invoice_discount_by TEXT;
 ALTER TABLE sales ADD COLUMN invoice_discount_approved_by TEXT;
+-- the invoice's own discount share (bp) the approver approved: completion accepts no more than that (Codex on #400)
+ALTER TABLE sales ADD COLUMN invoice_discount_approved_bp INTEGER;
 -- the program's own serial number of each purchase invoice, per branch, next to the supplier's invoice number
 -- (owner, launch day: both, like E-Stock). Existing invoices are numbered in the order they were created.
 ALTER TABLE purchase_invoices ADD COLUMN serial_no INTEGER;

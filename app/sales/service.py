@@ -581,7 +581,8 @@ class Sales:
                 raise NotFound("السطر غير موجود")
             # the same invoice discount is a bigger share of a smaller invoice: an approval given before no longer
             # counts; completion asks again when it passes the limit (review of update 1)
-            self.db.execute("UPDATE sales SET version=version+1, invoice_discount_approved_by=NULL WHERE id=?", (sid,))
+            self.db.execute("UPDATE sales SET version=version+1, invoice_discount_approved_by=NULL,"
+                            " invoice_discount_approved_bp=NULL WHERE id=?", (sid,))
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ pricing preview
@@ -762,7 +763,9 @@ class Sales:
         if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
             own = own_discount(preview["lines"])
             bp = equivalent_bp(own, preview["subtotal"])
-            if bp > ctx.discount_limit_bp and not preview["invoice_discount_approved_by"]:
+            # an approval covers the share it was given for, not a bigger one made later (Codex on #400)
+            approved = preview["invoice_discount_approved_bp"] if preview["invoice_discount_approved_by"] else None
+            if bp > ctx.discount_limit_bp and (approved is None or bp > approved):
                 raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")
         bad = [l for l in preview["lines"] if l.get("problem")]
         if bad:
@@ -1100,7 +1103,8 @@ class Sales:
             if bp > ctx.discount_limit_bp:
                 raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")
             if bp > ctx.max_discount_bp and ctx.approver_id:
-                self.db.execute("UPDATE sales SET invoice_discount_approved_by=? WHERE id=?", (ctx.approver_id, sid))
+                self.db.execute("UPDATE sales SET invoice_discount_approved_by=?, invoice_discount_approved_bp=? WHERE id=?",
+                                (ctx.approver_id, bp, sid))
 
     def set_invoice_discount(self, ctx: Context, sid: str, *, amount: int | None = None,
                              bp: int | None = None) -> dict:
@@ -1119,7 +1123,7 @@ class Sales:
             s = self._draft(ctx, sid)
             before = {"amount": s["invoice_discount_amount"], "bp": s["invoice_discount_bp"]}
             self.db.execute("UPDATE sales SET invoice_discount_amount=?, invoice_discount_bp=?, invoice_discount_by=?,"
-                            " invoice_discount_approved_by=NULL, version=version+1 WHERE id=?",
+                            " invoice_discount_approved_by=NULL, invoice_discount_approved_bp=NULL, version=version+1 WHERE id=?",
                             (amount, bp, ctx.user_id if amount or bp else None, sid))
             self._check_fixed_discounts(ctx, sid, None)
             audit.record(self.db, ctx, "sale.invoice_discount", "sale", sid, before=before,

@@ -250,9 +250,14 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
             share = min(disc, l["invoice_share"])
             own_key = "contract" if l["discount_source"] == "contract" else (l["line_by"] or "?")
             parts = [(disc - share, own_key, l["line_by_name"]), (share, l["inv_by"] or "?", l["inv_name"])]
+        merged: dict[str, list] = {}                     # one person, one entry per line (Codex on #400)
         for amount, key, name in parts:
             if not amount and len(parts) > 1:
                 continue
+            m = merged.setdefault(key, [0, name])
+            m[0] += amount
+            m[1] = m[1] or name
+        for key, (amount, name) in merged.items():
             g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (name or "—"),
                                         "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})
             g["lines"] += 1

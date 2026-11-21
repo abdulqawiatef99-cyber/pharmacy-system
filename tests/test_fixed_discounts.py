@@ -292,3 +292,37 @@ class CodexReview400Discounts(FixedCase):
         self.assertEqual(g.get(self.ctx.user_id), 100)
         self.assertEqual(g.get(mgr.user_id), 200)
         self.assertEqual(sum(g.values()), 300)
+
+
+class CodexReview400Round3(FixedCase):
+    def test_p1_an_approval_covers_only_the_discount_approved(self):
+        sid, d = self.draft()                                                  # 68.00
+        approved = dataclasses.replace(self.cashier, approver_id=self.ctx.user_id, approver_discount_bp=1000)
+        self.s.set_invoice_discount(approved, sid, bp=1000)                   # 10%, approved
+        more = cat.create_item(self.db, self.ctx, {"name_en": "Testmore", "public_price": 2000})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, more, "M1", (TODAY + timedelta(days=500)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=more, qty_delta=5, batch_id=b, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        self.s.add_line(self.cashier, sid, more, units=1, discount_bp=500)    # the cashier's own 5% on a new line
+        d = self.s.get(self.ctx, sid)
+        with self.assertRaises(Forbidden):                                    # now ~13% in all: not what was approved
+            self.s.complete(self.cashier, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+
+    def test_p1_within_the_approval_it_still_completes(self):
+        sid, d = self.draft()
+        approved = dataclasses.replace(self.cashier, approver_id=self.ctx.user_id, approver_discount_bp=1000)
+        d = self.s.set_invoice_discount(approved, sid, bp=800)
+        d = self.s.complete(self.cashier, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        self.assertEqual(d["status"], "completed")
+
+    def test_p2_one_person_one_group_entry_per_line(self):
+        from app.reports import owner
+        sid, d = self.draft()
+        gid = next(l for l in d["lines"] if l["item_id"] == self.cheap)["id"]
+        self.s.update_line(self.ctx, sid, gid, discount_amount=100)
+        d = self.s.set_invoice_discount(self.ctx, sid, amount=200)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        day = TODAY.isoformat()
+        g = next(x for x in owner.discounts_report(self.db, self.ctx, day, day)["by_who"] if x["key"] == self.ctx.user_id)
+        self.assertEqual((g["lines"], g["gross"], g["discount"]), (2, d["subtotal"], 300))
