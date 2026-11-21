@@ -63,11 +63,12 @@ call :log PASS "program and data found"
 echo.
 echo This keeps today's data in a folder named %TRIAL% and starts the program EMPTY.
 echo E-Stock is not touched.
-REM refused once the database has a sale after the E-Stock import (the live data after launch); otherwise the
-REM pharmacy name must be typed, not just YES. Python asks: set /p cannot read Arabic typing (#324 R2)
+REM the pharmacy name must be typed, not just YES (#324 R2); once the database has sales after the E-Stock import
+REM (the live data after launch) Python lists them (dates, totals; also in Notepad) and goes on only on YES
+REM (update 1, owner 21/11). Python asks: set /p cannot read Arabic typing
 set "PHARM_DATA_DIR=%DATA%"
 "%PY%" "%MANAGE%" fresh-start-check
-if errorlevel 1 (set "MSG=refused or the pharmacy name was not typed: nothing was changed" & goto fail)
+if errorlevel 1 (set "MSG=not confirmed (the pharmacy name, or YES for the sales listed): nothing was changed" & goto fail)
 set "PHARM_DATA_DIR="
 call :log PASS "confirmed by the user (pharmacy name typed, no sale after an import)"
 

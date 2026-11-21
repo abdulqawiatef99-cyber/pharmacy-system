@@ -360,10 +360,12 @@ class SafetyEngine:
                 if not l.get(flag):
                     continue
                 pol = policies.get(l["item_id"]) or default_policy   # item policy wins
+                if pol is None and flag == "partial_pack":
+                    # launch day 21/11 (owner): selling one of the item's own sale units (a strip of a box of
+                    # strips, a piece) is a normal sale, not a warning; only a policy that forbids it says so
+                    continue
                 if pol is None:
-                    # selling a strip from a box is routine; splitting a tablet is riskier
-                    sev, req = (("moderate", "acknowledge") if flag == "partial_pack"
-                                else ("high", "override"))
+                    sev, req = "high", "override"                  # splitting a tablet: ask the pharmacist
                     findings.append(Finding("split_unknown", sev,
                                             f"لا توجد سياسة موثقة لـ {label} للصنف {labels[l['item_id']]} — يلزم قرار الصيدلي",
                                             [l["item_id"]], requires=req))

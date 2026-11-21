@@ -130,6 +130,16 @@ def _index(db: Database, org_id: str) -> _OrgIndex:
     return idx
 
 
+def prewarm(db: Database) -> None:
+    """Build every pharmacy's index once, in the background at start (update 1: the first fuzzy search after a
+    start took ~3 s on 30,000 items, on the cashier's keystroke)."""
+    for r in db.all("SELECT id FROM organizations"):
+        try:
+            _index(db, r["id"])
+        except Exception:                       # a warm-up only: the first search builds it anyway
+            pass
+
+
 def invalidate(org_id: str) -> None:
     """The catalog changed: the next question builds the index again (the parsed names are kept, see _index)."""
     with _cache_lock:

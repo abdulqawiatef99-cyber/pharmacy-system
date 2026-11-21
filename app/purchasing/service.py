@@ -131,8 +131,9 @@ class Purchasing:
 
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
-        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual"), "manual",
-                                            None, supplier_id)
+        from ..sales.service import local_today       # update 1 (owner): the supplier invoice date starts as today
+        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual", invoice_date=local_today().isoformat()),
+                                            "manual", None, supplier_id)
 
     def _create_from_extraction(self, ctx: Context, ex: ExtractedInvoice, kind: str,
                                 file_id: str | None, supplier_id: str | None) -> str:
@@ -170,15 +171,22 @@ class Purchasing:
                 if dup:
                     raise Conflict("هذا الملف سُجّل من قبل كفاتورة", code="duplicate_file",
                                    details={"invoice_id": dup["id"]})
+            # the program's own serial (0041, owner: shown next to the supplier's invoice number), per branch
+            self.db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,'purchase',1)"
+                            " ON CONFLICT(org_id, branch_id, kind) DO NOTHING", (ctx.org_id, ctx.branch_id))
+            serial = self.db.one("SELECT next_no FROM branch_counters WHERE org_id=? AND branch_id=? AND kind='purchase'",
+                                 (ctx.org_id, ctx.branch_id))["next_no"]
+            self.db.execute("UPDATE branch_counters SET next_no=next_no+1 WHERE org_id=? AND branch_id=? AND kind='purchase'",
+                            (ctx.org_id, ctx.branch_id))
             self.db.execute(
                 "INSERT INTO purchase_invoices (id, org_id, branch_id, supplier_id, supplier_name_raw,"
                 " invoice_no, invoice_date, source_type, source_file_id, extraction_method,"
                 " extraction_model, declared_total, extra_discount, extra_tax, raw_extraction,"
-                " created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_by, serial_no) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (inv_id, ctx.org_id, ctx.branch_id, supplier_id, ex.supplier_name, ex.invoice_no,
                  ex.invoice_date, kind, file_id, ex.method, ex.model, to_piasters(ex.declared_total),
                  to_piasters(ex.extra_discount) or 0, to_piasters(ex.extra_tax) or 0,
-                 json.dumps(ex.to_json(), ensure_ascii=False), ctx.user_id))
+                 json.dumps(ex.to_json(), ensure_ascii=False), ctx.user_id, serial))
             for n, l in enumerate(ex.lines, start=1):
                 row = {
                     "id": new_id(), "invoice_id": inv_id, "org_id": ctx.org_id, "line_no": n,
@@ -295,8 +303,8 @@ class Purchasing:
     def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
              date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
         ctx.require("purchases.read")
-        q = ("SELECT pi.id, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
-             " pi.declared_total, pi.computed_total, pi.created_at, s.name supplier_name,"
+        q = ("SELECT pi.id, pi.serial_no, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
+             " pi.declared_total, pi.computed_total, pi.created_at, pi.approved_at, s.name supplier_name,"
              " (SELECT count(*) FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id) lines"
              " FROM purchase_invoices pi LEFT JOIN suppliers s ON s.id=pi.supplier_id"
              " WHERE pi.org_id=?")

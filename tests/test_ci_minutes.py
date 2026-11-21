@@ -31,11 +31,11 @@ class TestCiMinutes(unittest.TestCase):
 
     def test_docs_only_changes_skip_the_test_steps_but_keep_the_check(self):
         linux = self.ci[self.ci.index("\n  linux:\n"):self.ci.index("\n  windows:\n")]
-        for step in ("Release channel source", "Install", "Browser for the UI tests", "Tests"):
+        for step in ("Old release source", "Install", "Browser for the UI tests", "Tests"):
             block = linux[linux.index(f"- name: {step}"):]
             self.assertTrue(block.split("\n")[1].strip() == "if: needs.changes.outputs.code == 'true'", step)
         self.assertIn("No data files or secrets", linux)               # the secrets check always runs
-        self.assertNotIn("if:", linux[linux.index("No data files"):linux.index("Release channel source")])
+        self.assertNotIn("if:", linux[linux.index("No data files"):linux.index("Old release source")])
 
     def test_windows_runs_only_where_it_matters(self):
         win = self.ci[self.ci.index("\n  windows:\n"):]
