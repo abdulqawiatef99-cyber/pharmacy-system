@@ -564,6 +564,17 @@ const HELP = {
   notifications: ["الإشعارات: كل ما حدث ويحتاج إلى علمك.", []],
   me: ["المظهر واللغة ورقمي السري: إعدادات خاصة بك وحدك.", []],
   customize: ["تخصيص الواجهة لهذه الصيدلية: الشريط العلوي، وأزرار الصفحة الرئيسية، والاختصارات.", ["التغيير يظهر لكل المستخدمين.", "الأعمدة تُضبط من زر \"⚙ الأعمدة\" فوق الجدول."]],
+  // update 1 (owner 21/11): every screen explains itself; the screens below had no text
+  "purchases/1": ["فاتورة شراء: اختار المورد واكتب رقم فاتورته وتاريخها، ضيف الأصناف، وبعدين اعتمدها.", ["المخزون وحساب المورد بيتغيروا بعد الاعتماد بس.", "المسلسل اللي جنب العنوان رقم الفاتورة في البرنامج، وتاريخ الإدخال بيتسجل لوحده."]],
+  money: ["الخزنة والحسابات: رصيد كل خزنة ومحفظة وحساب بنك، وحركتها.", ["اضغط على الحساب علشان تشوف كشفه.", "التحويل بين الحسابات بيتسجل باسمك."]],
+  "money/1": ["كشف حساب الخزنة أو المحفظة: كل حركة دخلت أو خرجت بوقتها وسببها.", ["اختار الفترة من فوق، وتقدر تطبع أو تطلّع Excel."]],
+  reconcile: ["مطابقة الأرصدة: قارن الرصيد اللي في البرنامج باللي في إيدك فعلًا.", ["أي فرق لازم يتكتب سببه، وبيتسجل باسمك."]],
+  exchange: ["مرتجع واستبدال: هات الفاتورة برقمها أو بالصنف أو بالعميل، وحدد اللي راجع واللي هياخده بداله.", ["البرنامج بيحسب الفرق: يا ترجّع فلوس يا تحصّل.", "F7 من شاشة البيع بيفتح الشاشة دي."]],
+  "opening-fix": ["تصحيح الأرصدة بعد النقل: لو رصيد مورد أو عميل جه من إي ستوك غلط، صححه هنا.", ["لازم تكتب السبب، والتصحيح بيتسجل تسوية افتتاحية باسمك."]],
+  estock: ["تاريخ إي ستوك: الفواتير القديمة اللي اتنقلت من إي ستوك، للاطلاع بس.", ["دوّر برقم الفاتورة أو بالتاريخ."]],
+  "estock-statement": ["كشف حساب قديم من إي ستوك للعميل أو المورد، للاطلاع بس.", []],
+  "estock-item": ["حركة الصنف القديمة في إي ستوك، للاطلاع بس.", []],
+  "stock-check": ["مطابقة المخزون: البرنامج بيقارن أرصدة الأصناف بدفتر الحركات.", ["أي اختلاف بيظهر هنا، ومفيش حاجة بتتصلح لوحدها."]],
 };
 const helpKey = () => { const p = (location.hash || "#/home").slice(2).split(/[/?]/); const k = p[1] && HELP[`${p[0]}/1`] && p[1] !== "new" ? `${p[0]}/1` : p[0]; return HELP[k] ? k : null; };
 function addHelpLine() {
@@ -787,16 +798,21 @@ function tourAuto() {
   else if (pending) tourStart(pending);
 }
 function addTourBtn() {
-  const k = tourScreen();
+  // update 1 (owner 21/11): «اشرح الشاشة دي» on every screen: its guided tour where there is one, else its help
+  const k = tourScreen() || helpKey();
   if (!ME || !k || $("#app [data-tour-replay]")) return;
-  const at = $(TOUR_ANCHOR[k] || "#app h1");
-  if (!at) return;
+  const at = $(TOUR_ANCHOR[k] || "#app h1") || $("#app h2");
   const html = `<button type="button" class="btn small secondary tourbtn noprint" data-tour-replay="${k}">❓ اشرح الشاشة دي</button>`;
-  if (TOUR_ANCHOR[k]) at.insertAdjacentHTML("beforeend", " " + html); else at.insertAdjacentHTML("afterend", html);
+  if (!at) app.insertAdjacentHTML("afterbegin", html);
+  else if (TOUR_ANCHOR[k]) at.insertAdjacentHTML("beforeend", " " + html); else at.insertAdjacentHTML("afterend", html);
   const btn = $("#app [data-tour-replay]");
   // sale screen: the button never keeps the focus, so the next scan (and its Enter) lands in the search box
   btn.addEventListener("mousedown", (e) => { if (k === "pos") e.preventDefault(); });
-  btn.addEventListener("click", (e) => { e.stopPropagation(); tourStart(k); if (k === "pos") $("#posQ")?.focus(); });
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!(TOUR[k] && tourStart(k))) showHelp();
+    if (k === "pos") $("#posQ")?.focus();
+  });
 }
 new MutationObserver(addTourBtn).observe(app, { childList: true });
 // ------------------------------------------------------------------ F36 guided tour — END
