@@ -94,8 +94,8 @@ def report_extras(db: Database, ctx: Context, s: dict) -> dict:
         "SELECT u.full_name name, count(*) n, sum(x.discount_total) total FROM sales x LEFT JOIN users u"
         f" ON u.id=x.created_by WHERE {where} AND x.discount_total>0 GROUP BY x.created_by ORDER BY 3 DESC", args)]
     kept = None
-    a = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND action='cash.float_split' AND entity_id=?"
-               " ORDER BY at DESC LIMIT 1", (ctx.org_id, s["id"]))
+    a = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='cash_shift' AND entity_id=?"
+               " AND action='cash.float_split' ORDER BY at DESC LIMIT 1", (ctx.org_id, s["id"]))
     if a:
         kept = json.loads(a["after_json"] or "{}")
     return {"credit_sales": credit, "discount_by_user": disc, "float_split": kept}
