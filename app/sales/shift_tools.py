@@ -112,6 +112,9 @@ def split_for(counted: dict, target: dict, float_left: int | None = None) -> dic
         sp = split_float(counted, _target_for(counted, float_left, largest_first=order))
         if sp["float_left"] == float_left:
             return sp
+    exact = _exact_notes(counted, float_left)          # greedy missed (100 + 3×20 = 160 with a 50 in between)
+    if exact is not None:
+        return split_float(counted, _target_from_notes(exact))
     total = sum(int(d) * n for d, n in counted.items())
     return {"keep": {}, "move": {}, "float_left": float_left, "to_treasury": total - float_left, "short": 0, "exact": False}
 
@@ -123,6 +126,36 @@ def record_split(db: Database, ctx: Context, shift_id: str, counted: dict | None
     sp = split_for(counted, get_target(db, ctx.org_id), float_left)
     audit.record(db, ctx, "cash.float_split", "cash_shift", shift_id, after={"keep": sp["keep"], "move": sp["move"],
                                                                               "float_left": float_left})
+
+
+def _exact_notes(counted: dict, amount: int) -> dict | None:
+    """Notes from the count that make `amount` exactly (bounded search in 25-piaster steps), largest notes first;
+    None when no combination makes it (Codex P2 on #404)."""
+    if amount % 25 or amount < 0:
+        return None
+    goal = amount // 25
+    best: dict[int, dict] = {0: {}}                 # reachable sum -> notes used
+    for d in sorted(DENOMINATIONS, reverse=True):
+        n, step = int(counted.get(str(d), 0) or 0), d // 25
+        if not n:
+            continue
+        for reach, used in list(best.items()):
+            for k in range(1, n + 1):
+                t = reach + k * step
+                if t > goal:
+                    break
+                if t not in best:
+                    best[t] = {**used, str(d): k}
+        if goal in best:
+            return best[goal]
+    return best.get(goal)
+
+
+def _target_from_notes(notes: dict) -> dict:
+    t = {k: 0 for k in KEYS}
+    for d, n in notes.items():
+        t["coins" if int(d) in COINS else d] += int(d) * n
+    return t
 
 
 def _target_for(counted: dict, amount: int, *, largest_first: bool = True) -> dict:
@@ -137,6 +170,7 @@ def _target_for(counted: dict, amount: int, *, largest_first: bool = True) -> di
 
 
 # ------------------------------------------------------------------------------ difference hunt (U2-29)
+EDIT_ACTIONS = ("sale.details", "sale.invoice_discount", "sale.contract_repriced", "sale.transfer_review")
 def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
     """Where a drawer difference usually comes from, listed for the owner: cash sales in piaster fractions no
     coin can pay, sales paid without cash that opened the drawer, sales whose payments do not add up to the
@@ -168,8 +202,9 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
         " WHERE +x.org_id=? AND x.shift_id=?", (ctx.org_id, shift_id))]
     opened = {a["sale_id"] for a in audits if a["action"] == "cash.drawer_auto"
               and json.loads(a["after_json"] or "{}").get("outcome") == "sent"}
+    # only actions that change the invoice (a reprint writes an audit row too, Codex P2 on #404)
     edited = sorted({a["sale_id"] for a in audits if a["completed_at"] and a["at"] > a["completed_at"]
-                     and a["action"] not in ("sale.complete", "cash.drawer_auto", "sale.return", "sale.void")})
+                     and a["action"] in EDIT_ACTIONS})
     edits = [x for x in sales if x["id"] in edited]
     noncash_open = [x for x in sales if x["id"] in opened and x["paid_cash"] == 0]
     manual = [dict(r) for r in db.all(

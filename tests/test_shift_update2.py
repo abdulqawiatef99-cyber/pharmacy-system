@@ -40,10 +40,14 @@ class TestFloatTarget(SalesCase):
         self.assertEqual(st.get_target(self.db, self.ctx.org_id)["10000"], 20000)
         self.assertEqual(st.get_target(self.db, self.ctx.org_id)["5000"], 0)
 
-    def test_float_no_notes_can_make_is_shown_as_amount_only(self):
+    def test_float_found_when_greedy_misses_and_amount_only_when_impossible(self):
+        sp = st.split_for({"10000": 1, "5000": 1, "2000": 3}, st.get_target(self.db, self.ctx.org_id), 16000)
+        self.assertEqual((sp["keep"], sp["float_left"]), ({"10000": 1, "2000": 3}, 16000))       # Codex P2 on #404
+        sp = st.split_for({"10000": 1, "5000": 1}, st.get_target(self.db, self.ctx.org_id), 12000)
+        self.assertFalse(sp["exact"])
         cd = CashDrawer(self.db)
         r = cd.close(self.ctx, denominations={"10000": 1, "5000": 1, "2000": 3}, note="عدّ تجربة", float_left=16000)
-        self.assertEqual(r["float_split"]["keep"], {})
+        self.assertEqual(r["float_split"]["keep"], {"10000": 1, "2000": 3})
 
     def test_close_records_the_notes_kept(self):
         cd = CashDrawer(self.db)
@@ -79,9 +83,10 @@ class TestReportAndHunt(SalesCase):
             audit.record(self.db, self.ctx, "cash.drawer_open", "cash_shift", shift, after={"reason": "فكة"})
             sale = self.db.one("SELECT id, completed_at FROM sales WHERE shift_id=?", (shift,))
             # a pulse that failed never opened the drawer; an edit after payment is listed
-            self.db.execute("INSERT INTO audit_log (id, org_id, user_id, action, entity_type, entity_id, after_json, at)"
-                            " VALUES ('a1', ?, ?, 'sale.details', 'sale', ?, '{}', '9999-01-01T00:00:00Z')",
-                            (self.ctx.org_id, self.ctx.user_id, sale["id"]))
+            for aid, action in (("a1", "sale.details"), ("a2", "print.receipt")):     # a reprint is no edit
+                self.db.execute("INSERT INTO audit_log (id, org_id, user_id, action, entity_type, entity_id, after_json, at)"
+                                " VALUES (?, ?, ?, ?, 'sale', ?, '{}', '9999-01-01T00:00:00Z')",
+                                (aid, self.ctx.org_id, self.ctx.user_id, action, sale["id"]))
         h = st.difference_hunt(self.db, self.ctx, shift)
         self.assertEqual(len(h["mismatch"]), 1)               # 1 piaster on the invoice never reached the drawer
         self.assertEqual(len(h["edited_after_payment"]), 1)
