@@ -2516,6 +2516,39 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def cash_float_target(req):
+        from ..sales import shift_tools
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            return J(shift_tools.save_target(db, ctx, (await body(req)).get("target")))
+        ctx.require("cash.close")
+        return J(shift_tools.get_target(db, ctx.org_id))
+
+    @handler
+    async def cash_float_preview(req):
+        """Which notes stay in the drawer and which go to the treasury, for the count on the close screen."""
+        from ..sales import shift_tools
+        from ..sales.cash import count_total
+        ctx = ctx_of(req)
+        ctx.require("cash.close")
+        b = await body(req)
+        total, clean = count_total(b.get("denominations") or {})
+        fl = b.get("float_left")
+        if fl is not None:              # the closer typed his own float: show the notes for that amount (Codex P2)
+            try:
+                fl = whole_number(fl)
+            except (TypeError, ValueError):
+                raise ValidationFailed("الفكة غير صحيحة")
+            if not 0 <= fl <= total:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
+
+    @handler
+    async def cash_hunt(req):
+        from ..sales import shift_tools
+        return J(await off_loop(shift_tools.difference_hunt, db, ctx_of(req), req.path_params["id"]))
+
+    @handler
     async def shift_report_page(req):
         """Closing report sized for the 80mm receipt printer (browser print)."""
         from ..sales.cash import DENOMINATIONS
@@ -2544,13 +2577,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         drawer = "".join(f"<tr><td><small>{t(d['at'])} {e(d.get('by') or '')} — {e(d.get('reason') or '')}"
                          f"{(' : ' + e(d['note'])) if d.get('note') else ''}{' (فشل)' if d.get('outcome') == 'failed' else ''}</small></td><td></td></tr>"
                          for d in r["drawer_manual"])
-        drawer = (f"<hr><table><tr><td>أوامر فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
-                  f"<tr><td>أوامر فتح الدرج يدويًا</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
+        drawer = (f"<hr><table><tr><td>فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
+                  f"<tr><td>فتح الدرج من غير بيع</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
+        # U2-28: duration, credit sales by customer, discounts by seller, notes kept / moved, signatures
+        dur = ""
+        if r.get("closed_at"):
+            mins = int((accounts.parse_iso(r["closed_at"]) - accounts.parse_iso(r["opened_at"])).total_seconds() // 60)
+            dur = f"<br>مدة الشيفت: {mins // 60} ساعة و{mins % 60} دقيقة"
+        credit_rows = "".join(f"<tr><td>آجل فاتورة {c['sale_no']} — {e(c['customer'] or 'بدون اسم')}</td><td>{m(c['on_credit'])}</td></tr>"
+                              for c in r.get("credit_sales") or [])
+        disc_rows = "".join(f"<tr><td>خصم {e(d['name'] or '')} ({d['n']} فاتورة)</td><td>{m(d['total'])}</td></tr>"
+                            for d in r.get("discount_by_user") or [])
+        sp = r.get("float_split") or {}
+        keep_rows = "".join(f"<tr><td>{int(d) / 100:g} × {n}</td><td>{m(int(d) * n)}</td></tr>"
+                            for d, n in sorted((sp.get("keep") or {}).items(), key=lambda kv: -int(kv[0])))
+        fl = r.get("float_left")
+        kept = ""
+        if r["status"] == "closed" and fl is not None:
+            kept = (f"<hr><table><tr class='t'><td>الفكة اللي فضلت في الدرج</td><td>{m(fl)}</td></tr>{keep_rows}"
+                    f"<tr class='t'><td>اتحوّل للخزنة</td><td>{m((r['counted_cash'] or 0) - fl)}</td></tr></table>")
+        hint = ""
+        if r["status"] == "closed" and diff:
+            hint = "<p><small>دوّر على سبب الفرق من شاشة الشيفت ← «دوّر على الفرق» (قروش الفواتير، فتح الدرج، المرتجعات).</small></p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
 <div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
-إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
+إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')}){dur}</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
@@ -2561,10 +2614,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<hr><table>{den_rows}</table>" if den_rows else ""}
 <table><tr class="t"><td>المعدود</td><td>{m(r['counted_cash'])}</td></tr>{res}</table>
 {f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
-{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr></table>" if r['credit_total'] else ""}
+{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr>{credit_rows}</table>" if r['credit_total'] else ""}
+{f"<hr><table>{disc_rows}</table>" if disc_rows else ""}
+{kept}{hint}
 {f"<p>ملاحظة: {e(r['close_note'])}</p>" if r.get('close_note') else ""}
 {drawer}
-<p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
+<p class="f">توقيع الكاشير: ..................</p><p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
@@ -3066,6 +3121,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/hunt", cash_hunt),
+        Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
+        Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
         Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
         Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
         Route("/api/money/accounts/{id}/statement", money_statement_view),

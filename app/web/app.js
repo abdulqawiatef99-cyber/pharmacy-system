@@ -4055,22 +4055,40 @@ async function dayHealth(el) {
   el.innerHTML = `<div class="row between"><h2>صحة اليوم والجهاز</h2><span class="badge ${bad ? "b-warn" : "b-ok"}">${bad ? `⚠ ${bad} محتاجين نظرة` : "✓ كله تمام"}</span></div>
     <table><tbody>${rows(r.day)}</tbody></table><h3 class="mt">الجهاز</h3><table><tbody>${rows(r.pc)}</tbody></table>`;
 }
-async function viewShift() {
+// U2-29: where a drawer difference usually comes from (the shift history, open or not)
+function wireHunt() {
+  $("#shHist")?.addEventListener("click", async (e) => {
+    const b = e.target.closest(".shHunt"); if (!b) return;
+    try {
+      const h = await api(`/api/cash/shifts/${b.dataset.id}/hunt`), row = (x) => `<li>فاتورة ${x.sale_no}: الإجمالي ${money(x.total)}، نقدي ${money(x.paid_cash)}</li>`;
+      $("#shHuntOut").innerHTML = `<section class="panel"><h3>دوّر على الفرق (${money(h.difference || 0)} ج)</h3><ul>${h.hints.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        ${h.fractions.length ? `<h4>فواتير فيها قروش (${money(h.fractions_piasters)} ج قروش)</h4><ul>${h.fractions.slice(0, 50).map(row).join("")}</ul>` : ""}
+        ${h.noncash_drawer_open.length ? `<h4>دفع غير نقدي والدرج اتفتح</h4><ul>${h.noncash_drawer_open.map(row).join("")}</ul>` : ""}
+        ${h.mismatch.length ? `<h4>النقدي مش زي اللي دخل الدرج</h4><ul>${h.mismatch.map(row).join("")}</ul>` : ""}
+        ${h.edited_after_payment.length ? `<h4>اتعدلت بعد الدفع</h4><ul>${h.edited_after_payment.map(row).join("")}</ul>` : ""}
+        ${h.manual_openings.length ? `<h4>فتح الدرج من غير بيع</h4><ul>${h.manual_openings.map((m) => `<li>${esc(stamp(m.at))} ${esc(m.by_name || "")} — ${esc(m.reason || "")}</li>`).join("")}</ul>` : ""}
+        ${h.movements.length ? `<h4>مرتجعات وإلغاء وصرف وإيداع</h4><ul>${h.movements.map((m) => `<li>${esc(stamp(m.created_at))} ${esc(m.by_name || "")}: ${money(m.amount)} ${esc(m.note || "")}</li>`).join("")}</ul>` : ""}</section>`;
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+async function viewShift(opts = {}) {
   let sh = null;
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
   const seeAll = ME.permissions.includes("cash.see_expected"), keeps = ME.permissions.includes("cash.manage");
   const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
-  const accs = await moneyAccounts(true), lastFloat = (accs.find((a) => a.id === "drawer") || {}).balance;
+  const accs = await moneyAccounts(true), lastFloat = opts.float ?? (accs.find((a) => a.id === "drawer") || {}).balance;
   const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
-      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>` : ""}</td></tr>`).join("")}</tbody></table></section>` : "";
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
   if (!sh) {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
+    wireHunt();
     $("#shOpen").addEventListener("submit", async (e) => {
       e.preventDefault();
       try { await api("/api/cash/open", { method: "POST", body: { opening_cash: toPiasters(e.target.v.value) || 0 } }); toast("✓ تم فتح الشيفت"); viewShift(); }
@@ -4100,14 +4118,57 @@ async function viewShift() {
       <label class="chk"><input type="checkbox" name="ho" ${keeps ? "" : "checked"}> ${keeps ? "هسلّم الفلوس لحد تاني (هيكتب الرقم السري بتاعه)" : "سلّم النقدية لمدير أو للمالك (هيكتب الرقم السري بتاعه)"}</label>
       <div class="row" id="shMove" ${keeps ? "" : ""}><label class="f">الفكة اللي هتفضل في الدرج للشيفت الجاي (ج) <input name="fl" type="number" step="0.25" min="0" value="${money(sh.opening_cash)}"></label>
       ${accs.length ? `<label class="f">الباقي يتحول إلى <select name="to">${srcOptions(accs, "treasury", { drawer: false, outside: false })}</select></label>` : ""}</div>
-      <p class="muted small">${keeps ? "لو مش هتسلّم لحد، الفلوس بتتحول باسمك." : "لو محدش استلم، الفلوس كلها بتفضل في الدرج للشيفت الجاي."}</p></fieldset>
+      <p class="muted small">${keeps ? "لو مش هتسلّم لحد، الفلوس بتتحول باسمك." : "لو محدش استلم، الفلوس كلها بتفضل في الدرج للشيفت الجاي."}</p>
+      <div id="shSplit" class="muted small"></div></fieldset>
     <button class="btn big">إغلاق الشيفت وطباعة التقرير</button></form>` : ""}
+  ${keeps ? `<details class="panel" id="shTarget"><summary><b>الفكة اللي تفضل في الدرج (لكل فئة)</b></summary>
+    <p class="muted">عند التقفيل البرنامج بيقولك تسيب إيه من كل فئة وتحوّل الباقي للخزنة.</p>
+    <form class="row" id="shTargetF">${[["10000", "فئة 100"], ["5000", "فئة 50"], ["2000", "فئة 20"], ["1000", "فئة 10"], ["500", "فئة 5"], ["coins", "عملات (جنيه وأقل)"]]
+      .map(([k, t]) => `<label class="f">${t} (ج) <input type="number" min="0" step="0.25" data-t="${k}" class="narrow"></label>`).join("")}
+      <span id="shTargetSum" class="muted"></span><button class="btn secondary">احفظ</button></form></details>` : ""}
   ${hist}`;
   const recalc = () => {
     let t = 0;
     document.querySelectorAll("[data-d]").forEach((inp) => { const v = (+inp.value || 0) * +inp.dataset.d; t += v; $(`#dt${inp.dataset.d}`).textContent = money(v); });
     $("#dTotal").textContent = money(t);
+    splitSoon();
   };
+  // U2-30: which notes stay for the next shift and which go to the treasury, by the owner's target
+  let splitT = null;
+  const splitSoon = () => { clearTimeout(splitT); splitT = setTimeout(showSplit, 250); };
+  async function showSplit() {
+    const out = $("#shSplit"); if (!out) return;
+    const den = {};
+    document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
+    if (!Object.keys(den).length) { out.innerHTML = ""; return; }
+    const fc = $("#shClose");
+    if (!keeps && fc?.ho && !fc.ho.checked) {       // nobody receives it: the close keeps everything in the drawer
+      out.innerHTML = "<b>كل الفلوس هتفضل في الدرج للشيفت الجاي</b> (محدش استلم)"; return;
+    }
+    try {
+      const f0 = $("#shClose"), own = f0?.fl?.dataset.touched ? toPiasters(f0.fl.value) : null;
+      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, ...(own != null ? { float_left: own } : {}) } });
+      const lbl = (d) => `${+d / 100 >= 1 ? +d / 100 : `${+d} قرش`}`;
+      const list = (o) => Object.entries(o).sort((a, b) => b[0] - a[0]).map(([d, n]) => `${lbl(d)} × ${n}`).join("، ") || "—";
+      out.innerHTML = sp.exact === false ? `<b>سيب في الدرج:</b> ${money(sp.float_left)} ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك<br><b>حوّل للخزنة:</b> ${money(sp.to_treasury)} ج`
+        : `<b>سيب في الدرج:</b> ${list(sp.keep)} = ${money(sp.float_left)} ج<br><b>حوّل للخزنة:</b> ${list(sp.move)} = ${money(sp.to_treasury)} ج${sp.short ? `<br>⚠ الفكة ناقصة ${money(sp.short)} ج عن المطلوب` : ""}`;
+      const f = $("#shClose"); if (f && f.fl && !f.fl.dataset.touched) f.fl.value = money(sp.float_left);
+    } catch { out.innerHTML = ""; }
+  }
+  $("#shClose")?.fl?.addEventListener("input", (e) => { e.target.dataset.touched = "1"; splitSoon(); });
+  $("#shClose")?.ho?.addEventListener("change", splitSoon);
+  if ($("#shTargetF")) {
+    const tf = $("#shTargetF"), sum = () => { let t = 0; tf.querySelectorAll("[data-t]").forEach((i) => { t += toPiasters(i.value) || 0; }); $("#shTargetSum").textContent = `الإجمالي ${money(t)} ج`; };
+    api("/api/cash/float-target").then((t) => { tf.querySelectorAll("[data-t]").forEach((i) => { i.value = money(t[i.dataset.t] || 0); }); sum(); }).catch(() => {});
+    tf.addEventListener("input", sum);
+    tf.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const target = {}; tf.querySelectorAll("[data-t]").forEach((i) => { target[i.dataset.t] = toPiasters(i.value) || 0; });
+      try { await api("/api/cash/float-target", { method: "POST", body: { target } }); toast("✓ اتحفظت"); splitSoon(); }
+      catch (err) { toast(err.message, true); }
+    });
+  }
+  wireHunt();
   document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
   wireHist();
   if ($("#shHealth")) dayHealth($("#shHealth")).catch(() => { $("#shHealth").remove(); });
@@ -4134,7 +4195,9 @@ async function viewShift() {
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
         <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div>
           ${moved != null ? `<div>اتحوّل من الدرج<b>${money(moved)}</b></div><div>الفكة للشيفت الجاي<b>${money(r.float_left)}</b></div>` : ""}</div>
-        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><a class="btn secondary" href="#/shift">افتح شيفت جديدًا</a></div></section>`;
+        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><button type="button" class="btn secondary" id="shNew">افتح شيفت جديدًا</button></div></section>`;
+      // U2-26: the link pointed at this same screen and did nothing; open the new-shift form with the kept float
+      $("#shNew").addEventListener("click", () => viewShift({ float: r.float_left ?? undefined }));
       printInFrame(`/shift-report/${r.id}`);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
