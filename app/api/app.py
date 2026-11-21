@@ -1582,8 +1582,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 f"SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? AND branch_id=?"
                 f" AND item_id IN ({','.join('?' * len(ids))}) GROUP BY item_id",
                 (ctx.org_id, ctx.branch_id, *ids))}
+            from ..sales.service import local_today as _today_local
+            # U2-35: the nearest expiry still to come of what is on the shelf
+            soon = {r["item_id"]: r["e"] for r in db.all(
+                f"SELECT sb.item_id, min(b.expiry_date) e FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date>=?"
+                f" AND sb.item_id IN ({','.join('?' * len(ids))}) GROUP BY sb.item_id",
+                (ctx.org_id, ctx.branch_id, _today_local().isoformat(), *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+                r["nearest_expiry"] = soon.get(r["id"])
         hidden_no_stock = 0
         if stock_first and rows and "stock_qty" in rows[0]:
             has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
