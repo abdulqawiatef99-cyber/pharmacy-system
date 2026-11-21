@@ -127,9 +127,20 @@ class J(JSONResponse):
         return json.dumps(content, ensure_ascii=False, default=_json_default).encode("utf-8")
 
 
+SLOW_MS = 800                      # U2-10: a request slower than this is written to the server log
+SLOW_LOG: deque = deque(maxlen=200)   # and kept here (newest last) for the «البرنامج» screen
+_slow_logger = logging.getLogger("pharmacy.slow")
+
+
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
+        t0 = time.monotonic()
         resp = await call_next(request)
+        ms = int((time.monotonic() - t0) * 1000)
+        if ms > SLOW_MS:                 # the path only, never the query (a customer search carries a phone, #140)
+            SLOW_LOG.append({"at": time.time(), "method": request.method, "path": request.url.path, "ms": ms,
+                             "status": resp.status_code})
+            _slow_logger.warning("slow request %s %s %d ms", request.method, request.url.path, ms)
         printable = request.url.path.startswith(PRINT_PAGES)
         resp.headers.setdefault("Content-Security-Policy", CSP_PRINT if printable else CSP)
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -2483,6 +2494,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def slow_requests(req):
+        ctx_of(req).require("settings.manage")
+        return J({"threshold_ms": SLOW_MS, "requests": list(SLOW_LOG)[::-1]})
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
@@ -3034,6 +3050,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/movements", cash_move, methods=["POST"]),
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
+        Route("/api/system/slow-requests", slow_requests),
         Route("/api/cash/shifts/{id}", cash_report),
         Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
         Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
