@@ -557,7 +557,7 @@ const HELP = {
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
-  procurement: ["الطلبية: الكمية المقترحة لكل صنف مع سببها.", ["لا يطلب البرنامج شيئًا من تلقاء نفسه."]],
+  procurement: ["الطلبية: الأصناف اللي محتاجة تتطلب مرتبة بالأهم، مع آخر شراء وأفضل خصم.", ["دوس على عنوان أي عمود عشان ترتب بيه، ومرة تانية بالعكس.", "الأزرار اللي فوق بتفلتر: رصيدها صفر، هتخلص خلال أسبوع، الأكثر مبيعًا، قريبة الصلاحية، مطلوبة من عملاء.", "«ضيف للطلبية» بتحط الصنف عند المورد صاحب أعلى خصم حقيقي، والبونص محسوب.", "لا يطلب البرنامج شيئًا من تلقاء نفسه."]],
   deadstock: ["الرواكد: من تقارير البرنامج القديم.", []],
   system: ["البرنامج: التحديث، والنسخ الاحتياطي، وشكل الإيصال، وأجهزة البطاقات.", []],
   users: ["المستخدمون: الأدوار والصلاحيات وحدود الخصم.", []],
@@ -3126,25 +3126,50 @@ async function viewDeadstock() {
 }
 
 // ------------------------------------------------------------------ procurement
-const CONF_AR = { high: ["عالية", "b-ok"], medium: ["متوسطة", "b-warn"], low: ["منخفضة", "b-err"] };
+const MOVE_AR = { fast: ["سريع", "b-ok"], medium: ["متوسط", "b-warn"], slow: ["بطيء", "b-err"], dead: ["راكد", "b-err"] };
+const FLAG_AR = { expensive: "غالي: راجعه", fridge: "ثلاجة", below_official: "خصم أقل من الأساسي" };
+const PR_CHIPS = [["zero", "رصيدها صفر"], ["week", "هتخلص خلال أسبوع"], ["top", "الأكثر مبيعًا"],
+  ["expiry", "قريبة الصلاحية"], ["asked", "مطلوبة من عملاء"]];
+const prChip = {
+  zero: (r) => r.on_hand <= 0, week: (r) => r.on_hand <= 0 || (r.days_left !== null && r.days_left <= 7),
+  top: (r) => r.top_rank !== null, expiry: (r) => !!r.near_expiry, asked: (r) => r.asked,
+};
+const prPct = (bp) => (bp === null || bp === undefined ? "—" : `${(bp / 100).toFixed(2)}%`);
+const prSup = (r) => (r.best || r.last || {});
+const PR_ORDER = {                         // the order being built, kept on this PC until it is exported or cleared
+  get() { try { return JSON.parse(localStorage.getItem("smartOrder") || "{}") || {}; } catch { return {}; } },
+  set(v) { try { localStorage.setItem("smartOrder", JSON.stringify(v)); } catch { /* private window: list lives on screen only */ } },
+};
 
 async function viewProcurement() {
   app.innerHTML = `
   <section class="panel">
     <h1>اقتراح الطلبية</h1>
-    <p class="muted">الحساب: متوسط الاستهلاك × (أيام التوريد + أيام التغطية + أيام الأمان) − الرصيد − ما هو في الطريق. كل سطر مكتوب معه سببه. ولا يطلب البرنامج أي شيء من تلقاء نفسه.</p>
+    <p class="muted">الافتراضي: الأصناف السريعة والمتوسطة اللي هتخلص، والأصناف اللي طلبها عميل ورصيدها صفر. البطيء والراكد مخفيين إلا لو حد طلبهم. ولا يطلب البرنامج أي شيء من تلقاء نفسه.</p>
     <form id="prForm" class="row">
       <label class="f">تغطية (يوم) <input name="cover_days" type="number" value="30" min="1"></label>
       <label class="f">مدة التوريد (يوم) <input name="lead_days" type="number" value="2" min="0"></label>
       <label class="f">أمان (يوم) <input name="safety_days" type="number" value="5" min="0"></label>
       <label class="f">فترة الاستهلاك (يوم) <input name="window_days" type="number" value="90" min="7"></label>
+      <label class="f">الصنف الغالي من (ج) <input name="expensive_from" type="number" value="300" min="0" step="0.01"></label>
+      <label class="f"><input type="checkbox" name="all" id="prAll"> اعرض المخفي (بطيء وراكد)</label>
       <button class="btn" type="submit">احسب</button>
-      <a class="btn secondary" id="prXlsx" href="#">تحميل Excel للطلبية</a>
     </form>
+    <div class="row" id="prChips">${PR_CHIPS.map(([k, t]) => `<button type="button" class="chip tgl" data-chip="${k}">${t}</button>`).join("")}
+      <label class="f">المورد <select id="prSupSel"><option value="">كل الموردين</option></select></label></div>
+    <p class="muted" id="prCounts"></p>
   </section>
   <section class="panel"><div class="tablewrap"><table>
-    <thead><tr><th>الصنف</th><th>الرصيد</th><th>استهلاك/يوم</th><th>يكفي (يوم)</th><th>المقترح (علبة)</th><th>الثقة</th><th>الأسباب</th></tr></thead>
-    <tbody id="prBody"><tr><td colspan="7" class="muted">جارٍ الحساب…</td></tr></tbody></table></div></section>
+    <thead><tr><th data-sort="label">الصنف</th><th data-sort="movement">الحركة</th><th data-sort="on_hand">الرصيد</th>
+      <th data-sort="days_left">يكفي (يوم)</th><th data-sort="events">مرات البيع</th><th data-sort="suggested_packs">المقترح (علبة)</th>
+      <th data-sort="last">آخر شراء</th><th data-sort="best">أفضل خصم</th><th>تنبيه</th><th></th></tr></thead>
+    <tbody id="prBody"><tr><td colspan="10" class="muted">جارٍ الحساب…</td></tr></tbody></table></div>
+    <div class="row"><button class="btn secondary" type="button" id="prAddAll">ضيف كل الظاهر للطلبية</button></div></section>
+  <section class="panel"><h2>الطلبية مقسمة على الموردين</h2>
+    <p class="muted">كل صنف عند المورد صاحب أعلى خصم حقيقي (البونص محسوب) من آخر شراء عند كل مورد في آخر سنة.</p>
+    <div id="prOrder" class="muted">لسه مفيش أصناف في الطلبية.</div>
+    <div class="row"><button class="btn" type="button" id="prOrderXlsx">تحميل Excel لكل مورد</button>
+      <button class="btn secondary" type="button" id="prOrderClear">امسح الطلبية</button></div></section>
   <section class="panel"><h2>صحة المخزون</h2><div id="prHealth" class="muted">…</div></section>
   <section class="panel"><h2>رفع مبيعات شهر من البرنامج القديم</h2>
     <p class="muted">المطابقة بالكود أو الباركود فقط. الأصناف غير المتطابقة تظهر في تقرير ولا تُخمَّن.</p>
@@ -3155,16 +3180,110 @@ async function viewProcurement() {
       <label class="f">الملف <input type="file" name="file" required accept=".xlsx,.csv"></label>
       <button class="btn secondary" type="submit">تجربة بدون حفظ</button>
     </form><div id="consRes"></div></section>`;
-  const params = () => new URLSearchParams(new FormData($("#prForm"))).toString();
-  const load = async () => {
-    $("#prXlsx").href = `/api/procurement/suggestions.xlsx?${params()}`;
-    const rows = await api(`/api/procurement/suggestions?${params()}`);
-    $("#prBody").innerHTML = rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${r.on_hand}</td><td>${r.daily_usage}</td>
-      <td>${r.days_of_cover ?? "—"}</td><td><b>${r.suggested_packs}</b></td>
-      <td><span class="badge ${CONF_AR[r.confidence][1]}">${CONF_AR[r.confidence][0]}</span></td>
-      <td class="muted">${r.reasons.map(esc).join("<br>")}</td></tr>`).join("")
-      || `<tr><td colspan="7" class="muted">لا توجد أصناف تحتاج إلى طلب (أو لا توجد بيانات استهلاك بعد — ارفع مبيعات شهر من الأسفل)</td></tr>`;
+  const st = { rows: [], chips: new Set(), sup: "", sort: null, dir: 1, sups: {}, qty: {} };
+  const params = () => {
+    const fd = new FormData($("#prForm")); fd.delete("all");
+    if ($("#prAll").checked) fd.set("scope", "all");
+    return new URLSearchParams(fd).toString();
   };
+  const key = (r, k) => (k === "last" ? (r.last ? r.last.date || "" : "") : k === "best" ? (r.best ? r.best.discount_bp : -1)
+    : k === "movement" ? ["fast", "medium", "slow", "dead"].indexOf(r.movement) : k === "days_left" ? (r.days_left ?? 1e9) : r[k]);
+  const visible = () => {
+    let v = st.rows.filter((r) => [...st.chips].every((c) => prChip[c](r)) && (!st.sup || prSup(r).supplier_id === st.sup));
+    if (st.sort) {
+      v = v.slice().sort((a, b) => { const x = key(a, st.sort), y = key(b, st.sort);
+        return (typeof x === "string" ? x.localeCompare(y, "ar") : x - y) * st.dir; });
+    }
+    return v;
+  };
+  const buyCell = (x) => (x ? `${esc(x.supplier || "—")}<br><span class="muted">${prPct(x.discount_bp)}${x.bonus ? ` (${x.qty}+${x.bonus})` : ""} · ${esc(x.date || "")}</span>` : "—");
+  const draw = () => {
+    const v = visible(), order = PR_ORDER.get();
+    $("#prBody").innerHTML = v.map((r) => `<tr class="${r.shown ? "" : "muted"}"><td>${esc(r.label)}${r.asked ? ` <span class="badge b-warn">مطلوب</span>` : ""}
+      <div class="muted">${r.reasons.map(esc).join("<br>")}</div></td>
+      <td><span class="badge ${MOVE_AR[r.movement][1]}">${MOVE_AR[r.movement][0]}</span></td>
+      <td>${r.on_hand}${r.near_expiry ? `<div class="muted">أقرب صلاحية ${esc(r.near_expiry)}</div>` : ""}</td>
+      <td>${r.days_left ?? "—"}</td><td>${r.events}</td>
+      <td><input type="number" min="1" step="1" class="prQty" data-id="${esc(r.item_id)}" value="${order[r.item_id] ? order[r.item_id].packs : (st.qty[r.item_id] ?? r.suggested_packs)}" style="width:5em;min-width:0"></td>
+      <td>${buyCell(r.last)}</td><td>${buyCell(r.best)}</td>
+      <td>${r.flags.map((f) => `<span class="badge b-warn">${FLAG_AR[f]}</span>`).join(" ")}</td>
+      <td><button type="button" class="btn small ${order[r.item_id] ? "secondary" : ""} prAdd" data-id="${esc(r.item_id)}">${order[r.item_id] ? "في الطلبية ✓" : "ضيف للطلبية"}</button></td></tr>`).join("")
+      || `<tr><td colspan="10" class="muted">مفيش أصناف بالاختيار ده (أو مفيش بيانات بيع لسه — ارفع مبيعات شهر من تحت)</td></tr>`;
+    document.querySelectorAll("#prChips [data-chip]").forEach((b) => b.classList.toggle("on", st.chips.has(b.dataset.chip)));
+    document.querySelectorAll("th[data-sort]").forEach((th) => { th.dataset.dir = th.dataset.sort === st.sort ? (st.dir > 0 ? "▲" : "▼") : ""; });
+    drawOrder();
+  };
+  const groups = () => {
+    const g = {};
+    Object.entries(PR_ORDER.get()).forEach(([id, ln]) => { (g[ln.supplier_id || ""] = g[ln.supplier_id || ""] || []).push({ item_id: id, ...ln }); });
+    return g;
+  };
+  const drawOrder = () => {
+    const g = groups(), ks = Object.keys(g);
+    $("#prOrder").className = ks.length ? "" : "muted";
+    $("#prOrder").innerHTML = ks.length ? ks.map((sid) => `<h3>${esc(sid ? (st.sups[sid] || g[sid][0].supplier || "مورد") : "بدون مورد سابق")} — ${g[sid].length} صنف</h3>
+      <ul>${g[sid].map((l) => `<li>${esc(l.label)} × <b>${l.packs}</b> علبة ${l.discount_bp !== null && l.discount_bp !== undefined ? `<span class="muted">(${prPct(l.discount_bp)})</span>` : ""}
+        <button type="button" class="chip tgl prDel" data-id="${esc(l.item_id)}">شيل</button></li>`).join("")}</ul>`).join("")
+      : "لسه مفيش أصناف في الطلبية.";
+  };
+  const add = (r, quiet) => {
+    const o = PR_ORDER.get(), inp = $(`.prQty[data-id="${CSS.escape(r.item_id)}"]`);
+    const packs = parseInt(inp ? inp.value : r.suggested_packs, 10);
+    if (!(packs >= 1)) { if (!quiet) toast("اكتب الكمية (علبة واحدة على الأقل)", true); return; }
+    const s = prSup(r);
+    o[r.item_id] = { label: r.label, packs, supplier_id: s.supplier_id || null, supplier: s.supplier || null, discount_bp: s.discount_bp ?? null };
+    PR_ORDER.set(o);
+  };
+  const load = async () => {
+    const out = await api(`/api/procurement/smart?${params()}`);
+    st.rows = out.rows;
+    st.sups = Object.fromEntries(out.suppliers.map((s) => [s.id, s.name]));
+    $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
+    $("#prSupSel").value = st.sup && st.sups[st.sup] ? st.sup : "";
+    const c = out.counts;
+    $("#prCounts").textContent = `سريع ${c.fast} · متوسط ${c.medium} · بطيء ${c.slow} · راكد ${c.dead} · مخفي من العرض الأساسي ${c.hidden}`;
+    draw();
+  };
+  $("#prChips").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-chip]"); if (!b) return;
+    st.chips.has(b.dataset.chip) ? st.chips.delete(b.dataset.chip) : st.chips.add(b.dataset.chip); draw();
+  });
+  $("#prSupSel").addEventListener("change", (e) => { st.sup = e.target.value; draw(); });
+  document.querySelectorAll("th[data-sort]").forEach((th) => { th.style.cursor = "pointer"; th.addEventListener("click", () => {
+    if (st.sort === th.dataset.sort) st.dir = -st.dir; else { st.sort = th.dataset.sort; st.dir = 1; } draw(); }); });
+  $("#prBody").addEventListener("click", (e) => {
+    const b = e.target.closest(".prAdd"); if (!b) return;
+    const r = st.rows.find((x) => x.item_id === b.dataset.id); if (!r) return;
+    const o = PR_ORDER.get();
+    if (o[r.item_id]) { delete o[r.item_id]; PR_ORDER.set(o); } else add(r);
+    draw();
+  });
+  $("#prBody").addEventListener("change", (e) => {
+    const i = e.target.closest(".prQty"); if (!i) return;
+    const o = PR_ORDER.get(), n = parseInt(i.value, 10);
+    st.qty[i.dataset.id] = i.value;
+    if (o[i.dataset.id] && n >= 1) { o[i.dataset.id].packs = n; PR_ORDER.set(o); drawOrder(); }
+  });
+  $("#prAddAll").addEventListener("click", () => { visible().forEach((r) => add(r, true)); draw(); });
+  $("#prOrder").addEventListener("click", (e) => {
+    const b = e.target.closest(".prDel"); if (!b) return;
+    const o = PR_ORDER.get(); delete o[b.dataset.id]; PR_ORDER.set(o); draw();
+  });
+  $("#prOrderClear").addEventListener("click", () => { PR_ORDER.set({}); draw(); });
+  $("#prOrderXlsx").addEventListener("click", async () => {
+    const g = groups();
+    const body = { groups: Object.keys(g).map((sid) => ({ supplier_id: sid || null, lines: g[sid].map((l) => ({ item_id: l.item_id, packs: l.packs })) })) };
+    if (!body.groups.length) { toast("الطلبية فاضية", true); return; }
+    const res = await fetch("/api/procurement/order.xlsx", { method: "POST", body: JSON.stringify(body), credentials: "same-origin",
+      headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "Idempotency-Key": newKey() } });
+    if (!res.ok) {
+      let msg = "التنزيل فشل"; try { msg = (await res.json()).error.message || msg; } catch { /* not JSON */ }
+      toast(msg, true); return;
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: "الطلبية.xlsx" });
+    document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  });
   $("#prForm").addEventListener("submit", (e) => { e.preventDefault(); load().catch((er) => toast(er.message, true)); });
   load().catch((er) => toast(er.message, true));
   api("/api/procurement/health").then((h) => {

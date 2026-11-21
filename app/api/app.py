@@ -2011,6 +2011,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
 
     @handler
+    async def proc_smart(req):
+        from ..procurement import smart_order
+        ctx, qp = ctx_of(req), req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(smart_order.smart_order, db, ctx, scope=qp.get("scope") or "default",
+                                expensive_from=dear, **_sugg_params(req)))
+
+    @handler
+    async def proc_order_xlsx(req):
+        from ..procurement import smart_order
+        b = await body(req)
+        return Response(smart_order.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
+
+    @handler
     async def proc_health(req):
         return J(await off_loop(Procurement(db).stock_health, ctx_of(req)))
 
@@ -2974,6 +2995,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suggestions", proc_suggest),
         Route("/api/procurement/suggestions.xlsx", proc_suggest_xlsx),
         Route("/api/procurement/health", proc_health),
+        Route("/api/procurement/smart", proc_smart),
+        Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
