@@ -3522,7 +3522,7 @@ function discAsk(v) {
 async function patchLine(lineId, body) {
   POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9); false = not saved
     try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); return true; }
-    catch (er) { toast(er.message, true); return false; }
+    catch (er) { toast(er.message, true); renderCart(); return false; }     // the controls show what is saved
   })();
   await POS.saving;
 }
@@ -3558,10 +3558,16 @@ function renderCart(findings = null) {
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
   // U2-13: the same count in the other unit (1 box -> 1 strip, 2 strips -> 2 boxes); the server re-checks the stock
   $("#posCart").querySelectorAll("[data-unit]").forEach((sel) => sel.addEventListener("change", () => {
-    const l = line(sel.dataset.unit), ps = l.item.pack_size, isPack = l.qty_base % ps === 0;
-    const n = isPack ? l.qty_base / ps : l.qty_base;
-    const want = sel.value === "pack" ? n * ps : (isPack ? n : l.qty_base);
-    if (want !== l.qty_base) patchLine(l.id, { qty_base: want });
+    const l = line(sel.dataset.unit), ps = l.item.pack_size, q = l.qty_base, isPack = q % ps === 0;
+    let want = q;
+    if (sel.value === "unit" && isPack) want = q / ps;                 // 2 boxes -> 2 strips
+    else if (sel.value === "pack" && !isPack) {
+      // a few strips -> the same number of boxes; a mixed line ("2 boxes + 1 strip") -> its whole boxes, never
+      // multiplied (5 strips became 5 boxes in the independent review)
+      want = q < ps ? q * ps : Math.floor(q / ps) * ps;
+      if (q > ps && !confirm(`السطر هيبقى ${want / ps} علبة بدل ${qtyText(q, l.item)}؟`)) { renderCart(); return; }
+    }
+    if (want !== q) patchLine(l.id, { qty_base: want });
   }));
   $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
   $("#posCart").querySelectorAll("[data-minus]").forEach((b) => b.addEventListener("click", async () => {

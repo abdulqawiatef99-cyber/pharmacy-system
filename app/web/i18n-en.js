@@ -3050,4 +3050,5 @@ window.I18N_EN = {
 "تأكيد الخروج": "Sign-out confirmation",
 "اسألني قبل الخروج (الافتراضي)": "Ask me before signing out (default)",
 "اخرج على طول": "Sign out at once",
+"السطر هيبقى 0 علبة بدل 0؟": "The line becomes 0 boxes instead of 0?",
 };
