@@ -312,3 +312,30 @@ class TestCodexRound2(PurchaseBase):
         from app.core.errors import ValidationFailed
         with self.assertRaises(ValidationFailed):
             self.p.merge_lines(self.ctx, inv_id, dup["details"]["other_line"], dup["line_id"], None)
+
+
+class TestCodexRound3(PurchaseBase):
+    def sell(self, n, ctx=None):
+        with self.db.transaction():
+            inv.post_movement(self.db, ctx or self.ctx, item_id=self.item, qty_delta=-n, movement_type="sale",
+                              ref_type="sale", ref_id=new_id(), allow_negative=True)
+
+    def issues(self, inv_id, ctx=None):
+        d = self.p.get(ctx or self.ctx, inv_id)
+        return {i["code"] for i in d["issues"] if i["level"] == "error" and not i["acknowledged"]}
+
+    def test_exact_capacity_no_float_truncation(self):
+        self.sell(13)                                               # 13 in 90 days
+        inv_id = self.draft(qty=13, expiry=(date.today() + timedelta(days=180)).isoformat())   # 90 days to "near"
+        self.assertNotIn("slow_before_expiry", self.issues(inv_id))
+
+    def test_guard_uses_the_invoice_branch(self):
+        from dataclasses import replace
+        other = new_id()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO branches (id, org_id, name) VALUES (?,?,?)", (other, self.ctx.org_id, "فرع تاني"))
+        there = replace(self.ctx, branch_id=other)
+        self.sell(90)                                               # sales only in the invoice's branch
+        inv_id = self.draft(qty=300, expiry=(date.today() + timedelta(days=300)).isoformat())
+        self.assertIn("slow_before_expiry", self.issues(inv_id))
+        self.assertIn("slow_before_expiry", self.issues(inv_id, there))   # reviewed from the other branch: same answer

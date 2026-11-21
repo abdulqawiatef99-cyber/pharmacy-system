@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from fractions import Fraction
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path, PurePosixPath
@@ -304,7 +305,9 @@ class Purchasing:
             for l in sorted(group, key=lambda x: (x["expiry_date"], x.get("line_no") or 0)):
                 days = (date.fromisoformat(l["expiry_date"]) - today).days
                 qty = (l["qty"] + (l["bonus_qty"] or 0)) * it["pack_size"]
-                will = max(0, int(daily * max(0, days - self.NEAR_DAYS)) - ahead)
+                rate = Fraction(daily).limit_denominator(1_000_000)          # 13/90, not 0.14444…
+                cap = rate * max(0, days - self.NEAR_DAYS)
+                will = max(0, int(cap + Fraction(1, 2)) - ahead)             # half up
                 ahead += qty
                 if will >= qty:
                     continue
@@ -616,9 +619,11 @@ class Purchasing:
             if (pay_a is None) != (pay_b is None) or (merged["line_total"] is None and (a["line_total"], b["line_total"]) != (None, None)) \
                     or (pay_a is not None and validation.effective_amount(merged) != pay_a + pay_b):
                 raise ValidationFailed("السطرين مش هيتدمجوا من غير ما إجمالي الفاتورة يتغير؛ عدّل الكمية يدويًا", code="not_mergeable")
-            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=? WHERE id=?",
-                            (merged["qty"], (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0), merged["line_total"], tax, line_id))
-            self.db.execute("DELETE FROM purchase_invoice_lines WHERE id=?", (other_id,))
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=?"
+                            " WHERE id=? AND org_id=?",
+                            (merged["qty"], (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0), merged["line_total"], tax, line_id,
+                             ctx.org_id))
+            self.db.execute("DELETE FROM purchase_invoice_lines WHERE id=? AND org_id=?", (other_id, ctx.org_id))
             self._refresh_totals(ctx, inv_id)
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_merge", "purchase_invoice", inv_id,
@@ -653,8 +658,8 @@ class Purchasing:
             # the new line takes its share of what the line PAYS (tax included, half up); the original keeps the rest,
             # so the invoice total cannot move (Codex P1 on #406: raw total and tax split apart re-read the tax)
             moved_total = None if a["line_total"] is None else half_up(pay)
-            n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines WHERE invoice_id=?",
-                            (inv_id,))["n"]
+            n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=?",
+                            (inv_id, ctx.org_id))["n"]
             row = {**dict(a), "id": new_id(), "line_no": n, "qty": qty, "bonus_qty": 0, "line_total": moved_total,
                    "tax_amount": moved_tax, "expiry_date": iso, "expiry_precision": prec,
                    "batch_no": (str(batch_no).strip() or None) if batch_no else None,
@@ -672,11 +677,12 @@ class Purchasing:
                         if validation.effective_amount({**part, "line_total": cand}) == share:
                             part["line_total"] = cand
                             break
-                self.db.execute("UPDATE purchase_invoice_lines SET line_total=? WHERE id=?", (row["line_total"], row["id"]))
+                self.db.execute("UPDATE purchase_invoice_lines SET line_total=? WHERE id=? AND org_id=?",
+                                (row["line_total"], row["id"], ctx.org_id))
             if pay is not None and validation.effective_amount(row) + validation.effective_amount(rest) != pay:
                 raise ValidationFailed("التقسيم كان هيغيّر إجمالي السطر؛ قسّمه يدويًا", code="split_changes_total")
-            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=?",
-                            (rest["qty"], rest["line_total"], rest["tax_amount"], line_id))
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=? AND org_id=?",
+                            (rest["qty"], rest["line_total"], rest["tax_amount"], line_id, ctx.org_id))
             self._refresh_totals(ctx, inv_id)
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_split", "purchase_invoice", inv_id,
