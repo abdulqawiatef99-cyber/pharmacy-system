@@ -3169,6 +3169,18 @@ const qtyText = (q, it) => (it.pack_size > 1 && q % it.pack_size === 0 ? `${q / 
   : it.pack_size > 1 && q > it.pack_size ? `${Math.floor(q / it.pack_size)} علبة + ${q % it.pack_size} ${esc(unitName({ base_unit_name: it.base_unit }))}`
   : `${q} ${esc(unitName({ base_unit_name: it.base_unit }))}`);
 
+// launch day 21/11: the price shown is the price of the unit the line is sold in (1 box of a 3-strip item showed
+// the strip's 32.00 while the total was the box's); a line of boxes + strips shows both
+function linePrice(l) {
+  const ps = l.item.pack_size || 1, whole = ps > 1 && l.qty_base % ps === 0, mixed = ps > 1 && l.qty_base > ps && !whole;
+  const one = (a) => {
+    const pack = a.pack_price != null ? a.pack_price : a.unit_price != null ? a.unit_price * ps : null;
+    if (whole) return money(pack);
+    if (mixed) return `${money(pack)} / ${money(a.unit_price)}`;
+    return money(a.unit_price);
+  };
+  return l.allocations.map(one).filter((v, i, arr) => arr.indexOf(v) === i).join(" ، ");
+}
 async function openDraft(id) {
   SALE = id ? await api(`/api/sales/${id}`) : await api("/api/sales", { method: "POST", body: {} });
   POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = [];
@@ -3435,7 +3447,7 @@ function renderCart(findings = null) {
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية غير متاحة"}</span>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div></td>
-        <td class="num">${l.allocations.map((a) => money(a.unit_price)).filter((v, i, arr) => arr.indexOf(v) === i).join(" / ")}</td>
+        <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
         <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<input class="narrow" type="number" min="0" max="100" step="0.5" value="${l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="%">`
           : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}</td>
