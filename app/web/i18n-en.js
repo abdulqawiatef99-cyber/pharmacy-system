@@ -2982,4 +2982,5 @@ window.I18N_EN = {
 "مفيش صنف في الفاتورة": "No item on the invoice",
 "اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)": "Type the correct balance in EGP (at most two digits after the point)",
 "إشعار المورد:": "Supplier credit note:",
+"في مدة المرتجع (المدة: 0)": "Within the return window (window: 0)",
 };
