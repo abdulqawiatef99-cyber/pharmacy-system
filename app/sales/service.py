@@ -1228,11 +1228,11 @@ class Sales:
                     raise Conflict(f"أقصى كمية يمكن إرجاعها {remaining_returnable}", code="return_exceeds")
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                before = kept_value(allocs, kept, l["discount_bp"], l["line_total"], fixed=line_fixed(l))
+                fx = {"fixed": line_fixed(l)} if line_fixed(l) else {}     # sales before 0041: the call as before
+                before = kept_value(allocs, kept, l["discount_bp"], l["line_total"], **fx)
                 if history is None:
                     history = returns_history(self.db, ctx.org_id, [sid]).get(sid, [])
-                rest = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], line_id, history,
-                                         fixed=line_fixed(l))
+                rest = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], line_id, history, **fx)
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -1251,7 +1251,7 @@ class Sales:
                         break
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
-                r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"], fixed=line_fixed(l))
+                r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"], **fx)
                 if l["line_total"] is not None:
                     # reconciled with what this line still holds (outstanding_value, the reports' figure too):
                     # never more than the line in all, never negative, and the return that empties the line
