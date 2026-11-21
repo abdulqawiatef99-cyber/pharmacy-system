@@ -193,3 +193,28 @@ class TestLabelsAfterApproval(APICase):
         self.assertEqual(out["checked"], 0)
         self.assertEqual(out["posts"], 0)
         self.assertEqual(out["asked"], ["هتطبع 4 ملصق لـ 1 صنف؟"])
+
+
+class TestImportIsAlwaysADraft(PurchaseBase):
+    """U2-16: supplier files in the shapes of the big distributors (SYNTHETIC rows) come in as a DRAFT to review,
+    never approved and never touching stock. (Reading a photo by AI is unchanged: off without the owner's key.)"""
+
+    def test_nahda_xlsx_and_pharma_csv(self):
+        import io
+        from openpyxl import Workbook
+        from app.inventory import service as invs
+        cat.create_supplier(self.db, self.ctx, name="النهضة")
+        wb = Workbook(); ws = wb.active
+        for r in (["شركة النهضة للأدوية"], ["رقم الفاتورة", "N-100", "التاريخ", date.today().strftime("%d/%m/%Y")], [],
+                  ["الصنف", "الكمية", "بونص", "سعر الجمهور", "الخصم", "الصافي", "الإجمالي", "التشغيلة", "الصلاحية"],
+                  ["Guard Tab", 4, 1, 10, "20%", 8, 32, "N1", "11/2029"]):
+            ws.append(r)
+        b = io.BytesIO(); wb.save(b)
+        csv = ("Item;Qty;Public Price;Discount;Net Price;Total;Batch;Expiry\n"
+               "Guard Tab;2;10,00;0,20;8,00;16,00;P1;11/2029\n").encode("utf-8")
+        for data, name in ((b.getvalue(), "nahda.xlsx"), (csv, "pharma.csv")):
+            inv_id = self.p.import_file(self.ctx, data, name)
+            d = self.p.get(self.ctx, inv_id)
+            self.assertEqual(d["invoice"]["status"], "draft", name)
+            self.assertEqual(len(d["lines"]), 1, name)
+        self.assertEqual(invs.stock_for_item(self.db, self.ctx, self.item)["total_qty"], 0)
