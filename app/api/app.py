@@ -169,6 +169,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     accounts.sync_system_roles(db)
     from ..catalog.search import backfill_search_keys, search as item_search
     backfill_search_keys(db)
+    from ..dataimport import estock_party_fix      # update 1: customers / suppliers the move hid, once
+    estock_party_fix.run(db)
     from ..catalog import alternatives as alts
     alts.backfill_ingredient_keys(db)
     from ..catalog import card as item_card
@@ -572,8 +574,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def system_update_status(req):
-        ctx_of(req).require("settings.manage")
-        return J(await run_in_threadpool(_update_status))
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        st = await run_in_threadpool(_update_status)
+        from ..dataimport import estock_party_fix                  # update 1: what the one-time repair brought back
+        return J({**st, "parties_reactivated": estock_party_fix.result(db, ctx.org_id)})
 
     @handler
     async def system_update_run(req):
@@ -1200,7 +1205,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def customers_all(req):
         from ..sales import customers as cu
         qp = req.query_params
-        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None)})
+        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None,
+                                          sort=qp.get("sort") or None)})
 
     @handler
     async def customers_phone_doubles(req):
@@ -1558,7 +1564,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
+        limit = _qlimit(req, 20, 200)
+        # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
+        stock_first = req.query_params.get("stock") in ("first", "only")
+        only_stock = req.query_params.get("stock") == "only"
+        # the stock filter looks at up to 500 name matches, not the first 10x (Codex on #400)
+        res = item_search(db, ctx, req.query_params.get("q", ""), 500 if stock_first else limit,
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -1573,8 +1584,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 (ctx.org_id, ctx.branch_id, *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+        hidden_no_stock = 0
+        if stock_first and rows and "stock_qty" in rows[0]:
+            has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
+            rows = sorted(rows, key=lambda r: not has(r))                          # stable: the search order inside
+            if only_stock:
+                hidden_no_stock = sum(not has(r) for r in rows)
+                rows = [r for r in rows if has(r)]
+        rows = rows[:limit]
+        hint = res["hint"]
+        if not hint and rows and all(r.get("match") == "spelling" for r in rows):
+            hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
         if req.query_params.get("meta") == "1":
-            return J({"items": rows, "hint": res["hint"]})
+            return J({"items": rows, "hint": hint, "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler
@@ -2105,7 +2127,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(Sales(db).update_line(ctx, req.path_params["id"], req.path_params["line_id"],
-                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp")))
+                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp"),
+                                       discount_amount=b.get("discount_amount")))
+
+    @handler
+    async def sales_invoice_discount(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).set_invoice_discount(ctx, req.path_params["id"], amount=b.get("amount"), bp=b.get("bp")))
 
     @handler
     async def sales_delivery(req):
@@ -2232,9 +2261,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
-        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
-                      f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
-                      (ctx.org_id, *cu.search_terms(req.query_params.get("q", ""))))
+        where, wp, rank, rp = cu.search_clause(req.query_params.get("q", ""))   # update 1: code, titles, spelling
+        # every customer, none hidden for E-Stock's flags (owner 21/11); a deleted one is tagged
+        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit,"
+                      f" {cu.CODE_SQL} estock_code FROM customers c"
+                      f" WHERE c.org_id=? AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
+                      (ctx.org_id, *wp, *rp))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -2609,7 +2641,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if cfg["show_expiry"]:
                 exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
                 exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else ""
+            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
+                f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
             rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
                         f"<td>{m(l['line_total'])}</td></tr>")
@@ -2957,6 +2990,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/discard", sales_discard, methods=["POST"]),
         Route("/api/sales/{id}/delivery", sales_delivery, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_update_line, methods=["PATCH"]),
+        Route("/api/sales/{id}/invoice-discount", sales_invoice_discount, methods=["PUT"]),
         Route("/api/sales/{id}", sales_get),
         Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),

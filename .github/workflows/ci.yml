@@ -71,11 +71,14 @@ jobs:
           python-version: "3.13"
       - name: No data files or secrets in the repository
         run: python scripts/check_secrets.py $(git ls-files)
-      - name: Release channel source (writes the old-format backup for test_legacy_restore)
+      # The release BEFORE 0.4 (main until 21/11), which writes the old-format backup (test_legacy_restore) and the
+      # per-batch 99.99 sales (test_legacy_split_refund). Pinned: since v0.4.0 is on main, main no longer writes
+      # them, and every PR went red (update 1).
+      - name: Old release source (writes the old-format backup and sales for the legacy tests)
         if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: 25328e3c7851d68e3154eaf5315d1962051220e2
           path: _release
           persist-credentials: false
       - name: Install

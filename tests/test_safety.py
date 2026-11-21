@@ -119,9 +119,9 @@ class TestEngine(SafetyCase):
             self.se.edit_approved_rule(self.ctx, r2)
 
     def test_partial_pack_default_policy(self):
+        # launch day 21/11 (owner): a strip of a box is a normal sale, no notice without a forbidding policy
         f = self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True}])
-        su = [x for x in f if x.code == "split_unknown"][0]
-        self.assertEqual((su.severity, su.requires), ("moderate", "acknowledge"))
+        self.assertNotIn("split_unknown", self.codes(f))
         src = self.se.add_source(self.ctx, name="سياسة الصيدلية الداخلية", version="1", license="internal")
         rid = self.se.create_rule(self.ctx, rule_type="split_policy", severity="moderate",
                                   title="بيع الشريط", explanation="مسموح بيع شريط مع النشرة",

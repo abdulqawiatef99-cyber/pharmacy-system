@@ -12,7 +12,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross_as_sold, outstanding_value, returns_history
+from ..sales.service import line_fixed, line_gross_as_sold, outstanding_value, returns_history
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -52,7 +52,8 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
     line_ids: list[str] = []
     for k in range(0, len(sale_ids), _CHUNK):
         part = sale_ids[k:k + _CHUNK]
-        for l in db.all("SELECT l.sale_id, l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_source, l.line_total, i.name_en,"
+        for l in db.all("SELECT l.sale_id, l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_amount, l.invoice_share,"
+                        " l.discount_source, l.line_total, i.name_en,"
                         " i.name_ar, i.pack_size, i.base_unit_name, i.hidden FROM sale_lines l JOIN items i ON i.id=l.item_id"
                         f" WHERE l.sale_id IN ({','.join('?' * len(part))}) ORDER BY l.sale_id, l.line_no", tuple(part)):
             lines_of.setdefault(l["sale_id"], []).append(l)
@@ -135,18 +136,20 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
         lines = []
         for l in lines_of.get(r["id"], []):
             allocs = allocs_of.get(l["id"], [])
-            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"])
+            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"], line_fixed(l))
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net
             if l["discount_source"] == "contract":
-                r["customer_discount"] += disc
+                share = min(disc, l["invoice_share"] or 0)          # the invoice discount: the person's, not the contract's
+                r["customer_discount"] += disc - share
+                r["item_discount"] += share
             else:
                 r["item_discount"] += disc
             returned = sum(a["returned_qty"] for a in allocs)
             if show_cost and r["status"] == "completed":
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
                 value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
-                                          history.get(r["id"], []))
+                                          history.get(r["id"], []), fixed=line_fixed(l))
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
                 value_sum += value

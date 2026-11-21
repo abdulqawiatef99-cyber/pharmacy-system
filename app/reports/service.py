@@ -8,7 +8,7 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import (cost_piasters, local_day_bounds, local_today, outstanding_value, retail_value,
+from ..sales.service import (cost_piasters, line_fixed, local_day_bounds, local_today, outstanding_value, retail_value,
                              returns_history)
 
 
@@ -109,7 +109,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
         of(r["item_id"])["revenue"] += r["revenue"] or 0
         legacy = legacy or bool(r["no_total"])
     # 3. line by line: the invoices with a return, and (rare, sales from before 0.4) lines without a recorded total
-    cols = ("l.id line_id, l.sale_id, l.item_id, l.discount_bp, l.line_total, a.id, a.rowid rid, a.qty_base,"
+    cols = ("l.id line_id, l.sale_id, l.item_id, l.discount_bp, l.discount_amount, l.invoice_share, l.line_total, a.id, a.rowid rid, a.qty_base,"
             " a.returned_qty, a.unit_price, a.pack_price, a.pack_size")
     one_by_one = [f" AND {_RETURNED}"] + ([f" AND NOT {_RETURNED} AND l.line_total IS NULL"] if legacy else [])
     lines: dict[str, list[dict]] = {}
@@ -126,7 +126,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             continue
         kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
         of(l["item_id"])["revenue"] += outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["line_id"],
-                                                         history.get(l["sale_id"], []))
+                                                         history.get(l["sale_id"], []), fixed=line_fixed(l))
     # equal money: by item id, so the fiftieth place does not depend on the order the database answered in
     ranked = sorted(by_item.values(), key=lambda d: (-d["revenue"], d["item_id"]))[:limit]
     names = {r["id"]: dict(r) for r in db.all(
