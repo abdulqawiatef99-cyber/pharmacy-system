@@ -2247,13 +2247,20 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(Sales(db).day_summary(ctx_of(req), req.query_params.get("day")))
 
     @handler
+    async def customer_set_active(req):
+        from ..sales import customers as cu
+        b = await body(req)
+        return J(cu.set_active(db, ctx_of(req), req.path_params["id"], bool(b.get("active", True))))
+
+    @handler
     async def customers_list(req):
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
+        where, wp, rank, rp = cu.search_clause(req.query_params.get("q", ""))   # update 1: code, titles, spelling
         rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
-                      f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
-                      (ctx.org_id, *cu.search_terms(req.query_params.get("q", ""))))
+                      f" WHERE c.org_id=? AND c.is_active=1 AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
+                      (ctx.org_id, *wp, *rp))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -3002,6 +3009,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
+        Route("/api/customers/{id}/active", customer_set_active, methods=["POST"]),
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),

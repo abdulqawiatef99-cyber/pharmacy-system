@@ -18,6 +18,9 @@ State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and i
 8/8b. Purchases: «رقم فاتورة المورد», program serial, «تاريخ فاتورة المورد» (starts today) + «تاريخ الإدخال على السيستم» (+ approval time), Cairo time, list search/sort.
 9. Launch scripts: password asked once (env var, never the command line), a stray Enter asks again, English console prompts (Arabic in Notepad), fresh start lists the sales after an import and goes on only on YES.
 10. «اشرح الشاشة دي» on every screen (tour or help text), test fails on a route without help.
+11. Customer search (owner 20:10, «د محمد الشربيني», E-Stock code 335): E-Stock code exact (from the notes tag the move writes, ranked first), titles dropped, Arabic spelling, words in any order; «عملاء موقوفين» + «رجّعه نشط» (customers.manage, audited); POS and Customers share it. 12. «ناقص» → «نفد» for zero stock, «في النواقص» for the shortage mark.
+Update 2 (after update 1 merges, branch claude/update-2): U2-1..U2-10 from the owner 19:57 / 20:10 messages (purchase line keyboard, field focus/expiry entry, live duplicate notes, «إجمالي فاتورة المورد», labels after approval (revised: remembered per item, confirm before printing), purchase dates incl. print time, help on new routes, «مراجعة اليوم», several expiries in one line, slow-request log).
+CI: the legacy tests now read the release before 0.4 (`25328e3`, pinned in ci.yml): with v0.4.0 on main they failed on develop too.
 Not done / for the device check: the cmd `???` fix is by design (English console, Arabic in Notepad), not seen on the PC yet; Uninstall once on the device test (#18).
 
 ## 21/11 Cairo — launch-final session: last installer guard, spare key, release PR (READ THIS FIRST)

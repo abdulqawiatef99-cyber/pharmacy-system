@@ -53,6 +53,31 @@ def search_terms(q: str) -> list[str]:
     return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3 + [key, key] * 2
 
 
+# update 1 (owner 21/11: «د محمد الشربيني», E-Stock code 335, not found): titles are not part of the name
+_TITLES = {"د", "دكتر", "لدكتر", "دكتره", "لدكتره", "دك", "ا", "استاذ", "ستاذ", "استذ", "ستذ", "م", "مهندس", "مهندسه"}
+ESTOCK_TAG = "كود إي ستوك: "
+
+
+def search_clause(q: str) -> tuple[str, list, str, list]:
+    """WHERE part and ORDER BY rank for a customer search, POS and the customers screen alike: name / second name /
+    phones as typed; every word of the query in any order, by its Arabic spelling key (أإآ/ا, ى/ي, ة/ه, long
+    vowels; «د/» «دكتور» dropped); and the E-Stock customer code exactly (kept in the notes by the move), ranked
+    first. Returns (where_sql, params, rank_sql, rank_params)."""
+    q = str(q or "").strip()[:100]
+    parts, params = [SEARCH_SQL], search_terms(q)
+    words = [w for w in spelling_key(q.replace("/", " ").replace(".", " ")).split() if w not in _TITLES]
+    if words:
+        one = f"({spelling_sql('c.name')} LIKE ? OR " + spelling_sql("coalesce(c.name_alt,'')") + " LIKE ?)"
+        parts.append("(" + " AND ".join([one] * len(words)) + ")")
+        for w in words:
+            params += [f"%{w}%", f"%{w}%"]
+    code_sql = "(coalesce(c.notes,'') = ? OR coalesce(c.notes,'') LIKE ?)"
+    code_params = [ESTOCK_TAG + q, ESTOCK_TAG + q + "؛%"]
+    parts.append(code_sql)
+    params += code_params
+    return " OR ".join(f"({p})" for p in parts), params, f"CASE WHEN {code_sql} THEN 0 ELSE 1 END", code_params
+
+
 def phone_forms(ph: str) -> list[str]:
     """Every way the same number may already be saved (numbers saved before the canonical form)."""
     if re.fullmatch(r"01[0125]\d{8}", ph):
@@ -113,16 +138,21 @@ def _bal_sql() -> str:
 
 
 def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
+    """only: debt / refill / inactive (update 1: the «عملاء موقوفين», e.g. E-Stock-deleted ones with no balance)."""
     ctx.require("sales.read")
     today = today or date.today()
+    rank, rank_params = "1", []
     sql = (f"SELECT c.*, {_bal_sql()} balance,"
            " (SELECT min(date(coalesce(r.last_at, r.created_at), '+' || r.every_days || ' days')) FROM customer_refills r"
-           "  WHERE r.customer_id=c.id) next_refill"
-           " FROM customers c WHERE c.org_id=? AND c.is_active=1")
+           "  WHERE r.customer_id=c.id) next_refill, {rank} rank"
+           " FROM customers c WHERE c.org_id=? AND c.is_active=" + ("0" if only == "inactive" else "1"))
     params: list = [ctx.org_id]
     if q.strip():
-        sql += f" AND ({SEARCH_SQL})"
-        params += search_terms(q)
+        where, wp, rank, rank_params = search_clause(q)
+        sql += f" AND ({where})"
+        params += wp
+    sql = sql.replace("{rank}", rank)
+    params = rank_params + params
     # the filter runs before the 300 limit, so a big customer list never hides a debtor
     sql = f"SELECT * FROM ({sql}) WHERE 1=1"
     if only == "debt":
@@ -130,8 +160,21 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     elif only == "refill":
         sql += " AND next_refill IS NOT NULL AND next_refill <= ?"
         params.append((today + timedelta(days=5)).isoformat())
-    sql += " ORDER BY " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
+    sql += " ORDER BY rank, " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
     return [dict(r) for r in db.all(sql, tuple(params))]
+
+
+def set_active(db: Database, ctx: Context, cid: str, active: bool) -> dict:
+    """«رجّعه نشط» for a stopped customer (update 1), or stop one; owner / manager (customers.manage), audited."""
+    ctx.require("customers.manage")
+    c = db.one("SELECT id, is_active FROM customers WHERE id=? AND org_id=?", (cid, ctx.org_id))
+    if not c:
+        raise NotFound("العميل غير موجود")
+    with db.transaction():
+        db.execute("UPDATE customers SET is_active=? WHERE id=?", (1 if active else 0, cid))
+        audit.record(db, ctx, "customer.active", "customer", cid, before={"active": c["is_active"]},
+                     after={"active": 1 if active else 0})
+    return {"id": cid, "is_active": 1 if active else 0}
 
 
 def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:

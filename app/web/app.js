@@ -1475,7 +1475,7 @@ async function altPanel(itemId, box, onAdd = null) {
         ${(x.groups || []).map((g) => `<span class="chip">${esc(g)}</span>`).join("")}</div></div>
       <b class="price">${money(x.public_price)} ج</b>
       ${onAdd && can ? `<button class="btn small" data-aa="${esc(x.id)}" data-k="pack">علبة</button>${x.pack_size > 1 ? `<button class="btn small secondary" data-aa="${esc(x.id)}" data-k="unit">${esc(unitName(x))}</button>` : ""}`
-        : onAdd ? `<span class="badge b-err">✕ ناقص</span>` : `<a class="btn small secondary" href="#/items/${esc(x.id)}">البطاقة</a>`}</div>`;
+        : onAdd ? `<span class="badge b-err">✕ نفد</span>` : `<a class="btn small secondary" href="#/items/${esc(x.id)}">البطاقة</a>`}</div>`;
   };
   const all = [...r.similar, ...r.other_strength, ...r.alternatives];
   const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
@@ -1544,7 +1544,7 @@ async function viewItems() {
     $("#itemsHint").innerHTML = hintHtml(r.hint);
     $("#itemsBody").innerHTML = rows.map((it, i) => `<tr class="clickable" data-i="${i}">
       ${canW() ? `<td><input type="checkbox" data-sel="${i}" aria-label="اختر"></td>` : ""}
-      <td>${itemHtml(it)}${it.shortage_at ? ` <span class="badge b-warn">⚠ ناقص</span>` : ""}</td>
+      <td>${itemHtml(it)}${it.shortage_at ? ` <span class="badge b-warn">⚠ في النواقص</span>` : ""}</td>
       <td>${esc(it.category || "—")} ${markChip(it.mark)}${it.no_return ? ` <span class="chip mk-nr">لا يُقبل إرجاعه</span>` : ""}</td>
       <td>${it.pack_size} ${esc(unitName(it))}</td><td>${money(it.public_price)}</td>
       <td><b>${esc(fmtStock(it.stock_qty, it)) || "0"}</b>${it.min_stock && it.stock_qty != null && it.stock_qty <= it.min_stock ? ` <span class="badge b-warn">⚠ تحت حد الطلب</span>` : ""}</td>
@@ -3238,7 +3238,7 @@ async function openDraft(id) {
 }
 
 async function viewPos() {
-  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "ناقص" (11/01)
+  QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "نفد" (11/01; «ناقص» = not in the market, update 1)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
   const drafts = (await api("/api/sales/drafts")).drafts;
@@ -3305,7 +3305,7 @@ async function viewPos() {
         <b class="price">${money(r.public_price)} ج</b>
         ${r.stock_qty ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>
         ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}`
-        : `<span class="badge b-err">✕ ناقص</span>`}
+        : `<span class="badge b-err">✕ نفد</span>`}
         ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
       + (found.hidden_no_stock ? `<p class="muted small">${found.hidden_no_stock} صنف رصيده صفر مش ظاهر — <a href="#" id="posShowZero">اعرضهم</a></p>` : "")
       || `<p class="muted">لا توجد نتائج</p>`;
@@ -3366,7 +3366,7 @@ async function renderQuick() {
     ${open ? (list.length ? `<div class="qgrid">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">ناقص</span>`}</button>`; }).join("")}</div>
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 30} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}</section>`;
   $("#qkTgl").addEventListener("click", () => { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } renderQuick(); });
@@ -3583,7 +3583,7 @@ function renderSide() {
         <button class="${s.kind !== "delivery" ? "on" : ""}" data-kind="store">${s.kind !== "delivery" ? "✓ " : ""}في الصيدلية</button>
         <button class="${s.kind === "delivery" ? "on" : ""}" data-kind="delivery">${s.kind === "delivery" ? "✓ " : ""}توصيل للمنزل</button></div>
       <label class="f mt">العميل ${s.kind === "delivery" ? "" : "(اختياري)"}
-        <input id="posCust" placeholder="اسم أو رقم هاتف" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
+        <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
@@ -4766,8 +4766,8 @@ const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", retur
 async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
   app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
-    <div class="row"><input id="cuQ" class="grow" placeholder="اسم أو رقم هاتف" autocomplete="off">
-      <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
+    <div class="row"><input id="cuQ" class="grow" placeholder="الاسم أو الموبايل أو الكود" autocomplete="off">
+      <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button><button data-f="inactive" class="${filter === "inactive" ? "on" : ""}">عملاء موقوفين</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
@@ -4786,9 +4786,15 @@ async function viewCustomers(filter = "") {
     cur = { list, f };
     $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b>${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
       <td>${c.balance > 0 ? `<span class="badge b-err">✕ ${money(c.balance)}</span>` : `<span class="ok">✓ لا يوجد</span>`}</td>
-      <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ فات موعده" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}</td></tr>`).join("")
+      <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ فات موعده" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}
+        ${f === "inactive" && canM ? ` <button class="btn small" data-revive="${esc(c.id)}">رجّعه نشط</button>` : ""}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد عملاء</td></tr>`;
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
+    document.querySelectorAll("[data-revive]").forEach((b) => b.addEventListener("click", async (e) => {   // update 1
+      e.stopPropagation();
+      try { await api(`/api/customers/${b.dataset.revive}/active`, { method: "POST", body: { active: true } }); toast("✓ العميل رجع نشط"); load(); }
+      catch (er) { toast(er.message, true); }
+    }));
   };
   if ($("#ktBox")) renderContracts();
   // one number saved in two forms (010… and +20 10…) before the program kept one form (#324 M2-20)
