@@ -38,6 +38,9 @@ class Search(DBTestCase):
         self.assertIn("cx", self.ids("335"))
         self.assertEqual(self.ids("3350")[0], "c3350")
         self.assertNotIn("c3350", self.ids("335"))                           # exact code, not a prefix
+        self.assertEqual(self.ids("٣٣٥")[0], "c335")                          # Arabic-Indic digits (review)
+        self.assertNotEqual(self.ids("3%")[:1], ["c3350"])                   # % and _ are not wildcards (review)
+        self.assertNotIn("c335", self.ids("33_"))
 
     def test_stopped_customers_and_back(self):
         self.assertNotIn("off", self.ids("الشربيني"))

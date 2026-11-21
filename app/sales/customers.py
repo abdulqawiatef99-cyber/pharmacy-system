@@ -71,8 +71,10 @@ def search_clause(q: str) -> tuple[str, list, str, list]:
         parts.append("(" + " AND ".join([one] * len(words)) + ")")
         for w in words:
             params += [f"%{w}%", f"%{w}%"]
-    code_sql = "(coalesce(c.notes,'') = ? OR coalesce(c.notes,'') LIKE ?)"
-    code_params = [ESTOCK_TAG + q, ESTOCK_TAG + q + "؛%"]
+    # exact, never LIKE (a typed % or _ is not a wildcard), and ٣٣٥ is 335 (the move writes ASCII digits)
+    code = q.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    code_sql = "(coalesce(c.notes,'') = ? OR substr(coalesce(c.notes,''), 1, length(?)) = ?)"
+    code_params = [ESTOCK_TAG + code, ESTOCK_TAG + code + "؛", ESTOCK_TAG + code + "؛"]
     parts.append(code_sql)
     params += code_params
     return " OR ".join(f"({p})" for p in parts), params, f"CASE WHEN {code_sql} THEN 0 ELSE 1 END", code_params
