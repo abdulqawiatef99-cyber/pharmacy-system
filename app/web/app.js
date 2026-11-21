@@ -31,7 +31,7 @@ const pct = (bp) => (bp == null ? "" : (bp / 100).toString());
 // pharmacists type expiry as 629 / 0629 / 6-29 / 6.29 / 6 29: "629" -> "6-29" (month-year)
 const normExpiry = (v) => {
   const t = String(v || "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/\s+/g, "-");
-  const m = t.match(/^(\d{1,2})(\d{2})$/);
+  const m = t.match(/^(\d{1,2})(\d{2}|\d{4})$/);              // 628, 1128, 112028 (U2-2)
   return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
 };
 // ------------------------------------------------------------------ person's screen preferences
@@ -1238,7 +1238,7 @@ function quickAddHtml() {
       <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
       <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
-      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="6-29" class="narrow"></label>
+      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>
       <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
@@ -1294,8 +1294,25 @@ function bindQuickAdd() {
     $("#qaQ")?.focus();
   };
   $("#qaAdd").addEventListener("click", add);
-  ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"].forEach((s) =>
-    $(s).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }));
+  // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
+  // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
+  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"];
+  order.forEach((sel, i) => {
+    const el = $(sel);
+    el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); if (i === order.length - 1 || e.ctrlKey) add(); else $(order[i + 1]).focus(); return; }
+      const back = e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft"), fwd = e.key === (document.dir === "rtl" ? "ArrowLeft" : "ArrowRight");
+      if ((back || fwd) && (el.type === "number" || el.selectionStart === (back ? 0 : el.value.length))) {
+        const j = i + (fwd ? 1 : -1);
+        if (j >= 0 && j < order.length) { e.preventDefault(); $(order[j]).focus(); }
+      }
+    });
+  });
+  $("#qaExp").addEventListener("input", (e) => {
+    const m = normExpiry(e.target.value).match(/^(\d{1,2})-(\d{2}|\d{4})$/);
+    $("#qaExpSee").textContent = m && +m[1] >= 1 && +m[1] <= 12 ? `← ${String(+m[1]).padStart(2, "0")}/${m[2].length === 2 ? `20${m[2]}` : m[2]}` : "";
+  });
 }
 
 function renderLine(l) {

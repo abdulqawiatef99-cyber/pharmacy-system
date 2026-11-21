@@ -6,6 +6,9 @@ from app.core.errors import Conflict
 from app.db import new_id
 from app.inventory import service as inv
 from app.purchasing.model import parse_expiry
+from tests.helpers import OWNER_PW, needs_browser
+from tests.pos_browser import LOGIN, run_node
+from tests.test_api import APICase
 from tests.test_u2_purchase_base import PurchaseBase
 
 
@@ -55,3 +58,44 @@ class TestNearExpiryGuard(PurchaseBase):
         new = cat.create_item(self.db, self.ctx, {"name_en": "Brand New", "public_price": 1000})
         inv_id = self.draft(qty=300, expiry=(date.today() + timedelta(days=400)).isoformat(), item=new)
         self.assertNotIn("slow_before_expiry", self.codes(inv_id)[1])
+
+
+SCRIPT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, inv] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.goto(base + '/#/purchases/' + inv);
+  await p.waitForSelector('#qaQ');
+  await p.fill('#qaQ', 'Panadol');
+  await p.waitForSelector('#qaRes [data-qa]');
+  await p.press('#qaQ', 'Enter');                       // picks the first result, focus on the quantity
+  const out = { f1: await p.evaluate(() => document.activeElement.id) };
+  await p.keyboard.type('3'); await p.keyboard.press('Enter');
+  out.f2 = await p.evaluate(() => document.activeElement.id);
+  await p.focus('#qaExp'); await p.keyboard.type('112028');
+  out.see = await p.textContent('#qaExpSee');
+  await p.keyboard.press('Enter');
+  out.f3 = await p.evaluate(() => document.activeElement.id);
+  await p.keyboard.type('B9'); await p.keyboard.press('Enter');  // the last box adds the line
+  await p.waitForSelector('table.lines tbody tr');
+  await p.waitForFunction(() => document.activeElement && document.activeElement.id === 'qaQ');
+  out.rows = await p.$$eval('table.lines tbody tr', (r) => r.length);
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestQuickAddKeyboard(APICase):
+    def test_enter_walks_the_boxes_and_adds(self):
+        from dataclasses import replace
+        from app import config
+        from app.purchasing.service import Purchasing
+        p = Purchasing(self.db, replace(config.load(), upload_dir=self.tmp / "u"))
+        inv_id = p.create_manual(self.ctx)
+        out = run_node(self, SCRIPT, "owner", OWNER_PW, inv_id)
+        self.assertEqual((out["f1"], out["f2"], out["f3"]), ("qaQty", "qaBonus", "qaBatch"))
+        self.assertIn("11/2028", out["see"])
+        self.assertEqual(out["rows"], 1)
