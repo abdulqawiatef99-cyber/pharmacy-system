@@ -10,7 +10,7 @@
 
 ## 21/11 Cairo — launch-final session: last installer guard, spare key, release PR (READ THIS FIRST)
 1. State: part 3 merged into develop: #386 → #391 → #392 → #394 → #395 → #396, develop @ `17a8079`, CI linux + windows green on it (checked by the manager). #397 closed (review only).
-2. Key outcome (b): `release_keys/update-2.pub` signs (it was the spare); update-1 retired (private half not found, `update-1.pub` removed). A new spare `update-3.pub` comes from the owner's `new-signing-key.bat` and is committed on `claude/launch-final` (docs/SMART_UPDATE.md, release_keys/README.md).
+2. Key outcome (b): `release_keys/update-2.pub` signs (it was the spare); update-1 retired (private half not found, `update-1.pub` removed). New spare `release_keys/update-3.pub`: made 21/11 14:41 by the owner with `new-signing-key.bat` on the cashier PC (private half only on the flash drive `F:\pharmacy-update-keys-3`), committed on `claude/launch-final`; tests now require both keys (docs/SMART_UPDATE.md, release_keys/README.md).
 3. Return window back to **14 days** (owner 21/11 10:17, #396); Settings still changes it.
 4. Branch `claude/launch-final`: installer `MinVersion=10.0` + `ArchitecturesAllowed=x64compatible` + `ArchitecturesInstallIn64BitMode=x64compatible` (Windows 10+, 64-bit; the embedded Python is amd64), tests in `tests/test_installer_script.py`; #393 (part 3 HANDOFF log, OWNER_RULES §12, AGENTS §2a step 0) merged into it, so #393 is closed.
 5. Owner decisions 21/11 (manager chat 14:29, «اعمل اللي انت شايفه»): order = last installer → move → launch. The **final full review runs AFTER the launch**, and its fixes ship through the «تحديث» button (no new installer). Install on the owner's PC first, Dr. Adham's later. Only one worker session at a time.
