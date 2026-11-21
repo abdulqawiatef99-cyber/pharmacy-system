@@ -187,6 +187,8 @@ class TestProductActiveFlags(Base):
         tb = base_tables()
         tb["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "مورد محذوف", "vendor_current_money": "0",
                              "deleted": "0", "active": "0"})
+        tb["Customer"].append({"customer_id": "4", "customer_code": "C4", "customer_name_ar": "عميل محذوف عليه رصيد",
+                               "customer_current_money": "150.0000", "customer_max_money": "0", "deleted": "0", "active": "1"})
         res = self.run_import(tables=tb)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM customers")}, {1})
@@ -194,6 +196,7 @@ class TestProductActiveFlags(Base):
         notes = {r["name"]: r["notes"] or "" for r in self.db.all("SELECT name, notes FROM customers")}
         self.assertNotIn("محذوف في إي ستوك", notes["أحمد تجربة"])            # deleted='1' active='1': a live one
         self.assertIn("محذوف في إي ستوك", notes["عميل C3"])                  # active='0': tagged, still shown
+        self.assertIn("محذوف في إي ستوك", notes["عميل محذوف عليه رصيد"])     # with a balance too (review)
         import json as _j
         flags = {_j.loads(r["raw"])["code"]: _j.loads(r["raw"])["deleted"] for r in self.db.all(
             "SELECT ir.raw FROM import_rows ir JOIN import_runs r ON r.id=ir.run_id WHERE r.kind='suppliers'"

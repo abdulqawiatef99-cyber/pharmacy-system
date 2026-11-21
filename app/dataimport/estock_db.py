@@ -1367,6 +1367,7 @@ def _party(p: Plan, kind: str, eid: str, code: str, name: str, bal: int, conf: d
                     value_egp=Decimal(d["adjustment"]) / 100, kind="info")
     if kind == "customer" and conf.get("limit") is not None:
         d["limit"] = conf["limit"]
+    d["deleted"] = bool(d.get("inactive"))            # E-Stock's own flag, for the tag (review of update 1)
     if d.get("inactive") and d["balance"]:
         d["inactive"] = False
         p.issue("Customer" if kind == "customer" else "Vendor", eid, code, "deleted/active", "محذوف",
@@ -1991,7 +1992,7 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                 else:
                     from ..sales.service import Sales
                     ph = d["phones"] + [None, None, None]
-                    notes = d["notes"] + (f"؛ {DELETED_TAG}" if d["inactive"] else "")
+                    notes = d["notes"] + (f"؛ {DELETED_TAG}" if d.get("deleted", d["inactive"]) else "")
                     pid = Sales(db).create_customer(ctx, name=d["name"], phone=ph[0], phone2=ph[1], phone3=ph[2],
                                                     credit_limit=d["limit"], notes=notes, name_alt=d["alt"],
                                                     address1=d["address"])
@@ -2002,7 +2003,8 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                 total += d["estock_balance"]
                 # owner 21/11: a party is never hidden for its E-Stock flags; a deleted one is only tagged (the import
                 # row keeps the flag for both kinds, a customer's notes say so too)
-                rows.append(({"estock_id": d["estock_id"], "code": d["code"], "deleted": bool(d["inactive"])}, pid))
+                rows.append(({"estock_id": d["estock_id"], "code": d["code"],
+                              "deleted": bool(d.get("deleted", d["inactive"]))}, pid))
             return rows, {"parties": len(rows), "balance_total": total}
         return fn
     runs["suppliers"], r = _step(db, ctx, "suppliers", "suppliers", H("suppliers", ex.sha("Vendor")), esha, label,
