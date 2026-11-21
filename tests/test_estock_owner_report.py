@@ -306,3 +306,23 @@ class TestOwner0050(_R):
         self.assertIn("500.00", sec1)
         self.assertIn("مرجع", t)
         self.assertIn("1,200.00", t)
+
+
+class TestPlainWordingPart3(_R):
+    """Part 3 item 3 (idea 32): the owner reads every line without help — the screen to use by name, what a
+    balance sign means, and no English program words."""
+
+    def test_names_the_correction_screen(self):
+        t = self.report()
+        self.assertIn("«تصحيح الأرصدة بعد النقل»", t)
+
+    def test_each_balance_to_settle_says_who_owes_whom(self):
+        sec = self.section(self.report(), "أرصدة للتسوية", None)
+        self.assertIn("«مورد تجربة» (كود V1): رصيد 500.00 ج (علينا له)", sec)
+        self.assertIn("(كود V2): رصيد 20.00 ج (لينا عنده)", sec)
+        self.assertIn("«أحمد تجربة» (كود C1): رصيد 120.00 ج (لينا عنده)", sec)
+        self.assertIn("«منى تجربة» (كود C2): رصيد 15.50 ج (علينا له)", sec)
+
+    def test_no_english_program_word_in_the_report(self):
+        t = self.report()
+        self.assertNotIn("E-Stock", t)

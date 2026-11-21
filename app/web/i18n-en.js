@@ -2926,5 +2926,9 @@ window.I18N_EN = {
 "مفيش أرصدة منقولة": "No moved balances",
 "✓ اتصحح: الفرق 0 ج": "✓ Corrected: difference 0 EGP",
 "✓ الموردين": "✓ Suppliers",
+"بيتحسب…": "Checking…",
+"صحة اليوم والجهاز": "Day and PC health",
+"⚠ 0 محتاجين نظرة": "⚠ 0 need a look",
+"✓ كله تمام": "✓ All fine",
 "اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)": "Type the correct balance in EGP (at most two digits after the point)",
 };

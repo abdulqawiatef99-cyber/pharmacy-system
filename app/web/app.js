@@ -3548,6 +3548,16 @@ function bindPosExtras() {
 // ------------------------------------------------------------------ shift: open, count the drawer, close, report
 const DENOMS = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25];
 const denomLabel = (d) => (d >= 100 ? `${d / 100} جنيه` : d === 50 ? "نصف جنيه" : "ربع جنيه");
+// Part 3 item 4: the day's checks at shift close (backup, stock, open drafts, transfers, expenses, returns,
+// alerts) and the PC check (disk, database, clock, Windows). Read only; worst first.
+const HEALTH_ICON = { ok: "✓", warn: "⚠", bad: "✕" }, HEALTH_BADGE = { ok: "b-ok", warn: "b-warn", bad: "b-err" };
+async function dayHealth(el) {
+  const r = await api("/api/health/day");
+  const rows = (list) => list.map((c) => `<tr><td><span class="badge ${HEALTH_BADGE[c.status]}">${HEALTH_ICON[c.status]}</span></td><td><b>${esc(c.title)}</b></td><td>${esc(c.text)}</td></tr>`).join("");
+  const bad = [...r.day, ...r.pc].filter((c) => c.status !== "ok").length;
+  el.innerHTML = `<div class="row between"><h2>صحة اليوم والجهاز</h2><span class="badge ${bad ? "b-warn" : "b-ok"}">${bad ? `⚠ ${bad} محتاجين نظرة` : "✓ كله تمام"}</span></div>
+    <table><tbody>${rows(r.day)}</tbody></table><h3 class="mt">الجهاز</h3><table><tbody>${rows(r.pc)}</tbody></table>`;
+}
 async function viewShift() {
   let sh = null;
   try { sh = await api("/api/cash/current"); } catch { /* none open */ }
@@ -3583,6 +3593,7 @@ async function viewShift() {
     ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
       <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
   </section>
+  ${ME.permissions.includes("cash.close") ? `<section class="panel" id="shHealth"><h2>صحة اليوم والجهاز</h2><p class="muted">بيتحسب…</p></section>` : ""}
   ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>إغلاق الشيفت — عدّ الخزينة</h2>
     <table class="denoms"><thead><tr><th>الفئة</th><th>العدد</th><th>المبلغ</th></tr></thead><tbody>
     ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
@@ -3602,6 +3613,7 @@ async function viewShift() {
   };
   document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
   wireHist();
+  if ($("#shHealth")) dayHealth($("#shHealth")).catch(() => { $("#shHealth").remove(); });
   function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الشيفتات", subtitle: "", el: $("#shHist"), sheets: [
     { name: "الشيفتات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
       rows: recent.map((r) => [stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",

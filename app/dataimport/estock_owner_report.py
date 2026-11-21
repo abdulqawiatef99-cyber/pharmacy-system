@@ -164,8 +164,8 @@ def _balances_line(plan) -> dict | None:
     return {"what": f"أرصدة {sup} مورد و{cus} عميل" + (" اتنقلت زي ما هي في إي ستوك" if not fixed else " اتنقلت"),
             "estock": f"إجمالي الأرصدة في إي ستوك {_money(src)} ج (الأكبر الأول في openings-to-confirm.xlsx)",
             "done": done,
-            "ask": "أكّد الرصيد الحقيقي لكل مورد وعميل من البرنامج بعد النقل (أو في openings-to-confirm.xlsx قبله)؛"
-                   " الفرق بيتسجل تسوية افتتاحية مش دفع",
+            "ask": "أكّد الرصيد الحقيقي لكل مورد وعميل: بعد النقل من شاشة «تصحيح الأرصدة بعد النقل» في البرنامج"
+                   " (من «الخزنة والحسابات»)، أو في openings-to-confirm.xlsx قبله؛ الفرق بيتسجل تسوية افتتاحية مش دفع",
             "value": src}
 
 
@@ -289,6 +289,17 @@ def _group_key(d: dict) -> str:
 
 
 DOUBT_MAX = 200
+
+
+def _owes(d: dict) -> str:
+    """The sign in words: + for a supplier = we owe him, + for a customer = he owes us (part 3 item 3)."""
+    ours = (Decimal(d["estock_balance"]) > 0) == (d["kind"] == "supplier")
+    return "علينا له" if ours else "لينا عنده"
+
+
+def _arabic(line: str) -> str:
+    """The owner's report has no English program words: E-Stock's own number reads «رقم إي ستوك»."""
+    return line.replace("(E-Stock ", "(رقم إي ستوك ").replace("E-Stock", "إي ستوك")
 SETTLE_CUSTOMERS = 50
 
 
@@ -359,10 +370,11 @@ def write(path: Path, plan, rec: dict) -> Path:
     if owed:
         sup = [d for d in owed if d["kind"] == "supplier"]
         cus = [d for d in owed if d["kind"] == "customer"]
-        lines += ["", "  أرصدة للتسوية (الأكبر الأول؛ الكل في openings-to-confirm.xlsx بآخر فاتورة وآخر دفعة):"]
+        lines += ["", "  أرصدة للتسوية (الأكبر الأول؛ الكل في openings-to-confirm.xlsx بآخر فاتورة وآخر دفعة؛"
+                      " التصحيح بعد النقل من شاشة «تصحيح الأرصدة بعد النقل»):"]
         for d in sup + cus[:SETTLE_CUSTOMERS]:
             lines.append(f"    - {'مورد' if d['kind'] == 'supplier' else 'عميل'} «{d['name']}» (كود {d['code'] or '-'}):"
-                         f" رصيد {_money(Decimal(d['estock_balance']) / 100)} ج — آخر فاتورة {d.get('last_invoice') or 'مفيش'}،"
+                         f" رصيد {_money(abs(Decimal(d['estock_balance'])) / 100)} ج ({_owes(d)}) — آخر فاتورة {d.get('last_invoice') or 'مفيش'}،"
                          f" آخر دفعة {d.get('last_payment') or 'مفيش'}")
         if len(cus) > SETTLE_CUSTOMERS:
             lines.append(f"    والباقي ({len(cus) - SETTLE_CUSTOMERS} عميل) في openings-to-confirm.xlsx")
@@ -381,5 +393,5 @@ def write(path: Path, plan, rec: dict) -> Path:
                          + (f" — القيمة {_money(v)} ج" if v else "") + f" — {_plain(d['action'])}")
         if len(doubt) > DOUBT_MAX:
             lines.append(f"    والباقي ({len(doubt) - DOUBT_MAX}) في data-quality.csv")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    path.write_text("\n".join(_arabic(x) for x in lines) + "\n", encoding="utf-8-sig")
     return path
