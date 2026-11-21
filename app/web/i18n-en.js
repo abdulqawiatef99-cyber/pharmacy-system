@@ -3056,4 +3056,13 @@ window.I18N_EN = {
 "كام علبة من السطر ده صلاحيتها مختلفة؟": "How many boxes of this line have another expiry?",
 "الصلاحية التانية (مثال 1128 أو 11/2028):": "The other expiry (e.g. 1128 or 11/2028):",
 "التشغيلة (اختياري):": "Batch (optional):",
+"اطبع ملصقات الفاتورة": "Print the invoice labels",
+"اطبع": "Print",
+"شيل الكل": "Untick all",
+"علّم الكل": "Tick all",
+"متعلّم بس الأصناف اللي اتعملها ملصقات آخر مرة اتشرت.": "Only the items labelled the last time they were bought are ticked.",
+"مش دلوقتي": "Not now",
+"ملصقات الفاتورة": "Invoice labels",
+"علّم صنف واحد على الأقل": "Tick at least one item",
+"هتطبع 0 ملصق لـ 0 صنف؟": "Print 0 labels for 0 items?",
 };

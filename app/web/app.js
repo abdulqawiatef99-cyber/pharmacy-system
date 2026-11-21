@@ -1209,6 +1209,7 @@ function renderInvoice() {
     <div class="row">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && ME.permissions.includes("purchases.approve") ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>
         ${fileUrl ? `<button class="btn secondary" id="addLine">إضافة سطر ناقص من الملف</button>` : ""}` : ""}
+      ${inv.status === "approved" ? `<button class="btn secondary" id="invLabels">اطبع ملصقات الفاتورة</button>` : ""}
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
@@ -1228,6 +1229,49 @@ function renderInvoice() {
   fillSuppliers(inv.supplier_id, draft);
   if (draft) bindQuickAdd();
   purchaseTabs(inv.id);
+}
+
+// U2-5: labels after approval (or from any approved invoice). Nothing ticked except the items labelled the last
+// time they were bought (remembered on this PC); counts editable; Enter never prints; one confirm with the totals.
+const LBL_KEY = "lblItems";
+const lblRemembered = () => { try { return new Set(JSON.parse(localStorage.getItem(LBL_KEY) || "[]")); } catch { return new Set(); } };
+function purchaseLabels(cur) {
+  const seen = new Set(), rows = [];
+  for (const l of cur.lines || []) {
+    if (!l.item_id || seen.has(l.item_id)) continue;
+    seen.add(l.item_id);
+    const boxes = (cur.lines || []).filter((x) => x.item_id === l.item_id).reduce((n, x) => n + (x.qty || 0) + (x.bonus_qty || 0), 0);
+    rows.push({ id: l.item_id, name: l.item || l.raw_name, boxes });
+  }
+  if (!rows.length) return;
+  const mem = lblRemembered(), d = document.createElement("dialog");
+  d.innerHTML = `<form method="dialog" class="formgrid"><h2>ملصقات الفاتورة</h2>
+    <p class="muted">متعلّم بس الأصناف اللي اتعملها ملصقات آخر مرة اتشرت.</p>
+    <div class="row"><button type="button" class="btn small secondary" data-all="1">علّم الكل</button><button type="button" class="btn small secondary" data-all="0">شيل الكل</button></div>
+    <table><tbody>${rows.map((r, i) => `<tr><td><label class="chk"><input type="checkbox" data-i="${i}" ${mem.has(r.id) ? "checked" : ""}> ${esc(r.name || "")}</label></td>
+      <td><input type="number" min="1" max="500" step="1" class="narrow" data-n="${i}" value="${r.boxes || 1}"></td></tr>`).join("")}</tbody></table>
+    <div class="row"><button type="button" class="btn" data-go="1">اطبع</button><button type="button" class="btn secondary" data-go="0">مش دلوقتي</button></div></form>`;
+  document.body.append(d);
+  d.querySelector("form").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  d.addEventListener("close", () => d.remove());
+  d.addEventListener("click", async (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.all) { d.querySelectorAll("[data-i]").forEach((c) => { c.checked = b.dataset.all === "1"; }); return; }
+    if (b.dataset.go === "0") { d.close(); return; }
+    if (b.dataset.go !== "1") return;
+    const pick = [...d.querySelectorAll("[data-i]")].filter((c) => c.checked)
+      .map((c) => ({ id: rows[+c.dataset.i].id, count: Math.max(1, Math.min(500, parseInt(d.querySelector(`[data-n="${c.dataset.i}"]`).value, 10) || 1)) }));
+    if (!pick.length) { toast("علّم صنف واحد على الأقل", true); return; }
+    const n = pick.reduce((a, x) => a + x.count, 0);
+    if (!confirm(`هتطبع ${n} ملصق لـ ${pick.length} صنف؟`)) return;
+    try {
+      const r = await api("/api/print/labels", { method: "POST", body: { items: pick } });
+      const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
+      try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
+      toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); d.close();
+    } catch (er) { toast(er.message, true); }
+  });
+  d.showModal();
 }
 
 // fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
@@ -1425,6 +1469,9 @@ app.addEventListener("click", async (e) => {
     if (!confirm("اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.")) return;
     await save(`${base}/approve`, {}, "POST");
     toast("تم اعتماد الفاتورة وإضافتها للمخزون");
+    if (CUR?.invoice?.status === "approved") purchaseLabels(CUR);
+  } else if (t.id === "invLabels") {
+    purchaseLabels(CUR);
   } else if (t.id === "cancelInv") {
     const reason = prompt("سبب الإلغاء:");
     if (reason) await save(`${base}/cancel`, { reason }, "POST");

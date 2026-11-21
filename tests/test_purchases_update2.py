@@ -151,3 +151,45 @@ class TestSplitExpiry(PurchaseBase):
         for bad in ((10, "1129"), (0, "1129"), (2, "1329"), (2, exp)):
             with self.assertRaises(ValidationFailed):
                 self.p.split_line(self.ctx, inv_id, line["id"], bad[0], bad[1], None, None)
+
+
+LABELS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, inv] = process.argv.slice(1);
+""" + LOGIN + r"""
+  const out = { asked: [], posts: 0 };
+  p.on('dialog', async (d) => { out.asked.push(d.message()); await d.dismiss(); });
+  p.on('request', (r) => { if (r.url().includes('/api/print/labels')) out.posts++; });
+  await p.goto(base + '/#/purchases/' + inv);
+  await p.click('#invLabels');
+  await p.waitForSelector('dialog [data-i]');
+  out.checked = await p.$$eval('dialog [data-i]', (c) => c.filter((x) => x.checked).length);
+  await p.focus('dialog [data-n="0"]'); await p.keyboard.press('Enter');          // Enter never prints
+  await p.click('dialog [data-all="1"]');
+  await p.click('dialog [data-go="1"]');                                          // the confirm is dismissed
+  await p.waitForTimeout(200);
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestLabelsAfterApproval(APICase):
+    def test_nothing_ticked_enter_never_prints_confirm_counts(self):
+        from dataclasses import replace
+        from app import config
+        from app.purchasing.service import Purchasing
+        p = Purchasing(self.db, replace(config.load(), upload_dir=self.tmp / "u"))
+        sup = cat.create_supplier(self.db, self.ctx, name="مورد ملصقات")
+        inv_id = p.create_manual(self.ctx)
+        p.update_header(self.ctx, inv_id, {"supplier_id": sup, "invoice_no": "L1"}, None)
+        p.add_line(self.ctx, inv_id, {"item_id": self.pan, "qty": 3, "bonus_qty": 1, "public_price": "4000",
+                                      "discount_pct": "20", "unit_net_price": "3200", "batch_no": "L",
+                                      "expiry_date": (date.today() + timedelta(days=900)).isoformat()}, None)
+        p.approve(self.ctx, inv_id, None)
+        out = run_node(self, LABELS, "owner", OWNER_PW, inv_id)
+        self.assertEqual(out["checked"], 0)
+        self.assertEqual(out["posts"], 0)
+        self.assertEqual(out["asked"], ["هتطبع 4 ملصق لـ 1 صنف؟"])
