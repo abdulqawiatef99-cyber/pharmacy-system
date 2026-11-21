@@ -99,3 +99,37 @@ class TestScreen(PlanCase):
         self.assertIn("1 علبة", out["before"])
         self.assertIn("1 ", out["after"])
         self.assertEqual(out["fields"], ["name", "phone", "phone2", "address1"])
+
+
+class TestCrashKeepsDraft(SalesCase):
+    def test_sale_survives_a_killed_process(self):
+        """U2-25: a process that dies mid-invoice (os._exit, no close, no cleanup) leaves the sale on disk as a
+        draft; after the restart it is listed as «معلقة» with its lines."""
+        import subprocess
+        import sys
+        import textwrap
+        from app.core import accounts
+        tok = accounts.login(self.db, "owner", "Owner-Pass-2026")["token"]
+        self.db.close()
+        code = textwrap.dedent(f"""
+            import os
+            from app.core import accounts
+            from app.db import Database
+            from app.sales.service import Sales
+            db = Database({str(self.tmp / 'test.db')!r})
+            ctx = accounts.resolve_session(db, {tok!r})
+            s = Sales(db)
+            sid = s.create(ctx)
+            s.add_line(ctx, sid, {self.pan!r}, units=2)
+            print(sid, flush=True)
+            os._exit(9)                       # killed mid-invoice: nothing closed, nothing flushed by us
+        """)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60,
+                           cwd=str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+        self.assertEqual(r.returncode, 9, r.stderr[-1500:])
+        sid = r.stdout.strip().splitlines()[-1]
+        from app.db import Database
+        self.db = Database(self.tmp / "test.db")
+        self.ctx = self.login("owner", "Owner-Pass-2026")
+        drafts = {d["id"]: d for d in self.s.__class__(self.db).list_drafts(self.ctx)}
+        self.assertEqual(drafts[sid]["lines"], 1)
