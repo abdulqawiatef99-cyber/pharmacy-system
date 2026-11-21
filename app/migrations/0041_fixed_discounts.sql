@@ -9,3 +9,15 @@ ALTER TABLE sales ADD COLUMN invoice_discount_bp INTEGER NOT NULL DEFAULT 0
 ALTER TABLE sales ADD COLUMN invoice_discount_amount INTEGER NOT NULL DEFAULT 0 CHECK (invoice_discount_amount >= 0);
 ALTER TABLE sales ADD COLUMN invoice_discount_by TEXT;
 ALTER TABLE sales ADD COLUMN invoice_discount_approved_by TEXT;
+-- the program's own serial number of each purchase invoice, per branch, next to the supplier's invoice number
+-- (owner, launch day: both, like E-Stock). Existing invoices are numbered in the order they were created.
+ALTER TABLE purchase_invoices ADD COLUMN serial_no INTEGER;
+UPDATE purchase_invoices SET serial_no = (
+    SELECT count(*) FROM purchase_invoices p WHERE p.org_id = purchase_invoices.org_id
+       AND p.branch_id = purchase_invoices.branch_id
+       AND (p.created_at < purchase_invoices.created_at
+            OR (p.created_at = purchase_invoices.created_at AND p.id <= purchase_invoices.id)));
+CREATE UNIQUE INDEX ux_pinv_serial ON purchase_invoices(org_id, branch_id, serial_no) WHERE serial_no IS NOT NULL;
+INSERT INTO branch_counters (org_id, branch_id, kind, next_no)
+    SELECT org_id, branch_id, 'purchase', max(serial_no) + 1 FROM purchase_invoices GROUP BY org_id, branch_id
+    ON CONFLICT(org_id, branch_id, kind) DO UPDATE SET next_no = max(next_no, excluded.next_no);

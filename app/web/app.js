@@ -637,8 +637,14 @@ const TOUR = {
   ],
   purchases: [
     ["#upForm", "قراءة فاتورة المورد", "ارفع ملف الفاتورة (Excel أو PDF أو صورة) والبرنامج يقراها، وانت تراجعها قبل الاعتماد."],
-    ["#manForm", "فاتورة بإيدك", "مفيش ملف؟ اختار المورد واكتب رقم الفاتورة، وابدأ تدخل الأصناف بإيدك."],
+    ["#manForm", "فاتورة بإيدك", "مفيش ملف؟ اختار المورد واكتب رقم فاتورة المورد، وابدأ تدخل الأصناف بإيدك."],
     ["#puRep", "الفواتير", "كل فواتير الشراء. المسودة لسه ماغيّرتش المخزون؛ المعتمدة بس هي اللي زوّدته."],
+  ],
+  purchase: [
+    ["[data-h=supplier_id]", "المورد", "اختار المورد اللي جت منه الفاتورة."],
+    ["[data-h=invoice_no]", "رقم فاتورة المورد", "الرقم المطبوع على فاتورة المورد. المسلسل اللي جنب العنوان رقم الفاتورة في البرنامج."],
+    ["#addLine", "الأصناف", "ضيف كل صنف بكميته وسعره وتاريخ الصلاحية، والبونص لو فيه."],
+    ["#approve", "الاعتماد", "بعد المراجعة اعتمد الفاتورة: ساعتها بس المخزون يزيد وحساب المورد يتسجل."],
   ],
   items: [
     ["#q", "البحث", "دوّر بالاسم العربي أو الإنجليزي أو الكود أو الباركود."],
@@ -665,7 +671,11 @@ const TOUR = {
   ],
 };
 const TOUR_ANCHOR = { pos: "#app p.keys" };              // screens without a heading: where the replay button goes
-const tourScreen = () => { const h = location.hash || "#/home"; const m = h.match(/^#\/([\w-]+)$/); return m && TOUR[m[1]] && m[1] !== "main" ? m[1] : null; };
+const tourScreen = () => {
+  const h = location.hash || "#/home";
+  if (/^#\/purchases\/[\w-]+$/.test(h)) return "purchase";                // one purchase invoice (update 1)
+  const m = h.match(/^#\/([\w-]+)$/); return m && TOUR[m[1]] && m[1] !== "main" ? m[1] : null;
+};
 const TOUR_MEM = {};                                      // when the browser storage is blocked: seen for this tab only
 const tourStoreKey = () => `tour:${ME?.organization?.id || ""}:${ME?.user?.id || ""}`;
 function tourSeen() {
@@ -1001,7 +1011,7 @@ async function viewPurchases() {
     <form id="manForm" class="row">
       <label class="f">المورد<select name="supplier_id" required><option value="">— اختر —</option>
         ${suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>
-      <label class="f">رقم الفاتورة<input name="invoice_no" required></label>
+      <label class="f">رقم فاتورة المورد<input name="invoice_no" required></label>
       <label class="f">التاريخ<input name="invoice_date" type="date" value="${localDay()}"></label>
       <button class="btn" type="submit">ابدأ الفاتورة</button>
     </form>
@@ -1021,15 +1031,15 @@ async function viewPurchases() {
   const drawList = () => {
     const ok = rows.filter((i) => i.status === "approved");
     $("#puBox").innerHTML = `<div class="tablewrap"><table class="list">
-      <thead><tr><th>المورد</th><th>رقم الفاتورة</th><th>التاريخ</th><th>الأصناف</th>
+      <thead><tr><th>مسلسل</th><th>المورد</th><th>رقم فاتورة المورد</th><th>التاريخ</th><th>الأصناف</th>
         <th>الإجمالي</th><th>الحالة</th><th>المصدر</th></tr></thead>
-      <tbody>${rows.map((i) => `<tr>
+      <tbody>${rows.map((i) => `<tr><td class="num">${esc(i.serial_no ?? "")}</td>
         <td><a href="#/purchases/${esc(i.id)}">${esc(i.supplier_name || "— غير محدد —")}</a></td>
         <td>${esc(i.invoice_no || "")}</td><td>${esc(i.invoice_date || dayOf(i.created_at))}</td><td>${i.lines}</td>
         <td>${money(amt(i))}</td>
         <td><span class="badge ${STATUS[i.status][1]}">${STATUS[i.status][0]}</span></td>
         <td>${esc(i.source_type)}</td></tr>`).join("") ||
-        `<tr><td colspan="7" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
+        `<tr><td colspan="8" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
     </table></div>${ok.length ? `<p><b>المعتمد: ${ok.length} فاتورة — ${money(ok.reduce((a, i) => a + (amt(i) || 0), 0))} ج</b></p>` : ""}`;
   };
   const loadList = async (f, t) => {
@@ -1039,8 +1049,8 @@ async function viewPurchases() {
   const getRange = wireRange("puRange", (f, t) => loadList(f, t).catch((e) => toast(e.message, true)));
   ["#puSup", "#puSt"].forEach((id) => $(id).addEventListener("change", () => loadList(...getRange()).catch((e) => toast(e.message, true))));
   wireTools("pur", () => ({ title: "فواتير الشراء", subtitle: sub + ($("#puSup").value ? ` — ${$("#puSup").selectedOptions[0].text}` : ""), el: $("#puRep"), sheets: [
-    { name: "فواتير الشراء", columns: [Tx("المورد"), Tx("رقم الفاتورة"), Dt("التاريخ"), N("الأصناف"), M("الإجمالي"), Tx("الحالة")],
-      rows: rows.map((i) => [i.supplier_name || "", i.invoice_no || "", i.invoice_date || dayOf(i.created_at), i.lines, amt(i), STATUS[i.status][0]]) }] }));
+    { name: "فواتير الشراء", columns: [N("مسلسل"), Tx("المورد"), Tx("رقم فاتورة المورد"), Dt("التاريخ"), N("الأصناف"), M("الإجمالي"), Tx("الحالة")],
+      rows: rows.map((i) => [i.serial_no ?? "", i.supplier_name || "", i.invoice_no || "", i.invoice_date || dayOf(i.created_at), i.lines, amt(i), STATUS[i.status][0]]) }] }));
   $("#addSup").addEventListener("click", async () => {
     const name = $("#newSup").value.trim(); if (!name) return;
     try { await api("/api/suppliers", { method: "POST", body: { name } }); toast("تمت إضافة المورد"); viewPurchases(); }
@@ -1116,7 +1126,7 @@ function renderInvoice() {
   <nav class="tabs" id="pTabs" aria-label="فواتير الشراء المفتوحة"></nav>
   <section class="panel">
     <div class="row between">
-      <h1>فاتورة شراء <span class="badge ${STATUS[inv.status][1]}">${STATUS[inv.status][0]}</span>
+      <h1>فاتورة شراء ${inv.serial_no ? `<span class="muted" title="المسلسل في البرنامج">مسلسل ${esc(inv.serial_no)}</span> ` : ""}<span class="badge ${STATUS[inv.status][1]}">${STATUS[inv.status][0]}</span>
         ${inv.extraction_method === "ai_vision" ? `<span class="badge b-ai">قراءة آلية — راجع كل القيم</span>` : ""}</h1>
       <a href="#/purchases">رجوع للفواتير</a>
     </div>
@@ -1124,7 +1134,7 @@ function renderInvoice() {
       <label class="f">المورد <select data-h="supplier_id" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
       <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
-      <label class="f">رقم الفاتورة <input data-h="invoice_no" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
+      <label class="f">رقم فاتورة المورد <input data-h="invoice_no" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">التاريخ <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">الإجمالي المطبوع (ج) <input data-h="declared_total" type="number" step="0.01" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}></label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
