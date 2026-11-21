@@ -4112,6 +4112,10 @@ async function viewShift(opts = {}) {
     const den = {};
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length) { out.innerHTML = ""; return; }
+    const fc = $("#shClose");
+    if (!keeps && fc?.ho && !fc.ho.checked) {       // nobody receives it: the close keeps everything in the drawer
+      out.innerHTML = "<b>كل الفلوس هتفضل في الدرج للشيفت الجاي</b> (محدش استلم)"; return;
+    }
     try {
       const f0 = $("#shClose"), own = f0?.fl?.dataset.touched ? toPiasters(f0.fl.value) : null;
       const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, ...(own != null ? { float_left: own } : {}) } });
@@ -4123,6 +4127,7 @@ async function viewShift(opts = {}) {
     } catch { out.innerHTML = ""; }
   }
   $("#shClose")?.fl?.addEventListener("input", (e) => { e.target.dataset.touched = "1"; splitSoon(); });
+  $("#shClose")?.ho?.addEventListener("change", splitSoon);
   if ($("#shTargetF")) {
     const tf = $("#shTargetF"), sum = () => { let t = 0; tf.querySelectorAll("[data-t]").forEach((i) => { t += toPiasters(i.value) || 0; }); $("#shTargetSum").textContent = `الإجمالي ${money(t)} ج`; };
     api("/api/cash/float-target").then((t) => { tf.querySelectorAll("[data-t]").forEach((i) => { i.value = money(t[i.dataset.t] || 0); }); sum(); }).catch(() => {});

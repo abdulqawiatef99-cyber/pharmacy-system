@@ -3101,4 +3101,6 @@ window.I18N_EN = {
 "في الطريق": "On the way",
 "اكتب الكمية رقم صحيح (علبة واحدة على الأقل)": "Type the quantity as a whole number (at least one box)",
 "0 ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك": "0 EGP — no notes make this exact amount, count it by hand",
+"كل الفلوس هتفضل في الدرج للشيفت الجاي": "All the cash stays in the drawer for the next shift",
+"(محدش استلم)": "(nobody received it)",
 };
