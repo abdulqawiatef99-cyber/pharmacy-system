@@ -27,7 +27,7 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
-DEFAULT_RETURN_DAYS = 7          # owner, part 3 item 6a: default 7 days; Settings can change it
+DEFAULT_RETURN_DAYS = 14         # owner 21/11 10:17: «مدة المرتجع 14 يوم»; Settings can change it
 
 
 def egp(piasters: int) -> str:

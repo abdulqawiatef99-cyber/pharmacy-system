@@ -157,7 +157,7 @@ class TestFindForReturn(Base):
         g = next(x for x in self.s.find_for_return(self.ctx, "01000000001") if x["id"] == sid)
         self.assertEqual((g["lines"][0]["sold"], g["lines"][0]["returned"], g["lines"][0]["returnable"]), (3, 1, 2))
         self.assertTrue(g["in_window"])
-        self.assertEqual(g["window_days"], 7)
+        self.assertEqual(g["window_days"], 14)
         self.assertEqual(self.s.find_for_return(self.ctx, "  "), [])
 
 
