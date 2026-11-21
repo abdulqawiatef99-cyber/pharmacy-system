@@ -39,3 +39,16 @@ class TestDayReviewVoids(SalesCase):
         self.assertEqual(r["sales"]["voided_total"], d["total"])   # and voided today
         self.assertEqual(r["by_method"]["cash"], 0)                # the drawer got nothing in the end
         self.assertEqual(r["net_sales"], 0)
+
+
+class TestDayReviewDeliveryVoid(SalesCase):
+    def test_a_voided_delivery_leaves_cash_alone(self):
+        """Codex P2 on #407: a delivery's cash never reached the drawer, so its void comes off the delivery line."""
+        sid = self.s.create(self.ctx)
+        self.s.set_details(self.ctx, sid, {"kind": "delivery", "delivery": {"address": "عنوان تجربة"}})
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        self.s.void(self.ctx, sid, "غلط في الفاتورة")
+        r = day_review(self.db, self.ctx, today())
+        self.assertEqual(r["by_method"]["cash"], 0)
+        self.assertEqual(r["by_method"]["delivery_cash"], 0)

@@ -30,7 +30,9 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
         " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=? AND sale_no IS NOT NULL"
         " AND status IN ('completed','voided') AND completed_at>=? AND completed_at<?", (o, b, lo, hi)))
-    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t, coalesce(sum(paid_cash),0) cash,"
+    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t,"
+                   " coalesce(sum(CASE WHEN kind='delivery' THEN 0 ELSE paid_cash END),0) cash,"
+                   " coalesce(sum(CASE WHEN kind='delivery' THEN paid_cash ELSE 0 END),0) delivery_cash,"
                    " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
                    " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=?"
                    " AND status='voided' AND sale_no IS NOT NULL AND voided_at>=? AND voided_at<?", (o, b, lo, hi))
@@ -62,7 +64,7 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         "net_sales": s["total"] - refunded - voids["t"],
         "by_method": {"cash": s["cash"] - ret("cash") - voids["cash"], "card": s["card"] - ret("card") - voids["card"],
                       "transfer": s["transfer"] - voids["transfer"], "credit": s["credit"] - ret("credit") - voids["credit"],
-                      "delivery_cash": s["delivery_cash"]},
+                      "delivery_cash": s["delivery_cash"] - voids["delivery_cash"]},
         "credit_collected": collected,
         "purchases": pur, "supplier_returns": sret,
         "drawer": {"shifts": shifts, "expected": sum(x["expected_cash"] or 0 for x in shifts),
