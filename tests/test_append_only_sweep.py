@@ -17,7 +17,7 @@ class AppendOnlySweep(PlanCase):
         self.sell(self.pan, payments=[{"method": "credit", "amount": 4000}], customer=cust, units=2)   # ledger + safety
         self.call("POST", "/api/cash/movements", json={"amount": 500, "kind": "payout", "note": "تجربة"})
         sup = cat.create_supplier(self.db, self.ctx, name="مورد تجربة")
-        self.call("POST", f"/api/suppliers/{sup}/pay", json={"amount": 1000, "method": "cash"})
+        self.call("POST", f"/api/suppliers/{sup}/pay", json={"amount": 1000, "method": "cash", "note": "دفعة مقدمة متفق عليها"})
 
     def test_no_row_of_any_ledger_can_be_changed_or_deleted(self):
         conn = sqlite3.connect(self.db.path)                         # straight to the file, no program rules
