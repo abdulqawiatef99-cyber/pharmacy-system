@@ -14,7 +14,7 @@ import re
 from ..core.permissions import Context
 from ..db import Database
 from . import gs1
-from .normalize import normalize_barcode, normalize_text
+from .normalize import normalize_barcode, normalize_text, spelling_key, spelling_sql
 
 # Windows Arabic (101) layout: English key -> Arabic character
 _EN_AR = {
@@ -80,6 +80,28 @@ def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None
     return [dict(r) for r in rows]
 
 
+def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | None, skip: set) -> list[dict]:
+    """Arabic spelling variants (update 1): بكتول / بيكتول, ى / ي, ة / ه, every word of the query in the name's
+    spelling key (`spelling_key` / `spelling_sql`); only after the exact patterns found too few."""
+    toks = [t for t in spelling_key(q).split() if _ARABIC.search(t)]
+    if not toks:
+        return []
+    csql, cparams = _cat_sql(category)
+    col = spelling_sql("coalesce(name_ar_norm,'')")
+    where = " AND ".join(f"{col} LIKE ?" for _ in toks)
+    rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
+                  " ORDER BY length(coalesce(name_ar_norm,'')) LIMIT ?",
+                  (org_id, *[f"%{t}%" for t in toks], *cparams, limit + len(skip)))
+    return [dict(r) for r in rows if r["id"] not in skip]
+
+
+def _exact_code(db: Database, org_id: str, q: str) -> list[dict]:
+    """The code typed in full comes first (launch day: «3796» found nothing): the item code as typed or in any
+    letter case, and E<code> (an E-Stock item moved without a code of its own gets E + its E-Stock id)."""
+    return [dict(r) for r in db.all("SELECT * FROM items WHERE org_id=? AND status='active' AND"
+                                    " (lower(code)=lower(?) OR code=?) ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
+
+
 def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
     """{'items': [...], 'hint': None | {'kind': 'layout', 'query': 'aspocid'}}.
     Hidden items are left out for people without items.hidden."""
@@ -111,11 +133,13 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         if r:
             return {"items": [dict(r)], "hint": None}
     found: dict[str, dict] = {}
-    r = db.one("SELECT * FROM items WHERE org_id=? AND code=? AND status='active'", (ctx.org_id, q))
-    if r:
-        found[r["id"]] = dict(r)
+    for r in _exact_code(db, ctx.org_id, q):
+        found.setdefault(r["id"], r)
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
+    if len(found) < limit and "%" not in q:
+        for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
+            found.setdefault(row["id"], row)
     hint = None
     if not found:
         alt = swap_layout(q)

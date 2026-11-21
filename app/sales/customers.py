@@ -11,9 +11,14 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 
 
+from ..catalog.normalize import spelling_key, spelling_sql
+
+# update 1: a name also matches by its Arabic spelling key (جالهوم = جلهوم, ى/ي, ة/ه), every word of the query
 SEARCH_SQL = ("c.name LIKE ? OR coalesce(c.name_alt,'') LIKE ? OR coalesce(c.phone,'') LIKE ?"
-              " OR coalesce(c.phone2,'') LIKE ? OR coalesce(c.phone3,'') LIKE ?")
-SEARCH_N = 5
+              " OR coalesce(c.phone2,'') LIKE ? OR coalesce(c.phone3,'') LIKE ?"
+              f" OR ({spelling_sql('c.name')} LIKE ? AND ? <> '%%')"
+              " OR (" + spelling_sql("coalesce(c.name_alt,'')") + " LIKE ? AND ? <> '%%')")
+SEARCH_N = 9
 TEXT_FIELDS = ("name", "name_alt", "address1", "address2", "phone", "phone2", "phone3", "notes")
 
 
@@ -44,7 +49,8 @@ def search_terms(q: str) -> list[str]:
             ph = c
     except ValidationFailed:
         pass
-    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3
+    key = "%" + "%".join(spelling_key(q).split()) + "%"
+    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3 + [key, key] * 2
 
 
 def phone_forms(ph: str) -> list[str]:

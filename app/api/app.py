@@ -1558,7 +1558,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
+        limit = _qlimit(req, 20, 200)
+        # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
+        stock_first = req.query_params.get("stock") in ("first", "only")
+        only_stock = req.query_params.get("stock") == "only"
+        res = item_search(db, ctx, req.query_params.get("q", ""), min(200, limit * 10) if stock_first else limit,
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -1573,8 +1577,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 (ctx.org_id, ctx.branch_id, *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+        hidden_no_stock = 0
+        if stock_first and rows and "stock_qty" in rows[0]:
+            has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
+            rows = sorted(rows, key=lambda r: not has(r))                          # stable: the search order inside
+            if only_stock:
+                hidden_no_stock = sum(not has(r) for r in rows)
+                rows = [r for r in rows if has(r)]
+        rows = rows[:limit]
         if req.query_params.get("meta") == "1":
-            return J({"items": rows, "hint": res["hint"]})
+            return J({"items": rows, "hint": res["hint"], "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler

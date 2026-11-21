@@ -195,8 +195,8 @@ const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.n
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
   ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
-async function findItems(q, limit = 8) {
-  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1`);
+async function findItems(q, limit = 8, stock = "") {
+  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}`);
   return r;
 }
 const hintHtml = (h) => (!h ? "" : h.kind === "layout"
@@ -3204,6 +3204,7 @@ async function viewPos() {
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
         <input id="posQ" class="big" autocomplete="off" autofocus></label>
+      <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
       <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
@@ -3226,13 +3227,21 @@ async function viewPos() {
   }));
   $("#tabNew").addEventListener("click", newTab);
   const q = $("#posQ");
+  q.value = "";                                   // update 1: never the old text after a reload
+  $("#posAll").addEventListener("change", (e) => {
+    try { localStorage.setItem("posAll", e.target.checked ? "1" : "0"); } catch { /* per-viewer only */ }
+    if (q.value.trim()) search(false, true).catch(() => {});
+    q.focus();
+  });
   let res = [], liveSeq = 0, liveT = null;
   // live = while typing: only lists results, never adds; a live answer that arrives after newer typing or an Enter
   // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
   const search = async (unit, live = false, given = null) => {
     const v = given ?? q.value.trim(); if (!v) return;
     const mine = live ? ++liveSeq : null;
-    const found = await findItems(v);
+    const isScan = /^\d{6,}$/.test(v) || /^01\d{14}/.test(v);
+    // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
+    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only");
     if (live && mine !== liveSeq) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
@@ -3246,7 +3255,10 @@ async function viewPos() {
         ${r.stock_qty ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>
         ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}`
         : `<span class="badge b-err">✕ ناقص</span>`}
-        ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("") || `<p class="muted">لا توجد نتائج</p>`;
+        ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
+      + (found.hidden_no_stock ? `<p class="muted small">${found.hidden_no_stock} صنف رصيده صفر مش ظاهر — <a href="#" id="posShowZero">اعرضهم</a></p>` : "")
+      || `<p class="muted">لا توجد نتائج</p>`;
+    $("#posShowZero")?.addEventListener("click", (e) => { e.preventDefault(); $("#posAll").checked = true; $("#posAll").dispatchEvent(new Event("change")); });
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
@@ -3282,6 +3294,13 @@ async function viewPos() {
 }
 
 
+const posShowAll = () => { try { return localStorage.getItem("posAll") === "1"; } catch { return false; } };
+// a page restored from the browser's back/forward cache keeps typed text: search boxes start empty (update 1)
+window.addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  ["#posQ", "#q"].forEach((sel) => { const el = $(sel); if (el) el.value = ""; });
+  const r = $("#posRes"); if (r) r.innerHTML = "";
+});
 // أزرار البيع السريع: اللي الصاحب ثبّتها، وبعدها الأكتر بيعًا آخر 30 يوم
 let QUICK = null;
 const quickOpen = () => { try { return localStorage.getItem("posQuick") !== "0"; } catch { return true; } };
