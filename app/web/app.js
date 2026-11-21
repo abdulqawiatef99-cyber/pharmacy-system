@@ -3762,12 +3762,12 @@ function currentPayments() {
   return [{ method: POS.method, amount: SALE.total, channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
 }
 
+// a discount still being typed (line or invoice): saved before completion like a delivery field (Codex #400)
+const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");
 async function complete(findings) {
   // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
   // for a missing address that is right there on the screen (device test 11/01)
-  // the same for a discount just typed (Codex on #400: F9 / F10 completed at the old total)
-  const act = document.activeElement;
-  if (act?.dataset?.dl || act?.dataset?.disc || act?.id === "posInvDisc") act.blur();
+  if (document.activeElement?.dataset?.dl || isDiscField(document.activeElement)) document.activeElement.blur();
   await POS.saving;
   // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
   // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows

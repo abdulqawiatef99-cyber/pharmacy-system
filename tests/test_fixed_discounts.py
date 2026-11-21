@@ -345,7 +345,8 @@ class CodexReview400Round4(FixedCase):
 class CodexKeyboardCompletion(unittest.TestCase):
     def test_a_discount_being_typed_is_saved_before_f9(self):
         body = _re.search(r"\nasync function complete\(findings\) \{.*?\n  await POS\.saving;", _JS, _re.S).group(0)
-        self.assertIn('act?.dataset?.disc || act?.id === "posInvDisc"', body)
+        self.assertIn("isDiscField(document.activeElement)) document.activeElement.blur()", body)
+        self.assertIn('const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");', _JS)
         for fn in (r"\nasync function patchLine\(", r"const invDisc = async \(\) =>"):
             block = _JS[_re.search(fn, _JS).start():][:900]
             self.assertIn("POS.saving = (async () =>", block, fn)
