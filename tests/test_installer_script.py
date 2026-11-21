@@ -32,5 +32,23 @@ class TestInstallerStopsServer(unittest.TestCase):
         self.assertRegex(CODE, r"if not StopAndWait\(\) then\s+Result := ")
 
 
+class TestInstallerSupportedWindows(unittest.TestCase):
+    """Owner 21/11 (part 3): the installer refuses Windows older than 10 and 32-bit Windows (the
+    embedded Python is amd64), instead of installing a program that cannot start."""
+    SETUP = ISS[ISS.index("[Setup]"):ISS.index("[Languages]")]
+
+    def test_windows_10_or_newer(self):
+        self.assertRegex(self.SETUP, r"(?m)^MinVersion=10\.0\s*$")
+        self.assertNotRegex(self.SETUP, r"(?m)^OnlyBelowVersion=")
+
+    def test_64_bit_only(self):
+        self.assertRegex(self.SETUP, r"(?m)^ArchitecturesAllowed=x64compatible\s*$")
+        self.assertRegex(self.SETUP, r"(?m)^ArchitecturesInstallIn64BitMode=x64compatible\s*$")
+
+    def test_embedded_python_is_amd64(self):
+        wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "windows-installer.yml")
+        self.assertIn("-embed-amd64.zip", wf.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
