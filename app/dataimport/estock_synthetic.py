@@ -78,7 +78,7 @@ def tables(scale: float = 1.0, seed: int = 1, wide: bool = True) -> dict[str, li
              "product_name_en": f"{_word(rnd, _EN, 7).title()} {rnd.choice((50, 100, 250, 500, 1000))}mg Tab",
              "product_name_ar": f"{_word(rnd, _AR, 6)} أقراص", "product_scientific_name": _word(rnd, _EN, 9),
              "company_id": str(rnd.randint(1, 300)), "group_id": str(rnd.randint(1, 40)),
-             "product_drug": rnd.choice("1110"), "deleted": "0", "active": "1",
+             "product_drug": rnd.choice("1110"), "deleted": "1", "active": "1",
              "sell_price": f"{sell:.4f}", "buy_price": f"{sell * rnd.uniform(0.7, 0.92):.4f}",
              "product_disc1": "0", "product_disc2": "0", "product_unit1": "1",
              "product_unit2": "2" if pack > 1 else "", "product_unit1_2": f"{pack}.0000" if pack > 1 else "",

@@ -415,6 +415,15 @@ def flag(v) -> bool | None:
     return True if s in _TRUE else False if s in _FALSE else None
 
 
+def product_inactive(r: dict) -> bool:
+    """Products: on the pharmacy's live E-Stock (launch day 21/11) `deleted` is '1' on 30,269 of the 30,508 rows
+    with active='1', so deleted='1' does NOT mean deleted. (active, deleted) counts: (1,1)=30269, (0,1)=225,
+    (0,0)=14. Rule (manager 21/11): inactive = active is '0' OR deleted is '0'; anything else stays active."""
+    def no(v) -> bool:                           # an empty cell is unknown, not '0'
+        return str(v or "").strip() != "" and flag(v) is False
+    return no(r.get("active")) or no(r.get("deleted"))
+
+
 def ident(v) -> str:
     """E-Stock ids are decimal(18,0): '123' and '123.0' are the same id."""
     s = str(v or "").strip()
@@ -578,8 +587,7 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             p.issue("Products", pid, code, "product_drug", r.get("product_drug"), "دواء/غير دواء: غير معروف",
                     kind="info")
         it["is_drug"] = None if drug is None else int(drug)
-        deleted, active = flag(r.get("deleted")), flag(r.get("active"))
-        it["inactive"] = bool(deleted) or active is False
+        it["inactive"] = product_inactive(r)
         price = dec(r.get("sell_price"))
         if price is None or price <= 0:
             p.issue("Products", pid, code, "sell_price", r.get("sell_price") or "(فاضي)",
@@ -2208,7 +2216,14 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
     n_items = db.one("SELECT count(*) n FROM items WHERE org_id=?", (ctx.org_id,))["n"]
     if n_items != len(plan.items) or len(item_map) != len(plan.items):
         mm.append({"what": "items", "code": "", "name": "", "detail": f"الأصناف {n_items}، إي ستوك {len(plan.items)}", "value": Decimal(0)})
-    out["items"] = {"estock": len(plan.items), "program": n_items}
+    # active counts too (launch day 21/11: a wrong deleted/active reading made almost every item inactive while
+    # the total still matched)
+    n_active = db.one("SELECT count(*) n FROM items WHERE org_id=? AND status='active'", (ctx.org_id,))["n"]
+    e_active = sum(not it["inactive"] for it in plan.items)
+    if n_active != e_active:
+        mm.append({"what": "items", "code": "", "name": "",
+                   "detail": f"الأصناف الشغالة {n_active}، إي ستوك {e_active}", "value": Decimal(0)})
+    out["items"] = {"estock": len(plan.items), "program": n_items, "estock_active": e_active, "program_active": n_active}
     for kind, table, ltable, col, parties in (("suppliers", "suppliers", "supplier_ledger", "supplier_id", plan.suppliers),
                                              ("customers", "customers", "customer_ledger", "customer_id", plan.customers)):
         n = db.one(f"SELECT count(*) n FROM {table} WHERE org_id=?", (ctx.org_id,))["n"]

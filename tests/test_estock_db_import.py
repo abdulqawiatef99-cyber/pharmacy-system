@@ -28,7 +28,7 @@ OLD = "2025-01-01T10:00:00.000"
 
 def product(pid, code, en, ar="", **kw):
     r = {"product_id": str(pid), "product_code": code, "product_name_en": en, "product_name_ar": ar,
-         "product_scientific_name": "", "company_id": "1", "product_drug": "1", "deleted": "0", "active": "1",
+         "product_scientific_name": "", "company_id": "1", "product_drug": "1", "deleted": "1", "active": "1",
          "sell_price": "30.0000", "buy_price": "20.0000", "product_disc1": "0", "product_disc2": "0",
          "product_unit1": "1", "product_unit2": "", "product_unit3": "", "product_unit1_2": "", "product_unit1_3": "",
          "unit2_sell_price": "", "unit3_sell_price": "", "unit2_sell_price_clause": "", "unit3_sell_price_clause": "",
@@ -57,7 +57,7 @@ def base_tables():
         product(2, "101", "Testofen Syrup", buy_price="-5.0000", sell_price="25.5000"),
         product(3, "102", "Testaclav 1g Tab", product_unit2="2", product_unit3="3", product_unit1_2="2",
                 product_unit1_3="14", product_disc1="-6076", unit2_sell_price_clause="-3.0000", sell_price="140.0000"),
-        product(4, "", "", "مرهم تجربة", deleted="1", product_int_code="6220000000017", sell_price="0.0000"),
+        product(4, "", "", "مرهم تجربة", active="0", product_int_code="6220000000017", sell_price="0.0000"),
         product(6, "100", "Testamol Copy Tab"),
     ]
     t["Product_Amount"] = [
@@ -155,6 +155,41 @@ class Base(DBTestCase):
             r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)")) else ""
         return self.db.one("SELECT coalesce(sum(m.qty_delta),0) q FROM stock_movements m LEFT JOIN batches b ON"
                            f" b.id=m.batch_id WHERE m.item_id=?{own}", (self.item(code)["id"],))["q"]
+
+
+class TestProductActiveFlags(Base):
+    """Launch day 21/11: E-Stock Products.deleted is '1' on 30,269 of 30,508 live items, so it does not mean
+    deleted. Rule: inactive = active is '0' OR deleted is '0' (live counts (1,1)=30269, (0,1)=225, (0,0)=14)."""
+
+    def test_rule_on_every_combination(self):
+        from app.dataimport.estock_db import product_inactive
+        cases = {("1", "1"): False, ("0", "1"): True, ("0", "0"): True, ("1", "0"): True,
+                 ("1", ""): False, ("", "1"): False, ("", ""): False}
+        for (active, deleted), want in cases.items():
+            self.assertIs(product_inactive({"active": active, "deleted": deleted}), want, (active, deleted))
+
+    def test_live_pattern_moves_active_and_reconciles_active_counts(self):
+        tb = base_tables()
+        tb["Products"].append(product(7, "107", "Testlive Tab", active="1", deleted="1"))
+        tb["Products"].append(product(8, "108", "Teststopped Tab", active="0", deleted="1"))
+        tb["Products"].append(product(9, "109", "Testgone Tab", active="0", deleted="0"))
+        res = self.run_import(tables=tb)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual([self.item(c)["status"] for c in ("100", "107", "108", "109", "E4")],
+                         ["active", "active", "inactive", "inactive", "inactive"])
+        rec = res["reconciliation"]["items"]
+        self.assertEqual(rec["estock_active"], rec["program_active"])
+        self.assertEqual(rec["program_active"],
+                         self.db.one("SELECT count(*) n FROM items WHERE status='active'")["n"])
+
+    def test_an_active_count_difference_is_a_mismatch(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"])
+        # an item switched off behind the move's back: the totals still agree, the active counts do not
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET status='inactive' WHERE code='100'")
+        out = estock_db.reconcile(self.db, self.ctx, res["plan"], res["runs"], estock_db.Export(self._last), None)
+        self.assertIn("الأصناف الشغالة", " ".join(m["detail"] for m in out["mismatches"]))
 
 
 class TestFullMove(Base):
