@@ -1582,8 +1582,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 f"SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? AND branch_id=?"
                 f" AND item_id IN ({','.join('?' * len(ids))}) GROUP BY item_id",
                 (ctx.org_id, ctx.branch_id, *ids))}
+            from ..sales.service import local_today as _today_local
+            # U2-35: the nearest expiry still to come of what is on the shelf
+            soon = {r["item_id"]: r["e"] for r in db.all(
+                f"SELECT sb.item_id, min(b.expiry_date) e FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date>=?"
+                f" AND sb.item_id IN ({','.join('?' * len(ids))}) GROUP BY sb.item_id",
+                (ctx.org_id, ctx.branch_id, _today_local().isoformat(), *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+                r["nearest_expiry"] = soon.get(r["id"])
         hidden_no_stock = 0
         if stock_first and rows and "stock_qty" in rows[0]:
             has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
@@ -2027,6 +2035,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return Response(suggestions_xlsx(rows, db, ctx), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
+
+    @handler
+    async def proc_smart(req):
+        from ..procurement import smart_order
+        ctx, qp = ctx_of(req), req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(smart_order.smart_order, db, ctx, scope=qp.get("scope") or "default",
+                                expensive_from=dear, **_sugg_params(req)))
+
+    @handler
+    async def proc_order_xlsx(req):
+        from ..procurement import smart_order
+        b = await body(req)
+        return Response(smart_order.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
 
     @handler
     async def proc_health(req):
@@ -2994,6 +3023,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suggestions", proc_suggest),
         Route("/api/procurement/suggestions.xlsx", proc_suggest_xlsx),
         Route("/api/procurement/health", proc_health),
+        Route("/api/procurement/smart", proc_smart),
+        Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),

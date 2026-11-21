@@ -21,7 +21,7 @@ from .normalize import FORM_GROUP, ingredient_key, normalize_text
 
 SOON_DAYS = 180          # "قرب يخلص": اتباع الأول
 MAX_MEMBERS = 200
-QUICK_DAYS = 30
+QUICK_DAYS = 14                 # U2-18 (owner 21/11): the last two weeks, refreshed daily
 QUICK_LIMIT = 24
 _COLS = ("id, name_en, name_ar, strength, strength_norm, dosage_form, manufacturer, pack_size, base_unit_name,"
          " pack_unit_name, public_price, is_service, hidden, rx_required, misuse_risk, sale_note, category_id,"
@@ -303,7 +303,14 @@ def quick_items(db: Database, ctx: Context, today: date | None = None) -> dict:
             " GROUP BY item_id", (ctx.org_id, ctx.branch_id, *ids))}
         for r in rows:
             r["stock_qty"] = q.get(r["id"], 0)
-    return {"items": rows, "days": QUICK_DAYS, "limit": QUICK_LIMIT}
+    # U2-34: the services (blood pressure, injection...) as their own quick group, never pushed out by best sellers
+    services = _visible(ctx, db.all(f"SELECT {_COLS} FROM items WHERE org_id=? AND status='active' AND is_service=1"
+                                    " ORDER BY coalesce(name_ar, name_en) LIMIT 12", (ctx.org_id,)))
+    return {"items": rows, "days": QUICK_DAYS, "limit": QUICK_LIMIT, "services": services,
+            "suggested_services": [] if services else SUGGESTED_SERVICES}
+
+
+SUGGESTED_SERVICES = ["قياس ضغط", "قياس سكر", "ضرب حقنة", "تركيب كانيولا"]      # the owner prices them himself
 
 
 def backfill_ingredient_keys(db: Database) -> int:
