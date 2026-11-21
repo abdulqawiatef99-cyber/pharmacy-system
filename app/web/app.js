@@ -278,7 +278,9 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // part 3 item 2: an opening balance corrected after the move
   /^\/api\/opening-balances\/(supplier|customer)\/[^/]+$/,
   // part 3 item 6a: a return with its replacement sale
-  /^\/api\/sales\/[^/]+\/exchange$/];
+  /^\/api\/sales\/[^/]+\/exchange$/,
+  // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
+  /^\/api\/supplier-returns$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -2834,12 +2836,29 @@ async function viewExchange() {
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
       <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
-      <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div>
+      <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div><div id="exSafe" class="mt"></div>
       <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
         <label class="f" id="exChW" hidden>الجهاز<select id="exCh">${(CHANNELS || []).filter((c) => c.kind === "card").map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
         <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
     $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
     draft = null; drawDraft(); totals();
+    let findings = [];
+    // safety findings of the replacement items: shown here, decided here, sent with the exchange (Codex P2 on #396)
+    const showFindings = (fs) => {
+      findings = fs || [];
+      $("#exSafe").innerHTML = findings.length ? `<div class="panel"><h3>فحص السلامة الدوائية</h3>${findings.map((f, i) => `<div class="mt"><b>${esc(f.message || f.title || "")}</b>
+        ${["override", "block", "acknowledge"].includes(f.requires) ? `<input data-xdec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("")}</div>` : "";
+    };
+    const decisions = () => {
+      const d = {};
+      document.querySelectorAll("[data-xdec]").forEach((inp) => {
+        const f = findings[+inp.dataset.xdec];
+        if (!f) return;
+        if (f.requires === "acknowledge") d[inp.dataset.xdec] = inp.value || "تمت المراجعة";
+        else if (inp.value.trim()) d[inp.dataset.xdec] = inp.value.trim();
+      });
+      return d;
+    };
     document.querySelectorAll("[data-xr]").forEach((i) => i.addEventListener("input", () => totals()));
     $("#exRm").addEventListener("change", () => totals());
     $("#exAdd").addEventListener("submit", async (e) => {
@@ -2860,10 +2879,13 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: newKey(), receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), receipt: true } });
+          const dv = r.devices || {};
+          if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${r.sale_id}`);    // Codex P2 on #396
+          if (dv.message) toast(dv.message, dv.receipt === "failed");
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
-        } catch (err) { toast(err.message, true); }
+        } catch (err) { toast(err.message, true); if (err.code === "safety_unresolved") showFindings(err.details?.findings); }
       });
     });
   };
