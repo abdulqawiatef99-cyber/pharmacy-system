@@ -2494,6 +2494,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def day_review_api(req):
+        from ..reports.day_review import day_review
+        return J(await off_loop(day_review, db, ctx_of(req), req.query_params.get("day") or None))
+
+    @handler
     async def slow_requests(req):
         ctx_of(req).require("settings.manage")
         return J({"threshold_ms": SLOW_MS, "requests": list(SLOW_LOG)[::-1]})
@@ -3051,6 +3056,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/system/slow-requests", slow_requests),
+        Route("/api/reports/day-review", day_review_api),
         Route("/api/cash/shifts/{id}", cash_report),
         Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
         Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
