@@ -303,6 +303,8 @@ def create_from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_id
     why = (partial_bonus_reason or "").strip()[:200]
     with db.transaction():
         inv_row = _invoice(db, ctx, supplier_id, invoice_id=invoice_id)
+        if inv_row["branch_id"] != ctx.branch_id:      # its units are that branch's stock (independent review)
+            raise Conflict("الفاتورة دي اتسلمت في فرع تاني؛ المرتجع منها بيتعمل من نفس الفرع", code="other_branch")
         by_id = {l["id"]: l for l in _invoice_lines(db, ctx, inv_row["id"])}
         plan, partial = [], []
         ids = [str(ln.get("purchase_line_id") or "") for ln in lines if isinstance(ln, dict)]

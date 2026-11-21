@@ -235,3 +235,12 @@ class TestCodexReview397(Base):
         with self.assertRaises(Conflict):
             returns.create_from_invoice(self.db, self.ctx, self.sup, self.inv,
                                         [{"purchase_line_id": line["id"], "paid_units": 3, "reason": "expired"}])
+
+
+class TestIndependentReview(Base):
+    def test_a_return_from_an_invoice_is_made_in_its_own_branch(self):
+        other = replace(self.ctx, branch_id="another-branch")
+        with self.assertRaises(Conflict) as e:
+            returns.create_from_invoice(self.db, other, self.sup, self.inv, [{"purchase_line_id": self.lines[self.tax]["id"],
+                                        "paid_units": 1, "reason": "expired"}])
+        self.assertEqual(e.exception.code, "other_branch")

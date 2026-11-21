@@ -260,3 +260,22 @@ console.log(JSON.stringify({ printed, toasts }));
         self.assertIn("exchangeDevices(r);", js)
         self.assertIn("expected_new_total: got.t.new_total", js)
         self.assertIn("findings = []; if ($(\"#exSafe\")) $(\"#exSafe\").innerHTML = \"\";", js)   # cleared on a change
+
+
+class TestIndependentReview(Base):
+    """Independent review (part 3): a contract customer's exchange whose replacement draft has no customer."""
+
+    def test_contract_customer_with_an_empty_customer_on_the_draft_completes(self):
+        from app.sales import contracts
+        cust = self.s.create_customer(self.ctx, name="عميل تعاقد", credit_limit=100000)
+        cid = next(c["id"] for c in contracts.save(self.db, self.ctx, {"name": "تعاقد تجربة", "discount_local_bp": 1000,
+                                                                        "discount_imported_bp": 1000}))
+        contracts.link_customer(self.db, self.ctx, cust, cid)
+        sid = self.sell(self.a, 2, customer=cust)
+        new = self.draft(self.b, 1)                      # a draft with no customer
+        try:
+            r = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
+        except Conflict as e:                            # the contract price is shown once to confirm, kept
+            self.assertEqual(e.code, "price_changed")
+            r = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
+        self.assertEqual(r["sale"]["customer_id"], cust)

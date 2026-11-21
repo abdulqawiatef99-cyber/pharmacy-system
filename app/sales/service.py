@@ -1255,8 +1255,15 @@ class Sales:
                 return {**json.loads(a["after_json"]), "sale": self.get(ctx, new_sid), "replayed": True}
         # a contract that changed since the draft was priced: reprice it for good (outside the exchange's
         # transaction, which would roll the new price back) and let the cashier confirm (Codex P2 on #397)
-        if self.db.one("SELECT 1 FROM sales WHERE id=? AND org_id=? AND status='draft'", (new_sid, ctx.org_id)) \
-                and self._reprice_contract(ctx, new_sid):
+        pre = self.db.one("SELECT s.customer_id, o.customer_id orig FROM sales s, sales o WHERE s.id=? AND s.org_id=?"
+                          " AND s.status='draft' AND o.id=? AND o.org_id=?", (new_sid, ctx.org_id, sid, ctx.org_id))
+        if pre and pre["orig"] and not pre["customer_id"]:
+            # the replacement is the same customer's: set before the contract check, so a contract price is
+            # settled here and not inside the transaction below (independent review, part 3)
+            with self.db.transaction():
+                self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=? AND status='draft'",
+                                (pre["orig"], new_sid, ctx.org_id))
+        if pre and self._reprice_contract(ctx, new_sid):
             raise Conflict("تغيّر خصم التعاقد على فاتورة الاستبدال، راجع الإجمالي الجديد", code="price_changed",
                            details={"reason": "contract"})
         with self.db.transaction():
