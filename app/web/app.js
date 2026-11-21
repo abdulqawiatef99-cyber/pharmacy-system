@@ -1270,12 +1270,11 @@ function purchaseLabels(cur) {
     if (!pick.length) { toast("علّم صنف واحد على الأقل", true); return; }
     const n = pick.reduce((a, x) => a + x.count, 0);
     if (!confirm(`هتطبع ${n} ملصق لـ ${pick.length} صنف؟`)) return;
-    try {
-      const r = await api("/api/print/labels", { method: "POST", body: { items: pick } });
-      const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
-      try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
-      toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); d.close();
-    } catch (er) { toast(er.message, true); }
+    const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
+    try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
+    d.close();
+    // the program's own label path: label printer, or the browser / A4 page (Codex P2 on #406)
+    await printLabels(pick.map((x) => [x.id, x.count]));
   });
   d.showModal();
 }

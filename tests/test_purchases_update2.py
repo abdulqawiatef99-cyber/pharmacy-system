@@ -267,3 +267,30 @@ class TestReviewFixes(PurchaseBase):
             d = self.p.add_line(self.ctx, inv_id, {"item_id": self.item, "qty": 2, "public_price": "10", "discount_pct": "20",
                                                    "unit_net_price": "8", "batch_no": "B", "expiry_date": e}, None)
         self.assertTrue([x for x in d["issues"] if x["code"] == "duplicate_line"])
+
+
+class TestCodexPayable(PurchaseBase):
+    def total(self, inv_id):
+        return self.p.get(self.ctx, inv_id)["invoice"]["computed_total"]
+
+    def line(self, inv_id, **kw):
+        base = {"item_id": self.item, "public_price": "1000", "discount_pct": "20", "batch_no": "B",
+                "expiry_date": (date.today() + timedelta(days=700)).isoformat()}
+        return self.p.add_line(self.ctx, inv_id, {**base, **kw}, None)
+
+    def test_split_keeps_the_payable_total(self):
+        inv_id = self.p.create_manual(self.ctx)
+        d = self.line(inv_id, qty=2, unit_net_price="800", tax_amount="2", line_total="1601")
+        before = self.total(inv_id)
+        d = self.p.split_line(self.ctx, inv_id, d["lines"][0]["id"], 1, "1129", None, None)
+        self.assertEqual(self.total(inv_id), before)
+
+    def test_merge_keeps_the_payable_total(self):
+        inv_id = self.p.create_manual(self.ctx)
+        self.line(inv_id, qty=1, unit_net_price="800", tax_amount="8", line_total="800")      # printed without tax
+        d = self.line(inv_id, qty=1, unit_net_price="800", tax_amount="8", line_total="808")  # printed with tax
+        before = self.total(inv_id)
+        dup = next(i for i in d["issues"] if i["code"] == "duplicate_line")
+        d = self.p.merge_lines(self.ctx, inv_id, dup["details"]["other_line"], dup["line_id"], None)
+        self.assertEqual(self.total(inv_id), before)
+        self.assertEqual(len(d["lines"]), 1)
