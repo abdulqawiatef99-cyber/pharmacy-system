@@ -18,7 +18,8 @@ from dataclasses import dataclass, field as dc_field
 from datetime import date
 
 LOW_CONFIDENCE = 0.8
-ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch"}
+ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch",
+                  "short_expiry", "slow_before_expiry"}      # U2-22: approved only with a written reason
 
 MESSAGES = {
     "supplier_missing": "حدد المورد",
@@ -40,11 +41,14 @@ MESSAGES = {
     "net_above_public": "السعر الصافي أعلى من سعر الجمهور",
     "public_price_changed": "سعر الجمهور مختلف عن السعر المسجل للصنف",
     "expired": "الصنف منتهي الصلاحية",
-    "short_expiry": "صلاحية قصيرة",
+    "short_expiry": "صلاحية قصيرة: اكتب سبب قبولها",
+    "slow_before_expiry": "الكمية أكبر من اللي هيتباع قبل ما يقرب ينتهي: اكتب السبب",
     "expiry_missing": "تاريخ الصلاحية غير موجود",
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
-    "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة",
+    "duplicate_line": "الصنف مكرر في الفاتورة بنفس التشغيلة والصلاحية",
+    "duplicate_line_no_batch": "الصنف مكرر في الفاتورة بنفس الصلاحية (من غير تشغيلة)",
+    "same_item_other_expiry": "الصنف موجود في سطر تاني بصلاحية مختلفة (عادي: تشغيلتين)",
     "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
     "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
@@ -148,7 +152,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
     if not lines:
         add("error", "no_lines")
 
-    seen: dict[tuple, str] = {}
+    seen: dict[str, list] = {}
     for l in lines:
         lid = l["id"]
         src, conf = _j(l.get("field_sources")), _j(l.get("field_confidence"))
@@ -206,13 +210,27 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             if d < today:
                 add("error", "expired", lid, "expiry_date")
             elif (d - today).days < short_expiry_days:
-                add("warning", "short_expiry", lid, "expiry_date", days=(d - today).days)
+                # details without the day count: an acceptance must not expire at midnight (independent review)
+                add("error", "short_expiry", lid, "expiry_date", expiry=exp_date, qty=qty)
+                issues[-1].message += f" ({(d - today).days} يوم)"
         elif item is None or item.get("is_drug") != 0:
             add("warning", "expiry_missing", lid, "expiry_date")
-        key = (l.get("item_id"), (l.get("batch_no") or "").upper(), exp_date)
-        if l.get("item_id") and key in seen:
-            add("warning", "duplicate_line", lid, None, other_line=seen[key])
-        seen[key] = lid
+        # U2-3: the same item twice. Same batch and expiry: a real duplicate (merge it when the prices match too);
+        # no batch on either: said so; another expiry: normal (two lots), information only
+        if l.get("item_id"):
+            batch = (l.get("batch_no") or "").strip().upper()
+            earlier = seen.get(l["item_id"], [])
+            twin = next((o for o in earlier if o.get("expiry_date") == exp_date
+                         and (o.get("batch_no") or "").strip().upper() == batch), None)
+            if twin:
+                same = all(twin.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price",
+                                                             "expiry_precision")) \
+                    and twin.get("qty") is not None and l.get("qty") is not None
+                add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
+                    other_line=twin["id"], mergeable=same)
+            elif earlier and all(o.get("expiry_date") != exp_date for o in earlier):
+                add("info", "same_item_other_expiry", lid, None, other_line=earlier[0]["id"])
+            seen.setdefault(l["item_id"], []).append(l)
 
     for f in ("extra_discount", "extra_tax", "declared_total"):
         if (invoice.get(f) or 0) < 0:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from ..core import audit, notify
-from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..sales import cash
@@ -102,6 +102,17 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
     if not s:
         raise NotFound("المورد غير موجود")
     with db.transaction():
+        # U2-0: paying more than the pharmacy owes is refused; an advance payment is a rare real exception
+        # (owner / manager, with the reason written in the note). Read under the write lock.
+        due = balance(db, ctx.org_id, sid)
+        advance = amount > due
+        if advance:
+            if not ctx.allowed("suppliers.pay_advance"):      # the owner or a manager can approve it on the screen
+                raise Forbidden(f"المبلغ ({amount / 100:,.2f} ج) أكبر من المستحق للمورد ({max(due, 0) / 100:,.2f} ج)",
+                                code="approval_required", details={"permission": "suppliers.pay_advance",
+                                                                   "label": "دفعة مقدمة للمورد", "balance": due, "amount": amount})
+            if len((note or "").strip()) < 3:
+                raise ValidationFailed("الدفع أكبر من المستحق: اكتب السبب في الملاحظة", code="reason_required")
         lid = new_id()
         db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by, pay_method, pay_ref)"
                    " VALUES (?,?,?,?,'payment',?,?,?,?,?)", (lid, ctx.org_id, sid, -amount, None,
@@ -109,7 +120,9 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
                                                             ctx.user_id, method, ref))
         if method == "drawer":
             cash.record(db, ctx, -amount, "payout", lid, f"دفع للمورد {s['name']}")
-        audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method, "ref": ref})
+        audit.record(db, ctx, "supplier.payment", "supplier", sid, after={"amount": amount, "method": method, "ref": ref,
+                                                                    "advance": advance, "balance_before": due,
+                                                                    "approved_by": ctx.approver_id})
         notify.emit(db, ctx, "supplier_payment", "info", f"دفع {amount / 100:,.2f} ج إلى {s['name']}",
                     PAY_METHODS[method] + (f" {ref}" if ref else ""), "supplier", sid)
     if not ctx.can("suppliers.read"):

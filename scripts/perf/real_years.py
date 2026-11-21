@@ -354,8 +354,8 @@ def make_generator(a, work: Path):
                 self.stats["purchase_lines"] += 1
                 added += 1
             if added:
-                ver = self.db.one("SELECT version FROM purchase_invoices WHERE id=?", (inv,))["version"]
-                p.approve(ctx, inv, ver)
+                from loadgen import approve_with_reasons
+                approve_with_reasons(p, ctx, inv)
 
         def one_sale(self, ctx, day, recent, att):
             # real items carry real rules (expiry, interactions, limits): a refused sale is counted, not fatal
@@ -473,6 +473,13 @@ def purchase_flow(c, f: dict) -> dict:
             return {"error": f"line {k + 1} HTTP {code}"}
         ver = inv["invoice"]["version"]
     out = {"add line": {"median_ms": round(statistics.median(lat), 1), "max_ms": round(max(lat), 1)}}
+    for i in inv.get("issues", []):        # update 2 (U2-22): the near-expiry guards need the owner's written reason
+        if i["code"] in ("short_expiry", "slow_before_expiry") and not i["acknowledged"]:
+            code, inv, _, _ = c.req("POST", f"/api/purchases/{pid}/acknowledge", {
+                "version": ver, "code": i["code"], "line_id": i["line_id"], "reason": "بيانات تجربة: كمية متفق عليها"})
+            if code != 200:
+                return {"error": f"acknowledge HTTP {code}"}
+            ver = inv["invoice"]["version"]
     b = during_report(c, f, f"/api/purchases/{pid}/approve", "POST", {"version": ver})
     out["approve"] = b
     return out
