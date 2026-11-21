@@ -765,6 +765,13 @@ class Sales:
             approved = l.get("discount_approved_bp") if l["discount_approved_by"] else None
             if fixed and bp > ctx.discount_limit_bp and (approved is None or bp > approved):
                 raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
+        if preview["invoice_discount_amount"]:
+            # U2-0: a line removed after the invoice discount was typed can leave it bigger than the invoice;
+            # completing would swallow the items silently (independent review on U2-0)
+            left = preview["subtotal"] - sum(l["discount"] - l["invoice_share"] for l in preview["lines"])
+            if preview["invoice_discount_amount"] > left:
+                raise ValidationFailed(f"خصم الفاتورة ({egp(preview['invoice_discount_amount'])} ج) بقى أكبر من قيمتها"
+                                       f" ({egp(left)} ج) بعد تعديل الأصناف: عدّل الخصم", code="discount_exceeds_value")
         if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
             own = own_discount(preview["lines"])
             bp = equivalent_bp(own, preview["subtotal"])
@@ -1096,6 +1103,10 @@ class Sales:
         for l in draft["lines"]:
             if l["id"] != line_id or not l["discount_amount"]:
                 continue
+            if l["discount_amount"] > l["gross"]:     # U2-0: a discount bigger than the line is impossible, not a warning
+                raise ValidationFailed(f"الخصم ({egp(l['discount_amount'])} ج) أكبر من قيمة الصنف ({egp(l['gross'])} ج):"
+                                       " قلّل الخصم الأول",
+                                       code="discount_exceeds_value")
             fixed = l["discount"] - l["invoice_share"] - discount_of(l["gross"], l["discount_bp"])
             bp = equivalent_bp(fixed, l["gross"])
             if bp > ctx.discount_limit_bp:
@@ -1103,6 +1114,11 @@ class Sales:
             if bp > ctx.max_discount_bp:
                 self.db.execute("UPDATE sale_lines SET discount_approved_by=?, discount_approved_bp=? WHERE id=?",
                                 (ctx.approver_id, bp, l["id"]))
+        if draft.get("invoice_discount_amount"):
+            left = draft["subtotal"] - sum(l["discount"] - l["invoice_share"] for l in draft["lines"])
+            if draft["invoice_discount_amount"] > left:     # U2-0: more than what is left to pay is impossible
+                raise ValidationFailed(f"خصم الفاتورة ({egp(draft['invoice_discount_amount'])} ج) أكبر من قيمتها"
+                                       f" ({egp(left)} ج): قلّل الخصم الأول", code="discount_exceeds_value")
         if draft.get("invoice_discount_amount") or draft.get("invoice_discount_bp"):
             own = own_discount(draft["lines"])
             bp = equivalent_bp(own, draft["subtotal"])
@@ -1286,9 +1302,25 @@ class Sales:
                     got = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["received"]
                     unreceived = got < s["paid_transfer"]
                     received -= s["paid_transfer"] - got
-                refunded = self.db.one("SELECT coalesce(sum(total), 0) FROM sale_returns WHERE sale_id=? AND org_id=?"
-                                       " AND refund_method IN ('cash', 'card')", (sid, ctx.org_id))[0]
+                done = {r["refund_method"]: r["t"] for r in self.db.all(
+                    "SELECT refund_method, coalesce(sum(total), 0) t FROM sale_returns WHERE sale_id=? AND org_id=?"
+                    " AND refund_method IN ('cash', 'card') GROUP BY refund_method", (sid, ctx.org_id))}
+                refunded = done.get("cash", 0) + done.get("card", 0)
                 can = max(0, received - refunded)
+                # U2-0 (owner 21/11): a refund goes back by the way the money came in, never above what that way
+                # brought on this invoice. Back to a card / wallet: only money that came by card or transfer.
+                # Cash for an invoice paid by card is a rare real exception: owner or manager, with the reason.
+                by_cash = (s["paid_cash"] or 0) - done.get("cash", 0)
+                by_card = received - (s["paid_cash"] or 0) - done.get("card", 0)
+                if refund_method == "card" and max(0, by_card) < refund <= can:
+                    raise Conflict(f"الفاتورة دي ما اتدفعتش بالبطاقة أو التحويل بالمبلغ ده، فمينفعش يترد عليها"
+                                   f" (الحد الأقصى {egp(max(0, min(by_card, can)))} ج)",
+                                   code="refund_exceeds_method", details={"max_card": max(0, min(by_card, can)), "refund": refund})
+                # also inside an exchange: the replacement would record this money as cash-paid, and its own return
+                # could then pay it out in cash (Codex P1 on #403), so card money never turns into cash without
+                # the owner's or a manager's approval
+                if refund_method == "cash" and refund > max(0, by_cash) and refund <= can:
+                    ctx.require("sales.refund_other_method")
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
                     if unreceived:

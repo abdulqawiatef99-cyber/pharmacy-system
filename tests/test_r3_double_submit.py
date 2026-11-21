@@ -116,7 +116,7 @@ class TestARepeatedKeyPostsOnce(APICase):
 
     def test_supplier_payment(self):
         sup = cat.create_supplier(self.db, self.ctx, name="مورد تجريبي")
-        self.twice(f"/api/suppliers/{sup}/pay", {"amount": 5000, "method": "cash"}, "p-1")
+        self.twice(f"/api/suppliers/{sup}/pay", {"amount": 5000, "method": "cash", "note": "دفعة مقدمة متفق عليها"}, "p-1")
         self.assertEqual(self.count("SELECT count(*) FROM supplier_ledger WHERE kind='payment'"), 1)
 
     def test_customer_collection(self):
