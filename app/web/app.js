@@ -3510,9 +3510,9 @@ function discAsk(v) {
 }
 
 async function patchLine(lineId, body) {
-  POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9)
-    try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); }
-    catch (er) { toast(er.message, true); }
+  POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9); false = not saved
+    try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); return true; }
+    catch (er) { toast(er.message, true); return false; }
   })();
   await POS.saving;
 }
@@ -3639,8 +3639,8 @@ function renderSide() {
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
     POS.saving = (async () => {        // complete() waits for it: F9 typed in the address field (11/01)
-      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); }
-      catch (er) { toast(er.message, true); }
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: { [k]: v } } }); if (k === "fee") renderSide(); return true; }
+      catch (er) { toast(er.message, true); return false; }
     })();
     await POS.saving;
   }));
@@ -3664,9 +3664,9 @@ function renderSide() {
     const body = egp ? { amount: v === "" ? 0 : exactPiasters(v) } : { bp: toBp(v) || 0 };
     if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0)))
       return toast("الخصم غير صحيح", true);
-    POS.saving = (async () => {          // complete() waits for it
-      try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); }
-      catch (er) { toast(er.message, true); renderSide(); }
+    POS.saving = (async () => {          // complete() waits for it; false = not saved, the sale waits (Codex #400)
+      try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); return true; }
+      catch (er) { toast(er.message, true); renderSide(); return false; }
     })();
     await POS.saving;
   };
@@ -3768,7 +3768,8 @@ async function complete(findings) {
   // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
   // for a missing address that is right there on the screen (device test 11/01)
   if (document.activeElement?.dataset?.dl || isDiscField(document.activeElement)) document.activeElement.blur();
-  await POS.saving;
+  const saved = await POS.saving;
+  if (saved === false) { POS.saving = null; return; }   // a field not saved: no sale at the old total (Codex #400)
   // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
   // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows
   // another name, so the sale waits until the box and the invoice say the same customer.
