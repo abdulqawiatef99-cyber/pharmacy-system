@@ -279,3 +279,19 @@ class TestIndependentReview(Base):
             self.assertEqual(e.code, "price_changed")
             r = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
         self.assertEqual(r["sale"]["customer_id"], cust)
+
+
+class TestCodexRound5(Base):
+    def test_an_employee_cannot_touch_someone_elses_draft_through_an_exchange(self):
+        from app.core import people
+        from app.core.errors import Forbidden
+        cust = self.s.create_customer(self.ctx, name="عميل", credit_limit=0)
+        people.add_user(self.db, self.ctx, username="asst9", full_name="م", password="Staff-Pass-2026", role_code="assistant")
+        asst = self.login("asst9", "Staff-Pass-2026")
+        mine = self.s.create(asst, cust)
+        self.s.add_line(asst, mine, self.a, units=1)
+        self.s.complete(asst, mine, paid_cash=1000)
+        owners = self.draft(self.b, 1)                                  # the owner's open invoice
+        with self.assertRaises(Forbidden):
+            self.s.exchange(asst, mine, {self.line(mine): 1}, owners, refund_method="cash", reason="استبدال")
+        self.assertIsNone(self.db.one("SELECT customer_id FROM sales WHERE id=?", (owners,))["customer_id"])

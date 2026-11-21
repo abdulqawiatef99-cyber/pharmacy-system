@@ -188,8 +188,8 @@ def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str
             raise Forbidden("صلاحيات المدير يغيّرها المالك بس", code="owner_only")
         if perm in ("users.manage", "users.permissions"):
             raise Forbidden("الصلاحية دي يغيّرها المالك بس", code="owner_only")
-        role_has_it = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=?",
-                                                     (m["role_id"],))["permissions"]))
+        role_has_it = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                                     (m["role_id"], ctx.org_id))["permissions"]))
         opens = mode == "grant" or (mode == "default" and role_has_it)     # 'default' can lift a deny (Codex P1 on #396)
         if opens and not ctx.can(perm):
             raise Forbidden("مينفعش تفتح صلاحية إنت نفسك معندكش", code="beyond_own")

@@ -2887,11 +2887,22 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, confirm_below_cost: !!draft.confirm_below_cost, receipt: true } });
           exchangeDevices(r);
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
-        } catch (err) { toast(err.message, true); if (err.code === "safety_unresolved") showFindings(err.details?.findings); }
+        } catch (err) {
+          if (err.code === "below_cost_confirm") {          // as at checkout: an explicit yes, then save again
+            const ls = (err.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
+            if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${ls}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { draft.confirm_below_cost = true; setTimeout(() => btn.click(), 0); }
+            return;
+          }
+          toast(err.message, true);
+          if (err.code === "safety_unresolved") showFindings(err.details?.findings);
+          if (["price_changed", "stale_version"].includes(err.code)) {   // the server repriced it: show the new draft
+            try { draft = await api(`/api/sales/${draft.id}`); drawDraft(); totals(); } catch { /* the toast says why */ }
+          }
+        }
       });
     });
   };

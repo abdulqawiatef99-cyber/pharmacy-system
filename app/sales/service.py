@@ -1255,6 +1255,14 @@ class Sales:
                 return {**json.loads(a["after_json"]), "sale": self.get(ctx, new_sid), "replayed": True}
         # a contract that changed since the draft was priced: reprice it for good (outside the exchange's
         # transaction, which would roll the new price back) and let the cashier confirm (Codex P2 on #397)
+        # both invoices are checked for this person before anything is written (Codex P1, round 5): the
+        # original as for any return of it, the replacement as any change to an open invoice
+        orig_row = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
+        if not orig_row:
+            raise NotFound("الفاتورة غير موجودة")
+        if orig_row["created_by"] != ctx.user_id:
+            ctx.require("sales.return_others")
+        self._draft(ctx, new_sid)
         pre = self.db.one("SELECT s.customer_id, o.customer_id orig FROM sales s, sales o WHERE s.id=? AND s.org_id=?"
                           " AND s.status='draft' AND o.id=? AND o.org_id=?", (new_sid, ctx.org_id, sid, ctx.org_id))
         if pre and pre["orig"] and not pre["customer_id"]:
@@ -1263,6 +1271,8 @@ class Sales:
             with self.db.transaction():
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=? AND status='draft'",
                                 (pre["orig"], new_sid, ctx.org_id))
+                audit.record(self.db, ctx, "sale.details", "sale", new_sid,
+                             after={"customer_id": pre["orig"], "for": "exchange", "original_sale_id": sid})
         if pre and self._reprice_contract(ctx, new_sid):
             raise Conflict("تغيّر خصم التعاقد على فاتورة الاستبدال، راجع الإجمالي الجديد", code="price_changed",
                            details={"reason": "contract"})

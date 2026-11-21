@@ -244,3 +244,19 @@ class TestIndependentReview(Base):
             returns.create_from_invoice(self.db, other, self.sup, self.inv, [{"purchase_line_id": self.lines[self.tax]["id"],
                                         "paid_units": 1, "reason": "expired"}])
         self.assertEqual(e.exception.code, "other_branch")
+
+
+class TestCodexRound5(TestCodexReview397):
+    def test_an_invoice_discount_bigger_than_the_tax_still_returns_what_was_charged(self):
+        inv = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.update_header(self.ctx, inv, {"invoice_no": "X-1", "invoice_date": date.today().isoformat(),
+                                             "extra_discount": 13000}, v)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.add_line(self.ctx, inv, {"item_id": self.tax, "qty": 3, "bonus_qty": 0, "unit_net_price": 4000,
+                                        "tax_amount": 1680, "line_total": 13680, "batch_no": "T1", "expiry_date": FUT}, v)
+        bal = self.balance()
+        self.p.approve(self.ctx, inv, self.p.get(self.ctx, inv)["invoice"]["version"])
+        self.assertEqual(self.balance() - bal, 680)
+        self.assertEqual(self.full_return(inv, "X-1")["total"], 680)
+        self.assertEqual(self.balance(), bal)

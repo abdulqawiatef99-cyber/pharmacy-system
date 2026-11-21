@@ -274,10 +274,12 @@ def line_value(l: dict, paid_units: int) -> tuple[int, int]:
     """(net, tax) credited for `paid_units` of an invoice line: the net invoice price of those units (owner
     #310: the box at the invoice's net price) and their share of the line's tax. Returning everything still
     left of a line credits exactly what is left of it, never a piaster more or less."""
-    tax = l["tax_amount"] or 0
-    # what approval charged the supplier for this line (validation.effective_amount, tax included), never a
-    # total rebuilt from a rounded unit price (Codex P1 on #396: 3 x 30.00 = 90.00 for a line charged 89.99)
-    total_net = max(0, (l["amount"] or 0) - tax)
+    # what approval charged the supplier for this line (validation.effective_amount, tax included, plus its share
+    # of the invoice discount/tax), never a total rebuilt from a rounded unit price (Codex P1 on #396). The tax is
+    # never more than that amount: an invoice discount can leave less than the line's tax (Codex P1, round 5)
+    charged = max(0, l["amount"] or 0)
+    tax = min(l["tax_amount"] or 0, charged)
+    total_net = charged - tax
     done = l["paid_returned"]
     if done + paid_units >= l["paid_units"]:      # the rest of the line: what is left, exactly
         return (total_net - _share(total_net, done, l["paid_units"]), tax - _share(tax, done, l["paid_units"]))
