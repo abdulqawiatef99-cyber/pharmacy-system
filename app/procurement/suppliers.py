@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from ..core import audit, notify
-from ..core.errors import Conflict, NotFound, ValidationFailed
+from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..sales import cash
@@ -107,9 +107,10 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
         due = balance(db, ctx.org_id, sid)
         advance = amount > due
         if advance:
-            if not ctx.allowed("suppliers.pay_advance"):
-                raise ValidationFailed(f"المبلغ ({amount / 100:,.2f} ج) أكبر من المستحق للمورد ({max(due, 0) / 100:,.2f} ج)",
-                                       code="over_payment", details={"balance": due, "amount": amount})
+            if not ctx.allowed("suppliers.pay_advance"):      # the owner or a manager can approve it on the screen
+                raise Forbidden(f"المبلغ ({amount / 100:,.2f} ج) أكبر من المستحق للمورد ({max(due, 0) / 100:,.2f} ج)",
+                                code="approval_required", details={"permission": "suppliers.pay_advance",
+                                                                   "label": "دفعة مقدمة للمورد", "balance": due, "amount": amount})
             if len((note or "").strip()) < 3:
                 raise ValidationFailed("الدفع أكبر من المستحق: اكتب السبب في الملاحظة", code="reason_required")
         lid = new_id()

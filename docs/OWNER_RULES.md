@@ -195,7 +195,11 @@ Owner's words: «أي غلط غير قابل للمنطق يكون ممنوع ع
   line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
   (cash for a card invoice = exception); credit sale without a customer; customer collection above the debt;
   supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
-  today; expired or past-dated expiry at purchase approval; the same supplier invoice number twice.
+  today; expired expiry at purchase approval (an expiry before the invoice date is always already expired, since
+  the invoice date cannot be after today); the same supplier invoice number twice. A refund to the customer's
+  own account (store credit) stays allowed whatever the invoice was paid with: no money leaves the pharmacy.
+  The supplier advance and the cash refund of a card invoice can be approved on the screen by the owner or a
+  manager (PIN), with the reason.
 - Not yet covered (needs a migration or a later item): an exception path for a genuinely repeated supplier
   invoice number (today: always refused), returnable expired goods with permission (today: always refused),
   sale price above the public price (the screen cannot type a price; it comes from the batch), and a unit change

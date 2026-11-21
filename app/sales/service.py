@@ -762,6 +762,13 @@ class Sales:
             approved = l.get("discount_approved_bp") if l["discount_approved_by"] else None
             if fixed and bp > ctx.discount_limit_bp and (approved is None or bp > approved):
                 raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
+        if preview["invoice_discount_amount"]:
+            # U2-0: a line removed after the invoice discount was typed can leave it bigger than the invoice;
+            # completing would swallow the items silently (independent review on U2-0)
+            left = preview["subtotal"] - sum(l["discount"] - l["invoice_share"] for l in preview["lines"])
+            if preview["invoice_discount_amount"] > left:
+                raise ValidationFailed(f"خصم الفاتورة ({egp(preview['invoice_discount_amount'])} ج) بقى أكبر من قيمتها"
+                                       f" ({egp(left)} ج) بعد تعديل الأصناف: عدّل الخصم", code="discount_exceeds_value")
         if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
             own = own_discount(preview["lines"])
             bp = equivalent_bp(own, preview["subtotal"])
@@ -1094,7 +1101,8 @@ class Sales:
             if l["id"] != line_id or not l["discount_amount"]:
                 continue
             if l["discount_amount"] > l["gross"]:     # U2-0: a discount bigger than the line is impossible, not a warning
-                raise ValidationFailed(f"الخصم ({egp(l['discount_amount'])} ج) أكبر من قيمة الصنف ({egp(l['gross'])} ج)",
+                raise ValidationFailed(f"الخصم ({egp(l['discount_amount'])} ج) أكبر من قيمة الصنف ({egp(l['gross'])} ج):"
+                                       " قلّل الخصم الأول",
                                        code="discount_exceeds_value")
             fixed = l["discount"] - l["invoice_share"] - discount_of(l["gross"], l["discount_bp"])
             bp = equivalent_bp(fixed, l["gross"])
@@ -1107,7 +1115,7 @@ class Sales:
             left = draft["subtotal"] - sum(l["discount"] - l["invoice_share"] for l in draft["lines"])
             if draft["invoice_discount_amount"] > left:     # U2-0: more than what is left to pay is impossible
                 raise ValidationFailed(f"خصم الفاتورة ({egp(draft['invoice_discount_amount'])} ج) أكبر من قيمتها"
-                                       f" ({egp(left)} ج)", code="discount_exceeds_value")
+                                       f" ({egp(left)} ج): قلّل الخصم الأول", code="discount_exceeds_value")
         if draft.get("invoice_discount_amount") or draft.get("invoice_discount_bp"):
             own = own_discount(draft["lines"])
             bp = equivalent_bp(own, draft["subtotal"])
@@ -1185,7 +1193,7 @@ class Sales:
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
-                     reason: str) -> dict:
+                     reason: str, offset: int = 0) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
@@ -1305,7 +1313,8 @@ class Sales:
                     raise Conflict(f"الفاتورة دي ما اتدفعتش بالبطاقة أو التحويل بالمبلغ ده، فمينفعش يترد عليها"
                                    f" (الحد الأقصى {egp(max(0, min(by_card, can)))} ج)",
                                    code="refund_exceeds_method", details={"max_card": max(0, min(by_card, can)), "refund": refund})
-                if refund_method == "cash" and refund > max(0, by_cash) and refund <= can:
+                # in an exchange only what is left after the new invoice is paid from it leaves the drawer
+                if refund_method == "cash" and max(0, refund - offset) > max(0, by_cash) and refund <= can:
                     ctx.require("sales.refund_other_method")
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
@@ -1477,7 +1486,8 @@ class Sales:
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
                                 (orig["customer_id"], new_sid, ctx.org_id))
             ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
-                                    reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
+                                    reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason,
+                                    offset=self.get(ctx, new_sid)["total"])
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
             if expected_new_total is not None and n_total != expected_new_total:   # not what the screen showed

@@ -63,10 +63,39 @@ class Refused(SalesCase):
         sid, d = self._sold(paid_cash="all")
         self.refuses(self.s.return_items, self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="card", reason="test")
 
-    def test_transfer_refund_of_a_cash_sale(self):
-        sid, d = self._sold(paid_cash="all")
-        self.refuses(self.s.return_items, self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="transfer",
-                     reason="test")
+    def test_split_invoice_partial_returns_by_method(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=4)                 # 4 strips
+        cash_part = d["total"] // 2
+        self.s.complete(self.ctx, sid, paid_cash=cash_part, paid_card=d["total"] - cash_part,
+                        safety_decisions=self.ack_all(sid))
+        lid = d["lines"][0]["id"]
+        self.s.return_items(self.ctx, sid, {lid: 1}, refund_method="card", reason="test")    # one strip to the card
+        with self.assertRaises(AppError):                                                   # two more: above the card
+            self.s.return_items(self.ctx, sid, {lid: 2}, refund_method="card", reason="test")
+        self.s.return_items(self.ctx, sid, {lid: 2}, refund_method="cash", reason="test")    # the cash part
+
+    def test_exchange_of_a_card_invoice_needs_no_approval_when_no_cash_leaves(self):
+        from dataclasses import replace
+        sid, d = self._sold(paid_card="all")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"sales.refund_other_method"})
+        new = self.s.create(self.ctx)
+        self.s.add_line(self.ctx, new, self.pan, units=2)                    # worth more than the return
+        out = self.s.exchange(staff, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash", pay_method="card",
+                              reason="تغيير", safety_decisions=self.ack_all(new))
+        self.assertEqual(out["settled"]["refund"], 0)
+
+    def test_invoice_discount_left_bigger_after_line_removed(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=4)
+        d = self.s.set_invoice_discount(self.ctx, sid, amount=d["total"] - 100)
+        d = self.s.update_line(self.ctx, sid, d["lines"][0]["id"], qty_base=4)      # unchanged: fine
+        with self.db.transaction():                                              # lines changed behind the discount
+            self.db.execute("UPDATE sale_lines SET qty_base=1 WHERE sale_id=?", (sid,))
+        d = self.s.get(self.ctx, sid)
+        with self.assertRaises(AppError) as e:
+            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        self.assertEqual(e.exception.code, "discount_exceeds_value")
 
     # ------------------------------------------------------------------ money in / out
     def test_customer_payment_above_due(self):
@@ -83,7 +112,7 @@ class Refused(SalesCase):
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"suppliers.pay_advance"})
         with self.assertRaises(AppError) as e:
             suppliers.pay(self.db, staff, sup, 100000, "cash", note="دفعة مقدمة")
-        self.assertEqual(e.exception.code, "over_payment")
+        self.assertEqual(e.exception.details["permission"], "suppliers.pay_advance")    # a manager can approve it
         with self.assertRaises(AppError) as e:
             suppliers.pay(self.db, self.ctx, sup, 100000, "cash")                     # owner: reason needed
         self.assertEqual(e.exception.code, "reason_required")
@@ -131,11 +160,6 @@ class PurchaseRefused(SalesCase):
     def test_expired_purchase_line_cannot_be_approved(self):
         inv_id = self.draft(no="EXP1")
         self._line(inv_id, (TODAY - timedelta(days=3)).isoformat())
-        self.refuses(self.pur.approve, self.ctx, inv_id, None)
-
-    def test_expiry_before_invoice_date_cannot_be_approved(self):
-        inv_id = self.draft(no="EXP2", date=(TODAY - timedelta(days=60)).isoformat())
-        self._line(inv_id, (TODAY - timedelta(days=90)).isoformat())
         self.refuses(self.pur.approve, self.ctx, inv_id, None)
 
     def test_duplicate_supplier_invoice_number(self):
