@@ -8,27 +8,32 @@
 
 
 
-## 22/11 night — UPDATE-2 worker session (READ THIS FIRST; newest line last)
-Base develop @ `88cb658`. One PR per group, independent agent review before Codex (OWNER_RULES §12). Nothing merged into main, no installer. Local worktrees: /home/user/wt-{shift,pos,pur,misc,doc}.
-| PR | Items | State |
+## 22/11 night — UPDATE-2 worker session: end report (READ THIS FIRST)
+Base develop @ `88cb658` (update 1 = main @ `4f2828f`). Each PR: tests first, an independent fresh-context agent review before Codex (OWNER_RULES §12), then Codex until no P0/P1, CI linux green on the same head, merge commit. Nothing on main, no installer, no migration, no `requirements.txt` change: the whole batch ships through the in-app «تحديث» once the owner merges the release PR.
+| PR | Items | Result |
 |---|---|---|
-| #402 | U2-36 smart order | merged `180d472` (Codex 3 rounds, CI green) |
+| #402 | U2-36 smart order screen | merged `180d472` |
 | #405 | POS U2-11/12/13/18/25/32/34/35 | merged `d22b496` |
-| #403 | U2-0 refusals, OWNER_RULES §13, 2 permissions | merged `b3bf34d` (card-paid exchange through cash now needs a manager PIN) |
+| #403 | U2-0 refusals + OWNER_RULES §13, permissions `sales.refund_other_method`, `suppliers.pay_advance` | merged `b3bf34d` |
 | #404 | shift U2-26/28/29/30 | merged `9216cf4` |
-| #406 | purchases U2-1/2/3/4/5/9/16/22 | Codex round 4 + CI pending (merge/split money math hardened over 3 rounds) |
-| #407 | U2-8 day review, U2-10, U2-15 | Codex + CI pending after develop merge |
-Open P2s kept for later: sold unit not stored on sale lines (U2-13/U2-24, needs a migration); RTL test checks page direction only; perf limit may be tight on slow CI.
-Not started / blocked, with the reason:
-- U2-27 silent printing, U2-23/U2-24 receipt: `app/printing/` (a session may not merge it, OWNER_RULES §10).
-- U2-31 two drawers: needs a migration (one open shift per branch today).
-- U2-6 print time: needs a column.
-- U2-14 rounding, U2-33 below cost refused: change agreed money rules.
-- U2-17, U2-19, U2-20, U2-21: not started.
-- U2-7: already covered by update 1 (`tests/test_help_every_screen.py`).
-- U2-10: the two freezes (purchase-line Enter, customer → «توصيل للمنزل») are not reproduced in the cloud. The slow-request log now records them on the PC.
-Git note: commits work only with short one-line messages (the auto-mode check refused long multi-line messages and `--amend`). Push one branch per command.
-Next: full suites for #403–#406 and misc, Codex on each, fix P0/P1, merge into develop in order #402 → #403 → #405 → #404 → #406 → misc (all touch app.js/app.py/i18n-en.js: after each merge, merge develop into the next branch and re-run), then one release PR develop → main for the owner.
+| #406 | purchases U2-1/2/3/4/5/9/16/22 | merged `603b8d5` |
+| #407 | U2-8 day review, U2-10 slow log, U2-15 RTL/LTR | see below |
+Behaviour changes the owner should know (all his rules, said in each PR):
+- Exchanging a card-paid invoice for cash needs a manager PIN; a cash invoice exchanges as before.
+- Paying a supplier more than his balance (an advance) needs a written reason and owner/manager rights.
+- A refund goes back by the way the money came; cash back for a card invoice = owner/manager PIN.
+- A discount bigger than the line or the invoice is refused (no longer silently cut).
+- A supplier invoice dated after today is refused; short expiry (< 180 days) and "won't sell before it gets near expiry" need a written reason to approve.
+- Sign-out asks first (personal setting «تأكيد الخروج»).
+Not done, with the reason:
+- U2-27 silent printing, U2-23/U2-24 receipt template and sold unit: `app/printing/` (OWNER_RULES §10) and U2-24 needs a `sale_unit` column (migration).
+- U2-31 two drawers with their own shifts: migration (one open shift per branch today). U2-6 print time: migration.
+- U2-14 rounding, U2-33 below-cost refused: change agreed money rules; need the owner's go-ahead on the exact rule.
+- U2-17, U2-19, U2-20, U2-21: not started (lowest priority).
+- U2-10 the two freezes: not reproduced in the cloud; the slow-request log now records them on the PC (owner opens `/api/system/slow-requests`).
+Open P2s (next small PR): day review splits wallet refunds into card (#407 thread); unit selector cannot tell 3 strips from 1 box without `sale_unit`; RTL test checks page direction only.
+Git note: in this environment commits pass only with short one-line messages (long multi-line messages and `--amend` were refused by the auto-mode check).
+Next: owner reviews and merges the release PR develop → main, then presses «تحديث» on the cashier PC; device check of the new screens (#18 sheet).
 
 ## 21/11 Cairo — update 1 (launch-day fixes, through the «تحديث» button) (READ THIS FIRST)
 State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and installed, E-Stock moved, the pharmacy is LIVE since 18:04. Owner 19:14 «توكل على الله ونفذ» + 19:39 additions (8b, 10). Branch `claude/update-1`, one PR into develop, then a release PR into main (the owner merges; he stops selling for the 1-2 minutes of the update).
