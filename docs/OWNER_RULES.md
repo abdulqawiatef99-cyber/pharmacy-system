@@ -169,3 +169,16 @@ work. The model that built a part never grades it alone (Codex or a different mo
 Every audit: findings as an issue (file:line, scenario, severity), each verified with a failing test before
 any fix, fixes in small PRs, and a 5-line Arabic summary to the owner. Paid tools or a new service need the owner first.
 
+
+## 12. Two reviews, a second agent first, then Codex (owner, 21/11 03:53: a standing rule)
+Owner's words: «موافق بس حطها قاعدة في المشروع كله ان وكيل تاني يراجع الاول و بعد كده كودكس يراجع».
+- Before ANY `@codex review`, the implementing session runs an independent review by a separate agent
+  (sub-agent or another session) with a fresh context: it gets only the diff and the item's spec, never the
+  implementer's reasoning. It reports findings P0/P1/P2 with file:line and a concrete failing scenario.
+- Its focus: whatever can break money or stock: cancel after a return, partial returns adding up, piastres and
+  rounding, bonus lines, taxes (line and invoice level), permissions and escalation, retries and concurrency,
+  `org_id`, a migration on a real-size database.
+- Every P0/P1 it finds is fixed test-first; only then Codex is asked. Codex stays the final reviewer; the merge
+  rules of §4 and §10 do not change (no unresolved Codex P0/P1, CI green).
+- Before the launch: one last full review of the whole program by the strongest suitable Claude model and by
+  Codex (owner, same message).
