@@ -86,22 +86,22 @@ class TestPayouts(WiringCase):
         with self.db.transaction():
             self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind) VALUES ('op', ?, ?, 40000, 'opening')",
                             (self.ctx.org_id, sup))
-        r = self.call("POST", f"/api/suppliers/{sup}/pay", json={"source": self.t, "settle": 20000, "discount_bp": 200})
+        r = self.call("POST", f"/api/suppliers/{sup}/pay", json={"source": self.t, "settle": 20000, "discount_bp": 200, "note": "دفعة مقدمة متفق عليها"})
         self.assertEqual((r["paid"], r["discount"], r["balance"]), (19600, 400, 20000))
         self.assertEqual(self.bal(self.t), 50000 - 19600)
         kinds = sorted((x["kind"], x["amount"]) for x in r["ledger"])
         self.assertEqual(kinds, [("discount", -400), ("opening", 40000), ("payment", -19600)])
         p = self.call("GET", f"/api/reports/profit?from={self.today}&to={self.today}")
         self.assertEqual(p["supplier_discounts"], 400)
-        r2 = self.c.post(f"/api/suppliers/{sup}/pay", json={"source": self.t, "amount": 40000}, headers=self.H())
+        r2 = self.c.post(f"/api/suppliers/{sup}/pay", json={"source": self.t, "amount": 40000, "note": "دفعة مقدمة متفق عليها"}, headers=self.H())
         self.assertEqual(r2.status_code, 409)                  # more than the treasury holds
         self.assertEqual(self.call("GET", f"/api/suppliers/{sup}")["balance"], 20000)
 
     def test_supplier_payment_from_the_drawer_never_below_zero(self):
         sup = cat.create_supplier(self.db, self.ctx, name="مورد درج")
-        r = self.c.post(f"/api/suppliers/{sup}/pay", json={"source": "drawer", "amount": 10001}, headers=self.H())
+        r = self.c.post(f"/api/suppliers/{sup}/pay", json={"source": "drawer", "amount": 10001, "note": "دفعة مقدمة متفق عليها"}, headers=self.H())
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "drawer_negative"))
-        self.call("POST", f"/api/suppliers/{sup}/pay", json={"source": "drawer", "amount": 10000})
+        self.call("POST", f"/api/suppliers/{sup}/pay", json={"source": "drawer", "amount": 10000, "note": "دفعة مقدمة متفق عليها"})
         self.assertEqual(self.drawer(), 0)
 
     def test_salary_advance_from_an_account(self):
@@ -223,9 +223,13 @@ class TestCodexReview348c(WiringCase):
         a = self.sell(self.pan, payments=[{"method": "cash", "amount": 2000},
                                           {"method": "card", "amount": 2000, "channel_id": self.card_ch}], units=2)
         d = a if "lines" in a else a["sale"]
-        self.call("POST", f"/api/sales/{d['id']}/return", json={"lines": {d["lines"][0]["id"]: 2},
+        # U2-0 (OWNER_RULES §13): only the card part goes back to the card; the whole 40.00 is refused
+        r = self.call("POST", f"/api/sales/{d['id']}/return", 409, json={"lines": {d["lines"][0]["id"]: 2},
+                                                                    "refund_method": "card", "reason": "العميل رجّعه"})
+        self.assertEqual(r["error"]["code"], "refund_exceeds_method")
+        self.call("POST", f"/api/sales/{d['id']}/return", json={"lines": {d["lines"][0]["id"]: 1},
                                                                "refund_method": "card", "reason": "العميل رجّعه"})
-        self.assertEqual(self.bal(self.paymob), 2000 - 4000)
+        self.assertEqual(self.bal(self.paymob), 2000 - 2000)
 
 
 class TestLaunchGateCodex381(WiringCase):
@@ -240,9 +244,11 @@ class TestLaunchGateCodex381(WiringCase):
 
     def test_a_cash_sale_refunded_to_the_card_debits_the_card_account(self):
         sid, line = self.sale_id(self.sell(self.pan, units=2))                      # 40.00 cash
-        self.call("POST", f"/api/sales/{sid}/return", json={"lines": {line: 1}, "refund_method": "card",
-                                                            "reason": "العميل رجّعه"})
-        self.assertEqual(self.bal(self.paymob), -2000)                               # the card machine paid it
+        # U2-0 (OWNER_RULES §13): money that came in cash never goes back to a card
+        r = self.call("POST", f"/api/sales/{sid}/return", 409, json={"lines": {line: 1}, "refund_method": "card",
+                                                                 "reason": "العميل رجّعه"})
+        self.assertEqual(r["error"]["code"], "refund_exceeds_method")
+        self.assertEqual(self.bal(self.paymob), 0)
 
     def test_a_card_sale_made_before_its_channel_was_routed(self):
         self.call("PATCH", f"/api/payment-channels/{self.card_ch}", json={"account_id": None})

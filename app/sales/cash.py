@@ -222,6 +222,8 @@ class CashDrawer:
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
                          after={"expected": expected, "counted": counted_cash, "difference": diff})
             money.shift_close_transfer(self.db, ctx, sid, left, to_account=to_account, received_by=receiver)
+            from . import shift_tools
+            shift_tools.record_split(self.db, ctx, sid, detail, left)      # which notes stayed (U2-28 report)
             if diff:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
@@ -326,6 +328,8 @@ class CashDrawer:
                     closed_by_name=names.get(s["closed_by"]),
                     counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None,
                     drawer_manual=manual, drawer_manual_count=len(manual), drawer_auto_count=auto)
+        from . import shift_tools
+        full.update(shift_tools.report_extras(self.db, ctx, dict(s)))
         return full
 
     def recent(self, ctx: Context, limit: int = 30) -> list[dict]:
