@@ -26,3 +26,16 @@ class TestDayReview(SalesCase):
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"sales.totals"})
         with self.assertRaises(Forbidden):
             day_review(self.db, staff)
+
+
+class TestDayReviewVoids(SalesCase):
+    def test_void_taken_out_on_its_day_and_kept_on_the_sale_day(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        self.s.void(self.ctx, sid, "غلط في الفاتورة")
+        r = day_review(self.db, self.ctx, today())
+        self.assertEqual(r["sales"]["n"], 1)                       # it was sold today
+        self.assertEqual(r["sales"]["voided_total"], d["total"])   # and voided today
+        self.assertEqual(r["by_method"]["cash"], 0)                # the drawer got nothing in the end
+        self.assertEqual(r["net_sales"], 0)

@@ -3052,4 +3052,11 @@ window.I18N_EN = {
 "بطاقة (بعد المرتجع)": "Card (after returns)",
 "آجل (بعد المرتجع)": "Credit (after returns)",
 "ملغاة (": "Voided (",
+"بطاقة (بعد المرتجع والإلغاء)": "Card (after returns and voids)",
+"ملغاة النهارده (0)": "Voided today (0)",
+"نقدي (بعد المرتجع والإلغاء)": "Cash (after returns and voids)",
+"آجل (بعد المرتجع والإلغاء)": "Credit (after returns and voids)",
+"نقدي توصيل (بيدخل الدرج لما المندوب يسلّم)": "Delivery cash (reaches the drawer when the courier hands it in)",
+"فواتير شراء معتمدة (0)": "Approved purchase invoices (0)",
+"مرتجع للموردين (0)": "Supplier returns (0)",
 };

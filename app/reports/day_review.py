@@ -20,13 +20,20 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         raise ValidationFailed("التاريخ غير صحيح")
     lo, hi = local_day_bounds(d)
     o, b = ctx.org_id, ctx.branch_id
+    # the day's sales stay the day's even if voided later (a closed day never changes); a void is taken out on the
+    # day it happened, by payment method, as returns are (independent review P1). A delivery's cash reaches the
+    # drawer when the courier hands it in, so it is shown on its own.
     s = dict(db.one(
         "SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(discount_total),0) discount,"
-        " coalesce(sum(paid_cash),0) cash, coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
-        " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
-        " AND completed_at>=? AND completed_at<?", (o, b, lo, hi)))
-    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t FROM sales WHERE org_id=? AND branch_id=?"
-                   " AND status='voided' AND voided_at>=? AND voided_at<?", (o, b, lo, hi))
+        " coalesce(sum(CASE WHEN kind='delivery' THEN 0 ELSE paid_cash END),0) cash,"
+        " coalesce(sum(CASE WHEN kind='delivery' THEN paid_cash ELSE 0 END),0) delivery_cash,"
+        " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
+        " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=? AND sale_no IS NOT NULL"
+        " AND status IN ('completed','voided') AND completed_at>=? AND completed_at<?", (o, b, lo, hi)))
+    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t, coalesce(sum(paid_cash),0) cash,"
+                   " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
+                   " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=?"
+                   " AND status='voided' AND sale_no IS NOT NULL AND voided_at>=? AND voided_at<?", (o, b, lo, hi))
     rets = {r["m"]: {"count": r["n"], "total": r["t"]} for r in db.all(
         "SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN sales x ON x.id=r.sale_id"
         " WHERE r.org_id=? AND x.branch_id=? AND r.created_at>=? AND r.created_at<? GROUP BY 1", (o, b, lo, hi))}
@@ -39,20 +46,23 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         " AND p.status='approved' AND p.approved_at>=? AND p.approved_at<? GROUP BY 1 ORDER BY 3 DESC", (o, b, lo, hi))]
     sret = dict(db.one("SELECT count(*) n, coalesce(sum(total),0) total FROM supplier_returns WHERE org_id=? AND"
                        " branch_id=? AND created_at>=? AND created_at<?", (o, b, lo, hi)))
+    # a shift belongs to the day it opened (one closed at 00:30 holds the evening's sales)
     shifts = [dict(r) for r in db.all(
         "SELECT s.id, s.opened_at, s.closed_at, s.expected_cash, s.counted_cash, s.difference, u.full_name closed_by"
         " FROM cash_shifts s LEFT JOIN users u ON u.id=s.closed_by WHERE s.org_id=? AND s.branch_id=?"
-        " AND s.status='closed' AND s.closed_at>=? AND s.closed_at<? ORDER BY s.closed_at", (o, b, lo, hi))]
+        " AND s.status='closed' AND s.opened_at>=? AND s.opened_at<? ORDER BY s.opened_at", (o, b, lo, hi))]
     collected = db.one("SELECT coalesce(-sum(amount),0) t FROM customer_ledger WHERE org_id=? AND kind='payment'"
                        " AND created_at>=? AND created_at<?", (o, lo, hi))["t"]
     refunded = sum(v["total"] for v in rets.values())
+    ret = lambda m: rets.get(m, {}).get("total", 0)        # noqa: E731
     return {
         "day": d.isoformat(),
         "sales": {**s, "voided_count": voids["n"], "voided_total": voids["t"]},
         "returns": {"by_method": rets, "total": refunded},
-        "net_sales": s["total"] - refunded,
-        "by_method": {"cash": s["cash"] - rets.get("cash", {}).get("total", 0), "card": s["card"] - rets.get("card", {}).get("total", 0),
-                      "transfer": s["transfer"], "credit": s["credit"] - rets.get("credit", {}).get("total", 0)},
+        "net_sales": s["total"] - refunded - voids["t"],
+        "by_method": {"cash": s["cash"] - ret("cash") - voids["cash"], "card": s["card"] - ret("card") - voids["card"],
+                      "transfer": s["transfer"] - voids["transfer"], "credit": s["credit"] - ret("credit") - voids["credit"],
+                      "delivery_cash": s["delivery_cash"]},
         "credit_collected": collected,
         "purchases": pur, "supplier_returns": sret,
         "drawer": {"shifts": shifts, "expected": sum(x["expected_cash"] or 0 for x in shifts),
