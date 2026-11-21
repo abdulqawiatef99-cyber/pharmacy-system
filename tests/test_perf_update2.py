@@ -23,6 +23,14 @@ class TestSlowLog(PlanCase):
         hit = [x for x in r["requests"] if x["path"] == "/api/customers"]
         self.assertTrue(hit)
         self.assertNotIn("0101", str(r))
+        # another pharmacy on the same server never sees them (Codex P1 on #407)
+        self.second_tenant()
+        from starlette.testclient import TestClient
+        c2 = TestClient(self.app)
+        self.http_login("other", "Other-Pass-2026", client=c2)
+        r2 = c2.get("/api/system/slow-requests", headers={"X-Requested-With": "pharm"}).json()
+        self.assertEqual([x for x in r2["requests"] if x["path"] == "/api/customers"], [])
+
 
 
 class TestSearchAtScale(PlanCase):

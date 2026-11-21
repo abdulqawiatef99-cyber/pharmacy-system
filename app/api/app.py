@@ -138,8 +138,9 @@ class SecurityHeaders(BaseHTTPMiddleware):
         resp = await call_next(request)
         ms = int((time.monotonic() - t0) * 1000)
         if ms > SLOW_MS:                 # the path only, never the query (a customer search carries a phone, #140)
+            org = (request.scope.get("state") or {}).get("org_id")
             SLOW_LOG.append({"at": time.time(), "method": request.method, "path": request.url.path, "ms": ms,
-                             "status": resp.status_code})
+                             "status": resp.status_code, "org_id": org})
             _slow_logger.warning("slow request %s %s %d ms", request.method, request.url.path, ms)
         printable = request.url.path.startswith(PRINT_PAGES)
         resp.headers.setdefault("Content-Security-Policy", CSP_PRINT if printable else CSP)
@@ -236,6 +237,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
         if approver and req.url.path == "/api/approvals/check":
             # the PIN is typed once and checked here only; every other request carries the approval token (#137)
@@ -2529,8 +2531,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def slow_requests(req):
-        ctx_of(req).require("settings.manage")
-        return J({"threshold_ms": SLOW_MS, "requests": list(SLOW_LOG)[::-1]})
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        # only this pharmacy's requests (Codex P1 on #407); requests before sign-in carry no pharmacy and are not shown
+        mine = [{k: v for k, v in x.items() if k != "org_id"} for x in SLOW_LOG if x.get("org_id") == ctx.org_id]
+        return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
 
     @handler
     async def cash_report(req):
