@@ -287,6 +287,9 @@ class Purchasing:
         acks = {(a.get("code"), a.get("line_id") or "", json.dumps(a.get("details") or {}, sort_keys=True))
                 for a in json.loads(inv.get("acknowledged_issues") or "[]")}
         p, out, by_item = Procurement(self.db, today=today), [], {}
+        if inv.get("branch_id") and inv["branch_id"] != ctx.branch_id:      # the branch that receives the goods
+            from dataclasses import replace as _replace                       # (Codex P2 on #406)
+            ctx = _replace(ctx, branch_id=inv["branch_id"])
         for l in lines:
             if l.get("item_id") and l.get("expiry_date") and l.get("qty") and l["expiry_date"] >= today.isoformat():
                 by_item.setdefault(l["item_id"], []).append(l)       # expired lines: refused by "expired" already
@@ -591,6 +594,14 @@ class Purchasing:
             if not a or not b or line_id == other_id:
                 raise NotFound("السطر غير موجود")
             keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision")
+            # a value still waiting for a person (low-confidence reading, unconfirmed match) is never merged away
+            # (Codex P1 on #406): it is confirmed first
+            for ln in (a, b):
+                src, conf = json.loads(ln["field_sources"] or "{}"), json.loads(ln["field_confidence"] or "{}")
+                if ln["match_status"] == "suggested" or any(c < validation.LOW_CONFIDENCE and src.get(f) != "user"
+                                                            for f, c in conf.items()):
+                    raise ValidationFailed("في السطرين قيمة لسه محتاجة مراجعة؛ أكّدها الأول وبعدين ادمج",
+                                           code="not_mergeable")
             if not a["item_id"] or any(a[k] != b[k] for k in keys) or \
                     (a["batch_no"] or "").strip().upper() != (b["batch_no"] or "").strip().upper():
                 raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر): مينفعش يتدمجوا",

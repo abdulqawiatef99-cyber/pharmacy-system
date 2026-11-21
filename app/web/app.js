@@ -1247,7 +1247,7 @@ function purchaseLabels(cur) {
     if (!l.item_id || seen.has(l.item_id)) continue;
     seen.add(l.item_id);
     const boxes = (cur.lines || []).filter((x) => x.item_id === l.item_id).reduce((n, x) => n + (x.qty || 0) + (x.bonus_qty || 0), 0);
-    rows.push({ id: l.item_id, name: l.item || l.raw_name, boxes });
+    rows.push({ id: l.item_id, name: l.item && typeof l.item === "object" ? itemText(l.item) : (l.item || l.raw_name), boxes });
   }
   if (!rows.length) return;
   const mem = lblRemembered(), d = document.createElement("dialog");

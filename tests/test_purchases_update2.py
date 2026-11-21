@@ -294,3 +294,21 @@ class TestCodexPayable(PurchaseBase):
         d = self.p.merge_lines(self.ctx, inv_id, dup["details"]["other_line"], dup["line_id"], None)
         self.assertEqual(self.total(inv_id), before)
         self.assertEqual(len(d["lines"]), 1)
+
+
+class TestCodexRound2(PurchaseBase):
+    def test_merge_refused_while_a_value_waits_for_review(self):
+        inv_id = self.p.create_manual(self.ctx)
+        exp = (date.today() + timedelta(days=700)).isoformat()
+        base = {"item_id": self.item, "qty": 1, "public_price": "1000", "discount_pct": "20", "unit_net_price": "800",
+                "batch_no": "B", "expiry_date": exp}
+        self.p.add_line(self.ctx, inv_id, base, None)
+        d = self.p.add_line(self.ctx, inv_id, base, None)
+        with self.db.transaction():          # as an extracted file leaves it: quantity read with low confidence
+            self.db.execute("UPDATE purchase_invoice_lines SET field_sources='{\"qty\": \"file\"}',"
+                            " field_confidence='{\"qty\": 0.5}' WHERE id=?", (d["lines"][-1]["id"],))
+        d = self.p.get(self.ctx, inv_id)
+        dup = next(i for i in d["issues"] if i["code"] == "duplicate_line")
+        from app.core.errors import ValidationFailed
+        with self.assertRaises(ValidationFailed):
+            self.p.merge_lines(self.ctx, inv_id, dup["details"]["other_line"], dup["line_id"], None)
