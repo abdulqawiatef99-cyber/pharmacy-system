@@ -2801,6 +2801,7 @@ async function viewExchange() {
     <form class="row" id="exF"><input name="q" class="grow" placeholder="رقم الفاتورة أو كود الصنف أو الباركود أو تليفون العميل أو اسمه" autofocus><button class="btn small">ابحث</button></form>
     <div id="exList" class="mt"></div></section><div id="exSale"></div>`;
   let sale = null, draft = null;
+  CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);   // card devices (Codex P2 on #396)
   const H = (t) => `<span class="muted small">${t}</span>`;
   const totals = async () => {
     const lines = {};
@@ -2835,7 +2836,9 @@ async function viewExchange() {
       <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
       <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div>
       <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+        <label class="f" id="exChW" hidden>الجهاز<select id="exCh">${(CHANNELS || []).filter((c) => c.kind === "card").map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
         <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
+    $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
     draft = null; drawDraft(); totals();
     document.querySelectorAll("[data-xr]").forEach((i) => i.addEventListener("input", () => totals()));
     $("#exRm").addEventListener("change", () => totals());
@@ -2857,7 +2860,7 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, reason: $("#exWhy").value, version: draft.version, request_id: newKey(), receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: newKey(), receipt: true } });
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) { toast(err.message, true); }
@@ -4497,9 +4500,10 @@ async function viewSupplierReturn(id) {
   app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><div class="row between"><h1>مرتجع رقم ${r.return_no} — ${esc(r.supplier)}</h1>
     <a class="btn secondary" href="/supplier-return/${esc(r.id)}" target="_blank">🖨 اطبع الإذن</a></div>
     <p class="muted">${esc(dayOf(r.created_at))} ${hhmm(r.created_at)} · سجّله ${esc(r.by_name || "")}${r.note ? ` · ${esc(r.note)}` : ""}</p>
-    <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>السبب</th>${r.total != null ? "<th>قيمة الوحدة</th><th>القيمة</th>" : ""}</tr></thead><tbody>
-    ${r.lines.map((l) => `<tr><td>${itemHtml(l)}</td><td>${esc(l.batch_no || "")}</td><td>${esc((l.expiry_date || "").slice(0, 7))}</td><td>${esc(fmtStock(l.qty_base, l))}</td><td>${esc(l.reason_label)}</td>
-      ${r.total != null ? `<td class="num">${money(l.unit_value)}</td><td class="num">${money(l.unit_value * l.qty_base)}</td>` : ""}</tr>`).join("")}</tbody></table>
+    ${r.credit_note_no ? `<p>إشعار المورد: <b>${esc(r.credit_note_no)}</b></p>` : ""}
+    <table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>السبب</th>${r.total != null ? `<th>قيمة الوحدة</th>${r.tax_total ? "<th>الضريبة</th>" : ""}<th>القيمة</th>` : ""}</tr></thead><tbody>
+    ${r.lines.map((l) => `<tr><td>${itemHtml(l)}</td><td>${esc(l.batch_no || "")}</td><td>${esc((l.expiry_date || "").slice(0, 7))}</td><td>${esc(fmtStock(l.qty_base, l))}${l.is_bonus ? ` <span class="chip">بونص</span>` : ""}</td><td>${esc(l.reason_label)}</td>
+      ${r.total != null ? `<td class="num">${money(l.unit_value)}</td>${r.tax_total ? `<td class="num">${money(l.tax_value || 0)}</td>` : ""}<td class="num">${money(l.unit_value * l.qty_base + (l.tax_value || 0))}</td>` : ""}</tr>`).join("")}</tbody></table>
     ${r.total != null ? `<p><b>الإجمالي المخصوم من حساب المورد: ${money(r.total)} ج</b></p>` : ""}</section>`;
 }
 

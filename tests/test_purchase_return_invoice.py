@@ -120,3 +120,37 @@ class TestCodexReview396(Base):
                                         [{"purchase_line_id": lid, "paid_units": 2, "reason": "expired"},
                                          {"purchase_line_id": lid, "paid_units": 2, "reason": "expired"}])
         self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))
+
+    def test_credit_is_the_approved_line_amount_not_the_rounded_unit_price(self):
+        """Codex P1 on #396: 3 packs at a rounded 30.00 but the line charged 89.99: a full return credits 89.99."""
+        item = cat.create_item(self.db, self.ctx, {"name_en": "Rounded tab", "pack_size": 1, "public_price": 3333})
+        inv = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.update_header(self.ctx, inv, {"invoice_no": "F-78", "invoice_date": date.today().isoformat()}, v)
+        v = self.p.get(self.ctx, inv)["invoice"]["version"]
+        self.p.add_line(self.ctx, inv, {"item_id": item, "qty": 3, "bonus_qty": 0, "unit_net_price": 3000,
+                                        "line_total": 8999, "batch_no": "R1", "expiry_date": FUT}, v)
+        self.p.approve(self.ctx, inv, self.p.get(self.ctx, inv)["invoice"]["version"])
+        bal = self.balance()
+        line = returns.from_invoice(self.db, self.ctx, self.sup, "F-78")["lines"][0]
+        r = returns.create_from_invoice(self.db, self.ctx, self.sup, inv,
+                                        [{"purchase_line_id": line["id"], "paid_units": 3, "reason": "expired"}])
+        self.assertEqual(r["total"], 8999)
+        self.assertEqual(self.balance() - bal, -8999)
+
+    def test_the_slip_shows_the_tax_and_adds_up(self):
+        """Codex P2 on #396: the signed slip shows the tax column, the credit note and lines that add up."""
+        from starlette.testclient import TestClient
+        from app.api.app import create_app
+        from tests.helpers import OWNER_PW
+        st = replace(config.load(), upload_dir=self.tmp / "up2", anthropic_api_key=None, data_dir=self.tmp,
+                     backup_dir=self.tmp / "backups")
+        c = TestClient(create_app(self.db, st, Purchasing(self.db, st)))
+        H = {"X-Requested-With": "pharm"}
+        c.post("/api/auth/login", json={"username": "owner", "password": OWNER_PW}, headers=H)
+        r = self.ret(self.tax, 1, credit_note_no="CN-9")
+        page = c.get(f"/supplier-return/{r['id']}", headers=H).text
+        self.assertIn("الضريبة", page)
+        self.assertIn("CN-9", page)
+        self.assertIn("45.60", page)
+        self.assertIn("5.60", page)

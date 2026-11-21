@@ -938,21 +938,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
+        taxed = show and bool(r.get("tax_total"))       # part 3 item 6b: the tax credited back, on its own column
         from ..printing import settings as rs
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
-            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
-            + (f"<td>{m(l['unit_value'])}</td><td>{m(l['unit_value'] * l['qty_base'])}</td>" if show else "") + "</tr>"
+            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}{' (بونص)' if l.get('is_bonus') else ''}</td><td>{e(l['reason_label'])}</td>"
+            + (f"<td>{m(l['unit_value'])}</td>" + (f"<td>{m(l.get('tax_value'))}</td>" if taxed else "")
+               + f"<td>{m(l['unit_value'] * l['qty_base'] + (l.get('tax_value') or 0))}</td>" if show else "") + "</tr>"
             for i, l in enumerate(r["lines"], 1))
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع للمورد {r['return_no']}</title>
 <link rel="stylesheet" href="/static/doc.css"></head><body><main class="doc">
 <header><h1>{e(org)}</h1><h2>إذن مرتجع للمورد رقم {r['return_no']}</h2>
-<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}</p></header>
+<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}{f" · إشعار المورد: {e(r['credit_note_no'])}" if r.get('credit_note_no') else ''}</p></header>
 <table><thead><tr><th>#</th><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية (وحدة)</th><th>السبب</th>
-{'<th>سعر الوحدة</th><th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
-{f'<tfoot><tr><th colspan="7">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
+{'<th>سعر الوحدة</th>' + ('<th>الضريبة</th>' if taxed else '') + '<th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
+{f'<tfoot><tr><th colspan="{8 if taxed else 7}">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
 {f'<p>ملاحظة: {e(r["note"])}</p>' if r.get('note') else ''}
 <div class="sign"><p>توقيع الصيدلية: ................</p><p>توقيع مندوب المورد: ................</p></div>
 </main><script src="/static/print.js"></script></body></html>"""

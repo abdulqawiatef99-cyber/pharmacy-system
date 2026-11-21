@@ -11,6 +11,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inv
 from ..inventory.adjust import avg_cost
+from ..purchasing.validation import effective_amount
 
 REASONS = {"expired": "منتهي الصلاحية", "near_expiry": "قارب على الانتهاء", "damaged": "تالف / مكسور",
            "wrong_item": "صنف خاطئ / غير مطلوب", "overstock": "زيادة / راكد", "recall": "سحب من هيئة الدواء", "other": "سبب آخر"}
@@ -161,8 +162,10 @@ def get(db: Database, ctx: Context, rid: str) -> dict:
         " ORDER BY i.name_en, l.rowid", (rid,))]
     if not (ctx.can("suppliers.pay") or ctx.can("costs.read")):
         out.pop("total", None)
+        out.pop("tax_total", None)
         for x in out["lines"]:
             x.pop("unit_value", None)
+            x.pop("tax_value", None)
     return out
 
 
@@ -218,6 +221,7 @@ def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
                     "expiry_date": l["expiry_date"], "paid_units": paid_units, "bonus_units": bonus_units,
                     "paid_returned": back.get(0, 0), "bonus_returned": back.get(1, 0),
                     "qty_packs": l["qty"] or 0, "unit_net_price": l["unit_net_price"], "tax_amount": l["tax_amount"] or 0,
+                    "amount": effective_amount(l),
                     "line_total": l["line_total"], "on_hand": inv.batch_qty(db, ctx.org_id, mv["branch_id"], l["item_id"],
                                                                             mv["batch_id"]) if mv else 0})
     return out
@@ -232,7 +236,7 @@ def from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str) 
     show = ctx.can("suppliers.pay") or ctx.can("costs.read")
     if not show:
         for l in lines:
-            for k in ("unit_net_price", "tax_amount", "line_total"):
+            for k in ("unit_net_price", "tax_amount", "line_total", "amount"):
                 l.pop(k, None)
     return {"invoice_id": inv_row["id"], "invoice_no": inv_row["invoice_no"], "invoice_date": inv_row["invoice_date"],
             "lines": lines}
@@ -248,10 +252,9 @@ def line_value(l: dict, paid_units: int) -> tuple[int, int]:
     #310: the box at the invoice's net price) and their share of the line's tax. Returning everything still
     left of a line credits exactly what is left of it, never a piaster more or less."""
     tax = l["tax_amount"] or 0
-    if l["unit_net_price"] is not None:
-        total_net = l["unit_net_price"] * l["qty_packs"]
-    else:                                         # only the printed line total was read: it carries the tax
-        total_net = max(0, (l["line_total"] or 0) - tax)
+    # what approval charged the supplier for this line (validation.effective_amount, tax included), never a
+    # total rebuilt from a rounded unit price (Codex P1 on #396: 3 x 30.00 = 90.00 for a line charged 89.99)
+    total_net = max(0, (l["amount"] or 0) - tax)
     done = l["paid_returned"]
     if done + paid_units >= l["paid_units"]:      # the rest of the line: what is left, exactly
         return (total_net - _share(total_net, done, l["paid_units"]), tax - _share(tax, done, l["paid_units"]))
