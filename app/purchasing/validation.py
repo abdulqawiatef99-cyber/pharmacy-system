@@ -18,7 +18,8 @@ from dataclasses import dataclass, field as dc_field
 from datetime import date
 
 LOW_CONFIDENCE = 0.8
-ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch"}
+ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch",
+                  "short_expiry", "slow_before_expiry"}      # U2-22: approved only with a written reason
 
 MESSAGES = {
     "supplier_missing": "حدد المورد",
@@ -40,7 +41,8 @@ MESSAGES = {
     "net_above_public": "السعر الصافي أعلى من سعر الجمهور",
     "public_price_changed": "سعر الجمهور مختلف عن السعر المسجل للصنف",
     "expired": "الصنف منتهي الصلاحية",
-    "short_expiry": "صلاحية قصيرة",
+    "short_expiry": "صلاحية قصيرة: اكتب سبب قبولها",
+    "slow_before_expiry": "الكمية أكبر من اللي هيتباع قبل ما يقرب ينتهي: اكتب السبب",
     "expiry_missing": "تاريخ الصلاحية غير موجود",
     "low_confidence": "قيمة غير مؤكدة من القراءة — راجعها",
     "unreadable": "قيمة موجودة في المستند لكن لم تُقرأ — أدخلها يدويًا",
@@ -206,7 +208,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             if d < today:
                 add("error", "expired", lid, "expiry_date")
             elif (d - today).days < short_expiry_days:
-                add("warning", "short_expiry", lid, "expiry_date", days=(d - today).days)
+                add("error", "short_expiry", lid, "expiry_date", days=(d - today).days)
         elif item is None or item.get("is_drug") != 0:
             add("warning", "expiry_missing", lid, "expiry_date")
         key = (l.get("item_id"), (l.get("batch_no") or "").upper(), exp_date)

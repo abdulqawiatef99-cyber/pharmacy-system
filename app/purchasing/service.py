@@ -270,10 +270,49 @@ class Purchasing:
             "SELECT 1 FROM purchase_invoices WHERE org_id=? AND content_hash=? AND status<>'cancelled'"
             " AND id<>? AND coalesce(supplier_id,'')=coalesce(?, '')",
             (ctx.org_id, inv["content_hash"], inv["id"], inv["supplier_id"])))
-        return validation.validate(inv, lines, items=items, today=date.today(),
-                                   short_expiry_days=self.s.short_expiry_days,
-                                   total_tolerance=self.s.total_tolerance_piasters,
-                                   duplicate_no=dup_no, duplicate_content=dup_content)
+        out = validation.validate(inv, lines, items=items, today=date.today(),
+                                  short_expiry_days=self.s.short_expiry_days,
+                                  total_tolerance=self.s.total_tolerance_piasters,
+                                  duplicate_no=dup_no, duplicate_content=dup_content)
+        return out + self._slow_before_expiry(ctx, inv, lines)
+
+    NEAR_DAYS = 90          # an item is "near expiry" from 3 months before its date (U2-22)
+
+    def _slow_before_expiry(self, ctx: Context, inv: dict, lines: list[dict]) -> list[validation.Issue]:
+        """U2-22: from the last 90 days' sales, how much of this line will sell before it gets near its expiry.
+        More than that needs a written reason to approve. Items never sold here are left out (a new item would
+        always be flagged)."""
+        from ..procurement.service import Procurement
+        today = date.today()
+        acks = {(a.get("code"), a.get("line_id") or "", json.dumps(a.get("details") or {}, sort_keys=True))
+                for a in json.loads(inv.get("acknowledged_issues") or "[]")}
+        p, out, seen = Procurement(self.db, today=today), [], {}
+        for l in lines:
+            if not l.get("item_id") or not l.get("expiry_date") or not l.get("qty"):
+                continue
+            days = (date.fromisoformat(l["expiry_date"]) - today).days
+            if days < 0:
+                continue                                  # expired: refused by the "expired" error already
+            it = self.db.one("SELECT pack_size, is_service FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
+            if not it or it["is_service"]:
+                continue
+            if l["item_id"] not in seen:
+                seen[l["item_id"]] = (p._usage(ctx, l["item_id"], 90)["daily"], p._sellable(ctx, l["item_id"])[0])
+            daily, have = seen[l["item_id"]]
+            if daily <= 0:
+                continue
+            qty = (l["qty"] + (l["bonus_qty"] or 0)) * it["pack_size"]
+            will = max(0, int(daily * max(0, days - self.NEAR_DAYS)) - max(have, 0))
+            if will >= qty:
+                continue
+            details = {"will_sell": will, "qty": qty, "monthly": round(daily * 30, 1), "months_left": days // 30}
+            i = validation.Issue("error", "slow_before_expiry",
+                                 f"هتبيع حوالي {will} من {qty} وحدة قبل ما يقرب ينتهي (البيع حوالي {details['monthly']:g}"
+                                 f" في الشهر، والصلاحية بعد {details['months_left']} شهر): اكتب السبب",
+                                 l["id"], "expiry_date", details)
+            i.acknowledged = ("slow_before_expiry", l["id"], json.dumps(details, sort_keys=True)) in acks
+            out.append(i)
+        return out
 
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
         ctx.require("purchases.read")
