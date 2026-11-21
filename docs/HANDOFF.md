@@ -8,6 +8,21 @@
 
 
 
+## 21/11 06:10 Cairo — part 3 done in code, waiting for the key and the merges (READ THIS FIRST)
+Stack (nothing merged, nothing published, no main, no installer): develop ← #386 `claude/smart-update` ← #391 ← #392 `claude/p3-1-last-installer-rehearsal` ← **#394** `claude/p3-2-balance-correction` @ `7bdd8e4` ← **#395** `claude/p3-3-move-report` @ `d5cf5a4` ← **#396** `claude/p3-6-returns-permissions-keys` @ `973ea72`. #397 = the same top as one diff, **review only, close it after #396 merges**. Merge order: #386 → #391 → #392 → #394 → #395 → #396 (re-target each to develop as the one below merges; merge commits).
+1. Done, with evidence
+   - Item 2 #394: balance correction after the move (`balances.correct`, reason, opening adjustment through `post_adjustment`, revision guard, exact piasters on the screen). Codex clean `7bdd8e4`.
+   - Items 3–5 #395: report in plain words; day/PC health at shift close (`/api/health/day`); Desktop buttons «إي ستوك ١/٢/٣». Codex clean `b656278` (later commits are merges of #394/#392).
+   - Items 6a, 6b, A, C #396: exchange (one transaction, net only, cash/credit refund, same branch, preview in one rolled-back simulation, `expected_new_total`); return window default **7 days (was 14)**; purchase return from invoice (migration **0040**, approved line amount incl. invoice discount/tax by largest remainder, tax ≤ amount, #310 bonus rule, earlier lot returns counted, cancel nets exactly); `users.permissions` + `docs/PERMISSIONS.md` (48 codes); keyboard map `POS_KEYS` (new invoice moved F2 → Insert). Codex clean `973ea72`.
+   - Reviews: Codex 7 rounds; from round 5 on, an independent fresh-context agent reviewed first (owner rule 21/11 03:53, now OWNER_RULES §12 + AGENTS §2a step 0 in this branch). Full suite 2455 OK; CI linux green on every head; Windows green on `973ea72` (run 44862258612) — the only Windows failure seen (run 44837080242) was the key tools' cp1252 output, fixed by the other session in `5dd8315` (#391).
+2. Open, not blocking (P2 / after launch)
+   - #397 P2: a replacement of the same item as the return cannot be added beyond today's stock before the return (add_line checks stock first). Workaround: do the return, then the sale.
+   - The old by-item supplier return can still return part of a bonus lot (#310).
+   - Ctrl+Tab / F11 may be kept by Chrome on the cashier PC (FUTURE_REQUIREMENTS P3-K1); F8 and clicking the tab still work.
+   - Ideas 28/30/31/32 and "#385 small fixes" had no written list in the repo; built from the one-line plan (#395 body). #385's Codex threads were all fixed in #385.
+3. Facts for the owner: minimum Windows = **10, 64-bit**; `installer/pharmacy.iss` has no `MinVersion=10.0` / `ArchitecturesAllowed=x64compatible` yet (installer PR, owner approval). Empty installer (no pharmacy data) last built `81a71c1`: **34,798,343 bytes = 33.2 MB**; the next one is not built.
+4. Next: owner settles the signing key (#386 / item 0) → merge in the order above → smart update or one installer with migration 0040 → device check of the new screens (#18 sheet) → owner acceptance.
+
 ## 21/11 part 3 session 2 — progress log (READ THIS FIRST; newest line last)
 - Item 2 done: #394 `claude/p3-2-balance-correction` @ `f866030` (stacked on #392). Permission `balances.correct` (owner+manager, per person), reason required, `reconcile.post_adjustment` type opening, stale-screen guard. Suite 2382 OK. Codex + CI asked.
 - Items 3–5 done: #395 `claude/p3-3-move-report` (on #394). Suite 2399 OK. Codex P1+P2 on #394 fixed `eb14e6d` (revision guard, opening basis); Codex 2×P1 on #395 fixed `b656278` (clock per org, money without float). Re-review asked.
