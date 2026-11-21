@@ -3553,7 +3553,7 @@ function renderCart(findings = null) {
     const v = inp.value.trim();
     if (unit === "egp") {
       const p = v === "" ? 0 : exactPiasters(v);
-      if (p == null || p < 0) return toast("مبلغ الخصم غير صحيح", true);
+      if (p == null || p < 0) { POS.saving = Promise.resolve(false); return toast("مبلغ الخصم غير صحيح", true); }
       return patchLine(id, { discount_amount: p });
     }
     patchLine(id, { discount_bp: toBp(v) || 0 });
@@ -3662,8 +3662,10 @@ function renderSide() {
   const invDisc = async () => {         // one discount on the whole invoice, spread over the lines (update 1)
     const v = $("#posInvDisc").value.trim(), egp = $("#posInvDiscU").value === "egp";
     const body = egp ? { amount: v === "" ? 0 : exactPiasters(v) } : { bp: toBp(v) || 0 };
-    if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0)))
+    if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0))) {
+      POS.saving = Promise.resolve(false);          // an invalid discount stops F9 too (Codex #400)
       return toast("الخصم غير صحيح", true);
+    }
     POS.saving = (async () => {          // complete() waits for it; false = not saved, the sale waits (Codex #400)
       try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); return true; }
       catch (er) { toast(er.message, true); renderSide(); return false; }

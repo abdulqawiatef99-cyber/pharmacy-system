@@ -351,3 +351,26 @@ class CodexKeyboardCompletion(unittest.TestCase):
             block = _JS[_re.search(fn, _JS).start():][:900]
             self.assertIn("POS.saving = (async () =>", block, fn)
             self.assertIn("return false; }", block, fn)                       # a failed save stops the sale
+
+
+class CodexReview400Round5(FixedCase):
+    def test_p2_each_part_keeps_its_own_approval(self):
+        from app.reports import owner
+        sid, d = self.draft()
+        gid = next(l for l in d["lines"] if l["item_id"] == self.cheap)["id"]
+        self.s.update_line(self.ctx, sid, gid, discount_amount=100)            # the owner: no approval needed
+        from app.core import people
+        people.add_user(self.db, self.ctx, username="cash2", full_name="C2", password="Staff-Pass-2026", role_code="manager")
+        other = dataclasses.replace(self.login("cash2", "Staff-Pass-2026"), max_discount_bp=500,
+                                    approver_id=self.ctx.user_id, approver_discount_bp=5000)
+        d = self.s.set_invoice_discount(other, sid, amount=900)                # another person: approved
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        day = TODAY.isoformat()
+        g = {x["key"]: x for x in owner.discounts_report(self.db, self.ctx, day, day)["by_who"]}
+        self.assertEqual(g[self.ctx.user_id]["approved_lines"], 0)
+        self.assertGreaterEqual(g[other.user_id]["approved_lines"], 1)
+
+    def test_p2_an_invalid_discount_stops_f9(self):
+        for pat in (r"const invDisc = async \(\) =>", r"const sendDisc = \(id\) =>"):
+            block = _JS[_re.search(pat, _JS).start():][:900]
+            self.assertIn("POS.saving = Promise.resolve(false)", block, pat)
