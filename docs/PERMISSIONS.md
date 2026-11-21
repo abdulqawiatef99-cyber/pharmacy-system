@@ -18,6 +18,7 @@
 | المرتجع | `sales.return_others` | مرتجع فاتورة باعها شخص آخر | ✓ |  |  |  |
 | المرتجع | `sales.return_late` | مرتجع بعد مدة المرتجع | ✓ |  |  |  |
 | المرتجع | `sales.return_restricted` | مرتجع أصناف لا ترتجع (ثلاجة واستعمال شخصي) | ✓ |  |  |  |
+| المرتجع | `sales.refund_other_method` | رد مرتجع نقدي لفاتورة اتدفعت ببطاقة أو تحويل (بسبب مكتوب) | ✓ | ✓ |  |  |
 | ما يراه | `sales.totals` | عرض إجمالي المبيعات وفواتير كل الموظفين | ✓ | ✓ |  |  |
 | ما يراه | `costs.read` | عرض التكلفة والربح | ✓ |  |  |  |
 | ما يراه | `cash.see_expected` | معرفة المتوقع في الخزينة | ✓ | ✓ |  |  |
@@ -39,6 +40,7 @@
 | الشراء والأصناف | `suppliers.read` | عرض الموردين | ✓ | ✓ | ✓ | ✓ |
 | الشراء والأصناف | `suppliers.write` | إضافة وتعديل الموردين | ✓ | ✓ |  |  |
 | الشراء والأصناف | `suppliers.pay` | تسجيل دفع للموردين | ✓ | ✓ |  |  |
+| الشراء والأصناف | `suppliers.pay_advance` | دفع للمورد أكتر من المستحق عليه (دفعة مقدمة بسبب مكتوب) | ✓ | ✓ |  |  |
 | المخزون | `inventory.read` | عرض المخزون | ✓ | ✓ | ✓ | ✓ |
 | المخزون | `inventory.count` | تسجيل الجرد | ✓ | ✓ | ✓ | ✓ |
 | المخزون | `inventory.adjust` | تسويات المخزون | ✓ | ✓ |  |  |
@@ -57,7 +59,7 @@
 | الإدارة | `settings.manage` | الإعدادات والنسخ الاحتياطي والتحديث | ✓ |  |  |  |
 | الإدارة | `payroll.manage` | الحضور والرواتب والسلف | ✓ |  |  |  |
 
-الإجمالي: 48 صلاحية.
+الإجمالي: 50 صلاحية.
 
 ## مراجعة مع مجموعات إي ستوك الـ 12 (مرجع بس، مش قاعدة)
 
@@ -66,7 +68,7 @@
 | البيانات العامة | `settings.manage`، `items.groups`، `items.no_return` | الإعدادات والأقسام والمجموعات العلاجية |
 | الأصناف | `items.read`، `items.write`، `items.price`، `items.import`، `items.hidden` | سعر الجمهور منفصل عن تعديل الصنف |
 | المخازن | `inventory.read`، `inventory.count`، `inventory.adjust` | الجرد منفصل عن التسوية |
-| الموردين | `suppliers.read`، `suppliers.write`، `suppliers.pay` | |
+| الموردين | `suppliers.read`، `suppliers.write`، `suppliers.pay`، `suppliers.pay_advance` | |
 | المشتريات | `purchases.read`، `purchases.create`، `purchases.edit`، `purchases.approve`، `purchases.cancel`، `purchases.return_bonus_part` | الاعتماد بس هو اللي بيحرّك المخزون |
 | العملاء | `customers.manage`، `contracts.manage` | |
 | المبيعات | `sales.create`، `sales.read`، `sales.totals`، `sales.below_cost`، `sales.void`، `sales.return*` | المرتجع 4 صلاحيات (بنفسه، فاتورة غيره، بعد المدة، أصناف لا ترتجع) |
