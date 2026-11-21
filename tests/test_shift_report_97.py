@@ -109,14 +109,14 @@ class TestReportLines(ShiftBase):
         self.assertEqual(two["مرتجعات (1)"], "20.00")
 
     def test_card_and_credit_refunds_are_listed_but_not_in_the_drawer(self):
-        a = self.sell(units=4)                                            # +80.00 cash
+        a = self.sell(units=4, card=4000)                                 # 80.00: 40.00 cash + 40.00 card
         self.s.return_items(self.ctx, a["id"], {a["lines"][0]["id"]: 1}, refund_method="card", reason="مرتجع")
-        r = self.close({"10000": 1, "5000": 1, "2000": 1, "1000": 1})      # 180.00: card refund leaves the drawer alone
+        r = self.close({"10000": 1, "2000": 2})                           # 140.00: card refund leaves the drawer alone
         two, _ = rows(self.lines(r))
         self.assertEqual(r["card_refunds"], 2000)
         self.assertEqual(two["منها مرتجع على البطاقة"], "20.00")
         self.assertNotIn("منها مرتجع على حساب العميل", two)
-        self.assertEqual((two["المتوقع في الخزينة"], two["العجز"], two["الزيادة"]), ("180.00", "0.00", "0.00"))
+        self.assertEqual((two["المتوقع في الخزينة"], two["العجز"], two["الزيادة"]), ("140.00", "0.00", "0.00"))
 
     def test_open_shift_has_no_result_rows(self):
         r = self.cd.report(self.ctx, self.cd.summary(self.ctx)["id"])

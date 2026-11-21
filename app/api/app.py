@@ -169,6 +169,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     accounts.sync_system_roles(db)
     from ..catalog.search import backfill_search_keys, search as item_search
     backfill_search_keys(db)
+    from ..dataimport import estock_party_fix      # update 1: customers / suppliers the move hid, once
+    estock_party_fix.run(db)
     from ..catalog import alternatives as alts
     alts.backfill_ingredient_keys(db)
     from ..catalog import card as item_card
@@ -501,34 +503,95 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        chan = updater.channel(info)
+        token = updater.read_token()
+        # #107: the install's own channel (develop on test PCs); a review installer of a work branch follows the
+        # official release (main) once main contains it (owner 20/11), never an older main
+        chan = updater.follow(info, updater.DEFAULT_REPO, token)
         out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1"}
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, info)}
         if chan is None:
-            out["candidate"] = info["ref"]        # a review installer of a work branch: no channel to follow
+            out["candidate"] = info["ref"]        # a review installer main does not contain yet: no channel
             upd_cache.update(at=now, v=out)
             return out
-        try:                                      # #107: the install's own channel (develop on test PCs)
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, updater.read_token())
+        try:
+            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, token)
             out["available"] = out["latest"] != cur
         except updater.UpdateError as e:
             out["error"] = str(e)
         upd_cache.update(at=now, v=out)
         return out
 
+    upd_root = Path(__file__).resolve().parents[2]
+
+    def _smart_status(chan, info) -> dict:
+        """docs/SMART_UPDATE.md: signed bundles (migrations and packages too) once this PC trusts a key."""
+        from ..core import smart_update as su, update_sign, updater
+        out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
+               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
+        try:
+            keys = update_sign.trusted_keys(upd_root)
+        except (OSError, update_sign.SignatureError):
+            keys = []
+        if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
+            return out                                # old launcher: today's code-only button
+        token = updater.read_token()
+        try:
+            m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, token), keys)
+            forward = su.is_forward(m, info, updater.DEFAULT_REPO, token)   # never an older bundle
+        except updater.UpdateError as e:
+            out["error"] = str(e)
+            return out
+        out.update(enabled=True, sha=m["sha"], available=forward, needs_installer=m["python"] != su.python_tag(),
+                   notes=[n for n in m.get("notes", []) if n not in set(su.notes_of(upd_root))][:60],
+                   database=bool(set(m["migrations"]) - {f.stem for f in (upd_root / "app" / "migrations").glob("*.sql")}))
+        if out["request"]:
+            out["waiting"] = su.busy_reason(db, out["request"].get("when", "now"))
+        return out
+
+    def _manage(*args, timeout=1800):
+        import subprocess
+        import sys as _sys
+        return subprocess.run([_sys.executable, str(upd_root / "manage.py"), "update", *args], cwd=os.getcwd(),
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                              env={**os.environ, "PYTHONUTF8": "1"})
+
+    def _smart_loop():
+        from ..core import smart_update as su
+        try:
+            su.import_log(db, s.data_dir)
+        except Exception:                             # the audit copy is retried on the next start
+            logging.getLogger(__name__).exception("update log import failed")
+        while True:
+            time.sleep(30)
+            try:
+                if os.environ.get("PHARM_LAUNCHER") == "1":
+                    su.trigger(s, db)
+            except Exception:
+                logging.getLogger(__name__).exception("smart update check failed")
+
+    if auto_backup and os.environ.get("PHARM_LAUNCHER") == "1":
+        threading.Thread(target=_smart_loop, daemon=True, name="smart-update").start()
+
     @handler
     async def system_update_status(req):
-        ctx_of(req).require("settings.manage")
-        return J(await run_in_threadpool(_update_status))
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        st = await run_in_threadpool(_update_status)
+        from ..dataimport import estock_party_fix                  # update 1: what the one-time repair brought back
+        return J({**st, "parties_reactivated": estock_party_fix.result(db, ctx.org_id)})
 
     @handler
     async def system_update_run(req):
         ctx = ctx_of(req)
         ctx.require("settings.manage")
+        b = await body(req)
+        action = (b or {}).get("action") or "classic"
+        if action != "classic":
+            return J(await _smart_action(ctx, action, b))
         import subprocess
         import sys as _sys
         from ..core import updater
-        chan = updater.channel(updater.installed(s.data_dir))
+        chan = updater.follow(updater.installed(s.data_dir), updater.DEFAULT_REPO, updater.read_token())
         if chan is None:
             raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
         root = Path(__file__).resolve().parents[2]
@@ -546,6 +609,37 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             threading.Timer(1.5, lambda: os._exit(75)).start()
         return J({"ok": ok, "restarting": restart,
                   "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
+
+    async def _smart_action(ctx, action: str, b: dict) -> dict:
+        """prepare (download, verify, rehearse) / schedule (now | after_close) / cancel; each one audited."""
+        from ..core import smart_update as su, updater
+        if action == "prepare":
+            proc = await run_in_threadpool(_manage, "--prepare")
+            ok = proc.returncode == 0
+            text = (proc.stdout or "") + (proc.stderr or "")
+            with db.transaction():
+                audit.record(db, ctx, "system.update.prepare", "system", None, after={"ok": ok, "tail": text[-500:]})
+            upd_cache.clear()
+            if not ok:
+                raise ValidationFailed(text.strip().splitlines()[-1] if text.strip() else "التجهيز فشل", code="update_failed")
+            return {"ok": True, "prepared": su.prepared(s.data_dir) or None}
+        if action == "schedule":
+            when = b.get("when")
+            try:
+                value = su.request(s.data_dir, when, ctx.user_id)
+            except updater.UpdateError as e:
+                raise ValidationFailed(str(e), code="update_failed") from e
+            with db.transaction():
+                audit.record(db, ctx, "system.update.schedule", "system", None, after=value)
+            upd_cache.clear()
+            return {"ok": True, "request": value, "waiting": su.busy_reason(db, when)}
+        if action == "cancel":
+            su.cancel(s.data_dir)
+            with db.transaction():
+                audit.record(db, ctx, "system.update.cancel", "system", None)
+            upd_cache.clear()
+            return {"ok": True}
+        raise ValidationFailed("أمر تحديث غير معروف", code="bad_action")
 
     @handler
     async def setup_restore(req):
@@ -827,10 +921,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if rid == "suggest":
                 return J({"unit_value": returns.suggest_value(db, ctx, qp.get("item", ""), qp.get("batch") or None,
                                                               qp.get("supplier") or None)})
+            if rid == "invoice":        # part 3 item 6b: load an approved purchase invoice to return from
+                return J(returns.from_invoice(db, ctx, qp.get("supplier", ""), qp.get("no", "")))
             if rid:
                 return J(returns.get(db, ctx, rid))
             return J(returns.listing(db, ctx, qp.get("from", ""), qp.get("to", ""), qp.get("supplier") or None))
         b = await body(req)
+        if b.get("invoice_id"):
+            return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
+                                                 b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
+                                                 note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
         return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
 
     @handler
@@ -843,21 +943,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         e = _html.escape
         m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
         show = "total" in r
+        taxed = show and bool(r.get("tax_total"))       # part 3 item 6b: the tax credited back, on its own column
         from ..printing import settings as rs
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), rs.get(db, ctx.org_id)["time_format"])  # #206
         rows = "".join(
             f"<tr><td>{i}</td><td>{e(l['name_en'] or l['name_ar'] or '')}</td><td>{e(l['batch_no'] or '')}</td>"
-            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}</td><td>{e(l['reason_label'])}</td>"
-            + (f"<td>{m(l['unit_value'])}</td><td>{m(l['unit_value'] * l['qty_base'])}</td>" if show else "") + "</tr>"
+            f"<td class='n'><bdi dir='ltr'>{e((l['expiry_date'] or '')[:7])}</bdi></td><td>{l['qty_base']}{' (بونص)' if l.get('is_bonus') else ''}</td><td>{e(l['reason_label'])}</td>"
+            + (f"<td>{m(l['unit_value'])}</td>" + (f"<td>{m(l.get('tax_value'))}</td>" if taxed else "")
+               + f"<td>{m(l['unit_value'] * l['qty_base'] + (l.get('tax_value') or 0))}</td>" if show else "") + "</tr>"
             for i, l in enumerate(r["lines"], 1))
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>مرتجع للمورد {r['return_no']}</title>
 <link rel="stylesheet" href="/static/doc.css"></head><body><main class="doc">
 <header><h1>{e(org)}</h1><h2>إذن مرتجع للمورد رقم {r['return_no']}</h2>
-<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}</p></header>
+<p>المورد: <b>{e(r['supplier'])}</b> · التاريخ: <bdi dir="ltr">{when}</bdi> · سجّله: {e(r['by_name'] or '')}{f" · إشعار المورد: {e(r['credit_note_no'])}" if r.get('credit_note_no') else ''}</p></header>
 <table><thead><tr><th>#</th><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية (وحدة)</th><th>السبب</th>
-{'<th>سعر الوحدة</th><th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
-{f'<tfoot><tr><th colspan="7">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
+{'<th>سعر الوحدة</th>' + ('<th>الضريبة</th>' if taxed else '') + '<th>القيمة</th>' if show else ''}</tr></thead><tbody>{rows}</tbody>
+{f'<tfoot><tr><th colspan="{8 if taxed else 7}">الإجمالي</th><th>{m(r["total"])}</th></tr></tfoot>' if show else ''}</table>
 {f'<p>ملاحظة: {e(r["note"])}</p>' if r.get('note') else ''}
 <div class="sign"><p>توقيع الصيدلية: ................</p><p>توقيع مندوب المورد: ................</p></div>
 </main><script src="/static/print.js"></script></body></html>"""
@@ -1103,7 +1205,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def customers_all(req):
         from ..sales import customers as cu
         qp = req.query_params
-        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None)})
+        return J({"customers": cu.listing(db, ctx_of(req), qp.get("q", ""), qp.get("only") or None,
+                                          sort=qp.get("sort") or None)})
 
     @handler
     async def customers_phone_doubles(req):
@@ -1183,6 +1286,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 "failed": failed, "late": late, "warn": failed or late, "interval_min": interval,
                 "last_fail_at": st.get("last_fail_at"), "last_error": st.get("last_error") if failed else None,
                 "offsite_error": st.get("offsite_error")}
+
+    @handler
+    async def day_health_view(req):
+        """Part 3 item 4: the day's checks at shift close and the PC check, read only."""
+        from ..reports import dayhealth
+        ctx = ctx_of(req)
+
+        def run():
+            return {"day": dayhealth.day_checks(db, ctx, backup=backup_health()),
+                    "pc": dayhealth.pc_checks(db, s.data_dir, org_id=ctx.org_id)}
+        return J(await off_loop(run))
 
     @handler
     async def backup_health_view(req):
@@ -1450,7 +1564,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def items_list(req):
         ctx = ctx_of(req)
-        res = item_search(db, ctx, req.query_params.get("q", ""), _qlimit(req, 20, 200),
+        limit = _qlimit(req, 20, 200)
+        # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
+        stock_first = req.query_params.get("stock") in ("first", "only")
+        only_stock = req.query_params.get("stock") == "only"
+        # the stock filter looks at up to 500 name matches, not the first 10x (Codex on #400)
+        res = item_search(db, ctx, req.query_params.get("q", ""), 500 if stock_first else limit,
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -1463,10 +1582,29 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 f"SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? AND branch_id=?"
                 f" AND item_id IN ({','.join('?' * len(ids))}) GROUP BY item_id",
                 (ctx.org_id, ctx.branch_id, *ids))}
+            from ..sales.service import local_today as _today_local
+            # U2-35: the nearest expiry still to come of what is on the shelf
+            soon = {r["item_id"]: r["e"] for r in db.all(
+                f"SELECT sb.item_id, min(b.expiry_date) e FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date>=?"
+                f" AND sb.item_id IN ({','.join('?' * len(ids))}) GROUP BY sb.item_id",
+                (ctx.org_id, ctx.branch_id, _today_local().isoformat(), *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+                r["nearest_expiry"] = soon.get(r["id"])
+        hidden_no_stock = 0
+        if stock_first and rows and "stock_qty" in rows[0]:
+            has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
+            rows = sorted(rows, key=lambda r: not has(r))                          # stable: the search order inside
+            if only_stock:
+                hidden_no_stock = sum(not has(r) for r in rows)
+                rows = [r for r in rows if has(r)]
+        rows = rows[:limit]
+        hint = res["hint"]
+        if not hint and rows and all(r.get("match") == "spelling" for r in rows):
+            hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
         if req.query_params.get("meta") == "1":
-            return J({"items": rows, "hint": res["hint"]})
+            return J({"items": rows, "hint": hint, "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler
@@ -1881,6 +2019,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
 
     @handler
+    async def proc_smart(req):
+        from ..procurement import smart_order
+        ctx, qp = ctx_of(req), req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(smart_order.smart_order, db, ctx, scope=qp.get("scope") or "default",
+                                expensive_from=dear, **_sugg_params(req)))
+
+    @handler
+    async def proc_order_xlsx(req):
+        from ..procurement import smart_order
+        b = await body(req)
+        return Response(smart_order.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
+
+    @handler
     async def proc_health(req):
         return J(await off_loop(Procurement(db).stock_health, ctx_of(req)))
 
@@ -1997,7 +2156,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(Sales(db).update_line(ctx, req.path_params["id"], req.path_params["line_id"],
-                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp")))
+                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp"),
+                                       discount_amount=b.get("discount_amount")))
+
+    @handler
+    async def sales_invoice_discount(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).set_invoice_discount(ctx, req.path_params["id"], amount=b.get("amount"), bp=b.get("bp")))
 
     @handler
     async def sales_delivery(req):
@@ -2066,6 +2232,50 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                         reason=str(b.get("reason", ""))))
 
     @handler
+    async def sales_exchange(req):
+        """Part 3 item 6a: a return and its replacement sale in one operation."""
+        ctx = ctx_of(req)
+        b = await body(req)
+        raw = b.get("lines")
+        if not isinstance(raw, dict) or not raw:
+            raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
+        lines = {str(k): _int(v, "qty") for k, v in raw.items()}
+        if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
+            sales = Sales(db)
+            if b.get("new_sale_id"):          # both totals in one simulation, the returned units back first
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines, new_sid=str(b["new_sale_id"]),
+                                                      refund_method=str(b.get("refund_method", "")))
+            else:
+                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines,
+                                                      refund_method=str(b.get("refund_method", ""))), 0
+            return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
+        decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
+        done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
+                                  refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
+                                  reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
+                                  version=b.get("version"),
+                                  request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
+                                                      if b.get("expected_new_total") is not None else None))
+        if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
+            sale = done["sale"]
+            if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
+                    done["settled"]["refund"] and done["refund_method"] == "cash"):
+                sale = {**sale, "paid_cash": 0}
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, sale, b.get("receipt") is True, 0)
+        return J(done)
+
+    @handler
+    async def item_branch_stock(req):
+        from ..catalog import card as _card
+        return J(_card.branch_stock(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def returns_find(req):
+        return J({"sales": await off_loop(Sales(db).find_for_return, ctx_of(req), req.query_params.get("q", ""))})
+
+    @handler
     async def sales_void(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2080,9 +2290,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
-        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
-                      f" WHERE c.org_id=? AND c.is_active=1 AND ({cu.SEARCH_SQL}) ORDER BY c.name LIMIT 30",
-                      (ctx.org_id, *cu.search_terms(req.query_params.get("q", ""))))
+        where, wp, rank, rp = cu.search_clause(req.query_params.get("q", ""))   # update 1: code, titles, spelling
+        # every customer, none hidden for E-Stock's flags (owner 21/11); a deleted one is tagged
+        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit,"
+                      f" {cu.CODE_SQL} estock_code FROM customers c"
+                      f" WHERE c.org_id=? AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
+                      (ctx.org_id, *wp, *rp))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
 
@@ -2270,6 +2483,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   adj_type=b.get("adj_type") or None, note=b.get("note")), status_code=201)
 
     @handler
+    async def opening_corrections_view(req):
+        from ..dataimport import opening_balances as ob
+        return J({"parties": await off_loop(ob.corrections, db, ctx_of(req), req.path_params["kind"],
+                                            req.query_params.get("q", ""))})
+
+    @handler
+    async def opening_correct_view(req):
+        from ..dataimport import opening_balances as ob
+        ctx = ctx_of(req)
+        kind, pid = req.path_params["kind"], req.path_params["id"]
+        if req.method == "GET":
+            return J({"history": ob.correction_history(db, ctx, kind, pid)})
+        b = await body(req)
+        if b.get("amount") in (None, "") or b.get("seen_opening") in (None, "") or b.get("seen_revision") in (None, ""):
+            raise ValidationFailed("اكتب الرصيد الصحيح")
+        return J(ob.correct(db, ctx, kind, pid, _int(b.get("amount"), "amount"),
+                            seen_opening=_int(b.get("seen_opening"), "seen_opening"), reason=b.get("reason"),
+                            seen_revision=_int(b.get("seen_revision"), "seen_revision")),
+                 status_code=201)
+
+    @handler
     async def reconcile_history_view(req):
         return J({"history": reconcile.history(db, ctx_of(req), req.path_params["party"], req.path_params["id"])})
 
@@ -2280,6 +2514,39 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def cash_float_target(req):
+        from ..sales import shift_tools
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            return J(shift_tools.save_target(db, ctx, (await body(req)).get("target")))
+        ctx.require("cash.close")
+        return J(shift_tools.get_target(db, ctx.org_id))
+
+    @handler
+    async def cash_float_preview(req):
+        """Which notes stay in the drawer and which go to the treasury, for the count on the close screen."""
+        from ..sales import shift_tools
+        from ..sales.cash import count_total
+        ctx = ctx_of(req)
+        ctx.require("cash.close")
+        b = await body(req)
+        total, clean = count_total(b.get("denominations") or {})
+        fl = b.get("float_left")
+        if fl is not None:              # the closer typed his own float: show the notes for that amount (Codex P2)
+            try:
+                fl = whole_number(fl)
+            except (TypeError, ValueError):
+                raise ValidationFailed("الفكة غير صحيحة")
+            if not 0 <= fl <= total:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
+
+    @handler
+    async def cash_hunt(req):
+        from ..sales import shift_tools
+        return J(await off_loop(shift_tools.difference_hunt, db, ctx_of(req), req.path_params["id"]))
 
     @handler
     async def shift_report_page(req):
@@ -2405,7 +2672,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if cfg["show_expiry"]:
                 exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
                 exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else ""
+            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
+                f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
             rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
                         f"<td>{m(l['line_total'])}</td></tr>")
@@ -2464,7 +2732,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            policy = f"<p class='s'>المرتجع خلال {return_window_days(db, ctx.org_id)} يومًا بهذه الفاتورة"
+            n = return_window_days(db, ctx.org_id)       # Arabic number agreement: 7 أيام, 14 يومًا
+            days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
+            policy = f"<p class='s'>المرتجع خلال {days} بهذه الفاتورة"
             policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
@@ -2662,11 +2932,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/backup", backup_status, methods=["GET", "PUT"]),
         Route("/api/backup/run", backup_run, methods=["POST"]),
         Route("/api/backup/health", backup_health_view),
+        Route("/api/health/day", day_health_view),
         Route("/api/items", items_list),
         Route("/api/items", items_create, methods=["POST"]),
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
         Route("/api/stock/reasons", stock_reasons),
@@ -2733,6 +3005,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suggestions", proc_suggest),
         Route("/api/procurement/suggestions.xlsx", proc_suggest_xlsx),
         Route("/api/procurement/health", proc_health),
+        Route("/api/procurement/smart", proc_smart),
+        Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
@@ -2749,12 +3023,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/discard", sales_discard, methods=["POST"]),
         Route("/api/sales/{id}/delivery", sales_delivery, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_update_line, methods=["PATCH"]),
+        Route("/api/sales/{id}/invoice-discount", sales_invoice_discount, methods=["PUT"]),
         Route("/api/sales/{id}", sales_get),
         Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),
         Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
+        Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
+        Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
@@ -2792,6 +3069,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/hunt", cash_hunt),
+        Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
+        Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
         Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
         Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
         Route("/api/money/accounts/{id}/statement", money_statement_view),
@@ -2805,6 +3085,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reconcile/parties", reconcile_parties_view),
         Route("/api/reconcile", reconcile_record_view, methods=["POST"]),
         Route("/api/reconcile/{party}/{id}", reconcile_history_view),
+        Route("/api/opening-balances/{kind}", opening_corrections_view),
+        Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
@@ -2841,8 +3123,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 await run_in_threadpool(autob.stop)
 
     from .hostcheck import HostAllowlist
+    from ..core.smart_update import InFlight
     app = Starlette(routes=routes, middleware=[Middleware(HostAllowlist, extra_hosts=s.allowed_hosts),
-                                               Middleware(SecurityHeaders)], lifespan=lifespan)
+                                               Middleware(SecurityHeaders), Middleware(InFlight)], lifespan=lifespan)
     app.state.db = db
     app.state.autobackup = autob
     return app

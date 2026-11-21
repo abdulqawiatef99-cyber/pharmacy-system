@@ -73,7 +73,7 @@ class TestOwnerReport(_R):
     def test_the_rest_is_grouped_by_kind_with_counts(self):
         tb = base_tables()
         tb["Customer"] += [{"customer_id": str(10 + i), "customer_code": f"X{i}", "customer_name_ar": f"عميل {i}",
-                            "mobile": "12", "customer_current_money": "0", "deleted": "0", "active": "1"}
+                            "mobile": "12", "customer_current_money": "0", "deleted": "1", "active": "1"}
                            for i in range(3)]
         sec = self.section(self.report(tables=tb), "٣. الباقي", None)
         groups = [ln for ln in sec.splitlines() if re.match(r"\s*- .+: \d+ سطر", ln)]
@@ -275,7 +275,7 @@ class TestOwner0050(_R):
     def test_a_cancelled_item_with_unclear_units_and_no_stock_moves_stopped_and_is_listed(self):
         tb = base_tables()
         tb["Products"].append(product(5, "104", "Testcancelled Tab", "صنف ملغي", product_unit3="3",
-                                      product_unit1_3="2.5", deleted="1"))
+                                      product_unit1_3="2.5", active="0"))
         t = self.report(tables=tb)
         self.assertTrue(self.res["ok"], self.res.get("plan").blocking)
         it = self.db.one("SELECT * FROM items WHERE code='104'")
@@ -289,7 +289,7 @@ class TestOwner0050(_R):
     def test_a_cancelled_item_with_unclear_units_and_stock_still_stops(self):
         tb = base_tables()
         tb["Products"].append(product(5, "104", "Testcancelled Tab", "صنف ملغي", product_unit3="3",
-                                      product_unit1_3="2.5", deleted="1"))
+                                      product_unit1_3="2.5", active="0"))
         tb["Product_Amount"].append(stock_row(11, 5, 1, "2", "10.0000", "2027-01-01T00:00:00"))
         self.report(tables=tb)
         self.assertFalse(self.res["ok"])                                  # its stock needs the real pack
@@ -306,3 +306,23 @@ class TestOwner0050(_R):
         self.assertIn("500.00", sec1)
         self.assertIn("مرجع", t)
         self.assertIn("1,200.00", t)
+
+
+class TestPlainWordingPart3(_R):
+    """Part 3 item 3 (idea 32): the owner reads every line without help — the screen to use by name, what a
+    balance sign means, and no English program words."""
+
+    def test_names_the_correction_screen(self):
+        t = self.report()
+        self.assertIn("«تصحيح الأرصدة بعد النقل»", t)
+
+    def test_each_balance_to_settle_says_who_owes_whom(self):
+        sec = self.section(self.report(), "أرصدة للتسوية", None)
+        self.assertIn("«مورد تجربة» (كود V1): رصيد 500.00 ج (علينا له)", sec)
+        self.assertIn("(كود V2): رصيد 20.00 ج (لينا عنده)", sec)
+        self.assertIn("«أحمد تجربة» (كود C1): رصيد 120.00 ج (لينا عنده)", sec)
+        self.assertIn("«منى تجربة» (كود C2): رصيد 15.50 ج (علينا له)", sec)
+
+    def test_no_english_program_word_in_the_report(self):
+        t = self.report()
+        self.assertNotIn("E-Stock", t)

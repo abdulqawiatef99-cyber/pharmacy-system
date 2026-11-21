@@ -109,3 +109,39 @@ class TestServeRefreshesUnderTheLauncherOnly(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMoveButtons(unittest.TestCase):
+    """Part 3 item 5 (idea 31): a numbered Desktop button for each step of the E-Stock move."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pharm-btn-"))
+        self.rel = self.tmp / "rel"
+        (self.rel / "scripts" / "windows").mkdir(parents=True)
+        for n in ("estock-backups.bat", "estock-db-read.bat", "estock-db-import.bat"):
+            (self.rel / "scripts" / "windows" / n).write_bytes(f"rem {n}\r\n".encode())
+        self.home, self.desk = self.tmp / "home", self.tmp / "Desktop"
+        self.desk.mkdir()
+
+    def test_one_button_per_step_in_order_pointing_at_the_tools_copy(self):
+        r = tf.refresh(self.rel, self.home, desktop=self.desk)
+        self.assertEqual(r["buttons"], [b for b, _ in tf.MOVE_BUTTONS])
+        self.assertEqual([b[:10] for b, _ in tf.MOVE_BUTTONS], ["إي ستوك ١ ", "إي ستوك ٢ ", "إي ستوك ٣ "])
+        for label, script in tf.MOVE_BUTTONS:
+            body = (self.desk / label).read_text(encoding="utf-8")
+            self.assertIn("URL=" + (self.home / "tools" / script).resolve().as_uri(), body)
+
+    def test_every_button_script_is_an_owner_tool(self):
+        self.assertTrue({s for _, s in tf.MOVE_BUTTONS} <= set(tf.TOOLS))
+        for _, s in tf.MOVE_BUTTONS:
+            self.assertTrue((ROOT / "scripts" / "windows" / s).is_file(), s)
+
+    def test_a_missing_script_has_no_button_and_nothing_breaks(self):
+        (self.rel / "scripts" / "windows" / "estock-db-import.bat").unlink()
+        r = tf.refresh(self.rel, self.home, desktop=self.desk)
+        self.assertEqual(len(r["buttons"]), 2)
+        self.assertFalse((self.desk / tf.MOVE_BUTTONS[2][0]).exists())
+
+    def test_no_desktop_no_buttons(self):
+        with mock.patch.object(tf, "desktop_dir", return_value=None):
+            self.assertEqual(tf.refresh(self.rel, self.home)["buttons"], [])

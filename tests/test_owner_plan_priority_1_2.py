@@ -152,7 +152,7 @@ class TestPriority1(PlanCase):
         # similar/alternative button are drawn (what the owner sees is checked by hand)
         self.assertIn("r.stock_qty > 0", JS)
         self.assertRegex(JS, r"res\.length === 1 && sellable\(res\[0\]\)")
-        self.assertIn("✕ ناقص", JS)
+        self.assertIn("✕ نفد", JS)                         # update 1: «ناقص» = not in the market
         self.assertIn("↔ مثيل / بديل", JS)
 
     def test_return_one_strip_refunds_what_was_paid_and_receipt_says_return(self):

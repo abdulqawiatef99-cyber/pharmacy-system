@@ -58,8 +58,11 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
     _when_tf = lambda iso: _when(iso, time_format)  # noqa: E731
     out: list[tuple] = [("title", org), ("text", "تقرير إغلاق الشيفت"),
                         ("small", f"من {_when_tf(r['opened_at'])} ({r['opened_by_name'] or ''})"),
-                        ("small", f"إلى {_when_tf(r['closed_at'])} ({r['closed_by_name'] or ''})"), ("rule",),
-                        ("row", "عدد الفواتير", str(r["sales_count"])), ("row", "إجمالي المبيعات", egp(r["sales_total"]))]
+                        ("small", f"إلى {_when_tf(r['closed_at'])} ({r['closed_by_name'] or ''})")]
+    if r.get("closed_at") and r.get("opened_at"):                                          # U2-28
+        mins = int((accounts.parse_iso(r["closed_at"]) - accounts.parse_iso(r["opened_at"])).total_seconds() // 60)
+        out.append(("small", f"مدة الشيفت: {mins // 60} ساعة و{mins % 60} دقيقة"))
+    out += [("rule",), ("row", "عدد الفواتير", str(r["sales_count"])), ("row", "إجمالي المبيعات", egp(r["sales_total"]))]
     if r["discount_total"]:
         out.append(("row", "الخصومات", egp(r["discount_total"])))
     if r["returns_count"]:
@@ -92,16 +95,32 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
             out.append(("row", f"{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {c['channel']}", egp(c["amount"])))
     if r["credit_total"]:
         out.append(("row", "آجل", egp(r["credit_total"])))
+        for c in r.get("credit_sales") or []:                                              # U2-28
+            out.append(("row", f"آجل فاتورة {c['sale_no']} — {c['customer'] or 'بدون اسم'}", egp(c["on_credit"])))
+    disc = r.get("discount_by_user") or []
+    if disc:
+        out.append(("rule",))
+        for d in disc:
+            out.append(("row", f"خصم {d['name'] or ''} ({d['n']} فاتورة)", egp(d["total"])))
+    fl = r.get("float_left")
+    if r["status"] == "closed" and fl is not None:                                          # notes kept / moved at close
+        keep = (r.get("float_split") or {}).get("keep") or {}
+        out += [("rule",), ("total", "الفكة اللي فضلت في الدرج", egp(fl))]
+        for dn, n in sorted(keep.items(), key=lambda kv: -int(kv[0])):
+            out.append(("row", f"{DEN_LABELS.get(int(dn), dn)} × {n}", egp(int(dn) * int(n))))
+        out.append(("total", "اتحوّل للخزنة", egp((r["counted_cash"] or 0) - fl)))
+    if r["status"] == "closed" and r["difference"]:
+        out.append(("small", "دوّر على سبب الفرق من شاشة الشيفت ← «دوّر على الفرق» (قروش الفواتير، فتح الدرج، المرتجعات)."))
     if r.get("close_note"):
         out.append(("small", f"ملاحظة: {r['close_note']}"))
     # #81: drawer-open commands (the printer cannot confirm the drawer physically opened)
-    out += [("rule",), ("row", "أوامر فتح الدرج مع البيع النقدي", str(r["drawer_auto_count"])),
-            ("row", "أوامر فتح الدرج يدويًا", str(r["drawer_manual_count"]))]
+    out += [("rule",), ("row", "فتح الدرج مع البيع النقدي", str(r["drawer_auto_count"])),
+            ("row", "فتح الدرج من غير بيع", str(r["drawer_manual_count"]))]
     for d in r["drawer_manual"]:
         note = (" : " + d["note"]) if d.get("note") else ""
         failed = " (فشل)" if d.get("outcome") == "failed" else ""
         out.append(("small", f"{_when_tf(d['at'])} {d.get('by') or ''} — {d.get('reason') or ''}{note}{failed}"))
-    out.append(("text", "توقيع المستلم: .................."))
+    out += [("text", "توقيع الكاشير: .................."), ("text", "توقيع المستلم: ..................")]
     return out
 
 

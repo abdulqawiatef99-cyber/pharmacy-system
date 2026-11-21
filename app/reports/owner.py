@@ -11,7 +11,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross_as_sold, retail_value
+from ..sales.service import line_fixed, line_gross_as_sold, retail_value
 from .service import _period, local_buckets
 
 MAX_ROWS = 5000
@@ -228,22 +228,47 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
                " coalesce(sum(discount_total>0),0) n_disc FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
                " AND completed_at>=? AND completed_at<?", (o, b, lo, hi))
     by_who: dict[str, dict] = {}
-    for l in db.all("SELECT l.id, l.discount_bp, l.discount_source, l.line_total, l.discount_by, l.discount_approved_by,"
+    for l in db.all("SELECT l.id, l.discount_bp, l.discount_amount, l.invoice_share, l.discount_source, l.line_total,"
+                    " coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END) discount_by,"
+                    " coalesce(l.discount_approved_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
+                    " discount_approved_by, s.invoice_discount_by inv_by, ui.full_name inv_name,"
+                    " l.discount_by line_by, (SELECT full_name FROM users WHERE id=l.discount_by) line_by_name,"
+                    " l.discount_approved_by line_approved, s.invoice_discount_approved_by inv_approved,"
                     " ub.full_name by_name, ua.full_name approved_name FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
-                    " LEFT JOIN users ub ON ub.id=l.discount_by LEFT JOIN users ua ON ua.id=l.discount_approved_by"
+                    " LEFT JOIN users ui ON ui.id=s.invoice_discount_by"
+                    " LEFT JOIN users ub ON ub.id=coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END)"
+                    " LEFT JOIN users ua ON ua.id=coalesce(l.discount_approved_by,"
+                    " CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
                     " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
-                    " AND l.discount_bp>0", (o, b, lo, hi)):
+                    " AND (l.discount_bp>0 OR l.discount_amount>0 OR l.invoice_share>0)", (o, b, lo, hi)):
         gross = line_gross_as_sold([dict(a) for a in db.all(
             "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],))],
-            l["discount_bp"], l["line_total"])
+            l["discount_bp"], l["line_total"], line_fixed(l))
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
-        key = "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?")
-        g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (l["by_name"] or "—"),
-                                    "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})
-        g["lines"] += 1
-        g["gross"] += gross
-        g["discount"] += disc
-        g["approved_lines"] += 1 if l["discount_approved_by"] else 0
+        parts = [(disc, "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?"), l["by_name"],
+                  bool(l["discount_approved_by"]))]
+        if l["invoice_share"]:
+            # the invoice discount is the person who gave it, not the contract's nor the line's (reviews of update 1);
+            # each part keeps its own approval (Codex on #400)
+            share = min(disc, l["invoice_share"])
+            own_key = "contract" if l["discount_source"] == "contract" else (l["line_by"] or "?")
+            parts = [(disc - share, own_key, l["line_by_name"], bool(l["line_approved"])),
+                     (share, l["inv_by"] or "?", l["inv_name"], bool(l["inv_approved"]))]
+        merged: dict[str, list] = {}                     # one person, one entry per line (Codex on #400)
+        for amount, key, name, ok in parts:
+            if not amount and len(parts) > 1:
+                continue
+            m = merged.setdefault(key, [0, name, False])
+            m[0] += amount
+            m[1] = m[1] or name
+            m[2] = m[2] or ok
+        for key, (amount, name, ok) in merged.items():
+            g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (name or "—"),
+                                        "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})
+            g["lines"] += 1
+            g["gross"] += gross
+            g["discount"] += amount
+            g["approved_lines"] += 1 if ok else 0
     for g in by_who.values():
         g["discount_bp"] = int(round(g["discount"] * 10000 / g["gross"])) if g["gross"] else 0
     days: dict = {}

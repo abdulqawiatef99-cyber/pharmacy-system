@@ -415,6 +415,23 @@ def flag(v) -> bool | None:
     return True if s in _TRUE else False if s in _FALSE else None
 
 
+def party_flags(r: dict) -> dict:
+    """E-Stock's raw active / deleted values of a Customer or Vendor row, kept in the import row only. The owner
+    (21/11 20:59): E-Stock has no stopped, cancelled or deleted customer or supplier, and none was ever deleted. The
+    old rule made a party inactive whenever `active` was empty, NULL or missing (flag() reads those as False) or
+    `deleted` was '1' (normal on live rows), so live customers were hidden. A party never takes a state from them."""
+    return {"active": r.get("active"), "deleted": r.get("deleted")}
+
+
+def product_inactive(r: dict) -> bool:
+    """Products: on the pharmacy's live E-Stock (launch day 21/11) `deleted` is '1' on 30,269 of the 30,508 rows
+    with active='1', so deleted='1' does NOT mean deleted. (active, deleted) counts: (1,1)=30269, (0,1)=225,
+    (0,0)=14. Rule (manager 21/11): inactive = active is '0' OR deleted is '0'; anything else stays active."""
+    def no(v) -> bool:                           # an empty cell is unknown, not '0'
+        return str(v or "").strip() != "" and flag(v) is False
+    return no(r.get("active")) or no(r.get("deleted"))
+
+
 def ident(v) -> str:
     """E-Stock ids are decimal(18,0): '123' and '123.0' are the same id."""
     s = str(v or "").strip()
@@ -578,8 +595,7 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             p.issue("Products", pid, code, "product_drug", r.get("product_drug"), "دواء/غير دواء: غير معروف",
                     kind="info")
         it["is_drug"] = None if drug is None else int(drug)
-        deleted, active = flag(r.get("deleted")), flag(r.get("active"))
-        it["inactive"] = bool(deleted) or active is False
+        it["inactive"] = product_inactive(r)
         price = dec(r.get("sell_price"))
         if price is None or price <= 0:
             p.issue("Products", pid, code, "sell_price", r.get("sell_price") or "(فاضي)",
@@ -1252,7 +1268,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
                                   phones=phones, notes="؛ ".join(notes),
                                   address=(r.get("address") or "").strip() or None,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=False, flags=party_flags(r)))     # never from E-Stock's flags (owner 21/11)
     names: dict[str, str] = {}
     for r in sorted(ex.rows("Vendor"), key=lambda r: (dec(r.get("vendor_id")) or 0)):
         vid = ident(r.get("vendor_id"))
@@ -1279,7 +1295,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         c = crows.get(("supplier", vid), {})
         p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=False, flags=party_flags(r)))
     _balance_sign_check(ex, p)
 
 
@@ -1973,8 +1989,6 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
             for d in (plan.suppliers if kind == "supplier" else plan.customers):
                 if kind == "supplier":
                     pid = catalog.create_supplier(db, ctx, name=d["name"], phone=d.get("phone"))
-                    if d["inactive"]:
-                        db.execute("UPDATE suppliers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'opening', ?, 'رصيد افتتاحي من إي ستوك', ?)",
@@ -1985,14 +1999,13 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                     pid = Sales(db).create_customer(ctx, name=d["name"], phone=ph[0], phone2=ph[1], phone3=ph[2],
                                                     credit_limit=d["limit"], notes=d["notes"], name_alt=d["alt"],
                                                     address1=d["address"])
-                    if d["inactive"]:
-                        db.execute("UPDATE customers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'adjustment', ?, 'رصيد افتتاحي من إي ستوك', ?)",
                                    (new_id(), ctx.org_id, pid, d["estock_balance"], run_id, ctx.user_id))
                 total += d["estock_balance"]
-                rows.append(({"estock_id": d["estock_id"], "code": d["code"]}, pid))
+                # owner 21/11: a party is never hidden for E-Stock's flags; their raw values stay in the import row
+                rows.append(({"estock_id": d["estock_id"], "code": d["code"], "estock_flags": d.get("flags") or {}}, pid))
             return rows, {"parties": len(rows), "balance_total": total}
         return fn
     runs["suppliers"], r = _step(db, ctx, "suppliers", "suppliers", H("suppliers", ex.sha("Vendor")), esha, label,
@@ -2208,7 +2221,14 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
     n_items = db.one("SELECT count(*) n FROM items WHERE org_id=?", (ctx.org_id,))["n"]
     if n_items != len(plan.items) or len(item_map) != len(plan.items):
         mm.append({"what": "items", "code": "", "name": "", "detail": f"الأصناف {n_items}، إي ستوك {len(plan.items)}", "value": Decimal(0)})
-    out["items"] = {"estock": len(plan.items), "program": n_items}
+    # active counts too (launch day 21/11: a wrong deleted/active reading made almost every item inactive while
+    # the total still matched)
+    n_active = db.one("SELECT count(*) n FROM items WHERE org_id=? AND status='active'", (ctx.org_id,))["n"]
+    e_active = sum(not it["inactive"] for it in plan.items)
+    if n_active != e_active:
+        mm.append({"what": "items", "code": "", "name": "",
+                   "detail": f"الأصناف الشغالة {n_active}، إي ستوك {e_active}", "value": Decimal(0)})
+    out["items"] = {"estock": len(plan.items), "program": n_items, "estock_active": e_active, "program_active": n_active}
     for kind, table, ltable, col, parties in (("suppliers", "suppliers", "supplier_ledger", "supplier_id", plan.suppliers),
                                              ("customers", "customers", "customer_ledger", "customer_id", plan.customers)):
         n = db.one(f"SELECT count(*) n FROM {table} WHERE org_id=?", (ctx.org_id,))["n"]
@@ -2285,7 +2305,7 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
 # E-Stock settings seen on its screens (manager's tour 18/11 22:45) and what the program has for each:
 # listed in the report, never applied by the move (returns and printing are the owner's rules).
 ESTOCK_SETTINGS = (       # (E-Stock's setting, what the program has, recommended value) - none applied
-    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 7 زي إي ستوك"),
+    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 14 (قرار المالك 21/11)"),
     ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية", "المقترح: زي ما هو"),
     ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده", "المقترح: مش محتاج"),
     ("شريط الصلاحية 6 شهور", "إعداد تشغيل (PHARM_SHORT_EXPIRY_DAYS=180)", "المقترح: 180 يوم زي ما هو"),

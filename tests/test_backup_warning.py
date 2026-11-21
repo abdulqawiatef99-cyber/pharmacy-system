@@ -83,6 +83,7 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#logout');
   await p.waitForTimeout(300);
   const asCashier = await p.locator('#backupAlert').isHidden();
+  p.once('dialog', (d) => d.accept());            // update 2: sign-out asks first (U2-32)
   await p.click('#logout');
   await p.waitForSelector('#loginForm');
   await p.evaluate(async ([u, w]) => fetch('/api/auth/login', { method: 'POST',

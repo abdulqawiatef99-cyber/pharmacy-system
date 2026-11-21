@@ -78,7 +78,7 @@ def tables(scale: float = 1.0, seed: int = 1, wide: bool = True) -> dict[str, li
              "product_name_en": f"{_word(rnd, _EN, 7).title()} {rnd.choice((50, 100, 250, 500, 1000))}mg Tab",
              "product_name_ar": f"{_word(rnd, _AR, 6)} أقراص", "product_scientific_name": _word(rnd, _EN, 9),
              "company_id": str(rnd.randint(1, 300)), "group_id": str(rnd.randint(1, 40)),
-             "product_drug": rnd.choice("1110"), "deleted": "0", "active": "1",
+             "product_drug": rnd.choice("1110"), "deleted": "1", "active": "1",
              "sell_price": f"{sell:.4f}", "buy_price": f"{sell * rnd.uniform(0.7, 0.92):.4f}",
              "product_disc1": "0", "product_disc2": "0", "product_unit1": "1",
              "product_unit2": "2" if pack > 1 else "", "product_unit1_2": f"{pack}.0000" if pack > 1 else "",
@@ -118,7 +118,7 @@ def tables(scale: float = 1.0, seed: int = 1, wide: bool = True) -> dict[str, li
                               "customer_name_ar": f"عميل {_word(rnd, _AR, 4)} {cid}", "customer_name_en": "",
                               "mobile": f"010{cid:08d}", "tel": "", "address": "",
                               "customer_current_money": f"{total:.4f}", "customer_max_money": "0",
-                              "deleted": "0", "active": "1"})
+                              "deleted": "1", "active": "1"})
     for r in t["Gedo_customers"]:          # a running total in time order, as E-Stock keeps it
         r["insert_date"] = (now - timedelta(minutes=n["customer_rows"] - int(r["gc_id"]))).strftime("%Y-%m-%dT%H:%M:%S.000")
     # suppliers: a statement of their purchases and payments
@@ -156,7 +156,7 @@ def tables(scale: float = 1.0, seed: int = 1, wide: bool = True) -> dict[str, li
                                       "insert_date": (now - timedelta(minutes=20000 - gv)).strftime("%Y-%m-%dT%H:%M:%S.000")})
     for v in range(1, n["suppliers"] + 1):
         t["Vendor"].append({"vendor_id": str(v), "vendor_code": f"V{v}", "vendor_name_ar": f"مورد {_word(rnd, _AR, 5)} {v}",
-                            "mobile": f"011{v:08d}", "vendor_current_money": f"{vbal[v]:.4f}", "deleted": "0", "active": "1"})
+                            "mobile": f"011{v:08d}", "vendor_current_money": f"{vbal[v]:.4f}", "deleted": "1", "active": "1"})
     # sales: headers and this branch's lines; the paid parts add up to the net
     t["Sales_header"], t["Branches_sales_details"] = [], []
     per_s = max(1, n["sale_lines"] // n["sales"])

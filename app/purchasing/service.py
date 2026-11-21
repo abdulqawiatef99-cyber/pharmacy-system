@@ -131,8 +131,9 @@ class Purchasing:
 
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
-        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual"), "manual",
-                                            None, supplier_id)
+        from ..sales.service import local_today       # update 1 (owner): the supplier invoice date starts as today
+        return self._create_from_extraction(ctx, ExtractedInvoice(method="manual", invoice_date=local_today().isoformat()),
+                                            "manual", None, supplier_id)
 
     def _create_from_extraction(self, ctx: Context, ex: ExtractedInvoice, kind: str,
                                 file_id: str | None, supplier_id: str | None) -> str:
@@ -170,15 +171,22 @@ class Purchasing:
                 if dup:
                     raise Conflict("هذا الملف سُجّل من قبل كفاتورة", code="duplicate_file",
                                    details={"invoice_id": dup["id"]})
+            # the program's own serial (0041, owner: shown next to the supplier's invoice number), per branch
+            self.db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,'purchase',1)"
+                            " ON CONFLICT(org_id, branch_id, kind) DO NOTHING", (ctx.org_id, ctx.branch_id))
+            serial = self.db.one("SELECT next_no FROM branch_counters WHERE org_id=? AND branch_id=? AND kind='purchase'",
+                                 (ctx.org_id, ctx.branch_id))["next_no"]
+            self.db.execute("UPDATE branch_counters SET next_no=next_no+1 WHERE org_id=? AND branch_id=? AND kind='purchase'",
+                            (ctx.org_id, ctx.branch_id))
             self.db.execute(
                 "INSERT INTO purchase_invoices (id, org_id, branch_id, supplier_id, supplier_name_raw,"
                 " invoice_no, invoice_date, source_type, source_file_id, extraction_method,"
                 " extraction_model, declared_total, extra_discount, extra_tax, raw_extraction,"
-                " created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_by, serial_no) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (inv_id, ctx.org_id, ctx.branch_id, supplier_id, ex.supplier_name, ex.invoice_no,
                  ex.invoice_date, kind, file_id, ex.method, ex.model, to_piasters(ex.declared_total),
                  to_piasters(ex.extra_discount) or 0, to_piasters(ex.extra_tax) or 0,
-                 json.dumps(ex.to_json(), ensure_ascii=False), ctx.user_id))
+                 json.dumps(ex.to_json(), ensure_ascii=False), ctx.user_id, serial))
             for n, l in enumerate(ex.lines, start=1):
                 row = {
                     "id": new_id(), "invoice_id": inv_id, "org_id": ctx.org_id, "line_no": n,
@@ -295,8 +303,8 @@ class Purchasing:
     def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
              date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
         ctx.require("purchases.read")
-        q = ("SELECT pi.id, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
-             " pi.declared_total, pi.computed_total, pi.created_at, s.name supplier_name,"
+        q = ("SELECT pi.id, pi.serial_no, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
+             " pi.declared_total, pi.computed_total, pi.created_at, pi.approved_at, s.name supplier_name,"
              " (SELECT count(*) FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id) lines"
              " FROM purchase_invoices pi LEFT JOIN suppliers s ON s.id=pi.supplier_id"
              " WHERE pi.org_id=?")
@@ -356,7 +364,14 @@ class Purchasing:
                 if k in ("extra_discount", "extra_tax") and v is None:
                     v = 0
                 if k == "invoice_date" and v:
-                    date.fromisoformat(v)
+                    try:
+                        d = date.fromisoformat(v)
+                    except (TypeError, ValueError):
+                        raise ValidationFailed("تاريخ فاتورة المورد غير صحيح")
+                    from ..sales.service import local_today
+                    if d > local_today():          # U2-0: a supplier invoice is never dated after today
+                        raise ValidationFailed("تاريخ فاتورة المورد بعد النهارده: مستحيل، راجع التاريخ",
+                                               code="invoice_date_future")
                 clean[k] = v
             if clean:
                 sets = ", ".join(f"{k}=?" for k in clean)
@@ -592,6 +607,11 @@ class Purchasing:
             if blocking:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
                                details={"issues": [i.as_dict() for i in blocking]})
+            if inv["invoice_date"]:
+                from ..sales.service import local_today
+                if date.fromisoformat(inv["invoice_date"]) > local_today():     # U2-0: an import may carry it
+                    raise Conflict("تاريخ فاتورة المورد بعد النهارده: مستحيل، صحّح التاريخ قبل الاعتماد",
+                                   code="invoice_date_future")
             amounts = [validation.effective_amount(l) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []
@@ -716,8 +736,8 @@ class Purchasing:
                     # read again per movement: an earlier line of this invoice may sit on the same lot
                     receipts = self._lot_receipts(ctx, m["branch_id"], m["item_id"], m["batch_id"])
                     me = next(p for p in receipts if p["id"] == m["id"])
-                    returned_units += sum(q for q, _ in me["took"])
-                    credited += sum(q * v for q, v in me["took"])
+                    returned_units += sum(t[0] for t in me["took"])
+                    credited += sum(t[1] for t in me["took"])
                     if me["left"] <= 0:           # every unit of this line already went back to the supplier
                         continue
                     # what later deliveries of the same lot brought in is theirs: without this, cancelling took
@@ -759,41 +779,49 @@ class Purchasing:
         return self.get(ctx, inv_id, with_candidates=False)
 
     def _lot_receipts(self, ctx: Context, branch_id: str, item_id: str, batch_id: str | None) -> list[dict]:
-        """Every receipt of one lot in ledger order, with what is still its own: `left` = received, minus what
-        its cancellation reversed, minus what went back to its supplier; `took` = those returns as
-        (units, piasters credited per unit). A return to a supplier is taken from that supplier's receipts of
-        the lot, oldest first: a return slip names the supplier and the lot, not the invoice."""
-        receipts: list[dict] = []
-        by_line: dict[tuple, dict] = {}
-        for r in self.db.all(
-                "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
-                " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value"
-                " FROM stock_movements m"
-                " LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice' AND pi.id=m.ref_id AND pi.org_id=m.org_id"
-                " LEFT JOIN supplier_returns sr ON m.movement_type='supplier_return' AND sr.id=m.ref_id AND sr.org_id=m.org_id"
-                " LEFT JOIN supplier_return_lines sl ON m.movement_type='supplier_return' AND sl.id=m.ref_line_id"
-                " WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.batch_id IS ?"
-                " AND m.movement_type IN ('purchase','opening','purchase_reversal','supplier_return') ORDER BY m.rowid",
-                (ctx.org_id, branch_id, item_id, batch_id)):
-            if r["movement_type"] in ("purchase", "opening"):
-                if r["qty_delta"] > 0:
-                    p = {"seq": r["seq"], "id": r["id"], "ref_id": r["ref_id"] if r["ref_type"] == "purchase_invoice" else None,
-                         "supplier_id": r["bought_from"], "left": r["qty_delta"], "took": []}
-                    receipts.append(p)
-                    if p["ref_id"]:
-                        by_line[(r["ref_id"], r["ref_line_id"])] = p
-            elif r["movement_type"] == "purchase_reversal":
-                p = by_line.get((r["ref_id"], r["ref_line_id"]))
-                if p:
-                    p["left"] = max(p["left"] + r["qty_delta"], 0)
-            elif r["returned_to"]:
-                n = -r["qty_delta"]
-                for p in receipts:
-                    if n <= 0:
-                        break
-                    if p["supplier_id"] == r["returned_to"] and p["left"] > 0:
-                        t = min(n, p["left"])
-                        p["left"] -= t
-                        p["took"].append((t, r["unit_value"] or 0))
-                        n -= t
-        return receipts
+        return lot_receipts(self.db, ctx, branch_id, item_id, batch_id)
+
+
+def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch_id: str | None) -> list[dict]:
+    """Every receipt of one lot in ledger order, with what is still its own: `left` = received, minus what
+    its cancellation reversed, minus what went back to its supplier; `took` = those returns as
+    (units, piasters credited for them, tax included). A return made from an invoice (part 3 item 6b) names
+    its purchase line and is taken from that receipt first; a return by item and lot is taken from that
+    supplier's receipts of the lot, oldest first (Codex P1 x2 on #396)."""
+    receipts: list[dict] = []
+    by_line: dict[tuple, dict] = {}
+    for r in db.all(
+            "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
+            " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value,"
+            " coalesce(sl.tax_value, 0) tax_value, sl.purchase_line_id, sr.purchase_invoice_id"
+            " FROM stock_movements m"
+            " LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice' AND pi.id=m.ref_id AND pi.org_id=m.org_id"
+            " LEFT JOIN supplier_returns sr ON m.movement_type='supplier_return' AND sr.id=m.ref_id AND sr.org_id=m.org_id"
+            " LEFT JOIN supplier_return_lines sl ON m.movement_type='supplier_return' AND sl.id=m.ref_line_id"
+            " WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.batch_id IS ?"
+            " AND m.movement_type IN ('purchase','opening','purchase_reversal','supplier_return') ORDER BY m.rowid",
+            (ctx.org_id, branch_id, item_id, batch_id)):
+        if r["movement_type"] in ("purchase", "opening"):
+            if r["qty_delta"] > 0:
+                p = {"seq": r["seq"], "id": r["id"], "ref_id": r["ref_id"] if r["ref_type"] == "purchase_invoice" else None,
+                     "supplier_id": r["bought_from"], "left": r["qty_delta"], "took": []}
+                receipts.append(p)
+                if p["ref_id"]:
+                    by_line[(r["ref_id"], r["ref_line_id"])] = p
+        elif r["movement_type"] == "purchase_reversal":
+            p = by_line.get((r["ref_id"], r["ref_line_id"]))
+            if p:
+                p["left"] = max(p["left"] + r["qty_delta"], 0)
+        elif r["returned_to"]:
+            n, tax = -r["qty_delta"], r["tax_value"]
+            named = by_line.get((r["purchase_invoice_id"], r["purchase_line_id"])) if r["purchase_line_id"] else None
+            for p in ([named] if named else []) + receipts:
+                if n <= 0:
+                    break
+                if p["supplier_id"] == r["returned_to"] and p["left"] > 0:
+                    t = min(n, p["left"])
+                    p["left"] -= t
+                    p["took"].append((t, t * (r["unit_value"] or 0) + tax, r["purchase_line_id"]))
+                    tax = 0                   # the row's tax is credited once, with its first units
+                    n -= t
+    return receipts

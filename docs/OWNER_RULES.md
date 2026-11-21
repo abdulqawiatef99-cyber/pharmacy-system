@@ -36,7 +36,7 @@ with this file, this file wins. Change it only through a PR, after the owner agr
 ## 4. Merging
 - `develop` only when `CI / linux` is green on the PR's latest head AND Codex reviewed that same head
   with no unresolved P0/P1 (AGENTS.md §2, §2a). Merge commit. Never `main` without the owner.
-- `develop` is the pharmacy PC's update channel. The in-app «تحديث» button works since 12/11 (#158);
+- `main` (the official release) is the pharmacy PC's update channel (owner 20/11); `develop` is for test PCs. A review installer follows `main` once `main` contains it (`docs/SMART_UPDATE.md`). The in-app «تحديث» button works since 12/11 (#158);
   use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
   keep them grouped.
 - After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
@@ -169,3 +169,38 @@ work. The model that built a part never grades it alone (Codex or a different mo
 Every audit: findings as an issue (file:line, scenario, severity), each verified with a failing test before
 any fix, fixes in small PRs, and a 5-line Arabic summary to the owner. Paid tools or a new service need the owner first.
 
+
+## 12. Two reviews, a second agent first, then Codex (owner, 21/11 03:53: a standing rule)
+Owner's words: «موافق بس حطها قاعدة في المشروع كله ان وكيل تاني يراجع الاول و بعد كده كودكس يراجع».
+- Before ANY `@codex review`, the implementing session runs an independent review by a separate agent
+  (sub-agent or another session) with a fresh context: it gets only the diff and the item's spec, never the
+  implementer's reasoning. It reports findings P0/P1/P2 with file:line and a concrete failing scenario.
+- Its focus: whatever can break money or stock: cancel after a return, partial returns adding up, piastres and
+  rounding, bonus lines, taxes (line and invoice level), permissions and escalation, retries and concurrency,
+  `org_id`, a migration on a real-size database.
+- Every P0/P1 it finds is fixed test-first; only then Codex is asked. Codex stays the final reviewer; the merge
+  rules of §4 and §10 do not change (no unresolved Codex P0/P1, CI green).
+- Before the launch: one last full review of the whole program by the strongest suitable Claude model and by
+  Codex (owner, same message).
+
+## 13. «امنع الغلط، متنبهش عليه» — refuse the impossible (owner, 21/11 evening: a standing rule)
+Owner's words: «أي غلط غير قابل للمنطق يكون ممنوع على السيستم، يكون مرفوض».
+- An impossible or illogical money / stock entry is REFUSED by the server (a clear Arabic message saying what
+  is wrong and the allowed limit), never just warned about. A warning is only for something unusual but possible.
+- A rare real exception (for example an advance payment to a supplier, cash back for an invoice paid by card)
+  needs the owner's or a manager's permission and a written reason, and is recorded in the audit log.
+- Every money / stock entry point has a test that tries the impossible value and must be refused
+  (`tests/test_u2_0_refusals.py`). A new entry point adds its own case in the same PR.
+- Covered (U2-0, 22/11): sale or quantity beyond stock; zero or negative quantity or price; discount above the
+  line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
+  (cash for a card invoice = exception); credit sale without a customer; customer collection above the debt;
+  supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
+  today; expired expiry at purchase approval (an expiry before the invoice date is always already expired, since
+  the invoice date cannot be after today); the same supplier invoice number twice. A refund to the customer's
+  own account (store credit) stays allowed whatever the invoice was paid with: no money leaves the pharmacy.
+  The supplier advance and the cash refund of a card invoice can be approved on the screen by the owner or a
+  manager (PIN), with the reason.
+- Not yet covered (needs a migration or a later item): an exception path for a genuinely repeated supplier
+  invoice number (today: always refused), returnable expired goods with permission (today: always refused),
+  sale price above the public price (the screen cannot type a price; it comes from the batch), and a unit change
+  on a line (U2-13).

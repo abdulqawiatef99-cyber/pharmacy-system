@@ -14,7 +14,7 @@ import re
 from ..core.permissions import Context
 from ..db import Database
 from . import gs1
-from .normalize import normalize_barcode, normalize_text
+from .normalize import normalize_barcode, normalize_text, spelling_key, spelling_sql
 
 # Windows Arabic (101) layout: English key -> Arabic character
 _EN_AR = {
@@ -80,6 +80,35 @@ def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None
     return [dict(r) for r in rows]
 
 
+def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | None, skip: set) -> list[dict]:
+    """Arabic spelling variants (update 1): بكتول / بيكتول, ى / ي, ة / ه, every word of the query in the name's
+    spelling key (`spelling_key` / `spelling_sql`); only after the exact patterns found too few."""
+    words = normalize_text(q).split()
+    ar = [spelling_key(w) for w in words if _ARABIC.search(w)]
+    ar = [w for w in ar if w]
+    if not ar:
+        return []
+    other = [w for w in words if not _ARABIC.search(w)]          # a strength or a Latin word stays required (Codex #400)
+    csql, cparams = _cat_sql(category)
+    col = spelling_sql("coalesce(name_ar_norm,'')")
+    where = " AND ".join([f"{col} LIKE ?"] * len(ar)
+                         + ["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other))
+    params = [f"%{t}%" for t in ar]
+    for w in other:
+        params += [f"%{w}%", f"%{w}%"]
+    rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
+                  " ORDER BY length(coalesce(name_ar_norm,'')) LIMIT ?",
+                  (org_id, *params, *cparams, limit + len(skip)))
+    return [dict(r) for r in rows if r["id"] not in skip]
+
+
+def _exact_code(db: Database, org_id: str, q: str) -> list[dict]:
+    """The code typed in full comes first (launch day: «3796» found nothing): the item code as typed or in any
+    letter case, and E<code> (an E-Stock item moved without a code of its own gets E + its E-Stock id)."""
+    return [dict(r) for r in db.all("SELECT * FROM items WHERE org_id=? AND status='active' AND"
+                                    " (lower(code)=lower(?) OR code=?) ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
+
+
 def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
     """{'items': [...], 'hint': None | {'kind': 'layout', 'query': 'aspocid'}}.
     Hidden items are left out for people without items.hidden."""
@@ -111,12 +140,18 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         if r:
             return {"items": [dict(r)], "hint": None}
     found: dict[str, dict] = {}
-    r = db.one("SELECT * FROM items WHERE org_id=? AND code=? AND status='active'", (ctx.org_id, q))
-    if r:
-        found[r["id"]] = dict(r)
+    for r in _exact_code(db, ctx.org_id, q):
+        found.setdefault(r["id"], r)
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
     hint = None
+    if len(found) < limit and "%" not in q:
+        exact = bool(found)
+        for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
+            row["match"] = "spelling"            # per row: the hint is decided again after a stock filter (Codex #400)
+            found.setdefault(row["id"], row)
+        if found and not exact:
+            hint = {"kind": "spelling"}          # a guess by spelling: Enter on the sale screen never adds it alone
     if not found:
         alt = swap_layout(q)
         if alt:

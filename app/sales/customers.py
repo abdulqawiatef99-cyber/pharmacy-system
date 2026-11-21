@@ -11,9 +11,14 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 
 
+from ..catalog.normalize import spelling_key, spelling_sql
+
+# update 1: a name also matches by its Arabic spelling key (جالهوم = جلهوم, ى/ي, ة/ه), every word of the query
 SEARCH_SQL = ("c.name LIKE ? OR coalesce(c.name_alt,'') LIKE ? OR coalesce(c.phone,'') LIKE ?"
-              " OR coalesce(c.phone2,'') LIKE ? OR coalesce(c.phone3,'') LIKE ?")
-SEARCH_N = 5
+              " OR coalesce(c.phone2,'') LIKE ? OR coalesce(c.phone3,'') LIKE ?"
+              f" OR ({spelling_sql('c.name')} LIKE ? AND ? <> '%%')"
+              " OR (" + spelling_sql("coalesce(c.name_alt,'')") + " LIKE ? AND ? <> '%%')")
+SEARCH_N = 9
 TEXT_FIELDS = ("name", "name_alt", "address1", "address2", "phone", "phone2", "phone3", "notes")
 
 
@@ -44,7 +49,49 @@ def search_terms(q: str) -> list[str]:
             ph = c
     except ValidationFailed:
         pass
-    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3
+    key = "%" + "%".join(spelling_key(q).split()) + "%"
+    return [f"%{q}%"] * 2 + [f"%{ph}%"] * 3 + [key, key] * 2
+
+
+# update 1 (owner 21/11: «د محمد الشربيني», E-Stock code 335, not found): titles are not part of the name
+_TITLES = {"د", "دكتر", "لدكتر", "دكتره", "لدكتره", "دك", "ا", "استاذ", "ستاذ", "استذ", "ستذ", "م", "مهندس", "مهندسه"}
+_TITLE_PREFIXES = ("", "د/ ", "د/", "د ", "د. ", "د.", "دكتر ", "لدكتر ", "دكتره ")   # in spelling_sql form
+ESTOCK_TAG = "كود إي ستوك: "
+# the E-Stock code as a number, for sorting (the move writes «كود إي ستوك: N» first in the notes)
+CODE_SQL = (f"CASE WHEN substr(coalesce(c.notes,''), 1, {len(ESTOCK_TAG)}) = '{ESTOCK_TAG}'"
+            f" THEN CAST(substr(c.notes, {len(ESTOCK_TAG) + 1}) AS INTEGER) END")
+
+
+def search_clause(q: str) -> tuple[str, list, str, list]:
+    """WHERE part and ORDER BY rank for a customer search, POS and the customers screen alike: name / second name /
+    phones as typed; every word of the query in any order, by its Arabic spelling key (أإآ/ا, ى/ي, ة/ه, long
+    vowels; «د/» «دكتور» dropped); and the E-Stock customer code exactly (kept in the notes by the move), ranked
+    first. Returns (where_sql, params, rank_sql, rank_params)."""
+    q = str(q or "").strip()[:100]
+    parts, params = [SEARCH_SQL], search_terms(q)
+    words = [w for w in spelling_key(q.replace("/", " ").replace(".", " ")).split() if w not in _TITLES]
+    if words:
+        one = f"({spelling_sql('c.name')} LIKE ? OR " + spelling_sql("coalesce(c.name_alt,'')") + " LIKE ?)"
+        parts.append("(" + " AND ".join([one] * len(words)) + ")")
+        for w in words:
+            params += [f"%{w}%", f"%{w}%"]
+    # exact, never LIKE (a typed % or _ is not a wildcard), and ٣٣٥ is 335 (the move writes ASCII digits)
+    code = q.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
+    code_sql = "(coalesce(c.notes,'') = ? OR substr(coalesce(c.notes,''), 1, length(?)) = ?)"
+    code_params = [ESTOCK_TAG + code, ESTOCK_TAG + code + "؛", ESTOCK_TAG + code + "؛"]
+    parts.append(code_sql)
+    params += code_params
+    # owner 21/11: the exact code first, then names starting with what was typed (a title before it allowed),
+    # then the rest
+    key = " ".join(words)
+    pre_sql, pre_params = ["substr(c.name, 1, length(?)) = ?"], [q, q]
+    if key:
+        name_key = spelling_sql("c.name")
+        for t in _TITLE_PREFIXES:
+            pre_sql.append(f"substr({name_key}, 1, length(?)) = ?")
+            pre_params += [t + key, t + key]
+    rank = f"CASE WHEN {code_sql} THEN 0 WHEN ? <> '' AND ({' OR '.join(pre_sql)}) THEN 1 ELSE 2 END"
+    return " OR ".join(f"({p})" for p in parts), params, rank, code_params + [q] + pre_params
 
 
 def phone_forms(ph: str) -> list[str]:
@@ -106,17 +153,25 @@ def _bal_sql() -> str:
     return "coalesce((SELECT sum(amount) FROM customer_ledger l WHERE l.org_id=c.org_id AND l.customer_id=c.id),0)"
 
 
-def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
+def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None,
+            sort: str | None = None) -> list[dict]:
+    """only: debt / refill. Every customer is listed (owner 21/11: none hidden for E-Stock's flags). sort: code (the
+    E-Stock code, default) / name / balance; a search puts the exact code first, then names starting with it."""
     ctx.require("sales.read")
     today = today or date.today()
+    rank, rank_params = "1", []
     sql = (f"SELECT c.*, {_bal_sql()} balance,"
            " (SELECT min(date(coalesce(r.last_at, r.created_at), '+' || r.every_days || ' days')) FROM customer_refills r"
-           "  WHERE r.customer_id=c.id) next_refill"
-           " FROM customers c WHERE c.org_id=? AND c.is_active=1")
+           "  WHERE r.customer_id=c.id) next_refill, {rank} rank,"
+           f" {CODE_SQL} estock_code"
+           " FROM customers c WHERE c.org_id=?")
     params: list = [ctx.org_id]
     if q.strip():
-        sql += f" AND ({SEARCH_SQL})"
-        params += search_terms(q)
+        where, wp, rank, rank_params = search_clause(q)
+        sql += f" AND ({where})"
+        params += wp
+    sql = sql.replace("{rank}", rank)
+    params = rank_params + params
     # the filter runs before the 300 limit, so a big customer list never hides a debtor
     sql = f"SELECT * FROM ({sql}) WHERE 1=1"
     if only == "debt":
@@ -124,7 +179,11 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
     elif only == "refill":
         sql += " AND next_refill IS NOT NULL AND next_refill <= ?"
         params.append((today + timedelta(days=5)).isoformat())
-    sql += " ORDER BY " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
+    order = {"name": "name", "balance": "balance DESC, name",
+             "code": "estock_code IS NULL, estock_code, name"}.get(sort or ("balance" if only == "debt" else "code"))
+    if order is None:
+        raise ValidationFailed("ترتيب غير معروف")
+    sql += f" ORDER BY rank, {order} LIMIT 300"
     return [dict(r) for r in db.all(sql, tuple(params))]
 
 
