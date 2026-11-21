@@ -175,6 +175,21 @@ document.addEventListener("keydown", (e) => {        // Ctrl + / Ctrl - : font s
   const i = Math.min(FONT_STEPS.length - 1, Math.max(0, FONT_STEPS.indexOf(PREFS.font) + d));
   savePrefs({ font: FONT_STEPS[i] }).catch(() => {});
 });
+// launch day 21/11: a number field showing 0 / 0.00 is selected on focus, so typing replaces it (typing 1185
+// in front of the shift's "0" gave 11850). Every screen, one place.
+const isZeroField = (el) => el instanceof HTMLInputElement && !el.readOnly && !el.disabled &&
+  (el.type === "number" || /^(numeric|decimal)$/.test(el.inputMode || "")) && el.type !== "password" &&
+  el.value.trim() !== "" && Number(el.value) === 0;
+let zeroPick = null;
+document.addEventListener("focusin", (e) => {
+  if (!isZeroField(e.target)) return;
+  zeroPick = e.target;
+  e.target.select();
+});
+document.addEventListener("mouseup", (e) => {   // the click that focused it would otherwise drop the selection
+  if (zeroPick && e.target === zeroPick) { e.preventDefault(); zeroPick.select(); }
+  zeroPick = null;
+});
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
 const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
