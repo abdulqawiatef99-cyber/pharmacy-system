@@ -3722,7 +3722,9 @@ async function complete(findings) {
   if (!findings) {
     const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
     const blocking = r.findings.filter((f) => ["override", "block", "acknowledge"].includes(f.requires));
-    if (r.findings.length && (blocking.length || r.findings.some((f) => f.severity !== "insufficient"))) {
+    // launch day 21/11 (owner): only a real risk stops the sale; «no data» notes (no active ingredient, no
+    // interaction list) and look-alike hints never ask for a click
+    if (blocking.length || r.findings.some((f) => f.code === "item_recall_pending")) {   // a recall: always shown
       renderCart(r.findings); return;
     }
     findings = r.findings;
