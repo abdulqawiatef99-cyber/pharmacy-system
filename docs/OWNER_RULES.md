@@ -182,3 +182,21 @@ Owner's words: «موافق بس حطها قاعدة في المشروع كله 
   rules of §4 and §10 do not change (no unresolved Codex P0/P1, CI green).
 - Before the launch: one last full review of the whole program by the strongest suitable Claude model and by
   Codex (owner, same message).
+
+## 13. «امنع الغلط، متنبهش عليه» — refuse the impossible (owner, 21/11 evening: a standing rule)
+Owner's words: «أي غلط غير قابل للمنطق يكون ممنوع على السيستم، يكون مرفوض».
+- An impossible or illogical money / stock entry is REFUSED by the server (a clear Arabic message saying what
+  is wrong and the allowed limit), never just warned about. A warning is only for something unusual but possible.
+- A rare real exception (for example an advance payment to a supplier, cash back for an invoice paid by card)
+  needs the owner's or a manager's permission and a written reason, and is recorded in the audit log.
+- Every money / stock entry point has a test that tries the impossible value and must be refused
+  (`tests/test_u2_0_refusals.py`). A new entry point adds its own case in the same PR.
+- Covered (U2-0, 22/11): sale or quantity beyond stock; zero or negative quantity or price; discount above the
+  line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
+  (cash for a card invoice = exception); credit sale without a customer; customer collection above the debt;
+  supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
+  today; expired or past-dated expiry at purchase approval; the same supplier invoice number twice.
+- Not yet covered (needs a migration or a later item): an exception path for a genuinely repeated supplier
+  invoice number (today: always refused), returnable expired goods with permission (today: always refused),
+  sale price above the public price (the screen cannot type a price; it comes from the batch), and a unit change
+  on a line (U2-13).

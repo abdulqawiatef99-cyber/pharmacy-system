@@ -364,7 +364,14 @@ class Purchasing:
                 if k in ("extra_discount", "extra_tax") and v is None:
                     v = 0
                 if k == "invoice_date" and v:
-                    date.fromisoformat(v)
+                    try:
+                        d = date.fromisoformat(v)
+                    except (TypeError, ValueError):
+                        raise ValidationFailed("تاريخ فاتورة المورد غير صحيح")
+                    from ..sales.service import local_today
+                    if d > local_today():          # U2-0: a supplier invoice is never dated after today
+                        raise ValidationFailed("تاريخ فاتورة المورد بعد النهارده: مستحيل، راجع التاريخ",
+                                               code="invoice_date_future")
                 clean[k] = v
             if clean:
                 sets = ", ".join(f"{k}=?" for k in clean)
@@ -600,6 +607,11 @@ class Purchasing:
             if blocking:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
                                details={"issues": [i.as_dict() for i in blocking]})
+            if inv["invoice_date"]:
+                from ..sales.service import local_today
+                if date.fromisoformat(inv["invoice_date"]) > local_today():     # U2-0: an import may carry it
+                    raise Conflict("تاريخ فاتورة المورد بعد النهارده: مستحيل، صحّح التاريخ قبل الاعتماد",
+                                   code="invoice_date_future")
             amounts = [validation.effective_amount(l) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []
