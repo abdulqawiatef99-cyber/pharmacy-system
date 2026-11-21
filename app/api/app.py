@@ -169,6 +169,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     accounts.sync_system_roles(db)
     from ..catalog.search import backfill_search_keys, search as item_search
     backfill_search_keys(db)
+    from ..dataimport import estock_party_fix      # update 1: customers / suppliers the move hid, once
+    estock_party_fix.run(db)
     from ..catalog import alternatives as alts
     alts.backfill_ingredient_keys(db)
     from ..catalog import card as item_card
@@ -572,8 +574,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def system_update_status(req):
-        ctx_of(req).require("settings.manage")
-        return J(await run_in_threadpool(_update_status))
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        st = await run_in_threadpool(_update_status)
+        from ..dataimport import estock_party_fix                  # update 1: what the one-time repair brought back
+        return J({**st, "parties_reactivated": estock_party_fix.result(db, ctx.org_id)})
 
     @handler
     async def system_update_run(req):
@@ -1562,7 +1567,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
         stock_first = req.query_params.get("stock") in ("first", "only")
         only_stock = req.query_params.get("stock") == "only"
-        res = item_search(db, ctx, req.query_params.get("q", ""), min(200, limit * 10) if stock_first else limit,
+        # the stock filter looks at up to 500 name matches, not the first 10x (Codex on #400)
+        res = item_search(db, ctx, req.query_params.get("q", ""), 500 if stock_first else limit,
                           category=req.query_params.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
@@ -2247,19 +2253,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(Sales(db).day_summary(ctx_of(req), req.query_params.get("day")))
 
     @handler
-    async def customer_set_active(req):
-        from ..sales import customers as cu
-        b = await body(req)
-        return J(cu.set_active(db, ctx_of(req), req.path_params["id"], bool(b.get("active", True))))
-
-    @handler
     async def customers_list(req):
         ctx = ctx_of(req)
         ctx.require("sales.read")
         from ..sales import customers as cu
         where, wp, rank, rp = cu.search_clause(req.query_params.get("q", ""))   # update 1: code, titles, spelling
-        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit FROM customers c"
-                      f" WHERE c.org_id=? AND c.is_active=1 AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
+        # every customer, none hidden for E-Stock's flags (owner 21/11); a deleted one is tagged
+        rows = db.all("SELECT c.id, c.name, c.name_alt, c.phone, c.phone2, c.phone3, c.address1, c.credit_limit,"
+                      f" instr(coalesce(c.notes,''), '{cu.DELETED_TAG}') > 0 estock_deleted FROM customers c"
+                      f" WHERE c.org_id=? AND ({where}) ORDER BY {rank}, c.name LIMIT 30",
                       (ctx.org_id, *wp, *rp))
         sales = Sales(db)
         return J([{**dict(r), "balance": sales.balance(ctx, r["id"])} for r in rows])
@@ -3009,7 +3011,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
-        Route("/api/customers/{id}/active", customer_set_active, methods=["POST"]),
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),

@@ -274,3 +274,21 @@ class TestReviewFindings(FixedCase):
         d = self.s.get(self.ctx, sid)
         with self.assertRaises(Forbidden):
             self.s.complete(self.cashier, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+
+
+class CodexReview400Discounts(FixedCase):
+    def test_p2_invoice_share_on_an_ordinary_line_goes_to_who_gave_it(self):
+        from app.core import people
+        from app.reports import owner
+        people.add_user(self.db, self.ctx, username="mgr1", full_name="M", password="Staff-Pass-2026", role_code="manager")
+        mgr = dataclasses.replace(self.login("mgr1", "Staff-Pass-2026"), max_discount_bp=5000)
+        sid, d = self.draft()
+        gid = next(l for l in d["lines"] if l["item_id"] == self.cheap)["id"]
+        self.s.update_line(self.ctx, sid, gid, discount_amount=100)          # the owner's line discount
+        d = self.s.set_invoice_discount(mgr, sid, amount=200)                # the manager's invoice discount
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        day = TODAY.isoformat()
+        g = {x["key"]: x["discount"] for x in owner.discounts_report(self.db, self.ctx, day, day)["by_who"]}
+        self.assertEqual(g.get(self.ctx.user_id), 100)
+        self.assertEqual(g.get(mgr.user_id), 200)
+        self.assertEqual(sum(g.values()), 300)

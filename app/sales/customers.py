@@ -56,6 +56,7 @@ def search_terms(q: str) -> list[str]:
 # update 1 (owner 21/11: «د محمد الشربيني», E-Stock code 335, not found): titles are not part of the name
 _TITLES = {"د", "دكتر", "لدكتر", "دكتره", "لدكتره", "دك", "ا", "استاذ", "ستاذ", "استذ", "ستذ", "م", "مهندس", "مهندسه"}
 ESTOCK_TAG = "كود إي ستوك: "
+DELETED_TAG = "محذوف في إي ستوك"          # estock_db.DELETED_TAG: the move tags, never hides (owner 21/11)
 
 
 def search_clause(q: str) -> tuple[str, list, str, list]:
@@ -140,14 +141,16 @@ def _bal_sql() -> str:
 
 
 def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, today: date | None = None) -> list[dict]:
-    """only: debt / refill / inactive (update 1: the «عملاء موقوفين», e.g. E-Stock-deleted ones with no balance)."""
+    """only: debt / refill. Every customer is listed (owner 21/11: none hidden for E-Stock's flags); one deleted in
+    E-Stock carries `estock_deleted` (its notes tag) for a grey tag on the screen."""
     ctx.require("sales.read")
     today = today or date.today()
     rank, rank_params = "1", []
     sql = (f"SELECT c.*, {_bal_sql()} balance,"
            " (SELECT min(date(coalesce(r.last_at, r.created_at), '+' || r.every_days || ' days')) FROM customer_refills r"
-           "  WHERE r.customer_id=c.id) next_refill, {rank} rank"
-           " FROM customers c WHERE c.org_id=? AND c.is_active=" + ("0" if only == "inactive" else "1"))
+           "  WHERE r.customer_id=c.id) next_refill, {rank} rank,"
+           f" instr(coalesce(c.notes,''), '{DELETED_TAG}') > 0 estock_deleted"
+           " FROM customers c WHERE c.org_id=?")
     params: list = [ctx.org_id]
     if q.strip():
         where, wp, rank, rank_params = search_clause(q)
@@ -164,19 +167,6 @@ def listing(db: Database, ctx: Context, q: str = "", only: str | None = None, to
         params.append((today + timedelta(days=5)).isoformat())
     sql += " ORDER BY rank, " + ("balance DESC" if only == "debt" else "name") + " LIMIT 300"
     return [dict(r) for r in db.all(sql, tuple(params))]
-
-
-def set_active(db: Database, ctx: Context, cid: str, active: bool) -> dict:
-    """«رجّعه نشط» for a stopped customer (update 1), or stop one; owner / manager (customers.manage), audited."""
-    ctx.require("customers.manage")
-    c = db.one("SELECT id, is_active FROM customers WHERE id=? AND org_id=?", (cid, ctx.org_id))
-    if not c:
-        raise NotFound("العميل غير موجود")
-    with db.transaction():
-        db.execute("UPDATE customers SET is_active=? WHERE id=?", (1 if active else 0, cid))
-        audit.record(db, ctx, "customer.active", "customer", cid, before={"active": c["is_active"]},
-                     after={"active": 1 if active else 0})
-    return {"id": cid, "is_active": 1 if active else 0}
 
 
 def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:

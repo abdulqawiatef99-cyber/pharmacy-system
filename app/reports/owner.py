@@ -232,6 +232,7 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
                     " coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END) discount_by,"
                     " coalesce(l.discount_approved_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
                     " discount_approved_by, s.invoice_discount_by inv_by, ui.full_name inv_name,"
+                    " l.discount_by line_by, (SELECT full_name FROM users WHERE id=l.discount_by) line_by_name,"
                     " ub.full_name by_name, ua.full_name approved_name FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
                     " LEFT JOIN users ui ON ui.id=s.invoice_discount_by"
                     " LEFT JOIN users ub ON ub.id=coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END)"
@@ -244,12 +245,13 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
             l["discount_bp"], l["line_total"], line_fixed(l))
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
         parts = [(disc, "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?"), l["by_name"])]
-        if l["discount_source"] == "contract" and l["invoice_share"]:
-            # the invoice discount on a contract line is the person's, not the contract's (review of update 1)
+        if l["invoice_share"]:
+            # the invoice discount is the person who gave it, not the contract's nor the line's (reviews of update 1)
             share = min(disc, l["invoice_share"])
-            parts = [(disc - share, "contract", None), (share, l["inv_by"] or "?", l["inv_name"])]
+            own_key = "contract" if l["discount_source"] == "contract" else (l["line_by"] or "?")
+            parts = [(disc - share, own_key, l["line_by_name"]), (share, l["inv_by"] or "?", l["inv_name"])]
         for amount, key, name in parts:
-            if not amount and key == "contract" and len(parts) > 1:
+            if not amount and len(parts) > 1:
                 continue
             g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (name or "—"),
                                         "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})

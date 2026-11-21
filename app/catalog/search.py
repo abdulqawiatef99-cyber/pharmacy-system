@@ -83,15 +83,22 @@ def _by_name(db: Database, org_id: str, q: str, limit: int, category: str | None
 def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | None, skip: set) -> list[dict]:
     """Arabic spelling variants (update 1): بكتول / بيكتول, ى / ي, ة / ه, every word of the query in the name's
     spelling key (`spelling_key` / `spelling_sql`); only after the exact patterns found too few."""
-    toks = [t for t in spelling_key(q).split() if _ARABIC.search(t)]
-    if not toks:
+    words = normalize_text(q).split()
+    ar = [spelling_key(w) for w in words if _ARABIC.search(w)]
+    ar = [w for w in ar if w]
+    if not ar:
         return []
+    other = [w for w in words if not _ARABIC.search(w)]          # a strength or a Latin word stays required (Codex #400)
     csql, cparams = _cat_sql(category)
     col = spelling_sql("coalesce(name_ar_norm,'')")
-    where = " AND ".join(f"{col} LIKE ?" for _ in toks)
+    where = " AND ".join([f"{col} LIKE ?"] * len(ar)
+                         + ["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other))
+    params = [f"%{t}%" for t in ar]
+    for w in other:
+        params += [f"%{w}%", f"%{w}%"]
     rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
                   " ORDER BY length(coalesce(name_ar_norm,'')) LIMIT ?",
-                  (org_id, *[f"%{t}%" for t in toks], *cparams, limit + len(skip)))
+                  (org_id, *params, *cparams, limit + len(skip)))
     return [dict(r) for r in rows if r["id"] not in skip]
 
 
@@ -137,10 +144,13 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         found.setdefault(r["id"], r)
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
+    hint = None
     if len(found) < limit and "%" not in q:
+        exact = bool(found)
         for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
             found.setdefault(row["id"], row)
-    hint = None
+        if found and not exact:
+            hint = {"kind": "spelling"}          # a guess by spelling: Enter on the sale screen never adds it alone
     if not found:
         alt = swap_layout(q)
         if alt:

@@ -415,6 +415,9 @@ def flag(v) -> bool | None:
     return True if s in _TRUE else False if s in _FALSE else None
 
 
+DELETED_TAG = "محذوف في إي ستوك"
+
+
 def product_inactive(r: dict) -> bool:
     """Products: on the pharmacy's live E-Stock (launch day 21/11) `deleted` is '1' on 30,269 of the 30,508 rows
     with active='1', so deleted='1' does NOT mean deleted. (active, deleted) counts: (1,1)=30269, (0,1)=225,
@@ -1260,7 +1263,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
                                   phones=phones, notes="؛ ".join(notes),
                                   address=(r.get("address") or "").strip() or None,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=product_inactive(r)))     # the same flags as Products (owner 21/11)
     names: dict[str, str] = {}
     for r in sorted(ex.rows("Vendor"), key=lambda r: (dec(r.get("vendor_id")) or 0)):
         vid = ident(r.get("vendor_id"))
@@ -1287,7 +1290,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         c = crows.get(("supplier", vid), {})
         p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=product_inactive(r)))
     _balance_sign_check(ex, p)
 
 
@@ -1981,8 +1984,6 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
             for d in (plan.suppliers if kind == "supplier" else plan.customers):
                 if kind == "supplier":
                     pid = catalog.create_supplier(db, ctx, name=d["name"], phone=d.get("phone"))
-                    if d["inactive"]:
-                        db.execute("UPDATE suppliers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'opening', ?, 'رصيد افتتاحي من إي ستوك', ?)",
@@ -1990,17 +1991,18 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                 else:
                     from ..sales.service import Sales
                     ph = d["phones"] + [None, None, None]
+                    notes = d["notes"] + (f"؛ {DELETED_TAG}" if d["inactive"] else "")
                     pid = Sales(db).create_customer(ctx, name=d["name"], phone=ph[0], phone2=ph[1], phone3=ph[2],
-                                                    credit_limit=d["limit"], notes=d["notes"], name_alt=d["alt"],
+                                                    credit_limit=d["limit"], notes=notes, name_alt=d["alt"],
                                                     address1=d["address"])
-                    if d["inactive"]:
-                        db.execute("UPDATE customers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'adjustment', ?, 'رصيد افتتاحي من إي ستوك', ?)",
                                    (new_id(), ctx.org_id, pid, d["estock_balance"], run_id, ctx.user_id))
                 total += d["estock_balance"]
-                rows.append(({"estock_id": d["estock_id"], "code": d["code"]}, pid))
+                # owner 21/11: a party is never hidden for its E-Stock flags; a deleted one is only tagged (the import
+                # row keeps the flag for both kinds, a customer's notes say so too)
+                rows.append(({"estock_id": d["estock_id"], "code": d["code"], "deleted": bool(d["inactive"])}, pid))
             return rows, {"parties": len(rows), "balance_total": total}
         return fn
     runs["suppliers"], r = _step(db, ctx, "suppliers", "suppliers", H("suppliers", ex.sha("Vendor")), esha, label,

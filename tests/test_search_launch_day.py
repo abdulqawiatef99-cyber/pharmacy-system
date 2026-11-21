@@ -114,3 +114,30 @@ class SaleScreenToggleInBrowser(APICase):
         self.assertEqual((out["first"], out["note"], out["all"]), (1, 1, 2))
         self.assertTrue(out["kept"] and out["stillAll"])
         self.assertEqual(out["afterReload"], "")
+
+
+class CodexReview400(DBTestCase):
+    """Codex on #400 @a3eb012 (each failed before the fix)."""
+
+    def test_p1_a_strength_stays_required_in_the_spelling_search(self):
+        b250 = cat.create_item(self.db, self.ctx, {"name_ar": "بكتول 250 كريم", "name_en": "Testbec 250", "pack_size": 1,
+                                                   "public_price": 1000})
+        r = search.search(self.db, self.ctx, "بيكتول 500", 8)
+        self.assertNotIn(b250, [i["id"] for i in r["items"]])
+        r = search.search(self.db, self.ctx, "بيكتول 250", 8)
+        self.assertEqual([i["id"] for i in r["items"]], [b250])
+        self.assertEqual(r["hint"], {"kind": "spelling"})        # a hint: Enter never auto-adds a spelling guess
+
+
+class CodexStockBeyondTheFirstMatches(APICase):
+    def test_p2_a_stocked_item_after_many_zero_stock_names_is_found(self):
+        for n in range(90):
+            cat.create_item(self.db, self.ctx, {"name_en": f"Testzz {n:02d}", "public_price": 1000})
+        far = cat.create_item(self.db, self.ctx, {"name_en": "Testzz with a much longer name in stock", "public_price": 1000})
+        with self.db.transaction():
+            bt = inv.get_or_create_batch(self.db, self.ctx, far, "B1", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=far, qty_delta=4, batch_id=bt, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        self.http_login()
+        r = self.c.get("/api/items?q=testzz&limit=8&meta=1&stock=only", headers=H).json()
+        self.assertEqual([i["id"] for i in r["items"]], [far])

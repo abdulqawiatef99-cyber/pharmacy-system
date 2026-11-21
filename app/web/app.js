@@ -2238,6 +2238,7 @@ async function viewSystem() {
     <div class="totals"><div>الإصدار<b>${esc(st.version)}</b></div><div>النسخة المثبتة<b>${st.installed ? esc(st.installed.slice(0, 7)) : "غير معروفة"}</b></div>
       <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
       <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `لا توجد (فرع ${esc(st.candidate || "?")})`}</b></div></div>
+    ${st.parties_reactivated && (st.parties_reactivated.customers || st.parties_reactivated.suppliers) ? `<p class="badge b-ok">✓ بعد التحديث رجع يظهر في البحث ${st.parties_reactivated.customers} عميل و${st.parties_reactivated.suppliers} مورد كانوا مستخبيين من نقل إي ستوك</p>` : ""}
     ${updatePanelHtml(st)}
     <pre id="updOut" class="muted" hidden></pre>`;
   bindSmartUpdate();
@@ -3643,7 +3644,7 @@ function renderSide() {
   $("#posCust").addEventListener("input", async (e) => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#posCustRes").innerHTML = ""; return; }
     const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
-    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}</button>`).join("") || `<p class="muted">لا يوجد عميل بهذا الاسم</p>`;
+    $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}${c.estock_deleted ? ` <span class="badge">محذوف في إي ستوك</span>` : ""}</button>`).join("") || `<p class="muted">لا يوجد عميل بهذا الاسم</p>`;
     $("#posCustRes").querySelectorAll("[data-cust]").forEach((b) => b.addEventListener("click", async () => {
       SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } });
       const fill = {};
@@ -4767,7 +4768,7 @@ async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
   app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
     <div class="row"><input id="cuQ" class="grow" placeholder="الاسم أو الموبايل أو الكود" autocomplete="off">
-      <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button><button data-f="inactive" class="${filter === "inactive" ? "on" : ""}">عملاء موقوفين</button></div></div>
+      <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <table class="mt"><thead><tr><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
@@ -4784,17 +4785,12 @@ async function viewCustomers(filter = "") {
     const debt = list.reduce((a, c) => a + Math.max(0, c.balance), 0);
     $("#cuSum").innerHTML = `<b>${list.length} عميل${debt ? ` — عليهم ${money(debt)} ج` : ""}</b>${list.length >= 300 ? ` <span class="muted">(أول 300 — ابحث بالاسم عن الباقي)</span>` : ""}`;
     cur = { list, f };
-    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b>${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
+    $("#cuBody").innerHTML = list.map((c) => `<tr class="clickable" data-go="${esc(c.id)}"><td><b>${esc(c.name)}</b>${c.estock_deleted ? ` <span class="badge" title="اتنقل من إي ستوك وهو محذوف هناك">محذوف في إي ستوك</span>` : ""}${c.name_alt ? `<div class="muted small">${esc(c.name_alt)}</div>` : ""}</td><td dir="ltr">${[c.phone, c.phone2, c.phone3].filter(Boolean).map(esc).join("<br>")}</td>
       <td>${c.balance > 0 ? `<span class="badge b-err">✕ ${money(c.balance)}</span>` : `<span class="ok">✓ لا يوجد</span>`}</td>
-      <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ فات موعده" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}
-        ${f === "inactive" && canM ? ` <button class="btn small" data-revive="${esc(c.id)}">رجّعه نشط</button>` : ""}</td></tr>`).join("")
+      <td>${c.next_refill ? `<span class="badge ${c.next_refill <= today ? "b-err" : "b-warn"}">${c.next_refill <= today ? "✕ فات موعده" : "⚠"} ${esc(c.next_refill)}</span>` : "—"}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد عملاء</td></tr>`;
     document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/customers/${tr.dataset.go}`; }));
-    document.querySelectorAll("[data-revive]").forEach((b) => b.addEventListener("click", async (e) => {   // update 1
-      e.stopPropagation();
-      try { await api(`/api/customers/${b.dataset.revive}/active`, { method: "POST", body: { active: true } }); toast("✓ العميل رجع نشط"); load(); }
-      catch (er) { toast(er.message, true); }
-    }));
+
   };
   if ($("#ktBox")) renderContracts();
   // one number saved in two forms (010… and +20 10…) before the program kept one form (#324 M2-20)

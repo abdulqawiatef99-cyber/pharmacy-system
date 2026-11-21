@@ -95,17 +95,17 @@ def base_tables():
     t["Customer"] = [
         {"customer_id": "1", "customer_code": "C1", "customer_name_ar": "أحمد تجربة", "customer_name_en": "Ahmed",
          "mobile": "01012345678", "tel": "0223456789", "address": "شارع التجربة", "customer_current_money": "120.0000",
-         "customer_max_money": "9999999999999.0000", "deleted": "0", "active": "1"},
+         "customer_max_money": "9999999999999.0000", "deleted": "1", "active": "1"},
         {"customer_id": "2", "customer_code": "C2", "customer_name_ar": "منى تجربة", "mobile": "01012345678",
-         "tel": "12", "customer_current_money": "-15.5000", "customer_max_money": "500.0000", "deleted": "0", "active": "1"},
+         "tel": "12", "customer_current_money": "-15.5000", "customer_max_money": "500.0000", "deleted": "1", "active": "1"},
         {"customer_id": "3", "customer_code": "C3", "customer_name_ar": "", "customer_current_money": "0.0000",
          "customer_max_money": "0", "deleted": "1", "active": "0"}]
     t["Vendor"] = [
         {"vendor_id": "1", "vendor_code": "V1", "vendor_name_ar": "مورد تجربة", "mobile": "01111111111",
          "vendor_current_money": "500.0000", "emp_tel": "مندوب حسن", "emp_tel_details": "01222222222",
-         "deleted": "0", "active": "1"},
+         "deleted": "1", "active": "1"},
         {"vendor_id": "2", "vendor_code": "V2", "vendor_name_ar": "مورد تجربه", "vendor_current_money": "-20.0000",
-         "deleted": "0", "active": "1"}]
+         "deleted": "1", "active": "1"}]
     return t
 
 
@@ -182,6 +182,24 @@ class TestProductActiveFlags(Base):
         self.assertEqual(rec["program_active"],
                          self.db.one("SELECT count(*) n FROM items WHERE status='active'")["n"])
 
+    def test_customers_and_suppliers_follow_the_same_rule_and_are_never_hidden(self):
+        # owner 21/11 20:34: «الشربيني» (code 335, not deleted in E-Stock) was hidden: live rows have deleted='1'
+        tb = base_tables()
+        tb["Vendor"].append({"vendor_id": "3", "vendor_code": "V3", "vendor_name_ar": "مورد محذوف", "vendor_current_money": "0",
+                             "deleted": "0", "active": "0"})
+        res = self.run_import(tables=tb)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM customers")}, {1})
+        self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM suppliers")}, {1})
+        notes = {r["name"]: r["notes"] or "" for r in self.db.all("SELECT name, notes FROM customers")}
+        self.assertNotIn("محذوف في إي ستوك", notes["أحمد تجربة"])            # deleted='1' active='1': a live one
+        self.assertIn("محذوف في إي ستوك", notes["عميل C3"])                  # active='0': tagged, still shown
+        import json as _j
+        flags = {_j.loads(r["raw"])["code"]: _j.loads(r["raw"])["deleted"] for r in self.db.all(
+            "SELECT ir.raw FROM import_rows ir JOIN import_runs r ON r.id=ir.run_id WHERE r.kind='suppliers'"
+            " AND r.options LIKE '%\"step\": \"suppliers\"%'")}
+        self.assertEqual((flags["V1"], flags["V3"]), (False, True))
+
     def test_an_active_count_difference_is_a_mismatch(self):
         res = self.run_import()
         self.assertTrue(res["ok"])
@@ -232,7 +250,9 @@ class TestFullMove(Base):
         self.assertIn("01012345678", c["منى تجربة"]["notes"])
         # E-Stock's 9,999,999,999,999 = no limit there: kept as-is, never 0 (0 = no credit at all here)
         self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (999999999999900, 50000))
-        self.assertEqual(c["عميل C3"]["is_active"], 0)
+        # owner 21/11: never hidden for its E-Stock flags, only tagged (and the import row keeps the flag)
+        self.assertEqual(c["عميل C3"]["is_active"], 1)
+        self.assertIn("محذوف في إي ستوك", c["عميل C3"]["notes"])
         bal = {r["customer_id"]: (r["amount"], r["kind"]) for r in self.db.all("SELECT * FROM customer_ledger")}
         self.assertEqual(bal, {c["أحمد تجربة"]["id"]: (12000, "adjustment"), c["منى تجربة"]["id"]: (-1550, "adjustment")})
         s = {r["name"]: r for r in self.db.all("SELECT * FROM suppliers")}

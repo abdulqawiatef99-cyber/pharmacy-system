@@ -171,7 +171,11 @@ def cmd_serve(a, s):
         from app.core import tools_folder
         tools_folder.refresh(Path(__file__).resolve().parent, s.data_dir.parent)
     from app.core.accesslog import uvicorn_log_config
-    uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
+    db = _db(s, create=True)
+    import threading
+    from app.catalog import matching          # update 1: the fuzzy index is built at start, not on a keystroke
+    threading.Thread(target=matching.prewarm, args=(db,), daemon=True, name="fuzzy-prewarm").start()
+    uvicorn.run(create_app(db, s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
                 server_header=False, log_config=uvicorn_log_config())
 
 

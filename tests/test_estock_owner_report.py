@@ -73,7 +73,7 @@ class TestOwnerReport(_R):
     def test_the_rest_is_grouped_by_kind_with_counts(self):
         tb = base_tables()
         tb["Customer"] += [{"customer_id": str(10 + i), "customer_code": f"X{i}", "customer_name_ar": f"عميل {i}",
-                            "mobile": "12", "customer_current_money": "0", "deleted": "0", "active": "1"}
+                            "mobile": "12", "customer_current_money": "0", "deleted": "1", "active": "1"}
                            for i in range(3)]
         sec = self.section(self.report(tables=tb), "٣. الباقي", None)
         groups = [ln for ln in sec.splitlines() if re.match(r"\s*- .+: \d+ سطر", ln)]
