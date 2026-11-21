@@ -3040,4 +3040,9 @@ window.I18N_EN = {
 "اكتب الرصيد الصحيح بالجنيه (قرشين بعد العلامة بالكتير)": "Type the correct balance in EGP (at most two digits after the point)",
 "إشعار المورد:": "Supplier credit note:",
 "في مدة المرتجع (المدة: 0)": "Within the return window (window: 0)",
+"إجمالي فاتورة المورد": "Supplier invoice total",
+"إجمالي فاتورة المورد (من الورقة) (ج)": "Supplier invoice total (from the paper) (EGP)",
+"اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف": "Type the total printed at the bottom of the supplier's paper; the program compares it with the lines",
+"الفرق 0 قرش (0 ج)": "Difference 0 piasters (0 EGP)",
+"✓ مطابق بالقرش": "✓ Matches to the piaster",
 };

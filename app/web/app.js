@@ -1177,14 +1177,16 @@ function renderInvoice() {
       <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
       <label class="f">تاريخ الإدخال على السيستم <input id="pinEntered" value="${esc(cairoWhen(inv.created_at))}" readonly disabled></label>
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
-      <label class="f">الإجمالي المطبوع (ج) <input data-h="declared_total" type="number" step="0.01" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}></label>
+      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
+        <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
+        ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
     </div>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
   </section>
   <section class="panel">
     <div class="totals">
-      <div>الإجمالي المطبوع<b>${money(inv.declared_total) || "—"}</b></div>
+      <div>إجمالي فاتورة المورد<b>${money(inv.declared_total) || "—"}</b></div>
       <div>الإجمالي المحسوب<b>${money(inv.computed_total) || "—"}</b></div>
       <div class="${diff == null ? "" : diff === 0 ? "t-ok" : totalErr ? "t-err" : "t-warn"}">${diff == null ? "الفرق" : diff === 0 ? "✓ الإجماليان متطابقان" : totalErr ? "✕ الفرق" : "⚠ الفرق (مقبول)"}<b>${diff == null ? "—" : money(diff)}</b>
         ${totalErr ? `<span>سطر زائد أو سطر ناقص؟ راجع قبل الاعتماد</span>` : ""}</div>
