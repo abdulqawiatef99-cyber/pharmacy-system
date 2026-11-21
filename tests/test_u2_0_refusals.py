@@ -75,13 +75,21 @@ class Refused(SalesCase):
             self.s.return_items(self.ctx, sid, {lid: 2}, refund_method="card", reason="test")
         self.s.return_items(self.ctx, sid, {lid: 2}, refund_method="cash", reason="test")    # the cash part
 
-    def test_exchange_of_a_card_invoice_needs_no_approval_when_no_cash_leaves(self):
+    def test_exchange_of_a_card_invoice_through_cash_needs_approval(self):
+        """Codex P1 on #403: an exchange records the returned money as a cash payment of the replacement, whose own
+        return could then pay it out in cash. Card money turns into cash only with an approval, in the preview too."""
         from dataclasses import replace
         sid, d = self._sold(paid_card="all")
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"sales.refund_other_method"})
         new = self.s.create(self.ctx)
-        self.s.add_line(self.ctx, new, self.pan, units=2)                    # worth more than the return
-        out = self.s.exchange(staff, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash", pay_method="card",
+        self.s.add_line(self.ctx, new, self.pan, units=2)
+        for call in (lambda c: self.s.return_value(c, sid, {d["lines"][0]["id"]: 1}, refund_method="cash"),
+                     lambda c: self.s.exchange(c, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash",
+                                               pay_method="card", reason="تغيير", safety_decisions=self.ack_all(new))):
+            with self.assertRaises(AppError) as e:
+                call(staff)
+            self.assertEqual(e.exception.details["permission"], "sales.refund_other_method")
+        out = self.s.exchange(self.ctx, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash", pay_method="card",
                               reason="تغيير", safety_decisions=self.ack_all(new))
         self.assertEqual(out["settled"]["refund"], 0)
 

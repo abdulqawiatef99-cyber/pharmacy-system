@@ -1193,7 +1193,7 @@ class Sales:
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
-                     reason: str, offset: int = 0) -> dict:
+                     reason: str) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
@@ -1313,8 +1313,10 @@ class Sales:
                     raise Conflict(f"الفاتورة دي ما اتدفعتش بالبطاقة أو التحويل بالمبلغ ده، فمينفعش يترد عليها"
                                    f" (الحد الأقصى {egp(max(0, min(by_card, can)))} ج)",
                                    code="refund_exceeds_method", details={"max_card": max(0, min(by_card, can)), "refund": refund})
-                # in an exchange only what is left after the new invoice is paid from it leaves the drawer
-                if refund_method == "cash" and max(0, refund - offset) > max(0, by_cash) and refund <= can:
+                # also inside an exchange: the replacement would record this money as cash-paid, and its own return
+                # could then pay it out in cash (Codex P1 on #403), so card money never turns into cash without
+                # the owner's or a manager's approval
+                if refund_method == "cash" and refund > max(0, by_cash) and refund <= can:
                     ctx.require("sales.refund_other_method")
                 if refund > can:
                     how = "نقدًا" if refund_method == "cash" else "على البطاقة"
@@ -1486,8 +1488,7 @@ class Sales:
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
                                 (orig["customer_id"], new_sid, ctx.org_id))
             ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
-                                    reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason,
-                                    offset=self.get(ctx, new_sid)["total"])
+                                    reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
             if expected_new_total is not None and n_total != expected_new_total:   # not what the screen showed
