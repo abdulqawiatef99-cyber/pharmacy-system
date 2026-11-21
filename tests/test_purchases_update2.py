@@ -14,11 +14,11 @@ from tests.test_u2_purchase_base import PurchaseBase
 
 class TestFastExpiry(PurchaseBase):
     def test_compact_forms(self):
-        self.assertEqual(parse_expiry("1128"), ("2028-11-30", "month"))
-        self.assertEqual(parse_expiry("112028"), ("2028-11-30", "month"))
+        self.assertEqual(parse_expiry("1128", compact=True), ("2028-11-30", "month"))
+        self.assertEqual(parse_expiry("112028", compact=True), ("2028-11-30", "month"))
         self.assertEqual(parse_expiry("11/28"), ("2028-11-30", "month"))
         for bad in ("1328", "2027", "128", "11280"):
-            self.assertEqual(parse_expiry(bad), (None, None), bad)
+            self.assertEqual(parse_expiry(bad, compact=True), (None, None), bad)
 
 
 class TestNearExpiryGuard(PurchaseBase):
@@ -38,7 +38,7 @@ class TestNearExpiryGuard(PurchaseBase):
         d, issues = self.codes(inv_id)
         i = issues["slow_before_expiry"]
         self.assertIn("هتبيع حوالي", i["message"])
-        self.assertLess(i["details"]["will_sell"], 300)
+        self.assertEqual(i["details"]["qty"], 300)
         with self.assertRaises(Conflict):
             self.p.approve(self.ctx, inv_id, d["invoice"]["version"])
         d = self.p.acknowledge(self.ctx, inv_id, "slow_before_expiry", "عرض كبير من المورد", i["line_id"],
@@ -218,3 +218,52 @@ class TestImportIsAlwaysADraft(PurchaseBase):
             self.assertEqual(d["invoice"]["status"], "draft", name)
             self.assertEqual(len(d["lines"]), 1, name)
         self.assertEqual(invs.stock_for_item(self.db, self.ctx, self.item)["total_qty"], 0)
+
+
+class TestReviewFixes(PurchaseBase):
+    def test_split_keeps_tax_and_total_exact(self):
+        inv_id = self.draft(qty=3, expiry=(date.today() + timedelta(days=700)).isoformat())
+        line = self.p.get(self.ctx, inv_id)["lines"][0]
+        self.p.update_line(self.ctx, inv_id, line["id"], {"tax_amount": 1, "line_total": 25}, None)
+        before = self.p.get(self.ctx, inv_id)["invoice"]["computed_total"]
+        d = self.p.split_line(self.ctx, inv_id, line["id"], 1, "1129", None, None)
+        self.assertEqual(sum(l["tax_amount"] or 0 for l in d["lines"]), 1)
+        self.assertEqual(sum(l["line_total"] or 0 for l in d["lines"]), 25)
+        self.assertEqual(d["invoice"]["computed_total"], before)
+
+    def test_acceptance_survives_a_new_day_and_new_sales(self):
+        inv_id = self.draft(qty=5, expiry=(date.today() + timedelta(days=100)).isoformat())
+        d = self.p.get(self.ctx, inv_id)
+        i = next(x for x in d["issues"] if x["code"] == "short_expiry")
+        self.assertNotIn("days", i["details"])                    # nothing in the match that changes by itself
+        self.p.acknowledge(self.ctx, inv_id, "short_expiry", "متفق على مرتجع", i["line_id"], None)
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.item, qty_delta=-3, movement_type="sale",
+                              ref_type="sale", ref_id=new_id(), allow_negative=True)
+        d = self.p.get(self.ctx, inv_id)
+        self.assertFalse([x for x in d["issues"] if x["code"] == "short_expiry" and not x["acknowledged"]])
+
+    def test_two_lines_of_one_item_are_counted_together(self):
+        with self.db.transaction():       # 1 a day for 90 days
+            inv.post_movement(self.db, self.ctx, item_id=self.item, qty_delta=-90, movement_type="sale",
+                              ref_type="sale", ref_id=new_id(), allow_negative=True)
+        exp = (date.today() + timedelta(days=150)).isoformat()   # 60 days before "near": about 60 will sell
+        inv_id = self.draft(qty=50, expiry=exp)
+        self.p.add_line(self.ctx, inv_id, {"item_id": self.item, "qty": 50, "public_price": "10", "discount_pct": "20",
+                                           "unit_net_price": "8", "batch_no": "B1", "expiry_date": exp}, None)
+        d = self.p.get(self.ctx, inv_id)
+        self.assertTrue([x for x in d["issues"] if x["code"] == "slow_before_expiry"])
+
+    def test_compact_expiry_only_for_typed_entry(self):
+        self.assertEqual(parse_expiry("011228"), (None, None))         # an import cell: never a guess
+        self.assertEqual(parse_expiry("1211"), (None, None))
+        self.assertEqual(parse_expiry("1128", compact=True), ("2028-11-30", "month"))
+        self.assertEqual(parse_expiry("011228", compact=True), (None, None))   # year 1228: refused
+
+    def test_duplicate_found_after_another_expiry(self):
+        inv_id = self.p.create_manual(self.ctx)
+        e1, e2 = ((date.today() + timedelta(days=n)).isoformat() for n in (700, 800))
+        for e in (e1, e2, e2):
+            d = self.p.add_line(self.ctx, inv_id, {"item_id": self.item, "qty": 2, "public_price": "10", "discount_pct": "20",
+                                                   "unit_net_price": "8", "batch_no": "B", "expiry_date": e}, None)
+        self.assertTrue([x for x in d["issues"] if x["code"] == "duplicate_line"])

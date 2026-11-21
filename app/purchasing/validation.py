@@ -210,22 +210,25 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             if d < today:
                 add("error", "expired", lid, "expiry_date")
             elif (d - today).days < short_expiry_days:
-                add("error", "short_expiry", lid, "expiry_date", days=(d - today).days)
+                # details without the day count: an acceptance must not expire at midnight (independent review)
+                add("error", "short_expiry", lid, "expiry_date", expiry=exp_date, qty=qty)
+                issues[-1].message += f" ({(d - today).days} يوم)"
         elif item is None or item.get("is_drug") != 0:
             add("warning", "expiry_missing", lid, "expiry_date")
         # U2-3: the same item twice. Same batch and expiry: a real duplicate (merge it when the prices match too);
         # no batch on either: said so; another expiry: normal (two lots), information only
         if l.get("item_id"):
             batch = (l.get("batch_no") or "").strip().upper()
-            for o in seen.get(l["item_id"], []):
-                ob = (o.get("batch_no") or "").strip().upper()
-                if o.get("expiry_date") != exp_date:
-                    add("info", "same_item_other_expiry", lid, None, other_line=o["id"])
-                elif ob == batch:
-                    same = all(o.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price"))
-                    add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
-                        other_line=o["id"], mergeable=same)
-                break
+            earlier = seen.get(l["item_id"], [])
+            twin = next((o for o in earlier if o.get("expiry_date") == exp_date
+                         and (o.get("batch_no") or "").strip().upper() == batch), None)
+            if twin:
+                same = all(twin.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price",
+                                                             "expiry_precision"))
+                add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
+                    other_line=twin["id"], mergeable=same)
+            elif earlier and all(o.get("expiry_date") != exp_date for o in earlier):
+                add("info", "same_item_other_expiry", lid, None, other_line=earlier[0]["id"])
             seen.setdefault(l["item_id"], []).append(l)
 
     for f in ("extra_discount", "extra_tax", "declared_total"):

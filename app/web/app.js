@@ -1204,7 +1204,7 @@ function renderInvoice() {
       ${warns.map((i) => `<li class="${i.level === "info" ? "muted" : "warn"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}${i.details?.other_line ? ` (سطر ${lineNo[i.details.other_line]})` : ""}
         ${i.details?.mergeable && draft ? `<button class="btn small secondary" data-merge="${esc(i.details.other_line)}" data-mergewith="${esc(i.line_id)}">دمج السطرين</button>` : ""}
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
-        ${i.code === "short_expiry" ? ` (${i.details.days} يوم)` : ""}</li>`).join("")}
+</li>`).join("")}
     </ul>
     <div class="row">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && ME.permissions.includes("purchases.approve") ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>

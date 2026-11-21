@@ -171,7 +171,7 @@ def _month_end(y: int, m: int) -> str:
     return date(y, m, calendar.monthrange(y, m)[1]).isoformat()
 
 
-def parse_expiry(v) -> tuple[str | None, str | None]:
+def parse_expiry(v, compact: bool = False) -> tuple[str | None, str | None]:
     """Returns (iso_date, precision). Accepts '05/2027', '5-27', '2027-05',
     '31/05/2027', 'MAY-27', 'May 2027', Excel serials and datetime objects.
     Ambiguous or invalid input returns (None, None) — never a guess."""
@@ -187,7 +187,11 @@ def parse_expiry(v) -> tuple[str | None, str | None]:
     s = str(v).translate(_AR_DIGITS).strip().lower()
     s = re.sub(r"^(exp|expiry|ex|صلاحيه|صلاحية|ينتهي)[\s.:]*", "", s)
     try:
-        m = re.fullmatch(r"(\d{2})(\d{2}|\d{4})", s)                              # U2-2 fast entry: 1128, 112028
+        # U2-2 fast entry typed by a person (1128, 112028); never for an imported cell, where 4 or 6 digits may be
+        # anything (DDMMYY, a batch number): there it is no date, not a guess
+        m = re.fullmatch(r"(\d{2})(\d{2}|\d{4})", s) if compact else None
+        if m and len(m.group(2)) == 4 and not 2000 <= int(m.group(2)) <= 2099:
+            return None, None
         if m:
             mm, yy = int(m.group(1)), _year(int(m.group(2)))
             return (_month_end(yy, mm), "month") if 1 <= mm <= 12 else (None, None)

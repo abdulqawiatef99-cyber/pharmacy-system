@@ -286,32 +286,34 @@ class Purchasing:
         today = date.today()
         acks = {(a.get("code"), a.get("line_id") or "", json.dumps(a.get("details") or {}, sort_keys=True))
                 for a in json.loads(inv.get("acknowledged_issues") or "[]")}
-        p, out, seen = Procurement(self.db, today=today), [], {}
+        p, out, by_item = Procurement(self.db, today=today), [], {}
         for l in lines:
-            if not l.get("item_id") or not l.get("expiry_date") or not l.get("qty"):
-                continue
-            days = (date.fromisoformat(l["expiry_date"]) - today).days
-            if days < 0:
-                continue                                  # expired: refused by the "expired" error already
-            it = self.db.one("SELECT pack_size, is_service FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
+            if l.get("item_id") and l.get("expiry_date") and l.get("qty") and l["expiry_date"] >= today.isoformat():
+                by_item.setdefault(l["item_id"], []).append(l)       # expired lines: refused by "expired" already
+        for item_id, group in by_item.items():
+            it = self.db.one("SELECT pack_size, is_service FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
             if not it or it["is_service"]:
                 continue
-            if l["item_id"] not in seen:
-                seen[l["item_id"]] = (p._usage(ctx, l["item_id"], 90)["daily"], p._sellable(ctx, l["item_id"])[0])
-            daily, have = seen[l["item_id"]]
+            daily = p._usage(ctx, item_id, 90)["daily"]
             if daily <= 0:
                 continue
-            qty = (l["qty"] + (l["bonus_qty"] or 0)) * it["pack_size"]
-            will = max(0, int(daily * max(0, days - self.NEAR_DAYS)) - max(have, 0))
-            if will >= qty:
-                continue
-            details = {"will_sell": will, "qty": qty, "monthly": round(daily * 30, 1), "months_left": days // 30}
-            i = validation.Issue("error", "slow_before_expiry",
-                                 f"هتبيع حوالي {will} من {qty} وحدة قبل ما يقرب ينتهي (البيع حوالي {details['monthly']:g}"
-                                 f" في الشهر، والصلاحية بعد {details['months_left']} شهر): اكتب السبب",
-                                 l["id"], "expiry_date", details)
-            i.acknowledged = ("slow_before_expiry", l["id"], json.dumps(details, sort_keys=True)) in acks
-            out.append(i)
+            ahead = max(p._sellable(ctx, item_id)[0], 0)       # the shelf sells first, then the lines, earliest expiry first
+            for l in sorted(group, key=lambda x: (x["expiry_date"], x.get("line_no") or 0)):
+                days = (date.fromisoformat(l["expiry_date"]) - today).days
+                qty = (l["qty"] + (l["bonus_qty"] or 0)) * it["pack_size"]
+                will = max(0, int(daily * max(0, days - self.NEAR_DAYS)) - ahead)
+                ahead += qty
+                if will >= qty:
+                    continue
+                # the match keeps only what the person accepted (this expiry, this quantity): the sales of the day
+                # and the date moving on do not undo the acceptance (independent review)
+                details = {"expiry": l["expiry_date"], "qty": qty}
+                i = validation.Issue("error", "slow_before_expiry",
+                                     f"هتبيع حوالي {min(will, qty)} من {qty} وحدة قبل ما يقرب ينتهي (البيع حوالي"
+                                     f" {daily * 30:.0f} في الشهر، والصلاحية بعد {days // 30} شهر): اكتب السبب",
+                                     l["id"], "expiry_date", details)
+                i.acknowledged = ("slow_before_expiry", l["id"], json.dumps(details, sort_keys=True)) in acks
+                out.append(i)
         return out
 
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
@@ -490,7 +492,7 @@ class Purchasing:
                     upd[k] = v
                 elif k == "expiry_date":
                     if v:
-                        iso, prec = parse_expiry(v)
+                        iso, prec = parse_expiry(v, compact=True)
                         if not iso:
                             raise ValidationFailed("تاريخ صلاحية غير مفهوم (مثال: 05/2027)")
                         upd.update(expiry_date=iso, expiry_precision=prec)
@@ -588,7 +590,7 @@ class Purchasing:
                                 (x, inv_id, ctx.org_id)) for x in (line_id, other_id))
             if not a or not b or line_id == other_id:
                 raise NotFound("السطر غير موجود")
-            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date")
+            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision")
             if not a["item_id"] or any(a[k] != b[k] for k in keys) or \
                     (a["batch_no"] or "").strip().upper() != (b["batch_no"] or "").strip().upper():
                 raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر): مينفعش يتدمجوا",
@@ -613,7 +615,7 @@ class Purchasing:
         ctx.require("purchases.edit")
         if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
             raise ValidationFailed("الكمية لازم رقم صحيح أكبر من صفر")
-        iso, prec = parse_expiry(expiry)
+        iso, prec = parse_expiry(expiry, compact=True)
         if not iso:
             raise ValidationFailed("الصلاحية مش مفهومة (مثال: 1128 أو 11/2028)")
         with self.db.transaction():
@@ -626,12 +628,10 @@ class Purchasing:
                 raise ValidationFailed(f"الكمية لازم أقل من كمية السطر ({a['qty'] or 0})", code="split_too_big")
             if iso == a["expiry_date"]:
                 raise ValidationFailed("دي نفس صلاحية السطر")
-            share = lambda v: None if v is None else v * qty // a["qty"]       # noqa: E731  exact piasters below
+            # whole piasters: the new line takes its share rounded down, the original keeps the rest, so the two always
+            # add up to what the line had (independent review: a None share dropped the tax from the invoice)
+            share = lambda v: None if v is None else v * qty // a["qty"]       # noqa: E731
             moved_total, moved_tax = share(a["line_total"]), share(a["tax_amount"])
-            if a["line_total"] is not None and a["line_total"] * qty % a["qty"]:
-                moved_total = None                     # not a whole piaster: the new line computes its own total
-            if a["tax_amount"] is not None and a["tax_amount"] * qty % a["qty"]:
-                moved_tax = None
             n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines WHERE invoice_id=?",
                             (inv_id,))["n"]
             row = {**dict(a), "id": new_id(), "line_no": n, "qty": qty, "bonus_qty": 0, "line_total": moved_total,
@@ -641,9 +641,8 @@ class Purchasing:
             row["field_sources"].update(expiry_date="user", qty="user")
             self._insert_line(row)
             self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=?",
-                            (a["qty"] - qty,
-                             None if a["line_total"] is None or moved_total is None else a["line_total"] - moved_total,
-                             None if a["tax_amount"] is None or moved_tax is None else a["tax_amount"] - moved_tax, line_id))
+                            (a["qty"] - qty, None if a["line_total"] is None else a["line_total"] - moved_total,
+                             None if a["tax_amount"] is None else a["tax_amount"] - moved_tax, line_id))
             self._refresh_totals(ctx, inv_id)
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_split", "purchase_invoice", inv_id,
