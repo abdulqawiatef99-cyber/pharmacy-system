@@ -43,14 +43,14 @@ class TestCheck(Base):
 
     def test_output_never_contains_a_private_key_and_exit_code_says_the_outcome(self):
         (self.drive / "a.txt").write_text(self.p2, encoding="ascii")
-        r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "windows" / "signing_key_check.py"),
+        r = subprocess.run([sys.executable, "-I", "-X", "utf8", str(ROOT / "scripts" / "windows" / "signing_key_check.py"),
                             "--keys", str(self.keys), str(self.drive)], capture_output=True, text=True,
                            encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)                   # spare only
         self.assertNotIn(self.p2, r.stdout + r.stderr)
         self.assertIn("update-2-spare", r.stdout)
         (self.drive / "b.txt").write_text(self.p1, encoding="ascii")
-        r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "windows" / "signing_key_check.py"),
+        r = subprocess.run([sys.executable, "-I", "-X", "utf8", str(ROOT / "scripts" / "windows" / "signing_key_check.py"),
                             "--keys", str(self.keys), str(self.drive)], capture_output=True, text=True,
                            encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0)                                         # update-1 found
@@ -66,7 +66,7 @@ class TestCheck(Base):
 class TestNewKey(Base):
     def test_new_pair_written_once_and_private_never_printed(self):
         out = self.drive / "new"
-        r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "windows" / "new_signing_key.py"), str(out)],
+        r = subprocess.run([sys.executable, "-I", "-X", "utf8", str(ROOT / "scripts" / "windows" / "new_signing_key.py"), str(out)],
                            capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         priv = (out / "update-signing-PRIVATE.txt").read_text(encoding="ascii").strip()
@@ -84,6 +84,20 @@ class TestNewKey(Base):
 
 
 class TestToolsFolder(unittest.TestCase):
+    def test_a_key_the_release_removed_leaves_the_tools_folder(self):
+        """Codex P2 on #391: outcome (b) removes update-1.pub; the checker must stop recognising it."""
+        from app.core import tools_folder
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = Path(tmp) / "release"
+            (rel / "release_keys").mkdir(parents=True)
+            for n in ("update-1.pub", "update-2-spare.pub"):
+                (rel / "release_keys" / n).write_text(update_sign.generate()[1] + "\n", encoding="ascii")
+            home = Path(tmp) / "home"
+            tools_folder.refresh(rel, home, desktop=Path(tmp))
+            (rel / "release_keys" / "update-1.pub").unlink()
+            tools_folder.refresh(rel, home, desktop=Path(tmp))
+            self.assertEqual(sorted(os.listdir(home / "tools" / "keys")), ["update-2-spare.pub"])
+
     def test_both_tools_and_the_public_keys_reach_the_tools_folder(self):
         from app.core import tools_folder
         with tempfile.TemporaryDirectory() as tmp:

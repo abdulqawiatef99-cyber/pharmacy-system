@@ -83,11 +83,16 @@ def refresh(release_root: Path, home: Path, desktop: Path | None = None) -> dict
             f = src / name
             if f.is_file() and _write_if_changed(tools / name, f.read_bytes()):
                 out["written"].append(name)
-        keys = tools / "keys"           # public keys only, for signing-key-check.bat
-        for f in sorted((Path(release_root) / "release_keys").glob("*.pub")):
+        keys = tools / "keys"           # public keys only, for signing-key-check.bat: exactly the release's set
+        wanted = {f.name: f for f in sorted((Path(release_root) / "release_keys").glob("*.pub"))}
+        for name, f in wanted.items():
             keys.mkdir(exist_ok=True)
-            if _write_if_changed(keys / f.name, f.read_bytes()):
-                out["written"].append(f"keys/{f.name}")
+            if _write_if_changed(keys / name, f.read_bytes()):
+                out["written"].append(f"keys/{name}")
+        for old in keys.glob("*.pub") if keys.is_dir() else []:
+            if old.name not in wanted:  # a key the release retired (a lost private key) is never recognised again
+                old.unlink()
+                out["written"].append(f"keys/{old.name} (removed)")
         if _write_if_changed(tools / README, b"\xef\xbb\xbf" + README_TEXT.encode("utf-8")):
             out["written"].append(README)
         desk = desktop if desktop is not None else desktop_dir()
