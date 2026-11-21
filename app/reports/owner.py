@@ -11,7 +11,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross_as_sold, retail_value
+from ..sales.service import line_fixed, line_gross_as_sold, retail_value
 from .service import _period, local_buckets
 
 MAX_ROWS = 5000
@@ -228,14 +228,19 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
                " coalesce(sum(discount_total>0),0) n_disc FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
                " AND completed_at>=? AND completed_at<?", (o, b, lo, hi))
     by_who: dict[str, dict] = {}
-    for l in db.all("SELECT l.id, l.discount_bp, l.discount_source, l.line_total, l.discount_by, l.discount_approved_by,"
+    for l in db.all("SELECT l.id, l.discount_bp, l.discount_amount, l.invoice_share, l.discount_source, l.line_total,"
+                    " coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END) discount_by,"
+                    " coalesce(l.discount_approved_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
+                    " discount_approved_by,"
                     " ub.full_name by_name, ua.full_name approved_name FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
-                    " LEFT JOIN users ub ON ub.id=l.discount_by LEFT JOIN users ua ON ua.id=l.discount_approved_by"
+                    " LEFT JOIN users ub ON ub.id=coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END)"
+                    " LEFT JOIN users ua ON ua.id=coalesce(l.discount_approved_by,"
+                    " CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
                     " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?"
-                    " AND l.discount_bp>0", (o, b, lo, hi)):
+                    " AND (l.discount_bp>0 OR l.discount_amount>0 OR l.invoice_share>0)", (o, b, lo, hi)):
         gross = line_gross_as_sold([dict(a) for a in db.all(
             "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],))],
-            l["discount_bp"], l["line_total"])
+            l["discount_bp"], l["line_total"], line_fixed(l))
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
         key = "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?")
         g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (l["by_name"] or "—"),

@@ -63,9 +63,18 @@ def sort_lines(lines: list[dict], order: str, names: str = "en") -> list[dict]:
     return sorted(lines, key=key)
 
 
-def discount_denied(ctx: Context, discount_bp: int) -> Forbidden:
+def equivalent_bp(discount: int, gross: int) -> int:
+    """A fixed discount as a percent of `gross` in basis points, rounded UP (a limit is never passed by rounding)."""
+    if discount <= 0:
+        return 0
+    if gross <= 0:
+        return 10000
+    return min(10000, -(-discount * 10000 // gross))
+
+
+def discount_denied(ctx: Context, discount_bp: int, label: str | None = None) -> Forbidden:
     return Forbidden(f"الخصم المسموح لك {ctx.discount_limit_bp / 100:g}% فقط", code="approval_required",
-                     details={"permission": "discount", "label": f"خصم {discount_bp / 100:g}%",
+                     details={"permission": "discount", "label": label or f"خصم {discount_bp / 100:g}%",
                               "requested_bp": discount_bp, "limit_bp": ctx.discount_limit_bp})
 
 
@@ -183,36 +192,88 @@ def discount_of(gross: int, bp: int) -> int:
     return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
 
 
+def invoice_discount_shares(s: dict, lines: list[dict]) -> int:
+    """The invoice discount (EGP, or % of the lines after their own discounts) over the lines by their net,
+    largest remainder; each line's `invoice_share`, `discount` and `net` updated. Returns the discount added."""
+    nets = [max(0, l["net"]) for l in lines]
+    base = sum(nets)
+    want = s.get("invoice_discount_amount") or discount_of(base, s.get("invoice_discount_bp") or 0)
+    shares = spread(min(want, base), nets)
+    for l, sh in zip(lines, shares):
+        l["invoice_share"] = sh
+        l["discount"] += sh
+        l["net"] -= sh
+    return sum(shares)
+
+
+def prorate(fixed: int, gross: int, full_gross: int) -> int:
+    """The part of a line's fixed discount (piasters) on `gross` of its `full_gross`, half up; the whole line
+    takes exactly `fixed` (update 1: fixed EGP discounts and the invoice discount's share)."""
+    if not fixed or gross >= full_gross or full_gross <= 0:
+        return fixed if gross >= full_gross else 0
+    return int((Decimal(fixed) * gross / full_gross).quantize(Decimal("1"), ROUND_HALF_UP))
+
+
+def line_fixed(l) -> int:
+    """A line's fixed discount: its own (EGP) + its share of the invoice discount (0 on sales before 0041)."""
+    keys = l.keys() if hasattr(l, "keys") else ()
+    return (l["discount_amount"] if "discount_amount" in keys else 0) + \
+        (l["invoice_share"] if "invoice_share" in keys else 0)
+
+
+def spread(total: int, amounts: list[int]) -> list[int]:
+    """`total` piasters over the lines by their amounts, integers that add up to `total` exactly: floor shares,
+    the leftover to the largest remainders (the purchase invoice's rule, procurement.returns._spread), never
+    more on a line than its amount."""
+    n, whole = len(amounts), sum(max(0, a) for a in amounts)
+    if not n or total <= 0 or whole <= 0:
+        return [0] * n
+    total = min(total, whole)
+    base = [total * max(0, a) // whole for a in amounts]
+    rest = total - sum(base)
+    for i in sorted(range(n), key=lambda i: (-(total * max(0, amounts[i]) % whole), i)):
+        if not rest:
+            break
+        if base[i] < amounts[i]:
+            base[i] += 1
+            rest -= 1
+    return base
+
+
 def _per_batch_gross(parts, price=alloc_gross) -> int:
     """How the release before 0.4 priced a line: each batch on its own (a pack split over two batches
     by FEFO came to 2 x 33.33 + 33.33 = 99.99). Only for reading sales it recorded (#72)."""
     return sum(price(q, a) for q, a in parts)
 
 
-def _rule_as_sold(allocs: list[dict], bp: int, line_total: int | None):
+def _rule_as_sold(allocs: list[dict], bp: int, line_total: int | None, fixed: int = 0):
     """The pricing rule that produced this line's recorded total, so returns and reports of a sale
-    use the money it was actually sold for; the current rule when the record says nothing."""
+    use the money it was actually sold for; the current rule when the record says nothing.
+    `fixed` = the line's fixed discount (`line_fixed`, 0 before 0041)."""
     if line_total is not None:
         for rule in (line_gross, _per_batch_gross):
             g = rule((a["qty_base"], a) for a in allocs)
-            if g - discount_of(g, bp) == line_total:
+            if g - discount_of(g, bp) - fixed == line_total:
                 return rule
     return line_gross
 
 
-def line_gross_as_sold(allocs: list[dict], bp: int, line_total: int | None) -> int:
+def line_gross_as_sold(allocs: list[dict], bp: int, line_total: int | None, fixed: int = 0) -> int:
     """Gross of a whole line under the rule it was sold with."""
-    return _rule_as_sold(allocs, bp, line_total)((a["qty_base"], a) for a in allocs)
+    return _rule_as_sold(allocs, bp, line_total, fixed)((a["qty_base"], a) for a in allocs)
 
 
 def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None = None,
-               price=_kept_gross) -> int:
+               price=_kept_gross, fixed: int = 0) -> int:
     """Net value of the units of a line the customer still keeps (after discount), priced the way the
     line was sold. With the recorded total: the whole line is worth exactly that and never more, so
     all the returns of a line add up to what was paid for it, not a piaster more or less.
     `price=alloc_gross` is the rule before #324 M1, only to replay returns booked with it."""
-    g = _rule_as_sold(allocs, bp, line_total)(((kept[a["id"]], a) for a in allocs), price=price)
+    rule = _rule_as_sold(allocs, bp, line_total, fixed)
+    g = rule(((kept[a["id"]], a) for a in allocs), price=price)
     value = g - discount_of(g, bp)
+    if fixed:                                   # the fixed part follows the kept share of the line's gross
+        value -= prorate(fixed, g, rule(((a["qty_base"], a) for a in allocs), price=price))
     if line_total is None:
         return value
     if all(kept[a["id"]] == a["qty_base"] for a in allocs):
@@ -247,13 +308,13 @@ def returns_history(db: Database, org_id: str, sale_ids) -> dict[str, list[dict]
 
 
 def outstanding_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None, line_id: str,
-                      history: list[dict]) -> int:
+                      history: list[dict], fixed: int = 0) -> int:
     """What is still paid for the kept units of a line: its recorded total minus the refunds already booked
     for it. The one reference for returns and reports, so they never disagree (#331): a return booked under
     the rule before #324 M1 valued kept units differently, and `kept_value` alone no longer matches it.
     Without a recorded total, or a history that does not explain the units returned: `kept_value`."""
     if line_total is None:
-        return kept_value(allocs, kept, bp, None)
+        return kept_value(allocs, kept, bp, None, fixed=fixed)
     if all(kept[a["id"]] == a["qty_base"] for a in allocs):
         return line_total
     replay = {a["id"]: a["qty_base"] for a in allocs}
@@ -266,11 +327,11 @@ def outstanding_value(allocs: list[dict], kept: dict, bp: int, line_total: int |
             refunded += int(after["line_refunds"][line_id])
             _take(allocs, replay, qty)
         else:                                   # booked before per-line refunds were stored: replay its rule
-            old = kept_value(allocs, replay, bp, line_total, price=alloc_gross)
+            old = kept_value(allocs, replay, bp, line_total, price=alloc_gross, fixed=fixed)
             _take(allocs, replay, qty)
-            refunded += old - kept_value(allocs, replay, bp, line_total, price=alloc_gross)
+            refunded += old - kept_value(allocs, replay, bp, line_total, price=alloc_gross, fixed=fixed)
     if replay != {a["id"]: kept[a["id"]] for a in allocs}:
-        return kept_value(allocs, kept, bp, line_total)
+        return kept_value(allocs, kept, bp, line_total, fixed=fixed)
     return max(0, line_total - refunded)
 
 
@@ -588,6 +649,11 @@ class Sales:
                 l["problem"] = "no_price"
             gross = line_gross((a["qty"], a) for a in plan if a.get("unit_price") is not None)
             disc = discount_of(gross, l["discount_bp"])
+            if s["status"] == "draft":
+                disc += min(l["discount_amount"], gross - disc)      # a fixed EGP discount, never past the line
+                l["invoice_share"] = 0                               # set below, over the whole invoice
+            else:
+                disc += line_fixed(l)
             l["gross"], l["discount"], l["net"] = gross, disc, gross - disc
             if any(a.get("expiry_date") and (date.fromisoformat(a["expiry_date"]) - self.today).days
                    < NEAR_EXPIRY_DAYS for a in plan):
@@ -595,6 +661,9 @@ class Sales:
             subtotal += gross
             discount += disc
             lines.append(l)
+        if s["status"] == "draft":
+            add = invoice_discount_shares(s, lines)
+            discount += add
         from ..printing import settings as ps
         s["line_order"] = line_order(self.db, ctx.org_id)
         s["lines"] = sort_lines(lines, s["line_order"], ps.get(self.db, ctx.org_id).get("names", "en"))
@@ -674,6 +743,18 @@ class Sales:
             raise Conflict("عُدّلت الفاتورة، حدّث الشاشة", code="stale_version")
         if not preview["lines"]:
             raise ValidationFailed("الفاتورة فارغة")
+        # fixed discounts against the limit once more: a line removed or shortened after the discount was typed
+        # makes the same EGP a bigger share (update 1); an approval given for it still counts
+        for l in preview["lines"]:
+            fixed = l["discount"] - l["invoice_share"] - discount_of(l["gross"], l["discount_bp"])
+            bp = equivalent_bp(fixed, l["gross"])
+            if fixed and bp > ctx.discount_limit_bp and not l["discount_approved_by"]:
+                raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
+        if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
+            own = sum(l["discount"] for l in preview["lines"] if l.get("discount_source") != "contract")
+            bp = equivalent_bp(own, preview["subtotal"])
+            if bp > ctx.discount_limit_bp and not preview["invoice_discount_approved_by"]:
+                raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")
         bad = [l for l in preview["lines"] if l.get("problem")]
         if bad:
             raise Conflict("توجد أصناف غير متاحة أو بدون سعر", code="line_problems",
@@ -734,6 +815,8 @@ class Sales:
                                      cost_row["avg_cost"] if cost_row else None, a["pack_price"], a["pack_size"]))
                 gross = line_gross((a["qty"], a) for a in plan)
                 disc = discount_of(gross, l["discount_bp"])
+                fixed_part = min(l["discount_amount"], gross - disc)     # stored as applied: line_fixed adds up
+                disc += fixed_part + l["invoice_share"]
                 net = gross - disc
                 # each line against the one the cashier confirmed: two price changes that cancel out keep the
                 # total but not the lines (#324 M2-07)
@@ -741,12 +824,13 @@ class Sales:
                     raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
                 subtotal += gross
                 discount += disc
-                if l["discount_bp"] and cost_row and cost_row["avg_cost"] is not None:
+                if disc and cost_row and cost_row["avg_cost"] is not None:
                     cost = Decimal(cost_row["avg_cost"]) * l["qty_base"] * 100   # avg_cost is EGP per base unit
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
                                            "net": net, "cost": cost_piasters(cost)})
-                self.db.execute("UPDATE sale_lines SET line_total=? WHERE id=?", (net, l["id"]))
+                self.db.execute("UPDATE sale_lines SET line_total=?, discount_amount=?, invoice_share=? WHERE id=?",
+                                (net, fixed_part, l["invoice_share"], l["id"]))
                 total += net
             if below_cost:
                 ctx.require("sales.below_cost")
@@ -792,9 +876,14 @@ class Sales:
                                 "below_cost": below_cost or None})
             from . import customers as _cust
             _cust.mark_refilled(self.db, sid)
-            disc_lines = [l for l in preview["lines"] if l["discount_bp"] and l.get("discount_source") != "contract"]
-            if disc_lines:
-                names = "، ".join(f"{l['item']['name']} {l['discount_bp'] / 100:g}%" for l in disc_lines[:4])
+            disc_lines = [l for l in preview["lines"] if (l["discount_bp"] or l["discount_amount"])
+                          and l.get("discount_source") != "contract"]
+            inv_disc = sum(l["invoice_share"] for l in preview["lines"])
+            if disc_lines or inv_disc:
+                names = "، ".join(f"{l['item']['name']} " + (f"{l['discount_bp'] / 100:g}%" if l["discount_bp"]
+                                  else f"{egp(l['discount_amount'])} ج") for l in disc_lines[:4])
+                if inv_disc:
+                    names = "، ".join(x for x in (names, f"خصم على الفاتورة {egp(inv_disc)} ج") if x)
                 notify.emit(self.db, ctx, "discount", "warning",
                             f"خصم {egp(preview['discount_total'])} ج — فاتورة {no}", names, "sale", sid)
             if below_cost:
@@ -934,7 +1023,8 @@ class Sales:
         return self.get(ctx, sid)
 
     def update_line(self, ctx: Context, sid: str, line_id: str, *, qty_base: int | None = None,
-                    discount_bp: int | None = None) -> dict:
+                    discount_bp: int | None = None, discount_amount: int | None = None) -> dict:
+        """`discount_amount`: a fixed discount in piasters (update 1); a line has either a percent or an amount."""
         ctx.require("sales.create")
         with self.db.transaction():
             s = self._draft(ctx, sid)
@@ -967,10 +1057,64 @@ class Sales:
                     raise ValidationFailed("نسبة الخصم غير صحيحة")
                 if discount_bp > ctx.discount_limit_bp:
                     raise discount_denied(ctx, discount_bp)
-                self.db.execute("UPDATE sale_lines SET discount_bp=?, discount_source=NULL, discount_by=?, discount_approved_by=? WHERE id=?",
+                self.db.execute("UPDATE sale_lines SET discount_bp=?, discount_amount=0, discount_source=NULL,"
+                                " discount_by=?, discount_approved_by=? WHERE id=?",
                                 (discount_bp, ctx.user_id if discount_bp else None,
                                  ctx.approver_id if discount_bp and discount_bp > ctx.max_discount_bp else None, line_id))
+            if discount_amount is not None:
+                if isinstance(discount_amount, bool) or not isinstance(discount_amount, int) or discount_amount < 0:
+                    raise ValidationFailed("مبلغ الخصم غير صحيح")
+                self.db.execute("UPDATE sale_lines SET discount_amount=?, discount_bp=0, discount_source=NULL,"
+                                " discount_by=?, discount_approved_by=NULL WHERE id=?",
+                                (discount_amount, ctx.user_id if discount_amount else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+            self._check_fixed_discounts(ctx, sid, line_id if (discount_amount or qty_base is not None) else None)
+        return self.get(ctx, sid)
+
+    def _check_fixed_discounts(self, ctx: Context, sid: str, line_id: str | None) -> None:
+        """A fixed discount is held to the same limit as a percent: its share of the line's price (and the invoice
+        discount with the lines' own discounts, of the invoice) may not pass the person's limit, or the approver's.
+        Checked after the change, inside the same transaction, so a refusal rolls it back."""
+        draft = self.get(ctx, sid)
+        for l in draft["lines"]:
+            if l["id"] != line_id or not l["discount_amount"]:
+                continue
+            fixed = l["discount"] - l["invoice_share"] - discount_of(l["gross"], l["discount_bp"])
+            bp = equivalent_bp(fixed, l["gross"])
+            if bp > ctx.discount_limit_bp:
+                raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
+            if bp > ctx.max_discount_bp:
+                self.db.execute("UPDATE sale_lines SET discount_approved_by=? WHERE id=?", (ctx.approver_id, l["id"]))
+        if draft.get("invoice_discount_amount") or draft.get("invoice_discount_bp"):
+            own = sum(l["discount"] for l in draft["lines"] if l.get("discount_source") != "contract")
+            bp = equivalent_bp(own, draft["subtotal"])
+            if bp > ctx.discount_limit_bp:
+                raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")
+            if bp > ctx.max_discount_bp and ctx.approver_id:
+                self.db.execute("UPDATE sales SET invoice_discount_approved_by=? WHERE id=?", (ctx.approver_id, sid))
+
+    def set_invoice_discount(self, ctx: Context, sid: str, *, amount: int | None = None,
+                             bp: int | None = None) -> dict:
+        """One discount on the whole invoice, EGP (piasters) or percent, after the lines' own discounts; spread over
+        the lines by the largest-remainder rule (`invoice_discount_shares`). 0 / 0 removes it."""
+        ctx.require("sales.create")
+        for v, what in ((amount, "مبلغ"), (bp, "نسبة")):
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+                raise ValidationFailed(f"{what} الخصم غير صحيح")
+        if bp is not None and bp > 10000:
+            raise ValidationFailed("نسبة الخصم غير صحيحة")
+        if amount and bp:
+            raise ValidationFailed("الخصم على الفاتورة يا مبلغ يا نسبة")
+        amount, bp = amount or 0, bp or 0
+        with self.db.transaction():
+            s = self._draft(ctx, sid)
+            before = {"amount": s["invoice_discount_amount"], "bp": s["invoice_discount_bp"]}
+            self.db.execute("UPDATE sales SET invoice_discount_amount=?, invoice_discount_bp=?, invoice_discount_by=?,"
+                            " invoice_discount_approved_by=NULL, version=version+1 WHERE id=?",
+                            (amount, bp, ctx.user_id if amount or bp else None, sid))
+            self._check_fixed_discounts(ctx, sid, None)
+            audit.record(self.db, ctx, "sale.invoice_discount", "sale", sid, before=before,
+                         after={"amount": amount, "bp": bp, "approved_by": ctx.approver_id})
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ home delivery
@@ -1075,10 +1219,11 @@ class Sales:
                     raise Conflict(f"أقصى كمية يمكن إرجاعها {remaining_returnable}", code="return_exceeds")
                 left = qty
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                before = kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                before = kept_value(allocs, kept, l["discount_bp"], l["line_total"], fixed=line_fixed(l))
                 if history is None:
                     history = returns_history(self.db, ctx.org_id, [sid]).get(sid, [])
-                rest = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], line_id, history)
+                rest = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], line_id, history,
+                                         fixed=line_fixed(l))
                 for a in allocs:
                     can = a["qty_base"] - a["returned_qty"]
                     take = min(can, left)
@@ -1097,7 +1242,7 @@ class Sales:
                         break
                 # refund = what the kept units were worth before minus after: all the returns of a
                 # line add up to exactly what was paid for it, never a piaster more or less
-                r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"])
+                r = before - kept_value(allocs, kept, l["discount_bp"], l["line_total"], fixed=line_fixed(l))
                 if l["line_total"] is not None:
                     # reconciled with what this line still holds (outstanding_value, the reports' figure too):
                     # never more than the line in all, never negative, and the return that empties the line

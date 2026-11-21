@@ -2105,7 +2105,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(Sales(db).update_line(ctx, req.path_params["id"], req.path_params["line_id"],
-                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp")))
+                                       qty_base=b.get("qty_base"), discount_bp=b.get("discount_bp"),
+                                       discount_amount=b.get("discount_amount")))
+
+    @handler
+    async def sales_invoice_discount(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(Sales(db).set_invoice_discount(ctx, req.path_params["id"], amount=b.get("amount"), bp=b.get("bp")))
 
     @handler
     async def sales_delivery(req):
@@ -2609,7 +2616,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if cfg["show_expiry"]:
                 exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
                 exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else ""
+            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
+                f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
             rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
                         f"<td>{m(l['line_total'])}</td></tr>")
@@ -2957,6 +2965,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/discard", sales_discard, methods=["POST"]),
         Route("/api/sales/{id}/delivery", sales_delivery, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_update_line, methods=["PATCH"]),
+        Route("/api/sales/{id}/invoice-discount", sales_invoice_discount, methods=["PUT"]),
         Route("/api/sales/{id}", sales_get),
         Route("/api/sales/{id}/lines", sales_add_line, methods=["POST"]),
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),

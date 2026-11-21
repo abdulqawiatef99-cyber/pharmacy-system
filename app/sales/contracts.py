@@ -82,10 +82,10 @@ def apply(db: Database, sid: str) -> None:
     k = db.one("SELECT k.* FROM customers c JOIN contracts k ON k.id=c.contract_id AND k.is_active=1 WHERE c.id=?",
                (s["customer_id"],)) if s and s["customer_id"] else None
     db.execute("UPDATE sales SET contract_id=? WHERE id=?", (k["id"] if k else None, sid))
-    for l in db.all("SELECT l.id, l.discount_bp, l.discount_source, i.is_imported FROM sale_lines l JOIN items i ON i.id=l.item_id"
-                    " WHERE l.sale_id=?", (sid,)):
-        if l["discount_bp"] and l["discount_source"] != "contract":
-            continue
+    for l in db.all("SELECT l.id, l.discount_bp, l.discount_amount, l.discount_source, i.is_imported FROM sale_lines l"
+                    " JOIN items i ON i.id=l.item_id WHERE l.sale_id=?", (sid,)):
+        if (l["discount_bp"] and l["discount_source"] != "contract") or l["discount_amount"]:
+            continue                       # a typed percent or a typed EGP discount (update 1) stays
         bp = (k["discount_imported_bp"] if l["is_imported"] else k["discount_local_bp"]) if k else 0
         db.execute("UPDATE sale_lines SET discount_bp=?, discount_source=?, discount_by=NULL, discount_approved_by=NULL WHERE id=?",
                    (bp, "contract" if bp else None, l["id"]))
@@ -226,7 +226,7 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
     E-Stock line values come from its archive: sale = total_sell (else amount x sell_price - disc_money)
     minus back_amount x back_price; cost = (amount - back_amount) x buy_price. To be checked once against
     E-Stock's own «مبيعات أصناف عميل» report in the rehearsal before a real claim."""
-    from .service import _local_date, local_day_bounds, outstanding_value, returns_history
+    from .service import _local_date, line_fixed, local_day_bounds, outstanding_value, returns_history
     ctx.require("sales.totals")
     show_cost = ctx.can("costs.read")
     k = db.one("SELECT * FROM contracts WHERE id=? AND org_id=?", (contract_id, ctx.org_id))
@@ -244,7 +244,7 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
         " AND s.status='completed' AND s.completed_at>=? AND s.completed_at<?",
         (ctx.org_id, contract_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))}
     history = returns_history(db, ctx.org_id, list(sales)) if sales else {}
-    for l in db.all("SELECT l.id, l.sale_id, l.discount_bp, l.line_total, i.code, coalesce(i.name_en, i.name_ar) name"
+    for l in db.all("SELECT l.id, l.sale_id, l.discount_bp, l.discount_amount, l.invoice_share, l.line_total, i.code, coalesce(i.name_en, i.name_ar) name"
                     " FROM sale_lines l JOIN items i ON i.id=l.item_id WHERE l.org_id=? AND l.sale_id IN"
                     f" ({','.join('?' * len(sales)) or 'NULL'}) ORDER BY l.sale_id, l.line_no", (ctx.org_id, *sales)):
         allocs = [dict(a) for a in db.all(       # scoped through the parent line (allocations have no org_id)
@@ -257,7 +257,7 @@ def claim(db: Database, ctx: Context, contract_id: str, date_from: str, date_to:
         s = sales[l["sale_id"]]
         cost = sum((Decimal(a["unit_cost"]) * kept[a["id"]] for a in allocs if a["unit_cost"] is not None), Decimal(0))
         sale = Decimal(outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
-                                         history.get(l["sale_id"], []))) / 100
+                                         history.get(l["sale_id"], []), fixed=line_fixed(l))) / 100
         # the local day, as the period filter counts it (completed_at is UTC)
         row = {"source": "program", "day": _local_date(s["completed_at"]).isoformat(), "invoice": str(s["sale_no"]),
                "customer_id": s["customer_id"], "customer": s["customer"], "ticket_name": s["ticket_name"], "ticket_ref": s["ticket_ref"],

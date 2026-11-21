@@ -3428,6 +3428,16 @@ async function addItem(item, packs, units, scanned = false) {
   } catch (er) { toast(er.message, true); }
 }
 
+// a typed discount: "5" / "5%" = percent, "3ج" / "3 ج" / "3egp" = EGP (update 1); null when not a number
+function discAsk(v) {
+  const t = String(v ?? "").trim();
+  if (!t) return null;
+  const egp = /(ج|جنيه|egp)\s*$/i.test(t), num = t.replace(/(ج|جنيه|egp|%)\s*$/i, "").trim();
+  if (egp) { const p = exactPiasters(num); return p == null || p < 0 ? (toast("مبلغ الخصم غير صحيح", true), null) : { discount_amount: p }; }
+  const bp = toBp(num);
+  return bp == null || Number.isNaN(bp) ? (toast("نسبة الخصم غير صحيحة", true), null) : { discount_bp: bp };
+}
+
 async function patchLine(lineId, body) {
   try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); }
   catch (er) { toast(er.message, true); }
@@ -3449,8 +3459,8 @@ function renderCart(findings = null) {
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div></td>
         <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
-        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<input class="narrow" type="number" min="0" max="100" step="0.5" value="${l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="%">`
-          : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}</td>
+        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
+          : l.discount_amount ? `${money(l.discount_amount)} ج` : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}${l.invoice_share ? `<div class="muted small" title="نصيبه من الخصم على الفاتورة">+ ${money(l.invoice_share)}</div>` : ""}</td>
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
@@ -3464,9 +3474,23 @@ function renderCart(findings = null) {
     if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
     else patchLine(l.id, { qty_base: n });
   }));
-  $("#posCart").querySelectorAll("[data-disc]").forEach((inp) => inp.addEventListener("change", () => patchLine(inp.dataset.disc, { discount_bp: toBp(inp.value) || 0 })));
+  const sendDisc = (id) => {
+    const inp = $(`[data-disc="${CSS.escape(id)}"]`, $("#posCart")), unit = $(`[data-dunit="${CSS.escape(id)}"]`, $("#posCart")).value;
+    const v = inp.value.trim();
+    if (unit === "egp") {
+      const p = v === "" ? 0 : exactPiasters(v);
+      if (p == null || p < 0) return toast("مبلغ الخصم غير صحيح", true);
+      return patchLine(id, { discount_amount: p });
+    }
+    patchLine(id, { discount_bp: toBp(v) || 0 });
+  };
+  $("#posCart").querySelectorAll("[data-disc]").forEach((inp) => inp.addEventListener("change", () => sendDisc(inp.dataset.disc)));
+  $("#posCart").querySelectorAll("[data-dunit]").forEach((sel) => sel.addEventListener("change", () => {
+    if ($(`[data-disc="${CSS.escape(sel.dataset.dunit)}"]`, $("#posCart")).value.trim() !== "") sendDisc(sel.dataset.dunit);
+  }));
   $("#posCart").querySelectorAll("[data-askdisc]").forEach((b) => b.addEventListener("click", () => {
-    const v = prompt("نسبة الخصم %:"); if (v) patchLine(b.dataset.askdisc, { discount_bp: toBp(v) });
+    const v = discAsk(prompt("الخصم: نسبة (مثال 5) أو مبلغ بالجنيه (مثال 3ج):"));
+    if (v) patchLine(b.dataset.askdisc, v);
   }));
   $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
     SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart(); renderSide();
@@ -3499,6 +3523,9 @@ function renderSide() {
         <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}"></label>
         <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}"></label></div>` : ""}
       <div class="sum"><span>الإجمالي</span><b>${money(s.subtotal)}</b></div>
+      ${s.lines.length ? `<div class="row nowrap mt" id="posInvDiscRow"><label class="f">خصم على الفاتورة
+        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0"></label>
+        <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
       <div class="sum due"><span>المطلوب</span><b>${money(s.total)}</b></div>
@@ -3558,6 +3585,16 @@ function renderSide() {
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
   $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
+  const invDisc = async () => {         // one discount on the whole invoice, spread over the lines (update 1)
+    const v = $("#posInvDisc").value.trim(), egp = $("#posInvDiscU").value === "egp";
+    const body = egp ? { amount: v === "" ? 0 : exactPiasters(v) } : { bp: toBp(v) || 0 };
+    if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0)))
+      return toast("الخصم غير صحيح", true);
+    try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); }
+    catch (er) { toast(er.message, true); renderSide(); }
+  };
+  $("#posInvDisc")?.addEventListener("change", invDisc);
+  $("#posInvDiscU")?.addEventListener("change", () => { if ($("#posInvDisc").value.trim() !== "") invDisc(); });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
