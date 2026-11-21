@@ -1,12 +1,20 @@
 # HANDOFF — الحالة الحالية
 
-آخر تحقق: 2026-11-20 22:30 · Claude · `develop` @ `dc41794` (#387: launch candidate merged, migrations 0037-0039; CI linux + windows أخضر). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
+آخر تحقق: 2026-11-21 · Claude · `develop` @ `17a8079` (part 3 merged: #386 #391 #392 #394 #395 #396; CI linux + windows أخضر). **الترتيب الحالي للإطلاق في [START_HERE.md](START_HERE.md)**؛ الأدوار: [LAUNCH_PLAN.md](LAUNCH_PLAN.md).
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **73.25%**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
 
 
 
+
+## 21/11 Cairo — launch-final session: last installer guard, spare key, release PR (READ THIS FIRST)
+1. State: part 3 merged into develop: #386 → #391 → #392 → #394 → #395 → #396, develop @ `17a8079`, CI linux + windows green on it (checked by the manager). #397 closed (review only).
+2. Key outcome (b): `release_keys/update-2.pub` signs (it was the spare); update-1 retired (private half not found, `update-1.pub` removed). A new spare `update-3.pub` comes from the owner's `new-signing-key.bat` and is committed on `claude/launch-final` (docs/SMART_UPDATE.md, release_keys/README.md).
+3. Return window back to **14 days** (owner 21/11 10:17, #396); Settings still changes it.
+4. Branch `claude/launch-final`: installer `MinVersion=10.0` + `ArchitecturesAllowed=x64compatible` + `ArchitecturesInstallIn64BitMode=x64compatible` (Windows 10+, 64-bit; the embedded Python is amd64), tests in `tests/test_installer_script.py`; #393 (part 3 HANDOFF log, OWNER_RULES §12, AGENTS §2a step 0) merged into it, so #393 is closed.
+5. Owner decisions 21/11 (manager chat 14:29, «اعمل اللي انت شايفه»): order = last installer → move → launch. The **final full review runs AFTER the launch**, and its fixes ship through the «تحديث» button (no new installer). Install on the owner's PC first, Dr. Adham's later. Only one worker session at a time.
+6. Next: release PR `release/v0.4.0` → `main` (RELEASE_RUNBOOK §2-أ) is opened, **not merged**; the owner merges it, then the installer is built from main (no agent builds it).
 
 ## 21/11 15:00 Cairo — signing key settled (outcome b), all of part 3 merged into develop (READ THIS FIRST)
 1. Key: the owner's 10:28 "primary" line matched no committed key (run 44896903157 attempt 1: `signature does not match a trusted key`). He put the spare back at 13:16; attempt 2: `signed with release_keys/update-2-spare.pub`. Owner's choice: the spare becomes the signing key. #391 `29fae69`/`46c86ec`: `update-2-spare.pub` → `release_keys/update-2.pub` (same key), `update-1.pub` removed; dry run on #391: `signed with release_keys/update-2.pub` (run 44900092464).
