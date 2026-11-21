@@ -326,3 +326,26 @@ class CodexReview400Round3(FixedCase):
         day = TODAY.isoformat()
         g = next(x for x in owner.discounts_report(self.db, self.ctx, day, day)["by_who"] if x["key"] == self.ctx.user_id)
         self.assertEqual((g["lines"], g["gross"], g["discount"]), (2, d["subtotal"], 300))
+
+
+class CodexReview400Round4(FixedCase):
+    def test_p1_a_line_approval_covers_only_the_share_approved(self):
+        svc = cat.create_item(self.db, self.ctx, {"name_en": "Testservice", "public_price": 3000, "is_service": 1})
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, svc, units=1)
+        lid = d["lines"][0]["id"]
+        approved = dataclasses.replace(self.cashier, approver_id=self.ctx.user_id, approver_discount_bp=1000)
+        self.s.update_line(approved, sid, lid, discount_amount=300)           # 10% of 30.00, approved
+        cat.update_item(self.db, self.ctx, svc, {"public_price": 1500})       # the price falls: now 20%
+        d = self.s.get(self.ctx, sid)
+        with self.assertRaises(Forbidden):
+            self.s.complete(self.cashier, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+
+
+class CodexKeyboardCompletion(unittest.TestCase):
+    def test_a_discount_being_typed_is_saved_before_f9(self):
+        body = _re.search(r"\nasync function complete\(findings\) \{.*?\n  await POS\.saving;", _JS, _re.S).group(0)
+        self.assertIn('act?.dataset?.disc || act?.id === "posInvDisc"', body)
+        for fn in (r"\nasync function patchLine\(", r"const invDisc = async \(\) =>"):
+            block = _JS[_re.search(fn, _JS).start():][:900]
+            self.assertIn("POS.saving = (async () =>", block, fn)

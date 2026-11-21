@@ -758,7 +758,9 @@ class Sales:
         for l in preview["lines"]:
             fixed = l["discount"] - l["invoice_share"] - discount_of(l["gross"], l["discount_bp"])
             bp = equivalent_bp(fixed, l["gross"])
-            if fixed and bp > ctx.discount_limit_bp and not l["discount_approved_by"]:
+            # an approval covers the share it was given for: a lower price later makes it a bigger one (Codex #400)
+            approved = l.get("discount_approved_bp") if l["discount_approved_by"] else None
+            if fixed and bp > ctx.discount_limit_bp and (approved is None or bp > approved):
                 raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
         if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
             own = own_discount(preview["lines"])
@@ -1077,7 +1079,7 @@ class Sales:
                 if isinstance(discount_amount, bool) or not isinstance(discount_amount, int) or discount_amount < 0:
                     raise ValidationFailed("مبلغ الخصم غير صحيح")
                 self.db.execute("UPDATE sale_lines SET discount_amount=?, discount_bp=0, discount_source=NULL,"
-                                " discount_by=?, discount_approved_by=NULL WHERE id=?",
+                                " discount_by=?, discount_approved_by=NULL, discount_approved_bp=NULL WHERE id=?",
                                 (discount_amount, ctx.user_id if discount_amount else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
             self._check_fixed_discounts(ctx, sid, line_id if (discount_amount or qty_base is not None) else None)
@@ -1096,7 +1098,8 @@ class Sales:
             if bp > ctx.discount_limit_bp:
                 raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
             if bp > ctx.max_discount_bp:
-                self.db.execute("UPDATE sale_lines SET discount_approved_by=? WHERE id=?", (ctx.approver_id, l["id"]))
+                self.db.execute("UPDATE sale_lines SET discount_approved_by=?, discount_approved_bp=? WHERE id=?",
+                                (ctx.approver_id, bp, l["id"]))
         if draft.get("invoice_discount_amount") or draft.get("invoice_discount_bp"):
             own = own_discount(draft["lines"])
             bp = equivalent_bp(own, draft["subtotal"])

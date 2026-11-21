@@ -3510,8 +3510,11 @@ function discAsk(v) {
 }
 
 async function patchLine(lineId, body) {
-  try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); }
-  catch (er) { toast(er.message, true); }
+  POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9)
+    try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); }
+    catch (er) { toast(er.message, true); }
+  })();
+  await POS.saving;
 }
 
 function renderCart(findings = null) {
@@ -3661,8 +3664,11 @@ function renderSide() {
     const body = egp ? { amount: v === "" ? 0 : exactPiasters(v) } : { bp: toBp(v) || 0 };
     if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0)))
       return toast("الخصم غير صحيح", true);
-    try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); }
-    catch (er) { toast(er.message, true); renderSide(); }
+    POS.saving = (async () => {          // complete() waits for it
+      try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); }
+      catch (er) { toast(er.message, true); renderSide(); }
+    })();
+    await POS.saving;
   };
   $("#posInvDisc")?.addEventListener("change", invDisc);
   $("#posInvDiscU")?.addEventListener("change", () => { if ($("#posInvDisc").value.trim() !== "") invDisc(); });
@@ -3759,7 +3765,9 @@ function currentPayments() {
 async function complete(findings) {
   // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
   // for a missing address that is right there on the screen (device test 11/01)
-  if (document.activeElement?.dataset?.dl) document.activeElement.blur();
+  // the same for a discount just typed (Codex on #400: F9 / F10 completed at the old total)
+  const act = document.activeElement;
+  if (act?.dataset?.dl || act?.dataset?.disc || act?.id === "posInvDisc") act.blur();
   await POS.saving;
   // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
   // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows
