@@ -2359,6 +2359,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   adj_type=b.get("adj_type") or None, note=b.get("note")), status_code=201)
 
     @handler
+    async def opening_corrections_view(req):
+        from ..dataimport import opening_balances as ob
+        return J({"parties": await off_loop(ob.corrections, db, ctx_of(req), req.path_params["kind"],
+                                            req.query_params.get("q", ""))})
+
+    @handler
+    async def opening_correct_view(req):
+        from ..dataimport import opening_balances as ob
+        ctx = ctx_of(req)
+        kind, pid = req.path_params["kind"], req.path_params["id"]
+        if req.method == "GET":
+            return J({"history": ob.correction_history(db, ctx, kind, pid)})
+        b = await body(req)
+        if b.get("amount") in (None, "") or b.get("seen_opening") in (None, "") or b.get("seen_revision") in (None, ""):
+            raise ValidationFailed("اكتب الرصيد الصحيح")
+        return J(ob.correct(db, ctx, kind, pid, _int(b.get("amount"), "amount"),
+                            seen_opening=_int(b.get("seen_opening"), "seen_opening"), reason=b.get("reason"),
+                            seen_revision=_int(b.get("seen_revision"), "seen_revision")),
+                 status_code=201)
+
+    @handler
     async def reconcile_history_view(req):
         return J({"history": reconcile.history(db, ctx_of(req), req.path_params["party"], req.path_params["id"])})
 
@@ -2924,6 +2945,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reconcile/parties", reconcile_parties_view),
         Route("/api/reconcile", reconcile_record_view, methods=["POST"]),
         Route("/api/reconcile/{party}/{id}", reconcile_history_view),
+        Route("/api/opening-balances/{kind}", opening_corrections_view),
+        Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
         Route("/api/counts", counts_create, methods=["POST"]),
