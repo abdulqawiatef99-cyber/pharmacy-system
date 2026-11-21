@@ -2523,8 +2523,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..sales.cash import count_total
         ctx = ctx_of(req)
         ctx.require("cash.close")
-        _, clean = count_total((await body(req)).get("denominations") or {})
-        return J(shift_tools.split_float(clean, shift_tools.get_target(db, ctx.org_id)))
+        b = await body(req)
+        total, clean = count_total(b.get("denominations") or {})
+        fl = b.get("float_left")
+        if fl is not None:              # the closer typed his own float: show the notes for that amount (Codex P2)
+            try:
+                fl = whole_number(fl)
+            except (TypeError, ValueError):
+                raise ValidationFailed("الفكة غير صحيحة")
+            if not 0 <= fl <= total:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
 
     @handler
     async def cash_hunt(req):

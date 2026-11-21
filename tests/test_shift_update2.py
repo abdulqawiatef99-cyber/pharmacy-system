@@ -150,3 +150,32 @@ class TestNewShiftButton(PlanCase):
         self.assertEqual(out["fl"], "300.00")
         self.assertIn("سيب في الدرج", out["split"])
         self.assertEqual(out["prefill"], "300.00")
+
+
+class TestCodexRound1(PlanCase):
+    def setUp(self):
+        super().setUp()
+        CashDrawer(self.db).open(self.ctx, 30000)
+
+    def test_preview_follows_a_typed_float(self):
+        sp = self.call("POST", "/api/cash/float-preview", json={"denominations": {"10000": 5}, "float_left": 10000})
+        self.assertEqual((sp["keep"], sp["to_treasury"]), ({"10000": 1}, 40000))
+        sp = self.call("POST", "/api/cash/float-preview", json={"denominations": {"10000": 5}, "float_left": 5000})
+        self.assertFalse(sp["exact"])
+        self.call("POST", "/api/cash/float-preview", 422, json={"denominations": {"10000": 1}, "float_left": 20000})
+
+
+class TestHuntKeepsLaterVoids(SalesCase):
+    def test_a_sale_voided_after_the_close_stays_in_the_hunt(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        cd = CashDrawer(self.db)
+        shift = cd.summary(self.ctx)["id"]
+        cd.close(self.ctx, counted_cash=0, note="عدّ تجربة", float_left=0)
+        cd.open(self.ctx, 0)
+        self.s.void(self.ctx, sid, "غلط في الفاتورة")
+        with self.db.transaction():
+            self.db.execute("UPDATE sales SET paid_cash=paid_cash+1, total=total+1 WHERE id=?", (sid,))
+        h = st.difference_hunt(self.db, self.ctx, shift)
+        self.assertEqual(len(h["fractions"]), 1)

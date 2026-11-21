@@ -4113,14 +4113,16 @@ async function viewShift(opts = {}) {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length) { out.innerHTML = ""; return; }
     try {
-      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den } });
+      const f0 = $("#shClose"), own = f0?.fl?.dataset.touched ? toPiasters(f0.fl.value) : null;
+      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, ...(own != null ? { float_left: own } : {}) } });
       const lbl = (d) => `${+d / 100 >= 1 ? +d / 100 : `${+d} قرش`}`;
       const list = (o) => Object.entries(o).sort((a, b) => b[0] - a[0]).map(([d, n]) => `${lbl(d)} × ${n}`).join("، ") || "—";
-      out.innerHTML = `<b>سيب في الدرج:</b> ${list(sp.keep)} = ${money(sp.float_left)} ج<br><b>حوّل للخزنة:</b> ${list(sp.move)} = ${money(sp.to_treasury)} ج${sp.short ? `<br>⚠ الفكة ناقصة ${money(sp.short)} ج عن المطلوب` : ""}`;
+      out.innerHTML = sp.exact === false ? `<b>سيب في الدرج:</b> ${money(sp.float_left)} ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك<br><b>حوّل للخزنة:</b> ${money(sp.to_treasury)} ج`
+        : `<b>سيب في الدرج:</b> ${list(sp.keep)} = ${money(sp.float_left)} ج<br><b>حوّل للخزنة:</b> ${list(sp.move)} = ${money(sp.to_treasury)} ج${sp.short ? `<br>⚠ الفكة ناقصة ${money(sp.short)} ج عن المطلوب` : ""}`;
       const f = $("#shClose"); if (f && f.fl && !f.fl.dataset.touched) f.fl.value = money(sp.float_left);
     } catch { out.innerHTML = ""; }
   }
-  $("#shClose")?.fl?.addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
+  $("#shClose")?.fl?.addEventListener("input", (e) => { e.target.dataset.touched = "1"; splitSoon(); });
   if ($("#shTargetF")) {
     const tf = $("#shTargetF"), sum = () => { let t = 0; tf.querySelectorAll("[data-t]").forEach((i) => { t += toPiasters(i.value) || 0; }); $("#shTargetSum").textContent = `الإجمالي ${money(t)} ج`; };
     api("/api/cash/float-target").then((t) => { tf.querySelectorAll("[data-t]").forEach((i) => { i.value = money(t[i.dataset.t] || 0); }); sum(); }).catch(() => {});

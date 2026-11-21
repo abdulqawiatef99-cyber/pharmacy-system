@@ -87,6 +87,7 @@ def report_extras(db: Database, ctx: Context, s: dict) -> dict:
     """Credit sales with the customer, discounts by seller, the notes kept / moved at the close."""
     from .cash import _sales_of
     where, args = _sales_of(s)
+    where, args = f"+x.org_id=? AND {where}", (ctx.org_id, *args)      # tenant filter on every read (Codex P1); + keeps the shift index
     credit = [dict(r) for r in db.all(
         "SELECT x.sale_no, x.on_credit, c.name customer FROM sales x LEFT JOIN customers c ON c.id=x.customer_id"
         f" WHERE {where} AND x.on_credit>0 ORDER BY x.sale_no", args)]
@@ -101,18 +102,25 @@ def report_extras(db: Database, ctx: Context, s: dict) -> dict:
     return {"credit_sales": credit, "discount_by_user": disc, "float_split": kept}
 
 
+def split_for(counted: dict, target: dict, float_left: int | None = None) -> dict:
+    """The owner's target split, or, when the closer typed his own float, the notes that make that amount exactly
+    (largest first, then smallest first); when no notes make it, no note list (the amount only)."""
+    sp = split_float(counted, target)
+    if float_left is None or sp["float_left"] == float_left:
+        return sp
+    for order in (True, False):
+        sp = split_float(counted, _target_for(counted, float_left, largest_first=order))
+        if sp["float_left"] == float_left:
+            return sp
+    total = sum(int(d) * n for d, n in counted.items())
+    return {"keep": {}, "move": {}, "float_left": float_left, "to_treasury": total - float_left, "short": 0, "exact": False}
+
+
 def record_split(db: Database, ctx: Context, shift_id: str, counted: dict | None, float_left: int) -> None:
     """Inside the close transaction: which notes stayed, for the printed report."""
     if not counted:
         return
-    sp = split_float(counted, get_target(db, ctx.org_id))
-    if sp["float_left"] != float_left:      # the closer typed his own float: the notes that make it exactly
-        for order in (True, False):
-            sp = split_float(counted, _target_for(counted, float_left, largest_first=order))
-            if sp["float_left"] == float_left:
-                break
-        else:                            # no notes make that amount exactly: the report shows the amount only
-            sp = {"keep": {}, "move": {}}
+    sp = split_for(counted, get_target(db, ctx.org_id), float_left)
     audit.record(db, ctx, "cash.float_split", "cash_shift", shift_id, after={"keep": sp["keep"], "move": sp["move"],
                                                                               "float_left": float_left})
 
@@ -140,9 +148,10 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
     s = dict(s)
     from .cash import _sales_of
     where, args = _sales_of(s)
+    where, args = f"+x.org_id=? AND {where}", (ctx.org_id, *args)      # tenant filter on every read (Codex P1); + keeps the shift index
     sales = [dict(r) for r in db.all(
         "SELECT x.id, x.sale_no, x.kind, x.total, x.paid_cash, x.paid_card, x.paid_transfer, x.on_credit, x.completed_at"
-        f" FROM sales x WHERE {where} AND x.status='completed' ORDER BY x.sale_no", args)]
+        f" FROM sales x WHERE {where} ORDER BY x.sale_no", args)]     # the report's scope: later voids stay
     fractions = [x for x in sales if x["paid_cash"] % 25]
     # paid in cash on the invoice vs what really reached this drawer for it (the completion refuses paid != total,
     # so the useful check is the drawer's own movement)
