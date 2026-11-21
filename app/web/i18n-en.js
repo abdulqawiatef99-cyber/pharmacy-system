@@ -3077,4 +3077,5 @@ window.I18N_EN = {
 "الطلبية فاضية": "The order is empty",
 "الطلبية.xlsx": "order.xlsx",
 "في الطريق": "On the way",
+"اكتب الكمية رقم صحيح (علبة واحدة على الأقل)": "Type the quantity as a whole number (at least one box)",
 };

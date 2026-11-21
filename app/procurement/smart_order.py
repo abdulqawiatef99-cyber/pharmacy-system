@@ -177,6 +177,14 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
     for n, row in enumerate(sorted((x for x in rows if x["events"] > 0), key=lambda x: -x["events"])[:TOP_SELLERS]):
         row["top_rank"] = n
     # most urgent first: empty shelves a customer asked for, then the fewest days left, then the busiest
+    if not ctx.can("costs.read"):
+        # purchase discounts and bonuses are the owner's to see (as on the item card, app/catalog/card.py): the
+        # others get the last supplier and date only (Codex P1 on #402)
+        for row in rows:
+            if row["last"]:
+                row["last"] = {k: row["last"][k] for k in ("supplier_id", "supplier", "date")}
+            row["best"], row["official_bp"] = None, None
+            row["flags"] = [f for f in row["flags"] if f != "below_official"]
     rows.sort(key=lambda r: (not (r["asked"] and r["on_hand"] <= 0),
                              r["days_left"] if r["days_left"] is not None else (0 if r["on_hand"] <= 0 else 1e9),
                              -r["events"]))
@@ -208,10 +216,12 @@ def order_xlsx(db: Database, ctx: Context, groups: list) -> bytes:
             if not s:
                 raise NotFound("المورد غير موجود")
             name = s["name"]
-        title = "".join(ch for ch in name if ch not in "[]:*?/\\")[:28] or "مورد"
-        while title in titles:
-            title = title[:26] + f"_{len(titles)}"
-        titles.add(title)
+        base = "".join(ch for ch in name if ch not in "[]:*?/\\")[:28] or "مورد"
+        title, k = base, 1
+        while title.lower() in titles:              # Excel titles ignore case; the counter always moves on
+            k += 1
+            title = f"{base[:31 - len(str(k)) - 1]}_{k}"
+        titles.add(title.lower())
         ws = wb.create_sheet(title)
         ws.sheet_view.rightToLeft = True
         ws.append(["المورد", name])

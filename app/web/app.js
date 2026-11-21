@@ -3136,6 +3136,8 @@ const prChip = {
 };
 const prPct = (bp) => (bp === null || bp === undefined ? "—" : `${(bp / 100).toFixed(2)}%`);
 const prSup = (r) => (r.best || r.last || {});
+// a whole number of boxes, the whole text (parseInt read "1.9" and "1e2" as 1, Codex P1 on #402)
+const prPacks = (v) => { const t = String(v ?? "").trim(); return /^[0-9]{1,6}$/.test(t) && +t >= 1 ? +t : null; };
 const PR_ORDER = {                         // the order being built, kept on this PC until it is exported or cleared
   get() { try { return JSON.parse(localStorage.getItem("smartOrder") || "{}") || {}; } catch { return {}; } },
   set(v) { try { localStorage.setItem("smartOrder", JSON.stringify(v)); } catch { /* private window: list lives on screen only */ } },
@@ -3228,8 +3230,8 @@ async function viewProcurement() {
   };
   const add = (r, quiet) => {
     const o = PR_ORDER.get(), inp = $(`.prQty[data-id="${CSS.escape(r.item_id)}"]`);
-    const packs = parseInt(inp ? inp.value : r.suggested_packs, 10);
-    if (!(packs >= 1)) { if (!quiet) toast("اكتب الكمية (علبة واحدة على الأقل)", true); return; }
+    const packs = prPacks(inp ? inp.value : r.suggested_packs);
+    if (!packs) { if (!quiet) toast("اكتب الكمية (علبة واحدة على الأقل)", true); return; }
     const s = prSup(r);
     o[r.item_id] = { label: r.label, packs, supplier_id: s.supplier_id || null, supplier: s.supplier || null, discount_bp: s.discount_bp ?? null };
     PR_ORDER.set(o);
@@ -3260,9 +3262,10 @@ async function viewProcurement() {
   });
   $("#prBody").addEventListener("change", (e) => {
     const i = e.target.closest(".prQty"); if (!i) return;
-    const o = PR_ORDER.get(), n = parseInt(i.value, 10);
+    const o = PR_ORDER.get(), n = prPacks(i.value);
     st.qty[i.dataset.id] = i.value;
-    if (o[i.dataset.id] && n >= 1) { o[i.dataset.id].packs = n; PR_ORDER.set(o); drawOrder(); }
+    if (!n) { toast("اكتب الكمية رقم صحيح (علبة واحدة على الأقل)", true); return; }
+    if (o[i.dataset.id]) { o[i.dataset.id].packs = n; PR_ORDER.set(o); drawOrder(); }
   });
   $("#prAddAll").addEventListener("click", () => { visible().forEach((r) => add(r, true)); draw(); });
   $("#prOrder").addEventListener("click", (e) => {

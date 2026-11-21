@@ -234,3 +234,24 @@ class TestReviewFixes(SmartCase):
         r = self.rows(scope="all")[it]
         self.assertEqual(r["movement"], "slow")                # not "dead"
         self.assertIsNotNone(r["top_rank"])
+
+
+class TestCodexRound1(SmartCase):
+    def test_discounts_hidden_without_costs_read(self):
+        from dataclasses import replace
+        self._buy(self.fast, self.s1, public=5000, net=4000, qty=10, bonus=2, days_ago=5)
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        r = {x["item_id"]: x for x in so.smart_order(self.db, staff, today=TODAY)["rows"]}[self.fast]
+        self.assertIsNone(r["best"])
+        self.assertEqual(set(r["last"]), {"supplier_id", "supplier", "date"})
+        self.assertNotIn("below_official", r["flags"])
+        self.assertIsNone(r["official_bp"])
+
+    def test_sheet_titles_never_loop(self):
+        groups = []
+        for name in ("A" * 28, "A" * 26 + "_2", "A" * 28 + "*B"):
+            sid = cat.create_supplier(self.db, self.ctx, name=name)
+            groups.append({"supplier_id": sid, "lines": [{"item_id": self.fast, "packs": 1}]})
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(so.order_xlsx(self.db, self.ctx, groups)))
+        self.assertEqual(len(set(wb.sheetnames)), 3)
