@@ -116,9 +116,15 @@ class TestPipelineLayers(CorpusCase):
         d = self.p.get(self.ctx, inv_id)
         self.assertEqual(d["invoice"]["supplier_id"], self.ibn)     # long name contains ours
         self.assertEqual([l["item_id"] for l in d["lines"]], [self.panx, self.caf])
-        self.assertIn("short_expiry", {i["code"] for i in d["issues"] if i["level"] == "warning"})
-        self.assertEqual(self.issues(d), set(), d["issues"])
+        # U2-22 (owner 21/11): a short expiry is approved only with a written reason
+        short = [i for i in d["issues"] if i["code"] == "short_expiry"]
+        self.assertEqual({i["level"] for i in short}, {"error"})
+        self.assertEqual(self.issues(d), {("short_expiry", "expiry_date")}, d["issues"])
         self.assertEqual(inv.stock_for_item(self.db, self.ctx, self.panx)["total_qty"], 0)   # not yet
+        for i in short:
+            d = self.p.acknowledge(self.ctx, inv_id, "short_expiry", "متفق مع المورد على مرتجع", i["line_id"],
+                                   d["invoice"]["version"])
+        self.assertEqual(self.issues(d), set(), d["issues"])
         self.p.approve(self.ctx, inv_id, d["invoice"]["version"])
         # layer 4: approval posts (10 + 2 bonus) packs x 2 = 24 strips at 459.20/24
         s = inv.stock_for_item(self.db, self.ctx, self.panx)
