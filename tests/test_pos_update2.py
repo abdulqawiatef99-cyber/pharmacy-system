@@ -133,3 +133,43 @@ class TestCrashKeepsDraft(SalesCase):
         self.ctx = self.login("owner", "Owner-Pass-2026")
         drafts = {d["id"]: d for d in self.s.__class__(self.db).list_drafts(self.ctx)}
         self.assertEqual(drafts[sid]["lines"], 1)
+
+
+LOGOUT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  const out = { dialogs: 0 };
+  const me = () => p.evaluate(async () => (await fetch('/api/me', { headers: { 'X-Requested-With': 'pharm' } })).status);
+  await p.goto(base + '/#/home'); await p.waitForSelector('#logout');
+  p.once('dialog', (d) => { out.dialogs++; d.dismiss(); });
+  await p.click('#logout'); await p.waitForTimeout(300);
+  out.afterCancel = await me();                          // cancelled: still signed in
+  p.once('dialog', (d) => { out.dialogs++; d.accept(); });
+  await p.click('#logout'); await p.waitForSelector('#loginForm');
+  out.afterAccept = await me();                          // accepted: signed out
+""" + LOGIN.split("await p.goto(base + '/');", 1)[1] + r"""
+  await p.evaluate(async () => fetch('/api/me/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json',
+    'X-Requested-With': 'pharm' }, body: JSON.stringify({ logout_confirm: 'off' }) }));
+  await p.evaluate(() => { try { localStorage.setItem('prefs', JSON.stringify({ logout_confirm: 'off' })); } catch (e) {} });
+  await p.goto(base + '/#/home'); await p.reload(); await p.waitForSelector('#logout');
+  const before = out.dialogs;
+  p.on('dialog', (d) => { out.dialogs++; d.dismiss(); });
+  await p.click('#logout'); await p.waitForSelector('#loginForm');
+  out.offAsked = out.dialogs - before;
+  out.afterOff = await me();
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestLogoutConfirm(PlanCase):
+    def test_cancel_keeps_accept_leaves_off_skips(self):
+        out = run_node(self, LOGOUT, "owner", OWNER_PW)
+        self.assertEqual(out["afterCancel"], 200)
+        self.assertEqual(out["afterAccept"], 401)
+        self.assertEqual(out["offAsked"], 0)
+        self.assertEqual(out["afterOff"], 401)
