@@ -10,14 +10,15 @@
 
 ## 22/11 night — UPDATE-2 worker session (READ THIS FIRST; newest line last)
 Base develop @ `88cb658`. One PR per group, independent agent review before Codex (OWNER_RULES §12). Nothing merged into main, no installer. Local worktrees: /home/user/wt-{shift,pos,pur,misc,doc}.
-| PR | Items | Independent review | Full suite | Codex |
-|---|---|---|---|---|
-| #402 `claude/u2-36-smart-order` | U2-36 | P1 + P2s fixed | 2545 OK | asked, label `ci` |
-| #403 `claude/u2-0-refusals` | U2-0, OWNER_RULES §13, 2 new permissions | 3 P1 fixed `7f47a38` | running | not yet |
-| #404 `claude/u2-shift` | U2-26/28/29/30 | 3 P1 fixed `c81349e` | todo | not yet |
-| #405 `claude/u2-pos` | U2-11/12/13/18/25/32/34/35 | 2 P1 fixed `5cb6c8e` | todo | not yet |
-| #406 `claude/u2-purchases` | U2-1/2/3/4/5/9/16/22 | 4 P1 fixed `37cf03f` | todo | not yet |
-| (PR next) `claude/u2-misc` | U2-8/10/15 | running | todo | not yet |
+| PR | Items | State |
+|---|---|---|
+| #402 | U2-36 smart order | merged `180d472` (Codex 3 rounds, CI green) |
+| #405 | POS U2-11/12/13/18/25/32/34/35 | merged `d22b496` |
+| #403 | U2-0 refusals, OWNER_RULES §13, 2 permissions | merged `b3bf34d` (card-paid exchange through cash now needs a manager PIN) |
+| #404 | shift U2-26/28/29/30 | merged `9216cf4` |
+| #406 | purchases U2-1/2/3/4/5/9/16/22 | Codex round 4 + CI pending (merge/split money math hardened over 3 rounds) |
+| #407 | U2-8 day review, U2-10, U2-15 | Codex + CI pending after develop merge |
+Open P2s kept for later: sold unit not stored on sale lines (U2-13/U2-24, needs a migration); RTL test checks page direction only; perf limit may be tight on slow CI.
 Not started / blocked, with the reason:
 - U2-27 silent printing, U2-23/U2-24 receipt: `app/printing/` (a session may not merge it, OWNER_RULES §10).
 - U2-31 two drawers: needs a migration (one open shift per branch today).
