@@ -9,12 +9,25 @@
 
 
 ## 22/11 night — UPDATE-2 worker session (READ THIS FIRST; newest line last)
-Base develop @ `88cb658`. One PR per group, independent agent review before Codex (OWNER_RULES §12). Nothing merged into main, no installer.
-- U2-36 smart order: PR #402 `claude/u2-36-smart-order`. Independent review: no P0, P1 + P2s fixed. Full suite running.
-- U2-0 refusals + OWNER_RULES §13: PR #403 `claude/u2-0-refusals`. Independent review: 3 P1 fixed (`7f47a38`). Two new permissions (`sales.refund_other_method`, `suppliers.pay_advance`).
-- Shift U2-26/28/29/30: branch `claude/u2-shift` (local worktree /home/user/wt-shift, not pushed yet). Independent review running. U2-27 (silent printing) not started: it touches `app/printing/`, which a session must not merge (OWNER_RULES §10). U2-31 (two drawers, each with its own shift) not started: today one open shift per branch (unique index), so it needs a migration.
-- POS U2-11/12/13/18/25/32/34/35: branch `claude/u2-pos` (worktree /home/user/wt-pos). Independent review running. U2-23/U2-24 (receipt) touch `app/printing/`. U2-14 rounding and U2-33 (below cost refused) change money rules: not started.
-- Git note: commits work only with short one-line messages (the auto-mode check refused long multi-line messages and `--amend`). Push one branch per command.
+Base develop @ `88cb658`. One PR per group, independent agent review before Codex (OWNER_RULES §12). Nothing merged into main, no installer. Local worktrees: /home/user/wt-{shift,pos,pur,misc,doc}.
+| PR | Items | Independent review | Full suite | Codex |
+|---|---|---|---|---|
+| #402 `claude/u2-36-smart-order` | U2-36 | P1 + P2s fixed | 2545 OK | asked, label `ci` |
+| #403 `claude/u2-0-refusals` | U2-0, OWNER_RULES §13, 2 new permissions | 3 P1 fixed `7f47a38` | running | not yet |
+| #404 `claude/u2-shift` | U2-26/28/29/30 | 3 P1 fixed `c81349e` | todo | not yet |
+| #405 `claude/u2-pos` | U2-11/12/13/18/25/32/34/35 | 2 P1 fixed `5cb6c8e` | todo | not yet |
+| #406 `claude/u2-purchases` | U2-1/2/3/4/5/9/16/22 | 4 P1 fixed `37cf03f` | todo | not yet |
+| (PR next) `claude/u2-misc` | U2-8/10/15 | running | todo | not yet |
+Not started / blocked, with the reason:
+- U2-27 silent printing, U2-23/U2-24 receipt: `app/printing/` (a session may not merge it, OWNER_RULES §10).
+- U2-31 two drawers: needs a migration (one open shift per branch today).
+- U2-6 print time: needs a column.
+- U2-14 rounding, U2-33 below cost refused: change agreed money rules.
+- U2-17, U2-19, U2-20, U2-21: not started.
+- U2-7: already covered by update 1 (`tests/test_help_every_screen.py`).
+- U2-10: the two freezes (purchase-line Enter, customer → «توصيل للمنزل») are not reproduced in the cloud. The slow-request log now records them on the PC.
+Git note: commits work only with short one-line messages (the auto-mode check refused long multi-line messages and `--amend`). Push one branch per command.
+Next: full suites for #403–#406 and misc, Codex on each, fix P0/P1, merge into develop in order #402 → #403 → #405 → #404 → #406 → misc (all touch app.js/app.py/i18n-en.js: after each merge, merge develop into the next branch and re-run), then one release PR develop → main for the owner.
 
 ## 21/11 Cairo — update 1 (launch-day fixes, through the «تحديث» button) (READ THIS FIRST)
 State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and installed, E-Stock moved, the pharmacy is LIVE since 18:04. Owner 19:14 «توكل على الله ونفذ» + 19:39 additions (8b, 10). Branch `claude/update-1`, one PR into develop, then a release PR into main (the owner merges; he stops selling for the 1-2 minutes of the update).
