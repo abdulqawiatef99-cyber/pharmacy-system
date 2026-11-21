@@ -3135,7 +3135,7 @@ const prChip = {
   top: (r) => r.top_rank !== null, expiry: (r) => !!r.near_expiry, asked: (r) => r.asked,
 };
 const prPct = (bp) => (bp === null || bp === undefined ? "—" : `${(bp / 100).toFixed(2)}%`);
-const prSup = (r) => (r.best || r.last || {});
+const prSup = (r) => (r.best || (r.last && r.last.active ? r.last : null) || {});   // never a stopped supplier
 // a whole number of boxes, the whole text (parseInt read "1.9" and "1e2" as 1, Codex P1 on #402)
 const prPacks = (v) => { const t = String(v ?? "").trim(); return /^[0-9]{1,6}$/.test(t) && +t >= 1 ? +t : null; };
 const PR_ORDER = {                         // the order being built, kept on this PC until it is exported or cleared

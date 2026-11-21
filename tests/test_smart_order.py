@@ -243,7 +243,7 @@ class TestCodexRound1(SmartCase):
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
         r = {x["item_id"]: x for x in so.smart_order(self.db, staff, today=TODAY)["rows"]}[self.fast]
         self.assertIsNone(r["best"])
-        self.assertEqual(set(r["last"]), {"supplier_id", "supplier", "date"})
+        self.assertEqual(set(r["last"]), {"supplier_id", "supplier", "date", "active"})
         self.assertNotIn("below_official", r["flags"])
         self.assertIsNone(r["official_bp"])
 
@@ -255,3 +255,19 @@ class TestCodexRound1(SmartCase):
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(so.order_xlsx(self.db, self.ctx, groups)))
         self.assertEqual(len(set(wb.sheetnames)), 3)
+
+
+class TestCodexRound2(SmartCase):
+    def test_unknown_latest_discount_hides_older_deals(self):
+        self._buy(self.fast, self.s1, public=5000, net=3000, qty=10, days_ago=60)    # old 40%
+        self._buy(self.fast, self.s1, public=None, net=4000, qty=10, days_ago=5)     # latest: discount unknown
+        self._buy(self.fast, self.s2, public=5000, net=4000, qty=10, days_ago=10)    # 20%
+        self.assertEqual(self.rows()[self.fast]["best"]["supplier_id"], self.s2)
+
+    def test_last_purchase_says_if_the_supplier_is_stopped(self):
+        from app.procurement import suppliers
+        self._buy(self.fast, self.s1, public=5000, net=4000, qty=10, days_ago=5)
+        suppliers.update(self.db, self.ctx, self.s1, {"is_active": False})
+        r = self.rows()[self.fast]
+        self.assertIsNone(r["best"])
+        self.assertFalse(r["last"]["active"])

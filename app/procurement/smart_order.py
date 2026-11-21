@@ -105,12 +105,15 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
         disc = real_discount_bp(r["public_price"], r["unit_net_price"], r["qty"], r["bonus_qty"], r["discount_bp"])
         sup = sups.get(r["supplier_id"])
         rec = {"supplier_id": r["supplier_id"], "supplier": sup["name"] if sup else None, "discount_bp": disc,
-               "shown_bp": r["discount_bp"], "qty": r["qty"], "bonus": r["bonus_qty"] or 0, "date": r["day"]}
+               "shown_bp": r["discount_bp"], "qty": r["qty"], "bonus": r["bonus_qty"] or 0, "date": r["day"],
+               "active": bool(sup and sup["is_active"])}
         last.setdefault(r["item_id"], rec)
         key = (r["item_id"], r["supplier_id"])
-        if key in per_sup or not r["supplier_id"] or disc is None:
+        if key in per_sup or not r["supplier_id"]:
             continue                     # each supplier's latest price only: an old deal is not today's offer
-        per_sup[key] = True
+        per_sup[key] = True              # marked before the discount check: an unknown latest discount still hides
+        if disc is None:                 # the older deals (Codex P2 on #402)
+            continue
         cur = best.get(r["item_id"])
         if sup and not sup["is_active"]:
             continue                     # a stopped supplier is not where the order goes
@@ -182,7 +185,7 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
         # others get the last supplier and date only (Codex P1 on #402)
         for row in rows:
             if row["last"]:
-                row["last"] = {k: row["last"][k] for k in ("supplier_id", "supplier", "date")}
+                row["last"] = {k: row["last"][k] for k in ("supplier_id", "supplier", "date", "active")}
             row["best"], row["official_bp"] = None, None
             row["flags"] = [f for f in row["flags"] if f != "below_official"]
     rows.sort(key=lambda r: (not (r["asked"] and r["on_hand"] <= 0),
