@@ -295,3 +295,12 @@ class TestCodexRound5(Base):
         with self.assertRaises(Forbidden):
             self.s.exchange(asst, mine, {self.line(mine): 1}, owners, refund_method="cash", reason="استبدال")
         self.assertIsNone(self.db.one("SELECT customer_id FROM sales WHERE id=?", (owners,))["customer_id"])
+
+    def test_a_voided_original_changes_nothing_on_the_draft(self):
+        cust = self.s.create_customer(self.ctx, name="عميل ملغي", credit_limit=0)
+        sid = self.sell(self.a, 1, customer=cust)
+        self.s.void(self.ctx, sid, "غلط في الصنف")
+        new = self.draft(self.b, 1)
+        with self.assertRaises(Conflict):
+            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, new, refund_method="cash", reason="استبدال")
+        self.assertIsNone(self.db.one("SELECT customer_id FROM sales WHERE id=?", (new,))["customer_id"])

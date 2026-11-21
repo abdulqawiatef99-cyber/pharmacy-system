@@ -196,8 +196,8 @@ def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
     grants.discard(perm)
     denies.discard(perm)
-    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=?",
-                                             (m["role_id"],))["permissions"]))
+    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                             (m["role_id"], ctx.org_id))["permissions"]))
     if mode == "grant" and not role_has:
         grants.add(perm)
     elif mode == "deny" and role_has:

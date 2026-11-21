@@ -1260,6 +1260,8 @@ class Sales:
         orig_row = self.db.one("SELECT * FROM sales WHERE id=? AND org_id=?", (sid, ctx.org_id))
         if not orig_row:
             raise NotFound("الفاتورة غير موجودة")
+        if orig_row["status"] != "completed":
+            raise Conflict("المرتجع يكون من فاتورة مكتملة فقط")
         if orig_row["created_by"] != ctx.user_id:
             ctx.require("sales.return_others")
         self._draft(ctx, new_sid)
