@@ -29,7 +29,7 @@ class TestImportBat(unittest.TestCase):
         L = code(BAT)
         asks = [l for l in L if "ask-password" in l]
         self.assertEqual(len(asks), 1)
-        self.assertIn('set "PHARM_OWNER_PASSWORD=%%p"', asks[0])
+        self.assertIn('set "PHARM_OWNER_PASSWORD_HEX=%%p"', asks[0])
         stop = L.index("call :stopprog")
         self.assertLess(L.index(asks[0]), stop)                         # asked before anything is stopped
         runs = [l for l in L if '"%MANAGE%" import-estock-db' in l and "--status" not in l and "--rehearsal" not in l]
@@ -39,9 +39,11 @@ class TestImportBat(unittest.TestCase):
         # cleared on every way out
         for label in (":fail", ":rehearsal"):
             block = L[L.index(label):]
-            self.assertIn('set "PHARM_OWNER_PASSWORD="', block[:12])
-        done = L.index('call :log PASS "ALL DONE - program started again"')
-        self.assertEqual(L[done - 1], 'set "PHARM_OWNER_PASSWORD="')
+            self.assertIn('set "PHARM_OWNER_PASSWORD_HEX="', block[:12])
+        # cleared before ANY start of the program (review of update 1: the server inherited it)
+        for i, l in enumerate(L):
+            if "launcher.py" in l and l.startswith(("start", "if ")):
+                self.assertIn('set "PHARM_OWNER_PASSWORD_HEX="', L[max(0, i - 6):i], l)
         self.assertNotIn("password twice", BAT)
 
     def test_a_stray_enter_asks_again(self):
@@ -66,11 +68,12 @@ class TestManagePrompts(unittest.TestCase):
         self.assertNotIn('getpass.getpass(f"كلمة مرور {a.username}: ")\n    tok = accounts.login(db, a.username, pw)["token"]\n'
                          '    for f in [a.dir', MANAGE)
         import manage
-        os.environ["PHARM_OWNER_PASSWORD"] = "x-secret"
-        try:
-            self.assertEqual(manage._owner_password("owner"), "x-secret")
-        finally:
-            del os.environ["PHARM_OWNER_PASSWORD"]
+        for pw in ("x-secret", ";starts-with-semicolon", "كلمة-سر", 'q"&^%!'):
+            os.environ["PHARM_OWNER_PASSWORD_HEX"] = pw.encode("utf-8").hex()
+            try:
+                self.assertEqual(manage._owner_password("owner"), pw)
+            finally:
+                del os.environ["PHARM_OWNER_PASSWORD_HEX"]
 
 
 class TestFreshStartSales(DBTestCase):

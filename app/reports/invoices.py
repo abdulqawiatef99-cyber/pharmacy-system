@@ -140,7 +140,9 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net
             if l["discount_source"] == "contract":
-                r["customer_discount"] += disc
+                share = min(disc, l["invoice_share"] or 0)          # the invoice discount: the person's, not the contract's
+                r["customer_discount"] += disc - share
+                r["item_discount"] += share
             else:
                 r["item_discount"] += disc
             returned = sum(a["returned_qty"] for a in allocs)

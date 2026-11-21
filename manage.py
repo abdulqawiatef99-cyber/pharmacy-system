@@ -325,11 +325,15 @@ def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
 
 
 def _owner_password(username: str) -> str:
-    """The password: from estock-db-import.bat's single prompt (PHARM_OWNER_PASSWORD, set for this run only,
-    never on the command line), else asked here. The prompt is English: an old cmd window shows Arabic as ???."""
-    pw = os.environ.get("PHARM_OWNER_PASSWORD")
-    if pw:
-        return pw
+    """The password: from estock-db-import.bat's single prompt (PHARM_OWNER_PASSWORD_HEX: UTF-8 as hex, so any
+    character survives cmd's for /f; set for this run only, never on the command line), else asked here. The prompt
+    is English: an old cmd window shows Arabic as ???."""
+    hx = os.environ.get("PHARM_OWNER_PASSWORD_HEX")
+    if hx:
+        try:
+            return bytes.fromhex(hx).decode("utf-8")
+        except ValueError:
+            sys.exit("FAIL: the password from estock-db-import.bat could not be read; run it again")
     return getpass.getpass(f"Password for {username} (typing is hidden): ")
 
 
@@ -339,7 +343,7 @@ def cmd_ask_password(a, s):
     for _ in range(5):
         pw = getpass.getpass(f"Password for {a.username} (typing is hidden): ")
         if pw:
-            print(pw)
+            print(pw.encode("utf-8").hex())      # hex: a leading ";" or an Arabic letter survive cmd's for /f
             return
         print("Nothing typed; type the password and press Enter.", file=sys.stderr)
     sys.exit(1)

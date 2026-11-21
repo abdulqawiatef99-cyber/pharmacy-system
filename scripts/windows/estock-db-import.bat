@@ -87,12 +87,12 @@ set "PWARG="
 REM automated check on synthetic data only (CI): never set on the pharmacy PC, where the password is asked below
 if defined PHARM_IMPORT_PASSWORD set "PWARG=--password "%PHARM_IMPORT_PASSWORD%""
 REM update 1: the password is asked ONCE, here, before anything runs; the prompt goes to this window itself
-REM (Python's hidden prompt), and the dry run and the move read it from PHARM_OWNER_PASSWORD, never from the
+REM (Python's hidden prompt), and the dry run and the move read it from PHARM_OWNER_PASSWORD_HEX (hex: any character survives for /f), never from the
 REM command line. Cleared on every way out.
-set "PHARM_OWNER_PASSWORD="
+set "PHARM_OWNER_PASSWORD_HEX="
 if defined PHARM_IMPORT_PASSWORD goto havepw
-for /f "usebackq delims=" %%p in (`""%PY%" -X utf8 "%MANAGE%" ask-password --username "%OWNER%""`) do set "PHARM_OWNER_PASSWORD=%%p"
-if not defined PHARM_OWNER_PASSWORD (set "MSG=no password given" & goto fail)
+for /f "usebackq delims=" %%p in (`""%PY%" -X utf8 "%MANAGE%" ask-password --username "%OWNER%""`) do set "PHARM_OWNER_PASSWORD_HEX=%%p"
+if not defined PHARM_OWNER_PASSWORD_HEX (set "MSG=no password given" & goto fail)
 :havepw
 
 set "STOPPED=1"
@@ -145,11 +145,12 @@ call :log PASS "move applied after its own verified backup (reports %REP%)"
 if errorlevel 1 (set "MSG=stock check after the move found problems (see the log)" & goto fail)
 call :log PASS "stock check after the move: OK"
 set "PHARM_DATA_DIR="
+REM the password never reaches the program started again (review of update 1)
+set "PHARM_OWNER_PASSWORD_HEX="
 start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0; $i -lt 90; $i++){ try { $h=Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:%PORT%/api/health'; if($h.ok -eq $true){ $ok=$true; break } } catch { }; Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Output 'the program did not answer on port %PORT% within 90 seconds'; exit 1 }; Write-Output ('program answers, version ' + $h.version); exit 0" <nul >> "%LOG%" 2>&1
 if errorlevel 1 (set "MSG=the move is done but the program did not answer after it (see the log)" & goto fail)
 call :log PASS "program started again and answers on port %PORT%"
-set "PHARM_OWNER_PASSWORD="
 call :log PASS "ALL DONE - program started again"
 echo.
 echo DONE.
@@ -169,7 +170,7 @@ findstr /b /c:"RECONCILIATION" "%DRY%"
 if exist "%REP%-rehearsal\openings-to-confirm.xlsx" copy /y "%REP%-rehearsal\openings-to-confirm.xlsx" "%OUT%\openings-to-confirm.xlsx" >nul
 call :owner "%REP%-rehearsal"
 if not "%RC%"=="0" (set "MSG=rehearsal failed, exit %RC%: nothing was moved (reports in %REP%-rehearsal)" & goto fail)
-set "PHARM_OWNER_PASSWORD="
+set "PHARM_OWNER_PASSWORD_HEX="
 call :log PASS "REHEARSAL ONLY: nothing was moved (reports %REP%-rehearsal). Tonight: launch-fresh-start.bat first, then this again"
 set "PHARM_DATA_DIR="
 if "%STOPPED%"=="1" if exist "%PYW%" start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"
@@ -184,7 +185,7 @@ call :log FAIL "%MSG%"
 REM the real move's own report when it ran (a failed apply must never show the trial's 100%), else the trial's
 if exist "%REP%\owner-report.txt" call :owner "%REP%"
 if not exist "%REP%\owner-report.txt" if not defined OWNERSHOWN call :owner "%REP%-dry"
-set "PHARM_OWNER_PASSWORD="
+set "PHARM_OWNER_PASSWORD_HEX="
 REM update 1: the program's own words (Arabic) in Notepad, which shows them; an old cmd window shows ???
 if defined SHOW if exist "%SHOW%" if not defined PHARM_E2E_ANSWER start "" notepad "%SHOW%"
 set "PHARM_DATA_DIR="

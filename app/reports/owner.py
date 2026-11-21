@@ -231,8 +231,9 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
     for l in db.all("SELECT l.id, l.discount_bp, l.discount_amount, l.invoice_share, l.discount_source, l.line_total,"
                     " coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END) discount_by,"
                     " coalesce(l.discount_approved_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
-                    " discount_approved_by,"
+                    " discount_approved_by, s.invoice_discount_by inv_by, ui.full_name inv_name,"
                     " ub.full_name by_name, ua.full_name approved_name FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
+                    " LEFT JOIN users ui ON ui.id=s.invoice_discount_by"
                     " LEFT JOIN users ub ON ub.id=coalesce(l.discount_by, CASE WHEN l.invoice_share>0 THEN s.invoice_discount_by END)"
                     " LEFT JOIN users ua ON ua.id=coalesce(l.discount_approved_by,"
                     " CASE WHEN l.invoice_share>0 THEN s.invoice_discount_approved_by END)"
@@ -242,13 +243,20 @@ def discounts_report(db: Database, ctx: Context, date_from: str, date_to: str) -
             "SELECT qty_base, unit_price, pack_price, pack_size FROM sale_allocations WHERE sale_line_id=?", (l["id"],))],
             l["discount_bp"], l["line_total"], line_fixed(l))
         disc = gross - (l["line_total"] if l["line_total"] is not None else gross)
-        key = "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?")
-        g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (l["by_name"] or "—"),
-                                    "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})
-        g["lines"] += 1
-        g["gross"] += gross
-        g["discount"] += disc
-        g["approved_lines"] += 1 if l["discount_approved_by"] else 0
+        parts = [(disc, "contract" if l["discount_source"] == "contract" else (l["discount_by"] or "?"), l["by_name"])]
+        if l["discount_source"] == "contract" and l["invoice_share"]:
+            # the invoice discount on a contract line is the person's, not the contract's (review of update 1)
+            share = min(disc, l["invoice_share"])
+            parts = [(disc - share, "contract", None), (share, l["inv_by"] or "?", l["inv_name"])]
+        for amount, key, name in parts:
+            if not amount and key == "contract" and len(parts) > 1:
+                continue
+            g = by_who.setdefault(key, {"key": key, "name": "خصم التعاقدات" if key == "contract" else (name or "—"),
+                                        "lines": 0, "gross": 0, "discount": 0, "approved_lines": 0})
+            g["lines"] += 1
+            g["gross"] += gross
+            g["discount"] += amount
+            g["approved_lines"] += 1 if l["discount_approved_by"] else 0
     for g in by_who.values():
         g["discount_bp"] = int(round(g["discount"] * 10000 / g["gross"])) if g["gross"] else 0
     days: dict = {}

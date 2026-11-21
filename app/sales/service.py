@@ -192,6 +192,13 @@ def discount_of(gross: int, bp: int) -> int:
     return int((Decimal(gross) * bp / 10000).quantize(Decimal("1"), ROUND_HALF_UP)) if bp else 0
 
 
+def own_discount(lines: list[dict]) -> int:
+    """The discount the pharmacy gives on this invoice (held to the person's limit): every line's own discount
+    except a contract's, plus the invoice discount's share on EVERY line, contract lines too (review of update 1)."""
+    return sum((l["discount"] if l.get("discount_source") != "contract" else 0)
+               + (l.get("invoice_share") or 0 if l.get("discount_source") == "contract" else 0) for l in lines)
+
+
 def invoice_discount_shares(s: dict, lines: list[dict]) -> int:
     """The invoice discount (EGP, or % of the lines after their own discounts) over the lines by their net,
     largest remainder; each line's `invoice_share`, `discount` and `net` updated. Returns the discount added."""
@@ -572,7 +579,9 @@ class Sales:
             n = self.db.execute("DELETE FROM sale_lines WHERE id=? AND sale_id=?", (line_id, sid)).rowcount
             if not n:
                 raise NotFound("السطر غير موجود")
-            self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+            # the same invoice discount is a bigger share of a smaller invoice: an approval given before no longer
+            # counts; completion asks again when it passes the limit (review of update 1)
+            self.db.execute("UPDATE sales SET version=version+1, invoice_discount_approved_by=NULL WHERE id=?", (sid,))
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ pricing preview
@@ -751,7 +760,7 @@ class Sales:
             if fixed and bp > ctx.discount_limit_bp and not l["discount_approved_by"]:
                 raise discount_denied(ctx, bp, label=f"خصم {egp(fixed)} ج على الصنف")
         if preview["invoice_discount_amount"] or preview["invoice_discount_bp"]:
-            own = sum(l["discount"] for l in preview["lines"] if l.get("discount_source") != "contract")
+            own = own_discount(preview["lines"])
             bp = equivalent_bp(own, preview["subtotal"])
             if bp > ctx.discount_limit_bp and not preview["invoice_discount_approved_by"]:
                 raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")
@@ -1086,7 +1095,7 @@ class Sales:
             if bp > ctx.max_discount_bp:
                 self.db.execute("UPDATE sale_lines SET discount_approved_by=? WHERE id=?", (ctx.approver_id, l["id"]))
         if draft.get("invoice_discount_amount") or draft.get("invoice_discount_bp"):
-            own = sum(l["discount"] for l in draft["lines"] if l.get("discount_source") != "contract")
+            own = own_discount(draft["lines"])
             bp = equivalent_bp(own, draft["subtotal"])
             if bp > ctx.discount_limit_bp:
                 raise discount_denied(ctx, bp, label=f"خصم {egp(own)} ج على الفاتورة")

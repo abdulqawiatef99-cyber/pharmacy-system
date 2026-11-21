@@ -232,3 +232,45 @@ class TestInvoiceDiscountApi(APICase):
         self.assertEqual(r.json()["total"], 1800)
         r = self.c.put(f"/api/sales/{sid}/invoice-discount", json={"amount": 10, "bp": 10}, headers=H)
         self.assertEqual(r.status_code, 422)
+
+
+class TestReviewFindings(FixedCase):
+    """Independent review of update 1 (each failed before the fix)."""
+
+    def contract_sale(self):
+        from app.sales import contracts as k
+        cid = k.save(self.db, self.ctx, {"name": "نقابة تجربة", "discount_local_bp": 1000, "discount_imported_bp": 1000})[0]["id"]
+        cust = self.s.create_customer(self.ctx, name="عميل تعاقد")
+        k.link_customer(self.db, self.ctx, cust, cid)
+        sid, _ = self.draft()
+        return sid, self.s.set_details(self.ctx, sid, {"customer_id": cust})
+
+    def test_p1_invoice_discount_on_contract_lines_counts_against_the_limit(self):
+        sid, d = self.contract_sale()
+        self.assertTrue(all(l["discount_source"] == "contract" for l in d["lines"]))
+        zero = dataclasses.replace(self.ctx, role_code="assistant", max_discount_bp=0)
+        with self.assertRaises(Forbidden):
+            self.s.set_invoice_discount(zero, sid, bp=500)
+
+    def test_p1_reports_put_the_invoice_share_under_the_person_not_the_contract(self):
+        from app.reports import owner
+        sid, d = self.contract_sale()
+        d = self.s.set_invoice_discount(self.ctx, sid, amount=300)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        day = TODAY.isoformat()
+        row = next(r for r in invoices.report(self.db, self.ctx, date_from=day, date_to=day)["rows"] if r["id"] == sid)
+        self.assertEqual(row["item_discount"], 300)
+        groups = {g["key"]: g["discount"] for g in owner.discounts_report(self.db, self.ctx, day, day)["by_who"]}
+        self.assertEqual(groups.get(self.ctx.user_id), 300)
+        self.assertEqual(sum(groups.values()), d["discount_total"])
+
+    def test_p2_removing_a_line_drops_an_invoice_discount_approval(self):
+        sid, d = self.draft()
+        approved = dataclasses.replace(self.cashier, approver_id=self.ctx.user_id, approver_discount_bp=10000)
+        self.s.set_invoice_discount(approved, sid, amount=600)              # 6.00 of 68.00: above 5%, approved
+        self.assertIsNotNone(self.db.one("SELECT invoice_discount_approved_by FROM sales WHERE id=?", (sid,))[0])
+        pan = next(l for l in d["lines"] if l["item_id"] == self.pan)
+        self.s.remove_line(self.cashier, sid, pan["id"])                    # now 6.00 of 30.00 = 20%
+        d = self.s.get(self.ctx, sid)
+        with self.assertRaises(Forbidden):
+            self.s.complete(self.cashier, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
