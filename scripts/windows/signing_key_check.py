@@ -2,13 +2,13 @@
 
 Looks at small .txt files (a flash drive by default: every drive letter from D: to Z:, three folders deep)
 and says, for each one that holds an Ed25519 private key, which committed public key it matches:
-update-1 (the signing key), update-2-spare (the spare that must stay offline) or none of ours.
+update-2 (the signing key since outcome (b), 21/11), update-3 (the next spare, once made) or none of ours.
 The key itself is never printed, copied or written anywhere; only file paths and public key names.
 
   signing-key-check.bat                -> every drive D: .. Z:
   signing-key-check.bat F:\\some\\folder  -> only there (a file can also be dropped on the .bat)
 
-Exit code: 0 = update-1 found, 1 = only the spare found, 2 = no key of ours found, 3 = could not run.
+Exit code: 0 = the signing key (update-2) found, 1 = only the spare found, 2 = no key of ours found, 3 = could not run.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 MAX_BYTES = 4096
 DEPTH = 3
-SIGNING, SPARE = "update-1.pub", "update-2-spare.pub"
+SIGNING, SPARE = "update-2.pub", "update-3.pub"     # owner 21/11 13:16, outcome (b)
 
 
 def default_keys_dir(here: Path) -> Path:

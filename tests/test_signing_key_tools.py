@@ -24,8 +24,8 @@ class Base(unittest.TestCase):
         self.keys.mkdir()
         self.p1, pub1 = update_sign.generate()
         self.p2, pub2 = update_sign.generate()
-        (self.keys / "update-1.pub").write_text(pub1 + "\n", encoding="ascii")
-        (self.keys / "update-2-spare.pub").write_text(pub2 + "\n", encoding="ascii")
+        (self.keys / "update-2.pub").write_text(pub1 + "\n", encoding="ascii")
+        (self.keys / "update-3.pub").write_text(pub2 + "\n", encoding="ascii")
         self.drive = self.tmp / "F"
         (self.drive / "old" / "deep").mkdir(parents=True)
 
@@ -38,7 +38,7 @@ class TestCheck(Base):
         (self.drive / "notes.txt").write_text("مش مفتاح\n", encoding="utf-8")
         (self.drive / "big.txt").write_bytes(b"x" * 10000)
         found = {Path(f).name: k for f, k in skc.scan([self.drive], skc.load_keys(self.keys))}
-        self.assertEqual(found, {"update-signing-PRIVATE.txt": "update-1.pub", "spare.txt": "update-2-spare.pub",
+        self.assertEqual(found, {"update-signing-PRIVATE.txt": "update-2.pub", "spare.txt": "update-3.pub",
                                  "other.txt": None})
 
     def test_output_never_contains_a_private_key_and_exit_code_says_the_outcome(self):
@@ -48,12 +48,12 @@ class TestCheck(Base):
                            encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)                   # spare only
         self.assertNotIn(self.p2, r.stdout + r.stderr)
-        self.assertIn("update-2-spare", r.stdout)
+        self.assertIn("update-3", r.stdout)
         (self.drive / "b.txt").write_text(self.p1, encoding="ascii")
         r = subprocess.run([sys.executable, "-I", "-X", "utf8", str(ROOT / "scripts" / "windows" / "signing_key_check.py"),
                             "--keys", str(self.keys), str(self.drive)], capture_output=True, text=True,
                            encoding="utf-8", timeout=60)
-        self.assertEqual(r.returncode, 0)                                         # update-1 found
+        self.assertEqual(r.returncode, 0)                                         # the signing key found
         self.assertNotIn(self.p1, r.stdout + r.stderr)
 
     def test_nothing_found(self):
@@ -105,7 +105,7 @@ class TestToolsFolder(unittest.TestCase):
             names = set(os.listdir(Path(tmp) / "tools"))
             self.assertLessEqual({"signing-key-check.bat", "signing_key_check.py", "new-signing-key.bat",
                                   "new_signing_key.py"}, names, out)
-            self.assertLessEqual({"update-1.pub", "update-2-spare.pub"}, set(os.listdir(Path(tmp) / "tools" / "keys")))
+            self.assertEqual({"update-2.pub"}, set(os.listdir(Path(tmp) / "tools" / "keys")))     # outcome (b), 21/11
 
 
 if __name__ == "__main__":

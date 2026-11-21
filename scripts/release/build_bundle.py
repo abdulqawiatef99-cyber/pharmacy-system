@@ -88,7 +88,7 @@ KEY_NOTE = "release_keys/{} (public file name; the secret is never printed)"
 
 def signing_key_file(raw: bytes, sig: str) -> str:
     """Which committed public key verifies this signature: the owner checks the secret is the key meant for
-    signing (update-1), not the spare kept offline for rotation."""
+    signing (update-2 since outcome (b), 21/11), not a spare kept offline for rotation."""
     for p in sorted((REPO / update_sign.KEY_DIR).glob("*.pub")):
         try:
             update_sign.verify(raw, sig, [update_sign.key_of(p)])
