@@ -3051,4 +3051,9 @@ window.I18N_EN = {
 "، تشغيلة 0": ", batch 0",
 "، من غير تشغيلة": ", no batch",
 "دمج السطرين في سطر واحد؟ الكميات والبونص بيتجمعوا.": "Merge the two lines into one? Quantities and bonus are added.",
+"+ صلاحية": "+ expiry",
+"جزء من الكمية بصلاحية تانية": "Part of the quantity has another expiry",
+"كام علبة من السطر ده صلاحيتها مختلفة؟": "How many boxes of this line have another expiry?",
+"الصلاحية التانية (مثال 1128 أو 11/2028):": "The other expiry (e.g. 1128 or 11/2028):",
+"التشغيلة (اختياري):": "Batch (optional):",
 };

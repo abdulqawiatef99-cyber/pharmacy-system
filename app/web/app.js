@@ -1347,7 +1347,8 @@ function renderLine(l) {
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
     <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_date ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : "", { type: "text" })}</td>
-    <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>` : ""}</td>
+    <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>
+      ${l.item_id && l.qty > 1 ? `<button class="btn small secondary" data-split="${esc(l.id)}" title="جزء من الكمية بصلاحية تانية">+ صلاحية</button>` : ""}` : ""}</td>
   </tr>`;
 }
 
@@ -1434,6 +1435,14 @@ app.addEventListener("click", async (e) => {
     await save(`${base}/lines/${t.dataset.confirm}`, { changes: { confirm_fields: [t.dataset.cfield] } });
   } else if (t.dataset.del) {
     if (confirm("حذف السطر؟")) await save(`${base}/lines/${t.dataset.del}`, {}, "DELETE");
+  } else if (t.dataset.split) {
+    // U2-9: part of this line has another expiry -> its own lot; the quantity of the line is the sum
+    const q = typedWhole(prompt("كام علبة من السطر ده صلاحيتها مختلفة؟") || "");
+    if (!(Number(q) > 0)) return;
+    const exp = prompt("الصلاحية التانية (مثال 1128 أو 11/2028):");
+    if (!exp) return;
+    const batch = prompt("التشغيلة (اختياري):") || null;
+    await save(`${base}/lines/${t.dataset.split}/split`, { qty: Number(q), expiry_date: normExpiry(exp), batch_no: batch }, "POST");
   } else if (t.dataset.merge) {
     if (confirm("دمج السطرين في سطر واحد؟ الكميات والبونص بيتجمعوا.")) await save(`${base}/lines/${t.dataset.merge}/merge`, { other_line: t.dataset.mergewith }, "POST");
   } else if (t.dataset.ack) {

@@ -136,3 +136,18 @@ class TestDuplicates(PurchaseBase):
         i = self.issue(d, "duplicate_line_no_batch")
         self.assertIn("من غير تشغيلة", i["message"])
         self.assertFalse(i["details"]["mergeable"])
+
+
+class TestSplitExpiry(PurchaseBase):
+    def test_part_of_a_line_gets_its_own_lot(self):
+        exp = (date.today() + timedelta(days=700)).isoformat()
+        inv_id = self.draft(qty=10, expiry=exp)
+        line = self.p.get(self.ctx, inv_id)["lines"][0]
+        d = self.p.split_line(self.ctx, inv_id, line["id"], 4, "1129", "B2", None)
+        got = sorted((l["qty"], l["expiry_date"], l["batch_no"]) for l in d["lines"])
+        self.assertEqual(got, [(4, "2029-11-30", "B2"), (6, exp, "B1")])
+        self.assertEqual(sum(l["qty"] for l in d["lines"]), 10)
+        from app.core.errors import ValidationFailed
+        for bad in ((10, "1129"), (0, "1129"), (2, "1329"), (2, exp)):
+            with self.assertRaises(ValidationFailed):
+                self.p.split_line(self.ctx, inv_id, line["id"], bad[0], bad[1], None, None)

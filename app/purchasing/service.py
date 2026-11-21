@@ -606,6 +606,50 @@ class Purchasing:
                          before={"kept": dict(a), "merged": dict(b)})
         return self.get(ctx, inv_id)
 
+    def split_line(self, ctx: Context, inv_id: str, line_id: str, qty: int, expiry, batch_no: str | None,
+                   version: int | None) -> dict:
+        """U2-9 «+ صلاحية»: part of a line's paid quantity has another expiry. It becomes its own line (its own lot)
+        with the same item and prices; the original keeps the rest. The bonus stays on the original line."""
+        ctx.require("purchases.edit")
+        if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
+            raise ValidationFailed("الكمية لازم رقم صحيح أكبر من صفر")
+        iso, prec = parse_expiry(expiry)
+        if not iso:
+            raise ValidationFailed("الصلاحية مش مفهومة (مثال: 1128 أو 11/2028)")
+        with self.db.transaction():
+            inv = self._draft_for_update(ctx, inv_id, version)
+            a = self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=? AND org_id=?",
+                            (line_id, inv_id, ctx.org_id))
+            if not a:
+                raise NotFound("السطر غير موجود")
+            if not a["qty"] or qty >= a["qty"]:
+                raise ValidationFailed(f"الكمية لازم أقل من كمية السطر ({a['qty'] or 0})", code="split_too_big")
+            if iso == a["expiry_date"]:
+                raise ValidationFailed("دي نفس صلاحية السطر")
+            share = lambda v: None if v is None else v * qty // a["qty"]       # noqa: E731  exact piasters below
+            moved_total, moved_tax = share(a["line_total"]), share(a["tax_amount"])
+            if a["line_total"] is not None and a["line_total"] * qty % a["qty"]:
+                moved_total = None                     # not a whole piaster: the new line computes its own total
+            if a["tax_amount"] is not None and a["tax_amount"] * qty % a["qty"]:
+                moved_tax = None
+            n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines WHERE invoice_id=?",
+                            (inv_id,))["n"]
+            row = {**dict(a), "id": new_id(), "line_no": n, "qty": qty, "bonus_qty": 0, "line_total": moved_total,
+                   "tax_amount": moved_tax, "expiry_date": iso, "expiry_precision": prec,
+                   "batch_no": (str(batch_no).strip() or None) if batch_no else None,
+                   "field_sources": json.loads(a["field_sources"] or "{}"), "field_confidence": json.loads(a["field_confidence"] or "{}")}
+            row["field_sources"].update(expiry_date="user", qty="user")
+            self._insert_line(row)
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=?",
+                            (a["qty"] - qty,
+                             None if a["line_total"] is None or moved_total is None else a["line_total"] - moved_total,
+                             None if a["tax_amount"] is None or moved_tax is None else a["tax_amount"] - moved_tax, line_id))
+            self._refresh_totals(ctx, inv_id)
+            self._bump(inv_id)
+            audit.record(self.db, ctx, "purchase.line_split", "purchase_invoice", inv_id,
+                         after={"line_id": line_id, "new_line": row["id"], "qty": qty, "expiry": iso})
+        return self.get(ctx, inv_id)
+
     def create_item_from_line(self, ctx: Context, inv_id: str, line_id: str, item: dict,
                               version: int | None, force: bool = False) -> dict:
         """New product the pharmacy never stocked: create it and link the line."""

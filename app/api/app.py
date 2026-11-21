@@ -1705,6 +1705,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                    b.get("version")))
 
     @handler
+    async def line_split(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        try:
+            qty = whole_number(b.get("qty"))
+        except (TypeError, ValueError):
+            raise ValidationFailed("الكمية لازم رقم صحيح")
+        return J(purch.split_line(ctx, req.path_params["id"], req.path_params["line_id"], qty, b.get("expiry_date"),
+                                  b.get("batch_no"), b.get("version")))
+
+    @handler
     async def line_merge(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2961,6 +2972,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}", line_delete, methods=["DELETE"]),
         Route("/api/purchases/{id}/lines/{line_id}/new-item", line_new_item, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}/merge", line_merge, methods=["POST"]),
+        Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
