@@ -1262,12 +1262,11 @@ class Sales:
             raise NotFound("الفاتورة غير موجودة")
         if orig_row["status"] != "completed":
             raise Conflict("المرتجع يكون من فاتورة مكتملة فقط")
-        nb = self.db.one("SELECT branch_id FROM sales WHERE id=? AND org_id=?", (new_sid, ctx.org_id))
-        if nb and nb["branch_id"] != orig_row["branch_id"]:     # one drawer nets the offset (Codex P1 round 6)
-            raise ValidationFailed("الاستبدال بيكون في نفس الفرع اللي اتباعت منه الفاتورة", code="exchange_branch")
         if orig_row["created_by"] != ctx.user_id:
             ctx.require("sales.return_others")
-        self._draft(ctx, new_sid)
+        nb = self._draft(ctx, new_sid)
+        if nb["branch_id"] != orig_row["branch_id"]:              # one drawer nets the offset (Codex P1 round 6)
+            raise ValidationFailed("الاستبدال بيكون في نفس الفرع اللي اتباعت منه الفاتورة", code="exchange_branch")
         pre = self.db.one("SELECT s.customer_id, o.customer_id orig FROM sales s, sales o WHERE s.id=? AND s.org_id=?"
                           " AND s.status='draft' AND o.id=? AND o.org_id=?", (new_sid, ctx.org_id, sid, ctx.org_id))
         if pre and pre["orig"] and not pre["customer_id"]:

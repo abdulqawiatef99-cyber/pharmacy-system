@@ -206,8 +206,8 @@ def _invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str | Non
 def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
     """Each line of an approved invoice with what is still returnable of it. Two rules from the Codex reviews of
     part 3 (#396, #397): the line's amount is what approval charged for it, the invoice-level discount and tax
-    spread over the lines by amount (half up, the last line takes the rest, so the lines add up to the
-    supplier's charge); and a return made earlier by item and lot that took this receipt's units counts as
+    spread over the lines by amount (`_spread`: floor shares, the leftover to the largest remainders, so the
+    lines add up to the supplier's charge); and a return made earlier by item and lot that took this receipt's units counts as
     returned from this line (paid units first), so the same units are never returned twice."""
     from ..purchasing.service import lot_receipts
     head = db.one("SELECT extra_discount, extra_tax FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id))
