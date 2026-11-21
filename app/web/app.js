@@ -3268,7 +3268,8 @@ async function viewProcurement() {
     st.rows = out.rows;
     st.sups = Object.fromEntries(out.suppliers.map((s) => [s.id, s.name]));
     $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
-    $("#prSupSel").value = st.sup && st.sups[st.sup] ? st.sup : "";
+    if (st.sup && !st.sups[st.sup]) st.sup = "";        // the supplier left the results: no stale filter (Codex P2 on #402)
+    $("#prSupSel").value = st.sup;
     const c = out.counts;
     $("#prCounts").textContent = `سريع ${c.fast} · متوسط ${c.medium} · بطيء ${c.slow} · راكد ${c.dead} · مخفي من العرض الأساسي ${c.hidden}`;
     draw();
