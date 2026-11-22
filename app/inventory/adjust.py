@@ -134,6 +134,7 @@ def loss_report(db: Database, ctx: Context, date_from: str, date_to: str) -> dic
         " LEFT JOIN users u ON u.id=m.created_by LEFT JOIN supplier_returns r ON r.id=m.ref_id AND m.movement_type='supplier_return'"
         " LEFT JOIN suppliers sp ON sp.id=r.supplier_id"
         " WHERE m.org_id=? AND m.movement_type IN ('adjustment','damage','supplier_return') AND m.created_at>=? AND m.created_at<?"
+        " AND coalesce(m.ref_type,'')<>'pack_fix'"          # a pack-size correction keeps the value (U3-1 review P1)
         " ORDER BY m.created_at", (ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1]))
     out, by, exact = [], {}, {}
     for r in rows:
