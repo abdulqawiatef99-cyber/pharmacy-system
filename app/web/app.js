@@ -2970,10 +2970,13 @@ async function viewSalesAdvanced() {
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
     $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
     // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
-    if (!types.size && !$("#iUser").value) {
+    // E-Stock counts whole days: part of a day would add sales outside the window; a capped program total (first
+    // 3000 invoices) is never added up (U4 review)
+    const fullDays = $("#iF").value.slice(11) === "00:00" && $("#iT").value.slice(11) === "23:59";
+    if (!types.size && !$("#iUser").value && fullDays) {
       estockSalesBelow($("#iBox"), $("#iF").value.slice(0, 10), $("#iT").value.slice(0, 10), $("#iQ").value.trim(),
-        item ? null : T.net, item ? item.id : "").catch(() => {});
-    }
+        item || R.truncated ? null : T.total, item ? item.id : "").catch(() => {});
+    } else document.querySelector("#esBelow")?.remove();
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -5254,7 +5257,10 @@ const esP = (v) => {
 };
 
 // the sales list: the same period's E-Stock invoices right under the program's own, with both totals and the sum
+let ES_SEQ = 0;
 async function estockSalesBelow(box, f, t, q, ours, itemId) {
+  const seq = ++ES_SEQ;                                // a late answer never lands under a newer search (U4 review)
+  document.querySelector("#esBelow")?.remove();
   if (!(await estockOn()) || !ME.permissions.includes("sales.totals") || !box.isConnected) return;
   const p = new URLSearchParams({ kind: "sale", from: f, to: t, limit: "500" });
   if (/^\d+$/.test(q || "")) p.set("q", q);
@@ -5262,14 +5268,17 @@ async function estockSalesBelow(box, f, t, q, ours, itemId) {
   if (itemId) p.set("item", itemId);
   const [rows, per] = await Promise.all([api(`/api/estock/invoices?${p}`).then((r) => r.invoices),
     q || itemId ? Promise.resolve(null) : api(`/api/estock/period?${new URLSearchParams({ from: f, to: t, by: "month" })}`)]);
-  if (!rows.length || !box.isConnected) return;
-  const T = per ? per.total : null, sales = T ? esP(T.sales || "0") : null, ret = T ? esP(T.returns || "0") : null;
-  const net = sales !== null && ret !== null ? sales - ret : null;
+  if (!rows.length || !box.isConnected || seq !== ES_SEQ) return;
+  // both sides on the same basis: sales of the period before returns (the program's returns follow their invoice,
+  // E-Stock's follow their own date, so the two nets would not add up)
+  const T = per ? per.total : null, sales = T ? esP(T.sales || "0") : null;
+  const bad = T ? (T.sales_unreadable || 0) : 0;
   const sec = document.createElement("div");
   sec.id = "esBelow"; sec.className = "mt";
   sec.innerHTML = `<div class="row between"><h2>فواتير إي ستوك في نفس الفترة</h2>${ES_BADGE}</div>
-    ${T ? `<p><b>${T.sales_count || 0} فاتورة — ${esMoney(T.sales || "0.00")} ج</b>${T.returns ? ` · مرتجع ${esMoney(T.returns)} · الصافي ${money(net)} ج` : ""}
-      ${ours !== null && net !== null ? ` · <b>البرنامج + إي ستوك: ${money(ours + net)} ج</b>` : ""}</p>` : ""}
+    ${T ? `<p><b>${T.sales_count || 0} فاتورة — ${esMoney(T.sales || "0.00")} ج</b>${T.returns ? ` · <span>مرتجعات بتاريخها في الفترة</span> ${esMoney(T.returns)}` : ""}
+      ${ours !== null && sales !== null && !bad ? ` · <b>مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك: ${money(ours + sales)} ج</b>` : ""}</p>
+      ${bad ? `<p class="badge b-warn">⚠ ${bad} فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ</p>` : ""}` : ""}
     <p class="muted"><span>أرقام إي ستوك زي ما هي، للاطلاع: مش داخلة في الخزينة ولا الأرصدة ولا تقارير البرنامج.</span> ${rows.length >= 500 ? "<span>ظاهر أول 500 فاتورة بس.</span>" : ""}</p>
     <div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>نقدي</th><th>شبكة</th></tr></thead><tbody>
     ${rows.map((r) => `<tr class="clickable" data-go="sale/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.at ? String(r.at).slice(0, 16).replace("T", " ") : r.day)}</td>

@@ -432,7 +432,10 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
                             f' FROM "e_{head}" WHERE {" AND ".join(where)}', tuple(params)):
                 d = out.setdefault(r["p"], {"source": SOURCE, "period": r["p"]})
                 d[key + "_count"] = d.get(key + "_count", 0) + 1
-                d[key] = d.get(key, Decimal(0)) + (_dec(r["v"]) or 0)        # exact; rounded once below
+                v = _dec(r["v"])
+                if v is None:                       # shown as is: counted apart, never a silent zero (U4 review)
+                    d[key + "_unreadable"] = d.get(key + "_unreadable", 0) + 1
+                d[key] = d.get(key, Decimal(0)) + (v or 0)                    # exact; rounded once below
     rows = [out[k] for k in sorted(out)]
     for d in rows:
         for k in ("sales", "returns", "purchases"):

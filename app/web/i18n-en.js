@@ -1,6 +1,9 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"مرتجعات بتاريخها في الفترة": "Returns dated in the period",
+"مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك: 0 ج": "Period sales before returns, program + E-Stock: 0 EGP",
+"⚠ 0 فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ": "⚠ 0 E-Stock invoices have an unreadable total: counted in the number, not in the amount",
 "آخر 0 فاتورة من إي ستوك (للاطلاع، مش داخلة في أرصدة البرنامج)": "The last 0 invoices from E-Stock (for reference, not in the program's balances)",
 "آخر 0 حركة من إي ستوك (للاطلاع، مش داخلة في رصيد البرنامج)": "The last 0 movements from E-Stock (for reference, not in the program's stock)",
 "البرنامج + إي ستوك: 0 ج": "Program + E-Stock: 0 EGP",

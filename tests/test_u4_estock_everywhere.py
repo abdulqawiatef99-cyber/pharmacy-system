@@ -138,9 +138,48 @@ class TestInlineScreens(EverywhereBase):
         self.assertGreater(out["item"], 0)
         self.assertTrue(out["below"] and all(out["below"]))
         self.assertIn("البرنامج + إي ستوك", out["belowText"])
+        # the program sold nothing in the window: the combined figure is E-Stock's sales before returns, exactly
+        es = self.get("/api/estock/period?from=2026-11-01&to=2026-11-20&by=month")["total"]["sales"]
+        self.assertIn(f"البرنامج + إي ستوك: {es} ج", out["belowText"])
         self.assertEqual(out["errs"], [])
         after = self.db_tables()
         # the screens wrote nothing; the browser's own login is the one audit entry allowed
         self.assertEqual({t for t in after if after[t] != before.get(t)} - {"audit_log"}, set())
         new = [r["action"] for r in self.db.all("SELECT action FROM audit_log ORDER BY rowid LIMIT -1 OFFSET ?", (n_audit,))]
         self.assertEqual(set(new), {"auth.login"})
+
+
+class TestReviewFixes(EverywhereBase):
+    def test_unreadable_totals_are_counted_not_turned_into_zero(self):
+        import sqlite3
+        from contextlib import closing
+        from app.dataimport import estock_history as eh
+        p = eh.archive_path(self.db)
+        with closing(sqlite3.connect(p)) as con:
+            col = [r[1] for r in con.execute('PRAGMA table_info("e_Sales_header")') if r[1].lower() == "total_bill_net"][0]
+            con.execute(f'UPDATE "e_Sales_header" SET "{col}"=\'garbage\' WHERE rowid=(SELECT min(rowid) FROM "e_Sales_header")')
+            con.commit()
+        out = self.get(f"/api/estock/period?{RANGE}&by=month")
+        self.assertEqual(out["total"]["sales_unreadable"], 1)
+
+    def test_no_purchases_without_purchases_read(self):
+        from app.core import people
+        from tests.test_estock_history_api import PW
+        uid = people.add_user(self.db, self.ctx, username="mgr2", full_name="M", password=PW, role_code="manager")
+        people.set_exception(self.db, self.ctx, uid if isinstance(uid, str) else uid["id"], "purchases.read", "deny")
+        self.login_as("mgr2", PW)
+        out = self.get(f"/api/estock/period?{RANGE}&by=month")
+        self.assertNotIn("purchases", out["total"])
+        self.assertTrue(all("purchases" not in r for r in out["rows"]))
+
+    def test_the_screen_guards(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        i = js.index("async function estockSalesBelow")
+        body = js[i:js.index("\n}\n", i)]
+        self.assertIn("ES_SEQ", body)                         # a late answer never lands under a newer search
+        self.assertIn("unreadable", body)
+        at = js.index("estockSalesBelow($(\"#iBox\")")
+        call = js[at - 600:at + 300]
+        self.assertIn("R.truncated", call)                    # a capped program total is never added up
+        self.assertIn("00:00", call)                          # part of a day: E-Stock counts whole days only

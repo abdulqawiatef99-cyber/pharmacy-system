@@ -1192,6 +1192,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 if k in r:
                     tot[k] = str(Decimal(tot.get(k, "0")) + Decimal(r[k]))
                     tot[k + "_count"] = tot.get(k + "_count", 0) + r[k + "_count"]
+                    tot[k + "_unreadable"] = tot.get(k + "_unreadable", 0) + r.get(k + "_unreadable", 0)
         return J({"source": eh.SOURCE, "rows": rows, "total": tot})
 
     @handler
