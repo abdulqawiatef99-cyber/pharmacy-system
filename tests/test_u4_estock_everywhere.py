@@ -183,3 +183,26 @@ class TestReviewFixes(EverywhereBase):
         call = js[at - 600:at + 300]
         self.assertIn("R.truncated", call)                    # a capped program total is never added up
         self.assertIn("00:00", call)                          # part of a day: E-Stock counts whole days only
+
+
+class TestCodexFixes(EverywhereBase):
+    def test_period_total_is_rounded_once_over_exact_values(self):
+        from tests.test_estock_db_import import Base, base_tables
+        self.db.close()
+        Base.setUp(self)
+        t = base_tables()
+        t["Sales_header"] = [{"sales_id": "1", "customer_id": "1", "total_bill_net": "0.004", "insert_date": "2026-10-01T10:00:00"},
+                             {"sales_id": "2", "customer_id": "1", "total_bill_net": "0.004", "insert_date": "2026-11-02T10:00:00"}]
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        from app.dataimport import estock_history as eh
+        rows, tot = eh.period_with_total(self.db, self.ctx, "2026-10-01", "2026-11-30", by="month")
+        self.assertEqual([r["sales"] for r in rows], ["0.00", "0.00"])
+        self.assertEqual(tot["sales"], "0.01")                   # 0.008 rounded once, not 0.00 + 0.00
+
+    def test_screen_invalidates_and_print_selected_leaves_history_out(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        at = js.index("estockSalesBelow($(\"#iBox\")")
+        self.assertIn("ES_SEQ++", js[at:at + 500])              # hiding the section drops a pending answer too
+        p = js.index("const printInv")
+        self.assertIn('copy.querySelector("#esBelow")?.remove()', js[p:p + 1500])

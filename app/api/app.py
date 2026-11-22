@@ -1179,21 +1179,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def estock_period(req):
-        """E-Stock's own totals per day or month (read-only, tagged), with the period's total: the history side of a
-        report that crosses the move. Never added into the program's own figures."""
-        from decimal import Decimal
+        """E-Stock's own totals per day or month (read-only, tagged), with the period's total added from the exact
+        values and rounded once: the history side of a report that crosses the move. Never added into the
+        program's own figures."""
         from ..dataimport import estock_history as eh
         qp = req.query_params
-        rows = await off_loop(eh.period_report, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
-                              by=qp.get("by") or "month")
-        tot: dict = {"source": eh.SOURCE}
-        for r in rows:
-            for k in ("sales", "returns", "purchases"):
-                if k in r:
-                    tot[k] = str(Decimal(tot.get(k, "0")) + Decimal(r[k]))
-                    tot[k + "_count"] = tot.get(k + "_count", 0) + r[k + "_count"]
-                    tot[k + "_unreadable"] = tot.get(k + "_unreadable", 0) + r.get(k + "_unreadable", 0)
-        return J({"source": eh.SOURCE, "rows": rows, "total": tot})
+        rows, tot = await off_loop(eh.period_with_total, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
+                                   by=qp.get("by") or "month")
+        return J({"source": eh.SOURCE, "rows": rows, "total": tot or {"source": eh.SOURCE}})
 
     @handler
     async def estock_invoice(req):

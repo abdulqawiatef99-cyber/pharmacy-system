@@ -2976,7 +2976,7 @@ async function viewSalesAdvanced() {
     if (!types.size && !$("#iUser").value && fullDays) {
       estockSalesBelow($("#iBox"), $("#iF").value.slice(0, 10), $("#iT").value.slice(0, 10), $("#iQ").value.trim(),
         item || R.truncated ? null : T.total, item ? item.id : "").catch(() => {});
-    } else document.querySelector("#esBelow")?.remove();
+    } else { ES_SEQ++; document.querySelector("#esBelow")?.remove(); }   // a pending answer is dropped too (Codex P2)
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -3021,7 +3021,7 @@ async function viewSalesAdvanced() {
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
-      if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); }
+      if (mode === "sel") { const keep = new Set([...sel].map(String)); copy.querySelectorAll("tbody tr[data-i]").forEach((tr) => { if (!keep.has(tr.dataset.i)) tr.remove(); }); copy.querySelector("tfoot")?.remove(); copy.querySelector(".totals")?.remove(); copy.querySelector("#esBelow")?.remove(); }
       box.append(copy);
     }
     printPreview(box, mode === "full" ? "فواتير البيع بالأصناف" : mode === "sel" ? "الفواتير المحددة" : "فواتير البيع", subOut());
