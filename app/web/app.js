@@ -2924,7 +2924,9 @@ async function viewSalesAdvanced() {
     if (!f || !t) return toast("اختر الفترة", true);
     $("#iBox").innerHTML = `<p class="muted">جارٍ التحميل…</p>`; $("#iDetail").innerHTML = ""; sel.clear(); open = null;
     const qs = new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
+    const asked = { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
     try { R = await api(`/api/reports/invoices?${qs}`); } catch (er) { $("#iBox").innerHTML = ""; return toast(er.message, true); }
+    R.asked = asked;               // the E-Stock side follows the request that was answered, not the live controls (Codex P2)
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
     draw();
   };
@@ -2972,10 +2974,10 @@ async function viewSalesAdvanced() {
     // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
     // E-Stock counts whole days: part of a day would add sales outside the window; a capped program total (first
     // 3000 invoices) is never added up (U4 review)
-    const fullDays = $("#iF").value.slice(11) === "00:00" && $("#iT").value.slice(11) === "23:59";
-    if (!types.size && !$("#iUser").value && fullDays) {
-      estockSalesBelow($("#iBox"), $("#iF").value.slice(0, 10), $("#iT").value.slice(0, 10), $("#iQ").value.trim(),
-        item || R.truncated ? null : T.total, item ? item.id : "").catch(() => {});
+    const A = R.asked, fullDays = A.f.slice(11) === "00:00" && A.t.slice(11) === "23:59";
+    if (!A.types && !A.user && fullDays) {
+      estockSalesBelow($("#iBox"), A.f.slice(0, 10), A.t.slice(0, 10), A.q,
+        A.item || R.truncated ? null : T.total, A.item).catch(() => {});
     } else { ES_SEQ++; document.querySelector("#esBelow")?.remove(); }   // a pending answer is dropped too (Codex P2)
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {

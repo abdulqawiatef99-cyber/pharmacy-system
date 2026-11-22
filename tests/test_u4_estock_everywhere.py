@@ -206,3 +206,13 @@ class TestCodexFixes(EverywhereBase):
         self.assertIn("ES_SEQ++", js[at:at + 500])              # hiding the section drops a pending answer too
         p = js.index("const printInv")
         self.assertIn('copy.querySelector("#esBelow")?.remove()', js[p:p + 1500])
+
+
+class TestCodexFixes2(EverywhereBase):
+    def test_e_stock_side_follows_the_answered_request(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        at = js.index("estockSalesBelow($(\"#iBox\")")
+        near = js[at - 400:at + 200]
+        self.assertIn("R.asked", near)
+        self.assertNotIn('$("#iF").value', near)
