@@ -756,6 +756,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(ui_settings.save(db, ctx, await body(req)))
         return J(ui_settings.get(db, ctx.org_id))
 
+    @handler
+    async def dispensing_notes_api(req):
+        from ..safety import dispensing
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(dispensing.save(db, ctx, (await body(req)).get("notes")))
+        ctx.require("items.read")
+        return J(dispensing.get(db, ctx.org_id))
+
     # ------------------------------------------------------------- people: PIN, approval, users
     def _local_only(req):
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
@@ -2260,7 +2269,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                    confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                    confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
                                     # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
                                     change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
@@ -2306,7 +2315,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
@@ -3041,6 +3050,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
         Route("/api/attachments/{id}", attachment_get),
         Route("/api/attachments/{id}/review", attachment_review, methods=["POST"]),

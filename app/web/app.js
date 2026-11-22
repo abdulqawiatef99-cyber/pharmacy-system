@@ -418,6 +418,7 @@ const routes = [
   [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
   [/^#\/day-review$/, viewDayReview],
+  [/^#\/dispensing-notes$/, viewDispensingNotes],
   [/^#\/item-health$/, viewItemHealth],
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
@@ -523,7 +524,7 @@ const SCREENS = {
   pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], exchange: ["مرتجع واستبدال", "sales.return"], purchases: ["الشراء", "purchases.read"],
   items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
-  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"], "day-review": ["مراجعة اليوم", "cash.see_expected"], "item-health": ["فحص بيانات الأصناف", "items.price"],
+  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"], "day-review": ["مراجعة اليوم", "cash.see_expected"], "dispensing-notes": ["ملاحظات الصرف", "settings.manage"], "item-health": ["فحص بيانات الأصناف", "items.price"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
   procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.permissions"], audit: ["سجل العمليات", "audit.read"],
@@ -556,6 +557,7 @@ const HELP = {
   reports: ["التقارير: المبيعات، وتحذيرات الأصناف، وخسائر المخزون، والصلاحية.", ["كل تقرير له زر Excel وزر طباعة."]],
   "owner-reports": ["تقارير المالك: الموظفون، والعملاء، والخزينة، والمرتجعات، والخصومات، والأسعار.", ["اختر التقرير من الأزرار ثم الفترة."]],
   profit: ["الربح: المبيعات ناقص التكلفة والمصروفات لفترة.", []],
+  "dispensing-notes": ["ملاحظات الصرف: تذكير بيظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي، ومبيوقفش البيع.", ["الخمس مواد من دليل قرار هيئة الدواء 375 لسنة 2026 شغالة من الأول.", "أي مادة تانية بتبدأ مقفولة «محتاج تأكيد» لحد ما تشغلها."]],
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
@@ -1666,7 +1668,7 @@ async function viewItems() {
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>الأصناف</h1>
-      <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
+      <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/dispensing-notes">ملاحظات الصرف</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
@@ -3107,14 +3109,14 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, confirm_below_cost: !!draft.confirm_below_cost, receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, cost_reason: draft.cost_reason || null, receipt: true } });
           exchangeDevices(r);
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) {
-          if (err.code === "below_cost_confirm") {          // as at checkout: an explicit yes, then save again
-            const ls = (err.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
-            if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${ls}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { draft.confirm_below_cost = true; setTimeout(() => btn.click(), 0); }
+          if (err.code === "at_cost_reason") {              // U2-33: down to cost only, with a written reason
+            const why = (prompt(`${err.message}\n${(err.details?.lines || []).map((l) => l.name).join("، ")}`, "") || "").trim();
+            if (why.length >= 3) { draft.cost_reason = why; setTimeout(() => btn.click(), 0); }
             return;
           }
           toast(err.message, true);
@@ -3276,6 +3278,34 @@ async function viewDeadstock() {
     const a = Object.assign(document.createElement("a"), { href: url, download: "الرواكد.xlsx" });
     document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   });
+}
+
+// ------------------------------------------------------------------ dispensing notes (U2-21)
+async function viewDispensingNotes() {
+  const draw = (notes) => {
+    app.innerHTML = `<section class="panel"><h1>ملاحظات الصرف</h1>
+      <p class="muted">ملاحظة بتظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي. مبتوقفش البيع.</p>
+      <table><thead><tr><th>المادة الفعالة</th><th>شغالة</th><th>اللي بيظهر (سطر لكل قاعدة)</th><th></th></tr></thead><tbody>
+      ${Object.entries(notes).map(([k, v]) => `<tr data-k="${esc(k)}"><td><b>${esc(k)}</b>${v.confirmed ? "" : ` <span class="badge b-warn">محتاج تأكيد</span>`}${v.source ? `<div class="muted small">${esc(v.source)}</div>` : ""}</td>
+        <td><input type="checkbox" data-on ${v.enabled ? "checked" : ""}></td>
+        <td><textarea data-rules rows="3">${esc((v.rules || []).join("\n"))}</textarea></td>
+        <td><button class="btn small" data-save>حفظ</button></td></tr>`).join("")}</tbody></table>
+      <div class="row"><input id="dnNew" placeholder="مادة فعالة جديدة (بالإنجليزي)"><button class="btn secondary" id="dnAdd">إضافة (هتبدأ مقفولة)</button></div></section>`;
+    document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+      const tr = b.closest("tr");
+      try {
+        draw(await api("/api/settings/dispensing-notes", { method: "PUT", body: { notes: { [tr.dataset.k]: {
+          enabled: tr.querySelector("[data-on]").checked, rules: tr.querySelector("[data-rules]").value.split("\n") } } } }));
+        toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    }));
+    $("#dnAdd").addEventListener("click", async () => {
+      const k = $("#dnNew").value.trim();
+      if (!k) return;
+      try { draw(await api("/api/settings/dispensing-notes", { method: "PUT", body: { notes: { [k]: { enabled: false } } } })); } catch (er) { toast(er.message, true); }
+    });
+  };
+  draw(await api("/api/settings/dispensing-notes"));
 }
 
 // ------------------------------------------------------------------ item data health (U3-1)
@@ -3895,7 +3925,13 @@ function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
   refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
+  // U2-21: dispensing notes, shown once per invoice (a toast the first time) and kept as one line above the items
+  const dn = s.dispensing_notes || [];
+  POS.dnSeen ||= {};
+  const seen = (POS.dnSeen[s.id] ||= new Set());
+  dn.filter((n) => !seen.has(n.ingredient)).forEach((n) => { seen.add(n.ingredient); toast(`📋 ${n.item}: ${n.rules.join(" · ")}`); });
   $("#posCart").innerHTML = `
+    ${dn.length ? `<div class="badge b-info dnotes" role="note">${dn.map((n) => `📋 <b>${esc(n.item || n.ingredient)}</b>: ${esc(n.rules.join(" · "))}${n.source ? ` <span class="muted small">(${esc(n.source)})</span>` : ""}`).join("<br>")}</div>` : ""}
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف بترتيب إدخالها" : "الأصناف مرتبة أبجديًا A→Z (أسرع في التحضير)"} — آخر صنف مُضاف عليه علامة ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
     <div class="tablewrap"><table class="cart">
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
@@ -4243,7 +4279,7 @@ async function complete(findings) {
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: !!$("#keepChange")?.checked && given > cashPart,
-              confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
+              cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
     delete POS.rcpt[SALE.id]; POS.noCoinsAsked = false;
@@ -4276,9 +4312,9 @@ async function complete(findings) {
       } catch { /* the message is already shown */ }
     }
     if (er.code === "no_open_shift") $("#posShift").click();
-    if (er.code === "below_cost_confirm") {
-      const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
-      if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${lines}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { SALE.confirm_below_cost = true; return complete(findings); }
+    if (er.code === "at_cost_reason") {        // U2-33: down to cost only, by the owner or a manager, with a reason
+      const why = (prompt(`${er.message}\n${(er.details?.lines || []).map((l) => l.name).join("، ")}`, "") || "").trim();
+      if (why.length >= 3) { SALE.cost_reason = why; return complete(findings); }
     }
   }
 }

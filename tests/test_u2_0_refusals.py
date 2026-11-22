@@ -95,6 +95,8 @@ class Refused(SalesCase):
 
     def test_invoice_discount_left_bigger_after_line_removed(self):
         sid = self.s.create(self.ctx)
+        with self.db.transaction():   # U2-33: nobody sells under cost; this test is about the invoice discount, so the cost is unknown
+            self.db.execute("DELETE FROM item_costs WHERE item_id=?", (self.pan,))
         d = self.s.add_line(self.ctx, sid, self.pan, units=4)
         d = self.s.set_invoice_discount(self.ctx, sid, amount=d["total"] - 100)
         d = self.s.update_line(self.ctx, sid, d["lines"][0]["id"], qty_base=4)      # unchanged: fine
