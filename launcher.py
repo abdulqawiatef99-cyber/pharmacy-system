@@ -53,11 +53,45 @@ def running() -> bool:
         return False
 
 
+def app_browser(env=os.environ, exists=os.path.exists) -> str | None:
+    """U3-4: Edge (always on Windows 10/11) or Chrome, to open the program in its own window (no tabs, no address
+    bar, the program's own icon from its manifest). None = use the default browser as before."""
+    if os.name != "nt" or env.get("PHARM_APP_WINDOW") == "0":
+        return None
+    roots = [env.get(k) for k in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA") if env.get(k)]
+    for rel in (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe"):
+        for root in roots:
+            exe = os.path.join(root, rel)
+            if exists(exe):
+                return exe
+    return None
+
+
+def app_command(exe: str, url: str, profile: Path) -> list[str]:
+    """One window of its own: --app (no tabs: Ctrl+Tab and F11 reach the program, F11 is full screen), a profile of
+    its own so a second click goes to the same browser process and the pharmacy's normal browsing is untouched."""
+    return [exe, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
+            "--disable-features=Translate"]
+
+
+def open_program(url: str = None) -> None:
+    url = url or URL
+    exe = app_browser()
+    if exe:
+        try:
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(app_command(exe, url, home() / "app-window"), close_fds=True, creationflags=flags)
+            return
+        except OSError:
+            pass                                   # the browser could not start: the default browser instead
+    webbrowser.open(url)
+
+
 def open_when_ready(timeout: float = 60) -> None:
     end = time.time() + timeout
     while time.time() < end:
         if running():
-            webbrowser.open(URL)
+            open_program(URL)
             return
         time.sleep(0.5)
 
@@ -123,7 +157,7 @@ def recover(code_home: Path, h: Path, selected_id, attempts: int = 3) -> bool:
 
 def main() -> int:
     if running():
-        webbrowser.open(URL)
+        open_program(URL)
         return 0
     h = home()
     lock = releases.stage0_lock(releases.code_home(h / "data"))
