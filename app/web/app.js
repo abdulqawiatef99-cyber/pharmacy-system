@@ -3625,13 +3625,15 @@ async function viewProcurement() {
   const st = { rows: [], chips: new Set(), sup: "", period: "7", sups: {}, all: [], qty: {}, pick: {} };
   const params = () => new URLSearchParams({ expensive_from: $("#prForm").expensive_from.value || "300",
     ...($("#prAll").checked ? { scope: "all" } : {}), ...($("#prSupplies").checked ? { supplies: "1" } : {}) }).toString();
-  const supOf = (r) => st.pick[r.item_id] ?? (r.best ? r.best.supplier_id : "");
+  // the owner's choice: picked now, else the one saved in the order on this PC, else the recommendation (Codex P2)
+  const supOf = (r) => { const o = st.order || {}; return st.pick[r.item_id] ?? (o[r.item_id] ? (o[r.item_id].supplier_id || "") : (r.best ? r.best.supplier_id : "")); };
   const visible = () => st.rows.filter((r) => (r.qty[st.period] > 0 || r.asked || !r.shown)
     && [...st.chips].every((c) => prChip[c](r)) && (!st.sup || supOf(r) === st.sup));
   const sideCell = (r) => r.suppliers.length ? r.suppliers.map((s) => `<div class="${s.supplier_id === supOf(r) ? "" : "muted"}">${s.supplier_id === supOf(r) ? "<b>" : ""}${esc(s.supplier || "—")}: ${prPct(s.discount_bp)}${s.prev_bp !== null && s.prev_bp !== undefined ? ` (قبلها ${prPct(s.prev_bp)})` : ""}${s.active ? "" : " · موقوف"}${s.supplier_id === supOf(r) ? "</b>" : ""}</div>`).join("") : "—";
   const supSel = (r) => `<select class="prSup" data-id="${esc(r.item_id)}"><option value="">بدون مورد</option>${st.all.map((s) => `<option value="${esc(s.id)}" ${s.id === supOf(r) ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>`;
   const draw = () => {
-    const v = visible(), order = PR_ORDER.get();
+    st.order = PR_ORDER.get();
+    const v = visible(), order = st.order;
     document.querySelectorAll(".prP").forEach((th) => th.classList.toggle("on", th.dataset.p === st.period));
     $("#prBody").innerHTML = v.map((r) => `<tr class="${r.shown ? "" : "muted"}"><td>${esc(r.label)}${r.asked ? ` <span class="badge b-warn">مطلوب</span>` : ""}${r.supply ? ` <span class="badge">مستلزمات</span>` : ""}
       <div class="muted">${r.reasons.map(esc).join("<br>")}</div>

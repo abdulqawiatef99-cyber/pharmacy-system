@@ -344,7 +344,7 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
             side.append({"supplier_id": sid, "supplier": s.get("name"), "active": bool(s.get("is_active")),
                          "discount_bp": recs[0]["discount_bp"], "date": recs[0]["date"],
                          "prev_bp": recs[1]["discount_bp"] if len(recs) > 1 else None,
-                         "kind": s.get("supplier_type")})
+                         "kind": s.get("supplier_type"), "unsure": recs[0]["unsure"], "raw_name": recs[0]["raw_name"]})
         side.sort(key=lambda x: (not x["active"], -(x["discount_bp"] if x["discount_bp"] is not None else -1)))
         best = next((x for x in side if x["active"] and x["discount_bp"] is not None), None) \
             or next((x for x in side if x["active"]), None)
@@ -362,7 +362,8 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
             ref = [x for x in ((lst or {}).get("discount_bp"), best["prev_bp"]) if x is not None]
             if ref and best["discount_bp"] < max(ref):
                 flags.append("below_last")
-        if lst and lst["unsure"]:
+        unsure = next((x for x in (best, lst) if x and x.get("unsure")), None)   # the recommended one too (Codex P2)
+        if unsure:
             flags.append("unsure_match")
         reasons = [f"{CLASS_AR[cls]}: اتباع في {sum(1 for u in units if u > 0)} شهر من 12"
                    f" ({sum(1 for u in units[-3:] if u > 0)} من آخر 3)"]
@@ -382,7 +383,11 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
             best = None
             lst = {k: lst[k] for k in ("supplier_id", "supplier", "date", "active")} if lst else None
             flags = [f for f in flags if f not in ("below_official", "below_last")]
-        rows.append({"item_id": iid, "code": it["code"], "label": it["name_en"] or it["name_ar"], "pack_size": pk,
+        unsure_raw = unsure["raw_name"] if unsure else None
+        side = [{k: v for k, v in x.items() if k not in ("unsure", "raw_name")} for x in side]
+        if best:
+            best = {k: v for k, v in best.items() if k not in ("unsure", "raw_name")}
+        rows.append({"unsure_raw": unsure_raw, "item_id": iid, "code": it["code"], "label": it["name_en"] or it["name_ar"], "pack_size": pk,
                      "public_price": price, "on_hand": on_hand, "arrived": arrived, "on_order": on_order,
                      "expired": expired, "units": units, "avg_month": round(float(avg), 2), "class": cls,
                      "qty": qty, "asked": asked, "shown": shown, "supply": not it["drug"], "flags": flags,
@@ -392,8 +397,8 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
     no_sup = [{"item_id": r["item_id"], "label": r["label"], "why": "no_supplier"} for r in rows
               if r["shown"] and not any(x["active"] for x in r["suppliers"])]
     ask_about = no_sup + [a for a in ask if a["item_id"] in pack]
-    check = [{"item_id": r["item_id"], "label": r["label"], "raw_name": last[r["item_id"]]["raw_name"],
-              "pack_size": r["pack_size"]} for r in rows if "unsure_match" in r["flags"] and r["item_id"] in last]
+    check = [{"item_id": r["item_id"], "label": r["label"], "raw_name": r["unsure_raw"],
+              "pack_size": r["pack_size"]} for r in rows if r["unsure_raw"] is not None]
     used = sorted({(r["best"] or {}).get("supplier_id") for r in rows} - {None},  # empty without costs.read
                   key=lambda s: sups[s]["name"] if s in sups else "")
     return {"rows": rows, "months": months, "periods": list(PERIODS), "period_default": PERIOD_DEFAULT,

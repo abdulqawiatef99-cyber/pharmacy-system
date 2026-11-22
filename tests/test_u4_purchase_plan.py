@@ -446,3 +446,17 @@ class TestCodexFixes(PlanBase):
         from pathlib import Path
         js = Path("app/web/app.js").read_text(encoding="utf-8")
         self.assertIn('.filter((s) => s !== l.status || s === "partial")', js)
+
+    def test_unsure_match_on_the_recommended_supplier_is_flagged(self):
+        self.buy(self.it, self.s1, public=10000, net=7000, days_ago=20, raw="RVW TB?", match="suggested", method="fuzzy")
+        self.buy(self.it, self.s2, public=10000, net=9000, days_ago=5)              # newer, confirmed, worse
+        out = self.plan()
+        r = {x["item_id"]: x for x in out["rows"]}[self.it]
+        self.assertEqual(r["best"]["supplier_id"], self.s1)
+        self.assertIn("unsure_match", r["flags"])
+        self.assertEqual([c["raw_name"] for c in out["check_names"]], ["RVW TB?"])
+
+    def test_screen_keeps_the_saved_supplier_choice(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        self.assertIn("st.pick[r.item_id] ?? (o[r.item_id] ? (o[r.item_id].supplier_id", js)
