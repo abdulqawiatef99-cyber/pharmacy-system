@@ -3182,4 +3182,8 @@ window.I18N_EN = {
 "جه ميعاده": "Due now",
 "مفيش مشتريات في آخر 6 شهور": "No purchases in the last 6 months",
 "مش متوفر": "Not in stock",
+"دلوقتي": "now",
+"· ميعاده 0": "· due 0",
+"بيتحمل…": "Loading…",
+"لأ": "No",
 };
