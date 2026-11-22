@@ -2807,8 +2807,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if sale["lines"]:                    # U2-23: the total quantity
             count += f"<tr><td>إجمالي الكمية</td><td>{' + '.join(x for x in (f'{bx} علبة' if bx else '', f'{un} وحدة' if un else '') if x)}</td></tr>"
         cu = sale.get("customer")
-        if cu and sale.get("on_credit") and cu.get("balance") is not None:   # U2-23: his balance
-            pay += (f"<tr><td>الرصيد السابق</td><td>{m(cu['balance'] - sale['on_credit'])}</td></tr>"
+        if cu and sale.get("on_credit") and cu.get("balance_before") is not None:   # U2-23: his balance
+            pay += (f"<tr><td>الرصيد السابق</td><td>{m(cu['balance_before'])}</td></tr>"
                     f"<tr><td>الرصيد الحالي</td><td>{m(cu['balance'])}</td></tr>")
         hd = []
         if cfg["has_logo"]:
@@ -2842,8 +2842,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
             cu = sale["customer"]
-            info.append(f"العميل: {e(cu['name'])}")
-            if sale.get("on_credit"):        # U2-23: on a credit sale, how to reach him
+            info.append(f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else ""))
+            if sale.get("on_credit") and sale.get("kind") != "delivery":   # U2-23 (a delivery prints its own line)
                 info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))

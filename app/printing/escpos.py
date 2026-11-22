@@ -369,8 +369,9 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
         out.append(("row", name, m(l["line_total"])))
         up = unit_price(l)
+        # the line's own discount only, as on the browser receipt; the invoice discount is in «خصم» below (review P2)
         disc = (f" · خصم {l['discount_bp'] / 100:g}%" if l.get("discount_bp") else
-                f" · خصم {m(l['discount'])}" if l.get("discount") else "")
+                f" · خصم {m(l['discount_amount'])}" if l.get("discount_amount") else "")
         out.append(("small", qty_text(l) + (f" × {m(up)}" if up is not None else "") + disc, ""))
         b, u, _, _ = qty_parts(l)
         boxes, units = boxes + b, units + u
@@ -379,7 +380,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
     if sale["lines"]:
         out.append(("small", "إجمالي الكمية: " + " + ".join(x for x in (f"{boxes} علبة" if boxes else "", f"{units} وحدة" if units else "") if x), ""))
-    if sale["discount_total"] and sale.get("subtotal"):
+    if (sale["discount_total"] or sale.get("delivery_fee")) and sale.get("subtotal"):
         out.append(("row", "الإجمالي", m(sale["subtotal"])))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
@@ -398,9 +399,9 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     cash = sale.get("paid_cash") or 0
     if cfg.get("show_change", True) and cash and given > cash:
         out += [("row", "المدفوع من العميل", m(given)), ("total", "الباقي", m(given - cash))]
-    if c and sale.get("on_credit") and c.get("balance") is not None:
-        # the balance now (at printing); the one before it is this invoice's credit less (exact at checkout)
-        out += [("row", "الرصيد السابق", m(c["balance"] - sale["on_credit"])), ("row", "الرصيد الحالي", m(c["balance"]))]
+    if c and sale.get("on_credit") and c.get("balance_before") is not None:
+        # only while his account has not moved since this invoice (Sales.get decides), so a reprint is never wrong
+        out += [("row", "الرصيد السابق", m(c["balance_before"])), ("row", "الرصيد الحالي", m(c["balance"]))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
     if return_days and cfg.get("show_return_policy", True):
         n = return_days

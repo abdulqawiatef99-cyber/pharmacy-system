@@ -699,8 +699,17 @@ class Sales:
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
         if s["customer_id"]:
-            c = self.db.one("SELECT id, name, name_alt, phone, address1, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
+            from .customers import CODE_SQL
+            c = self.db.one(f"SELECT c.id, c.name, c.name_alt, c.phone, c.address1, c.credit_limit, {CODE_SQL} estock_code"
+                            " FROM customers c WHERE c.id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
+            if s["status"] == "completed" and s.get("on_credit"):
+                # U2-23: the balance before / after this invoice, printed only while nothing else moved his account
+                # since it (review P1: a reprint after a payment or a return would print wrong figures)
+                later = self.db.one("SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? AND created_at>?"
+                                    " AND coalesce(ref_id,'')<>? LIMIT 1", (ctx.org_id, c["id"], s["completed_at"], sid))
+                if not later:
+                    s["customer"]["balance_before"] = s["customer"]["balance"] - s["on_credit"]
         if s.get("contract_id"):
             k = self.db.one("SELECT id, name, discount_local_bp, discount_imported_bp FROM contracts WHERE id=?", (s["contract_id"],))
             s["contract"] = dict(k) if k else None
