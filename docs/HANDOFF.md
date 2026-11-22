@@ -12,18 +12,20 @@
 Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; label `ci` only on the final head after the local full suite. Merge order is one at a time (all touch app.js / i18n-en.js): merge develop into the next branch, full suite, `ci`, merge.
 | PR | Item | State |
 |---|---|---|
-| #417 | U2-1 purchase grid keys, U2-10 two freezes | Codex clean; merging first |
-| #420 | U3-1 item data health + safe pack-size correction | Codex P1/P2 fixed, re-review asked |
-| #414 | U2-33 below cost refused for everyone, U2-17 split removed, U2-21 dispensing notes | Codex P1 fixed, re-review asked |
-| #416 | U3-3 Hikma claim | Codex P1 fixed, re-review asked |
-| #418 | U3-5 daily mini-count | Codex P2 fixed, re-review asked |
-| #419 | U3-6 customer medicines | Codex P2s fixed, re-review asked |
-| #421 | U3-7 dhikr strip + work hours | Codex P2s fixed, re-review asked |
-| #422 | U3-8 owner shift summary | Codex: no findings yet |
-| #415 | U2-14 invoice rounding (migration 0042 + printing) | **PR only, owner approves** |
+| #417 | U2-1 purchase grid keys, U2-10 two freezes | **merged** `0b96b7c` |
+| #420 | U3-1 item data health + safe pack-size correction | **merged** `603ca06` |
+| #414 | U2-33 below cost refused for everyone, U2-17 split removed, U2-21 dispensing notes | ready, waiting for Codex (conflict-only re-review) |
+| #422 | U3-8 owner shift summary | ready, waiting for Codex (conflict-only re-review) |
+| #421 | U3-7 dhikr strip + work hours | ready, waiting for Codex (conflict-only re-review; one open P2: stop the strip when the session expires) |
+| #416 | U3-3 Hikma claim | waiting for Codex (last P1 fix + conflict resolution not reviewed) |
+| #418 | U3-5 daily mini-count | waiting for Codex (last P2 fix + conflict resolution not reviewed) |
+| #419 | U3-6 customer medicines | waiting for Codex (last P2 fix + conflict resolution not reviewed) |
+| #415 | U2-14 invoice rounding (migration 0042 + printing) | **PR only, owner approves** (Codex clean before the conflict merge) |
 | #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** |
 | #424 | «خليها رصيد للعميل» (money rule) | **PR only, owner approves** |
 | #425 | U3-4 app window (launcher) | **PR only, owner approves; device check** |
+Codex hit its usage limit at 04:10 UTC. After #420 merged, every open branch got develop merged in; the only conflicts were the two "both sides added" places in app/web/app.js (route / screen lists, new view functions) and the end of app/web/i18n-en.js (both sides' translations kept). Each branch's own tests + i18n/help/screen-smoke tests pass after the merge; the next step for each is `@codex review` on the new head, then the full suite, label `ci`, merge one at a time. Release PR #410 body refreshed (develop @ `603ca06`: no migration, no requirements, nothing under printing/installer).
+
 Owner questions (for the morning):
 1. A 100% gift discount on an item with a known cost is now refused (below cost). Exception wanted?
 2. A contract that takes an item under cost blocks that item for that customer (refused when added).
