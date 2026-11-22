@@ -3180,4 +3180,5 @@ window.I18N_EN = {
 "بيتباع كتير": "Sells a lot",
 "كان فيه فرق في جرد قريب": "Had a difference in a recent count",
 "الأصناف المطلوب جردها: 0": "Items to count: 0",
+"الأصناف المطلوب جردها:": "Items to count:",
 };
