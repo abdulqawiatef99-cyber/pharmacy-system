@@ -171,3 +171,12 @@ class TestKeepChangeCodexP1(TestKeepChangeFutureTraps):
         self.assertEqual(out["net"], 0)
         self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start)  # nothing left the drawer unseen
         self.assertEqual(self.s.balance(self.ctx, self.cust), -100)          # his change is still his credit
+
+
+class TestKeepChangeBrowserReceipt(__import__("unittest").TestCase):
+    def test_browser_receipt_never_shows_the_kept_change_as_due(self):
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("shown = keepIt ? cashPart : given", js)                 # Codex P2: given less the kept change
+        self.assertIn("printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : \"\"}`)", js)
+        self.assertIn("keep_change: keepIt,", js)
