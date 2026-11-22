@@ -354,7 +354,8 @@ def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: da
     rows = db.all(
         "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.is_service, count(DISTINCT s.id) times,"
         " max(s.completed_at) last_at,"
-        " (SELECT l2.qty_base FROM sale_lines l2 JOIN sales s2 ON s2.id=l2.sale_id WHERE s2.org_id=s.org_id"
+        " (SELECT (SELECT sum(a3.qty_base - a3.returned_qty) FROM sale_allocations a3 WHERE a3.sale_line_id=l2.id)"
+        "   FROM sale_lines l2 JOIN sales s2 ON s2.id=l2.sale_id WHERE s2.org_id=s.org_id"
         "   AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id AND s2.completed_at>=?"
         "   AND (SELECT coalesce(sum(a2.qty_base - a2.returned_qty),0) FROM sale_allocations a2 WHERE a2.sale_line_id=l2.id) > 0"
         "   ORDER BY s2.completed_at DESC LIMIT 1) last_qty,"

@@ -52,3 +52,17 @@ class TestCodexOn419(TestUsualItems):
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"items.hidden"})
         self.assertEqual(cu.usual_items(self.db, staff, self.cust), [])
         self.assertEqual(len(cu.usual_items(self.db, self.ctx, self.cust)), 1)
+
+
+class TestCodexOn419Stock(TestUsualItems):
+    def test_unsellable_stock_is_not_available(self):
+        self.sell(1)
+        with self.db.transaction():          # what is left is only expired: nothing to sell
+            self.db.execute("UPDATE batches SET expiry_date='2000-01-01' WHERE item_id=?", (self.pan,))
+        it = cu.usual_items(self.db, self.ctx, self.cust)[0]
+        self.assertEqual((it["stock"], it["in_stock"]), (0, False))
+
+    def test_usual_qty_is_what_he_kept(self):
+        d = self.sell(5)
+        self.s.return_items(self.ctx, d["id"], {d["lines"][0]["id"]: 4}, refund_method="cash", reason="test")
+        self.assertEqual(cu.usual_items(self.db, self.ctx, self.cust)[0]["last_qty"], 1)
