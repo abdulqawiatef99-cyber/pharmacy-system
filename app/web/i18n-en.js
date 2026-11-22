@@ -3172,4 +3172,10 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"⏰ شيفتك بيخلص الساعة 0 (فاضل 0 دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك": "⏰ Your shift ends at 0 (0 minutes left): if you are leaving, close the shift and sign out of attendance",
+"الذِكر ومواعيد الشغل": "Dhikr and work hours",
+"شريط ذِكر صغير تحت الشاشة (مبيغطيش أي زرار ومبيوقفش البيع)": "A small dhikr strip at the bottom of the screen (covers no button, never stops a sale)",
+"الذِكر": "Dhikr",
+"قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.": "A quarter of an hour before the end of his hours the program reminds the employee to close the shift and sign out. A reminder only.",
+"بيتحمل…": "Loading…",
 };
