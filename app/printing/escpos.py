@@ -329,6 +329,16 @@ def unit_price(l: dict) -> int | None:
     return (2 * gross + n) // (2 * n) if n else None
 
 
+def policy_text(n: int, restricted: bool) -> str:
+    """The return-policy line, the same on the thermal and the browser receipt (B1)."""
+    if n <= 0:
+        text = "المرتجع غير متاح بهذه الفاتورة"
+    else:
+        days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
+        text = f"المرتجع خلال {days} بهذه الفاتورة"
+    return text + (" · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها" if restricted else "")
+
+
 def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
                   given: int = 0, return_days: int | None = None) -> list[tuple[str, str, str]]:
     """given: what the customer handed over in cash (piastres), printed with the change due when it is
@@ -367,12 +377,16 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     for l in sale["lines"]:
         it = l["item"]
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
-        out.append(("row", name, m(l["line_total"])))
+        out.append(("row", name + (" ✱" if it.get("no_return") else ""), m(l["line_total"])))
         up = unit_price(l)
+        exp = ""
+        if cfg.get("show_expiry"):              # as on the browser receipt (B1)
+            exps = sorted({(a.get("expiry_date") or "")[:7] for a in l.get("allocations") or [] if a.get("expiry_date")})
+            exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
         # the line's own discount only, as on the browser receipt; the invoice discount is in «خصم» below (review P2)
         disc = (f" · خصم {l['discount_bp'] / 100:g}%" if l.get("discount_bp") else
                 f" · خصم {m(l['discount_amount'])}" if l.get("discount_amount") else "")
-        out.append(("small", qty_text(l) + (f" × {m(up)}" if up is not None else "") + disc, ""))
+        out.append(("small", qty_text(l) + (f" × {m(up)}" if up is not None else "") + exp + disc, ""))
         b, u, _, _ = qty_parts(l)
         boxes, units = boxes + b, units + u
     out.append(("rule", "", ""))
@@ -380,7 +394,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
     if sale["lines"]:
         out.append(("small", "إجمالي الكمية: " + " + ".join(x for x in (f"{boxes} علبة" if boxes else "", f"{units} وحدة" if units else "") if x), ""))
-    if (sale["discount_total"] or sale.get("delivery_fee")) and sale.get("subtotal"):
+    if sale.get("subtotal") is not None:    # always, as on the browser receipt (B1)
         out.append(("row", "الإجمالي", m(sale["subtotal"])))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
@@ -405,8 +419,6 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         # only while his account has not moved since this invoice (Sales.get decides), so a reprint is never wrong
         out += [("row", "الرصيد السابق", m(c["balance_before"])), ("row", "الرصيد الحالي", m(c["balance"]))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
-    if return_days and cfg.get("show_return_policy", True):
-        n = return_days
-        days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
-        out.append(("small", f"المرتجع خلال {days} بهذه الفاتورة", ""))
+    if return_days is not None and cfg.get("show_return_policy", True):
+        out.append(("small", policy_text(return_days, any(l["item"].get("no_return") for l in sale["lines"])), ""))
     return out

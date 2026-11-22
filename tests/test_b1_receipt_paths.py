@@ -23,8 +23,9 @@ class TestBothPathsSameCustomer(PlanCase):
 
     def both(self, sale_id):
         page = self.c.get(f"/receipt/{sale_id}").text
+        from app.sales.service import return_window_days
         direct = texts(escpos.receipt_lines("صيدلية تجربة", Sales(self.db).get(self.ctx, sale_id), "اليوم",
-                                            {"show_customer": True}))
+                                            {"show_customer": True}, return_days=return_window_days(self.db, self.ctx.org_id)))
         return page, direct
 
     def test_credit_sale_customer_on_both(self):
@@ -57,3 +58,24 @@ class TestBothPathsSameCustomer(PlanCase):
         page, direct = self.both(done["id"])
         self.assertIn("عميل الإيصال", page)
         self.assertIn("عميل الإيصال", direct)
+
+    def test_no_return_star_policy_and_subtotal_on_both(self):
+        # agent review P2s on #423: the ✱ note, the policy line and «الإجمالي» were browser-only
+        cat = new_id()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO categories (id, org_id, name, no_return) VALUES (?,?,?,1)",
+                            (cat, self.ctx.org_id, "ثلاجة تجربة"))
+            self.db.execute("UPDATE items SET category_id=? WHERE id=?", (cat, self.box))
+        self.call("POST", "/api/cash/open", 201, json={"opening_cash": 10000})
+        sid = self.draft()
+        d = self.line(sid, self.box, packs=1)
+        done = self.complete(sid, [{"method": "cash", "amount": d["total"]}])
+        page, direct = self.both(done["id"])
+        for part in ("✱", "لا تُقبل إعادتها", "المرتجع خلال", "الإجمالي"):
+            self.assertIn(part, page, part)
+            self.assertIn(part, direct, part)
+
+    def test_policy_text_zero_days(self):
+        self.assertEqual(escpos.policy_text(0, False), "المرتجع غير متاح بهذه الفاتورة")
+        self.assertEqual(escpos.policy_text(14, False), "المرتجع خلال 14 يومًا بهذه الفاتورة")
+        self.assertEqual(escpos.policy_text(7, False), "المرتجع خلال 7 أيام بهذه الفاتورة")

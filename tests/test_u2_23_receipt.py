@@ -59,3 +59,20 @@ class TestReprintBalance(TestReceipt):
         self.s.customer_payment(self.ctx, cid, 100)
         t = texts(escpos.receipt_lines("ص", self.s.get(self.ctx, sid), "اليوم", {"show_customer": True}))
         self.assertNotIn("الرصيد السابق", t)
+
+
+class TestBalanceWithKeptChange(TestReceipt):
+    def test_balance_before_counts_the_kept_change_of_the_same_sale(self):
+        # agent review P1 on #423: a credit sale whose change is also kept as credit wrote two ledger rows
+        cid = new_id()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO customers (id, org_id, name, credit_limit) VALUES (?,?,?,?)",
+                            (cid, self.ctx.org_id, "عميل", 10000000))
+            self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, created_at)"
+                            " VALUES (?,?,?,?, 'adjustment', '2026-01-01T00:00:00.000Z')", (new_id(), self.ctx.org_id, cid, 10000))
+        sid = self.s.create(self.ctx, cid)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2)
+        self.s.complete(self.ctx, sid, paid_cash=d["total"] - 500, on_credit=500, change_to_credit=200,
+                        safety_decisions=self.ack_all(sid))
+        c = self.s.get(self.ctx, sid)["customer"]
+        self.assertEqual((c["balance_before"], c["balance"]), (10000, 10300))

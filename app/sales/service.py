@@ -718,10 +718,15 @@ class Sales:
             if s["status"] == "completed" and s.get("on_credit"):
                 # U2-23: the balance before / after this invoice, printed only while nothing else moved his account
                 # since it (review P1: a reprint after a payment or a return would print wrong figures)
-                later = self.db.one("SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? AND created_at>?"
-                                    " AND coalesce(ref_id,'')<>? LIMIT 1", (ctx.org_id, c["id"], s["completed_at"], sid))
+                # this sale's own rows: its credit and the change kept as credit (both written at completion); any
+                # other row after it (a payment, a return, kept change given back) means his account moved (#423 P1)
+                own = "coalesce(ref_id,'')=? AND kind IN ('credit_sale','payment')"
+                later = self.db.one(f"SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? AND created_at>?"
+                                    f" AND NOT ({own}) LIMIT 1", (ctx.org_id, c["id"], s["completed_at"], sid))
                 if not later:
-                    s["customer"]["balance_before"] = s["customer"]["balance"] - s["on_credit"]
+                    mine = self.db.one(f"SELECT coalesce(sum(amount),0) a FROM customer_ledger WHERE org_id=? AND"
+                                       f" customer_id=? AND {own}", (ctx.org_id, c["id"], sid))["a"]
+                    s["customer"]["balance_before"] = s["customer"]["balance"] - mine
         if s.get("contract_id"):
             k = self.db.one("SELECT id, name, discount_local_bp, discount_imported_bp FROM contracts WHERE id=?", (s["contract_id"],))
             s["contract"] = dict(k) if k else None
