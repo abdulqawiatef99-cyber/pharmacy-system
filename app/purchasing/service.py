@@ -238,7 +238,9 @@ class Purchasing:
         comp = validation.computed_total(inv, lines)
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
-            ((normalize_text(l["raw_name"]), l["qty"], l["line_total"]) for l in lines),
+            # the distributor's margin only when there is one: invoices without it keep the hash they had (B3)
+            ((normalize_text(l["raw_name"]), l["qty"], l["line_total"], *([l["distributor_margin"]]
+              if l.get("distributor_margin") else [])) for l in lines),
             key=lambda t: (t[0], t[1] is None, t[1] or 0, t[2] is None, t[2] or 0)),
             default=str).encode()).hexdigest() if lines else None
         self.db.execute("UPDATE purchase_invoices SET computed_total=?, content_hash=? WHERE id=?",

@@ -142,7 +142,7 @@ class TestThePaper(Paper):
 
     def test_a_negative_or_fractional_margin_is_refused(self):
         l = self.line("Margin four 40")
-        for bad in (-100, 12.5, "x"):
+        for bad in (-100, 12.5, "x", "4.005"):
             with self.assertRaises(ValidationFailed):
                 self.p.update_line(self.ctx, self.inv, l["id"], {"distributor_margin": bad},
                                    self.doc()["invoice"]["version"])
@@ -188,6 +188,27 @@ class TestThePaper(Paper):
                                         [{"purchase_line_id": l["id"], "paid_units": 5, "bonus_units": 0,
                                           "reason": "expired"}])
         self.assertEqual((r["total"], self.balance() - before), (42000, -42000))
+
+    def test_pack_cost_above_the_public_price_warns(self):
+        l = self.line("Margin four 40")
+        d = self.p.update_line(self.ctx, self.inv, l["id"], {"unit_net_price": 10500}, self.doc()["invoice"]["version"])
+        self.assertIn(("net_above_public", l["id"]), [(i["code"], i["line_id"]) for i in d["issues"]])
+
+    def test_duplicate_hash_counts_the_margin_only_when_there_is_one(self):
+        h = lambda: self.db.one("SELECT content_hash FROM purchase_invoices WHERE id=?", (self.inv,))["content_hash"]  # noqa: E731
+        with_margin = h()
+        l = self.line("Margin four 40")
+        d = self.p.update_line(self.ctx, self.inv, l["id"], {"distributor_margin": 300, "line_total": 40000},
+                               self.doc()["invoice"]["version"])
+        self.assertNotEqual(h(), with_margin)
+        lines = [dict(r) for r in self.db.all("SELECT * FROM purchase_invoice_lines WHERE invoice_id=?", (self.inv,))]
+        self.assertTrue(all(isinstance(x["distributor_margin"], int) for x in lines))
+
+    def test_return_screen_shows_the_pack_cost(self):
+        self.p.approve(self.ctx, self.inv, self.doc()["invoice"]["version"])
+        loaded = returns.from_invoice(self.db, self.ctx, self.sup, "PO-2211")
+        l = next(x for x in loaded["lines"] if x["item_id"] == self.items["Margin four 40"])
+        self.assertEqual(l["unit_net_price"], 8400)
 
     def test_purchases_tool_real_discount_counts_the_margin(self):
         from app.procurement.purchase_plan import _purchases

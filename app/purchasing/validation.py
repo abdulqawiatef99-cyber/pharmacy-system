@@ -209,7 +209,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "margin_too_large", lid, "distributor_margin", margin=margin_of(l), public=pub)
             base = None
         if pub is not None and net is not None:
-            if net > pub:
+            if net + margin_of(l) > pub:      # the pack's cost (with the distributor's margin) above the public price
                 add("warning", "net_above_public", lid, "unit_net_price")
             if disc is not None and base is not None and _j(l.get("field_sources")).get("unit_net_price") != "inferred":
                 exp = half_up_div(base * (10000 - disc), 10000)
