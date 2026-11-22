@@ -8,6 +8,22 @@
 
 
 
+## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
+Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
+- #407 merged `db2350b` (its first CI run failed only on date tests that crossed UTC midnight mid-run; the re-run on the same head passed). #408 (HANDOFF) merged `d33a87b`.
+- Release PR develop → main: #410, opened, NOT merged (owner only); body lists #402–#412. Ships by «تحديث»: no migration, no requirements, nothing under printing/installer. Refresh its body after each merge.
+- New PRs (each: independent agent review fixed first, then Codex, label `ci` needed for CI to run):
+  | PR | Item | State |
+  |---|---|---|
+  | #409 | U2-33 discount never under cost, refused when typed (owner / his PIN still passes and confirms at payment) | merged `cc96008` |
+  | #411 | U2-20 «مفيش فكة» suggestions at payment (+ no-coins hint). «خليها رصيد للعميل» REMOVED (Codex P1): needs a real recorded customer-credit flow, not built | merged `bc488b5` |
+  | #412 | U2-19 sale-screen keys in «تخصيص الواجهة» (conflict check, reset; typing keys not offered) | merged `48f911c` |
+- U2-17 «remove tablet splitting»: NOT done — question for the owner. Tablet splitting is not on any screen: only an API flag (`tablet_split`) in `app/safety/engine.py` asks the pharmacist when there is no split policy. Partial packs (a strip of a box) are a normal sale since update 1. Ask what he saw before removing anything.
+- Owner decision on U2-33: should even the owner be refused below cost? Now he (or his PIN) can, confirming at payment (one-line change if he wants an absolute refusal).
+- New TODO from U2-20: «خليها رصيد للعميل» = record the change as customer credit in the same transaction as the sale (cash stays in the drawer, customer ledger credit). Not built.
+- Still NOT done: U2-23/U2-24 receipt (printing + `sale_unit` migration, PR-only), U2-27 silent printing (printing, PR-only), U2-14 invoice rounding (money rule + setting + setup question), U2-31 two drawers (migration), U2-21 dispensing notes UI, U2-6 print time (migration), U2-1 grid arrows, U2-10 freezes.
+- Known test fragility: several date-based tests fail when a CI run crosses midnight UTC (02:00 Cairo); re-run once.
+
 ## 22/11 night — UPDATE-2 worker session: end report (READ THIS FIRST)
 Base develop @ `88cb658` (update 1 = main @ `4f2828f`). Each PR: tests first, an independent fresh-context agent review before Codex (OWNER_RULES §12), then Codex until no P0/P1, CI linux green on the same head, merge commit. Nothing on main, no installer, no migration, no `requirements.txt` change: the whole batch ships through the in-app «تحديث» once the owner merges the release PR.
 | PR | Items | Result |
