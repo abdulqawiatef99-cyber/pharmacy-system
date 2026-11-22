@@ -2461,6 +2461,7 @@ async function renderDeviceRestore() {
           toast("✓ رجعت الإعدادات. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد");
           renderReceiptCfg(await api("/api/settings/receipt"));
           renderChannels((await api("/api/payment-channels")).channels);
+          if (groups.includes("screen")) { ME.ui = await api("/api/settings/ui"); applyNav(); }   // Codex P2 on #430
           out.innerHTML = `<p class="badge b-ok">✓ رجعت الإعدادات المختارة (متسجلة في سجل العمليات)</p>`;
         } catch (e) { g.disabled = false; toast(e.message, true); }
       });

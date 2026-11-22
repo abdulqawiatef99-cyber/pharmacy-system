@@ -274,6 +274,7 @@ class Screens(DBTestCase):
         self.assertIn("اطبع ملصق تجربة", js)
         # Codex P2 on #430: the restore uses the previewed copy, and another choice clears the preview
         self.assertIn('body: { source: p.source.id, groups }', js)
+        self.assertIn('if (groups.includes("screen")) { ME.ui = await api("/api/settings/ui"); applyNav(); }', js)
         self.assertIn('$("#dvSrc").addEventListener("change", () => { $("#dvPrev").innerHTML = ""; });', js)
         bat = (ROOT / "scripts" / "windows" / "launch-fresh-start.bat").read_text(encoding="ascii")
         exp = bat.index("export-device-settings")
