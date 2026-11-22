@@ -8,6 +8,17 @@
 
 
 
+## 22/11 — UPDATE-4 worker session: progress log (READ THIS FIRST; newest line last)
+Spec: the manager's «Update 4» message (priority U4-0 … U4-13). Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge into develop only with linux CI green and no open Codex P0/P1; one release PR into main at the end (owner pre-approved on the gates, linux AND windows green).
+| PR | Item | State |
+|---|---|---|
+| #430 | U4-0 restore device/printing settings from an older copy + clean start carries them (`device_settings_carry.json`) + first-run printers step | **merged `3eb0325`**; linux + windows-scripts green on 301206b; Codex clean after 2 P2 fixes; agent review 1 P1 + 5 P2 fixed |
+| #431 | U4-1 smart order reads the E-Stock sales archive (`app/procurement/demand.py`; `monthly()` for U4-2) | **merged `ac120f6`**; linux green on a0ef0d1; Codex clean after 1 P1 (permission) + 1 P2 (returns on two lines) fixes; agent review 2 P1 fixed |
+Device check for the owner after «تحديث» (develop now; main only with the release PR): Settings → «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة» → choose the data-trial-* folder → check the printing lines → restore → «اطبع 3 ملصقات تجربة» on one label each.
+Assumption to verify on the PC (#431): E-Stock `amount` on sale lines is in packs (fractions = part of a pack). Compare one item-month of the smart order with E-Stock's own sales report.
+Known P2 left (#431): an item with no matched archive rows loses its manual upload for months the archive covers.
+Not started: U4-2 … U4-13 (this session stopped at a clean point: context high). Next session: U4-2 purchases rebuild on `demand.monthly()` (regular >= 6 of 12 months and 2 of last 3, semi 4-5; avg = max(avg 3, avg 6); week/2 weeks/month; per-supplier split; order tracking). No release PR into main yet: it collects all of update 4.
+
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
 Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
 
