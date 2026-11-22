@@ -1039,6 +1039,8 @@ window.I18N_EN = {
 "توصيل للمنزل": "Home delivery",
 "توصيل للبيت": "Home delivery",
 "توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه": "Delivery: the money stays with the courier until he hands it over",
+"توصيل: 0 ج نقدي مع مندوب التوصيل حتى يسلّمها": "Delivery: 0 EGP cash stays with the courier until he hands it over",
+"توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب": "Delivery: paid without cash, the courier carries no money",
 "توصيل: الفلوس مع اللي بيوصّل لحد ما يسلمها": "Delivery: the money stays with the courier until he hands it over",
 "ثم تأكيد": "then confirm",
 "ج": "EGP",

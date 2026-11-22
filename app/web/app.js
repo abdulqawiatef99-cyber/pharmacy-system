@@ -4593,7 +4593,7 @@ async function complete(findings) {
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
     if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : ""}`);
     QUICK = null;
-    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
+    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
     // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
     // under the drawer one when the printer was off), and it stays longer than a normal error
