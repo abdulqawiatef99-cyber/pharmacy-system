@@ -127,9 +127,21 @@ class J(JSONResponse):
         return json.dumps(content, ensure_ascii=False, default=_json_default).encode("utf-8")
 
 
+SLOW_MS = 800                      # U2-10: a request slower than this is written to the server log
+SLOW_LOG: deque = deque(maxlen=200)   # and kept here (newest last) for the «البرنامج» screen
+_slow_logger = logging.getLogger("pharmacy.slow")
+
+
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
+        t0 = time.monotonic()
         resp = await call_next(request)
+        ms = int((time.monotonic() - t0) * 1000)
+        if ms > SLOW_MS:                 # the path only, never the query (a customer search carries a phone, #140)
+            org = (request.scope.get("state") or {}).get("org_id")
+            SLOW_LOG.append({"at": time.time(), "method": request.method, "path": request.url.path, "ms": ms,
+                             "status": resp.status_code, "org_id": org})
+            _slow_logger.warning("slow request %s %s %d ms", request.method, request.url.path, ms)
         printable = request.url.path.startswith(PRINT_PAGES)
         resp.headers.setdefault("Content-Security-Policy", CSP_PRINT if printable else CSP)
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -225,6 +237,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
         if approver and req.url.path == "/api/approvals/check":
             # the PIN is typed once and checked here only; every other request carries the approval token (#137)
@@ -476,6 +489,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         name, user, pw = (str(b.get(k, "")).strip() for k in ("pharmacy", "username", "password"))
         if len(name) < 2 or len(user) < 3:
             raise ValidationFailed("اكتب اسم الصيدلية واسم المستخدم (3 حروف على الأقل)")
+        if str(b.get("rounding") if b.get("rounding") is not None else "").strip() not in ("", "0", "25", "50", "100"):
+            raise ValidationFailed("اختار تقريب الفاتورة")
         with setup_lock:
             if not _setup_needed():
                 raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
@@ -486,6 +501,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay_channels.ensure_defaults(db)
             fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
+        if b.get("rounding") is not None and str(b["rounding"]).strip() != "":   # U2-14: asked at setup
+            from ..sales import rounding as _rnd
+            _rnd.set_step(db, accounts.resolve_session(db, res["token"]), b.get("rounding"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx)}, status_code=201)
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
@@ -736,12 +754,30 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler
+    async def rounding_api(req):
+        from ..sales import rounding as rnd
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J({"step": rnd.set_step(db, ctx, (await body(req)).get("step"))})
+        ctx.require("sales.read")
+        return J({"step": rnd.step(db, ctx.org_id)})
+
+    @handler
     async def ui_settings_api(req):
         from ..core import ui_settings
         ctx = ctx_of(req)
         if req.method == "PUT":
             return J(ui_settings.save(db, ctx, await body(req)))
         return J(ui_settings.get(db, ctx.org_id))
+
+    @handler
+    async def dispensing_notes_api(req):
+        from ..safety import dispensing
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(dispensing.save(db, ctx, (await body(req)).get("notes")))
+        ctx.require("items.read")
+        return J(dispensing.get(db, ctx.org_id))
 
     # ------------------------------------------------------------- people: PIN, approval, users
     def _local_only(req):
@@ -787,6 +823,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def my_prefs(req):
         ctx = ctx_of(req)
         return J(people.set_prefs(db, ctx, await body(req)))
+
+    @handler
+    async def item_health_api(req):
+        from ..reports.item_health import item_health
+        return J(await off_loop(item_health, db, ctx_of(req)))
+
+    @handler
+    async def item_pack_preview(req):
+        from ..catalog import repack
+        return J(repack.preview(db, ctx_of(req), req.path_params["id"],
+                              int(p) if (p := req.query_params.get("pack") or "").isdigit() else -1))
+
+    @handler
+    async def item_pack_correct(req):
+        from ..catalog import repack
+        b = await body(req)
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
 
     @handler
     async def item_card_get(req):
@@ -1713,6 +1766,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                    b.get("version")))
 
     @handler
+    async def line_split(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        try:
+            qty = whole_number(b.get("qty"))
+        except (TypeError, ValueError):
+            raise ValidationFailed("الكمية لازم رقم صحيح")
+        return J(purch.split_line(ctx, req.path_params["id"], req.path_params["line_id"], qty, b.get("expiry_date"),
+                                  b.get("batch_no"), b.get("version")))
+
+    @handler
+    async def line_merge(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(purch.merge_lines(ctx, req.path_params["id"], req.path_params["line_id"], str(b.get("other_line", "")),
+                                   b.get("version")))
+
+    @handler
     async def line_new_item(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2212,7 +2283,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                    confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                    confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
@@ -2255,7 +2326,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
@@ -2512,6 +2583,37 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def hikma_claim_api(req):
+        from ..reports import hikma_claim as hk
+        ctx, q = ctx_of(req), req.query_params
+        return J(await off_loop(hk.claim, db, ctx, q.get("branch") or "", q.get("from") or "", q.get("to") or ""))
+
+    @handler
+    async def hikma_settings_api(req):
+        from ..reports import hikma_claim as hk
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            b = await body(req)
+            return J(hk.save_settings(db, ctx, str(b.get("branch") or ""), b.get("customer_id") or None,
+                                      _int(b.get("advance"), "advance")))
+        ctx.require("costs.read")
+        ctx.require("sales.totals")
+        return J(hk.settings(db, ctx.org_id))
+
+    @handler
+    async def day_review_api(req):
+        from ..reports.day_review import day_review
+        return J(await off_loop(day_review, db, ctx_of(req), req.query_params.get("day") or None))
+
+    @handler
+    async def slow_requests(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        # only this pharmacy's requests (Codex P1 on #407); requests before sign-in carry no pharmacy and are not shown
+        mine = [{k: v for k, v in x.items() if k != "org_id"} for x in SLOW_LOG if x.get("org_id") == ctx.org_id]
+        return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
@@ -2523,6 +2625,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(shift_tools.save_target(db, ctx, (await body(req)).get("target")))
         ctx.require("cash.close")
         return J(shift_tools.get_target(db, ctx.org_id))
+
+    @handler
+    async def sales_change_fill(req):
+        """«مفيش فكة» (U2-20): small in-stock items that fit in the customer's change."""
+        from ..sales import change_fill
+        ctx = ctx_of(req)
+        try:
+            change = int(req.query_params.get("change") or 0)
+        except ValueError:
+            raise ValidationFailed("الباقي غير صحيح")
+        return J(await off_loop(change_fill.suggestions, db, ctx, change, req.query_params.get("sale") or None))
 
     @handler
     async def cash_float_preview(req):
@@ -2744,7 +2857,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
-<tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{pay}</table>
+{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
+<tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -2913,6 +3027,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
+        Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
         Route("/api/attachments/{id}", attachment_get),
         Route("/api/attachments/{id}/review", attachment_review, methods=["POST"]),
@@ -2938,6 +3054,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/pack-fix", item_pack_preview),
+        Route("/api/items/{id}/pack-fix", item_pack_correct, methods=["POST"]),
+        Route("/api/reports/item-health", item_health_api),
         Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
@@ -2984,6 +3103,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}", line_update, methods=["PATCH"]),
         Route("/api/purchases/{id}/lines/{line_id}", line_delete, methods=["DELETE"]),
         Route("/api/purchases/{id}/lines/{line_id}/new-item", line_new_item, methods=["POST"]),
+        Route("/api/purchases/{id}/lines/{line_id}/merge", line_merge, methods=["POST"]),
+        Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
@@ -3011,6 +3132,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
         Route("/api/procurement/deadstock", proc_deadstock, methods=["POST"]),
+        Route("/api/sales/change-fill", sales_change_fill),
         Route("/api/sales", sales_create, methods=["POST"]),
         Route("/api/sales", sales_list),
         Route("/api/sales/summary", sales_summary),
@@ -3068,6 +3190,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/movements", cash_move, methods=["POST"]),
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
+        Route("/api/system/slow-requests", slow_requests),
+        Route("/api/reports/day-review", day_review_api),
+        Route("/api/reports/hikma-claim", hikma_claim_api),
+        Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),

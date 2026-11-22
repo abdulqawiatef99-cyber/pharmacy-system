@@ -98,6 +98,8 @@ class TestLineFixed(FixedCase):
         with self.assertRaises(ValidationFailed) as e:
             self.s.update_line(self.ctx, sid, gid, discount_amount=99999)
         self.assertEqual(e.exception.code, "discount_exceeds_value")
+        with self.db.transaction():   # U2-33: nobody sells under cost; this test is about the line cap, so the cost is unknown
+            self.db.execute("DELETE FROM item_costs WHERE item_id=?", (self.cheap,))
         d = self.s.update_line(self.ctx, sid, gid, discount_amount=gross)
         gl = next(l for l in d["lines"] if l["id"] == gid)
         self.assertEqual(gl["net"], 0)

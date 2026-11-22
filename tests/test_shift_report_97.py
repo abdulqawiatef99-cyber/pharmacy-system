@@ -118,6 +118,12 @@ class TestReportLines(ShiftBase):
         self.assertNotIn("منها مرتجع على حساب العميل", two)
         self.assertEqual((two["المتوقع في الخزينة"], two["العجز"], two["الزيادة"]), ("140.00", "0.00", "0.00"))
 
+    def test_cash_rounding_row_only_when_there_is_rounding(self):
+        r = self.close({"10000": 1})
+        self.assertNotIn("منها تقريب النقدي (مش مبيعات)", rows(self.lines(r))[0])
+        two, _ = rows(self.lines({**r, "rounding_total": 25}))
+        self.assertEqual(two["منها تقريب النقدي (مش مبيعات)"], "0.25")
+
     def test_open_shift_has_no_result_rows(self):
         r = self.cd.report(self.ctx, self.cd.summary(self.ctx)["id"])
         two, _ = rows(self.lines(r))

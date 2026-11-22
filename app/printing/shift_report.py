@@ -79,6 +79,8 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
                         ("void", "إلغاء فواتير"), ("payout", "مصروفات من الخزينة"), ("deposit", "إيداع")):
         if k.get(kind):
             out.append(("row", label, egp(k[kind])))
+    if r.get("rounding_total"):                         # cash rounding kept in the drawer is not a sale
+        out.append(("row", "منها تقريب النقدي (مش مبيعات)", egp(r["rounding_total"])))
     out.append(("total", "المتوقع في الخزينة", egp(r["expected_cash"])))
     dens = denomination_rows(r["counted_detail"])
     if dens:
