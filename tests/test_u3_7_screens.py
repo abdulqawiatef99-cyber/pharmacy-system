@@ -35,3 +35,32 @@ class TestUpdate3Screens(APICase):
 
     def routes(self):
         return self.ROUTES
+
+
+SAVE = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  const errors = [];
+  p.on('pageerror', (e) => errors.push(String(e)));
+  await p.goto(base + '/#/users');
+  await p.waitForSelector('#suSave');
+  await p.check('#suOn'); await p.click('#suSave');
+  await p.waitForSelector('#dhikrBar');
+  await p.click('#suSave');                                  // saved twice: one bar, timers restarted
+  await p.waitForTimeout(500);
+  const out = { bars: await p.$$eval('#dhikrBar', (x) => x.length),
+                pe: await p.$eval('#dhikrBar', (x) => getComputedStyle(x).pointerEvents) };
+  out.errors = errors;
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestDhikrSave(APICase):
+    def test_save_turns_it_on_without_errors(self):
+        out = run_node(self, SAVE, "owner", OWNER_PW)
+        self.assertEqual((out["bars"], out["pe"], out["errors"]), (1, "none", []))

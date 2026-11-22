@@ -382,34 +382,46 @@ function printInFrame(url) {
 // ------------------------------------------------------------------ dhikr ticker and work hours (U3-7)
 // The ticker is a passive strip at the very bottom (pointer-events: none, never over a button, hidden in print);
 // the work-hours reminder is one toast WARN_MIN minutes before the end of the person's hours. Neither stops work.
-let STAFF_UI = null;
-async function staffUi() {
-  if (STAFF_UI?.uid === ME.user.id) return;
-  try { STAFF_UI = { uid: ME.user.id, ...(await api("/api/settings/staff-ui")) }; } catch { return; }
+let STAFF_UI = null, STAFF_TIMERS = [], STAFF_LOADING = null;
+function staffUiStop() {                 // on sign-out and before every reload of the settings (review P1)
+  STAFF_TIMERS.forEach(clearInterval); STAFF_TIMERS = [];
   document.getElementById("dhikrBar")?.remove();
-  if (STAFF_UI.dhikr.length) {
+  document.body.style.paddingBottom = "";
+}
+async function staffUi() {
+  const uid = ME?.user?.id;
+  if (!uid || (STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  STAFF_LOADING = uid;
+  let cfg;
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui")) }; } catch { STAFF_LOADING = null; return; }
+  STAFF_LOADING = null;
+  if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
+  staffUiStop();
+  STAFF_UI = cfg;
+  STAFF_TIMERS.push(setInterval(() => {}, 3600000));   // marks "running" even with nothing to show
+  if (cfg.dhikr.length) {
     const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
     bar.setAttribute("aria-hidden", "true");
     bar.style.cssText = "position:fixed;inset-inline:0;bottom:0;height:1.4em;line-height:1.4em;font-size:.8em;opacity:.75;"
       + "pointer-events:none;overflow:hidden;white-space:nowrap;text-align:center;z-index:1;background:var(--panel,transparent)";
     let i = 0;
-    const show = () => { bar.textContent = STAFF_UI.dhikr[i++ % STAFF_UI.dhikr.length]; };
-    show(); setInterval(show, 20000);
+    const show = () => { bar.textContent = cfg.dhikr[i++ % cfg.dhikr.length]; };
+    show(); STAFF_TIMERS.push(setInterval(show, 20000));
     document.body.append(bar);
     document.body.style.paddingBottom = "1.6em";
   }
-  const h = STAFF_UI.hours;
+  const h = cfg.hours;
   if (h?.end) {
     const tick = () => {
       const now = new Date(), [eh, em] = h.end.split(":").map(Number), end = new Date(now);
       end.setHours(eh, em, 0, 0);
-      const left = (end - now) / 60000, key = `endWarn:${ME.user.id}:${now.toDateString()}`;
-      if (left > 0 && left <= STAFF_UI.warn_min && !sessionStorageGet(key)) {
+      const left = (end - now) / 60000, key = `endWarn:${uid}:${now.toDateString()}`;
+      if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
         sessionStorageSet(key, "1");
         toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
       }
     };
-    tick(); setInterval(tick, 60000);
+    tick(); STAFF_TIMERS.push(setInterval(tick, 60000));
   }
 }
 function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
@@ -965,6 +977,7 @@ $("#logout").addEventListener("click", async () => {
     try { if (ME?.permissions?.includes("sales.read") && await api("/api/cash/current")) warn.push("الشيفت لسه مفتوح: اقفله لو هتمشي."); } catch { /* no open shift */ }
     if (!confirm(["تخرج من البرنامج؟", ...warn].join("\n"))) return;
   }
+  staffUiStop(); STAFF_UI = null;
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
 });
@@ -6121,11 +6134,13 @@ async function viewUsers() {
       <p class="muted">قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.</p><button class="btn" id="suSave">حفظ</button>`;
     $("#suSave").addEventListener("click", async () => {
       const rows = [...box.querySelectorAll("tr[data-u]")], hours = {};
-      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      let half = false;
+      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; half ||= !!st !== !!en; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      if (half) { toast("اكتب الميعادين (من ولحد) أو سيبهم فاضيين", true); return; }
       try {
         await api("/api/settings/staff-ui", { method: "PUT", body: { dhikr_on: $("#suOn").checked, hours,
           dhikr_off_users: rows.filter((tr) => !tr.querySelector("[data-dk]").checked).map((tr) => tr.dataset.u) } });
-        STAFF_UI = null; toast("اتحفظ");
+        STAFF_UI = null; staffUiStop(); staffUi(); toast("اتحفظ");
       } catch (er) { toast(er.message, true); }
     });
   }).catch(() => {});

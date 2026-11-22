@@ -3178,4 +3178,5 @@ window.I18N_EN = {
 "الذِكر": "Dhikr",
 "قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.": "A quarter of an hour before the end of his hours the program reminds the employee to close the shift and sign out. A reminder only.",
 "بيتحمل…": "Loading…",
+"اكتب الميعادين (من ولحد) أو سيبهم فاضيين": "Fill both times (from and until) or leave both empty",
 };
