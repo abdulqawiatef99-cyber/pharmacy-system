@@ -25,19 +25,21 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
     # drawer when the courier hands it in, so it is shown on its own.
     s = dict(db.one(
         "SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(discount_total),0) discount,"
+        " coalesce(sum(rounding),0) rounding,"          # U2-14: cash rounding, on its own (not sales, not discount)
         " coalesce(sum(CASE WHEN kind='delivery' THEN 0 ELSE paid_cash END),0) cash,"
         " coalesce(sum(CASE WHEN kind='delivery' THEN paid_cash ELSE 0 END),0) delivery_cash,"
         " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
         " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=? AND sale_no IS NOT NULL"
         " AND status IN ('completed','voided') AND completed_at>=? AND completed_at<?", (o, b, lo, hi)))
-    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t,"
+    voids = db.one("SELECT count(*) n, coalesce(sum(total),0) t, coalesce(sum(rounding),0) rd,"
                    " coalesce(sum(CASE WHEN kind='delivery' THEN 0 ELSE paid_cash END),0) cash,"
                    " coalesce(sum(CASE WHEN kind='delivery' THEN paid_cash ELSE 0 END),0) delivery_cash,"
                    " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
                    " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=?"
                    " AND status='voided' AND sale_no IS NOT NULL AND voided_at>=? AND voided_at<?", (o, b, lo, hi))
-    rets = {r["m"]: {"count": r["n"], "total": r["t"]} for r in db.all(
-        "SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN sales x ON x.id=r.sale_id"
+    rets = {r["m"]: {"count": r["n"], "total": r["t"], "rounding": r["rd"]} for r in db.all(
+        "SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
+        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id"
         " WHERE r.org_id=? AND x.branch_id=? AND r.created_at>=? AND r.created_at<? GROUP BY 1", (o, b, lo, hi))}
     pur = dict(db.one(
         "SELECT count(*) n, coalesce(sum(computed_total),0) total FROM purchase_invoices WHERE org_id=? AND branch_id=?"
@@ -56,6 +58,9 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
     collected = db.one("SELECT coalesce(-sum(amount),0) t FROM customer_ledger WHERE org_id=? AND kind='payment'"
                        " AND created_at>=? AND created_at<?", (o, lo, hi))["t"]
     refunded = sum(v["total"] for v in rets.values())
+    rets_rounding = sum(v["rounding"] for v in rets.values())
+    # U2-14: the day's cash rounding, less the voids' and what the day's returns gave back (review P2)
+    s["rounding"] = s["rounding"] - voids["rd"] - rets_rounding
     ret = lambda m: rets.get(m, {}).get("total", 0)        # noqa: E731
     if not (ctx.can("costs.read") or ctx.can("suppliers.pay")):
         # purchase and supplier-return values are the owner's (as in procurement/returns.py and the item card):
@@ -66,7 +71,8 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         "day": d.isoformat(),
         "sales": {**s, "voided_count": voids["n"], "voided_total": voids["t"]},
         "returns": {"by_method": rets, "total": refunded},
-        "net_sales": s["total"] - refunded - voids["t"],
+        # the money refunded carries the rounding a return gave back: net sales take line values (review P1)
+        "net_sales": s["total"] - (refunded - rets_rounding) - voids["t"],
         "by_method": {"cash": s["cash"] - ret("cash") - voids["cash"], "card": s["card"] - ret("card") - voids["card"],
                       "transfer": s["transfer"] - voids["transfer"], "credit": s["credit"] - ret("credit") - voids["credit"],
                       "delivery_cash": s["delivery_cash"] - voids["delivery_cash"]},

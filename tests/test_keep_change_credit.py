@@ -180,3 +180,22 @@ class TestKeepChangeBrowserReceipt(__import__("unittest").TestCase):
         self.assertIn("shown = keepIt ? cashPart : given", js)                 # Codex P2: given less the kept change
         self.assertIn("printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : \"\"}`)", js)
         self.assertIn("keep_change: keepIt,", js)
+
+
+class TestKeepChangeWithCashRounding(SalesCase):
+    def test_the_change_is_counted_from_the_rounded_cash(self):
+        from app.sales import rounding
+        rounding.set_step(self.db, self.ctx, 50)
+        cust = self.s.create_customer(self.ctx, name="عميل تقريب", phone="01000000088")
+        cd = CashDrawer(self.db)
+        start = cd.summary(self.ctx)["expected_cash"]
+        sid = self.s.create(self.ctx, cust)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+        self.s.update_line(self.ctx, sid, d["lines"][0]["id"], discount_amount=10)   # 18.90 -> 19.00 in cash
+        d = self.s.get(self.ctx, sid)
+        self.s.complete(self.ctx, sid, paid_cash=d["cash_total"], safety_decisions=self.ack_all(sid),
+                        change_to_credit=2000 - d["cash_total"])                     # he gave 20.00, left 1.00
+        self.assertEqual(self.s.balance(self.ctx, cust), -100)
+        self.assertEqual(cd.summary(self.ctx)["expected_cash"], start + 2000)
+        row = self.db.one("SELECT total, rounding, paid_cash FROM sales WHERE id=?", (sid,))
+        self.assertEqual(tuple(row), (1890, 10, 1900))

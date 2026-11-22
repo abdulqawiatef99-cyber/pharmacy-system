@@ -689,6 +689,14 @@ class Sales:
         if s["status"] == "draft":
             s["subtotal"], s["discount_total"] = subtotal, discount
             s["total"] = subtotal - discount + (s["delivery_fee"] or 0)
+            # U2-14 (owner 22/11): only the CASH part is rounded, at payment; the total stays exact. The screen
+            # gets the step and what a cash-only payment would be
+            from .rounding import nearest, step
+            s["rounding"] = 0
+            s["rounding_step"] = step(self.db, ctx.org_id)
+            r = nearest(s["total"], s["rounding_step"])
+            s["cash_rounding"] = r if s["total"] + r > 0 else 0            # never rounded away to nothing
+            s["cash_total"] = s["total"] + s["cash_rounding"]
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
@@ -730,7 +738,7 @@ class Sales:
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
                  confirm_below_cost: bool = False, payments: list[dict] | None = None,
-                 cost_reason: str | None = None, change_to_credit: int = 0) -> dict:
+                 cost_reason: str | None = None, round_cash: bool = True, change_to_credit: int = 0) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -799,9 +807,17 @@ class Sales:
             raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
-        if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
+        # U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded
+        from .rounding import nearest, step
+        cash_due = preview["total"] - paid_card - paid_transfer - on_credit
+        # an exchange settles exactly: a return is never rounded (owner 22/11)
+        rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and paid_cash > 0 and round_cash else 0
+        if cash_due + rounding <= 0:          # review P2: no cash part rounded away (a card a little short)
+            rounding = 0
+        if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
-                                   details={"total": preview["total"]})
+                                   details={"total": preview["total"], "cash_due": max(0, cash_due),
+                                            "rounding": rounding, "cash_required": max(0, cash_due) + rounding})
         # «خليها رصيد للعميل» (U2-20 follow-up): the change the customer leaves, kept as his credit. The cash stays in
         # the drawer and his account is credited, in the same transaction as the sale
         if isinstance(change_to_credit, bool) or not isinstance(change_to_credit, int) or change_to_credit < 0:
@@ -927,9 +943,9 @@ class Sales:
                     money.receive(self.db, ctx, p["method"], p.get("channel_id"), p["amount"], "sale",
                                   ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
-                            " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
+                            " total=?, rounding=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
-                            (no, subtotal, discount, total, paid_cash,
+                            (no, subtotal, discount, total, rounding, paid_cash,
                              paid_card, paid_transfer, on_credit, _now(), request_id, sid))
             if paid_transfer:   # a proof already reviewed on the draft counts now the transfer is on its account (#348)
                 from .attachments import transfer_state
@@ -947,7 +963,7 @@ class Sales:
                                 (new_id(), ctx.org_id, s["customer_id"], -change_to_credit, sid,
                                  f"باقي فاتورة {no} اتساب رصيد", ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
-                         after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
+                         after={"no": no, "total": total, "rounding": rounding or None, "cash": paid_cash, "card": paid_card,
                                 "change_to_credit": change_to_credit or None,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
                                 "at_cost": at_cost or None, "cost_reason": cost_reason if at_cost else None})
@@ -1389,6 +1405,22 @@ class Sales:
                     r = rest if not any(kept.values()) else max(0, min(r, rest))
                 line_refunds[line_id] = r
                 refund += r
+            # U2-14: the return that empties the invoice gives its rounding back (up or down), so the customer gets
+            # exactly what he paid in all and nobody gains by a return; a partial return is never rounded
+            # (review P1) with a rounding down, the lines are worth more than was paid: no return, alone or added up,
+            # may give back more than the invoice took for its items (total - delivery fee); the emptying one settles
+            # exactly what is left of it
+            rounding_back = 0
+            if s["rounding"]:
+                # the invoice took for its items: the exact total plus its cash rounding, less the delivery fee
+                paid_back = self.db.one("SELECT coalesce(sum(total),0) t FROM sale_returns WHERE sale_id=? AND org_id=?",
+                                        (sid, ctx.org_id))["t"]
+                left = max(0, s["total"] + s["rounding"] - (s["delivery_fee"] or 0) - paid_back)
+                emptied = not self.db.one(
+                    "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id))
+                new = left if emptied else min(refund, left)
+                rounding_back, refund = new - refund, new
             if refund_method in ("cash", "card"):
                 # a refund to the card follows the same cap: money never received cannot go back to a card either
                 # #142 (owner's rule, 11/11): cash can be paid back only for money the shop actually received
@@ -1437,10 +1469,12 @@ class Sales:
             rid = new_id()
             # created_at by the same clock and format as the shift times: the shift report places card and
             # credit refunds by them (Codex P2 on #323; the table default has milliseconds only)
-            self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
-                            " created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                            (rid, ctx.org_id, sid, refund, refund_method, reason.strip(), ctx.user_id, _now()))
-            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund, sid))
+            self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
+                            " created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (rid, ctx.org_id, sid, refund, rounding_back, refund_method, reason.strip(), ctx.user_id, _now()))
+            # review P1: the sale's returns are line values (sales and profit stay exact); the money paid back,
+            # with its rounding, is the return's own total and moves the drawer / card / account
+            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund - rounding_back, sid))
             if refund_method == "credit":
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'return', ?, ?)",
@@ -1463,7 +1497,7 @@ class Sales:
                     ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي", kind="return")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
-                                "line_refunds": line_refunds})
+                                "line_refunds": line_refunds, "rounding": rounding_back or None})
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
                         if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
@@ -1624,7 +1658,7 @@ class Sales:
                 payments = [{"method": "card", "amount": n_total, "channel_id": channel_id}]
             sale = self.complete(ctx, new_sid, payments=payments, version=version, request_id=request_id,
                                  safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost,
-                                 cost_reason=cost_reason)
+                                 cost_reason=cost_reason, round_cash=False)
             out = {"return_id": ret["return_id"], "original_sale_id": sid, "sale_id": new_sid,
                    "returned": r_value, "new_total": n_total, "net": n_total - r_value,
                    "refund_method": refund_method, "pay_method": pay_method,
