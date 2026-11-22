@@ -36,9 +36,14 @@ def nearest(total: int, st: int) -> int:
 
 def set_step(db: Database, ctx: Context, value) -> int:
     ctx.require("settings.manage")
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
+    # an exact whole number only: 25.9 or "0.9" is refused, never truncated into another policy (Codex P1 on #415)
+    if isinstance(value, bool):
+        v = -1
+    elif isinstance(value, int):
+        v = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        v = int(value.strip())
+    else:
         v = -1
     if v not in STEPS:
         raise ValidationFailed("اختار: من غير تقريب، ربع جنيه، نص جنيه، أو جنيه")

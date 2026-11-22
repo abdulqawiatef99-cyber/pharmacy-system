@@ -17,8 +17,9 @@ class TestNearest(SalesCase):
     def test_setting(self):
         self.assertEqual(rounding.step(self.db, self.ctx.org_id), 0)          # a new pharmacy: off until chosen
         self.assertEqual(rounding.set_step(self.db, self.ctx, "50"), 50)
-        with self.assertRaises(ValidationFailed):
-            rounding.set_step(self.db, self.ctx, 30)
+        for bad in (30, 25.9, 0.9, "0.9", True, None):
+            with self.assertRaises(ValidationFailed):
+                rounding.set_step(self.db, self.ctx, bad)
         with self.assertRaises(Forbidden):
             rounding.set_step(self.db, replace(self.ctx, permissions=frozenset()), 25)
 
