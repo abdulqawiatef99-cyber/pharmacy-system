@@ -289,3 +289,16 @@ class TestScreen(__import__("tests.test_api", fromlist=["APICase"]).APICase):
         self.assertEqual((out["margin"], out["row"]), ("4.00", "80.00"))
         self.assertIn("هامشالموزع20.00", "".join(out["totals"].split()))
         self.assertEqual(p.get(self.ctx, inv_id)["invoice"]["computed_total"], 42000)
+
+
+class TestHashOrder(Paper):
+    def test_same_lines_in_another_order_give_the_same_hash(self):
+        """Codex P2 on #440: two lines equal on (name, qty, total) but with different margins hash the same in any order."""
+        h = lambda inv: self.db.one("SELECT content_hash FROM purchase_invoices WHERE id=?", (inv,))["content_hash"]  # noqa: E731
+        def make(order):
+            inv = self.p.create_manual(self.ctx, supplier_id=self.sup)
+            for m in order:
+                self.p.add_line(self.ctx, inv, {"raw_name": "Twin", "qty": 2, "unit_net_price": 1000, "line_total": 2000,
+                                                "distributor_margin": m}, None)
+            return h(inv)
+        self.assertEqual(make([100, 300]), make([300, 100]))
