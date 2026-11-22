@@ -1812,7 +1812,7 @@ async function viewItemEdit(id) {
       <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
       <label class="f">عدد الوحدات في العبوة <input name="pack_size" type="number" min="1" step="1" value="${it.pack_size}" ${id && it.stock_qty ? "disabled" : ""}>
         ${id && it.stock_qty ? `<span class="muted">مقفلة لأن للصنف رصيدًا</span>` : ""}
-        ${id && can("inventory.adjust") ? `<button type="button" class="btn small secondary" id="packFixBtn">تصحيح عدد الوحدات (الرصيد يتحوّل معاه)</button>` : ""}</label>
+        ${id && can("inventory.adjust") && can("items.write") ? `<button type="button" class="btn small secondary" id="packFixBtn">تصحيح عدد الوحدات (الرصيد يتحوّل معاه)</button>` : ""}</label>
       <label class="f">حد الطلب (بالعبوة) <input name="min_packs" type="number" min="0" step="1" value="${it.min_stock ? Math.round(it.min_stock / it.pack_size) : ""}"></label>
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
@@ -3243,8 +3243,8 @@ async function packFix(id, suggest) {
     if (p.not_whole.length) lines.push("⚠ فيه علبة مفتوحة مش هتتحول لوحدات كاملة: اعمل جرد للصنف الأول.");
     if (p.drafts) lines.push(`⚠ الصنف في ${p.drafts} فاتورة بيع مفتوحة: اقفلها الأول.`);
     if (p.counting) lines.push("⚠ الصنف في جرد مفتوح: اعتمده أو الغيه الأول.");
-    if (p.open_credit) lines.push(`⚠ فيه ${p.open_credit} فاتورة آجل مفتوحة اتباع فيها الصنف بالعبوة القديمة: راجع مبالغها مع العملاء (البرنامج مش هيغيّرها).`);
-    lines.push("الفواتير اللي قبل التصحيح مش هتترجع ولا تتلغي بالكمية القديمة؛ أي فرق يتعمل بالجرد.");
+    if (p.open_credit) lines.push(`⚠ فيه ${p.open_credit} فاتورة آجل لعملاء عليهم رصيد اتباع فيها الصنف بالعبوة القديمة: راجع مبالغها مع العملاء (البرنامج مش هيغيّرها).`);
+    lines.push("فواتير البيع اللي قبل التصحيح مش هتترجع ولا تتلغي، والتشغيلات القديمة مش هترجع للمورد؛ أي فرق يتعمل بتسوية أو جرد.");
     if (!confirm(lines.join("\n"))) return false;
     const reason = (prompt("سبب التصحيح (إجباري):", "العبوة متسجلة غلط") || "").trim();
     if (reason.length < 3) { toast("اكتب السبب", true); return false; }
@@ -3272,8 +3272,8 @@ async function viewItemHealth() {
       $("#ihOut").innerHTML = rows.length ? `<table><thead><tr><th>الصنف</th><th>المشكلة</th><th>التفاصيل</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td>${esc(x.name)}${x.code ? ` <span class="muted small">${esc(x.code)}</span>` : ""}</td>
           <td><span class="badge ${x.status === "bad" ? "b-err" : "b-warn"}">${esc(IH_KEYS[x.key] || x.key)}</span></td>
-          <td>${esc(x.text)}${x.open_credit ? `<div class="t-warn small">⚠ ${x.open_credit} فاتورة آجل مفتوحة اتباع فيها بالعبوة دي</div>` : ""}</td>
-          <td class="row"><a class="btn small" href="#/items/${esc(x.item_id)}/edit">صحّح</a>${x.key === "pack_vs_name" && can("inventory.adjust")
+          <td>${esc(x.text)}${x.open_credit ? `<div class="t-warn small">⚠ ${x.open_credit} فاتورة آجل لعملاء عليهم رصيد اتباع فيها بالعبوة دي</div>` : ""}</td>
+          <td class="row"><a class="btn small" href="#/items/${esc(x.item_id)}/edit">صحّح</a>${x.key === "pack_vs_name" && can("inventory.adjust") && can("items.write")
             ? `<button class="btn small secondary" data-fix="${esc(x.item_id)}" data-s="${esc((x.suggest || [])[0] || "")}">صحّح العبوة</button>` : ""}</td></tr>`).join("")}</tbody></table>`
         : `<p class="t-ok">مفيش مشاكل${only ? " من النوع ده" : ""} في ${r.items_checked} صنف.</p>`;
       document.querySelectorAll("#ihChips [data-k]").forEach((b) => b.addEventListener("click", () => { only = b.dataset.k; draw(); }));

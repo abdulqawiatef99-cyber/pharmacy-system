@@ -167,6 +167,36 @@ class TestPackCorrection(SalesCase):
         self.s.return_items(self.ctx, sid2, {d2["lines"][0]["id"]: 4}, refund_method="cash", reason="test")
         self.assertEqual(inv.verify_balances(self.db, self.ctx.org_id), [])
 
+    def _whole_boxes(self):
+        with self.db.transaction():
+            old = self.db.one("SELECT id FROM batches WHERE item_id=? AND batch_no='OLD'", (self.pan,))["id"]
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=1, batch_id=old,
+                              movement_type="purchase", unit_cost=Decimal("15"))
+        return old
+
+    def test_supplier_return_of_an_old_lot_refused_new_lot_fine(self):
+        """Review P1: a lot received before the fix counts its receipts in old units."""
+        from app.procurement import returns
+        old = self._whole_boxes()
+        sup = cat.create_supplier(self.db, self.ctx, name="مورد تجربة")
+        self._fix(4)
+        with self.assertRaises(Conflict) as e:
+            returns.create(self.db, self.ctx, sup, [{"item_id": self.pan, "batch_id": old, "qty_base": 4, "reason": "expired"}])
+        self.assertEqual(e.exception.code, "pack_corrected_after")
+        with self.db.transaction():
+            fresh = inv.get_or_create_batch(self.db, self.ctx, self.pan, "AFTER", "2031-01-01")
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=8, batch_id=fresh,
+                              movement_type="purchase", unit_cost=Decimal("8"))
+        returns.create(self.db, self.ctx, sup, [{"item_id": self.pan, "batch_id": fresh, "qty_base": 4, "reason": "expired"}])
+
+    def test_loss_report_ignores_the_fix(self):
+        from app.inventory.adjust import loss_report
+        from tests.helpers import today
+        self._whole_boxes()
+        self._fix(4)
+        r = loss_report(self.db, self.ctx, today(), today())
+        self.assertEqual((r["rows"], r["total"]), ([], 0))
+
     def test_needs_adjust_right(self):
         staff = replace(self.ctx, permissions=self.ctx.permissions - {"inventory.adjust"})
         with self.assertRaises(Forbidden):

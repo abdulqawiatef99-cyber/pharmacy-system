@@ -106,21 +106,30 @@ def corrected_at(db: Database, org_id: str, item_id: str) -> str | None:
 
 
 def guard_reversal(db: Database, org_id: str, item_id: str, movement_type: str, ref_type: str | None,
-                   ref_id: str | None) -> None:
-    """Refuses putting back old-size units: a return / void of a sale completed before the pack correction, or the
-    cancel of a purchase approved before it."""
-    if movement_type not in ("sale_return", "purchase_reversal") or not ref_id:
-        return
-    if ref_type in ("sale", "sale_void"):
-        q = "SELECT completed_at d FROM sales WHERE id=? AND org_id=?"
-    elif ref_type == "purchase_invoice":
-        q = "SELECT approved_at d FROM purchase_invoices WHERE id=? AND org_id=?"
-    else:
+                   ref_id: str | None, batch_id: str | None = None) -> None:
+    """After a pack correction, refuses what would count in old-size units:
+    - a return or void of a sale completed before it (its allocations are old units), an E-Stock return (its
+      earlier program returns are old units);
+    - a supplier return or a purchase cancel touching a lot that was received before it (the lot's receipts that
+      limit those are old units; U3-1 review P1). A lot received after the correction is fine."""
+    if movement_type not in ("sale_return", "purchase_reversal", "supplier_return"):
         return
     fixed = corrected_at(db, org_id, item_id)
     if not fixed:
         return
-    doc = db.one(q, (ref_id, org_id))
-    if doc and doc["d"] and doc["d"] < fixed:
-        raise Conflict("عدد الوحدات في عبوة الصنف ده اتصحح بعد العملية دي، فكمياتها القديمة مش هترجع صح."
-                       " رجّع الكمية بتسوية مخزون أو بجرد للصنف", code="pack_corrected_after")
+    msg = ("عدد الوحدات في عبوة الصنف ده اتصحح بعد العملية دي، فكمياتها القديمة مش هترجع صح."
+           " رجّع الكمية بتسوية مخزون أو بجرد للصنف")
+    if movement_type == "sale_return":
+        if ref_type == "estock_sale_return":
+            raise Conflict(msg, code="pack_corrected_after")
+        if ref_type in ("sale", "sale_void") and ref_id:
+            doc = db.one("SELECT completed_at d FROM sales WHERE id=? AND org_id=?", (ref_id, org_id))
+            if doc and doc["d"] and doc["d"] < fixed:
+                raise Conflict(msg, code="pack_corrected_after")
+        return
+    old_lot = db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND item_id=? AND coalesce(batch_id,'')=?"
+                     " AND qty_delta>0 AND coalesce(ref_type,'')<>'pack_fix' AND created_at<? LIMIT 1",
+                     (org_id, item_id, batch_id or "", fixed))
+    if old_lot:
+        raise Conflict("التشغيلة دي اتستلمت قبل تصحيح عدد الوحدات في العبوة، فمينفعش ترجع للمورد أو تتلغي فاتورتها"
+                       " بالكميات القديمة. اعملها بتسوية مخزون", code="pack_corrected_after")

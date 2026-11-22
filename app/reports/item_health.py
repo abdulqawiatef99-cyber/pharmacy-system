@@ -86,12 +86,11 @@ def item_health(db: Database, ctx: Context) -> dict:
         "   FROM stock_balances s LEFT JOIN batches b ON b.id=nullif(s.batch_key,'') AND b.org_id=s.org_id"
         "   WHERE s.org_id=? GROUP BY s.item_id) sb ON sb.item_id=i.id"
         " WHERE i.org_id=? AND i.status='active'", (org, org))
-    last_pub = {r["item_id"]: r["public_price"] for r in db.all(
-        "SELECT l.item_id, l.public_price FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id"
-        " WHERE l.org_id=? AND p.org_id=? AND p.status='approved' AND l.item_id IS NOT NULL AND l.public_price>0"
-        " AND l.rowid = (SELECT l2.rowid FROM purchase_invoice_lines l2 JOIN purchase_invoices p2 ON p2.id=l2.invoice_id"
-        "   WHERE l2.item_id=l.item_id AND l2.org_id=l.org_id AND p2.status='approved' AND l2.public_price>0"
-        "   ORDER BY p2.approved_at DESC, l2.line_no DESC LIMIT 1)", (org, org))}
+    last_pub = {r["item_id"]: r["public_price"] for r in db.all(       # one pass (review P2: no per-line subquery)
+        "SELECT item_id, public_price FROM (SELECT l.item_id, l.public_price, row_number() OVER"
+        " (PARTITION BY l.item_id ORDER BY p.approved_at DESC, l.line_no DESC) rn"
+        " FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id AND p.org_id=l.org_id"
+        " WHERE l.org_id=? AND p.status='approved' AND l.item_id IS NOT NULL AND l.public_price>0) WHERE rn=1", (org,))}
     avg = {}
     if costs:
         avg = {r["item_id"]: Decimal(r["avg_cost"]) for r in db.all(
@@ -100,6 +99,7 @@ def item_health(db: Database, ctx: Context) -> dict:
     for it in items:
         dup_names.setdefault(it["name_norm"], []).append(it)
     codes = {r["code"]: r["id"] for r in items if r["code"]}
+    by_id = {r["id"]: r for r in items}
     bc_rows = db.all("SELECT barcode, item_id FROM item_barcodes WHERE org_id=?", (org,))
     out: list[dict] = []
     for it in items:
@@ -136,7 +136,7 @@ def item_health(db: Database, ctx: Context) -> dict:
     for b in bc_rows:
         other = codes.get(b["barcode"])
         if other and other != b["item_id"]:
-            it = next((x for x in items if x["id"] == b["item_id"]), None)
+            it = by_id.get(b["item_id"])
             if it:
                 out.append(_row(it, "barcode_is_other_code", "warn",
                                 f"الباركود {b['barcode']} هو نفسه كود صنف تاني — المسح ممكن يجيب الصنف الغلط"))
@@ -148,7 +148,9 @@ def item_health(db: Database, ctx: Context) -> dict:
 
 
 def open_credit_sales(db: Database, ctx: Context, item_id: str) -> int:
-    """Completed credit invoices selling this item whose customer still owes money (U3-1: warn before a pack fix)."""
+    """Completed credit invoices selling this item whose customer still has a balance (U3-1: warn before a pack fix).
+    The customer's balance is not split per invoice, so an invoice already paid by a customer who owes for another
+    one is counted too: the screen says «لعملاء عليهم رصيد», never «unpaid»."""
     return db.one(
         "SELECT count(DISTINCT s.id) n FROM sales s JOIN sale_lines l ON l.sale_id=s.id AND l.org_id=s.org_id"
         " WHERE s.org_id=? AND l.item_id=? AND s.status='completed' AND s.on_credit>0 AND s.customer_id IS NOT NULL"
