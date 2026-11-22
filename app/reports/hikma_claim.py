@@ -169,18 +169,28 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
                    " AND action='sale.return' AND after_json LIKE ?", (org, r["sid"], f'%"{r["id"]}"%'))
         after = json.loads(a["after_json"]) if a else {}
         lines, refunds = after.get("lines") or {}, after.get("line_refunds") or {}
+        per_line = []
         for lid, q in lines.items():
             q = int(q)
-            al = db.all("SELECT a.rowid rid, a.qty_base, a.unit_cost, coalesce(b.owner,'pharmacy') owner FROM sale_allocations a"
-                        " JOIN sale_lines l ON l.id=a.sale_line_id AND l.org_id=? LEFT JOIN batches b ON b.id=a.batch_id"
-                        " AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))
-            line_v = int(refunds.get(lid, 0)) if refunds else (r["total"] if len(lines) == 1 else 0)
+            al = db.all("SELECT a.rowid rid, a.qty_base, a.unit_cost, a.unit_price, coalesce(b.owner,'pharmacy') owner"
+                        " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id AND l.org_id=? LEFT JOIN batches b"
+                        " ON b.id=a.batch_id AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))
             left, takes = q, []
             for x in al:
                 t = min(left, x["qty_base"])
                 if t > 0:
                     takes.append((x, t))
                     left -= t
+            per_line.append((lid, q, takes))
+        if refunds:
+            values = [int(refunds.get(lid, 0)) for lid, _, _ in per_line]
+        else:
+            # an older return has only its total (Codex P1 on #416): spread it over its lines by their price, the last
+            # line taking the remainder, so the lines add up to the refund exactly
+            from ..sales.service import spread
+            weights = [sum((x["unit_price"] or 0) * t for x, t in takes) for _, _, takes in per_line]
+            values = spread(r["total"], weights) if sum(weights) > 0 else [r["total"]] + [0] * (len(per_line) - 1)
+        for (lid, q, takes), line_v in zip(per_line, values):
             done_v = 0
             for k, (x, t) in enumerate(takes):
                 v = line_v - done_v if k == len(takes) - 1 else line_v * t // q

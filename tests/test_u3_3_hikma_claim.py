@@ -105,3 +105,28 @@ class TestHikmaReviewFixes(TestHikmaClaim):
     def test_bad_settings_input(self):
         with self.assertRaises(ValidationFailed):
             hk.save_settings(self.db, self.ctx, "shibin", ["x"], 0)
+
+
+class TestCodexOn416(TestHikmaClaim):
+    def test_old_return_without_line_refunds_keeps_its_value(self):
+        from app.core import audit
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        from decimal import Decimal
+        other = cat.create_item(self.db, self.ctx, {"name_en": "Other Item", "public_price": 1000})
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=other, qty_delta=5, movement_type="opening", unit_cost=Decimal("6"))
+        sid = self.s.create(self.ctx, self.cust)
+        self.s.add_line(self.ctx, sid, self.pan, units=1)
+        d = self.s.add_line(self.ctx, sid, other, units=1)
+        d = self.s.complete(self.ctx, sid, on_credit=d["total"], safety_decisions=self.ack_all(sid))
+        rid = new_id()
+        lines = {l["id"]: 1 for l in d["lines"]}
+        with self.db.transaction():          # a return booked before line_refunds existed: its total only
+            self.db.execute("UPDATE sales SET completed_at='2026-01-05T10:00:00.000000Z' WHERE id=?", (sid,))
+            self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason, created_by,"
+                            " created_at) VALUES (?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                            (rid, self.ctx.org_id, sid, d["total"], "credit", "قديم", self.ctx.user_id))
+            audit.record(self.db, self.ctx, "sale.return", "sale", sid, after={"return_id": rid, "lines": lines})
+        pr = hk.claim(self.db, self.ctx, "shibin", today(), today())["previous_returns"]
+        self.assertEqual(pr["value"], d["total"])
