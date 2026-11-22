@@ -199,3 +199,22 @@ class TestKeepChangeWithCashRounding(SalesCase):
         self.assertEqual(cd.summary(self.ctx)["expected_cash"], start + 2000)
         row = self.db.one("SELECT total, rounding, paid_cash FROM sales WHERE id=?", (sid,))
         self.assertEqual(tuple(row), (1890, 10, 1900))
+
+
+class TestKeepChangeCodexP2(SalesCase):
+    def test_a_later_shift_void_reverses_the_rounding_once(self):
+        from app.sales import rounding
+        rounding.set_step(self.db, self.ctx, 50)
+        cust = self.s.create_customer(self.ctx, name="عميل شيفتين", phone="01000000099")
+        cd = CashDrawer(self.db)
+        sid = self.s.create(self.ctx, cust)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+        self.s.update_line(self.ctx, sid, d["lines"][0]["id"], discount_amount=10)     # 18.90 -> 19.00
+        self.s.complete(self.ctx, sid, paid_cash=1900, safety_decisions=self.ack_all(sid), change_to_credit=100)
+        a = cd.summary(self.ctx)
+        cd.close(self.ctx, counted_cash=a["expected_cash"], note="عدّ تجربة", float_left=a["expected_cash"])
+        cd.open(self.ctx, a["expected_cash"])
+        self.s.void(self.ctx, sid, reason="غلط في الفاتورة")                          # two void movements
+        b = cd.summary(self.ctx)
+        self.assertEqual(b["rounding_total"], -10)                                   # once, not -0.20
+        self.assertEqual(cd.report(self.ctx, b["id"])["rounding_total"], -10)
