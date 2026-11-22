@@ -8,6 +8,41 @@
 
 
 
+## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
+Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
+
+**Released to main (owner «موافق» 11:18 Cairo):** #410 merged into main as `77807d1`. The signed «update-main» bundle is published for that commit; the «تحديث» button gets it.
+
+**Released to main — update 3 (owner approval 22/11 via the manager, usual gates):** #426 merged as `a0fb303` at 12:06 UTC; linux + windows green on `9ee5117`; signed «update-main» published for `a0fb303`, manifest lists 0042. The owner presses «تحديث» (the manager tells him).
+
+**What #426 carried** (merged into develop since #410):
+| PR | Item | Merge |
+|---|---|---|
+| #414 | U2-33 below cost refused for everyone (at cost = `sales.below_cost` + reason), U2-17 no split, U2-21 dispensing notes | `745bf15` |
+| #416 | U3-3 Hikma claim (any period, per branch, Excel) | `75bc93d` |
+| #425 | U3-4 app window (launcher; reaches the PC only with the installer) | `aa40585` |
+| #415 | U2-14 rounding of the CASH part only (owner 22/11), migration 0042, receipt + shift print lines | `ff87d8e` |
+| #424 | «خليها رصيد للعميل» + one-click credit use (manager correction 22/11: the drawer includes the kept change) | `c86974d` |
+| #428 | wording «له رصيد» (not «ليه») | `9ee5117` |
+The owner approved #415/#424/#425 at 11:38 with «اعمل حساب خوازيق المستقبل»: each got tests for the traps he listed. #415 was redesigned (cash part only).
+
+**Still open, for the next release** (not in update 3):
+| PR | Item | State |
+|---|---|---|
+| #421 | U3-7 dhikr strip + work hours | needs develop merged in + Codex (one open P2: stop the strip when the session expires) |
+| #419 | U3-6 customer medicines | needs develop merged in + Codex |
+| #418 | U3-5 daily mini-count | needs develop merged in + Codex |
+| #422 | U3-8 owner shift summary | needs develop merged in + Codex |
+| #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** (not in the 11:38 approval) |
+
+**Next PRs (manager 22/11, not started).** Update 4 (E-Stock move button, purchases/smart-order rebuild, screen-switch speed, purchase invoice fixed margins) starts in a NEW session with its own spec.
+1. Login security: wrong passwords never lock the real user; growing delay per device/IP; every failed attempt logged (target user, device, time); the bell tells owner/manager in plain Arabic; the owner can block a device; the right password always works. Tests: an attacker cannot lock a user out; brute force stays impractical.
+2. Update UX: the «تحديث» button glows when an update exists; after download one clear choice «حدّث دلوقتي (دقيقة)» or «لما البرنامج يفضى»; rename «إلغاء الميعاد» (e.g. «ماتحدّثش دلوقتي»).
+
+After the update on the PC (in #426's body): device check per #18; traps: rounding is on at 0.50 right after the update; after a confirmed start the old code refuses a database with 0042 (going back = restore the pre-update backup); the app window needs the installer (launcher.py is stage 0).
+NOT done this session: U3-2 reference → safety drafts, U2-27 silent printing, U2-6 print time (migration), U2-31 two drawers (migration), U3-7 fridge log (migration), «تغيّر سعر البيع للمخزون الحالي؟», «بيع بسعر التكلفة» per customer, receipt templates/preview (U2-23 part).
+Known P2s left: U3-1 refill/90-day figures keep old units for one window after a pack fix; #423 long rows cut on 58 mm; the app window's fallback fires only when Edge/Chrome cannot start.
+
 ## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
 Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
 - #407 merged `db2350b` (its first CI run failed only on date tests that crossed UTC midnight mid-run; the re-run on the same head passed). #408 (HANDOFF) merged `d33a87b`.
