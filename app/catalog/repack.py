@@ -80,7 +80,7 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
         old = p["old_pack"]
         # the ledger position before the correction: receipts are ordered by it, never by timestamps of different
         # precision (Codex P2 on #420)
-        seq = db.one("SELECT coalesce(max(rowid),0) s FROM stock_movements")["s"]
+        seq = db.one("SELECT coalesce(max(rowid),0) s FROM stock_movements WHERE org_id=?", (ctx.org_id,))["s"]
         for l in p["lots"]:
             delta = l["new_qty"] - l["qty"]
             if delta:
@@ -95,8 +95,17 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
         it = db.one("SELECT min_stock, max_stock FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
         mn = _half_up_scale(it["min_stock"] or 0, new_pack, old)
         mx = None if it["max_stock"] is None else _half_up_scale(it["max_stock"], new_pack, old)
-        db.execute("UPDATE items SET pack_size=?, min_stock=?, max_stock=?, updated_at=? WHERE id=? AND org_id=?",
-                   (new_pack, mn, mx, inv._now(), item_id, ctx.org_id))
+        # the item's identity includes its pack size (Codex P2 on #420): recomputed, keeping a deliberate duplicate suffix
+        from .normalize import dedupe_key
+        row = db.one("SELECT name_en, name_ar, strength, dosage_form, manufacturer, dedupe_key FROM items WHERE id=? AND org_id=?",
+                     (item_id, ctx.org_id))
+        key = dedupe_key(row["name_en"] or row["name_ar"], row["strength"], row["dosage_form"], new_pack, row["manufacturer"])
+        if "|dup:" in (row["dedupe_key"] or ""):
+            key += row["dedupe_key"][row["dedupe_key"].index("|dup:"):]
+        if db.one("SELECT 1 FROM items WHERE org_id=? AND dedupe_key=? AND id<>?", (ctx.org_id, key, item_id)):
+            raise Conflict("فيه صنف تاني بنفس الاسم والعبوة الجديدة: ادمجهم الأول أو فرّق الاسم", code="pack_duplicate")
+        db.execute("UPDATE items SET pack_size=?, min_stock=?, max_stock=?, dedupe_key=?, updated_at=? WHERE id=? AND org_id=?",
+                   (new_pack, mn, mx, key, inv._now(), item_id, ctx.org_id))
         audit.record(db, ctx, ACTION, "item", item_id, {"pack_size": old},
                      {"pack_size": new_pack, "reason": reason, "lots": len(p["lots"]), "open_credit": p["open_credit"],
                       "ledger_seq": seq})

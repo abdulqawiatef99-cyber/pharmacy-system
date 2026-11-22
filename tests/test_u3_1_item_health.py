@@ -251,3 +251,12 @@ class TestCodexOn420Order(TestPackCorrection):
         with mock.patch.object(repack, "corrected_at", return_value="0000-01-01T00:00:00.000000Z"):
             with self.assertRaises(Conflict):
                 returns.create(self.db, self.ctx, sup, [{"item_id": self.pan, "batch_id": old, "qty_base": 4, "reason": "expired"}])
+
+
+class TestCodexOn420Again(TestPackCorrection):
+    def test_identity_follows_the_new_pack(self):
+        self._whole_boxes()
+        self._fix(4)
+        with self.assertRaises(Conflict):                 # the same item with pack 4 is now a duplicate
+            cat.create_item(self.db, self.ctx, {"name_en": "Panadol 500mg 24 tab", "pack_size": 4, "public_price": 4000})
+        cat.update_item(self.db, self.ctx, self.pan, {"name_en": "Panadol 500mg 24 tab"})   # saving it again works
