@@ -118,32 +118,28 @@ class TestEngine(SafetyCase):
         with self.assertRaises(Conflict):
             self.se.edit_approved_rule(self.ctx, r2)
 
-    def test_partial_pack_default_policy(self):
-        # launch day 21/11 (owner): a strip of a box is a normal sale, no notice without a forbidding policy
-        f = self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True}])
-        self.assertNotIn("split_unknown", self.codes(f))
-        src = self.se.add_source(self.ctx, name="سياسة الصيدلية الداخلية", version="1", license="internal")
-        rid = self.se.create_rule(self.ctx, rule_type="split_policy", severity="moderate",
-                                  title="بيع الشريط", explanation="مسموح بيع شريط مع النشرة",
-                                  params={"scope": "all_items", "allow_partial_pack": True,
-                                          "allow_tablet_split": False}, source_id=src)
-        self.se.approve_rule(self.ctx, rid, self_approval_reason="سياسة الصيدلية المعتمدة")
-        f = self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True}])
-        self.assertNotIn("split_unknown", self.codes(f))
-        f = self.se.check(self.ctx, [{"item_id": self.a, "tablet_split": True}])
-        self.assertIn("split_forbidden", self.codes(f))
+    def test_no_split_findings_and_no_split_rules(self):
+        """U2-17 (owner: «يلزم قرار الصيدلي» on every item): tablet splitting is gone from the engine; a strip or a
+        unit of the item's own pack is a normal sale; no split setting can be created any more."""
+        for line in ({"item_id": self.a, "partial_pack": True}, {"item_id": self.a, "tablet_split": True}):
+            codes = self.codes(self.se.check(self.ctx, [line]))
+            self.assertFalse({"split_unknown", "split_forbidden"} & set(codes), codes)
+        with self.assertRaises(ValidationFailed):
+            self.se.create_rule(self.ctx, rule_type="split_policy", severity="high", title="no split",
+                                explanation="fictional", params={"item_id": self.a, "allow_partial_pack": True,
+                                                                 "allow_tablet_split": False}, source_id=self.src)
 
-    def test_split_policy_absent_means_ask(self):
-        f = self.se.check(self.ctx, [{"item_id": self.a, "tablet_split": True}])
-        self.assertIn("split_unknown", self.codes(f))
-        rid = self.se.create_rule(self.ctx, rule_type="split_policy", severity="high",
-                                  title="no split", explanation="fictional",
-                                  params={"item_id": self.a, "allow_partial_pack": True,
-                                          "allow_tablet_split": False}, source_id=self.src)
-        self.se.approve_rule(self.ctx, rid, self_approval_reason="مراجعة ذاتية موثقة")
-        f = self.se.check(self.ctx, [{"item_id": self.a, "tablet_split": True, "partial_pack": True}])
-        self.assertIn("split_forbidden", self.codes(f))
-        self.assertNotIn("split_unknown", self.codes(f))
+    def test_an_old_split_rule_in_the_database_is_ignored(self):
+        import json
+        from app.db import new_id
+        with self.db.transaction():
+            self.db.execute("INSERT INTO safety_rules (id, org_id, rule_type, severity, title, explanation, params,"
+                            " status, version, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (new_id(), self.ctx.org_id, "split_policy", "high", "old", "old",
+                             json.dumps({"scope": "all_items", "allow_partial_pack": False, "allow_tablet_split": False}),
+                             "approved", 1, self.ctx.user_id))
+        codes = self.codes(self.se.check(self.ctx, [{"item_id": self.a, "partial_pack": True, "tablet_split": True}]))
+        self.assertFalse({"split_unknown", "split_forbidden"} & set(codes), codes)
 
 
 class TestOverrides(SafetyCase):

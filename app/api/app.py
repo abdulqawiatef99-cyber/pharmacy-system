@@ -770,6 +770,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(ui_settings.save(db, ctx, await body(req)))
         return J(ui_settings.get(db, ctx.org_id))
 
+    @handler
+    async def dispensing_notes_api(req):
+        from ..safety import dispensing
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(dispensing.save(db, ctx, (await body(req)).get("notes")))
+        ctx.require("items.read")
+        return J(dispensing.get(db, ctx.org_id))
+
     # ------------------------------------------------------------- people: PIN, approval, users
     def _local_only(req):
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
@@ -2274,7 +2283,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                    confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                    confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
@@ -2317,7 +2326,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
@@ -2572,6 +2581,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def cash_shifts(req):
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
+
+    @handler
+    async def hikma_claim_api(req):
+        from ..reports import hikma_claim as hk
+        ctx, q = ctx_of(req), req.query_params
+        return J(await off_loop(hk.claim, db, ctx, q.get("branch") or "", q.get("from") or "", q.get("to") or ""))
+
+    @handler
+    async def hikma_settings_api(req):
+        from ..reports import hikma_claim as hk
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            b = await body(req)
+            return J(hk.save_settings(db, ctx, str(b.get("branch") or ""), b.get("customer_id") or None,
+                                      _int(b.get("advance"), "advance")))
+        ctx.require("costs.read")
+        ctx.require("sales.totals")
+        return J(hk.settings(db, ctx.org_id))
 
     @handler
     async def day_review_api(req):
@@ -3055,6 +3082,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
         Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
+        Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
         Route("/api/attachments/{id}", attachment_get),
         Route("/api/attachments/{id}/review", attachment_review, methods=["POST"]),
@@ -3217,6 +3245,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/system/slow-requests", slow_requests),
         Route("/api/reports/day-review", day_review_api),
+        Route("/api/reports/hikma-claim", hikma_claim_api),
+        Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
