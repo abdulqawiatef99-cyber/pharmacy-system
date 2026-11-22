@@ -905,7 +905,7 @@ async function viewCustomize() {
     }));
     app.querySelectorAll("[data-pk]").forEach((s) => s.addEventListener("change", () => {
       const a = s.dataset.pk, k = s.value, other = Object.keys(POS_KEY_DEFAULTS).find((b) => b !== a && ui.pos_keys[b] === k);
-      if (other) { toast(`الزرار ${k} متاخد لـ«${POS_KEY_NAMES[other]}» — غيّره هناك الأول`, true); s.value = ui.pos_keys[a]; return; }
+      if (other) { toast("الزرار ده متاخد لحاجة تانية — غيّرها هناك الأول", true); s.value = ui.pos_keys[a]; return; }
       save({ pos_keys: { [a]: k } });
     }));
     $("#cuPkReset")?.addEventListener("click", (e) => { if (confirmInline(e.target)) save({ pos_keys: {} }); });
@@ -3461,6 +3461,8 @@ async function viewPos() {
   QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "نفد" (11/01; «ناقص» = not in the market, update 1)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   RCFG = await api("/api/settings/receipt").catch(() => RCFG);
+  // another PC may have changed the sale screen's keys since this one loaded (U2-19)
+  ME.ui = await api("/api/settings/ui").catch(() => ME.ui);
   const drafts = (await api("/api/sales/drafts")).drafts;
   if (!SALE || SALE.status !== "draft" || !drafts.some((d) => d.id === SALE.id)) {
     await openDraft(drafts.length ? drafts[drafts.length - 1].id : null);
@@ -3545,7 +3547,7 @@ async function viewPos() {
     liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
   });
   q.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
+    if (e.key !== "Enter" || e.ctrlKey) return;          // Ctrl+Enter is a sale-screen key (U2-19), not a search
     e.preventDefault();
     clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
@@ -3620,8 +3622,8 @@ const POS_KEY_DEFAULTS = { search: "F1", branch_stock: "F2", item_card: "F3", re
 const POS_KEY_NAMES = { search: "بحث عن صنف", branch_stock: "رصيد الصنف في الفروع", item_card: "كارت الصنف", receipt: "إيصال",
   qty: "الكمية", exchange: "مرتجع واستبدال", done: "إتمام البيع", pay: "الدفع ثم الحفظ", drawer: "فتح الدرج",
   new_sale: "فاتورة جديدة", next_tab: "الفاتورة اللي بعدها", cancel_sale: "إلغاء الفاتورة" };
-const POS_KEY_CHOICES = ["F1", "F2", "F3", "F4", "F6", "F7", "F9", "F10", "F11", "Insert", "Home", "End", "PageUp", "PageDown",
-  "Ctrl+Tab", "Ctrl+Delete", "Ctrl+Enter", "Ctrl+Insert"];
+// never a key used while typing (Home/End/PageUp/PageDown, the number pad without NumLock) or Ctrl+Insert (copy)
+const POS_KEY_CHOICES = ["F1", "F2", "F3", "F4", "F6", "F7", "F9", "F10", "F11", "Insert", "Ctrl+Tab", "Ctrl+Delete", "Ctrl+Enter"];
 const posKey = (a) => ME?.ui?.pos_keys?.[a] || POS_KEY_DEFAULTS[a];
 const posAction = (k) => Object.keys(POS_KEY_DEFAULTS).find((a) => posKey(a) === k);
 const POS_KEYS_ORDER = ["search", "↑ ↓", "branch_stock", "item_card", "qty", "Delete", "receipt", "pay", "drawer", "exchange",

@@ -30,3 +30,13 @@ console.log(JSON.stringify([posAction("Ctrl+Enter"), posAction("F9"), posAction(
     def test_handler_has_no_fixed_keys_left(self):
         h = JS[JS.index("  const act = posAction(k);"):JS.index("// Manual drawer opening (#81)")]
         self.assertEqual(re.findall(r'k === "(F\d+|Insert|Ctrl\+\w+)"', h), ["F8"])
+
+    def test_choices_match_the_server_and_no_typing_keys(self):
+        m = re.search(r"const POS_KEY_CHOICES = \[(.*?)\];", JS, re.S)
+        choices = re.findall(r'"([^"]+)"', m.group(1))
+        self.assertEqual(tuple(choices), ui_settings.POS_KEYS_ALLOWED)
+        for k in ("Home", "End", "PageUp", "PageDown", "Ctrl+Insert", "F5", "F8", "F12", "Delete", "Escape"):
+            self.assertNotIn(k, choices)
+
+    def test_ctrl_enter_in_search_is_not_a_search(self):
+        self.assertIn('if (e.key !== "Enter" || e.ctrlKey) return;', JS)

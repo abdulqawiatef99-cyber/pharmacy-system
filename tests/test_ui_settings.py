@@ -42,6 +42,7 @@ class TestUi(Base):
         n = ui_settings.save(self.db, self.ctx, {"pos_keys": {"search": "F2", "branch_stock": "F1"}})
         self.assertEqual((n["pos_keys"]["search"], n["pos_keys"]["branch_stock"]), ("F2", "F1"))
         for bad in ({"pos_keys": {"done": "F5"}}, {"pos_keys": {"done": "F12"}}, {"pos_keys": {"nope": "F1"}},
+                    {"pos_keys": {"pay": "End"}}, {"pos_keys": {"pay": "Home"}}, {"pos_keys": {"done": "Ctrl+Insert"}},
                     {"pos_keys": ["F1"]}):
             with self.assertRaises(ValidationFailed, msg=bad):
                 ui_settings.save(self.db, self.ctx, bad)

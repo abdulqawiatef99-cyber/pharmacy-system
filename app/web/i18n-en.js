@@ -3146,5 +3146,6 @@ window.I18N_EN = {
 "اطبع إيصال لهذا البيع (0)": "Print a receipt for this sale (0)",
 "زراير شاشة البيع": "Sale screen keys",
 "كل زرار لحاجة واحدة بس. الأسهم وDelete وEsc وF8 (فتح الدرج) وF12 (الباركود) ثابتين.": "Each key does one thing only. The arrows, Delete, Esc, F8 (open the drawer) and F12 (the barcode) are fixed.",
-"الزرار 0 متاخد لـ«0» — غيّره هناك الأول": "Key 0 is already used for «0» — change it there first",
+"الزرار ده متاخد لحاجة تانية — غيّرها هناك الأول": "This key is already used for something else — change that one first",
+"اطبع إيصال لهذا البيع": "Print a receipt for this sale",
 };

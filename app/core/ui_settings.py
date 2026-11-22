@@ -29,8 +29,9 @@ DEFAULTS = {
 POS_KEYS_DEFAULT = {"search": "F1", "branch_stock": "F2", "item_card": "F3", "receipt": "F4", "qty": "F6",
                     "exchange": "F7", "done": "F9", "pay": "F10", "drawer": "F11", "new_sale": "Insert",
                     "next_tab": "Ctrl+Tab", "cancel_sale": "Ctrl+Delete"}
-POS_KEYS_ALLOWED = ("F1", "F2", "F3", "F4", "F6", "F7", "F9", "F10", "F11", "Insert", "Home", "End", "PageUp",
-                    "PageDown", "Ctrl+Tab", "Ctrl+Delete", "Ctrl+Enter", "Ctrl+Insert")
+# never a key used while typing (Home/End/PageUp/PageDown, the number pad without NumLock) or Ctrl+Insert (copy)
+POS_KEYS_ALLOWED = ("F1", "F2", "F3", "F4", "F6", "F7", "F9", "F10", "F11", "Insert", "Ctrl+Tab", "Ctrl+Delete",
+                    "Ctrl+Enter")
 
 
 def pos_keys(ui: dict) -> dict:
