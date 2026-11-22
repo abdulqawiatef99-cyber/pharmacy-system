@@ -75,7 +75,7 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
         out.append(("row", "فواتير ملغاة", str(r["voided_count"])))
     out.append(("rule",))
     out.append(("row", "رصيد البداية", egp(r["opening_cash"])))
-    for kind, label in (("sale", "مبيعات نقدي"), ("customer_payment", "تحصيل آجل"), ("refund", "مرتجع نقدي"),
+    for kind, label in (("sale", "مبيعات نقدي"), ("customer_payment", "تحصيل من العملاء (آجل وباقي اتساب رصيد)"), ("refund", "مرتجع نقدي"),
                         ("void", "إلغاء فواتير"), ("payout", "مصروفات من الخزينة"), ("deposit", "إيداع")):
         if k.get(kind):
             out.append(("row", label, egp(k[kind])))

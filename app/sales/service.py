@@ -27,6 +27,7 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
+KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
 DEFAULT_RETURN_DAYS = 14         # owner 21/11 10:17: «مدة المرتجع 14 يوم»; Settings can change it
 
 
@@ -737,7 +738,7 @@ class Sales:
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
                  confirm_below_cost: bool = False, payments: list[dict] | None = None,
-                 cost_reason: str | None = None, round_cash: bool = True) -> dict:
+                 cost_reason: str | None = None, round_cash: bool = True, change_to_credit: int = 0) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -817,6 +818,30 @@ class Sales:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"], "cash_due": max(0, cash_due),
                                             "rounding": rounding, "cash_required": max(0, cash_due) + rounding})
+        # «خليها رصيد للعميل» (U2-20 follow-up): the change the customer leaves, kept as his credit. The cash stays in
+        # the drawer and his account is credited, in the same transaction as the sale
+        if isinstance(change_to_credit, bool) or not isinstance(change_to_credit, int) or change_to_credit < 0:
+            raise ValidationFailed("الباقي غير صحيح")
+        if change_to_credit:
+            if not preview["customer_id"]:
+                raise ValidationFailed("الباقي يتساب رصيد لعميل متسجل بس: اختار العميل", code="customer_required")
+            if not paid_cash or delivery:
+                raise ValidationFailed("الباقي بيتساب رصيد من دفع نقدي في الصيدلية بس")
+            # a real person only (owner 22/11): not the pharmacy's own account (E-Stock customer 1) and not a
+            # contract customer (Hikma and the others), whose account is the contract's claim
+            who = self.db.one("SELECT c.name, c.notes, c.contract_id, o.name org FROM customers c JOIN organizations o"
+                              " ON o.id=c.org_id WHERE c.id=? AND c.org_id=?", (preview["customer_id"], ctx.org_id))
+            if who["contract_id"] or preview.get("contract_id"):
+                raise ValidationFailed("عميل التعاقد مايتسابلوش باقي رصيد: حسابه مطالبة التعاقد", code="keep_change_contract")
+            import re
+            if (who["name"] or "").strip() == (who["org"] or "").strip() or re.search(
+                    r"(^|؛ )كود إي ستوك: 1(؛|$)", who["notes"] or ""):
+                raise ValidationFailed("ده حساب الصيدلية نفسها: اختار العميل الحقيقي", code="keep_change_house")
+            # only real change (review P1, OWNER_RULES §13): less than the cash paid and at most 50 EGP. Anything more
+            # is an advance payment, which goes through the customer's account by the owner / a manager
+            if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
+                raise ValidationFailed(f"الباقي اللي يتساب رصيد لحد {egp(KEEP_CHANGE_MAX)} ج وأقل من المدفوع نقدي؛"
+                                       " أكتر من كده يبقى دفعة مقدمة من حساب العميل", code="keep_change_too_big")
         if on_credit:
             if not preview["customer_id"]:
                 raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")
@@ -930,8 +955,16 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], on_credit, sid, ctx.user_id))
+            if change_to_credit:
+                cash.record(self.db, ctx, change_to_credit, "customer_payment", s["customer_id"],
+                            f"باقي فاتورة {no} اتساب رصيد للعميل", branch_id=s["branch_id"])
+                self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
+                                " created_by) VALUES (?,?,?,?, 'payment', ?, ?, ?)",
+                                (new_id(), ctx.org_id, s["customer_id"], -change_to_credit, sid,
+                                 f"باقي فاتورة {no} اتساب رصيد", ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
                          after={"no": no, "total": total, "rounding": rounding or None, "cash": paid_cash, "card": paid_card,
+                                "change_to_credit": change_to_credit or None,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
                                 "at_cost": at_cost or None, "cost_reason": cost_reason if at_cost else None})
             from . import customers as _cust
@@ -1283,7 +1316,7 @@ class Sales:
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
-                     reason: str) -> dict:
+                     reason: str, give_back_change: bool = True) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
@@ -1453,6 +1486,15 @@ class Sales:
                 from ..finance import money
                 money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
                                    meta={"return_id": rid})
+            # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
+            # refunded to his account or his card, that change is already his credit and stays
+            # in cash only (review P2): a card refund never needs the drawer or an open shift; his change stays credit
+            change_back = 0
+            if give_back_change and refund_method == "cash" and not self.db.one(
+                    "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
+                change_back = self._give_back_kept_change(
+                    ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي", kind="return")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds, "rounding": rounding_back or None})
@@ -1461,7 +1503,8 @@ class Sales:
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
-        return {"return_id": rid, "refund": refund}
+        # Codex P1: the kept change paid back with it, shown to the cashier on its own (not goods value)
+        return {"return_id": rid, "refund": refund, "change_back": change_back}
 
     def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:
         """Completed sales to return from, by invoice number, item code or barcode, or customer phone or name
@@ -1522,7 +1565,8 @@ class Sales:
             pass
         try:
             with self.db.transaction():
-                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع")
+                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع",
+                                      give_back_change=False)
                 raise _Undo(r["refund"] if new_sid is None else (r["refund"], self.get(ctx, new_sid)["total"]))
         except _Undo as u:
             return u.args[0]
@@ -1596,7 +1640,8 @@ class Sales:
             if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
                                 (orig["customer_id"], new_sid, ctx.org_id))
-            ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
+            # an exchange never pays out the kept change: it stays his credit (Codex P1 on #424)
+            ret = self.return_items(ctx, sid, lines, refund_method=refund_method, give_back_change=False,
                                     reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
@@ -1678,12 +1723,39 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
+            change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
                         f"السبب: {reason.strip()}", "sale", sid)
-        return self.get(ctx, sid)
+        # Codex P1: the kept change paid back with the void, shown to the cashier on its own
+        return {**self.get(ctx, sid), "change_back": change_back}
+
+    def kept_change(self, ctx: Context, sid: str) -> int:
+        """The change of this sale left as the customer's credit and not yet given back (0 if none)."""
+        # from the sale's own audit rows (append-only): what completion kept, less what was given back
+        r = self.db.one("SELECT coalesce(sum(CASE action WHEN 'sale.complete' THEN json_extract(after_json,'$.change_to_credit')"
+                        " ELSE -json_extract(after_json,'$.amount') END),0) k FROM audit_log WHERE org_id=?"
+                        " AND entity_type='sale' AND entity_id=? AND action IN ('sale.complete','sale.kept_change_back')",
+                        (ctx.org_id, sid))
+        return int(r["k"] or 0)
+
+    def _give_back_kept_change(self, ctx: Context, s, note: str, kind: str = "void") -> int:
+        """Inside the caller's transaction: the kept change of sale `s` leaves the drawer in cash and his credit
+        goes with it (owner 22/11: a void, or the return that empties the invoice, reverses it)."""
+        kept = self.kept_change(ctx, s["id"]) if s["customer_id"] else 0
+        # review P1: only the credit he still holds goes back; what he already spent at a later sale stays spent
+        # (else he would have it twice: the goods and the cash)
+        kept = min(kept, max(0, -self.balance(ctx, s["customer_id"]))) if kept > 0 else 0
+        if kept <= 0:
+            return 0
+        cash.record(self.db, ctx, -kept, "void" if kind == "void" else "refund", s["id"], note, branch_id=s["branch_id"])
+        self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note, created_by)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (new_id(), ctx.org_id, s["customer_id"], kept, kind, s["id"], note, ctx.user_id))
+        audit.record(self.db, ctx, "sale.kept_change_back", "sale", s["id"], after={"amount": kept, "note": note})
+        return kept
 
     # ------------------------------------------------------------ reports
     def list_sales(self, ctx: Context, *, day: str | None = None, sale_no: int | None = None,

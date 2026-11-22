@@ -59,9 +59,12 @@ def _sales_of(s) -> tuple[str, tuple]:
 def _voided_elsewhere(db: Database, s) -> int:
     """U2-14 (Codex P2 on #415): the cash rounding of sales of an earlier shift voided in this one. Their cash left
     this drawer here, so their rounding leaves this shift's figure too; the earlier shift keeps its report."""
-    return db.one("SELECT coalesce(sum(x.rounding),0) r FROM cash_movements m JOIN sales x ON x.id=m.ref_id"
-                  " AND x.org_id=m.org_id WHERE m.shift_id=? AND m.org_id=? AND m.kind='void'"
-                  " AND (x.shift_id IS NULL OR x.shift_id<>?)", (s["id"], s["org_id"], s["id"]))["r"]
+    # once per sale (Codex P2 on #424): a void can move cash twice (its own cash and a kept change given back)
+    # from the shift's few void movements to their sales by id (CROSS JOIN keeps that order; no sales scan)
+    return db.one("SELECT coalesce(sum(x.rounding),0) r FROM (SELECT DISTINCT m.ref_id sid FROM cash_movements m"
+                  " WHERE m.shift_id=? AND m.org_id=? AND m.kind='void') v CROSS JOIN sales x ON x.id=v.sid"
+                  " WHERE x.org_id=? AND (x.shift_id IS NULL OR x.shift_id<>?)",
+                  (s["id"], s["org_id"], s["org_id"], s["id"]))["r"]
 
 
 def _returns_of(db: Database, s) -> dict:
