@@ -2110,6 +2110,56 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                 expensive_from=dear, **_sugg_params(req)))
 
     @handler
+    async def proc_plan(req):
+        from ..procurement import purchase_plan as pp
+        qp = req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(pp.plan, db, ctx_of(req), scope=qp.get("scope") or "default",
+                                supplies=qp.get("supplies") in ("1", "true"), expensive_from=dear))
+
+    @handler
+    async def proc_plan_xlsx(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return Response(pp.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
+
+    @handler
+    async def proc_orders(req):
+        from ..procurement import purchase_plan as pp
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            b = await body(req)
+            return J(pp.create_order(db, ctx, supplier_id=b.get("supplier_id"), lines=b.get("lines")))
+        return J({"orders": pp.list_orders(db, ctx)})
+
+    @handler
+    async def proc_order_line(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return J(pp.set_line(db, ctx_of(req), req.path_params["id"], str(b.get("item_id") or ""),
+                             status=str(b.get("status") or ""), got=b.get("got")))
+
+    @handler
+    async def proc_supplier_name(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        pp.remember_name(db, ctx_of(req), b.get("supplier_id"), b.get("item_id"), b.get("name"))
+        return J({"ok": True})
+
+    @handler
+    async def proc_message(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return J({"text": pp.message_draft(db, ctx_of(req), b.get("supplier_id"), b.get("lines"))})
+
+    @handler
     async def proc_order_xlsx(req):
         from ..procurement import smart_order
         b = await body(req)
@@ -3224,6 +3274,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/health", proc_health),
         Route("/api/procurement/smart", proc_smart),
         Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
+        Route("/api/procurement/plan", proc_plan),
+        Route("/api/procurement/plan.xlsx", proc_plan_xlsx, methods=["POST"]),
+        Route("/api/procurement/orders", proc_orders, methods=["GET", "POST"]),
+        Route("/api/procurement/orders/{id}/line", proc_order_line, methods=["POST"]),
+        Route("/api/procurement/supplier-name", proc_supplier_name, methods=["POST"]),
+        Route("/api/procurement/message", proc_message, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
