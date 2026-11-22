@@ -4593,7 +4593,7 @@ async function complete(findings) {
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
     if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : ""}`);
     QUICK = null;
-    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
+    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
     // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
     // under the drawer one when the printer was off), and it stays longer than a normal error
@@ -4643,11 +4643,16 @@ function bindPosExtras() {
     e.preventDefault();
     const ds = (await api("/api/deliveries")).deliveries;
     const ST = { out: ["b-warn", "⚠ خرجت"], delivered: ["b-info", "ℹ تم التسليم — المبلغ لم يصل بعد"] };
-    $("#posSum").innerHTML = `<section class="panel"><h2>التوصيلات المفتوحة</h2><table><thead><tr><th>فاتورة</th><th>العميل / العنوان</th><th>مندوب التوصيل</th><th>المبلغ معه</th><th>الحالة</th><th></th></tr></thead><tbody>
-      ${ds.map((d) => `<tr><td><a href="#/sales/${esc(d.sale_id)}">${d.sale_no}</a></td><td>${esc(d.customer || "")} ${esc(d.address || "")} ${esc(d.phone || "")}</td>
-        <td>${esc(d.courier || "—")}</td><td class="num">${money(d.cash_due)}</td><td><span class="badge ${ST[d.status][0]}">${ST[d.status][1]}</span></td>
+    // B2 (owner 22/11): the courier carries CASH only. A delivery paid without cash is never in his hand-in list:
+    // it is shown apart, on the road, closed with one press (nothing enters the drawer)
+    const cashRows = ds.filter((d) => d.cash_due > 0), noCash = ds.filter((d) => !(d.cash_due > 0));
+    const who = (d) => `<td><a href="#/sales/${esc(d.sale_id)}">${d.sale_no}</a></td><td>${esc(d.customer || "")} ${esc(d.address || "")} ${esc(d.phone || "")}</td><td>${esc(d.courier || "—")}</td>`;
+    $("#posSum").innerHTML = `<section class="panel"><h2>التوصيلات المفتوحة: فلوس مع المندوب</h2><table id="dlvCash"><thead><tr><th>فاتورة</th><th>العميل / العنوان</th><th>مندوب التوصيل</th><th>المبلغ معه</th><th>الحالة</th><th></th></tr></thead><tbody>
+      ${cashRows.map((d) => `<tr>${who(d)}<td class="num">${money(d.cash_due)}</td><td><span class="badge ${ST[d.status][0]}">${ST[d.status][1]}</span></td>
         <td>${d.status === "out" ? `<button class="btn small secondary" data-dst="delivered" data-id="${esc(d.sale_id)}">تم التسليم</button>` : ""}
-          <button class="btn small" data-dst="settled" data-id="${esc(d.sale_id)}">وصل المبلغ إلى الخزينة</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">لا توجد توصيلات مفتوحة</td></tr>`}</tbody></table></section>`;
+          <button class="btn small" data-dst="settled" data-id="${esc(d.sale_id)}">وصل المبلغ إلى الخزينة</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">مفيش فلوس مع المندوب</td></tr>`}</tbody></table>
+      ${noCash.length ? `<h2 class="mt">في الطريق، مدفوعة من غير نقدي (مفيش فلوس مع المندوب)</h2><table id="dlvNoCash"><thead><tr><th>فاتورة</th><th>العميل / العنوان</th><th>مندوب التوصيل</th><th></th></tr></thead><tbody>
+      ${noCash.map((d) => `<tr>${who(d)}<td><button class="btn small" data-dst="settled" data-id="${esc(d.sale_id)}">اتسلّمت — اقفلها</button></td></tr>`).join("")}</tbody></table>` : ""}</section>`;
     document.querySelectorAll("[data-dst]").forEach((b) => b.addEventListener("click", async () => {
       try { await api(`/api/sales/${b.dataset.id}/delivery`, { method: "POST", body: { status: b.dataset.dst } }); toast("تم التسجيل"); $("#posDeliv").click(); }
       catch (er) { toast(er.message, true); }
