@@ -79,6 +79,9 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     if batch_id and not db.one("SELECT 1 FROM batches WHERE id=? AND org_id=? AND item_id=?",
                                (batch_id, ctx.org_id, item_id)):
         raise NotFound("التشغيلة لا تخص هذا الصنف")
+    if movement_type in ("sale_return", "purchase_reversal"):
+        from ..catalog.repack import guard_reversal          # U3-1: no old-size units back after a pack fix
+        guard_reversal(db, ctx.org_id, item_id, movement_type, ref_type, ref_id)
     current_batch = batch_qty(db, ctx.org_id, branch_id, item_id, batch_id)
     if qty_delta < 0 and current_batch + qty_delta < 0 and not allow_negative:
         raise Conflict("الكمية غير متاحة في المخزون (ربما بيعت)", code="insufficient_stock",
