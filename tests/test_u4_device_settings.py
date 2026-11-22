@@ -272,6 +272,9 @@ class Screens(DBTestCase):
         self.assertIn('[/^#\\/setup-printers$/, viewSetupPrinters]', js)
         self.assertIn('location.hash = "#/setup-printers"', js)
         self.assertIn("اطبع ملصق تجربة", js)
+        # Codex P2 on #430: the restore uses the previewed copy, and another choice clears the preview
+        self.assertIn('body: { source: p.source.id, groups }', js)
+        self.assertIn('$("#dvSrc").addEventListener("change", () => { $("#dvPrev").innerHTML = ""; });', js)
         bat = (ROOT / "scripts" / "windows" / "launch-fresh-start.bat").read_text(encoding="ascii")
         exp = bat.index("export-device-settings")
         self.assertLess(exp, bat.index('ren "%DATA%" "%TRIAL%"'))            # read before the rename

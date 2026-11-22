@@ -2439,6 +2439,8 @@ async function renderDeviceRestore() {
     <label class="f">النسخة القديمة <select id="dvSrc">${src.map((r) => `<option value="${esc(r.id)}">${r.kind === "folder" ? "فولدر بيانات قديم" : "نسخة احتياطية"}: ${esc(r.name)} — ${esc(stamp(r.when))}</option>`).join("")}</select></label>
     <button type="button" class="btn small secondary" id="dvLook">اعرض الإعدادات اللي فيها</button>
     <div id="dvPrev" class="mt"></div>`;
+  // the restore always uses the copy that was previewed; another choice clears the preview (Codex P2 on #430)
+  $("#dvSrc").addEventListener("change", () => { $("#dvPrev").innerHTML = ""; });
   $("#dvLook").addEventListener("click", async () => {
     const b = $("#dvLook"); b.disabled = true; const out = $("#dvPrev"); out.innerHTML = `<p class="muted">جارٍ قراءة النسخة… (النسخة الاحتياطية الكبيرة بتاخد دقيقة)</p>`;
     try {
@@ -2455,7 +2457,7 @@ async function renderDeviceRestore() {
         if (!confirm("هترجع الإعدادات المختارة من النسخة القديمة مكان الإعدادات الحالية. متأكد؟")) return;
         const g = $("#dvGo"); g.disabled = true;
         try {
-          await api("/api/settings/device-restore/apply", { method: "POST", body: { source: $("#dvSrc").value, groups } });
+          await api("/api/settings/device-restore/apply", { method: "POST", body: { source: p.source.id, groups } });
           toast("✓ رجعت الإعدادات. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد");
           renderReceiptCfg(await api("/api/settings/receipt"));
           renderChannels((await api("/api/payment-channels")).channels);
