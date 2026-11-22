@@ -3167,5 +3167,9 @@ window.I18N_EN = {
 "كل زرار لحاجة واحدة بس. الأسهم وDelete وEsc وF8 (فتح الدرج) وF12 (الباركود) ثابتين.": "Each key does one thing only. The arrows, Delete, Esc, F8 (open the drawer) and F12 (the barcode) are fixed.",
 "الزرار ده متاخد لحاجة تانية — غيّرها هناك الأول": "This key is already used for something else — change that one first",
 "اطبع إيصال لهذا البيع": "Print a receipt for this sale",
+"آخر تقفيل مفيهوش جنيهات فكة": "The last close had no one-pound coins",
+"🪙 مفيش فكة": "🪙 No change",
+"أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
+"مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
 };

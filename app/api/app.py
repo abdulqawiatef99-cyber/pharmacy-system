@@ -2569,6 +2569,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(shift_tools.get_target(db, ctx.org_id))
 
     @handler
+    async def sales_change_fill(req):
+        """«مفيش فكة» (U2-20): small in-stock items that fit in the customer's change."""
+        from ..sales import change_fill
+        ctx = ctx_of(req)
+        try:
+            change = int(req.query_params.get("change") or 0)
+        except ValueError:
+            raise ValidationFailed("الباقي غير صحيح")
+        return J(await off_loop(change_fill.suggestions, db, ctx, change, req.query_params.get("sale") or None))
+
+    @handler
     async def cash_float_preview(req):
         """Which notes stay in the drawer and which go to the treasury, for the count on the close screen."""
         from ..sales import shift_tools
@@ -3110,6 +3121,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
         Route("/api/procurement/deadstock", proc_deadstock, methods=["POST"]),
+        Route("/api/sales/change-fill", sales_change_fill),
         Route("/api/sales", sales_create, methods=["POST"]),
         Route("/api/sales", sales_list),
         Route("/api/sales/summary", sales_summary),
