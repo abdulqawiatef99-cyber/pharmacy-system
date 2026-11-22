@@ -14,10 +14,12 @@
 - New PRs (each: independent agent review fixed first, then Codex, label `ci` needed for CI to run):
   | PR | Item | State |
   |---|---|---|
-  | #409 | U2-33 discount never under cost, refused when typed (owner / his PIN still passes and confirms at payment) | Codex + CI pending |
-  | #411 | U2-20 «مفيش فكة» suggestions at payment (+ no-coins hint). «خليها رصيد للعميل» REMOVED (Codex P1): needs a real recorded customer-credit flow, not built | Codex re-review + CI pending |
-  | #412 | U2-19 sale-screen keys in «تخصيص الواجهة» (conflict check, reset; typing keys not offered) | Codex + CI pending |
+  | #409 | U2-33 discount never under cost, refused when typed (owner / his PIN still passes and confirms at payment) | merged `cc96008` |
+  | #411 | U2-20 «مفيش فكة» suggestions at payment (+ no-coins hint). «خليها رصيد للعميل» REMOVED (Codex P1): needs a real recorded customer-credit flow, not built | merged `bc488b5` |
+  | #412 | U2-19 sale-screen keys in «تخصيص الواجهة» (conflict check, reset; typing keys not offered) | Codex clean on 5ce3fb4; head 68b1fa5 = develop merge only; merge when CI green |
 - U2-17 «remove tablet splitting»: NOT done — question for the owner. Tablet splitting is not on any screen: only an API flag (`tablet_split`) in `app/safety/engine.py` asks the pharmacist when there is no split policy. Partial packs (a strip of a box) are a normal sale since update 1. Ask what he saw before removing anything.
+- Owner decision on U2-33: should even the owner be refused below cost? Now he (or his PIN) can, confirming at payment (one-line change if he wants an absolute refusal).
+- New TODO from U2-20: «خليها رصيد للعميل» = record the change as customer credit in the same transaction as the sale (cash stays in the drawer, customer ledger credit). Not built.
 - Still NOT done: U2-23/U2-24 receipt (printing + `sale_unit` migration, PR-only), U2-27 silent printing (printing, PR-only), U2-14 invoice rounding (money rule + setting + setup question), U2-31 two drawers (migration), U2-21 dispensing notes UI, U2-6 print time (migration), U2-1 grid arrows, U2-10 freezes.
 - Known test fragility: several date-based tests fail when a CI run crosses midnight UTC (02:00 Cairo); re-run once.
 
