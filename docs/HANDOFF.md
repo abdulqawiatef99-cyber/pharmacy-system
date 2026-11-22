@@ -56,6 +56,13 @@ No release PR into main for the rest of update 4 until the manager says so (one 
 **B4 for the manager / device:** after «تحديث»: Settings → «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة» → data-trial-* → restore → label printer in Windows-driver mode, rows = 2 → «اطبع 3 ملصقات تجربة». If one label still spans two, send a photo + the label settings screen; code check: label test print after a restore with Windows-driver mode and rows=2 (`app/printing/labels.py`, `tests/test_*label*`).
 Lesson: run the full suite in a separate worktree (`git worktree add --detach <scratch> <sha>`), not in the working checkout: edits during a 13-minute run mix two versions.
 
+**Part 4 (22/11 night, worker session), newest line last:**
+- #439 merged `7171490`.
+- B3 = branch `claude/b3-distributor-margin` (`3942d71`): migration 0043 `purchase_invoice_lines.distributor_margin` (piasters/pack, >= 0); pharmacist = (public − 2m) × (1 − d); `validation.effective_amount` = line + qty × m (supplier balance, pack cost, total check, returns); `line_amount` = paper line (merge/split). Tests `tests/test_b3_distributor_margin.py` (22/11 paper 2,238.80 exact; the other paper's lines are NOT in the repo: ask the manager). Agent review: no P0/P1, P2 1-4 fixed. Assumptions: «m+m» same number twice; margin on paid packs only; a return credits the margin.
+- #423: Codex P1 (averaged unit price across batch prices) + P2 (policy cut on thermal) fixed on `claude/u2-23-receipt` (`fe7aee6`, develop merged `f4cda75`), tests fail before. Owner 21:22: merge on the gates, printing included (standing rule: owner pre-approves every merge into develop and main on the gates).
+- Purchase payment method = branch `claude/purchase-pay-method` (stacked on B3, `4038fbc`): migration 0044 (`pay_source`/`pay_amount`/`pay_ref`; open drafts → 'credit'); default warehouse = drawer, others آجل; paid part = one supplier payment (`suppliers.pay_from`, ref_id = invoice) in the approval transaction; refusals: above total, wallet/bank without reference, closed shift / drawer below zero, no `suppliers.pay`. `tests/test_purchase_pay_method.py`.
+- Next: full suites → PRs → Codex → merge B3, #423, pay method; then U4-3 (plan: run estock-db-read.ps1 hidden from the app, no driver = no installer; dry run on a copy; owner password → apply with the existing resumable steps), U4-5.
+
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
 Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
 
