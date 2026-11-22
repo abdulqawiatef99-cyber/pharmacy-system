@@ -39,7 +39,7 @@ def make_old(home: Path, folder: str = "data-trial-20261121-180000") -> Path:
     oid = org["org_id"]
     with db.transaction():
         for k, v in (("receipt", json.dumps(OLD_RECEIPT, ensure_ascii=False)), ("ui", json.dumps(OLD_UI)),
-                     ("receipt_logo", "iVBORw0KGgo="), ("shift_handover_pin", "secret-hash"),
+                     ("receipt_logo", "iVBORw0KGgoAAAA="), ("shift_handover_pin", "secret-hash"),
                      ("manager_expense_limit", "500000")):
             db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?,?,?)", (oid, k, v))
         db.execute("UPDATE payment_channels SET name='PayMob' WHERE org_id=? AND kind='card'", (oid,))
@@ -86,7 +86,7 @@ class DeviceSettingsCase(DBTestCase):
         users_before = self.db.one("SELECT count(*) n FROM users")["n"]
         res = dvs.restore(self.db, self.ctx, src, ["printing", "logo", "cards", "screen"])
         self.assertEqual(json.loads(self.setting("receipt"))["label_rows"], 2)
-        self.assertEqual(self.setting("receipt_logo"), "iVBORw0KGgo=")
+        self.assertEqual(self.setting("receipt_logo"), "iVBORw0KGgoAAAA=")
         ui = json.loads(self.setting("ui"))
         self.assertEqual(ui["nav_main"], ["pos", "sales"])                 # unknown screen dropped
         self.assertEqual(ui["pos_keys"], {"done": "F10", "pay": "F9"})     # unknown action dropped
@@ -154,6 +154,45 @@ class DeviceSettingsCase(DBTestCase):
         with self.assertRaises(ValidationFailed):
             dvs.preview(self.db, self.ctx, js)
         self.assertIsNone(self.setting("receipt"))
+
+    def test_bad_values_from_an_old_copy_are_dropped_not_stored(self):
+        """Review P1: the restored receipt goes through the settings screen's own checks, field by field."""
+        old = make_old(self.home)
+        odb = Database(old)
+        oid = odb.one("SELECT id FROM organizations")["id"]
+        bad = {**OLD_RECEIPT, "label_target": "C:\\Windows\\x.txt", "label_shift": 99, "copies": 7, "label_rows": 3,
+               "unknown_key": 1}
+        with odb.transaction():
+            odb.execute("UPDATE org_settings SET value=? WHERE org_id=? AND key='receipt'", (json.dumps(bad), oid))
+            odb.execute("UPDATE org_settings SET value='not a png' WHERE org_id=? AND key='receipt_logo'", (oid,))
+        odb.close()
+        dvs._cache.clear()
+        dvs.restore(self.db, self.ctx, dvs.sources(self.data, self.bk)[0], ["printing", "logo"])
+        got = json.loads(self.setting("receipt"))
+        for k in ("label_target", "label_shift", "copies", "unknown_key"):
+            self.assertNotIn(k, got)
+        self.assertEqual(got["label_rows"], 3)
+        self.assertEqual(got["receipt_target"], "win:POS-80C")
+        self.assertIsNone(self.setting("receipt_logo"))
+
+    def test_preview_sees_an_on_off_difference_in_cards(self):
+        old = make_old(self.home)
+        dvs.restore(self.db, self.ctx, dvs.sources(self.data, self.bk)[0], ["cards"])
+        odb = Database(old)
+        with odb.transaction():
+            odb.execute("UPDATE payment_channels SET is_active=0 WHERE name='PayMob'")
+        odb.close()
+        dvs._cache.clear()
+        g = {x["key"]: x for x in dvs.preview(self.db, self.ctx, dvs.sources(self.data, self.bk)[0])["groups"]}
+        self.assertFalse(g["cards"]["same"])
+
+    def test_a_copy_removed_after_the_listing_is_not_found(self):
+        old = make_old(self.home)
+        src = dvs.sources(self.data, self.bk)[0]
+        shutil.rmtree(old.parent)
+        dvs._cache.clear()
+        with self.assertRaises(NotFound):
+            dvs.preview(self.db, self.ctx, src)
 
     def test_clean_start_carry_round_trip(self):
         old = Database(make_old(self.home))

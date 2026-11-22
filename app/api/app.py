@@ -3029,8 +3029,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("settings.manage")
         b = await body(req)
-        src = dvs._find(str(b.get("source") or ""), s.data_dir, s.backup_path, _dev_dirs())
-        return J(await run_in_threadpool(dvs.preview, db, ctx, src))
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.preview(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs))))
 
     @handler
     async def device_restore_apply(req):
@@ -3038,8 +3039,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("settings.manage")
         b = await body(req)
-        src = dvs._find(str(b.get("source") or ""), s.data_dir, s.backup_path, _dev_dirs())
-        return J(await run_in_threadpool(dvs.restore, db, ctx, src, b.get("groups")))
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.restore(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs), b.get("groups"))))
 
     @handler
     async def print_label_calibrate(req):

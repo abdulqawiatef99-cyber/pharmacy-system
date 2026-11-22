@@ -66,7 +66,10 @@ def sources(data_dir: Path, backup_dir: Path, extra_dirs: tuple[Path, ...] = ())
         folders = []
     for p in folders:
         db = p / "pharmacy.db"
-        out.append({"id": _sid(db), "kind": "folder", "name": p.name, "path": str(db), "when": _when(db)})
+        try:
+            out.append({"id": _sid(db), "kind": "folder", "name": p.name, "path": str(db), "when": _when(db)})
+        except OSError:
+            continue
     zips: dict[Path, Path] = {}
     for d in (backup_dir, *extra_dirs, *OFFSITE_EXTRA):
         try:
@@ -77,8 +80,17 @@ def sources(data_dir: Path, backup_dir: Path, extra_dirs: tuple[Path, ...] = ())
                     zips.setdefault(z.resolve(), z)
         except OSError:
             continue
-    for z in sorted(zips.values(), key=lambda z: z.stat().st_mtime, reverse=True)[:MAX_ZIPS]:
-        out.append({"id": _sid(z), "kind": "backup", "name": z.name, "path": str(z), "when": _when(z)})
+    dated = []
+    for z in zips.values():
+        try:
+            dated.append((z.stat().st_mtime, z))
+        except OSError:
+            continue                                     # gone between the listing and now
+    for _, z in sorted(dated, key=lambda x: x[0], reverse=True)[:MAX_ZIPS]:
+        try:
+            out.append({"id": _sid(z), "kind": "backup", "name": z.name, "path": str(z), "when": _when(z)})
+        except OSError:
+            continue
     out.sort(key=lambda r: r["when"], reverse=True)
     return out
 
@@ -93,10 +105,11 @@ def _find(src_id: str, data_dir: Path, backup_dir: Path, extra_dirs: tuple[Path,
 # ------------------------------------------------------------------ reading a copy (read-only)
 def _read_db(path: Path) -> dict:
     """The settings of the (single) pharmacy in an older database file, opened read-only."""
-    uri = "file:" + path.resolve().as_posix() + "?mode=ro"
+    from urllib.parse import quote
+    uri = "file:" + quote(path.resolve().as_posix(), safe="/:") + "?mode=ro"
     try:
         con = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error as e:
+    except (sqlite3.Error, OSError) as e:
         raise ValidationFailed(f"الملف ده مش قاعدة بيانات البرنامج: {e}") from e
     con.row_factory = sqlite3.Row
     try:
@@ -127,7 +140,10 @@ def _read_db(path: Path) -> dict:
 
 def read_source(src: dict) -> dict:
     p = Path(src["path"])
-    mtime = p.stat().st_mtime
+    try:
+        mtime = p.stat().st_mtime
+    except OSError as e:
+        raise NotFound("النسخة دي اتشالت من مكانها") from e
     hit = _cache.get(src["id"])
     if hit and hit[0] == mtime:
         return hit[1]
@@ -215,10 +231,10 @@ def preview(db: Database, ctx: Context, src: dict) -> dict:
     for g, (title, keys, default) in GROUPS.items():
         lines = _describe(g, snap)
         if g == "cards":
-            same = sorted((c["kind"], c["name"]) for c in snap["channels"]) == \
-                sorted((c["kind"], c["name"]) for c in cur["channels"])
+            row = lambda c: (c["kind"], c["name"], int(c["is_active"]), int(c["sort"]))       # noqa: E731
+            same = sorted(map(row, snap["channels"])) == sorted(map(row, cur["channels"]))
         else:
-            same = all(snap["settings"].get(k) == cur["settings"].get(k) for k in keys)
+            same = all(_jload(snap["settings"].get(k)) == _jload(cur["settings"].get(k)) for k in keys)
         groups.append({"key": g, "title": title, "lines": lines, "available": bool(lines), "same": same,
                        "default": default and bool(lines) and not same})
     return {"source": {k: src[k] for k in ("id", "kind", "name", "when")}, "pharmacy": snap["pharmacy"],
@@ -241,6 +257,68 @@ def _clean_ui(raw: str) -> str:
         v["pos_keys"] = {a: b for a, b in v["pos_keys"].items()
                          if a in ui_settings.POS_KEYS_DEFAULT and b in ui_settings.POS_KEYS_ALLOWED}
     return json.dumps(v, ensure_ascii=False)
+
+
+def _clean_receipt(raw: str) -> tuple[str, list[str]]:
+    """The receipt / label settings of the older copy, field by field through the same checks the settings
+    screen uses (printing.settings): a field that fails is dropped (the default stays), never stored as it is
+    (a printer target is never a file path). Returns (JSON, dropped fields)."""
+    from ..printing import settings as rs
+    from ..printing.labels import DEFAULT_FIELDS, LANGS
+    v = _jload(raw)
+    if not isinstance(v, dict):
+        raise ValidationFailed("إعدادات الطباعة في النسخة دي مش مقروءة")
+    is_int = lambda x: isinstance(x, int) and not isinstance(x, bool)          # noqa: E731
+    one_of = lambda *ok: (lambda x: x if x in ok else _bad())                  # noqa: E731
+    checks = {
+        "receipt_target": lambda x: rs.check_target(x, allow_browser=True), "label_target": rs.check_target,
+        "label_size": rs.label_size_ok, "label_shift": rs.label_shift_ok, "label_variant": rs.label_variant_ok,
+        "label_flip": rs.label_flip_ok, "label_rows": rs.label_rows_ok,
+        "label_a4": lambda x: "%dx%d" % rs.a4_grid(x),
+        "paper": one_of(80, 58), "names": one_of("en", "ar", "both"), "label_lang": one_of(*LANGS),
+        "label_text_lang": one_of("ar", "en"), "label_dpi": one_of(203, 300), "drawer_timing": one_of(*rs.DRAWER_TIMINGS),
+        "time_format": one_of("12", "24"), "copies": one_of(1, 2, 3),
+        "label_gap": lambda x: x if is_int(x) and 0 <= x <= 10 else _bad(),
+        "auto_receipt_min": lambda x: x if is_int(x) and 0 <= x <= 100_000_000 else _bad(),
+        "lines": lambda x: [str(s or "").strip()[:60] for s in x[:3]] if isinstance(x, list) else _bad(),
+        "label_fields": lambda x: {k: bool(b) for k, b in x.items() if k in DEFAULT_FIELDS} if isinstance(x, dict) else _bad(),
+    }
+    for k in ("title", "footer", "header"):
+        checks[k] = lambda x: str(x or "").strip()[:80]
+    for k in ("tax_no", "cr_no"):
+        checks[k] = lambda x: str(x or "").strip()[:30]
+    for k in ("label_pharmacy", "label_phone", "label_pharmacy_en", "qr_caption", "qr2_caption"):
+        checks[k] = lambda x: str(x or "").strip()[:40]
+    for k in ("qr_text", "qr2_text"):
+        checks[k] = lambda x: str(x or "").strip()[:213]
+    for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash",
+              "show_item_count", "show_change"):
+        checks[k] = lambda x: x if isinstance(x, bool) else _bad()
+    out, dropped = {}, []
+    for k, x in v.items():
+        if k not in checks:
+            continue                                    # a field this version does not know: get() ignores it anyway
+        try:
+            out[k] = checks[k](x)
+        except (ValidationFailed, TypeError, ValueError, AttributeError):
+            dropped.append(k)
+    if out.get("label_lang") == "driver" and out.get("label_target") and not out["label_target"].startswith("win:"):
+        out.pop("label_target")
+        dropped.append("label_target")
+    return json.dumps(out, ensure_ascii=False), dropped
+
+
+def _bad():
+    raise ValidationFailed("قيمة غير صحيحة")
+
+
+def _logo_ok(raw: str) -> bool:
+    import base64
+    import binascii
+    try:
+        return base64.b64decode(raw, validate=True).startswith(b"\x89PNG\r\n\x1a\n")
+    except (binascii.Error, ValueError):
+        return False
 
 
 def _apply(db: Database, org_id: str, snap: dict, groups: list[str]) -> dict:
@@ -279,6 +357,13 @@ def _apply(db: Database, org_id: str, snap: dict, groups: list[str]) -> dict:
             val = snap["settings"][key]
             if key == "ui":
                 val = _clean_ui(val)
+            elif key == "receipt":
+                val, dropped = _clean_receipt(val)
+                if dropped:
+                    changed["receipt_dropped"] = dropped
+            elif key == "receipt_logo" and not _logo_ok(val):
+                changed["receipt_logo_dropped"] = True
+                continue
             before = db.one("SELECT value FROM org_settings WHERE org_id=? AND key=?", (org_id, key))
             if before and before["value"] == val:
                 continue
