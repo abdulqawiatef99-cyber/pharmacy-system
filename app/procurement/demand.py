@@ -6,8 +6,8 @@ unread in the archive (estock_archive.py, read-only). Rules:
 - archive lines: E-Stock's `amount` is in packs (fractions = part of a pack, as its stock table); base units =
   packs x the program item's pack size. The program item is found through the archive's map (the move's own
   result), else by the E-Stock product code = the program item code (the rule the move used);
-- returns are netted: the line's own back_amount when E-Stock filled it on any line, else the return invoices
-  (Back_Sales_details) in the month of the return; never both (no double count);
+- returns are netted per sale and item: the larger of the line's own back_amount and the return documents
+  (Back_Sales_details) for that sale, in the sale's month, never below zero; never both (no double count);
 - one event per invoice: an item on one invoice is one sale, whatever the quantity;
 - the cut-off: the archive counts only BEFORE the program's first sale, the program only from it, so a sale is
   never counted twice; the manual monthly upload counts only for months the archive does not cover.
@@ -36,6 +36,11 @@ def _dec(v) -> Decimal:
     except InvalidOperation:
         return Decimal(0)
     return d if d.is_finite() else Decimal(0)
+
+
+def _id(v) -> str:
+    s = str(v or "").strip()
+    return s[:-2] if s.endswith(".0") else s
 
 
 def _month(at) -> str | None:
@@ -76,7 +81,10 @@ def _archive_months(db: Database, ctx: Context, cut: str | None, lo: str | None 
     from ..dataimport import estock_archive
     if estock_archive.owner_org(p) != ctx.org_id:
         return {}                                          # another pharmacy's archive: nothing (#345)
-    key = (str(p), Path(p).stat().st_mtime, ctx.org_id, ctx.branch_id, cut, lo)
+    if not _archive_branch_ok(db, ctx):
+        return {}                                          # E-Stock's history belongs to the branch it moved into
+    ver = db.one("SELECT count(*) n, max(updated_at) u FROM items WHERE org_id=?", (ctx.org_id,))
+    key = (str(p), Path(p).stat().st_mtime, ctx.org_id, ctx.branch_id, cut, lo, ver["n"], ver["u"])
     with _lock:
         if key in _cache:
             return _cache[key]
@@ -89,6 +97,16 @@ def _archive_months(db: Database, ctx: Context, cut: str | None, lo: str | None 
             _cache.clear()                                 # a few windows of one archive: no growth
         _cache[key] = out
     return out
+
+
+def _archive_branch_ok(db: Database, ctx: Context) -> bool:
+    """The archive has no branch of its own: it is the history of the branch the E-Stock move ran on (its
+    import runs). Without a run on record, only a single-branch pharmacy reads it."""
+    r = db.one("SELECT branch_id FROM import_runs WHERE org_id=? AND source_system='estock_db' AND status='applied'"
+               " ORDER BY created_at DESC LIMIT 1", (ctx.org_id,))
+    if r:
+        return r["branch_id"] == ctx.branch_id
+    return db.one("SELECT count(*) n FROM branches WHERE org_id=?", (ctx.org_id,))["n"] <= 1
 
 
 def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None = None) -> dict:
@@ -105,25 +123,34 @@ def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None
                 codes[str(r["pid"]).strip()] = str(r["code"]).strip()
 
     def item_of(pid) -> str | None:
-        pid = str(pid or "").strip()
-        if pid.endswith(".0"):
-            pid = pid[:-2]
+        pid = _id(pid)
         return emap.get(pid) or by_code.get(codes.get(pid, "\0"))
 
-    at = f'replace({a.col("Sales_header", "insert_date", "h")}, " ", "T")'
+    raw = a.col("Sales_header", "insert_date", "h")
+    at = f'replace({raw}, " ", "T")'
     conds, params = [], []
     if cut:
         conds.append(f"{at} < ?")
         params.append(cut)
     if lo:
-        conds.append(f"{at} >= ?")
-        params.append(lo)
+        # the plain day filter can use the archive's insert_date index (a space or a T after the day both sort
+        # after the bare day); the exact comparison follows it
+        conds += [f"{raw} >= ?", f"{at} >= ?"]
+        params += [lo[:10], lo]
     where = " WHERE " + (" AND ".join(conds) or "1=1")
     rows = a.rows(f'SELECT {a.col(lt, "product_id", "l")} pid, {a.col("Sales_header", "sales_id", "h")} sid, {at} at,'
                   f' {a.col(lt, "amount", "l")} amt, {a.col(lt, "back_amount", "l")} back'
                   f' FROM "e_Sales_header" h JOIN "e_{lt}" l ON {a.col(lt, "sales_id", "l")}={a.col("Sales_header", "sales_id", "h")}'
                   f'{where}{extra}', (*params, *xp))
-    line_backs = any(_dec(r["back"]) > 0 for r in rows)
+    # returns: per sale and item, the larger of the line's own back_amount and the return documents for that sale
+    # (estock_returns.py does the same, #346): counted once, in the sale's month, never below zero
+    docs: dict[tuple[str, str], Decimal] = {}
+    if a.has("Back_Sales_details") and a.col("Back_Sales_details", "sales_id") != "NULL":
+        for r in a.rows(f'SELECT {a.col("Back_Sales_details", "sales_id")} sid, {a.col("Back_Sales_details", "product_id")} pid,'
+                        f' coalesce({a.col("Back_Sales_details", "back_amount")}, {a.col("Back_Sales_details", "amount")}) q'
+                        f' FROM "e_Back_Sales_details"'):
+            k = (_id(r["sid"]), _id(r["pid"]))
+            docs[k] = docs.get(k, Decimal(0)) + _dec(r["q"])
     items: dict[str, dict[str, list]] = {}
     first = None
     for r in rows:
@@ -131,21 +158,16 @@ def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None
         if not m or not iid:
             continue
         first = min(first, r["at"][:10]) if first else r["at"][:10]
-        net = _dec(r["amt"]) - (_dec(r["back"]) if line_backs else 0)
+        amt, k = _dec(r["amt"]), (_id(r["sid"]), _id(r["pid"]))
+        back = max(_dec(r["back"]), docs.get(k, Decimal(0)))
+        used = min(back, amt)
+        if k in docs:                    # a document return is used once, even with the item on two lines
+            docs[k] = max(docs[k] - used, Decimal(0))
+        net = max(amt - used, Decimal(0))
         cell = items.setdefault(iid, {}).setdefault(m, [Decimal(0), set()])
         cell[0] += net
         if net > 0:
             cell[1].add(str(r["sid"]))
-    if not line_backs and a.has("Back_sales_header") and a.has("Back_Sales_details"):
-        bat = f'replace({a.col("Back_sales_header", "insert_date", "h")}, " ", "T")'
-        for r in a.rows(f'SELECT {a.col("Back_Sales_details", "product_id", "l")} pid, {bat} at,'
-                        f' coalesce({a.col("Back_Sales_details", "back_amount", "l")}, {a.col("Back_Sales_details", "amount", "l")}) amt'
-                        f' FROM "e_Back_sales_header" h JOIN "e_Back_Sales_details" l'
-                        f' ON {a.col("Back_Sales_details", "back_sales_id", "l")}={a.col("Back_sales_header", "back_sales_id", "h")}'
-                        + where.replace(at, bat), params):
-            m, iid = _month(r["at"]), item_of(r["pid"])
-            if m and iid:
-                items.setdefault(iid, {}).setdefault(m, [Decimal(0), set()])[0] -= _dec(r["amt"])
     return {"items": items, "first": first}
 
 
@@ -204,7 +226,7 @@ def monthly(db: Database, ctx: Context, *, months: int = 12, today: date | None 
         c = acc.setdefault(r["item_id"], {}).setdefault(mo, [Decimal(0), 0])
         c[0] += Decimal(int(r["qty_base"]))
         c[1] += max(1, -(-int(r["qty_base"]) // pack.get(r["item_id"], 1))) if int(r["qty_base"]) > 0 else 0
-    items = {iid: {mo: {"units": int(c[0].quantize(Decimal(1), ROUND_HALF_UP)), "events": int(c[1])}
+    items = {iid: {mo: {"units": max(int(c[0].quantize(Decimal(1), ROUND_HALF_UP)), 0), "events": int(c[1])}
                    for mo, c in per.items()} for iid, per in acc.items()}
     return {"months": ms, "items": items, "cutoff": cut, "archive_from": first}
 
