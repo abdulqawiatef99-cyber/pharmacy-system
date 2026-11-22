@@ -9,30 +9,36 @@
 
 
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
-Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; label `ci` only on the final head after the local full suite. Merge order is one at a time (all touch app.js / i18n-en.js): merge develop into the next branch, full suite, `ci`, merge.
+Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
+
+**Released to main (owner «موافق» 11:18 Cairo):** #410 merged into main as `77807d1`. The signed «update-main» bundle is published for that commit; the «تحديث» button gets it.
+
+**Merged into develop since #410** (all in release PR **#426**, waiting for the owner's approval):
+| PR | Item | Merge |
+|---|---|---|
+| #414 | U2-33 below cost refused for everyone (at cost = `sales.below_cost` + reason), U2-17 no split, U2-21 dispensing notes | `745bf15` |
+| #416 | U3-3 Hikma claim (any period, per branch, Excel) | `75bc93d` |
+| #425 | U3-4 app window (launcher; reaches the PC only with the installer) | `aa40585` |
+| #415 | U2-14 rounding of the CASH part only (owner 22/11), migration 0042, receipt + shift print lines | `ff87d8e` |
+| #424 | «خليها رصيد للعميل» + «ليه رصيد» one-click use (manager correction 22/11: the drawer includes the kept change) | `c86974d` |
+The owner approved #415/#424/#425 at 11:38 with «اعمل حساب خوازيق المستقبل»: each got tests for the traps he listed. #415 was redesigned (cash part only).
+
+**Still open, waiting:**
 | PR | Item | State |
 |---|---|---|
-| #417 | U2-1 purchase grid keys, U2-10 two freezes | **merged** `0b96b7c` |
-| #420 | U3-1 item data health + safe pack-size correction | **merged** `603ca06` |
-| #414 | U2-33 below cost refused for everyone, U2-17 split removed, U2-21 dispensing notes | ready, waiting for Codex (conflict-only re-review) |
-| #422 | U3-8 owner shift summary | ready, waiting for Codex (conflict-only re-review) |
-| #421 | U3-7 dhikr strip + work hours | ready, waiting for Codex (conflict-only re-review; one open P2: stop the strip when the session expires) |
-| #416 | U3-3 Hikma claim | waiting for Codex (last P1 fix + conflict resolution not reviewed) |
-| #418 | U3-5 daily mini-count | waiting for Codex (last P2 fix + conflict resolution not reviewed) |
-| #419 | U3-6 customer medicines | waiting for Codex (last P2 fix + conflict resolution not reviewed) |
-| #415 | U2-14 invoice rounding (migration 0042 + printing) | **PR only, owner approves** (Codex clean before the conflict merge) |
-| #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** |
-| #424 | «خليها رصيد للعميل» (money rule) | **PR only, owner approves** |
-| #425 | U3-4 app window (launcher) | **PR only, owner approves; device check** |
-Codex hit its usage limit at 04:10 UTC. After #420 merged, every open branch got develop merged in; the only conflicts were the two "both sides added" places in app/web/app.js (route / screen lists, new view functions) and the end of app/web/i18n-en.js (both sides' translations kept). Each branch's own tests + i18n/help/screen-smoke tests pass after the merge; the next step for each is `@codex review` on the new head, then the full suite, label `ci`, merge one at a time. Release PR #410 body refreshed (develop @ `603ca06`: no migration, no requirements, nothing under printing/installer).
+| #421 | U3-7 dhikr strip + work hours | needs develop merged in + Codex (one open P2: stop the strip when the session expires) |
+| #419 | U3-6 customer medicines | needs develop merged in + Codex |
+| #418 | U3-5 daily mini-count | needs develop merged in + Codex |
+| #422 | U3-8 owner shift summary | needs develop merged in + Codex |
+| #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** (not in the 11:38 approval) |
 
-Owner questions (for the morning):
-1. A 100% gift discount on an item with a known cost is now refused (below cost). Exception wanted?
-2. A contract that takes an item under cost blocks that item for that customer (refused when added).
-3. #415: should the kept rounding count as profit in the line-based profit reports? Today only the cash/profit summary includes it.
-4. #424: kept change is capped at 50 EGP and below the cash paid; the receipt has no «اتساب رصيد» line yet.
+**Next PRs (manager 22/11, not started):**
+1. Login security: wrong passwords never lock the real user; growing delay per device/IP; every failed attempt logged (target user, device, time); the bell tells owner/manager in plain Arabic; the owner can block a device; the right password always works. Tests: an attacker cannot lock a user out; brute force stays impractical.
+2. Update UX: the «تحديث» button glows when an update exists; after download one clear choice «حدّث دلوقتي (دقيقة)» or «لما البرنامج يفضى»; rename «إلغاء الميعاد» (e.g. «ماتحدّثش دلوقتي»).
+
+Traps for the release (in #426's body): rounding is on at 0.50 right after the update; after a confirmed start the old code refuses a database with 0042 (going back = restore the pre-update backup); the app window needs the installer (launcher.py is stage 0).
 NOT done this session: U3-2 reference → safety drafts, U2-27 silent printing, U2-6 print time (migration), U2-31 two drawers (migration), U3-7 fridge log (migration), «تغيّر سعر البيع للمخزون الحالي؟», «بيع بسعر التكلفة» per customer, receipt templates/preview (U2-23 part).
-Known P2s left: U3-1 refill/90-day figures keep old units for one window after a pack fix; #423 long rows cut on 58 mm; #424 day review counts kept change as a collection.
+Known P2s left: U3-1 refill/90-day figures keep old units for one window after a pack fix; #423 long rows cut on 58 mm; the app window's fallback fires only when Edge/Chrome cannot start.
 
 ## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
 Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
