@@ -132,3 +132,21 @@ class TestBelowCostPaths(TestBelowCost):
         lid = self.s.add_line(self.m, sid, self.pan, units=2)["lines"][0]["id"]
         self.s.update_line(self.m, sid, lid, qty_base=3)                    # no discount: not refused here
         self.refused(lambda: self.s.update_line(self.m, sid, lid, discount_bp=100))
+
+    def test_choosing_a_contract_customer_that_takes_the_invoice_discount_under_cost(self):
+        """Codex P1 on #409: a contract lowers the line, so the invoice discount it already carries goes under cost."""
+        from app.sales import contracts
+        k = contracts.save(self.db, self.ctx, {"name": "نقابة", "discount_local_bp": 2000, "discount_imported_bp": 2000})[0]["id"]
+        cust = self.s.create_customer(self.ctx, name="عضو", credit_limit=0)
+        contracts.link_customer(self.db, self.ctx, cust, k)
+        sid = self.s.create(self.m)
+        self.s.add_line(self.m, sid, self.pan, units=2)                    # 40, cost 30
+        self.s.set_invoice_discount(self.m, sid, amount=500)               # 35: fine
+        version = self.s.get(self.m, sid)["version"]
+        self.refused(lambda: self.s.set_details(self.m, sid, {"customer_id": cust}))   # 40 - 8 - 5 = 27 < 30
+        d = self.s.get(self.m, sid)
+        self.assertIsNone(d["customer_id"])                                # rolled back: customer, contract, version
+        self.assertEqual((d["lines"][0]["discount"], d["version"]), (500, version))
+        approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
+        d = self.s.set_details(approved, sid, {"customer_id": cust})       # the owner's PIN: allowed
+        self.assertEqual(d["customer_id"], cust)
