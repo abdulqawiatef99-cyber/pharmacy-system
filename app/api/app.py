@@ -2284,10 +2284,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                     confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
-                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
+                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
+                                    # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
+                                    change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
+            kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
-                                                      given)
+                                                      given - kept)
         return J(done)
 
     @handler
@@ -2675,7 +2678,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         t = lambda iso: rs.fmt_when(accounts.parse_iso(iso).astimezone(), tf) if iso else "—"  # noqa: E731
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
-                ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
+                ("تحصيل من العملاء (آجل وباقي اتساب رصيد)", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
                 ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0)),
                 ("منها تقريب النقدي (مش مبيعات)", r.get("rounding_total", 0))]
         cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")

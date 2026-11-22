@@ -3197,7 +3197,7 @@ async function viewSale(id) {
     btn.disabled = true;
     try {
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
-      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
+      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
     } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
@@ -3221,7 +3221,7 @@ async function viewSale(id) {
   }));
   $("#vGo")?.addEventListener("click", async () => {
     if (!confirmInline($("#vGo"))) return;
-    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }); toast("تم إلغاء الفاتورة"); viewSale(id); }
+    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }).then((v) => { toast(v.change_back ? `تم إلغاء الفاتورة — رجّع للعميل كمان ${money(v.change_back)} ج نقدي (باقي كان سايبه رصيد)` : "تم إلغاء الفاتورة"); }); viewSale(id); }
     catch (e) { toast(e.message, true); }
   });
 }
@@ -4097,6 +4097,7 @@ function renderSide() {
         <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
+        ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 ليه رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
@@ -4127,6 +4128,7 @@ function renderSide() {
         ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
+          ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
             <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
@@ -4201,6 +4203,7 @@ function renderSide() {
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - dueNow(s);
     $("#changeBox").hidden = !(g >= dueNow(s)); $("#changeV").textContent = money(ch);
+    if ($("#keepBox")) $("#keepBox").hidden = !(g > dueNow(s) && g - dueNow(s) <= 5000);   // real change only (50 EGP)
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
     if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
@@ -4222,6 +4225,14 @@ function renderSide() {
         });
       }));
     } catch (er) { toast(er.message, true); }
+  });
+  // manager 22/11: the customer's credit (a change he left) in one click, never more than his balance or the invoice;
+  // the rest is cash, so the drawer expects only the cash really paid
+  $("#useCredit")?.addEventListener("click", () => {
+    const use = Math.min(-s.customer.balance, s.total), rest = s.total - use;
+    POS.split = true;
+    POS.parts = [{ method: "credit", amount: use }, ...(rest > 0 ? [{ method: "cash", amount: rest + roundNear(rest, s.rounding_step || 0) }] : [])];
+    renderSide();
   });
   $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total + roundNear(s.total, s.rounding_step || 0) }]; renderSide(); });
   $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });
@@ -4372,15 +4383,17 @@ async function complete(findings) {
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
+  // «خليها رصيد للعميل»: the change he leaves is his credit, so no receipt says it is still due (Codex P2 on #424)
+  const keepIt = !!$("#keepChange")?.checked && given > cashPart, shown = keepIt ? cashPart : given;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
+      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: keepIt,
               cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
     delete POS.rcpt[SALE.id]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
-    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${given ? `?given=${given}` : ""}`);
+    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : ""}`);
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
