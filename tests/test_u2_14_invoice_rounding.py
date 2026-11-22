@@ -308,3 +308,28 @@ class TestIndependentReviewFindings(Rounded):
         sid, _ = self.sale()                                             # 18.90
         self.pay(sid, paid_card=1880, paid_cash=10)                     # 0.10 in cash stays 0.10
         self.assertEqual(self.row(sid)["rounding"], 0)
+
+
+class TestHikmaClaimIgnoresRounding(SalesCase):
+    """Owner 22/11: the Hikma claim and the customer statement use exact line values, rounding on or off."""
+
+    def setUp(self):
+        super().setUp()
+        from app.db import new_id
+        self.cust = new_id()
+        with self.db.transaction():                   # the Shibin branch's customer (E-Stock code 50)
+            self.db.execute("INSERT INTO customers (id, org_id, name, credit_limit, notes) VALUES (?,?,?,?,?)",
+                            (self.cust, self.ctx.org_id, "مستشفى تجربة شبين", 10_000_000, "كود إي ستوك: 50"))
+
+    def test_same_claim_with_rounding_on(self):
+        from app.reports import hikma_claim as hk
+        from tests.helpers import today
+        rounding.set_step(self.db, self.ctx, 50)
+        sid = self.s.create(self.ctx, self.cust)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+        d = self.s.update_line(self.ctx, sid, d["lines"][0]["id"], discount_amount=10)   # 18.90
+        self.s.complete(self.ctx, sid, paid_cash=900, on_credit=1000, safety_decisions=self.ack_all(sid))  # 8.90 -> 9.00
+        self.assertEqual(self.db.one("SELECT rounding FROM sales WHERE id=?", (sid,))["rounding"], 10)
+        ph = hk.claim(self.db, self.ctx, "shibin", today(), today())["pharmacy"]
+        self.assertEqual(ph["value"], 1890)                                   # the lines, never the rounding
+        self.assertEqual(self.s.balance(self.ctx, self.cust), 1000)           # his statement: exact credit
