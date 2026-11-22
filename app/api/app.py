@@ -1185,7 +1185,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..dataimport import estock_history as eh
         qp = req.query_params
         rows, tot = await off_loop(eh.period_with_total, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
-                                   by=qp.get("by") or "month")
+                                   by=qp.get("by") or "month", supplier_id=qp.get("supplier") or None)
         return J({"source": eh.SOURCE, "rows": rows, "total": tot or {"source": eh.SOURCE}})
 
     @handler

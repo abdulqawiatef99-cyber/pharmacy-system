@@ -221,3 +221,126 @@ class TestCodexFixes2(EverywhereBase):
         near = js[at - 400:at + 200]
         self.assertIn("R.asked", near)
         self.assertNotIn('$("#iF").value', near)
+
+
+# ------------------------------------------------------------------ step 2: reports, purchases list, customer page, claim
+H2 = {"X-Requested-With": "pharm"}
+
+
+def _step2_tables():
+    from tests.test_estock_returns import tables
+    t = tables()
+    t["Purchase_header"][0].update({"insert_date": "2026-10-05T09:00:00.000", "bill_number": "P-9"})
+    return t
+
+
+class Step2Base(EverywhereBase):
+    TABLES = staticmethod(_step2_tables)                 # an old purchase inside the windows used below
+
+
+class TestStep2Api(Step2Base):
+    def test_one_suppliers_purchases_only(self):
+        out = self.get(f"/api/estock/period?{RANGE}&by=month&supplier={self.sup}")
+        rows = self.get(f"/api/estock/invoices?kind=purchase&party={self.sup}&{RANGE}")["invoices"]
+        self.assertTrue(rows)
+        self.assertEqual(out["total"]["purchases_count"], len(rows))
+        self.assertNotIn("sales", out["total"])                          # a supplier filter never brings sales in
+        self.assertTrue(all("sales" not in r and "returns" not in r for r in out["rows"]))
+
+    def test_a_supplier_e_stock_never_had_gives_nothing_not_everybody(self):
+        r = self.c.post("/api/suppliers", json={"name": "مورد جديد خالص"}, headers={**H2, "Idempotency-Key": "s-new"})
+        self.assertIn(r.status_code, (200, 201), r.text)
+        new = self.db.one("SELECT id FROM suppliers WHERE name='مورد جديد خالص'")["id"]
+        out = self.get(f"/api/estock/period?{RANGE}&by=month&supplier={new}")
+        self.assertNotIn("purchases", out["total"])
+        self.assertEqual(out["rows"], [])
+
+    def test_supplier_filter_needs_purchases_read(self):
+        from app.core import people
+        from tests.test_estock_history_api import PW
+        uid = people.add_user(self.db, self.ctx, username="mgr3", full_name="M", password=PW, role_code="manager")
+        people.set_exception(self.db, self.ctx, uid if isinstance(uid, str) else uid["id"], "purchases.read", "deny")
+        self.login_as("mgr3", PW)
+        self.get(f"/api/estock/period?{RANGE}&supplier={self.sup}", 403)
+
+    def test_hikma_claim_reads_only_the_programs_sales(self):
+        # E-Stock sold to the branch customer inside the window; the claim must not see any of it
+        es = self.get(f"/api/estock/invoices?kind=sale&party={self.cust}&from=2026-11-01&to=2026-11-20")["invoices"]
+        self.assertTrue(es)
+        claim = self.get("/api/reports/hikma-claim?branch=shibin&from=2026-11-01&to=2026-11-20")
+        self.assertEqual(claim["invoices"], 0)
+        self.assertEqual(claim["pharmacy"]["value"] + claim["hospital"]["value"], 0)
+
+    def test_nothing_changes_with_the_step_2_views(self):
+        before_db, before_rep = self.db_hash(), self.our_reports()
+        for _ in range(2):
+            self.get(f"/api/estock/period?{RANGE}&by=month&supplier={self.sup}")
+            self.get(f"/api/estock/period?from=2026-10-01&to=2026-11-20&by=day")
+            self.get(f"/api/estock/invoices?kind=purchase&{RANGE}&limit=500")
+            self.get(f"/api/estock/customers/{self.cust}/items")
+        self.assertEqual(self.db_hash(), before_db)
+        self.assertEqual(self.our_reports(), before_rep)
+
+
+STEP2 = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, cust] = process.argv.slice(1);
+""" + LOGIN + r"""
+  const errs = [];
+  p.on('pageerror', (e) => errs.push(String(e)));
+  const out = {};
+  const range = async (id, f, t) => {
+    const d = await p.$$('#' + id + ' input[type=date]');
+    await d[0].fill(f); await d[0].dispatchEvent('change');
+    await d[1].fill(t); await p.click('#' + id + ' [data-rgo]');
+  };
+  await p.goto(base + '/#/customers/' + cust);
+  await p.waitForSelector('#esItems tbody tr');
+  out.items = await p.textContent('#esItems');
+  await p.goto(base + '/#/reports');
+  await p.waitForSelector('#rRange input[type=date]');
+  await range('rRange', '2026-10-01', '2026-11-20');
+  await p.waitForFunction(() => document.querySelector('#esRep') && document.querySelector('#rSalesBox h2').textContent.includes('2026-10-01'));
+  out.rep = await p.textContent('#esRep');
+  out.repRows = await p.$$eval('#esRep tbody tr', (t) => t.map((x) => x.innerText.includes('من إي ستوك')));
+  await p.goto(base + '/#/purchases');
+  await p.waitForSelector('#puRange input[type=date]');
+  await range('puRange', '2026-09-01', '2026-11-20');
+  await p.waitForSelector('#esPur tr[data-go]');
+  out.pur = await p.textContent('#esPur');
+  out.purRows = await p.$$eval('#esPur tr[data-go]', (t) => t.map((x) => x.innerText.includes('من إي ستوك')));
+  await p.fill('#puQ', 'xyz');
+  out.goneOnSearch = (await p.$('#esPur')) === null;
+  console.log(JSON.stringify({ ...out, errs }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestStep2Screens(Step2Base):
+    def test_report_purchases_and_customer_show_the_history_tagged_and_write_nothing(self):
+        before = self.db_tables()
+        out = run_node(self, STEP2, "owner", OWNER_PW, self.cust)
+        self.assertEqual(out["errs"], [])
+        self.assertIn("من إي ستوك", out["items"])
+        es = self.get("/api/estock/period?from=2026-10-01&to=2026-11-20&by=month")["total"]
+        # the program sold nothing then: the combined line is E-Stock's sales before returns, exactly
+        self.assertIn(f"البرنامج + إي ستوك: {es['sales']} ج", out["rep"])
+        self.assertTrue(out["repRows"] and all(out["repRows"]))
+        self.assertTrue(out["purRows"] and all(out["purRows"]))
+        self.assertIn("المعتمد في البرنامج + إي ستوك", out["pur"])
+        self.assertTrue(out["goneOnSearch"])
+        after = self.db_tables()
+        self.assertEqual({t for t in after if after[t] != before.get(t)} - {"audit_log"}, set())
+
+
+class TestCodexFixes437(EverywhereBase):
+    def test_excel_sheet_keeps_the_unreadable_count(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        i = js.index("const estockRepSheet")
+        body = js[i:js.index("};", js.index("return [{", i))]
+        self.assertIn("_unreadable", body)
+        self.assertIn("مش مقروء", body)
