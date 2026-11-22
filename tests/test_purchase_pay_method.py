@@ -228,3 +228,20 @@ class TestMigration(DBTestCase):
         db.migrate(MIGRATIONS_DIR)
         rows = {r["id"]: (r["pay_source"], r["pay_amount"]) for r in db.all("SELECT * FROM purchase_invoices")}
         self.assertEqual(rows, {"d1": ("credit", None), "a1": (None, None)})
+
+
+class TestCodexRound1(Base):
+    def test_treasury_payment_needs_no_balance_view_right(self):
+        """Codex P2 on #441: the account kind check must not require cash.see_expected."""
+        from dataclasses import replace as dc_replace
+        from app.core import people
+        people.add_user(self.db, self.ctx, username="mgr2", full_name="م", password="Staff-Pass-2026", role_code="manager")
+        mgr = self.login("mgr2", "Staff-Pass-2026")
+        mgr = dc_replace(mgr, permissions=frozenset(mgr.permissions - {"cash.see_expected"}))
+        self.assertTrue(mgr.can("suppliers.pay") and mgr.can("cash.manage") and mgr.can("purchases.approve"))
+        tid = money.treasury_id(self.db, self.ctx)
+        with self.db.transaction():
+            money._post(self.db, self.ctx, tid, 50000, "opening", note="رصيد")
+        inv = self.draft(self.company, pay_source="treasury")
+        self.approve(inv, mgr)
+        self.assertEqual(self.balance(self.company), 0)

@@ -352,7 +352,7 @@ class Purchasing:
         if src == money.DRAWER:
             money.drawer_check(self.db, ctx, amount)       # an open shift, and never below zero
         elif src != money.OUTSIDE and not plan["ref"] and \
-                money.get_account(self.db, ctx, src)["kind"] in ("bank", "wallet"):
+                money._account(self.db, ctx, src)["kind"] in ("bank", "wallet"):    # the kind only, no balance (Codex P2)
             raise ValidationFailed("اكتب رقم التحويل أو العملية في «مرجع الدفع»", code="pay_ref_required")
         return {**plan, "amount": amount}
 
@@ -915,9 +915,9 @@ class Purchasing:
                                 " VALUES (?,?,?,?,'purchase',?,?,?)", (new_id(), ctx.org_id, inv["supplier_id"], net_total,
                                                                        inv_id, f"فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
                 plan = self.pay_plan(ctx, inv)        # what was applied, kept: a later supplier-type change never rewrites it
-                self.db.execute("UPDATE purchase_invoices SET pay_source=?, pay_amount=? WHERE id=?",
+                self.db.execute("UPDATE purchase_invoices SET pay_source=?, pay_amount=? WHERE id=? AND org_id=?",
                                 (plan["source"], pay["amount"] if pay else (0 if plan["source"] != PAY_CREDIT else None),
-                                 inv_id))
+                                 inv_id, ctx.org_id))
                 if pay:     # «طريقة الدفع»: one ordinary supplier payment, in this transaction (the drawer follows)
                     from ..procurement import suppliers
                     suppliers.pay_from(self.db, ctx, inv["supplier_id"], pay["amount"], pay["source"],
