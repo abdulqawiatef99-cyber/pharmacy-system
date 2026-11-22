@@ -926,17 +926,13 @@ class Sales:
             if total != preview["total"]:
                 raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
-            if delivery and paid_cash:    # the courier carries the cash until he hands it in
+            if delivery:              # the courier carries the cash until he hands it in
+                # B2: a delivery paid by card / InstaPay / wallet / credit has cash_due 0: the goods are on the road
+                # (still 'out', so a return waits and the sale joins a shift when it is closed), but the courier hands
+                # in nothing; the screen lists it apart from the cash to hand in
                 shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
                 self.db.execute("UPDATE sale_deliveries SET status='out', cash_due=?, out_at=? WHERE sale_id=?",
                                 (paid_cash, _now(), sid))
-            elif delivery:
-                # B2 (owner 22/11): paid by card / InstaPay / wallet, no cash part: the courier carries CASH only,
-                # so there is nothing to hand in. Settled now: never in his hand-in list or the expected cash
-                shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
-                self.db.execute("UPDATE sale_deliveries SET status='settled', cash_due=0, out_at=?, settled_at=?,"
-                                " settled_by=? WHERE sale_id=?", (_now(), _now(), ctx.user_id, sid))
-                audit.record(self.db, ctx, "delivery.settled", "sale", sid, after={"cash": 0, "no_cash_part": True})
             else:
                 shift = cash.record(self.db, ctx, paid_cash, "sale", sid, branch_id=s["branch_id"]) \
                     or cash.require_open_shift(self.db, ctx, s["branch_id"])   # again inside the write lock

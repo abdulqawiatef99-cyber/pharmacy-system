@@ -15,18 +15,32 @@ class TestNonCashDelivery(V2):
     def test_wallet_delivery_has_nothing_to_hand_in(self):
         d = self.delivery()
         r = self.done(d, [{"method": "transfer", "amount": 5000, "channel_id": self.insta}])
-        self.assertEqual((r["delivery"]["status"], r["delivery"]["cash_due"]), ("settled", 0))
-        self.assertEqual(self.s.open_deliveries(self.ctx), [])
+        # the goods are on the road (a return still waits), but the courier carries no money
+        self.assertEqual((r["delivery"]["status"], r["delivery"]["cash_due"]), ("out", 0))
+        self.assertEqual([x["cash_due"] for x in self.s.open_deliveries(self.ctx)], [0])
         sm = self.cd.summary(self.ctx)
         self.assertEqual((sm["expected_cash"], sm["with_courier"]), (10000, 0))
-        n = self.db.one("SELECT count(*) n FROM audit_log WHERE action='delivery.settled' AND entity_id=?", (d["id"],))["n"]
-        self.assertEqual(n, 1)                                    # recorded as settled at the sale, nothing handed in
+        self.s.delivery_status(self.ctx, d["id"], "settled")      # «اتسلّمت — اقفلها»: nothing enters the drawer
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], 10000)
+        self.assertEqual(self.s.open_deliveries(self.ctx), [])
 
     def test_card_delivery_too(self):
         d = self.delivery()
         r = self.done(d, [{"method": "card", "amount": 5000, "channel_id": self.visa}])
-        self.assertEqual(r["delivery"]["status"], "settled")
-        self.assertEqual(self.s.open_deliveries(self.ctx), [])
+        self.assertEqual(r["delivery"]["cash_due"], 0)
+        self.assertEqual(self.cd.summary(self.ctx)["with_courier"], 0)
+
+    def test_sold_with_no_shift_open_joins_the_shift_it_is_closed_in(self):
+        # review P1: a card delivery sold before any shift opened must still reach a shift's card total
+        sm = self.cd.summary(self.ctx)
+        self.cd.close(self.ctx, sm["expected_cash"])
+        d = self.delivery()
+        self.done(d, [{"method": "card", "amount": 5000, "channel_id": self.visa}])
+        self.assertIsNone(self.db.one("SELECT shift_id FROM sales WHERE id=?", (d["id"],))["shift_id"])
+        self.cd.open(self.ctx, 0)
+        self.s.delivery_status(self.ctx, d["id"], "settled")
+        self.assertIsNotNone(self.db.one("SELECT shift_id FROM sales WHERE id=?", (d["id"],))["shift_id"])
+        self.assertEqual(self.cd.summary(self.ctx)["card_total"], 5000)
 
     def test_void_of_a_wallet_delivery_takes_no_cash_from_the_drawer(self):
         d = self.delivery()
@@ -47,6 +61,13 @@ class TestNonCashDelivery(V2):
         d = self.delivery()
         r = self.done(d, [{"method": "cash", "amount": 5000}])
         self.assertEqual((r["delivery"]["status"], r["delivery"]["cash_due"]), ("out", 5000))
+
+    def test_panel_keeps_non_cash_out_of_the_hand_in_list(self):
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        at = js.index('$("#posDeliv").addEventListener')
+        body = js[at:at + 3000]
+        self.assertIn("d.cash_due > 0", body)
+        self.assertIn('id="dlvNoCash"', body)
 
     def test_message_after_saving_names_the_courier_only_for_cash(self):
         js = Path("app/web/app.js").read_text(encoding="utf-8")
