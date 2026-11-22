@@ -412,10 +412,11 @@ def shortages(db: Database, ctx: Context, *, date_from: str | None = None, date_
 
 
 def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month",
-                  _total: dict | None = None) -> list[dict]:
+                  supplier_id: str | None = None, _total: dict | None = None) -> list[dict]:
     """E-Stock's totals per day or month: sales (net bill), sale returns, purchases (purchases only with
-    purchases.read). E-Stock's own figures, apart from the program's reports."""
-    ctx.require("sales.totals")
+    purchases.read). E-Stock's own figures, apart from the program's reports. `supplier_id` (a program supplier)
+    keeps only that supplier's purchases (no sales): the purchases list filtered by supplier (U4 history step 2)."""
+    ctx.require("sales.totals" if not supplier_id else "purchases.read")
     if by not in ("day", "month"):
         raise ValidationFailed("التجميع لازم يكون day أو month")
     n = 10 if by == "day" else 7
@@ -425,10 +426,16 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
         for key, head, tot, perm in (("sales", "Sales_header", "total_bill_net", "sales.totals"),
                                      ("returns", "Back_sales_header", "total_bill_net", "sales.totals"),
                                      ("purchases", "Purchase_header", "total_bill", "purchases.read")):
-            if not a.has(head) or not ctx.can(perm):
+            if not a.has(head) or not ctx.can(perm) or (supplier_id and key != "purchases"):
                 continue
             where, params = ["1=1"], []
             _period(where, params, a.col(head, "insert_date"), date_from, date_to)
+            if supplier_id:
+                ids = _program_to_estock(a, "suppliers", supplier_id)
+                if not ids:
+                    continue                        # a supplier E-Stock never had: no rows, never every supplier
+                where.append(f'{a.col(head, "vendor_id")} IN ({",".join("?" * len(ids))})')
+                params += ids
             for r in a.rows(f'SELECT substr({a.col(head, "insert_date")}, 1, {n}) p, {a.col(head, tot)} v'
                             f' FROM "e_{head}" WHERE {" AND ".join(where)}', tuple(params)):
                 d = out.setdefault(r["p"], {"source": SOURCE, "period": r["p"]})
@@ -456,8 +463,9 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
     return rows
 
 
-def period_with_total(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month") -> tuple[list, dict]:
+def period_with_total(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month",
+                      supplier_id: str | None = None) -> tuple[list, dict]:
     """period_report's rows plus the whole period's totals, added from the exact values and rounded once."""
     total: dict = {}
-    rows = period_report(db, ctx, date_from, date_to, by=by, _total=total)
+    rows = period_report(db, ctx, date_from, date_to, by=by, supplier_id=supplier_id, _total=total)
     return rows, total
