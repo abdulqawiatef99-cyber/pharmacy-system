@@ -295,7 +295,9 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // part 3 item 6a: a return with its replacement sale
   /^\/api\/sales\/[^/]+\/exchange$/,
   // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
-  /^\/api\/supplier-returns$/];
+  /^\/api\/supplier-returns$/,
+  // U4-2: an order recorded as sent: an unanswered «اتبعتت» pressed again replays, never a second order (Codex P2 on #433)
+  /^\/api\/procurement\/orders$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -438,6 +440,7 @@ const routes = [
   [/^#\/notifications$/, viewNotifications],
   [/^#\/me$/, viewMe],
   [/^#\/customize$/, viewCustomize],
+  [/^#\/setup-printers$/, viewSetupPrinters],
 ];
 
 async function route() {
@@ -565,12 +568,13 @@ const HELP = {
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
-  procurement: ["الطلبية: الأصناف اللي محتاجة تتطلب مرتبة بالأهم، مع آخر شراء وأفضل خصم.", ["دوس على عنوان أي عمود عشان ترتب بيه، ومرة تانية بالعكس.", "الأزرار اللي فوق بتفلتر: رصيدها صفر، هتخلص خلال أسبوع، الأكثر مبيعًا، قريبة الصلاحية، مطلوبة من عملاء.", "«ضيف للطلبية» بتحط الصنف عند المورد صاحب أعلى خصم حقيقي، والبونص محسوب.", "لا يطلب البرنامج شيئًا من تلقاء نفسه."]],
+  procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
   deadstock: ["الرواكد: من تقارير البرنامج القديم.", []],
   system: ["البرنامج: التحديث، والنسخ الاحتياطي، وشكل الإيصال، وأجهزة البطاقات.", []],
   users: ["المستخدمون: الأدوار والصلاحيات وحدود الخصم.", []],
   notifications: ["الإشعارات: كل ما حدث ويحتاج إلى علمك.", []],
   me: ["المظهر واللغة ورقمي السري: إعدادات خاصة بك وحدك.", []],
+  "setup-printers": ["أول تشغيل: اختار طابعة الإيصال وطابعة الملصقات واطبع تجربة قبل نقل البيانات.", ["لو الصفحة في ويندوز فيها ملصقين فوق بعض اختار 2.", "تقدر تغيّر الطابعات بعدين من «البرنامج والنسخ الاحتياطي»."]],
   customize: ["تخصيص الواجهة لهذه الصيدلية: الشريط العلوي، وأزرار الصفحة الرئيسية، والاختصارات.", ["التغيير يظهر لكل المستخدمين.", "الأعمدة تُضبط من زر \"⚙ الأعمدة\" فوق الجدول."]],
   // update 1 (owner 21/11): every screen explains itself; the screens below had no text
   "purchases/1": ["فاتورة شراء: اختار المورد واكتب رقم فاتورته وتاريخها، ضيف الأصناف، وبعدين اعتمدها.", ["المخزون وحساب المورد بيتغيروا بعد الاعتماد بس.", "المسلسل اللي جنب العنوان رقم الفاتورة في البرنامج، وتاريخ الإدخال بيتسجل لوحده."]],
@@ -979,13 +983,57 @@ function viewSetup() {
     if (f.get("password") !== f.get("password2")) { toast("كلمتا السر غير متطابقتين", true); return; }
     try {
       const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password", "rounding"].map((k) => [k, f.get(k)])) });
-      ME = r.me; location.hash = "#/import";
+      ME = r.me; SETUP_CARRIED = r.carried || null; location.hash = "#/setup-printers";
       toast("البرنامج جاهز. الخطوة التالية: نقل بياناتك من البرنامج القديم");
     } catch (err) {
       if (err.code === "already_setup") { location.hash = "#/login"; return; }
       toast(err.message, true);
     }
   });
+}
+
+// U4-0 (c): right after the first-run setup, the receipt and label printers and a test label, before the data move.
+// A clean start brought the old settings along (SETUP_CARRIED): then this only confirms them with a test label.
+let SETUP_CARRIED = null;
+async function viewSetupPrinters() {
+  if (!ME) { location.hash = "#/login"; return; }
+  const [c, pr] = await Promise.all([api("/api/settings/receipt"), api("/api/print/printers").catch(() => ({ printers: [] }))]);
+  const carried = SETUP_CARRIED && SETUP_CARRIED.applied;
+  const opts = pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("");
+  app.innerHTML = `<section class="panel login"><h1>الطابعات</h1>
+    ${carried ? `<p class="badge b-ok">✓ اترجعت إعدادات الطباعة والأجهزة من البيانات القديمة. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد.</p>`
+      : `<p class="muted">اختار طابعة الإيصال وطابعة الملصقات، واطبع ملصق تجربة. تقدر تغيّرها بعدين من «البرنامج والنسخ الاحتياطي».</p>`}
+    <form id="spForm">
+      <datalist id="spList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${opts}</datalist>
+      <label class="f">طابعة الإيصال والدرج <input name="receipt_target" list="spList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="browser"></label>
+      <label class="f">طابعة الملصقات (تعريف ويندوز) <input name="label_target" list="spList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B"></label>
+      <label class="f">عدد الملصقات في صفحة ويندوز (إذا كانت الصفحة تضم ملصقين فوق بعضهما فاختر 2) <select name="label_rows">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(c.label_rows || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <div class="row"><button type="button" class="btn secondary" id="spSave">احفظ</button>
+        <button type="button" class="btn secondary" id="spLabel">اطبع ملصق تجربة</button>
+        <button type="button" class="btn secondary" id="spRcpt">اطبع إيصال تجربة</button></div>
+    </form>
+    ${carried ? "" : `<p class="muted">كان البرنامج شغال قبل كده؟ ممكن ترجع الإعدادات القديمة كلها من «البرنامج والنسخ الاحتياطي» ← «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة».</p>`}
+    <button type="button" class="btn" id="spNext">كمّل ← نقل البيانات</button></section>`;
+  const f = $("#spForm");
+  const vals = () => {
+    const lt = f.label_target.value.trim();
+    return { receipt_target: f.receipt_target.value.trim(), label_target: lt, label_rows: +f.label_rows.value,
+             ...(lt.startsWith("win:") ? { label_lang: "driver" } : {}) };
+  };
+  $("#spSave").addEventListener("click", async () => {
+    try { await api("/api/settings/receipt", { method: "PUT", body: vals() }); toast("✓ اتحفظت"); } catch (e) { toast(e.message, true); }
+  });
+  $("#spLabel").addEventListener("click", async () => {
+    const v = vals();
+    if (!v.label_target) { toast("اختار طابعة الملصقات الأول", true); return; }
+    try { const r = await api("/api/print/label-test", { method: "POST", body: v }); toast(`أُرسل ${r.labels} ملصق تجربة — لو طلعوا سليمين اضغط «احفظ»`); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#spRcpt").addEventListener("click", async () => {
+    try { await api("/api/print/test", { method: "POST", body: { target: f.receipt_target.value.trim() } }); toast("تم الإرسال للطابعة"); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#spNext").addEventListener("click", () => { location.hash = "#/import"; toast("الخطوة التالية: نقل بياناتك من البرنامج القديم"); });
 }
 
 async function viewLogin() {
@@ -2381,17 +2429,60 @@ function reasonOpts(map, selected, up) {
 }
 
 // ------------------------------------------------------------------ program / update
+// U4-0: the printing / label / drawer / card machine / screen settings from an older copy of the data
+// (a renamed data folder after a clean start, or a backup file). Nothing else is copied.
+async function renderDeviceRestore() {
+  const box = $("#dvBox");
+  if (!box) return;
+  let src = [];
+  try { src = (await api("/api/settings/device-restore/sources")).sources; } catch (e) { box.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; return; }
+  if (!src.length) { box.innerHTML = `<p class="muted">مفيش نسخة قديمة على الجهاز ده (لا فولدر بيانات قديم ولا نسخة احتياطية).</p>`; return; }
+  box.innerHTML = `<p class="muted">لو الإعدادات رجعت للأصل (بعد بداية من الصفر مثلًا): اختار النسخة القديمة، والبرنامج يوريك الإعدادات اللي هيرجعها قبل ما يغيّر أي حاجة. مفيش أي بيع أو مخزون أو عملاء أو مستخدمين أو كلمات سر بيتنقلوا.</p>
+    <label class="f">النسخة القديمة <select id="dvSrc">${src.map((r) => `<option value="${esc(r.id)}">${r.kind === "folder" ? "فولدر بيانات قديم" : "نسخة احتياطية"}: ${esc(r.name)} — ${esc(stamp(r.when))}</option>`).join("")}</select></label>
+    <button type="button" class="btn small secondary" id="dvLook">اعرض الإعدادات اللي فيها</button>
+    <div id="dvPrev" class="mt"></div>`;
+  // the restore always uses the copy that was previewed; another choice clears the preview (Codex P2 on #430)
+  $("#dvSrc").addEventListener("change", () => { $("#dvPrev").innerHTML = ""; });
+  $("#dvLook").addEventListener("click", async () => {
+    const b = $("#dvLook"); b.disabled = true; const out = $("#dvPrev"); out.innerHTML = `<p class="muted">جارٍ قراءة النسخة… (النسخة الاحتياطية الكبيرة بتاخد دقيقة)</p>`;
+    try {
+      const p = await api("/api/settings/device-restore/preview", { method: "POST", body: { source: $("#dvSrc").value } });
+      out.innerHTML = `<p>الصيدلية في النسخة دي: <b>${esc(p.pharmacy)}</b></p>
+        ${p.groups.map((g) => `<fieldset class="lblp"><legend><label class="chk"><input type="checkbox" data-dvg="${esc(g.key)}" ${g.default ? "checked" : ""} ${g.available ? "" : "disabled"}> ${esc(g.title)}</label></legend>
+          ${!g.available ? `<p class="muted">مش موجودة في النسخة دي</p>` : g.same ? `<p class="muted">زي اللي في البرنامج دلوقتي</p>` : ""}
+          ${g.lines.length ? `<ul class="small">${g.lines.map((l) => `<li dir="auto">${esc(l)}</li>`).join("")}</ul>` : ""}</fieldset>`).join("")}
+        <p class="muted">${esc(p.note)}</p>
+        <button type="button" class="btn" id="dvGo">رجّع الإعدادات المختارة</button>`;
+      $("#dvGo").addEventListener("click", async () => {
+        const groups = [...out.querySelectorAll("[data-dvg]:checked")].map((x) => x.dataset.dvg);
+        if (!groups.length) { toast("اختار الإعدادات اللي عايز ترجعها", true); return; }
+        if (!confirm("هترجع الإعدادات المختارة من النسخة القديمة مكان الإعدادات الحالية. متأكد؟")) return;
+        const g = $("#dvGo"); g.disabled = true;
+        try {
+          await api("/api/settings/device-restore/apply", { method: "POST", body: { source: p.source.id, groups } });
+          toast("✓ رجعت الإعدادات. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد");
+          renderReceiptCfg(await api("/api/settings/receipt"));
+          renderChannels((await api("/api/payment-channels")).channels);
+          if (groups.includes("screen")) { ME.ui = await api("/api/settings/ui"); applyNav(); }   // Codex P2 on #430
+          out.innerHTML = `<p class="badge b-ok">✓ رجعت الإعدادات المختارة (متسجلة في سجل العمليات)</p>`;
+        } catch (e) { g.disabled = false; toast(e.message, true); }
+      });
+    } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
+  });
+}
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>الهاتف المحمول على شبكة الصيدلية</h1><div id="lanBox"></div></section>
     <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
+    <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
+  renderDeviceRestore();
   renderLan(await api("/api/system/network"));
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
@@ -3470,35 +3561,35 @@ async function viewDayReview() {
 }
 
 // ------------------------------------------------------------------ procurement
-const MOVE_AR = { fast: ["سريع", "b-ok"], medium: ["متوسط", "b-warn"], slow: ["بطيء", "b-err"], dead: ["راكد", "b-err"] };
-const FLAG_AR = { expensive: "غالي: راجعه", fridge: "ثلاجة", below_official: "خصم أقل من الأساسي" };
-const PR_CHIPS = [["zero", "رصيدها صفر"], ["week", "هتخلص خلال أسبوع"], ["top", "الأكثر مبيعًا"],
-  ["expiry", "قريبة الصلاحية"], ["asked", "مطلوبة من عملاء"]];
-const prChip = {
-  zero: (r) => r.on_hand <= 0, week: (r) => r.on_hand <= 0 || (r.days_left !== null && r.days_left <= 7),
-  top: (r) => r.top_rank !== null, expiry: (r) => !!r.near_expiry, asked: (r) => r.asked,
-};
+const CLASS_AR = { regular: ["منتظم", "b-ok"], semi: ["شبه منتظم", "b-warn"], irregular: ["متقطع", "b-err"], dead: ["راكد", "b-err"] };
+const FLAG_AR = { expensive: "غالي: موافقتك", fridge: "ثلاجة: موافقتك", below_official: "خصم أقل من الرسمي",
+  below_last: "خصم أقل من آخر مرة", unsure_match: "المطابقة مش مؤكدة" };
+const PR_PERIOD_AR = { 7: "أسبوع", 14: "أسبوعين", 30: "شهر" };
+const PR_LINE_AR = { sent: "اتبعتت", arrived: "وصل", partial: "وصل جزء", na: "مش موجود عنده" };
+const PR_CHIPS = [["asked", "مطلوبة (كشكول / عميل)"], ["ok", "محتاجة موافقتك"], ["zero", "رصيدها صفر"]];
+const prChip = { asked: (r) => r.asked, ok: (r) => r.flags.length > 0, zero: (r) => r.on_hand <= 0 };
 const prPct = (bp) => (bp === null || bp === undefined ? "—" : `${(bp / 100).toFixed(2)}%`);
-const prSup = (r) => (r.best || (r.last && r.last.active ? r.last : null) || {});   // never a stopped supplier
 // a whole number of boxes, the whole text (parseInt read "1.9" and "1e2" as 1, Codex P1 on #402)
 const prPacks = (v) => { const t = String(v ?? "").trim(); return /^[0-9]{1,6}$/.test(t) && +t >= 1 ? +t : null; };
-const PR_ORDER = {                         // the order being built, kept on this PC until it is exported or cleared
-  get() { try { return JSON.parse(localStorage.getItem("smartOrder") || "{}") || {}; } catch { return {}; } },
-  set(v) { try { localStorage.setItem("smartOrder", JSON.stringify(v)); } catch { /* private window: list lives on screen only */ } },
-};
+// kept on this PC per pharmacy and branch until exported or cleared (private window: screen only)
+const prKey = (k) => `${k}:${(ME && ME.organization && ME.organization.id) || ""}:${(ME && ME.branch_id) || ""}`;
+const prStore = (k) => ({
+  get() { try { return JSON.parse(localStorage.getItem(prKey(k)) || "{}") || {}; } catch { return {}; } },
+  set(v) { try { localStorage.setItem(prKey(k), JSON.stringify(v)); } catch { /* private window */ } },
+});
+const PR_ORDER = prStore("purchasePlan"), PR_PRICES = prStore("purchasePlanPrices");
 
 async function viewProcurement() {
   app.innerHTML = `
   <section class="panel">
-    <h1>اقتراح الطلبية</h1>
-    <p class="muted">الافتراضي: الأصناف السريعة والمتوسطة اللي هتخلص، والأصناف اللي طلبها عميل ورصيدها صفر. البطيء والراكد مخفيين إلا لو حد طلبهم. ولا يطلب البرنامج أي شيء من تلقاء نفسه.</p>
+    <h1>أداة المشتريات</h1>
+    <p class="muted">المنتظم: اتباع 6 شهور أو أكتر من آخر 12، وشهرين من آخر 3. شبه المنتظم: 4 أو 5 شهور. المتوسط الشهري هو الأكبر بين متوسط آخر 3 شهور وآخر 6.
+      الكمية = المتوسط × أيام المدة ÷ 30 − الرصيد − اللي وصل ومش متسجل − اللي متطلب ولسه موصلش. الكشكول وطلبات العملاء داخلين دايمًا. البرنامج ما بيبعتش أي حاجة لأي مورد.</p>
     <form id="prForm" class="row">
-      <label class="f">تغطية (يوم) <input name="cover_days" type="number" value="30" min="1"></label>
-      <label class="f">مدة التوريد (يوم) <input name="lead_days" type="number" value="2" min="0"></label>
-      <label class="f">أمان (يوم) <input name="safety_days" type="number" value="5" min="0"></label>
-      <label class="f">فترة الاستهلاك (يوم) <input name="window_days" type="number" value="90" min="7"></label>
+      <label class="f">المدة <select id="prPeriod"><option value="7">أسبوع</option><option value="14">أسبوعين</option><option value="30">شهر</option></select></label>
       <label class="f">الصنف الغالي من (ج) <input name="expensive_from" type="number" value="300" min="0" step="0.01"></label>
-      <label class="f"><input type="checkbox" name="all" id="prAll"> اعرض المخفي (بطيء وراكد)</label>
+      <label class="f"><input type="checkbox" id="prSupplies"> المستلزمات كمان</label>
+      <label class="f"><input type="checkbox" id="prAll"> اعرض المتقطع والمخفي</label>
       <button class="btn" type="submit">احسب</button>
     </form>
     <div class="row" id="prChips">${PR_CHIPS.map(([k, t]) => `<button type="button" class="chip tgl" data-chip="${k}">${t}</button>`).join("")}
@@ -3506,16 +3597,23 @@ async function viewProcurement() {
     <p class="muted" id="prCounts"></p>
   </section>
   <section class="panel"><div class="tablewrap"><table>
-    <thead><tr><th data-sort="label">الصنف</th><th data-sort="movement">الحركة</th><th data-sort="on_hand">الرصيد</th>
-      <th data-sort="days_left">يكفي (يوم)</th><th data-sort="events">مرات البيع</th><th data-sort="suggested_packs">المقترح (علبة)</th>
-      <th data-sort="last">آخر شراء</th><th data-sort="best">أفضل خصم</th><th>تنبيه</th><th></th></tr></thead>
-    <tbody id="prBody"><tr><td colspan="10" class="muted">جارٍ الحساب…</td></tr></tbody></table></div>
+    <thead><tr><th>الصنف</th><th>الحالة</th><th>الرصيد</th><th>وصل ومش متسجل</th><th>متطلب</th>
+      <th class="prP" data-p="7">أسبوع</th><th class="prP" data-p="14">أسبوعين</th><th class="prP" data-p="30">شهر</th>
+      <th>خصم كل مورد (آخر شراء)</th><th>تنبيه</th><th>الكمية (علبة)</th><th>المورد</th><th></th></tr></thead>
+    <tbody id="prBody"><tr><td colspan="13" class="muted">جارٍ الحساب…</td></tr></tbody></table></div>
     <div class="row"><button class="btn secondary" type="button" id="prAddAll">ضيف كل الظاهر للطلبية</button></div></section>
   <section class="panel"><h2>الطلبية مقسمة على الموردين</h2>
-    <p class="muted">كل صنف عند المورد صاحب أعلى خصم حقيقي (البونص محسوب) من آخر شراء عند كل مورد في آخر سنة.</p>
+    <p class="muted">كل صنف عند المورد صاحب أعلى خصم حقيقي (البونص والسعر الصافي محسوبين) من آخر شراء عند كل مورد في آخر سنة. اسم الصنف هو اسمه عند المورد: صحّحه والبرنامج يفتكره للمرة الجاية.</p>
     <div id="prOrder" class="muted">لسه مفيش أصناف في الطلبية.</div>
     <div class="row"><button class="btn" type="button" id="prOrderXlsx">تحميل Excel لكل مورد</button>
-      <button class="btn secondary" type="button" id="prOrderClear">امسح الطلبية</button></div></section>
+      <button class="btn secondary" type="button" id="prOrderClear">امسح الطلبية</button></div>
+    <div id="prMsg"></div></section>
+  <section class="panel"><h2>متابعة الطلبيات</h2><div id="prTrack" class="muted">…</div></section>
+  <section class="panel"><h2>اسأل عليها</h2><div id="prAsk" class="muted">…</div></section>
+  <section class="panel"><h2>أسماء وعبوات محتاجة مراجعة</h2><div id="prCheck" class="muted">…</div></section>
+  <section class="panel"><h2>أسعار محتاجة تحديث</h2>
+    <p class="muted">لو سعر الجمهور عند المورد اتغيّر، اضغط «السعر اتغيّر؟» جنب الصنف واكتب السعر الجديد، واتأكد من العبوة قبل التحديث.</p>
+    <div id="prPrices" class="muted">مفيش.</div></section>
   <section class="panel"><h2>صحة المخزون</h2><div id="prHealth" class="muted">…</div></section>
   <section class="panel"><h2>رفع مبيعات شهر من البرنامج القديم</h2>
     <p class="muted">المطابقة بالكود أو الباركود فقط. الأصناف غير المتطابقة تظهر في تقرير ولا تُخمَّن.</p>
@@ -3526,79 +3624,108 @@ async function viewProcurement() {
       <label class="f">الملف <input type="file" name="file" required accept=".xlsx,.csv"></label>
       <button class="btn secondary" type="submit">تجربة بدون حفظ</button>
     </form><div id="consRes"></div></section>`;
-  const st = { rows: [], chips: new Set(), sup: "", sort: null, dir: 1, sups: {}, qty: {} };
-  const params = () => {
-    const fd = new FormData($("#prForm")); fd.delete("all");
-    if ($("#prAll").checked) fd.set("scope", "all");
-    return new URLSearchParams(fd).toString();
-  };
-  const key = (r, k) => (k === "last" ? (r.last ? r.last.date || "" : "") : k === "best" ? (r.best ? r.best.discount_bp : -1)
-    : k === "movement" ? ["fast", "medium", "slow", "dead"].indexOf(r.movement) : k === "days_left" ? (r.days_left ?? 1e9) : r[k]);
-  const visible = () => {
-    let v = st.rows.filter((r) => [...st.chips].every((c) => prChip[c](r)) && (!st.sup || prSup(r).supplier_id === st.sup));
-    if (st.sort) {
-      v = v.slice().sort((a, b) => { const x = key(a, st.sort), y = key(b, st.sort);
-        return (typeof x === "string" ? x.localeCompare(y, "ar") : x - y) * st.dir; });
-    }
-    return v;
-  };
-  const buyCell = (x) => (x ? `${esc(x.supplier || "—")}<br><span class="muted">${prPct(x.discount_bp)}${x.bonus ? ` (${x.qty}+${x.bonus})` : ""} · ${esc(x.date || "")}</span>` : "—");
+  const st = { rows: [], chips: new Set(), sup: "", period: "7", sups: {}, all: [], qty: {}, pick: {} };
+  const params = () => new URLSearchParams({ expensive_from: $("#prForm").expensive_from.value || "300",
+    ...($("#prAll").checked ? { scope: "all" } : {}), ...($("#prSupplies").checked ? { supplies: "1" } : {}) }).toString();
+  // the owner's choice: picked now, else the one saved in the order on this PC, else the recommendation (Codex P2)
+  const supOf = (r) => { const o = st.order || {}; return st.pick[r.item_id] ?? (o[r.item_id] ? (o[r.item_id].supplier_id || "") : (r.best ? r.best.supplier_id : "")); };
+  const visible = () => st.rows.filter((r) => (r.qty[st.period] > 0 || r.asked || !r.shown)
+    && [...st.chips].every((c) => prChip[c](r)) && (!st.sup || supOf(r) === st.sup));
+  const sideCell = (r) => r.suppliers.length ? r.suppliers.map((s) => `<div class="${s.supplier_id === supOf(r) ? "" : "muted"}">${s.supplier_id === supOf(r) ? "<b>" : ""}${esc(s.supplier || "—")}: ${prPct(s.discount_bp)}${s.prev_bp !== null && s.prev_bp !== undefined ? ` (قبلها ${prPct(s.prev_bp)})` : ""}${s.active ? "" : " · موقوف"}${s.supplier_id === supOf(r) ? "</b>" : ""}</div>`).join("") : "—";
+  const supSel = (r) => `<select class="prSup" data-id="${esc(r.item_id)}"><option value="">بدون مورد</option>${st.all.map((s) => `<option value="${esc(s.id)}" ${s.id === supOf(r) ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>`;
   const draw = () => {
-    const v = visible(), order = PR_ORDER.get();
-    $("#prBody").innerHTML = v.map((r) => `<tr class="${r.shown ? "" : "muted"}"><td>${esc(r.label)}${r.asked ? ` <span class="badge b-warn">مطلوب</span>` : ""}
-      <div class="muted">${r.reasons.map(esc).join("<br>")}</div></td>
-      <td><span class="badge ${MOVE_AR[r.movement][1]}">${MOVE_AR[r.movement][0]}</span></td>
-      <td>${r.on_hand}${r.near_expiry ? `<div class="muted">أقرب صلاحية ${esc(r.near_expiry)}</div>` : ""}</td>
-      <td>${r.days_left ?? "—"}</td><td>${r.events}</td>
-      <td><input type="number" min="1" step="1" class="prQty" data-id="${esc(r.item_id)}" value="${order[r.item_id] ? order[r.item_id].packs : (st.qty[r.item_id] ?? r.suggested_packs)}" style="width:5em;min-width:0"></td>
-      <td>${buyCell(r.last)}</td><td>${buyCell(r.best)}</td>
+    st.order = PR_ORDER.get();
+    const v = visible(), order = st.order;
+    document.querySelectorAll(".prP").forEach((th) => th.classList.toggle("on", th.dataset.p === st.period));
+    $("#prBody").innerHTML = v.map((r) => `<tr class="${r.shown ? "" : "muted"}"><td>${esc(r.label)}${r.asked ? ` <span class="badge b-warn">مطلوب</span>` : ""}${r.supply ? ` <span class="badge">مستلزمات</span>` : ""}
+      <div class="muted">${r.reasons.map(esc).join("<br>")}</div>
+      <button type="button" class="chip tgl prPrice" data-id="${esc(r.item_id)}">السعر اتغيّر؟</button></td>
+      <td><span class="badge ${CLASS_AR[r.class][1]}">${CLASS_AR[r.class][0]}</span></td>
+      <td>${r.on_hand}</td><td>${r.arrived || "—"}</td><td>${r.on_order || "—"}</td>
+      ${["7", "14", "30"].map((p) => `<td class="${p === st.period ? "on" : "muted"}">${r.qty[p]}</td>`).join("")}
+      <td>${sideCell(r)}</td>
       <td>${r.flags.map((f) => `<span class="badge b-warn">${FLAG_AR[f]}</span>`).join(" ")}</td>
+      <td><input type="number" min="1" step="1" class="prQty" data-id="${esc(r.item_id)}" value="${order[r.item_id] ? order[r.item_id].packs : (st.qty[r.item_id] ?? r.qty[st.period])}" style="width:5em;min-width:0"></td>
+      <td>${supSel(r)}</td>
       <td><button type="button" class="btn small ${order[r.item_id] ? "secondary" : ""} prAdd" data-id="${esc(r.item_id)}">${order[r.item_id] ? "في الطلبية ✓" : "ضيف للطلبية"}</button></td></tr>`).join("")
-      || `<tr><td colspan="10" class="muted">مفيش أصناف بالاختيار ده (أو مفيش بيانات بيع لسه — ارفع مبيعات شهر من تحت)</td></tr>`;
+      || `<tr><td colspan="13" class="muted">مفيش أصناف ناقصة للمدة دي (جرّب مدة أطول، أو ارفع مبيعات شهر من تحت لو مفيش بيانات بيع)</td></tr>`;
     document.querySelectorAll("#prChips [data-chip]").forEach((b) => b.classList.toggle("on", st.chips.has(b.dataset.chip)));
-    document.querySelectorAll("th[data-sort]").forEach((th) => { th.dataset.dir = th.dataset.sort === st.sort ? (st.dir > 0 ? "▲" : "▼") : ""; });
-    drawOrder();
+    drawOrder(); drawPrices();
   };
   const groups = () => {
     const g = {};
     Object.entries(PR_ORDER.get()).forEach(([id, ln]) => { (g[ln.supplier_id || ""] = g[ln.supplier_id || ""] || []).push({ item_id: id, ...ln }); });
     return g;
   };
+  const supName = (sid) => (sid ? (st.sups[sid] || "مورد") : "بدون مورد سابق");
   const drawOrder = () => {
     const g = groups(), ks = Object.keys(g);
     $("#prOrder").className = ks.length ? "" : "muted";
-    $("#prOrder").innerHTML = ks.length ? ks.map((sid) => `<h3>${esc(sid ? (st.sups[sid] || g[sid][0].supplier || "مورد") : "بدون مورد سابق")} — ${g[sid].length} صنف</h3>
-      <ul>${g[sid].map((l) => `<li>${esc(l.label)} × <b>${l.packs}</b> علبة ${l.discount_bp !== null && l.discount_bp !== undefined ? `<span class="muted">(${prPct(l.discount_bp)})</span>` : ""}
-        <button type="button" class="chip tgl prDel" data-id="${esc(l.item_id)}">شيل</button></li>`).join("")}</ul>`).join("")
+    $("#prOrder").innerHTML = ks.length ? ks.map((sid) => `<div class="prGroup" data-sid="${esc(sid)}"><h3>${esc(supName(sid))} — ${g[sid].length} صنف</h3>
+      <ul>${g[sid].map((l) => `<li>${esc(l.label)} × <b>${l.packs}</b> علبة
+        ${sid ? `<label class="f">اسمه عند المورد <input class="prName" data-id="${esc(l.item_id)}" value="${esc(l.supplier_name || "")}" placeholder="${esc(l.label)}"></label>` : ""}
+        <button type="button" class="chip tgl prDel" data-id="${esc(l.item_id)}">شيل</button></li>`).join("")}</ul>
+      <div class="row">${sid ? `<button type="button" class="btn small secondary prMsgBtn">نص الرسالة (للنسخ)</button>
+        <button type="button" class="btn small prSent">اتبعتت: تابعها</button>` : `<span class="muted">اختار مورد للأصناف دي من الجدول.</span>`}</div></div>`).join("")
       : "لسه مفيش أصناف في الطلبية.";
+  };
+  const drawPrices = () => {
+    const p = PR_PRICES.get(), ks = Object.keys(p);
+    $("#prPrices").className = ks.length ? "" : "muted";
+    $("#prPrices").innerHTML = ks.length ? `<ul>${ks.map((id) => `<li>${esc(p[id].label)}: ${money(p[id].old)} ← <b>${money(p[id].price)}</b> ج
+      <button type="button" class="btn small prPriceSave" data-id="${esc(id)}">حدّث السعر</button>
+      <button type="button" class="chip tgl prPriceDel" data-id="${esc(id)}">شيل</button></li>`).join("")}</ul>` : "مفيش.";
   };
   const add = (r, quiet) => {
     const o = PR_ORDER.get(), inp = $(`.prQty[data-id="${CSS.escape(r.item_id)}"]`);
-    const packs = prPacks(inp ? inp.value : r.suggested_packs);
+    const packs = prPacks(inp ? inp.value : r.qty[st.period]);
     if (!packs) { if (!quiet) toast("اكتب الكمية (علبة واحدة على الأقل)", true); return; }
-    const s = prSup(r);
-    o[r.item_id] = { label: r.label, packs, supplier_id: s.supplier_id || null, supplier: s.supplier || null, discount_bp: s.discount_bp ?? null };
+    const sid = supOf(r) || null;
+    o[r.item_id] = { label: r.label, packs, supplier_id: sid, supplier_name: null };
     PR_ORDER.set(o);
   };
+  const lines = (sid) => (groups()[sid] || []).map((l) => ({ item_id: l.item_id, packs: l.packs }));
+  const drawTrack = async () => {
+    const out = await api("/api/procurement/orders");
+    const open = out.orders.filter((o) => o.status !== "done" && o.status !== "arrived").concat(out.orders.filter((o) => o.status === "arrived").slice(0, 5));
+    $("#prTrack").className = open.length ? "" : "muted";
+    $("#prTrack").innerHTML = open.length ? open.map((o) => `<div><h3>${esc(o.supplier)} · ${esc(String(o.created_at).slice(0, 10))}</h3><ul>
+      ${o.lines.map((l) => `<li>${esc(l.label)} × ${l.packs} — <b>${PR_LINE_AR[l.status]}${l.status === "partial" ? ` ${l.got}` : ""}</b>
+        ${["arrived", "partial", "na", "sent"].filter((s) => s !== l.status || s === "partial").map((s) => `<button type="button" class="chip tgl prLine" data-o="${esc(o.id)}" data-i="${esc(l.item_id)}" data-s="${s}" data-n="${l.packs}">${PR_LINE_AR[s]}</button>`).join(" ")}</li>`).join("")}</ul></div>`).join("")
+      : "مفيش طلبيات مفتوحة. بعد ما تبعت طلبية لمورد اضغط «اتبعتت: تابعها».";
+  };
   const load = async () => {
-    const out = await api(`/api/procurement/smart?${params()}`);
+    const out = await api(`/api/procurement/plan?${params()}`);
     st.rows = out.rows;
-    st.sups = Object.fromEntries(out.suppliers.map((s) => [s.id, s.name]));
-    $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
-    if (st.sup && !st.sups[st.sup]) st.sup = "";        // the supplier left the results: no stale filter (Codex P2 on #402)
+    st.all = out.all_suppliers;
+    st.sups = Object.fromEntries(out.all_suppliers.map((s) => [s.id, s.name]));
+    $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.all_suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
+    if (st.sup && !st.sups[st.sup]) st.sup = "";
     $("#prSupSel").value = st.sup;
     const c = out.counts;
-    $("#prCounts").textContent = `سريع ${c.fast} · متوسط ${c.medium} · بطيء ${c.slow} · راكد ${c.dead} · مخفي من العرض الأساسي ${c.hidden}`;
+    $("#prCounts").textContent = `منتظم ${c.regular} · شبه منتظم ${c.semi} · متقطع ${c.irregular} · مخفي من العرض الأساسي ${c.hidden}`;
+    $("#prAsk").className = out.ask_about.length ? "" : "muted";
+    $("#prAsk").innerHTML = out.ask_about.length ? `<ul>${out.ask_about.map((a) => `<li>${esc(a.label)} — ${a.why === "no_supplier" ? "مفيش مورد اشترينا منه في آخر سنة"
+      : a.why === "na" ? `مش موجود عند ${esc(a.supplier || "")} (${a.missing_packs} علبة)` : `ناقص ${a.missing_packs} علبة من ${esc(a.supplier || "")}`}</li>`).join("")}</ul>` : "مفيش.";
+    $("#prCheck").className = out.check_names.length ? "" : "muted";
+    $("#prCheck").innerHTML = out.check_names.length ? `<ul>${out.check_names.map((c) => `<li>${esc(c.label)} ← اسمه في آخر فاتورة: «${esc(c.raw_name)}» · العبوة ${c.pack_size}</li>`).join("")}</ul>` : "مفيش.";
     draw();
   };
+  $("#prPeriod").addEventListener("change", (e) => { st.period = e.target.value; st.qty = {}; draw(); });
   $("#prChips").addEventListener("click", (e) => {
     const b = e.target.closest("[data-chip]"); if (!b) return;
     st.chips.has(b.dataset.chip) ? st.chips.delete(b.dataset.chip) : st.chips.add(b.dataset.chip); draw();
   });
   $("#prSupSel").addEventListener("change", (e) => { st.sup = e.target.value; draw(); });
-  document.querySelectorAll("th[data-sort]").forEach((th) => { th.style.cursor = "pointer"; th.addEventListener("click", () => {
-    if (st.sort === th.dataset.sort) st.dir = -st.dir; else { st.sort = th.dataset.sort; st.dir = 1; } draw(); }); });
   $("#prBody").addEventListener("click", (e) => {
+    const pb = e.target.closest(".prPrice");
+    if (pb) {
+      const r = st.rows.find((x) => x.item_id === pb.dataset.id); if (!r) return;
+      const t = (prompt(`سعر الجمهور الجديد لـ ${r.label} (ج)؟ السعر الحالي ${money(r.public_price)}`) || "").trim();
+      if (!t) return;
+      if (!/^[0-9]{1,7}(\.[0-9]{1,2})?$/.test(t)) { toast("اكتب السعر رقم بقرشين بالكتير", true); return; }
+      const p = PR_PRICES.get(); p[r.item_id] = { label: r.label, old: r.public_price, price: toPiasters(t) }; PR_PRICES.set(p); drawPrices(); return;
+    }
     const b = e.target.closest(".prAdd"); if (!b) return;
     const r = st.rows.find((x) => x.item_id === b.dataset.id); if (!r) return;
     const o = PR_ORDER.get();
@@ -3606,23 +3733,83 @@ async function viewProcurement() {
     draw();
   });
   $("#prBody").addEventListener("change", (e) => {
+    const s = e.target.closest(".prSup");
+    if (s) {
+      st.pick[s.dataset.id] = s.value;
+      const o = PR_ORDER.get();
+      if (o[s.dataset.id]) { o[s.dataset.id].supplier_id = s.value || null; o[s.dataset.id].supplier_name = null; PR_ORDER.set(o); }
+      draw(); return;
+    }
     const i = e.target.closest(".prQty"); if (!i) return;
     const o = PR_ORDER.get(), n = prPacks(i.value);
     st.qty[i.dataset.id] = i.value;
     if (!n) { toast("اكتب الكمية رقم صحيح (علبة واحدة على الأقل)", true); return; }
     if (o[i.dataset.id]) { o[i.dataset.id].packs = n; PR_ORDER.set(o); drawOrder(); }
   });
-  $("#prAddAll").addEventListener("click", () => { visible().forEach((r) => add(r, true)); draw(); });
-  $("#prOrder").addEventListener("click", (e) => {
-    const b = e.target.closest(".prDel"); if (!b) return;
-    const o = PR_ORDER.get(); delete o[b.dataset.id]; PR_ORDER.set(o); draw();
+  $("#prAddAll").addEventListener("click", () => { visible().filter((r) => r.shown).forEach((r) => add(r, true)); draw(); });
+  $("#prOrder").addEventListener("change", async (e) => {
+    const i = e.target.closest(".prName"); if (!i) return;
+    const sid = i.closest(".prGroup").dataset.sid, name = i.value.trim();
+    if (!name) return;
+    try {
+      await api("/api/procurement/supplier-name", { method: "POST", body: { supplier_id: sid, item_id: i.dataset.id, name } });
+      const o = PR_ORDER.get(); if (o[i.dataset.id]) { o[i.dataset.id].supplier_name = name; PR_ORDER.set(o); }
+      toast("اتحفظ اسمه عند المورد");
+    } catch (er) { toast(er.message, true); }
   });
-  $("#prOrderClear").addEventListener("click", () => { PR_ORDER.set({}); draw(); });
+  $("#prOrder").addEventListener("click", async (e) => {
+    const d = e.target.closest(".prDel");
+    if (d) { const o = PR_ORDER.get(); delete o[d.dataset.id]; PR_ORDER.set(o); draw(); return; }
+    const g = e.target.closest(".prGroup"); if (!g) return;
+    const sid = g.dataset.sid;
+    if (e.target.closest(".prMsgBtn")) {
+      try {
+        const r = await api("/api/procurement/message", { method: "POST", body: { supplier_id: sid, lines: lines(sid) } });
+        $("#prMsg").innerHTML = `<h3>نص الرسالة لـ ${esc(supName(sid))} (البرنامج ما بيبعتهاش: انسخها وابعتها بنفسك)</h3>
+          <textarea id="prMsgText" rows="10" style="width:100%">${esc(r.text)}</textarea>
+          <button type="button" class="btn small" id="prMsgCopy">انسخ</button>`;
+        $("#prMsgCopy").addEventListener("click", () => { $("#prMsgText").select(); try { navigator.clipboard.writeText($("#prMsgText").value); } catch { /* old browser */ } toast("اتنسخت"); });
+      } catch (er) { toast(er.message, true); }
+      return;
+    }
+    const sentBtn = e.target.closest(".prSent");
+    if (sentBtn) {
+      if (sentBtn.disabled) return;
+      if (!confirm(`سجّل إن طلبية ${supName(sid)} اتبعتت؟ (البرنامج ما بيبعتش حاجة؛ ده تسجيل للمتابعة بس)`)) return;
+      sentBtn.disabled = true;               // one press at a time; a retry reuses the same key (ONCE_PATHS)
+      try {
+        await api("/api/procurement/orders", { method: "POST", body: { supplier_id: sid, lines: lines(sid) } });
+        const o = PR_ORDER.get(); Object.keys(o).forEach((k) => { if ((o[k].supplier_id || "") === sid) delete o[k]; }); PR_ORDER.set(o);
+        toast("اتسجلت للمتابعة"); await load(); drawTrack().catch(() => {});
+      } catch (er) { toast(er.message, true); } finally { sentBtn.disabled = false; }
+    }
+  });
+  $("#prTrack").addEventListener("click", async (e) => {
+    const b = e.target.closest(".prLine"); if (!b) return;
+    const body = { item_id: b.dataset.i, status: b.dataset.s };
+    if (b.dataset.s === "partial") {
+      const t = (prompt(`وصل كام علبة من ${b.dataset.n}؟`) || "").trim();
+      if (!t) return;
+      body.got = t;
+    }
+    try { await api(`/api/procurement/orders/${encodeURIComponent(b.dataset.o)}/line`, { method: "POST", body }); await drawTrack(); load().catch(() => {}); }
+    catch (er) { toast(er.message, true); }
+  });
+  $("#prPrices").addEventListener("click", async (e) => {
+    const p = PR_PRICES.get(), d = e.target.closest(".prPriceDel"), s = e.target.closest(".prPriceSave");
+    if (d) { delete p[d.dataset.id]; PR_PRICES.set(p); drawPrices(); return; }
+    if (!s) return;
+    try {
+      await api(`/api/items/${encodeURIComponent(s.dataset.id)}`, { method: "PATCH", body: { public_price: p[s.dataset.id].price } });
+      delete p[s.dataset.id]; PR_PRICES.set(p); toast("اتحدّث السعر"); load().catch(() => {});
+    } catch (er) { toast(er.message, true); }
+  });
+  $("#prOrderClear").addEventListener("click", () => { PR_ORDER.set({}); $("#prMsg").innerHTML = ""; draw(); });
   $("#prOrderXlsx").addEventListener("click", async () => {
     const g = groups();
-    const body = { groups: Object.keys(g).map((sid) => ({ supplier_id: sid || null, lines: g[sid].map((l) => ({ item_id: l.item_id, packs: l.packs })) })) };
+    const body = { groups: Object.keys(g).map((sid) => ({ supplier_id: sid || null, lines: lines(sid) })) };
     if (!body.groups.length) { toast("الطلبية فاضية", true); return; }
-    const res = await fetch("/api/procurement/order.xlsx", { method: "POST", body: JSON.stringify(body), credentials: "same-origin",
+    const res = await fetch("/api/procurement/plan.xlsx", { method: "POST", body: JSON.stringify(body), credentials: "same-origin",
       headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "Idempotency-Key": newKey() } });
     if (!res.ok) {
       let msg = "التنزيل فشل"; try { msg = (await res.json()).error.message || msg; } catch { /* not JSON */ }
@@ -3634,6 +3821,7 @@ async function viewProcurement() {
   });
   $("#prForm").addEventListener("submit", (e) => { e.preventDefault(); load().catch((er) => toast(er.message, true)); });
   load().catch((er) => toast(er.message, true));
+  drawTrack().catch(() => { $("#prTrack").textContent = "—"; });
   api("/api/procurement/health").then((h) => {
     $("#prHealth").className = "";
     $("#prHealth").innerHTML = `

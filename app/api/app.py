@@ -501,11 +501,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay_channels.ensure_defaults(db)
             fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
+        carried = None
+        try:                                     # U4-0: a clean start keeps the device and printing settings
+            from ..core import device_settings as dvs
+            _c = accounts.resolve_session(db, res["token"])
+            carried = dvs.carry_in(db, s.data_dir, _c.org_id, _c.user_id)
+        except Exception:                        # never blocks the setup; the restore screen is still there
+            log.exception("device settings carry-over failed")
         if b.get("rounding") is not None and str(b["rounding"]).strip() != "":   # U2-14: asked at setup
             from ..sales import rounding as _rnd
             _rnd.set_step(db, accounts.resolve_session(db, res["token"]), b.get("rounding"))
         ctx = accounts.resolve_session(db, res["token"])
-        resp = J({"me": accounts.me(db, ctx)}, status_code=201)
+        resp = J({"me": accounts.me(db, ctx), "carried": carried}, status_code=201)
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
                         max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
         return resp
@@ -2103,6 +2110,56 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                 expensive_from=dear, **_sugg_params(req)))
 
     @handler
+    async def proc_plan(req):
+        from ..procurement import purchase_plan as pp
+        qp = req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(pp.plan, db, ctx_of(req), scope=qp.get("scope") or "default",
+                                supplies=qp.get("supplies") in ("1", "true"), expensive_from=dear))
+
+    @handler
+    async def proc_plan_xlsx(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return Response(pp.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
+
+    @handler
+    async def proc_orders(req):
+        from ..procurement import purchase_plan as pp
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            b = await body(req)
+            return J(pp.create_order(db, ctx, supplier_id=b.get("supplier_id"), lines=b.get("lines")))
+        return J({"orders": pp.list_orders(db, ctx)})
+
+    @handler
+    async def proc_order_line(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return J(pp.set_line(db, ctx_of(req), req.path_params["id"], str(b.get("item_id") or ""),
+                             status=str(b.get("status") or ""), got=b.get("got")))
+
+    @handler
+    async def proc_supplier_name(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        pp.remember_name(db, ctx_of(req), b.get("supplier_id"), b.get("item_id"), b.get("name"))
+        return J({"ok": True})
+
+    @handler
+    async def proc_message(req):
+        from ..procurement import purchase_plan as pp
+        b = await body(req)
+        return J({"text": pp.message_draft(db, ctx_of(req), b.get("supplier_id"), b.get("lines"))})
+
+    @handler
     async def proc_order_xlsx(req):
         from ..procurement import smart_order
         b = await body(req)
@@ -3004,6 +3061,38 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         return J(await run_in_threadpool(ps.print_label_test, db, ctx, b if isinstance(b, dict) else {}))
 
+    # ------------------------------------------------------------- U4-0: device settings from an older copy
+    def _dev_dirs() -> tuple:
+        off = autob.settings().get("offsite_dir")
+        return (Path(off),) if off else ()
+
+    @handler
+    async def device_restore_sources(req):
+        from ..core import device_settings as dvs
+        ctx_of(req).require("settings.manage")
+        rows = await run_in_threadpool(dvs.sources, s.data_dir, s.backup_path, _dev_dirs())
+        return J({"sources": [{k: r[k] for k in ("id", "kind", "name", "when")} for r in rows]})
+
+    @handler
+    async def device_restore_preview(req):
+        from ..core import device_settings as dvs
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        b = await body(req)
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.preview(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs))))
+
+    @handler
+    async def device_restore_apply(req):
+        from ..core import device_settings as dvs
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        b = await body(req)
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.restore(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs), b.get("groups"))))
+
     @handler
     async def print_label_calibrate(req):
         from ..printing import service as ps
@@ -3185,6 +3274,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/health", proc_health),
         Route("/api/procurement/smart", proc_smart),
         Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
+        Route("/api/procurement/plan", proc_plan),
+        Route("/api/procurement/plan.xlsx", proc_plan_xlsx, methods=["POST"]),
+        Route("/api/procurement/orders", proc_orders, methods=["GET", "POST"]),
+        Route("/api/procurement/orders/{id}/line", proc_order_line, methods=["POST"]),
+        Route("/api/procurement/supplier-name", proc_supplier_name, methods=["POST"]),
+        Route("/api/procurement/message", proc_message, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
@@ -3240,6 +3335,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/print/label-preview", label_preview, methods=["POST"]),
         Route("/api/print/label-test", print_label_test, methods=["POST"]),
+        Route("/api/settings/device-restore/sources", device_restore_sources),
+        Route("/api/settings/device-restore/preview", device_restore_preview, methods=["POST"]),
+        Route("/api/settings/device-restore/apply", device_restore_apply, methods=["POST"]),
         Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
