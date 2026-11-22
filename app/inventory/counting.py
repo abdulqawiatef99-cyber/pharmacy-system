@@ -85,13 +85,15 @@ class Counting:
                 " LEFT JOIN item_costs c ON c.item_id=i.id AND c.org_id=i.org_id AND c.branch_id=sb.branch_id"
                 " WHERE i.org_id=? AND i.status='active' AND coalesce(i.is_service,0)=0 GROUP BY i.id HAVING sum(sb.qty)>0")
         stock = {r["id"]: dict(r) for r in self.db.all(base, (br, org))}       # one query, Decimal in Python
-        value = sorted(stock, key=lambda i: -(Decimal(stock[i]["avg_cost"] or "0") * stock[i]["q"]))[:200]
+        for i in recent:                       # skipped before the lists are cut (Codex P2 on #418)
+            stock.pop(i, None)
+        value = sorted(stock, key=lambda i: -(Decimal(stock[i]["avg_cost"] or "0") * stock[i]["q"]))
         fast = [r["item_id"] for r in self.db.all(
             "SELECT item_id, -sum(qty_delta) s FROM stock_movements WHERE org_id=? AND branch_id=? AND movement_type='sale'"
-            " AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 200", (org, br, d30))]
+            " AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 2000", (org, br, d30))]
         diff = [r["item_id"] for r in self.db.all(
             "SELECT item_id, sum(abs(qty_delta)) s FROM stock_movements WHERE org_id=? AND branch_id=?"
-            " AND ref_type='count_session' AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 200", (org, br, d90))]
+            " AND ref_type='count_session' AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 2000", (org, br, d90))]
         picked, why = [], {}
         lists = [("diff", diff), ("value", value), ("fast", fast)]
         while len(picked) < n and any(l for _, l in lists):
