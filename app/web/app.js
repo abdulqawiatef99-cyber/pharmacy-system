@@ -3864,7 +3864,7 @@ async function posUsual() {
   const box = $("#posUsual"), cid = SALE?.customer_id;
   if (!box || !cid) return;
   try {
-    if (POS.usual?.cid !== cid) POS.usual = { cid, items: (await api(`/api/customers/${cid}/usual`)).items };
+    if (POS.usual?.cid !== cid || POS.usual?.sale !== SALE.id) POS.usual = { cid, sale: SALE.id, items: (await api(`/api/customers/${cid}/usual`)).items };
   } catch { return; }
   if (SALE?.customer_id !== cid || !$("#posUsual")) return;
   const items = POS.usual.items.slice(0, 8);

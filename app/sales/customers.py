@@ -355,13 +355,15 @@ def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: da
         "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.is_service, count(DISTINCT s.id) times,"
         " max(s.completed_at) last_at,"
         " (SELECT l2.qty_base FROM sale_lines l2 JOIN sales s2 ON s2.id=l2.sale_id WHERE s2.org_id=s.org_id"
-        "   AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id"
+        "   AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id AND s2.completed_at>=?"
+        "   AND (SELECT coalesce(sum(a2.qty_base - a2.returned_qty),0) FROM sale_allocations a2 WHERE a2.sale_line_id=l2.id) > 0"
         "   ORDER BY s2.completed_at DESC LIMIT 1) last_qty,"
-        " coalesce((SELECT sum(b.qty) FROM stock_balances b WHERE b.item_id=l.item_id AND b.org_id=s.org_id),0) stock"
+        " coalesce((SELECT sum(b.qty) FROM stock_balances b WHERE b.item_id=l.item_id AND b.org_id=s.org_id"
+        "   AND b.branch_id=?),0) stock"
         " FROM sale_lines l JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id JOIN items i ON i.id=l.item_id"
         " WHERE s.org_id=? AND s.customer_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
         " AND (SELECT coalesce(sum(a.qty_base - a.returned_qty),0) FROM sale_allocations a WHERE a.sale_line_id=l.id) > 0"
-        " GROUP BY l.item_id ORDER BY times DESC, last_at DESC LIMIT 30", (ctx.org_id, cid, since))
+        " GROUP BY l.item_id ORDER BY times DESC, last_at DESC LIMIT 30", (since, ctx.branch_id, ctx.org_id, cid, since))
     refills = {r["item_id"]: r for r in profile(db, ctx, cid, today)["refills"]}
     out = []
     for r in rows:
