@@ -16,7 +16,8 @@ from app.db import new_id
 from app.inventory import service as inv
 from app.procurement import demand
 from app.procurement import purchase_plan as pp
-from tests.helpers import DBTestCase
+from tests.helpers import OWNER_PW, DBTestCase, needs_browser
+from tests.pos_browser import LOGIN, run_node
 from tests.test_api import APICase, H
 
 TODAY = date(2026, 11, 22)
@@ -460,3 +461,68 @@ class TestCodexFixes(PlanBase):
         from pathlib import Path
         js = Path("app/web/app.js").read_text(encoding="utf-8")
         self.assertIn("st.pick[r.item_id] ?? (o[r.item_id] ? (o[r.item_id].supplier_id", js)
+
+
+PRICE_BROWSER = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  const sent = [];
+  let fail = true;
+  await p.route('**/api/items/*', async (route) => {
+    const req = route.request();
+    if (req.method() !== 'PATCH') return route.continue();
+    sent.push(JSON.parse(req.postData()));
+    if (fail) { fail = false; return route.fulfill({ status: 422, contentType: 'application/json',
+      body: JSON.stringify({ error: { message: 'refused for the test' } }) }); }
+    return route.continue();
+  });
+  p.on('dialog', (d) => d.accept('15.25'));
+  await p.goto(base + '/#/procurement');
+  await p.waitForSelector('#prBody .prPrice');
+  await p.click('#prBody .prPrice');
+  await p.waitForSelector('#prPrices .prPriceSave');
+  const out = { staged: await p.textContent('#prPrices') };
+  await p.click('#prPrices .prPriceSave');
+  await p.waitForTimeout(400);
+  out.after_refused = await p.textContent('#prPrices');
+  await p.click('#prPrices .prPriceSave');
+  await p.waitForFunction(() => !document.querySelector('#prPrices .prPriceSave'));
+  out.after_ok = await p.textContent('#prPrices');
+  out.sent = sent;
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestPriceScreen(APICase):
+    def test_price_update_sends_piasters_keeps_on_refusal_clears_on_success(self):
+        self.ctx = self.login("owner", OWNER_PW)
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Price Tab", "public_price": 1000})
+        card.set_shortage(self.db, self.ctx, it, True)
+        out = run_node(self, PRICE_BROWSER, "owner", OWNER_PW)
+        self.assertIn("15.25", out["staged"])
+        self.assertEqual(out["sent"], [{"public_price": 1525}, {"public_price": 1525}])   # integer piasters
+        self.assertIn("15.25", out["after_refused"])                                       # refused: still pending
+        self.assertNotIn("15.25", out["after_ok"])                                         # saved: cleared
+        self.assertEqual(self.db.one("SELECT public_price FROM items WHERE id=?", (it,))["public_price"], 1525)
+
+
+class TestOrderOnce(APICase):
+    def test_a_retried_order_with_the_same_key_is_recorded_once(self):
+        self.http_login()
+        s = cat.create_supplier(self.db, self.ctx, name="مورد د")
+        key = new_id()
+        for _ in range(2):
+            r = self.c.post("/api/procurement/orders", json={"supplier_id": s, "lines": [{"item_id": self.pan, "packs": 5}]},
+                            headers={**H, "Idempotency-Key": key})
+            self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(pp.list_orders(self.db, self.ctx)), 1)
+
+    def test_the_screen_keeps_one_key_for_an_unanswered_order(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        self.assertIn(r"/^\/api\/procurement\/orders$/", js[js.index("const ONCE_PATHS"):js.index("function onceKey")])

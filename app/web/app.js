@@ -295,7 +295,9 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // part 3 item 6a: a return with its replacement sale
   /^\/api\/sales\/[^/]+\/exchange$/,
   // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
-  /^\/api\/supplier-returns$/];
+  /^\/api\/supplier-returns$/,
+  // U4-2: an order recorded as sent: an unanswered «اتبعتت» pressed again replays, never a second order (Codex P2 on #433)
+  /^\/api\/procurement\/orders$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -3770,13 +3772,16 @@ async function viewProcurement() {
       } catch (er) { toast(er.message, true); }
       return;
     }
-    if (e.target.closest(".prSent")) {
+    const sentBtn = e.target.closest(".prSent");
+    if (sentBtn) {
+      if (sentBtn.disabled) return;
       if (!confirm(`سجّل إن طلبية ${supName(sid)} اتبعتت؟ (البرنامج ما بيبعتش حاجة؛ ده تسجيل للمتابعة بس)`)) return;
+      sentBtn.disabled = true;               // one press at a time; a retry reuses the same key (ONCE_PATHS)
       try {
         await api("/api/procurement/orders", { method: "POST", body: { supplier_id: sid, lines: lines(sid) } });
         const o = PR_ORDER.get(); Object.keys(o).forEach((k) => { if ((o[k].supplier_id || "") === sid) delete o[k]; }); PR_ORDER.set(o);
         toast("اتسجلت للمتابعة"); await load(); drawTrack().catch(() => {});
-      } catch (er) { toast(er.message, true); }
+      } catch (er) { toast(er.message, true); } finally { sentBtn.disabled = false; }
     }
   });
   $("#prTrack").addEventListener("click", async (e) => {
