@@ -14,16 +14,13 @@ def _egp(p: int | None) -> str:
     return f"{sign}{p // 100:,}.{p % 100:02d}"
 
 
-def _local(utc_iso: str | None) -> str:
-    """The PC's local time of a stored UTC stamp, as «YYYY-MM-DD HH:MM»."""
-    from datetime import datetime, timezone
+def _local(utc_iso: str | None, time_format: str) -> str:
+    """The PC's local time of a stored stamp, in the pharmacy's own 12 / 24 h setting (as the shift report)."""
+    from ..core import accounts
+    from ..printing import settings as rs
     if not utc_iso:
         return ""
-    try:
-        t = datetime.strptime(utc_iso, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).astimezone()
-    except ValueError:
-        return utc_iso[:16].replace("T", " ")
-    return t.strftime("%Y-%m-%d %H:%M")
+    return rs.fmt_when(accounts.parse_iso(utc_iso).astimezone(), time_format)
 
 
 def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
@@ -33,21 +30,26 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     if r["status"] != "closed":
         raise Conflict("الملخص بيطلع بعد قفل الشيفت", code="shift_open")
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
-    cash_sales = (r["cash_by_kind"] or {}).get("sale", 0)
+    from ..printing import settings as rs
+    tf = rs.get(db, ctx.org_id)["time_format"]
+    k = r["cash_by_kind"] or {}
+    cash_sales = k.get("sale", 0)
+    cash_back = -(k.get("refund", 0) + k.get("void", 0))          # review P2: what left the drawer for returns / voids
     diff = r["difference"] or 0
     # out of stock now and sold in the last 30 days: what to order first
     out = db.all(
         "SELECT coalesce(i.name_en, i.name_ar) n FROM items i WHERE i.org_id=? AND i.status='active'"
         " AND coalesce(i.is_service,0)=0"
-        " AND coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.org_id=i.org_id AND b.item_id=i.id),0) <= 0"
+        " AND coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.org_id=i.org_id AND b.item_id=i.id"
+        "   AND b.branch_id=?),0) <= 0"
         " AND EXISTS (SELECT 1 FROM stock_movements m WHERE m.org_id=i.org_id AND m.item_id=i.id"
         "   AND m.movement_type='sale' AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))"
-        " ORDER BY n LIMIT 15", (ctx.org_id,))
+        " ORDER BY n LIMIT 15", (ctx.org_id, r["branch_id"]))
     lines = [
         f"ملخص شيفت {org}",
-        f"من {_local(r['opened_at'])} لـ {_local(r['closed_at'])} — قفله {r.get('closed_by_name') or ''}",
+        f"من {_local(r['opened_at'], tf)} لـ {_local(r['closed_at'], tf)} — قفله {r.get('closed_by_name') or ''}",
         f"المبيعات: {_egp(r['sales_total'])} ج ({r['sales_count']} فاتورة)",
-        f"نقدي: {_egp(cash_sales)} ج · بطاقة: {_egp(r['card_total'])} ج · تحويل: {_egp(r['transfer_total'])} ج",
+        f"نقدي: {_egp(cash_sales)} ج" + (f" (رجع منه {_egp(cash_back)} ج مرتجع وإلغاء)" if cash_back else "") + f" · بطاقة: {_egp(r['card_total'])} ج · تحويل: {_egp(r['transfer_total'])} ج",
         f"آجل: {_egp(r['credit_total'])} ج",
         f"المرتجع: {_egp(r['returns_total'])} ج ({r['returns_count']}) · الملغي: {r['voided_count']} فاتورة",
         f"الخصومات: {_egp(r['discount_total'])} ج",
