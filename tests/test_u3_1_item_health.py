@@ -229,3 +229,25 @@ class TestItemHealthAPI(PlanCase):
         self.call("POST", f"/api/items/{self.box}/pack-fix", json={"pack_size": 6, "reason": "العبوة غلط"})
         self.assertEqual(self.qty(self.box), 60)
         self.call("POST", f"/api/items/{self.box}/pack-fix", 422, json={"pack_size": 6, "reason": "تاني"})   # retry: no double
+
+
+class TestCodexOn420(TestItemHealth):
+    def test_hidden_items_need_the_right(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET hidden=1 WHERE id=?", (self.ranx,))
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"items.hidden"})
+        self.assertNotIn(self.ranx, {r["item_id"] for r in item_health(self.db, staff)["rows"]})
+        self.assertIn(self.ranx, {r["item_id"] for r in item_health(self.db, self.ctx)["rows"]})
+
+
+class TestCodexOn420Order(TestPackCorrection):
+    def test_old_lot_found_by_ledger_position_not_timestamp(self):
+        from app.procurement import returns
+        old = self._whole_boxes()
+        sup = cat.create_supplier(self.db, self.ctx, name="مورد تجربة")
+        self._fix(4)
+        from unittest import mock
+        # a correction stamp that sorts before the receipts as text (mixed precision): the ledger position decides
+        with mock.patch.object(repack, "corrected_at", return_value="0000-01-01T00:00:00.000000Z"):
+            with self.assertRaises(Conflict):
+                returns.create(self.db, self.ctx, sup, [{"item_id": self.pan, "batch_id": old, "qty_base": 4, "reason": "expired"}])

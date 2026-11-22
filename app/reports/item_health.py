@@ -85,7 +85,9 @@ def item_health(db: Database, ctx: Context) -> dict:
         "   sum(CASE WHEN s.qty>0 AND (s.batch_key='' OR b.expiry_date IS NULL) THEN s.qty ELSE 0 END) no_exp"
         "   FROM stock_balances s LEFT JOIN batches b ON b.id=nullif(s.batch_key,'') AND b.org_id=s.org_id"
         "   WHERE s.org_id=? GROUP BY s.item_id) sb ON sb.item_id=i.id"
-        " WHERE i.org_id=? AND i.status='active'", (org, org))
+        " WHERE i.org_id=? AND i.status='active'"
+        + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0"),     # Codex P1: as the item card
+        (org, org))
     last_pub = {r["item_id"]: r["public_price"] for r in db.all(       # one pass (review P2: no per-line subquery)
         "SELECT item_id, public_price FROM (SELECT l.item_id, l.public_price, row_number() OVER"
         " (PARTITION BY l.item_id ORDER BY p.approved_at DESC, l.line_no DESC) rn"

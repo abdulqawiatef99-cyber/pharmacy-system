@@ -17,6 +17,7 @@ Open credit invoices that sold the item are only counted and shown (U3-1): their
 """
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from ..core import audit
@@ -77,6 +78,9 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
             raise Conflict("فيه رصيد مايتحولش لوحدات كاملة بالعبوة الجديدة (علبة مفتوحة): اعمل جرد للصنف الأول وبعدين صحّح العبوة",
                            code="pack_not_whole", details={"lots": p["not_whole"]})
         old = p["old_pack"]
+        # the ledger position before the correction: receipts are ordered by it, never by timestamps of different
+        # precision (Codex P2 on #420)
+        seq = db.one("SELECT coalesce(max(rowid),0) s FROM stock_movements")["s"]
         for l in p["lots"]:
             delta = l["new_qty"] - l["qty"]
             if delta:
@@ -94,7 +98,8 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
         db.execute("UPDATE items SET pack_size=?, min_stock=?, max_stock=?, updated_at=? WHERE id=? AND org_id=?",
                    (new_pack, mn, mx, inv._now(), item_id, ctx.org_id))
         audit.record(db, ctx, ACTION, "item", item_id, {"pack_size": old},
-                     {"pack_size": new_pack, "reason": reason, "lots": len(p["lots"]), "open_credit": p["open_credit"]})
+                     {"pack_size": new_pack, "reason": reason, "lots": len(p["lots"]), "open_credit": p["open_credit"],
+                      "ledger_seq": seq})
     return {**p, "done": True}
 
 
@@ -102,6 +107,16 @@ def corrected_at(db: Database, org_id: str, item_id: str) -> str | None:
     r = db.one("SELECT max(at) a FROM audit_log WHERE org_id=? AND entity_type='item' AND entity_id=? AND action=?",
                (org_id, item_id, ACTION))
     return r["a"] if r else None
+
+
+def corrected_seq(db: Database, org_id: str, item_id: str) -> int:
+    """The ledger position (stock_movements rowid) just before the latest correction of this item."""
+    r = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='item' AND entity_id=? AND action=?"
+               " ORDER BY at DESC, rowid DESC LIMIT 1", (org_id, item_id, ACTION))
+    try:
+        return int(json.loads(r["after_json"]).get("ledger_seq") or 0) if r else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def guard_reversal(db: Database, org_id: str, item_id: str, movement_type: str, ref_type: str | None,
@@ -127,8 +142,8 @@ def guard_reversal(db: Database, org_id: str, item_id: str, movement_type: str, 
                 raise Conflict(msg, code="pack_corrected_after")
         return
     old_lot = db.one("SELECT 1 FROM stock_movements WHERE org_id=? AND item_id=? AND coalesce(batch_id,'')=?"
-                     " AND qty_delta>0 AND coalesce(ref_type,'')<>'pack_fix' AND created_at<? LIMIT 1",
-                     (org_id, item_id, batch_id or "", fixed))
+                     " AND qty_delta>0 AND coalesce(ref_type,'')<>'pack_fix' AND rowid<=? LIMIT 1",
+                     (org_id, item_id, batch_id or "", corrected_seq(db, org_id, item_id)))
     if old_lot:
         raise Conflict("التشغيلة دي اتستلمت قبل تصحيح عدد الوحدات في العبوة، فمينفعش ترجع للمورد أو تتلغي فاتورتها"
                        " بالكميات القديمة. اعملها بتسوية مخزون", code="pack_corrected_after")
