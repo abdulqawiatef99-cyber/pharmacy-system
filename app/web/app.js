@@ -1488,7 +1488,7 @@ app.addEventListener("keydown", (e) => {
   // in a text box the side arrows move the caret until it reaches the edge
   if (side && el.type !== "number" && el.selectionStart !== (e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft") ? 0 : el.value.length)) return;
   e.preventDefault();                       // never a form submit or a number spin: that was the Enter stall
-  if (e.key === "Enter" && PG_SAVING) return;   // one save at a time
+  if (PG_SAVING) return;                    // one save at a time, for the arrows too (review P2)
   const to = pgTarget(el, e.key);
   if (!to) return;
   PG_FOCUS = to;
@@ -1504,8 +1504,9 @@ async function save(path, body, method = "PATCH") {
     pgFocus();
   } catch (e) {
     toast(e.message, true);
+    PG_FOCUS = null;                       // a failed save keeps no pending move (review P2)
     if (e.code === "stale_version") await viewInvoice(CUR.invoice.id);
-  } finally { PG_SAVING--; }
+  } finally { PG_SAVING--; if (PG_FOCUS && !CUR) PG_FOCUS = null; }
 }
 
 async function viewInvoice(id) {
