@@ -127,22 +127,15 @@ class TestDiscount(People):
         n = notify.listing(self.db, self.mgr)["items"][0]
         self.assertEqual((n["kind"], n["actor"]), ("discount", "Assistant"))
 
-    def test_below_cost_owner_confirms_others_cannot(self):
-        # cost 15/unit, price 20/unit: 30% discount = 14 < 15
+    def test_below_cost_refused_for_everyone(self):
+        # cost 15/unit, price 20/unit: 30% discount = 14 < 15. Update 3 (owner: «امنعه أساساً»): the owner too
         people.set_role_discount(self.db, self.ctx, "manager", 5000)
         m = self.login("manager", PW)
-        sid = self.s.create(m)
-        with self.assertRaises(Forbidden) as e:          # U2-33: refused when typed, not only at payment
-            self.s.add_line(m, sid, self.pan, units=2, discount_bp=3000)
-        self.assertEqual(e.exception.details["permission"], "sales.below_cost")
-        sid = self.s.create(self.ctx)
-        d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=3000)
-        with self.assertRaises(Conflict) as e:
-            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={})
-        self.assertEqual(e.exception.code, "below_cost_confirm")
-        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={}, confirm_below_cost=True)
-        kinds = [n["kind"] for n in notify.listing(self.db, self.ctx)["items"]]
-        self.assertIn("below_cost", kinds)
+        for who in (m, self.ctx):
+            sid = self.s.create(who)
+            with self.assertRaises(ValidationFailed) as e:          # refused when typed
+                self.s.add_line(who, sid, self.pan, units=2, discount_bp=3000)
+            self.assertEqual(e.exception.code, "below_cost")
 
 
 class TestReturns(People):
