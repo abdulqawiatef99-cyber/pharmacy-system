@@ -2569,6 +2569,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def hikma_claim_api(req):
+        from ..reports import hikma_claim as hk
+        ctx, q = ctx_of(req), req.query_params
+        return J(await off_loop(hk.claim, db, ctx, q.get("branch") or "", q.get("from") or "", q.get("to") or ""))
+
+    @handler
+    async def hikma_settings_api(req):
+        from ..reports import hikma_claim as hk
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            b = await body(req)
+            return J(hk.save_settings(db, ctx, str(b.get("branch") or ""), b.get("customer_id") or None,
+                                      _int(b.get("advance"), "advance")))
+        ctx.require("costs.read")
+        ctx.require("sales.totals")
+        return J(hk.settings(db, ctx.org_id))
+
+    @handler
     async def day_review_api(req):
         from ..reports.day_review import day_review
         return J(await off_loop(day_review, db, ctx_of(req), req.query_params.get("day") or None))
@@ -3210,6 +3228,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/shifts", cash_shifts),
         Route("/api/system/slow-requests", slow_requests),
         Route("/api/reports/day-review", day_review_api),
+        Route("/api/reports/hikma-claim", hikma_claim_api),
+        Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
