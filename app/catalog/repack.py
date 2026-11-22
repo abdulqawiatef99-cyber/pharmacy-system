@@ -17,7 +17,7 @@ Open credit invoices that sold the item are only counted and shown (U3-1): their
 """
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 from ..core import audit
 from ..core.errors import Conflict, NotFound, ValidationFailed
@@ -71,6 +71,8 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
             raise Conflict("الصنف موجود في فاتورة بيع لسه ما اتقفلتش: اقفلها أو احذف السطر الأول", code="pack_in_draft")
         if p["counting"]:
             raise Conflict("الصنف في جرد مفتوح: اعتمد الجرد أو الغيه الأول", code="pack_in_count")
+        if any(l["qty"] < 0 for l in p["lots"]):
+            raise Conflict("فيه رصيد بالسالب على الصنف ده: اعمل جرد للصنف الأول وبعدين صحّح العبوة", code="pack_negative")
         if p["not_whole"]:
             raise Conflict("فيه رصيد مايتحولش لوحدات كاملة بالعبوة الجديدة (علبة مفتوحة): اعمل جرد للصنف الأول وبعدين صحّح العبوة",
                            code="pack_not_whole", details={"lots": p["not_whole"]})
@@ -84,11 +86,8 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
                                   batch_id=l["batch_key"] or None, branch_id=l["branch_id"],
                                   unit_cost=Decimal(cost["avg_cost"]) if cost else None, ref_type="pack_fix",
                                   ref_id=item_id, note=f"تصحيح العبوة {old} ← {new_pack}: {reason}",
-                                  reason="entry_error", allow_negative=True)
-        for c in db.all("SELECT branch_id, avg_cost FROM item_costs WHERE org_id=? AND item_id=?", (ctx.org_id, item_id)):
-            new = (Decimal(c["avg_cost"]) * old / new_pack).quantize(inv.COST_Q, ROUND_HALF_UP)
-            db.execute("UPDATE item_costs SET avg_cost=?, updated_at=? WHERE org_id=? AND branch_id=? AND item_id=?",
-                       (str(new), inv._now(), ctx.org_id, c["branch_id"], item_id))
+                                  reason="entry_error")
+        inv.rescale_avg_cost(db, ctx.org_id, item_id, old, new_pack)
         it = db.one("SELECT min_stock, max_stock FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
         mn = _half_up_scale(it["min_stock"] or 0, new_pack, old)
         mx = None if it["max_stock"] is None else _half_up_scale(it["max_stock"], new_pack, old)

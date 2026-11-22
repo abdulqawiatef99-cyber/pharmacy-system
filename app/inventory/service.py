@@ -106,13 +106,24 @@ def post_movement(db: Database, ctx: Context, *, item_id: str, qty_delta: int,
     return mid
 
 
+def rescale_avg_cost(db: Database, org_id: str, item_id: str, old_pack: int, new_pack: int) -> None:
+    """U3-1 pack-size correction: the average cost per base unit × old / new in every branch, so a box keeps its
+    cost. Inside the caller's transaction."""
+    for r in db.all("SELECT branch_id FROM item_costs WHERE org_id=? AND item_id=?", (org_id, item_id)):
+        _update_avg_cost(db, org_id, r["branch_id"], item_id, 0, 0, Decimal(0), scale=(old_pack, new_pack))
+
+
 def _update_avg_cost(db: Database, org_id: str, branch_id: str, item_id: str,
-                     qty_before: int, delta: int, unit_cost: Decimal) -> None:
+                     qty_before: int, delta: int, unit_cost: Decimal, scale: tuple[int, int] | None = None) -> None:
     r = db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
                (org_id, branch_id, item_id))
     old = Decimal(r["avg_cost"]) if r else None
     qty_after = qty_before + delta
-    if delta > 0:
+    if scale is not None:
+        if old is None:
+            return
+        new = old * scale[0] / scale[1]
+    elif delta > 0:
         if old is None or qty_before <= 0:
             new = unit_cost
         else:
