@@ -1209,7 +1209,7 @@ let CUR = null;
 const FIELD_AR = { raw_name: "اسم الصنف", raw_code: "الكود", raw_barcode: "الباركود", qty: "الكمية",
   bonus_qty: "البونص", public_price: "سعر الجمهور", discount_bp: "الخصم", discount_pct: "الخصم",
   unit_net_price: "الصافي", tax_amount: "الضريبة", line_total: "الإجمالي", batch_no: "التشغيلة",
-  expiry_date: "الصلاحية" };
+  expiry_date: "الصلاحية", distributor_margin: "هامش الموزع" };
 const SRC_LABEL = { read: "مقروء", inferred: "محسوب", ai: "قراءة آلية", user: "أدخله المستخدم", db: "من قاعدة البيانات" };
 
 function fieldInput(line, field, value, { type = "number", step = "0.01" } = {}) {
@@ -1275,6 +1275,7 @@ function renderInvoice() {
       <div>الإجمالي المحسوب<b>${money(inv.computed_total) || "—"}</b></div>
       <div class="${diff == null ? "" : diff === 0 ? "t-ok" : totalErr ? "t-err" : "t-warn"}">${diff == null ? "الفرق" : diff === 0 ? "✓ الإجماليان متطابقان" : totalErr ? "✕ الفرق" : "⚠ الفرق (مقبول)"}<b>${diff == null ? "—" : money(diff)}</b>
         ${totalErr ? `<span>سطر زائد أو سطر ناقص؟ راجع قبل الاعتماد</span>` : ""}</div>
+      ${lines.some((l) => l.distributor_margin) ? `<div title="مجموع (الكمية × هامش الموزع)، بيتزوّد على مجموع الأسطر زي آخر ورقة الموزع">هامش الموزع<b>${money(lines.reduce((a, l) => a + (l.qty || 0) * (l.distributor_margin || 0), 0))}</b></div>` : ""}
       <div>عدد الأصناف<b>${lines.length}</b></div>
     </div>
     <h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة يجب حلها قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
@@ -1306,7 +1307,7 @@ function renderInvoice() {
         <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
       <div class="tablewrap"><table class="lines">
         <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
-          <th>الصافي</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
+          <th title="هامش ثابت للعلبة زي «4+4» في ورقة الموزع: بيتشال مرتين من سعر الجمهور قبل الخصم ويتزوّد مرة بعده">هامش الموزع</th><th>الصافي</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
         <tbody>${lines.map(renderLine).join("")}</tbody>
       </table></div>
     </section>
@@ -1369,6 +1370,7 @@ function quickAddHtml() {
       <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
       <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
+      <label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>
       <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
       <button class="btn" id="qaAdd" type="button">إضافة</button>
@@ -1419,6 +1421,7 @@ function bindQuickAdd() {
     const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
+    if ($("#qaMargin").value.trim() !== "") line.distributor_margin = exactPiasters($("#qaMargin").value) ?? $("#qaMargin").value;
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
     if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
     const keepDisc = $("#qaDisc").value;
@@ -1430,7 +1433,7 @@ function bindQuickAdd() {
   $("#qaAdd").addEventListener("click", add);
   // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
   // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
-  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaExp", "#qaBatch"];
+  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaMargin", "#qaExp", "#qaBatch"];
   order.forEach((sel, i) => {
     const el = $(sel);
     el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
@@ -1473,6 +1476,7 @@ function renderLine(l) {
     <td data-label="بونص">${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
     <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price))}</td>
     <td data-label="خصم %">${fieldInput(l, "discount_bp", pct(l.discount_bp))}</td>
+    <td data-label="هامش الموزع">${fieldInput(l, "distributor_margin", money(l.distributor_margin || 0))}</td>
     <td data-label="الصافي">${fieldInput(l, "unit_net_price", money(l.unit_net_price))}</td>
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
@@ -1513,6 +1517,8 @@ async function purchaseTabs(curId) {
 
 const CONVERT = {
   public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters, tax_amount: toPiasters,
+  // exact piasters, never a float round: 4.005 goes to the server as typed and is refused there (review P2)
+  distributor_margin: (v) => (String(v).trim() === "" ? 0 : exactPiasters(v) ?? String(v)),
   discount_bp: toBp, qty: (v) => typedWhole(v),
   bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
@@ -1520,7 +1526,7 @@ const CONVERT = {
 // U2-1 / U2-10: keyboard moves inside the purchase line grid. Enter = next box (the last box of a row goes to the
 // next row), arrows up/down = same box in the row above/below, left/right = the box beside (RTL aware). The grid
 // is redrawn after each saved change, so the box to land on is kept by line and field and focused again after it.
-const PG_FIELDS = ["qty", "bonus_qty", "public_price", "discount_bp", "unit_net_price", "line_total", "batch_no", "expiry_date"];
+const PG_FIELDS = ["qty", "bonus_qty", "public_price", "discount_bp", "distributor_margin", "unit_net_price", "line_total", "batch_no", "expiry_date"];
 let PG_FOCUS = null, PG_SAVING = 0;
 function pgFocus() {
   if (!PG_FOCUS) return;

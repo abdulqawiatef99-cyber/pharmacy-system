@@ -32,7 +32,7 @@ from .model import ExtractedInvoice, parse_expiry, pct_to_bp, to_piasters
 
 EDITABLE_LINE_FIELDS = {"item_id", "qty", "bonus_qty", "public_price", "discount_bp",
                         "unit_net_price", "tax_amount", "line_total", "batch_no", "expiry_date",
-                        "raw_name"}
+                        "raw_name", "distributor_margin"}
 EDITABLE_HEADER_FIELDS = {"supplier_id", "invoice_no", "invoice_date", "declared_total",
                           "extra_discount", "extra_tax", "notes"}
 
@@ -238,7 +238,9 @@ class Purchasing:
         comp = validation.computed_total(inv, lines)
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
-            ((normalize_text(l["raw_name"]), l["qty"], l["line_total"]) for l in lines),
+            # the distributor's margin only when there is one: invoices without it keep the hash they had (B3)
+            ((normalize_text(l["raw_name"]), l["qty"], l["line_total"], *([l["distributor_margin"]]
+              if l.get("distributor_margin") else [])) for l in lines),
             key=lambda t: (t[0], t[1] is None, t[1] or 0, t[2] is None, t[2] or 0)),
             default=str).encode()).hexdigest() if lines else None
         self.db.execute("UPDATE purchase_invoices SET computed_total=?, content_hash=? WHERE id=?",
@@ -492,7 +494,7 @@ class Purchasing:
                     else:
                         upd.update(item_id=None, match_status="unmatched", match_method=None)
                 elif k in ("qty", "bonus_qty", "public_price", "discount_bp", "unit_net_price",
-                           "tax_amount", "line_total"):
+                           "tax_amount", "line_total", "distributor_margin"):
                     if v is not None:
                         try:
                             v = whole_number(v)      # 2.5 boxes or 12.5 piasters is refused, never cut
@@ -500,7 +502,7 @@ class Purchasing:
                             raise ValidationFailed(f"قيمة غير صحيحة: {k}")
                         if v < 0 or (k == "discount_bp" and v > 10000):
                             raise ValidationFailed(f"قيمة غير صحيحة: {k}")
-                    if k == "bonus_qty" and v is None:
+                    if k in ("bonus_qty", "distributor_margin") and v is None:
                         v = 0
                     upd[k] = v
                 elif k == "expiry_date":
@@ -525,7 +527,7 @@ class Purchasing:
             for dep in ("unit_net_price", "discount_bp", "line_total"):
                 if dep not in changes and src.get(dep) == "inferred" and \
                         any(k in changes for k in ("public_price", "discount_bp", "unit_net_price",
-                                                   "qty", "tax_amount")):
+                                                   "qty", "tax_amount", "distributor_margin")):
                     upd[dep] = None
                     src.pop(dep, None)
                     conf.pop(dep, None)
@@ -564,7 +566,7 @@ class Purchasing:
             row = {"id": new_id(), "invoice_id": inv_id, "org_id": ctx.org_id, "line_no": n,
                    "raw_name": name, "raw_code": None, "raw_barcode": data.get("raw_barcode"),
                    "qty": None, "bonus_qty": 0, "public_price": None, "discount_bp": None,
-                   "unit_net_price": None, "tax_amount": None, "line_total": None,
+                   "unit_net_price": None, "tax_amount": None, "line_total": None, "distributor_margin": 0,
                    "batch_no": None, "expiry_date": None, "expiry_precision": None,
                    "field_sources": {"raw_name": "user"}, "field_confidence": {"raw_name": 1.0}}
             self._apply_match(ctx, row, inv["supplier_id"])
@@ -603,7 +605,8 @@ class Purchasing:
                                 (x, inv_id, ctx.org_id)) for x in (line_id, other_id))
             if not a or not b or line_id == other_id:
                 raise NotFound("السطر غير موجود")
-            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision")
+            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision",
+                    "distributor_margin")
             # a value still waiting for a person (low-confidence reading, unconfirmed match) is never merged away
             # (Codex P1 on #406): it is confirmed first
             if a["qty"] is None or b["qty"] is None:
@@ -616,17 +619,18 @@ class Purchasing:
                                            code="not_mergeable")
             if not a["item_id"] or any(a[k] != b[k] for k in keys) or \
                     (a["batch_no"] or "").strip().upper() != (b["batch_no"] or "").strip().upper():
-                raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر): مينفعش يتدمجوا",
+                raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر وهامش الموزع): مينفعش يتدمجوا",
                                        code="not_mergeable")
             # in payable amounts (validation.effective_amount): a total printed without tax on one line and with
             # tax on the other must not change what the invoice pays (Codex P1 on #406)
-            pay_a, pay_b = validation.effective_amount(dict(a)), validation.effective_amount(dict(b))
+            # without the distributor's margin, which is per pack and follows the quantity (B3)
+            pay_a, pay_b = validation.line_amount(dict(a)), validation.line_amount(dict(b))
             tax = None if a["tax_amount"] is None and b["tax_amount"] is None else (a["tax_amount"] or 0) + (b["tax_amount"] or 0)
             merged = {**dict(a), "qty": a["qty"] + b["qty"], "tax_amount": tax,
                       "line_total": None if a["line_total"] is None and b["line_total"] is None
                       else (pay_a + pay_b if pay_a is not None and pay_b is not None else None)}
             if (pay_a is None) != (pay_b is None) or (merged["line_total"] is None and (a["line_total"], b["line_total"]) != (None, None)) \
-                    or (pay_a is not None and validation.effective_amount(merged) != pay_a + pay_b):
+                    or (pay_a is not None and validation.line_amount(merged) != pay_a + pay_b):
                 raise ValidationFailed("السطرين مش هيتدمجوا من غير ما إجمالي الفاتورة يتغير؛ عدّل الكمية يدويًا", code="not_mergeable")
             self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=?"
                             " WHERE id=? AND org_id=?",
@@ -662,7 +666,8 @@ class Purchasing:
             # whole piasters: the new line takes its share rounded down, the original keeps the rest, so the two always
             # add up to what the line had (independent review: a None share dropped the tax from the invoice)
             half_up = lambda v: None if v is None else (2 * v * qty + a["qty"]) // (2 * a["qty"])   # noqa: E731
-            pay = validation.effective_amount(dict(a))
+            # the line's own amount; the distributor's margin is per pack and follows each part's quantity (B3)
+            pay = validation.line_amount(dict(a))
             moved_tax = half_up(a["tax_amount"])
             # the new line takes its share of what the line PAYS (tax included, half up); the original keeps the rest,
             # so the invoice total cannot move (Codex P1 on #406: raw total and tax split apart re-read the tax)
@@ -683,12 +688,12 @@ class Purchasing:
                 # validator would read that one as "before tax", the same share minus its tax
                 for part, share in ((row, moved_total), (rest, pay - moved_total)):
                     for cand in (share, share - (part["tax_amount"] or 0)):
-                        if validation.effective_amount({**part, "line_total": cand}) == share:
+                        if validation.line_amount({**part, "line_total": cand}) == share:
                             part["line_total"] = cand
                             break
                 self.db.execute("UPDATE purchase_invoice_lines SET line_total=? WHERE id=? AND org_id=?",
                                 (row["line_total"], row["id"], ctx.org_id))
-            if pay is not None and validation.effective_amount(row) + validation.effective_amount(rest) != pay:
+            if pay is not None and validation.line_amount(row) + validation.line_amount(rest) != pay:
                 raise ValidationFailed("التقسيم كان هيغيّر إجمالي السطر؛ قسّمه يدويًا", code="split_changes_total")
             self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=? AND org_id=?",
                             (rest["qty"], rest["line_total"], rest["tax_amount"], line_id, ctx.org_id))

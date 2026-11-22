@@ -102,7 +102,8 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
     per_sup: dict[tuple, bool] = {}
     for r in db.all(
             "SELECT l.item_id, p.supplier_id, coalesce(p.invoice_date, substr(p.approved_at,1,10)) day, p.approved_at,"
-            " l.qty, l.bonus_qty, l.public_price, l.discount_bp, l.unit_net_price FROM purchase_invoice_lines l"
+            " l.qty, l.bonus_qty, l.public_price, l.discount_bp,"
+            " l.unit_net_price + l.distributor_margin unit_net_price FROM purchase_invoice_lines l"
             " JOIN purchase_invoices p ON p.id=l.invoice_id WHERE p.org_id=? AND p.branch_id=? AND p.status='approved'"
             " AND l.item_id IS NOT NULL AND l.qty>0 AND p.approved_at>=? ORDER BY p.approved_at DESC, l.line_no",
             (o, b, since)):
