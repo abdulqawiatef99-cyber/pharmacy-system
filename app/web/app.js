@@ -3847,7 +3847,9 @@ function renderSide() {
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
-          <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
+          <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
+          <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
+            <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : "اطبع إيصال لهذا البيع (F4)"}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>F4</kbd></label>
@@ -3910,6 +3912,26 @@ function renderSide() {
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - s.total;
     $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
+    $("#noChange").hidden = !(ch > 0);
+    $("#noChangeRes").innerHTML = "";
+    if (!$("#noChange").hidden && POS.noCoins == null) {          // the hint: once per screen, from the last close
+      POS.noCoins = false;
+      api(`/api/sales/change-fill?change=0`).then((r) => { POS.noCoins = r.no_pound_coins; if ($("#noChangeHint")) $("#noChangeHint").hidden = !r.no_pound_coins; }).catch(() => {});
+    } else if ($("#noChangeHint")) $("#noChangeHint").hidden = !POS.noCoins;
+  });
+  $("#noChangeBtn")?.addEventListener("click", async () => {       // U2-20: an item instead of the coins
+    const ch = toPiasters($("#payGiven").value) - SALE.total;
+    if (!(ch > 0)) return;
+    try {
+      const r = await api(`/api/sales/change-fill?change=${ch}`);
+      $("#noChangeRes").innerHTML = `${r.items.length ? `<p class="muted small">أصناف بسعر يناسب الباقي (${money(ch)} ج):</p>${r.items.map((it) => `<button class="btn small secondary" type="button" data-cf="${esc(it.id)}">${esc(it.name)} — ${money(it.price)} ج</button>`).join(" ")}` : `<p class="muted small">مفيش صنف متاح بسعر يناسب الباقي</p>`}
+        <p><a href="#" id="cfCredit">خليها رصيد للعميل</a></p>`;
+      $("#noChangeRes").querySelectorAll("[data-cf]").forEach((x) => x.addEventListener("click", () => {
+        const it = r.items.find((i) => i.id === x.dataset.cf);
+        if (it) addItem({ id: it.id }, 1, 0);
+      }));
+      $("#cfCredit").addEventListener("click", (e) => { e.preventDefault(); $("#posCust")?.focus(); toast("اختار العميل"); });
+    } catch (er) { toast(er.message, true); }
   });
   $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total }]; renderSide(); });
   $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });

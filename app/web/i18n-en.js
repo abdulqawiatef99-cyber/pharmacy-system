@@ -3143,4 +3143,10 @@ window.I18N_EN = {
 "0 ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك": "0 EGP — no notes make this exact amount, count it by hand",
 "كل الفلوس هتفضل في الدرج للشيفت الجاي": "All the cash stays in the drawer for the next shift",
 "(محدش استلم)": "(nobody received it)",
+"آخر تقفيل مفيهوش جنيهات فكة": "The last close had no one-pound coins",
+"🪙 مفيش فكة": "🪙 No change",
+"أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
+"خليها رصيد للعميل": "Keep it as the customer's credit",
+"مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
+"اختار العميل": "Choose the customer",
 };
