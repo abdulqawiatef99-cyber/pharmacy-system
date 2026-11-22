@@ -21,10 +21,35 @@ class TestUi(Base):
                     {"columns": {"other": [1]}}, {"home": ["pos"] * 2}):
             with self.assertRaises(ValidationFailed, msg=bad):
                 ui_settings.save(self.db, self.ctx, bad)
-        self.assertEqual(ui_settings.save(self.db, self.ctx, {"reset": True}), ui_settings.DEFAULTS)
+        self.assertEqual(ui_settings.save(self.db, self.ctx, {"reset": True}),
+                         {**ui_settings.DEFAULTS, "pos_keys": ui_settings.POS_KEYS_DEFAULT})
         people.add_user(self.db, self.ctx, username="pharm1", full_name="P", password=PW, role_code="pharmacist")
         with self.assertRaises(Forbidden):
             ui_settings.save(self.db, self.login("pharm1", PW), {"home": ["pos"]})
+
+    def test_pos_keys_change_conflict_and_reset(self):
+        """U2-19: the sale screen's keys are changed in «تخصيص الواجهة»; a key used twice is refused."""
+        d = ui_settings.get(self.db, self.ctx.org_id)
+        self.assertEqual(d["pos_keys"]["done"], "F9")
+        n = ui_settings.save(self.db, self.ctx, {"pos_keys": {"done": "Ctrl+Enter"}})
+        self.assertEqual((n["pos_keys"]["done"], n["pos_keys"]["search"]), ("Ctrl+Enter", "F1"))
+        stored = self.db.one("SELECT value FROM org_settings WHERE org_id=? AND key='ui'", (self.ctx.org_id,))["value"]
+        self.assertIn('"pos_keys": {"done": "Ctrl+Enter"}', stored)          # only the change is kept
+        with self.assertRaises(ValidationFailed) as e:
+            ui_settings.save(self.db, self.ctx, {"pos_keys": {"search": "Ctrl+Enter"}})
+        self.assertEqual(e.exception.code, "key_conflict")
+        # a swap in one request is fine
+        n = ui_settings.save(self.db, self.ctx, {"pos_keys": {"search": "F2", "branch_stock": "F1"}})
+        self.assertEqual((n["pos_keys"]["search"], n["pos_keys"]["branch_stock"]), ("F2", "F1"))
+        for bad in ({"pos_keys": {"done": "F5"}}, {"pos_keys": {"done": "F12"}}, {"pos_keys": {"nope": "F1"}},
+                    {"pos_keys": {"pay": "End"}}, {"pos_keys": {"pay": "Home"}}, {"pos_keys": {"done": "Ctrl+Insert"}},
+                    {"pos_keys": ["F1"]}):
+            with self.assertRaises(ValidationFailed, msg=bad):
+                ui_settings.save(self.db, self.ctx, bad)
+        n = ui_settings.save(self.db, self.ctx, {"pos_keys": {}})
+        self.assertEqual(n["pos_keys"], ui_settings.POS_KEYS_DEFAULT)
+        n = ui_settings.save(self.db, self.ctx, {"nav_main": ["pos"]})                # other changes keep them
+        self.assertEqual(n["pos_keys"], ui_settings.POS_KEYS_DEFAULT)
 
     def test_help_pref(self):
         self.assertEqual(people.set_prefs(self.db, self.ctx, {"help": "off"})["help"], "off")
