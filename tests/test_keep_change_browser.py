@@ -1,4 +1,4 @@
-"""Manager 22/11: «ليه رصيد 3 ج» on the payment of a customer who left his change, one click uses it (never more than
+"""Manager 22/11: «له رصيد 3 ج» on the payment of a customer who left his change, one click uses it (never more than
 his balance), F10 saves, and the drawer expects only the cash he really paid. Real Chromium."""
 from datetime import date, timedelta
 from decimal import Decimal
@@ -56,7 +56,7 @@ class TestUseCreditInOneClick(APICase):
         cd = CashDrawer(self.db)
         cd.open(self.ctx, 0)
         out = run_node(self, SCRIPT, "owner", OWNER_PW, "6221043010373")
-        self.assertIn("ليه رصيد 3.00", out["button"])
+        self.assertIn("له رصيد 3.00", out["button"])
         self.assertEqual(out["parts"], [["credit", "3.00"], ["cash", "17.00"]])      # his 3, never more
         self.assertEqual(out["status"], 200)
         self.assertEqual(cd.summary(self.ctx)["expected_cash"], 1700)               # only the cash he paid
