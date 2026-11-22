@@ -25,6 +25,7 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
     # drawer when the courier hands it in, so it is shown on its own.
     s = dict(db.one(
         "SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(discount_total),0) discount,"
+        " coalesce(sum(rounding),0) rounding,"                         # U2-14: shown on its own line
         " coalesce(sum(CASE WHEN kind='delivery' THEN 0 ELSE paid_cash END),0) cash,"
         " coalesce(sum(CASE WHEN kind='delivery' THEN paid_cash ELSE 0 END),0) delivery_cash,"
         " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
