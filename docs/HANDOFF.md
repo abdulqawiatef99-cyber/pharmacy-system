@@ -8,6 +8,15 @@
 
 
 
+## 22/11 — UPDATE-4 worker session: progress log (READ THIS FIRST; newest line last)
+Spec: the manager's «Update 4» message (priority U4-0 … U4-13). Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge into develop only with linux CI green and no open Codex P0/P1; one release PR into main at the end (owner pre-approved on the gates, linux AND windows green).
+| PR | Item | State |
+|---|---|---|
+| #430 | U4-0 restore device/printing settings from an older copy + clean start carries them + first-run printers step | open; review P1/P2s fixed; full suite 2826/2827, the 1 failure (help text) fixed in 0cccb5c; waits Codex + CI (linux + windows: touches the fresh-start bat) |
+| #431 | U4-1 smart order reads the E-Stock sales archive (`app/procurement/demand.py`, `monthly()` for U4-2) | open; review 2 P1s fixed; full suite 2819 OK; waits Codex + CI |
+Assumption to verify on the PC (#431): E-Stock `amount` on sale lines is in packs (fractions = part of a pack). Compare one item-month with E-Stock's own sales report.
+Not started: U4-2 … U4-13. Next: merge #430/#431 when green, then U4-2 (purchases rebuild on `demand.monthly()`).
+
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
 Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
 
