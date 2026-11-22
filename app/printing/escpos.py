@@ -69,6 +69,25 @@ def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
              "row": ImageFont.truetype(fp, 24), "total": ImageFont.truetype(fp, 30),
              "small": ImageFont.truetype(fp, 20)}
     pad, y = 8, 6
+    # a small row with no amount (expiry, discount, the return policy) wraps by words instead of being cut with «…»:
+    # the ✱ rule at the end of the policy was lost on thermal paper (Codex P2 on #423)
+    meas, wrapped = ImageDraw.Draw(Image.new("L", (1, 1), 255)), []
+    for kind, right, left in lines:
+        if kind != "small" or left or not right or \
+                meas.textlength(right, font=fonts["small"], direction="rtl") <= width - 2 * pad:
+            wrapped.append((kind, right, left))
+            continue
+        cur = ""
+        for word in right.split(" "):
+            nxt = f"{cur} {word}".strip()
+            if cur and meas.textlength(nxt, font=fonts["small"], direction="rtl") > width - 2 * pad:
+                wrapped.append(("small", cur, ""))
+                cur = word
+            else:
+                cur = nxt
+        if cur:
+            wrapped.append(("small", cur, ""))
+    lines = wrapped
     height = sum({"title": 48, "total": 44, "rule": 14, "small": 28}.get(k, 34) for k, _, _ in lines) + 40
     img = Image.new("L", (width, height), 255)
     d = ImageDraw.Draw(img)
@@ -320,10 +339,16 @@ def qty_text(l: dict) -> str:
 
 
 def unit_price(l: dict) -> int | None:
-    """Price before discount of one sold unit (a box when sold in whole boxes), whole piastres half up."""
+    """Price before discount of one sold unit (a box when sold in whole boxes), whole piastres half up. None when
+    the line left from batches at different public prices: an average was never charged (Codex P1 on #423), so the
+    receipt shows the quantity and the line total only."""
     b, u, _, _ = qty_parts(l)
     gross = l.get("gross")
     if gross is None:
+        return None
+    packs = {(a.get("pack_price"), a.get("pack_size")) for a in l.get("allocations") or []
+             if a.get("pack_price") is not None}
+    if len(packs) > 1:
         return None
     n = b if b and not u else (b * max(1, l["item"].get("pack_size") or 1) + u)
     return (2 * gross + n) // (2 * n) if n else None
@@ -420,5 +445,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         out += [("row", "الرصيد السابق", m(c["balance_before"])), ("row", "الرصيد الحالي", m(c["balance"]))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
     if return_days is not None and cfg.get("show_return_policy", True):
-        out.append(("small", policy_text(return_days, any(l["item"].get("no_return") for l in sale["lines"])), ""))
+        # one row per sentence: the thermal renderer cuts a long row, so the ✱ rule is never lost (Codex P2 on #423)
+        for part in policy_text(return_days, any(l["item"].get("no_return") for l in sale["lines"])).split(" · "):
+            out.append(("small", part, ""))
     return out

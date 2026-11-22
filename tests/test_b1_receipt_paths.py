@@ -79,3 +79,33 @@ class TestBothPathsSameCustomer(PlanCase):
         self.assertEqual(escpos.policy_text(0, False), "المرتجع غير متاح بهذه الفاتورة")
         self.assertEqual(escpos.policy_text(14, False), "المرتجع خلال 14 يومًا بهذه الفاتورة")
         self.assertEqual(escpos.policy_text(7, False), "المرتجع خلال 7 أيام بهذه الفاتورة")
+
+
+class TestCodexRound2(__import__("tests.test_sales", fromlist=["SalesCase"]).SalesCase):
+    """Codex on #423: no averaged unit price for a line from batches at different prices; a long policy row is
+    wrapped on thermal paper, never cut."""
+    def test_two_batch_prices_print_no_invented_unit_price(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=6)      # 3 units from OLD @38/2, 3 from NEW @40/2
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        sale = self.s.get(self.ctx, sid)
+        line = sale["lines"][0]
+        self.assertEqual(len({a["pack_price"] for a in line["allocations"]}), 2)
+        self.assertIsNone(escpos.unit_price(line))
+        rows = texts(escpos.receipt_lines("صيدلية", sale, "اليوم", {}))
+        self.assertNotIn("×", rows)
+
+    def test_one_batch_price_keeps_the_unit_price(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2)      # one box from OLD @38
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        line = self.s.get(self.ctx, sid)["lines"][0]
+        self.assertEqual(escpos.unit_price(line), 3800)
+
+    def test_long_policy_row_is_wrapped_not_cut(self):
+        if not escpos.shaping_available():
+            self.skipTest("raqm not available")
+        long = escpos.policy_text(14, True) + " " + "كلمة " * 30
+        rows = [("small", long, "")]
+        one = escpos.render_receipt(rows)
+        self.assertGreater(one.height, 28 * 3)                     # several rows, nothing cut with «…»
