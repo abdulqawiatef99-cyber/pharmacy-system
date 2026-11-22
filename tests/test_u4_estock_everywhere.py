@@ -155,10 +155,15 @@ class TestReviewFixes(EverywhereBase):
         from contextlib import closing
         from app.dataimport import estock_history as eh
         p = eh.archive_path(self.db)
+        import os
+        import stat
+        mode = os.stat(p).st_mode
+        os.chmod(p, mode | stat.S_IWUSR)              # the archive is kept read-only; this test breaks one total on purpose
         with closing(sqlite3.connect(p)) as con:
             col = [r[1] for r in con.execute('PRAGMA table_info("e_Sales_header")') if r[1].lower() == "total_bill_net"][0]
             con.execute(f'UPDATE "e_Sales_header" SET "{col}"=\'garbage\' WHERE rowid=(SELECT min(rowid) FROM "e_Sales_header")')
             con.commit()
+        os.chmod(p, mode)                             # read-only again before the program reads it
         out = self.get(f"/api/estock/period?{RANGE}&by=month")
         self.assertEqual(out["total"]["sales_unreadable"], 1)
 

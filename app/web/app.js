@@ -5283,7 +5283,7 @@ async function estockSalesBelow(box, f, t, q, ours, itemId) {
       ${bad ? `<p class="badge b-warn">⚠ ${bad} فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ</p>` : ""}` : ""}
     <p class="muted"><span>أرقام إي ستوك زي ما هي، للاطلاع: مش داخلة في الخزينة ولا الأرصدة ولا تقارير البرنامج.</span> ${rows.length >= 500 ? "<span>ظاهر أول 500 فاتورة بس.</span>" : ""}</p>
     <div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>نقدي</th><th>شبكة</th></tr></thead><tbody>
-    ${rows.map((r) => `<tr class="clickable" data-go="sale/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.at ? String(r.at).slice(0, 16).replace("T", " ") : r.day)}</td>
+    ${rows.map((r) => `<tr class="clickable" data-go="sale/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.day)}</td>
       <td>${esc(r.party || "—")}</td><td class="num"><b>${esMoney(r.total)}</b></td><td class="num">${esMoney(r.cash)}</td><td class="num">${esMoney(r.network)}</td></tr>`).join("")}</tbody></table></div>`;
   box.appendChild(sec);
   sec.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
