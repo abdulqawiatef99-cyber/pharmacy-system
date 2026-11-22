@@ -55,8 +55,10 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     try:
         width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
         who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
+        from ..sales.service import return_window_days
         body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
-                                                          given=given), width=width)
+                                                          given=given, return_days=return_window_days(db, ctx.org_id)),
+                                     width=width)
         img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
