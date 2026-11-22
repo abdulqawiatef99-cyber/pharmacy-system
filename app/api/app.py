@@ -489,7 +489,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         name, user, pw = (str(b.get(k, "")).strip() for k in ("pharmacy", "username", "password"))
         if len(name) < 2 or len(user) < 3:
             raise ValidationFailed("اكتب اسم الصيدلية واسم المستخدم (3 حروف على الأقل)")
-        if str(b.get("rounding", "")).strip() not in ("", "0", "25", "50", "100"):
+        if str(b.get("rounding") if b.get("rounding") is not None else "").strip() not in ("", "0", "25", "50", "100"):
             raise ValidationFailed("اختار تقريب الفاتورة")
         with setup_lock:
             if not _setup_needed():
@@ -501,7 +501,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay_channels.ensure_defaults(db)
             fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
-        if str(b.get("rounding", "")).strip() not in ("", None):         # U2-14: asked at setup
+        if b.get("rounding") is not None and str(b["rounding"]).strip() != "":   # U2-14: asked at setup
             from ..sales import rounding as _rnd
             _rnd.set_step(db, accounts.resolve_session(db, res["token"]), b.get("rounding"))
         ctx = accounts.resolve_session(db, res["token"])
@@ -759,6 +759,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         if req.method == "PUT":
             return J({"step": rnd.set_step(db, ctx, (await body(req)).get("step"))})
+        ctx.require("sales.read")
         return J({"step": rnd.step(db, ctx.org_id)})
 
     @handler

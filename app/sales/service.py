@@ -1346,12 +1346,17 @@ class Sales:
                 refund += r
             # U2-14: the return that empties the invoice gives its rounding back (up or down), so the customer gets
             # exactly what he paid in all and nobody gains by a return; a partial return is never rounded
+            # (review P1) with a rounding down, the lines are worth more than was paid: no return, alone or added up,
+            # may give back more than the invoice took for its items (total - delivery fee); the emptying one settles
+            # exactly what is left of it
             rounding_back = 0
-            if s["rounding"] and not self.db.one(
+            if s["rounding"]:
+                left = max(0, s["total"] - (s["delivery_fee"] or 0) - s["returned_total"])
+                emptied = not self.db.one(
                     "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
-                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
-                rounding_back = max(s["rounding"], -refund)
-                refund += rounding_back
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id))
+                new = left if emptied else min(refund, left)
+                rounding_back, refund = new - refund, new
             if refund_method in ("cash", "card"):
                 # a refund to the card follows the same cap: money never received cannot go back to a card either
                 # #142 (owner's rule, 11/11): cash can be paid back only for money the shop actually received

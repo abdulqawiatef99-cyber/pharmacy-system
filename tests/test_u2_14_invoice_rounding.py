@@ -88,8 +88,29 @@ class TestRoundingReports(TestRoundedSale):
 
 class TestMigrationSetsExistingPharmacy(TestNearest):
     def test_existing_pharmacy_gets_half_pound(self):
-        sql = open("app/migrations/0042_invoice_rounding.sql", encoding="utf-8").read().split("\n")
+        with open("app/migrations/0042_invoice_rounding.sql", encoding="utf-8") as f:
+            sql = f.read().split("\n")
         ins = next(l for l in sql if l.startswith("INSERT"))
         with self.db.transaction():
             self.db.execute(ins)
         self.assertEqual(rounding.step(self.db, self.ctx.org_id), 50)
+
+
+class TestRoundingReviewP1(TestRoundedSale):
+    def test_partial_return_never_above_what_was_paid_when_rounded_down(self):
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        gift = cat.create_item(self.db, self.ctx, {"name_en": "Free Sample", "public_price": 500})
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=gift, qty_delta=3, movement_type="opening")
+        sid, d = self.sell(1)                                                     # 19.00
+        a = d["lines"][0]["id"]
+        self.s.add_line(self.ctx, sid, gift, units=1, discount_bp=9800)           # 5.00 - 98% = 0.10: 19.10 -> 19.00
+        d = self.s.get(self.ctx, sid)
+        self.assertEqual((d["total"] - d["rounding"], d["total"]), (1910, 1900))
+        self.s.complete(self.ctx, sid, paid_cash=1900, safety_decisions=self.ack_all(sid))
+        r1 = self.s.return_items(self.ctx, sid, {a: 1}, refund_method="cash", reason="test")
+        self.assertEqual(r1["refund"], 1900)                                     # capped at what was paid
+        g = next(l["id"] for l in d["lines"] if l["item_id"] == gift)
+        r2 = self.s.return_items(self.ctx, sid, {g: 1}, refund_method="cash", reason="test")
+        self.assertEqual(r1["refund"] + r2["refund"], 1900)
