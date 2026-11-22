@@ -3177,4 +3177,8 @@ window.I18N_EN = {
 "أي مادة تانية بتبدأ مقفولة «محتاج تأكيد» لحد ما تشغلها.": "Any other ingredient starts off, «needs confirmation», until you turn it on.",
 "ملاحظات الصرف": "Dispensing notes",
 "محتاج تأكيد": "Needs confirmation",
+"ملاحظة بتظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي. مبتوقفش البيع.": "A note the seller sees once per invoice when it has an item with this active ingredient. It never stops the sale.",
+"اللي بيظهر (سطر لكل قاعدة)": "What is shown (one line per rule)",
+"إضافة (هتبدأ مقفولة)": "Add (starts off)",
+"مادة فعالة جديدة (بالإنجليزي)": "New active ingredient (in English)",
 };
