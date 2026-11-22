@@ -303,14 +303,13 @@ class TestPriority2(PlanCase):
         thin = cat.create_item(self.db, self.ctx, {"name_en": "Trial Thin Margin", "public_price": 1000})
         self.stock(thin, 5, "9.50", batch="TRIAL-T")                             # 10% off 10.00 = 9.00 < 9.50
         sid = self.draft(cust)
-        d = self.line(sid, thin, packs=1)
-        self.assertEqual(d["total"], 900)
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # the assistant cannot sell at a loss
-        self.assertEqual(r["error"]["code"], "below_cost_refused", r)
+        r = self.line(sid, thin, 422, packs=1)                   # update 3: refused as soon as it is added
+        self.assertEqual(r["error"]["code"], "below_cost", r)
+        self.assertIn("التعاقد", r["error"]["message"])
         self.c.post("/api/auth/logout", headers=H)
         self.http_login()
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # update 3: nor can the owner
-        self.assertEqual(r["error"]["code"], "below_cost_refused")
+        r = self.line(sid, thin, 422, packs=1)                   # nor the owner
+        self.assertEqual(r["error"]["code"], "below_cost")
         self.assertEqual(self.qty(thin), 5)
 
     def test_transfer_sale_keeps_its_image_and_warns_on_a_duplicate_upload(self):

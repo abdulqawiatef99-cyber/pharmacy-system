@@ -862,7 +862,8 @@ class Sales:
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
                                            "net": net, "cost": cost_piasters(cost)})
-                    elif Decimal(net) - cost < 1:          # the discount takes it to its cost exactly (U2-33)
+                    elif Decimal(net) - cost < 1 and l.get("discount_source") != "contract":
+                        # the pharmacy's own discount takes it to its cost exactly (U2-33); a contract is the agreement
                         at_cost.append({"line_no": l["line_no"], "name": l["item"]["name"], "net": net})
                 self.db.execute("UPDATE sale_lines SET line_total=?, discount_amount=?, invoice_share=? WHERE id=?",
                                 (net, fixed_part, l["invoice_share"], l["id"]))
@@ -1126,7 +1127,9 @@ class Sales:
         draft = self.get(ctx, sid)
         out = {}
         for l in draft["lines"]:
-            disc = l["discount"] if l.get("discount_source") != "contract" else (l.get("invoice_share") or 0)
+            # update 3 (review P1): a contract's discount counts too, so it is refused when the customer or the item
+            # is added, not only at payment where nothing the cashier types could clear it
+            disc = l["discount"]
             if disc <= 0:
                 continue
             c = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
@@ -1149,7 +1152,9 @@ class Sales:
             if loss <= (before.get(lid) or (0,))[0]:
                 continue
             name = l["item"]["name"]
-            msg = f"الخصم ده يخلّي {name} تحت التكلفة؛ ممنوع لأي حد (أقصى حاجة سعر التكلفة)"
+            msg = (f"خصم التعاقد بينزّل {name} تحت التكلفة؛ ممنوع. بيعه من غير التعاقد أو شيل الصنف"
+                   if l.get("discount_source") == "contract" else
+                   f"الخصم ده يخلّي {name} تحت التكلفة؛ ممنوع لأي حد (أقصى حاجة سعر التكلفة)")
             details = {"label": f"خصم تحت التكلفة على {name}", "line_id": lid}
             if ctx.can("costs.read"):
                 import math

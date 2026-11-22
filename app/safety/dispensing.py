@@ -91,7 +91,7 @@ def for_items(db: Database, org_id: str, items: list[dict]) -> list[dict]:
         for name, v in notes.items():
             if name in seen:
                 continue
-            if any(_has(it.get(f), name) for f in ("active_ingredient", "ingredient_key", "name_en")):
+            if any(_has(it.get(f), name) for f in ("active_ingredient", "ingredient_key", "name_en", "name_ar")):
                 seen.add(name)
                 out.append({"ingredient": name, "rules": v["rules"], "source": v.get("source"),
                             "item": it.get("name") or it.get("name_en")})
