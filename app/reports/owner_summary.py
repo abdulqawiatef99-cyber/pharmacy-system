@@ -39,12 +39,12 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     # out of stock now and sold in the last 30 days: what to order first
     out = db.all(
         "SELECT coalesce(i.name_en, i.name_ar) n FROM items i WHERE i.org_id=? AND i.status='active'"
-        " AND coalesce(i.is_service,0)=0"
+        " AND coalesce(i.is_service,0)=0" + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0") +
         " AND coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.org_id=i.org_id AND b.item_id=i.id"
         "   AND b.branch_id=?),0) <= 0"
         " AND EXISTS (SELECT 1 FROM stock_movements m WHERE m.org_id=i.org_id AND m.item_id=i.id"
-        "   AND m.movement_type='sale' AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))"
-        " ORDER BY n LIMIT 15", (ctx.org_id, r["branch_id"]))
+        "   AND m.branch_id=? AND m.movement_type='sale' AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))"
+        " ORDER BY n LIMIT 15", (ctx.org_id, r["branch_id"], r["branch_id"]))
     lines = [
         f"ملخص شيفت {org}",
         f"من {_local(r['opened_at'], tf)} لـ {_local(r['closed_at'], tf)} — قفله {r.get('closed_by_name') or ''}",
