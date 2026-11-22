@@ -1,6 +1,16 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"مرتجعات بتاريخها في الفترة": "Returns dated in the period",
+"مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك: 0 ج": "Period sales before returns, program + E-Stock: 0 EGP",
+"⚠ 0 فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ": "⚠ 0 E-Stock invoices have an unreadable total: counted in the number, not in the amount",
+"آخر 0 فاتورة من إي ستوك (للاطلاع، مش داخلة في أرصدة البرنامج)": "The last 0 invoices from E-Stock (for reference, not in the program's balances)",
+"آخر 0 حركة من إي ستوك (للاطلاع، مش داخلة في رصيد البرنامج)": "The last 0 movements from E-Stock (for reference, not in the program's stock)",
+"البرنامج + إي ستوك: 0 ج": "Program + E-Stock: 0 EGP",
+"ظاهر أول 500 فاتورة بس.": "Only the first 500 invoices are shown.",
+"فواتير إي ستوك في نفس الفترة": "E-Stock invoices in the same period",
+"أرقام إي ستوك زي ما هي، للاطلاع: مش داخلة في الخزينة ولا الأرصدة ولا تقارير البرنامج.": "E-Stock's figures as they are, for reference: not in the treasury, the balances or the program's reports.",
+"شبكة": "Card network",
 "الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.": "Order: the regular items that will run out, plus the shortage book and customer requests, split across suppliers by the best real discount.",
 "اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.": "Choose the period: a week (default), 2 weeks or a month; the three columns show side by side.",
 "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.": "The flags (expensive, fridge, lower discount, uncertain match) need your OK before ordering.",
