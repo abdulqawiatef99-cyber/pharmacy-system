@@ -501,11 +501,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay_channels.ensure_defaults(db)
             fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
+        carried = None
+        try:                                     # U4-0: a clean start keeps the device and printing settings
+            from ..core import device_settings as dvs
+            _c = accounts.resolve_session(db, res["token"])
+            carried = dvs.carry_in(db, s.data_dir, _c.org_id, _c.user_id)
+        except Exception:                        # never blocks the setup; the restore screen is still there
+            log.exception("device settings carry-over failed")
         if b.get("rounding") is not None and str(b["rounding"]).strip() != "":   # U2-14: asked at setup
             from ..sales import rounding as _rnd
             _rnd.set_step(db, accounts.resolve_session(db, res["token"]), b.get("rounding"))
         ctx = accounts.resolve_session(db, res["token"])
-        resp = J({"me": accounts.me(db, ctx)}, status_code=201)
+        resp = J({"me": accounts.me(db, ctx), "carried": carried}, status_code=201)
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
                         max_age=int(accounts.SESSION_TTL.total_seconds()), path="/")
         return resp
@@ -3004,6 +3011,38 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         return J(await run_in_threadpool(ps.print_label_test, db, ctx, b if isinstance(b, dict) else {}))
 
+    # ------------------------------------------------------------- U4-0: device settings from an older copy
+    def _dev_dirs() -> tuple:
+        off = autob.settings().get("offsite_dir")
+        return (Path(off),) if off else ()
+
+    @handler
+    async def device_restore_sources(req):
+        from ..core import device_settings as dvs
+        ctx_of(req).require("settings.manage")
+        rows = await run_in_threadpool(dvs.sources, s.data_dir, s.backup_path, _dev_dirs())
+        return J({"sources": [{k: r[k] for k in ("id", "kind", "name", "when")} for r in rows]})
+
+    @handler
+    async def device_restore_preview(req):
+        from ..core import device_settings as dvs
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        b = await body(req)
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.preview(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs))))
+
+    @handler
+    async def device_restore_apply(req):
+        from ..core import device_settings as dvs
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        b = await body(req)
+        sid, dirs = str(b.get("source") or ""), _dev_dirs()
+        # the folder scan touches D: and the off-site folder (a sleeping drive): off the event loop
+        return J(await run_in_threadpool(lambda: dvs.restore(db, ctx, dvs._find(sid, s.data_dir, s.backup_path, dirs), b.get("groups"))))
+
     @handler
     async def print_label_calibrate(req):
         from ..printing import service as ps
@@ -3240,6 +3279,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/labels", print_labels_api, methods=["POST"]),
         Route("/api/print/label-preview", label_preview, methods=["POST"]),
         Route("/api/print/label-test", print_label_test, methods=["POST"]),
+        Route("/api/settings/device-restore/sources", device_restore_sources),
+        Route("/api/settings/device-restore/preview", device_restore_preview, methods=["POST"]),
+        Route("/api/settings/device-restore/apply", device_restore_apply, methods=["POST"]),
         Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),

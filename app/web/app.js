@@ -438,6 +438,7 @@ const routes = [
   [/^#\/notifications$/, viewNotifications],
   [/^#\/me$/, viewMe],
   [/^#\/customize$/, viewCustomize],
+  [/^#\/setup-printers$/, viewSetupPrinters],
 ];
 
 async function route() {
@@ -571,6 +572,7 @@ const HELP = {
   users: ["المستخدمون: الأدوار والصلاحيات وحدود الخصم.", []],
   notifications: ["الإشعارات: كل ما حدث ويحتاج إلى علمك.", []],
   me: ["المظهر واللغة ورقمي السري: إعدادات خاصة بك وحدك.", []],
+  "setup-printers": ["أول تشغيل: اختار طابعة الإيصال وطابعة الملصقات واطبع تجربة قبل نقل البيانات.", ["لو الصفحة في ويندوز فيها ملصقين فوق بعض اختار 2.", "تقدر تغيّر الطابعات بعدين من «البرنامج والنسخ الاحتياطي»."]],
   customize: ["تخصيص الواجهة لهذه الصيدلية: الشريط العلوي، وأزرار الصفحة الرئيسية، والاختصارات.", ["التغيير يظهر لكل المستخدمين.", "الأعمدة تُضبط من زر \"⚙ الأعمدة\" فوق الجدول."]],
   // update 1 (owner 21/11): every screen explains itself; the screens below had no text
   "purchases/1": ["فاتورة شراء: اختار المورد واكتب رقم فاتورته وتاريخها، ضيف الأصناف، وبعدين اعتمدها.", ["المخزون وحساب المورد بيتغيروا بعد الاعتماد بس.", "المسلسل اللي جنب العنوان رقم الفاتورة في البرنامج، وتاريخ الإدخال بيتسجل لوحده."]],
@@ -979,13 +981,57 @@ function viewSetup() {
     if (f.get("password") !== f.get("password2")) { toast("كلمتا السر غير متطابقتين", true); return; }
     try {
       const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password", "rounding"].map((k) => [k, f.get(k)])) });
-      ME = r.me; location.hash = "#/import";
+      ME = r.me; SETUP_CARRIED = r.carried || null; location.hash = "#/setup-printers";
       toast("البرنامج جاهز. الخطوة التالية: نقل بياناتك من البرنامج القديم");
     } catch (err) {
       if (err.code === "already_setup") { location.hash = "#/login"; return; }
       toast(err.message, true);
     }
   });
+}
+
+// U4-0 (c): right after the first-run setup, the receipt and label printers and a test label, before the data move.
+// A clean start brought the old settings along (SETUP_CARRIED): then this only confirms them with a test label.
+let SETUP_CARRIED = null;
+async function viewSetupPrinters() {
+  if (!ME) { location.hash = "#/login"; return; }
+  const [c, pr] = await Promise.all([api("/api/settings/receipt"), api("/api/print/printers").catch(() => ({ printers: [] }))]);
+  const carried = SETUP_CARRIED && SETUP_CARRIED.applied;
+  const opts = pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("");
+  app.innerHTML = `<section class="panel login"><h1>الطابعات</h1>
+    ${carried ? `<p class="badge b-ok">✓ اترجعت إعدادات الطباعة والأجهزة من البيانات القديمة. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد.</p>`
+      : `<p class="muted">اختار طابعة الإيصال وطابعة الملصقات، واطبع ملصق تجربة. تقدر تغيّرها بعدين من «البرنامج والنسخ الاحتياطي».</p>`}
+    <form id="spForm">
+      <datalist id="spList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${opts}</datalist>
+      <label class="f">طابعة الإيصال والدرج <input name="receipt_target" list="spList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="browser"></label>
+      <label class="f">طابعة الملصقات (تعريف ويندوز) <input name="label_target" list="spList" dir="ltr" value="${esc(c.label_target || "")}" placeholder="win:Xprinter XP-365B"></label>
+      <label class="f">عدد الملصقات في صفحة ويندوز (إذا كانت الصفحة تضم ملصقين فوق بعضهما فاختر 2) <select name="label_rows">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(c.label_rows || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <div class="row"><button type="button" class="btn secondary" id="spSave">احفظ</button>
+        <button type="button" class="btn secondary" id="spLabel">اطبع ملصق تجربة</button>
+        <button type="button" class="btn secondary" id="spRcpt">اطبع إيصال تجربة</button></div>
+    </form>
+    ${carried ? "" : `<p class="muted">كان البرنامج شغال قبل كده؟ ممكن ترجع الإعدادات القديمة كلها من «البرنامج والنسخ الاحتياطي» ← «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة».</p>`}
+    <button type="button" class="btn" id="spNext">كمّل ← نقل البيانات</button></section>`;
+  const f = $("#spForm");
+  const vals = () => {
+    const lt = f.label_target.value.trim();
+    return { receipt_target: f.receipt_target.value.trim(), label_target: lt, label_rows: +f.label_rows.value,
+             ...(lt.startsWith("win:") ? { label_lang: "driver" } : {}) };
+  };
+  $("#spSave").addEventListener("click", async () => {
+    try { await api("/api/settings/receipt", { method: "PUT", body: vals() }); toast("✓ اتحفظت"); } catch (e) { toast(e.message, true); }
+  });
+  $("#spLabel").addEventListener("click", async () => {
+    const v = vals();
+    if (!v.label_target) { toast("اختار طابعة الملصقات الأول", true); return; }
+    try { const r = await api("/api/print/label-test", { method: "POST", body: v }); toast(`أُرسل ${r.labels} ملصق تجربة — لو طلعوا سليمين اضغط «احفظ»`); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#spRcpt").addEventListener("click", async () => {
+    try { await api("/api/print/test", { method: "POST", body: { target: f.receipt_target.value.trim() } }); toast("تم الإرسال للطابعة"); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#spNext").addEventListener("click", () => { location.hash = "#/import"; toast("الخطوة التالية: نقل بياناتك من البرنامج القديم"); });
 }
 
 async function viewLogin() {
@@ -2381,17 +2427,60 @@ function reasonOpts(map, selected, up) {
 }
 
 // ------------------------------------------------------------------ program / update
+// U4-0: the printing / label / drawer / card machine / screen settings from an older copy of the data
+// (a renamed data folder after a clean start, or a backup file). Nothing else is copied.
+async function renderDeviceRestore() {
+  const box = $("#dvBox");
+  if (!box) return;
+  let src = [];
+  try { src = (await api("/api/settings/device-restore/sources")).sources; } catch (e) { box.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; return; }
+  if (!src.length) { box.innerHTML = `<p class="muted">مفيش نسخة قديمة على الجهاز ده (لا فولدر بيانات قديم ولا نسخة احتياطية).</p>`; return; }
+  box.innerHTML = `<p class="muted">لو الإعدادات رجعت للأصل (بعد بداية من الصفر مثلًا): اختار النسخة القديمة، والبرنامج يوريك الإعدادات اللي هيرجعها قبل ما يغيّر أي حاجة. مفيش أي بيع أو مخزون أو عملاء أو مستخدمين أو كلمات سر بيتنقلوا.</p>
+    <label class="f">النسخة القديمة <select id="dvSrc">${src.map((r) => `<option value="${esc(r.id)}">${r.kind === "folder" ? "فولدر بيانات قديم" : "نسخة احتياطية"}: ${esc(r.name)} — ${esc(stamp(r.when))}</option>`).join("")}</select></label>
+    <button type="button" class="btn small secondary" id="dvLook">اعرض الإعدادات اللي فيها</button>
+    <div id="dvPrev" class="mt"></div>`;
+  // the restore always uses the copy that was previewed; another choice clears the preview (Codex P2 on #430)
+  $("#dvSrc").addEventListener("change", () => { $("#dvPrev").innerHTML = ""; });
+  $("#dvLook").addEventListener("click", async () => {
+    const b = $("#dvLook"); b.disabled = true; const out = $("#dvPrev"); out.innerHTML = `<p class="muted">جارٍ قراءة النسخة… (النسخة الاحتياطية الكبيرة بتاخد دقيقة)</p>`;
+    try {
+      const p = await api("/api/settings/device-restore/preview", { method: "POST", body: { source: $("#dvSrc").value } });
+      out.innerHTML = `<p>الصيدلية في النسخة دي: <b>${esc(p.pharmacy)}</b></p>
+        ${p.groups.map((g) => `<fieldset class="lblp"><legend><label class="chk"><input type="checkbox" data-dvg="${esc(g.key)}" ${g.default ? "checked" : ""} ${g.available ? "" : "disabled"}> ${esc(g.title)}</label></legend>
+          ${!g.available ? `<p class="muted">مش موجودة في النسخة دي</p>` : g.same ? `<p class="muted">زي اللي في البرنامج دلوقتي</p>` : ""}
+          ${g.lines.length ? `<ul class="small">${g.lines.map((l) => `<li dir="auto">${esc(l)}</li>`).join("")}</ul>` : ""}</fieldset>`).join("")}
+        <p class="muted">${esc(p.note)}</p>
+        <button type="button" class="btn" id="dvGo">رجّع الإعدادات المختارة</button>`;
+      $("#dvGo").addEventListener("click", async () => {
+        const groups = [...out.querySelectorAll("[data-dvg]:checked")].map((x) => x.dataset.dvg);
+        if (!groups.length) { toast("اختار الإعدادات اللي عايز ترجعها", true); return; }
+        if (!confirm("هترجع الإعدادات المختارة من النسخة القديمة مكان الإعدادات الحالية. متأكد؟")) return;
+        const g = $("#dvGo"); g.disabled = true;
+        try {
+          await api("/api/settings/device-restore/apply", { method: "POST", body: { source: p.source.id, groups } });
+          toast("✓ رجعت الإعدادات. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد");
+          renderReceiptCfg(await api("/api/settings/receipt"));
+          renderChannels((await api("/api/payment-channels")).channels);
+          if (groups.includes("screen")) { ME.ui = await api("/api/settings/ui"); applyNav(); }   // Codex P2 on #430
+          out.innerHTML = `<p class="badge b-ok">✓ رجعت الإعدادات المختارة (متسجلة في سجل العمليات)</p>`;
+        } catch (e) { g.disabled = false; toast(e.message, true); }
+      });
+    } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
+  });
+}
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>الهاتف المحمول على شبكة الصيدلية</h1><div id="lanBox"></div></section>
     <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
+    <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
     <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
+  renderDeviceRestore();
   renderLan(await api("/api/system/network"));
   const st = await api("/api/system/update");
   $("#sysBox").innerHTML = `
