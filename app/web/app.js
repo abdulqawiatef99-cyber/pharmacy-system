@@ -1266,6 +1266,10 @@ function renderInvoice() {
         <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
         ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
+      <label class="f">طريقة الدفع <select data-h="pay_source" id="paySrc" ${draft ? "" : "disabled"}></select>
+        <small class="muted">${inv.pay?.default ? "الافتراضي حسب نوع المورد" : ""}</small></label>
+      ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
+        <label class="f">مرجع الدفع (رقم التحويل)<input data-h="pay_ref" autocomplete="off" value="${esc(inv.pay_ref || "")}" ${draft ? "" : "disabled"}></label>` : ""}
     </div>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
   </section>
@@ -1313,6 +1317,7 @@ function renderInvoice() {
     </section>
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
+  fillPaySources(inv);
   if (draft) bindQuickAdd();
   purchaseTabs(inv.id);
 }
@@ -1486,6 +1491,23 @@ function renderLine(l) {
   </tr>`;
 }
 
+// «طريقة الدفع» (owner 22/11): on the account, cash from the drawer, the treasury, or another money account
+async function fillPaySources(inv) {
+  const sel = $("#paySrc"); if (!sel) return;
+  const opts = [["credit", "آجل (على حساب المورد)"], ["drawer", "نقدي من الدرج"]];
+  if (ME.permissions.includes("cash.see_expected")) {
+    try {
+      for (const a of await api("/api/money/accounts")) {
+        if (a.kind === "drawer" || !a.is_active) continue;
+        opts.push([a.kind === "treasury" ? "treasury" : a.id, a.kind === "treasury" ? "من الخزنة" : `${a.kind_label || ""}: ${a.name}`]);
+      }
+    } catch { /* the list needs the right; the drawer and the account stay */ }
+  }
+  const cur = inv.pay?.source || "credit";
+  if (!opts.some(([v]) => v === cur)) opts.push([cur, "حساب محفوظ"]);
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
+}
+
 const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
 async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
@@ -1594,7 +1616,8 @@ app.addEventListener("change", async (e) => {
     await save(`${base}/lines/${t.dataset.line}`, { changes: { [t.dataset.field]: CONVERT[t.dataset.field](t.value) } });
   } else if (t.dataset.h) {
     const f = t.dataset.h;
-    const v = ["declared_total", "extra_discount"].includes(f) ? toPiasters(t.value) : (t.value || null);
+    const v = ["declared_total", "extra_discount"].includes(f) ? toPiasters(t.value)
+      : f === "pay_amount" ? (t.value.trim() === "" ? null : exactPiasters(t.value) ?? t.value) : (t.value || null);
     await save(base, { changes: { [f]: v } });
   } else if (t.dataset.pick && t.value) {
     await save(`${base}/lines/${t.dataset.pick}`, { changes: { item_id: t.value } });
@@ -1606,7 +1629,10 @@ app.addEventListener("click", async (e) => {
   if (!t || !CUR) return;
   const base = `/api/purchases/${CUR.invoice.id}`;
   if (t.id === "approve") {
-    if (!confirm("اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.")) return;
+    const pay = CUR.invoice.pay || {}, payNow = pay.source === "credit" ? 0 : pay.amount ?? CUR.invoice.computed_total ?? 0;
+    if (!confirm(["اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.",
+      payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج (${$("#paySrc")?.selectedOptions[0]?.textContent || ""})، والباقي على حسابه.`
+        : "الفاتورة كلها على حساب المورد (آجل)."].join("\n"))) return;
     await save(`${base}/approve`, {}, "POST");
     toast("تم اعتماد الفاتورة وإضافتها للمخزون");
     if (CUR?.invoice?.status === "approved") purchaseLabels(CUR);

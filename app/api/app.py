@@ -1099,25 +1099,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             paid, discount = reconcile.split_payment(paid=_int(b.get("amount"), "amount"),
                                                      discount=_int(disc or 0, "discount"))
-        ctx.require("suppliers.pay")
-        src = money.check_source(db, ctx, source or money.OUTSIDE)
-        if src == money.DRAWER:
-            method = "drawer"
-        elif src == money.OUTSIDE:
-            method = method if method in ("cash", "cheque") else "cash"
-        else:
-            kind = money.get_account(db, ctx, src)["kind"] if ctx.can("cash.see_expected") else "other"
-            method = method if method == "cheque" else {"bank": "bank", "wallet": "wallet"}.get(kind, "cash")
         with db.transaction():
-            if src == money.DRAWER:
-                money.drawer_check(db, ctx, paid)        # the drawer never goes below zero (F105)
-            sup.pay(db, ctx, sid, paid, method, b.get("note"), b.get("ref"))
-            lid = db.one("SELECT id FROM supplier_ledger WHERE org_id=? AND supplier_id=? AND kind='payment'"
-                         " ORDER BY rowid DESC LIMIT 1", (ctx.org_id, sid))["id"]
-            if src not in (money.DRAWER, money.OUTSIDE):
-                name = db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))["name"]
-                money.pay_out(db, ctx, src, paid, "supplier_payment", ref_type="supplier_ledger", ref_id=lid,
-                              note=f"دفع للمورد {name}")
+            lid = sup.pay_from(db, ctx, sid, paid, source, method=method, note=b.get("note"), ref=b.get("ref"))
             if discount:
                 reconcile.supplier_discount(db, ctx, sid, discount, payment_id=lid, note=b.get("discount_note"))
         out = sup.account(db, ctx, sid) if ctx.can("suppliers.read") else {"id": sid}
