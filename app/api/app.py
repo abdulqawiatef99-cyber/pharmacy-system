@@ -2556,6 +2556,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
 
     @handler
+    async def shift_owner_summary(req):
+        from ..reports.owner_summary import shift_summary
+        return J(shift_summary(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
@@ -3181,6 +3186,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/slow-requests", slow_requests),
         Route("/api/reports/day-review", day_review_api),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/owner-summary", shift_owner_summary),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
         Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
