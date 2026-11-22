@@ -31,7 +31,7 @@ class TestKeepChange(SalesCase):
             self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid), change_to_credit=100)
         sid = self.s.create(self.ctx, self.cust)
         d = self.s.add_line(self.ctx, sid, self.pan, units=1)
-        for bad in (-1, True, 100_001):
+        for bad in (-1, True, 5001, d['total']):
             with self.assertRaises(ValidationFailed):
                 self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid), change_to_credit=bad)
         self.assertEqual(self.s.balance(self.ctx, self.cust), 0)               # nothing written

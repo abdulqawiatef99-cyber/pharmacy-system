@@ -27,6 +27,7 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
+KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
 DEFAULT_RETURN_DAYS = 14         # owner 21/11 10:17: «مدة المرتجع 14 يوم»; Settings can change it
 
 
@@ -807,8 +808,11 @@ class Sales:
                 raise ValidationFailed("الباقي يتساب رصيد لعميل متسجل بس: اختار العميل", code="customer_required")
             if not paid_cash or delivery:
                 raise ValidationFailed("الباقي بيتساب رصيد من دفع نقدي في الصيدلية بس")
-            if change_to_credit > 100_000:                      # more than 1,000 EGP of change is not change
-                raise ValidationFailed("الباقي كبير قوي يتساب رصيد (الحد 1,000 ج)")
+            # only real change (review P1, OWNER_RULES §13): less than the cash paid and at most 50 EGP. Anything more
+            # is an advance payment, which goes through the customer's account by the owner / a manager
+            if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
+                raise ValidationFailed(f"الباقي اللي يتساب رصيد لحد {egp(KEEP_CHANGE_MAX)} ج وأقل من المدفوع نقدي؛"
+                                       " أكتر من كده يبقى دفعة مقدمة من حساب العميل", code="keep_change_too_big")
         if on_credit:
             if not preview["customer_id"]:
                 raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")

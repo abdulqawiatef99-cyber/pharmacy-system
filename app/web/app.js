@@ -3966,7 +3966,7 @@ function renderSide() {
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - s.total;
     $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
-    if ($("#keepBox")) $("#keepBox").hidden = !(g > s.total);
+    if ($("#keepBox")) $("#keepBox").hidden = !(g > s.total && g - s.total <= 5000);   // real change only (50 EGP)
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
     if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
