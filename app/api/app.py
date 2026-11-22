@@ -2895,13 +2895,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
             return e(it.get("name_en") or it["name"])
 
-        def qty(l):
-            it, q = l["item"], l["qty_base"]
-            unit = it["base_unit"] if it["base_unit"] not in (None, "unit") else "وحدة"
-            pack = it.get("pack_unit") if it.get("pack_unit") not in (None, "pack") else "علبة"
-            if it["pack_size"] > 1 and q % it["pack_size"] == 0:
-                return f"{q // it['pack_size']} {e(pack)}"
-            return f"{q} {e(unit)}"
+        from ..printing import escpos as _esc
+
+        def qty(l):                          # U2-24: the sold unit, «1 علبة + 2 شريط», and the price of one
+            up = _esc.unit_price(l)
+            return e(_esc.qty_text(l)) + (f" × {m(up)}" if up is not None else "")
         rows = []
         restricted = False
         for l in sale["lines"]:
@@ -2934,6 +2932,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                     f"<tr class='chg'><td>الباقي</td><td>{m(given - cash)}</td></tr>")
         count = (f"<tr><td>عدد الأصناف</td><td>{len(sale['lines'])}</td></tr>"
                  if cfg["show_item_count"] and sale["lines"] else "")
+        bx = sum(_esc.qty_parts(l)[0] for l in sale["lines"])
+        un = sum(_esc.qty_parts(l)[1] for l in sale["lines"])
+        if sale["lines"]:                    # U2-23: the total quantity
+            count += f"<tr><td>إجمالي الكمية</td><td>{' + '.join(x for x in (f'{bx} علبة' if bx else '', f'{un} وحدة' if un else '') if x)}</td></tr>"
+        cu = sale.get("customer")
+        if cu and sale.get("on_credit") and cu.get("balance_before") is not None:   # U2-23: his balance
+            pay += (f"<tr><td>الرصيد السابق</td><td>{m(cu['balance_before'])}</td></tr>"
+                    f"<tr><td>الرصيد الحالي</td><td>{m(cu['balance'])}</td></tr>")
         hd = []
         if cfg["has_logo"]:
             from ..printing import logo as logo_mod
@@ -2965,15 +2971,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if cfg["show_cashier"] and cashier:
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
-            info.append(f"العميل: {e(sale['customer']['name'])}")
+            cu = sale["customer"]
+            info.append(f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else ""))
+            if sale.get("on_credit") and sale.get("kind") != "delivery":   # U2-23 (a delivery prints its own line)
+                info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            n = return_window_days(db, ctx.org_id)       # Arabic number agreement: 7 أيام, 14 يومًا
-            days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
-            policy = f"<p class='s'>المرتجع خلال {days} بهذه الفاتورة"
-            policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
+            # one text for both receipts (B1): Arabic number agreement, 0 days, the ✱ note
+            policy = f"<p class='s'>{e(_esc.policy_text(return_window_days(db, ctx.org_id), restricted))}</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
