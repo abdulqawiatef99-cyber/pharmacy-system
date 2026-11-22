@@ -66,3 +66,12 @@ class TestCodexOn419Stock(TestUsualItems):
         d = self.sell(5)
         self.s.return_items(self.ctx, d["id"], {d["lines"][0]["id"]: 4}, refund_method="cash", reason="test")
         self.assertEqual(cu.usual_items(self.db, self.ctx, self.cust)[0]["last_qty"], 1)
+
+
+class TestCodexOn419Lines(TestUsualItems):
+    def test_two_lines_of_the_same_item(self):
+        sid = self.s.create(self.ctx, self.cust)
+        self.s.add_line(self.ctx, sid, self.pan, units=2)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=3, discount_bp=500)    # kept on its own line
+        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        self.assertEqual(cu.usual_items(self.db, self.ctx, self.cust)[0]["last_qty"], 5)

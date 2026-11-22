@@ -354,11 +354,13 @@ def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: da
     rows = db.all(
         "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.is_service, count(DISTINCT s.id) times,"
         " max(s.completed_at) last_at,"
-        " (SELECT (SELECT sum(a3.qty_base - a3.returned_qty) FROM sale_allocations a3 WHERE a3.sale_line_id=l2.id)"
-        "   FROM sale_lines l2 JOIN sales s2 ON s2.id=l2.sale_id WHERE s2.org_id=s.org_id"
-        "   AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id AND s2.completed_at>=?"
-        "   AND (SELECT coalesce(sum(a2.qty_base - a2.returned_qty),0) FROM sale_allocations a2 WHERE a2.sale_line_id=l2.id) > 0"
-        "   ORDER BY s2.completed_at DESC LIMIT 1) last_qty,"
+        # the last purchase that he kept something of: all its lines of this item, net of returns (Codex P2 on #419)
+        " (SELECT sum(a3.qty_base - a3.returned_qty) FROM sale_lines l3 JOIN sale_allocations a3 ON a3.sale_line_id=l3.id"
+        "   WHERE l3.item_id=l.item_id AND l3.sale_id=(SELECT s2.id FROM sales s2 JOIN sale_lines l2 ON l2.sale_id=s2.id"
+        "     WHERE s2.org_id=s.org_id AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id"
+        "     AND s2.completed_at>=?"
+        "     AND (SELECT coalesce(sum(a2.qty_base - a2.returned_qty),0) FROM sale_allocations a2 WHERE a2.sale_line_id=l2.id) > 0"
+        "     ORDER BY s2.completed_at DESC LIMIT 1)) last_qty,"
         " coalesce((SELECT sum(b.qty) FROM stock_balances b WHERE b.item_id=l.item_id AND b.org_id=s.org_id"
         "   AND b.branch_id=?),0) stock"
         " FROM sale_lines l JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id JOIN items i ON i.id=l.item_id"
