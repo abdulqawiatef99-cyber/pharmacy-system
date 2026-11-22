@@ -3172,4 +3172,9 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"مطالبة مستشفى نور الحكمة لأي فترة، لكل فرع لوحده: مخزن الصيدلية (التكلفة + نص الربح) ومخزن المستشفى (نص الربح).": "Nour Al-Hikma hospital claim for any period, one branch at a time: the pharmacy's stock (cost + half the margin) and the hospital's stock (half the margin).",
+"ملف «Excel للمستشفى» من غير تكلفة: ده اللي يتبعت.": "The «Excel for the hospital» file has no cost: that is the one to send.",
+"«Excel داخلي» فيه التكلفة والربح: للمالك والمحاسب بس.": "«Internal Excel» has the cost and the margin: for the owner and the accountant only.",
+"مطالبة الحكمة": "Hikma claim",
+"مطالبة مستشفى نور الحكمة": "Nour Al-Hikma hospital claim",
 };
