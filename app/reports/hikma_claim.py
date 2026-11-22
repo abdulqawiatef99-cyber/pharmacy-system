@@ -162,12 +162,23 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     # The units of a return are the line's newest lots first, the way the return took them (_take).
     back_rows = []
     pv = {"pharmacy": [0, Decimal(0)], "hospital": [0, Decimal(0)]}
-    for r in db.all("SELECT r.id, r.total, r.created_at, s.id sid, s.sale_no, s.completed_at FROM sale_returns r"
-                    " JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id WHERE r.org_id=? AND s.customer_id=?"
-                    " AND r.created_at>=? AND r.created_at<? AND s.completed_at<?", (org, cid, lo, hi, lo)):
-        a = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
-                   " AND action='sale.return' AND after_json LIKE ?", (org, r["sid"], f'%"{r["id"]}"%'))
-        after = json.loads(a["after_json"]) if a else {}
+    period = [dict(r) for r in db.all(
+        "SELECT r.id, r.total, r.created_at, s.id sid, s.sale_no, s.completed_at FROM sale_returns r"
+        " JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id WHERE r.org_id=? AND s.customer_id=?"
+        " AND r.created_at>=? AND r.created_at<? AND s.completed_at<?", (org, cid, lo, hi, lo))]
+    in_period = {r["id"]: r for r in period}
+    # each sale's returns are replayed oldest first, from before the period too, so a lot taken by an earlier return
+    # is never taken again (Codex P1 on #416); only the returns inside the period are counted
+    from ..sales.service import returns_history
+    hist = returns_history(db, org, sorted({r["sid"] for r in period}))
+    replay = []
+    for sid in sorted({r["sid"] for r in period}):
+        consumed: dict = {}
+        totals = {x["id"]: x["total"] for x in db.all("SELECT id, total FROM sale_returns WHERE org_id=? AND sale_id=?", (org, sid))}
+        for after in hist.get(sid, []):
+            replay.append((sid, after, consumed, totals.get(after.get("return_id"), 0)))
+    for sid, after, consumed, ret_total in replay:
+        r = in_period.get(after.get("return_id"))
         lines, refunds = after.get("lines") or {}, after.get("line_refunds") or {}
         per_line = []
         for lid, q in lines.items():
@@ -177,11 +188,14 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
                         " ON b.id=a.batch_id AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))
             left, takes = q, []
             for x in al:
-                t = min(left, x["qty_base"])
+                t = min(left, x["qty_base"] - consumed.get(x["rid"], 0))
                 if t > 0:
                     takes.append((x, t))
+                    consumed[x["rid"]] = consumed.get(x["rid"], 0) + t
                     left -= t
             per_line.append((lid, q, takes))
+        if r is None:
+            continue                       # an earlier return: replayed for the lots only
         if refunds:
             values = [int(refunds.get(lid, 0)) for lid, _, _ in per_line]
         else:
@@ -189,7 +203,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
             # line taking the remainder, so the lines add up to the refund exactly
             from ..sales.service import spread
             weights = [sum((x["unit_price"] or 0) * t for x, t in takes) for _, _, takes in per_line]
-            values = spread(r["total"], weights) if sum(weights) > 0 else [r["total"]] + [0] * (len(per_line) - 1)
+            values = spread(ret_total, weights) if sum(weights) > 0 else [ret_total] + [0] * (len(per_line) - 1)
         for (lid, q, takes), line_v in zip(per_line, values):
             done_v = 0
             for k, (x, t) in enumerate(takes):
@@ -230,7 +244,8 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     no_cost = sum(1 for o in ("pharmacy", "hospital") for l in out[o]["lines"] if l.get("no_cost"))
     return {"branch": branch, "title": st["title"], "customer_id": cid, "from": d1.isoformat(), "to": d2.isoformat(),
             "pharmacy": out["pharmacy"], "hospital": out["hospital"],
-            "previous_returns": {"rows": back, "value": back_v, "cost": back_c, "due": back_due},
+            "previous_returns": {"rows": back, "value": back_v, "cost": back_c, "due": back_due,
+                                 "by_owner": {"pharmacy": ph_v, "hospital": ho_v}},
             "due": due, "advance": adv, "net": due - adv, "next_advance": adv, "total": due - adv + adv,
             "invoices": len(sales), "no_cost_lines": no_cost,
             "account": {"debit": acct["debit"], "returns": -acct["back"], "net": account_net, "paid_not_on_account": paid,

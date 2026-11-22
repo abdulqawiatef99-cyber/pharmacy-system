@@ -130,3 +130,17 @@ class TestCodexOn416(TestHikmaClaim):
             audit.record(self.db, self.ctx, "sale.return", "sale", sid, after={"return_id": rid, "lines": lines})
         pr = hk.claim(self.db, self.ctx, "shibin", today(), today())["previous_returns"]
         self.assertEqual(pr["value"], d["total"])
+
+
+class TestCodexOn416Replay(TestHikmaClaim):
+    def test_successive_returns_take_each_lot_once(self):
+        d = self.sell(4)                                  # 3 from OLD, 1 from NEW (the newest lot)
+        lid = d["lines"][0]["id"]
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE item_id=? AND batch_no='NEW'", (self.pan,))
+            self.db.execute("UPDATE sales SET completed_at='2026-01-05T10:00:00.000000Z' WHERE id=?", (d["id"],))
+        self.s.return_items(self.ctx, d["id"], {lid: 1}, refund_method="credit", reason="test")
+        self.s.return_items(self.ctx, d["id"], {lid: 1}, refund_method="credit", reason="test")
+        by = hk.claim(self.db, self.ctx, "shibin", today(), today())["previous_returns"]["by_owner"]
+        self.assertGreater(by["hospital"], 0)             # the first return took the one hospital unit
+        self.assertGreater(by["pharmacy"], 0)             # the second one an OLD (pharmacy) unit, not the same lot again
