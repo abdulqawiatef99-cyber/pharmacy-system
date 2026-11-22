@@ -2765,13 +2765,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
             return e(it.get("name_en") or it["name"])
 
-        def qty(l):
-            it, q = l["item"], l["qty_base"]
-            unit = it["base_unit"] if it["base_unit"] not in (None, "unit") else "وحدة"
-            pack = it.get("pack_unit") if it.get("pack_unit") not in (None, "pack") else "علبة"
-            if it["pack_size"] > 1 and q % it["pack_size"] == 0:
-                return f"{q // it['pack_size']} {e(pack)}"
-            return f"{q} {e(unit)}"
+        from ..printing import escpos as _esc
+
+        def qty(l):                          # U2-24: the sold unit, «1 علبة + 2 شريط», and the price of one
+            up = _esc.unit_price(l)
+            return e(_esc.qty_text(l)) + (f" × {m(up)}" if up is not None else "")
         rows = []
         restricted = False
         for l in sale["lines"]:
@@ -2804,6 +2802,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                     f"<tr class='chg'><td>الباقي</td><td>{m(given - cash)}</td></tr>")
         count = (f"<tr><td>عدد الأصناف</td><td>{len(sale['lines'])}</td></tr>"
                  if cfg["show_item_count"] and sale["lines"] else "")
+        bx = sum(_esc.qty_parts(l)[0] for l in sale["lines"])
+        un = sum(_esc.qty_parts(l)[1] for l in sale["lines"])
+        if sale["lines"]:                    # U2-23: the total quantity
+            count += f"<tr><td>إجمالي الكمية</td><td>{' + '.join(x for x in (f'{bx} علبة' if bx else '', f'{un} وحدة' if un else '') if x)}</td></tr>"
+        cu = sale.get("customer")
+        if cu and sale.get("on_credit") and cu.get("balance") is not None:   # U2-23: his balance
+            pay += (f"<tr><td>الرصيد السابق</td><td>{m(cu['balance'] - sale['on_credit'])}</td></tr>"
+                    f"<tr><td>الرصيد الحالي</td><td>{m(cu['balance'])}</td></tr>")
         hd = []
         if cfg["has_logo"]:
             from ..printing import logo as logo_mod
@@ -2835,7 +2841,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if cfg["show_cashier"] and cashier:
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
-            info.append(f"العميل: {e(sale['customer']['name'])}")
+            cu = sale["customer"]
+            info.append(f"العميل: {e(cu['name'])}")
+            if sale.get("on_credit"):        # U2-23: on a credit sale, how to reach him
+                info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""

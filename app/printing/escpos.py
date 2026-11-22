@@ -301,11 +301,42 @@ def _job_status(win32print, h, job: int) -> int | None:
     return None
 
 
+def _unit(name: str | None, default: str) -> str:
+    return name if name not in (None, "", "unit", "pack") else default
+
+
+def qty_parts(l: dict) -> tuple[int, int, str, str]:
+    """(boxes, loose units, box name, unit name) of a sold line: the unit it was sold in (U2-24), never only
+    the base units («6 شريط» for one box)."""
+    it, q = l["item"], l["qty_base"]
+    ps = max(1, it.get("pack_size") or 1)
+    pack, unit = _unit(it.get("pack_unit"), "علبة"), _unit(it.get("base_unit"), "وحدة")
+    return (q // ps, q % ps, pack, unit) if ps > 1 else (0, q, pack, unit)
+
+
+def qty_text(l: dict) -> str:
+    b, u, pack, unit = qty_parts(l)
+    return " + ".join(x for x in (f"{b} {pack}" if b else "", f"{u} {unit}" if u else "") if x) or "0"
+
+
+def unit_price(l: dict) -> int | None:
+    """Price before discount of one sold unit (a box when sold in whole boxes), whole piastres half up."""
+    b, u, _, _ = qty_parts(l)
+    gross = l.get("gross")
+    if gross is None:
+        return None
+    n = b if b and not u else (b * max(1, l["item"].get("pack_size") or 1) + u)
+    return (2 * gross + n) // (2 * n) if n else None
+
+
 def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
-                  given: int = 0) -> list[tuple[str, str, str]]:
+                  given: int = 0, return_days: int | None = None) -> list[tuple[str, str, str]]:
     """given: what the customer handed over in cash (piastres), printed with the change due when it is
     more than the cash part of the sale (F27). Shown only on the receipt printed at checkout; it is
-    not stored, so a later reprint has no change line."""
+    not stored, so a later reprint has no change line.
+    U2-23 / U2-24: the sold unit and its price, each line's discount, the customer (and for credit or delivery his
+    phone and address), each payment method, the customer's balance on a credit sale, the total quantity and the
+    return policy line."""
     cfg = cfg or {}
     m = lambda p: f"{p / 100:.2f}"  # noqa: E731
     out = [("small", cfg["header"], "")] if cfg.get("header") else []
@@ -319,26 +350,60 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     out.append(("small", f"فاتورة رقم {sale['sale_no']}", when))
     if cashier and cfg.get("show_cashier", True):
         out.append(("small", f"البائع: {cashier}", ""))
+    c, d = sale.get("customer"), sale.get("delivery") or {}
+    if c and cfg.get("show_customer", True):
+        out.append(("small", f"العميل: {c.get('name', '')}" + (f" (كود {c['estock_code']})" if c.get("estock_code") is not None else ""), ""))
+        if sale.get("on_credit") or sale.get("kind") == "delivery":
+            phone = d.get("phone") or c.get("phone")
+            addr = d.get("address") or c.get("address1")
+            if phone:
+                out.append(("small", f"موبايل: {phone}", ""))
+            if addr:
+                out.append(("small", f"العنوان: {addr}", ""))
+    elif sale.get("kind") == "delivery" and (d.get("address") or d.get("phone")):
+        out.append(("small", "توصيل: " + " ".join(x for x in (d.get("address"), d.get("phone")) if x), ""))
     out.append(("rule", "", ""))
+    boxes = units = 0
     for l in sale["lines"]:
         it = l["item"]
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
         out.append(("row", name, m(l["line_total"])))
-        out.append(("small", f"{l['qty_base']} {it['base_unit']}", ""))
+        up = unit_price(l)
+        disc = (f" · خصم {l['discount_bp'] / 100:g}%" if l.get("discount_bp") else
+                f" · خصم {m(l['discount'])}" if l.get("discount") else "")
+        out.append(("small", qty_text(l) + (f" × {m(up)}" if up is not None else "") + disc, ""))
+        b, u, _, _ = qty_parts(l)
+        boxes, units = boxes + b, units + u
     out.append(("rule", "", ""))
     if cfg.get("show_item_count") and sale["lines"]:
         out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
+    if sale["lines"]:
+        out.append(("small", "إجمالي الكمية: " + " + ".join(x for x in (f"{boxes} علبة" if boxes else "", f"{units} وحدة" if units else "") if x), ""))
     if sale["discount_total"] and sale.get("subtotal"):
         out.append(("row", "الإجمالي", m(sale["subtotal"])))
     if sale["discount_total"]:
         out.append(("row", "خصم", m(sale["discount_total"])))
+    if sale.get("delivery_fee"):
+        out.append(("row", "رسوم التوصيل", m(sale["delivery_fee"])))
     out.append(("total", "المطلوب", m(sale["total"])))
-    for key, label in (("delivery_fee", "رسوم التوصيل"), ("paid_cash", "نقدي"), ("paid_card", "بطاقة"),
-                       ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
-        if sale.get(key):
-            out.append(("row", label, m(sale[key])))
+    MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
+    pays = sale.get("payments") or []
+    if pays:
+        for p in pays:
+            out.append(("row", MET.get(p["method"], p["method"]) + (f" — {p['channel']}" if p.get("channel") else ""), m(p["amount"])))
+    else:
+        for key, label in (("paid_cash", "نقدي"), ("paid_card", "بطاقة"), ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
+            if sale.get(key):
+                out.append(("row", label, m(sale[key])))
     cash = sale.get("paid_cash") or 0
     if cfg.get("show_change", True) and cash and given > cash:
         out += [("row", "المدفوع من العميل", m(given)), ("total", "الباقي", m(given - cash))]
+    if c and sale.get("on_credit") and c.get("balance") is not None:
+        # the balance now (at printing); the one before it is this invoice's credit less (exact at checkout)
+        out += [("row", "الرصيد السابق", m(c["balance"] - sale["on_credit"])), ("row", "الرصيد الحالي", m(c["balance"]))]
     out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
+    if return_days and cfg.get("show_return_policy", True):
+        n = return_days
+        days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
+        out.append(("small", f"المرتجع خلال {days} بهذه الفاتورة", ""))
     return out
