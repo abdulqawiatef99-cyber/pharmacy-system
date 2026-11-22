@@ -695,6 +695,9 @@ class Sales:
         s["returns"] = [dict(r) for r in self.db.all(
             "SELECT r.id, r.total, r.refund_method, r.reason, r.created_at, u.full_name by_name FROM sale_returns r"
             " LEFT JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.created_at", (sid,))]
+        if s["status"] == "draft":           # U2-21: a reminder once per invoice, never blocking
+            from ..safety import dispensing
+            s["dispensing_notes"] = dispensing.for_items(self.db, ctx.org_id, [l["item"] for l in lines])
         s["payments"] = [dict(r) for r in self.db.all(
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
