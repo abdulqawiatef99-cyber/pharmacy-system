@@ -82,7 +82,8 @@ class TestUpgradeFrom0036(DBTestCase):
         CashDrawer(self.db).open(self.ctx, 0)
         sid = s.create(self.ctx, None)
         s.add_line(self.ctx, sid, iid, units=1)                       # a sale on the upgraded database
-        tot = s.get(self.ctx, sid)["total"]
+        # 0042 turns 0.50 cash rounding on for an existing pharmacy (the owner's choice): cash pays the rounded amount
+        tot = s.get(self.ctx, sid)["cash_total"]
         f = s.safety_check(self.ctx, sid)
         s.complete(self.ctx, sid, paid_cash=tot, safety_decisions={i: "ok" for i in range(len(f))})
         self.assertEqual(inventory.verify_balances(self.db, self.ctx.org_id), [])
