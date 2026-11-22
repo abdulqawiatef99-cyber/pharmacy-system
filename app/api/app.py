@@ -2244,10 +2244,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                     confirm_below_cost=bool(b.get("confirm_below_cost")),
-                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
+                                    payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
+                                    # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
+                                    change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
+            kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
-                                                      given)
+                                                      given - kept)
         return J(done)
 
     @handler

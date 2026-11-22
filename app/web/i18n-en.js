@@ -3172,4 +3172,5 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"خليها رصيد للعميل (الباقي يتسجل له في حسابه)": "Keep it as the customer's credit (the change goes on his account)",
 };

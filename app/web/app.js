@@ -3901,6 +3901,7 @@ function renderSide() {
         ${POS.method === "transfer" ? proofInput(s) : ""}
         ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
+          ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
             <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
@@ -3965,6 +3966,7 @@ function renderSide() {
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - s.total;
     $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
+    if ($("#keepBox")) $("#keepBox").hidden = !(g > s.total);
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
     if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
@@ -4121,7 +4123,7 @@ async function complete(findings) {
   SALE.request_id = SALE.request_id || newKey();
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
+      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: !!$("#keepChange")?.checked && given > cashPart,
               confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
