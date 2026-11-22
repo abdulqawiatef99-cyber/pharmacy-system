@@ -688,9 +688,13 @@ class Sales:
         if s["status"] == "draft":
             s["subtotal"], s["discount_total"] = subtotal, discount
             s["total"] = subtotal - discount + (s["delivery_fee"] or 0)
+            # U2-14 (owner 22/11): only the CASH part is rounded, at payment; the total stays exact. The screen
+            # gets the step and what a cash-only payment would be
             from .rounding import nearest, step
-            s["rounding"] = nearest(s["total"], step(self.db, ctx.org_id))      # U2-14: its own line
-            s["total"] += s["rounding"]
+            s["rounding"] = 0
+            s["rounding_step"] = step(self.db, ctx.org_id)
+            s["cash_rounding"] = nearest(s["total"], s["rounding_step"])
+            s["cash_total"] = s["total"] + s["cash_rounding"]
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
@@ -728,7 +732,8 @@ class Sales:
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
-                 confirm_below_cost: bool = False, payments: list[dict] | None = None) -> dict:
+                 confirm_below_cost: bool = False, payments: list[dict] | None = None,
+                 round_cash: bool = True) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -797,9 +802,15 @@ class Sales:
             raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
-        if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
+        # U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded
+        from .rounding import nearest, step
+        cash_due = preview["total"] - paid_card - paid_transfer - on_credit
+        # an exchange settles exactly: a return is never rounded (owner 22/11)
+        rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and round_cash else 0
+        if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
-                                   details={"total": preview["total"]})
+                                   details={"total": preview["total"], "cash_due": max(0, cash_due),
+                                            "rounding": rounding, "cash_required": max(0, cash_due) + rounding})
         if on_credit:
             if not preview["customer_id"]:
                 raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")
@@ -870,9 +881,6 @@ class Sales:
                     raise Conflict("الخصم ينزل بالسعر عن التكلفة — هذا البيع بخسارة", code="below_cost_confirm",
                                    details={"lines": below_cost})
             total += s["delivery_fee"] or 0
-            from .rounding import nearest, step
-            rounding = nearest(total, step(self.db, ctx.org_id))         # U2-14, same rule as the draft
-            total += rounding
             if total != preview["total"]:
                 raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
@@ -1351,7 +1359,8 @@ class Sales:
             # exactly what is left of it
             rounding_back = 0
             if s["rounding"]:
-                left = max(0, s["total"] - (s["delivery_fee"] or 0) - s["returned_total"])
+                # the invoice took for its items: the exact total plus its cash rounding, less the delivery fee
+                left = max(0, s["total"] + s["rounding"] - (s["delivery_fee"] or 0) - s["returned_total"])
                 emptied = not self.db.one(
                     "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
                     " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id))
@@ -1578,7 +1587,8 @@ class Sales:
             if refund_method == "card" and pay_method == "card" and len(payments) == 2:
                 payments = [{"method": "card", "amount": n_total, "channel_id": channel_id}]
             sale = self.complete(ctx, new_sid, payments=payments, version=version, request_id=request_id,
-                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost)
+                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost,
+                                 round_cash=False)
             out = {"return_id": ret["return_id"], "original_sale_id": sid, "sale_id": new_sid,
                    "returned": r_value, "new_total": n_total, "net": n_total - r_value,
                    "refund_method": refund_method, "pay_method": pay_method,

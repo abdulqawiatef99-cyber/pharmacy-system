@@ -108,7 +108,7 @@ def redact_summary(ctx: Context, summary: dict) -> dict:
         return summary
     out = dict(summary)
     for key in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
-                "by_channel", "card_refunds", "credit_refunds"):
+                "by_channel", "card_refunds", "credit_refunds", "rounding_total"):
         out.pop(key, None)
     out["blind"] = True
     return out
@@ -143,7 +143,7 @@ class CashDrawer:
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
         where, args = _sales_of(s)
-        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t,"
+        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t, coalesce(sum(rounding),0) rd,"
                            f" coalesce(sum(on_credit),0) cr, count(*) n FROM sales x WHERE {where}", args)
         by_channel = [dict(r) for r in self.db.all(
             "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
@@ -156,7 +156,7 @@ class CashDrawer:
                                    " AND s.org_id=? AND s.branch_id=?", (ctx.org_id, ctx.org_id, s["branch_id"]))["c"]
         expected = s["opening_cash"] + sum(by_kind.values())
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
-               else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
+               else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"], "rounding_total": card["rd"],
                "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier,
                "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"]}
         return redact_summary(ctx, out)
@@ -283,7 +283,7 @@ class CashDrawer:
         where, args = _sales_of(s)
         sales = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_card),0) card,"
                             " coalesce(sum(paid_transfer),0) transfer, coalesce(sum(on_credit),0) credit,"
-                            f" coalesce(sum(discount_total),0) discount FROM sales x WHERE {where}", args)
+                            f" coalesce(sum(discount_total),0) discount, coalesce(sum(rounding),0) rounding FROM sales x WHERE {where}", args)
         # voided while this shift was open (a void after the close belongs to the shift open at that time)
         voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL"
                              " AND (? IS NULL OR voided_at<?)", (shift_id, s["closed_at"], s["closed_at"]))["n"]
@@ -321,6 +321,7 @@ class CashDrawer:
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
                     transfer_total=sales["transfer"], credit_total=sales["credit"], discount_total=sales["discount"],
+                    rounding_total=sales["rounding"],
                     voided_count=voided, returns_count=sum(r["count"] for r in rets.values()),
                     returns_total=sum(r["total"] for r in rets.values()), returns_by_method=rets,
                     card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"], by_channel=by_channel,

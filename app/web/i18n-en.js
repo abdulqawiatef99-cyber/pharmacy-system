@@ -3211,4 +3211,8 @@ window.I18N_EN = {
 "صحّح العبوة": "Fix the pack",
 "من النوع ده": "of this kind",
 "مفيش مشاكل0 في 0 صنف.": "No problems0 in 0 items.",
+"تقريب النقدي 00 (مش مبيعات)": "Cash rounding 00 (not sales)",
+"تقريب النقدي (مش مبيعات ولا خصم)": "Cash rounding (not sales, not discount)",
+"تقريب النقدي": "Cash rounding",
+"منها تقريب النقدي": "of which cash rounding",
 };
