@@ -61,7 +61,8 @@ jobs:
   linux:
     needs: changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # the suite takes 11-13 minutes on the runner (22/11: 12m50s): 15 cut a green run; 25 leaves room (U4-5)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
