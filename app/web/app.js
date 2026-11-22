@@ -417,6 +417,7 @@ const routes = [
   [/^#\/owner-reports$/, viewOwnerReports],
   [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
+  [/^#\/day-review$/, viewDayReview],
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
@@ -521,7 +522,7 @@ const SCREENS = {
   pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], exchange: ["مرتجع واستبدال", "sales.return"], purchases: ["الشراء", "purchases.read"],
   items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
-  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"],
+  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"], "day-review": ["مراجعة اليوم", "cash.see_expected"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
   procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.permissions"], audit: ["سجل العمليات", "audit.read"],
@@ -554,6 +555,7 @@ const HELP = {
   reports: ["التقارير: المبيعات، وتحذيرات الأصناف، وخسائر المخزون، والصلاحية.", ["كل تقرير له زر Excel وزر طباعة."]],
   "owner-reports": ["تقارير المالك: الموظفون، والعملاء، والخزينة، والمرتجعات، والخصومات، والأسعار.", ["اختر التقرير من الأزرار ثم الفترة."]],
   profit: ["الربح: المبيعات ناقص التكلفة والمصروفات لفترة.", []],
+  "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
@@ -1269,6 +1271,8 @@ function purchaseLabels(cur) {
       .map((c) => ({ id: rows[+c.dataset.i].id, count: Math.max(1, Math.min(500, parseInt(d.querySelector(`[data-n="${c.dataset.i}"]`).value, 10) || 1)) }));
     if (!pick.length) { toast("علّم صنف واحد على الأقل", true); return; }
     const n = pick.reduce((a, x) => a + x.count, 0);
+    // the label printer takes 500 labels a job: say so here, the dialog stays open (Codex P2 on #406)
+    if (n > 500) { toast(`أقصى عدد في المرة 500 ملصق؛ المختار ${n}. قلّل العدد أو اطبع على دفعات`, true); return; }
     if (!confirm(`هتطبع ${n} ملصق لـ ${pick.length} صنف؟`)) return;
     const keep = lblRemembered(); rows.forEach((r2) => keep.delete(r2.id)); pick.forEach((x) => keep.add(x.id));
     try { localStorage.setItem(LBL_KEY, JSON.stringify([...keep].slice(-5000))); } catch { /* this PC only */ }
@@ -3211,6 +3215,31 @@ async function viewDeadstock() {
   });
 }
 
+// ------------------------------------------------------------------ day review (U2-8)
+async function viewDayReview() {
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>مراجعة اليوم</h1>
+    <label class="f">اليوم <input type="date" id="drDay"></label></div><div id="drOut" class="muted">…</div></section>`;
+  const load = async () => {
+    const v = $("#drDay").value, r = await api(`/api/reports/day-review${v ? `?day=${encodeURIComponent(v)}` : ""}`);
+    if (!v) $("#drDay").value = r.day;
+    const row = (t, m) => `<tr><td>${t}</td><td class="num">${m == null ? "—" : money(m)}</td></tr>`, s = r.sales, mth = r.by_method;
+    $("#drOut").className = "";
+    $("#drOut").innerHTML = `<div class="totals"><div>صافي المبيعات<b>${money(r.net_sales)}</b></div><div>عدد الفواتير<b>${s.n}</b></div>
+        <div>الشراء<b>${r.purchases.total == null ? "—" : money(r.purchases.total)}</b></div><div class="${r.drawer.difference ? (r.drawer.difference < 0 ? "t-err" : "t-warn") : "t-ok"}">فرق الخزينة<b>${money(r.drawer.difference)}</b></div></div>
+      <div class="grid2"><table><tbody>
+        ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${row("المرتجعات", r.returns.total)}
+        ${row(`ملغاة النهارده (${s.voided_count})`, s.voided_total)}${row("نقدي (بعد المرتجع والإلغاء)", mth.cash)}${row("بطاقة (بعد المرتجع والإلغاء)", mth.card)}
+        ${row("تحويل ومحافظ", mth.transfer)}${row("آجل (بعد المرتجع والإلغاء)", mth.credit)}${row("نقدي توصيل (بيدخل الدرج لما المندوب يسلّم)", mth.delivery_cash)}${row("تحصيل آجل", r.credit_collected)}</tbody></table>
+      <table><tbody>${row(`فواتير شراء معتمدة (${r.purchases.n})`, r.purchases.total)}
+        ${r.purchases.by_supplier.map((x) => row(`— ${esc(x.supplier || "")} (${x.n})`, x.total)).join("")}
+        ${row(`مرتجع للموردين (${r.supplier_returns.n})`, r.supplier_returns.total)}
+        ${row("المتوقع في الخزينة", r.drawer.expected)}${row("المعدود", r.drawer.counted)}</tbody></table></div>
+      ${r.drawer.shifts.map((x) => `<p class="muted small">شيفت اتقفل ${esc(stamp(x.closed_at))} — ${esc(x.closed_by || "")}: متوقع ${money(x.expected_cash)}، معدود ${money(x.counted_cash)}، فرق ${money(x.difference)}</p>`).join("")}`;
+  };
+  $("#drDay").addEventListener("change", () => load().catch((er) => toast(er.message, true)));
+  load().catch((er) => { $("#drOut").textContent = er.message; });
+}
+
 // ------------------------------------------------------------------ procurement
 const MOVE_AR = { fast: ["سريع", "b-ok"], medium: ["متوسط", "b-warn"], slow: ["بطيء", "b-err"], dead: ["راكد", "b-err"] };
 const FLAG_AR = { expensive: "غالي: راجعه", fridge: "ثلاجة", below_official: "خصم أقل من الأساسي" };
@@ -3327,7 +3356,8 @@ async function viewProcurement() {
     st.rows = out.rows;
     st.sups = Object.fromEntries(out.suppliers.map((s) => [s.id, s.name]));
     $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
-    $("#prSupSel").value = st.sup && st.sups[st.sup] ? st.sup : "";
+    if (st.sup && !st.sups[st.sup]) st.sup = "";        // the supplier left the results: no stale filter (Codex P2 on #402)
+    $("#prSupSel").value = st.sup;
     const c = out.counts;
     $("#prCounts").textContent = `سريع ${c.fast} · متوسط ${c.medium} · بطيء ${c.slow} · راكد ${c.dead} · مخفي من العرض الأساسي ${c.hidden}`;
     draw();
@@ -5750,7 +5780,7 @@ async function viewOwnerReports() {
 
 async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${can("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${can("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${can("cash.see_expected") && can("sales.totals") ? `<a class="btn secondary" href="#/day-review">مراجعة اليوم</a>` : ""}${can("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والمالك.</p>`}
     <p class="muted noprint">تقارير أخرى: ${can("audit.read") ? `<a href="#/stock-check">مطابقة الأرصدة</a> · ` : ""}<a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف المؤكدة وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
