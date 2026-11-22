@@ -155,3 +155,16 @@ class ArchiveDemand(Base):
         got = demand.monthly(self.db, self.ctx, today=date.today())["items"][it["id"]][month]
         # every archived sale is before the cut-off, so it still counts; the program sale adds once
         self.assertEqual(got, {"units": base["units"] + 2, "events": base["events"] + 1})
+
+    def test_same_item_on_two_lines_return_taken_once(self):
+        """Codex P2 on #431: a line back_amount and a document for the same return were both deducted."""
+        t = base_tables()
+        weekly_sales(t, weeks=1, packs="1")
+        sid = t["Sales_header"][-1]["sales_id"]
+        line = dict(t["Branches_sales_details"][-1], details_id="d2x", back_amount="1")
+        t["Branches_sales_details"].append(line)                       # the same item again, its line returned
+        t["Back_Sales_details"].append({"back_sales_id": "1", "sales_id": sid, "product_id": "1", "back_amount": "1"})
+        self.assertTrue(self.run_import(tables=t)["ok"])
+        demand._cache.clear()
+        per = demand.monthly(self.db, self.ctx, today=TODAY)["items"][self.item("100")["id"]]
+        self.assertEqual(per["2026-11"], {"units": 3, "events": 1})       # 2 packs sold, 1 back: one pack left

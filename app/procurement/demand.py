@@ -6,8 +6,8 @@ unread in the archive (estock_archive.py, read-only). Rules:
 - archive lines: E-Stock's `amount` is in packs (fractions = part of a pack, as its stock table); base units =
   packs x the program item's pack size. The program item is found through the archive's map (the move's own
   result), else by the E-Stock product code = the program item code (the rule the move used);
-- returns are netted per sale and item: the larger of the line's own back_amount and the return documents
-  (Back_Sales_details) for that sale, in the sale's month, never below zero; never both (no double count);
+- returns are netted per sale and item: the lines' own back_amount, plus whatever the return documents
+  (Back_Sales_details) for that sale hold beyond it, in the sale's month, never below zero (no double count);
 - one event per invoice: an item on one invoice is one sale, whatever the quantity;
 - the cut-off: the archive counts only BEFORE the program's first sale, the program only from it, so a sale is
   never counted twice; the manual monthly upload counts only for months the archive does not cover.
@@ -151,6 +151,13 @@ def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None
                         f' FROM "e_Back_Sales_details"'):
             k = (_id(r["sid"]), _id(r["pid"]))
             docs[k] = docs.get(k, Decimal(0)) + _dec(r["q"])
+    # a document return first covers what the lines' own back_amount already says (estock_returns._invoice):
+    # only the rest of it is spread over the item's lines, so the same return is never taken twice
+    line_back: dict[tuple[str, str], Decimal] = {}
+    for r in rows:
+        k = (_id(r["sid"]), _id(r["pid"]))
+        line_back[k] = line_back.get(k, Decimal(0)) + _dec(r["back"])
+    extra_doc = {k: max(q - line_back.get(k, Decimal(0)), Decimal(0)) for k, q in docs.items()}
     items: dict[str, dict[str, list]] = {}
     first = None
     for r in rows:
@@ -159,11 +166,11 @@ def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None
             continue
         first = min(first, r["at"][:10]) if first else r["at"][:10]
         amt, k = _dec(r["amt"]), (_id(r["sid"]), _id(r["pid"]))
-        back = max(_dec(r["back"]), docs.get(k, Decimal(0)))
-        used = min(back, amt)
-        if k in docs:                    # a document return is used once, even with the item on two lines
-            docs[k] = max(docs[k] - used, Decimal(0))
-        net = max(amt - used, Decimal(0))
+        own = min(_dec(r["back"]), amt)
+        more = min(extra_doc.get(k, Decimal(0)), amt - own)
+        if more:
+            extra_doc[k] -= more
+        net = max(amt - own - more, Decimal(0))
         cell = items.setdefault(iid, {}).setdefault(m, [Decimal(0), set()])
         cell[0] += net
         if net > 0:
