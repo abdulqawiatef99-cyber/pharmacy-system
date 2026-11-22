@@ -2557,6 +2557,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(hk.save_settings(db, ctx, str(b.get("branch") or ""), b.get("customer_id") or None,
                                       _int(b.get("advance"), "advance")))
         ctx.require("costs.read")
+        ctx.require("sales.totals")
         return J(hk.settings(db, ctx.org_id))
 
     @handler

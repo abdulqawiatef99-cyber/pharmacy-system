@@ -80,3 +80,28 @@ class TestHikmaAPI(PlanCase):
         r = self.call("GET", f"/api/reports/hikma-claim?branch=shibin&from={self.today}&to={self.today}")
         self.assertEqual((r["due"], r["advance"]), (0, 1000000))
         self.call("GET", "/api/reports/hikma-claim?branch=shibin&from=x&to=y", 422)
+
+
+class TestHikmaReviewFixes(TestHikmaClaim):
+    def test_reconciliation_ignores_returns_of_older_sales(self):
+        old = self.sell(1)
+        with self.db.transaction():
+            self.db.execute("UPDATE sales SET completed_at='2026-01-05T10:00:00.000000Z' WHERE id=?", (old["id"],))
+        self.s.return_items(self.ctx, old["id"], {old["lines"][0]["id"]: 1}, refund_method="credit", reason="test")
+        self.sell(2)
+        r = hk.claim(self.db, self.ctx, "shibin", today(), today())
+        self.assertEqual(r["account"]["matched_bp"], 10000)              # the old return is its own line
+
+    def test_hospital_lot_return_takes_off_half_margin_only(self):
+        d = self.sell(1)
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE item_id=?", (self.pan,))
+            self.db.execute("UPDATE sales SET completed_at='2026-01-05T10:00:00.000000Z' WHERE id=?", (d["id"],))
+        self.s.return_items(self.ctx, d["id"], {d["lines"][0]["id"]: 1}, refund_method="credit", reason="test")
+        pr = hk.claim(self.db, self.ctx, "shibin", today(), today())["previous_returns"]
+        margin = 1900 - pr["cost"]
+        self.assertEqual(pr["due"], margin - (margin + 1) // 2)
+
+    def test_bad_settings_input(self):
+        with self.assertRaises(ValidationFailed):
+            hk.save_settings(self.db, self.ctx, "shibin", ["x"], 0)

@@ -3203,4 +3203,12 @@ window.I18N_EN = {
 "مطالبة 0 0 - 0": "Claim 0 0 - 0",
 "مطالبة داخلي 0 0 - 0": "Internal claim 0 0 - 0",
 "0 إلى 0 — داخلي، ممنوع يتبعت للمستشفى": "0 to 0 — internal, never send to the hospital",
+"عميل كل فرع والدفعة المقدمة": "Each branch's customer and the advance",
+"✓ متحدد": "✓ Set",
+"⚠ مش متحدد": "⚠ Not set",
+"دوّر على العميل": "Find the customer",
+"⚠ 0 صنف من غير تكلفة متسجلة: التكلفة اتحسبت صفر. راجعها قبل ما تبعت المطالبة.": "⚠ 0 items have no recorded cost: their cost was counted as zero. Check them before sending the claim.",
+"· اتدفع نقدي/بطاقة ومش على الحساب 0": "· paid cash/card, not on the account 0",
+"المطالبة صافية من أي مرتجع لحد النهارده. لو طلعت مطالبة فترة قديمة تاني، مرتجعاتها اللي اتخصمت في فترة بعدها هتتخصم مرتين.": "The claim is net of every return up to today. If an old period's claim is made again, its returns already taken off in a later period would be taken off twice.",
+"⚠ من غير تكلفة": "⚠ No cost",
 };
