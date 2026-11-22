@@ -154,3 +154,19 @@ class TestKeepChangeFutureTraps(SalesCase):
             self.assertNotEqual(getattr(e, "code", None), "no_open_shift")   # its own reasons, never the drawer
             return
         self.assertEqual(self.s.balance(self.ctx, self.cust), before)        # his change stays credit
+
+
+class TestKeepChangeCodexP1(TestKeepChangeFutureTraps):
+    def test_the_return_says_what_cash_goes_back_and_an_exchange_keeps_the_credit(self):
+        sid, d = self.keep(self.cust)
+        r = self.s.return_items(self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="test")
+        self.assertEqual((r["refund"], r["change_back"]), (1900, 100))      # both shown to the cashier
+        sid, d = self.keep(self.cust)
+        start = self.cd.summary(self.ctx)["expected_cash"]
+        new = self.s.create(self.ctx, self.cust)
+        self.s.add_line(self.ctx, new, self.pan, units=1)
+        out = self.s.exchange(self.ctx, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash", pay_method="cash",
+                              reason="تغيير", safety_decisions=self.ack_all(new))
+        self.assertEqual(out["net"], 0)
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start)  # nothing left the drawer unseen
+        self.assertEqual(self.s.balance(self.ctx, self.cust), -100)          # his change is still his credit

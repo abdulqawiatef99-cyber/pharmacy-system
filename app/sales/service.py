@@ -1300,7 +1300,7 @@ class Sales:
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
-                     reason: str) -> dict:
+                     reason: str, give_back_change: bool = True) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
@@ -1455,11 +1455,12 @@ class Sales:
             # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
             # refunded to his account or his card, that change is already his credit and stays
             # in cash only (review P2): a card refund never needs the drawer or an open shift; his change stays credit
-            if refund_method == "cash" and not self.db.one(
+            change_back = 0
+            if give_back_change and refund_method == "cash" and not self.db.one(
                     "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
                     " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
-                self._give_back_kept_change(ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي",
-                                            kind="return")
+                change_back = self._give_back_kept_change(
+                    ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي", kind="return")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1468,7 +1469,8 @@ class Sales:
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
-        return {"return_id": rid, "refund": refund}
+        # Codex P1: the kept change paid back with it, shown to the cashier on its own (not goods value)
+        return {"return_id": rid, "refund": refund, "change_back": change_back}
 
     def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:
         """Completed sales to return from, by invoice number, item code or barcode, or customer phone or name
@@ -1529,7 +1531,8 @@ class Sales:
             pass
         try:
             with self.db.transaction():
-                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع")
+                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع",
+                                      give_back_change=False)
                 raise _Undo(r["refund"] if new_sid is None else (r["refund"], self.get(ctx, new_sid)["total"]))
         except _Undo as u:
             return u.args[0]
@@ -1603,7 +1606,8 @@ class Sales:
             if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
                                 (orig["customer_id"], new_sid, ctx.org_id))
-            ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
+            # an exchange never pays out the kept change: it stays his credit (Codex P1 on #424)
+            ret = self.return_items(ctx, sid, lines, refund_method=refund_method, give_back_change=False,
                                     reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
