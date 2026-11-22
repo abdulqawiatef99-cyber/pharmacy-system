@@ -35,7 +35,7 @@ Owner additions 17:39 (via the manager): (A) E-Stock history everywhere, as if t
 - U4-22 Barcode anywhere on sale and purchase screens: a scan from any field adds/selects the item, never types into the focused field (merge with the U4-4 scan item; one shared scan detector by key timing).
 - U4-23 Sanity checks before saving any invoice: impossible refused (server, OWNER_RULES §13), unusual = confirm with reason (qty far above usual, price far from public/last cost); thresholds in settings.
 - U4-24 Speed of every add/save (purchase add line, sale add, save customer, save item): measure, fix, target < 0.3 s (do with U4-5).
- Next session: U4-2 purchases rebuild on `demand.monthly()` (regular >= 6 of 12 months and 2 of last 3, semi 4-5; avg = max(avg 3, avg 6); week/2 weeks/month; per-supplier split; order tracking). No release PR into main yet: it collects all of update 4.
+No release PR into main for the rest of update 4 until the manager says so (one combined release).
 
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
 Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
