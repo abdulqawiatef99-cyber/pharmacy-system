@@ -144,3 +144,11 @@ class TestCodexOn416Replay(TestHikmaClaim):
         by = hk.claim(self.db, self.ctx, "shibin", today(), today())["previous_returns"]["by_owner"]
         self.assertGreater(by["hospital"], 0)             # the first return took the one hospital unit
         self.assertGreater(by["pharmacy"], 0)             # the second one an OLD (pharmacy) unit, not the same lot again
+
+
+class TestShare(__import__("unittest").TestCase):
+    def test_keeps_the_whole_refund(self):
+        """Codex P1 on #416: weights summing below the refund (300 x 3,333 < 1,000,000) keep the whole refund."""
+        self.assertEqual(sum(hk._share(1_000_000, [300 * 3333])), 1_000_000)
+        self.assertEqual(hk._share(10, [1, 1, 1]), [4, 3, 3])
+        self.assertEqual(hk._share(5, [0, 0]), [5, 0])

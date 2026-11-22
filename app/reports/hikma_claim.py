@@ -37,6 +37,22 @@ def _half(x: int) -> int:
     return (x + 1) // 2 if x >= 0 else -((-x + 1) // 2)
 
 
+def _share(total: int, weights: list[int]) -> list[int]:
+    """`total` over the weights, whole piastres that add up to `total` exactly, never capped by the weights
+    (Codex P1 on #416: rounded unit prices can sum below the recorded refund). Largest remainders get the rest."""
+    w = [max(0, x) for x in weights]
+    whole = sum(w)
+    if not w:
+        return []
+    if whole <= 0:
+        return [total] + [0] * (len(w) - 1)
+    base = [total * x // whole for x in w]
+    rest = total - sum(base)
+    for i in sorted(range(len(w)), key=lambda i: (-(total * w[i] % whole), i))[:rest]:
+        base[i] += 1
+    return base
+
+
 def settings(db: Database, org_id: str) -> dict:
     r = db.one("SELECT value FROM org_settings WHERE org_id=? AND key=?", (org_id, KEY))
     try:
@@ -201,9 +217,8 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
         else:
             # an older return has only its total (Codex P1 on #416): spread it over its lines by their price, the last
             # line taking the remainder, so the lines add up to the refund exactly
-            from ..sales.service import spread
             weights = [sum((x["unit_price"] or 0) * t for x, t in takes) for _, _, takes in per_line]
-            values = spread(ret_total, weights) if sum(weights) > 0 else [ret_total] + [0] * (len(per_line) - 1)
+            values = _share(ret_total, weights)
         for (lid, q, takes), line_v in zip(per_line, values):
             done_v = 0
             for k, (x, t) in enumerate(takes):
