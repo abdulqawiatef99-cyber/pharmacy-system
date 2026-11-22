@@ -1958,9 +1958,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_daily_pick(req):
+        return J({"items": counting.daily_pick(ctx_of(req), 10)})
+
+    @handler
     async def counts_create(req):
         ctx = ctx_of(req)
         b = await body(req)
+        if b.get("daily"):                  # U3-5: today's mini-count, picked by the program
+            sid = counting.create_daily(ctx, 10)
+            return J({"id": sid}, status_code=201)
         scope, ids = b.get("scope", "full"), b.get("item_ids")
         if scope == "category":            # count one section: its items, stored as an items-scope count
             cid = str(b.get("category_id") or "")
@@ -3201,6 +3208,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
+        Route("/api/counts/daily-pick", counts_daily_pick),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
         Route("/api/counts/{id}/variances", counts_variances),

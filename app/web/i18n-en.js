@@ -3172,4 +3172,11 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"جرد يومي صغير (10 أصناف)": "Small daily count (10 items)",
+"البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.": "The program picks items of high value, fast sellers, or items that had a difference before. Selling goes on during the count: the expected quantity follows what was sold.",
+"هيتجرد: 0": "To count: 0",
+"مفيش أصناف محتاجة جرد النهارده": "No items need counting today",
+"قيمته عالية": "High value",
+"بيتباع كتير": "Sells a lot",
+"كان فيه فرق في جرد قريب": "Had a difference in a recent count",
 };

@@ -2187,11 +2187,21 @@ async function viewCounts() {
       <label class="f">القسم <select name="cat"><option value="">—</option>${(await loadCats()).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label>
       <label class="f">المواقع (إذا كان النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
       <button class="btn" type="submit">بدء جرد</button></form>` : ""}
+    ${canManage ? `<div class="row mt"><button class="btn secondary" id="cntDaily">جرد يومي صغير (10 أصناف)</button>
+      <span class="muted">البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.</span></div>
+      <div id="cntPick" class="muted small"></div>` : ""}
   </section>
   <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
     <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${{ full: "شامل", location: "مواقع", items: "أصناف / قسم" }[c.scope] || esc(c.scope)}</td>
       <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(dayOf(c.created_at))}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
+  if (canManage) api("/api/counts/daily-pick").then(({ items }) => {
+    if ($("#cntPick")) $("#cntPick").innerHTML = items.length ? `هيتجرد: ${items.map((x) => `${esc(x.label)} (${esc(x.why)})`).join("، ")}` : "مفيش أصناف محتاجة جرد النهارده";
+  }).catch(() => {});
+  $("#cntDaily")?.addEventListener("click", async () => {
+    try { const r = await api("/api/counts", { method: "POST", body: { daily: true } }); location.hash = `#/counts/${r.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
   $("#cntForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;

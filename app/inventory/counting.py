@@ -67,6 +67,55 @@ class Counting:
                          after={"scope": scope, "filter": flt})
         return sid
 
+    def daily_pick(self, ctx: Context, n: int = 10) -> list[dict]:
+        """U3-5 «جرد يومي صغير»: about `n` items to count today without stopping sales, a mix of the most valuable
+        on the shelf, the fastest sellers of the last 30 days, and items that had a count difference in the last
+        90 days; anything counted in the last 14 days is skipped. Only items with stock."""
+        ctx.require("inventory.count")
+        from datetime import timedelta
+        from ..core.accounts import iso, utcnow
+        org, br = ctx.org_id, ctx.branch_id
+        now = utcnow()
+        d14, d30, d90 = (iso(now - timedelta(days=k)) for k in (14, 30, 90))
+        recent = {r["item_id"] for r in self.db.all(
+            "SELECT DISTINCT e.item_id FROM count_entries e JOIN count_sessions c ON c.id=e.session_id"
+            " WHERE c.org_id=? AND e.counted_at>=?", (org, d14))}
+        base = ("SELECT i.id, coalesce(i.name_en, i.name_ar) label, i.location, sum(sb.qty) q, c.avg_cost FROM items i"
+                " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+                " LEFT JOIN item_costs c ON c.item_id=i.id AND c.org_id=i.org_id AND c.branch_id=sb.branch_id"
+                " WHERE i.org_id=? AND i.status='active' AND coalesce(i.is_service,0)=0 GROUP BY i.id HAVING sum(sb.qty)>0")
+        stock = {r["id"]: dict(r) for r in self.db.all(base, (br, org))}       # one query, Decimal in Python
+        value = sorted(stock, key=lambda i: -(Decimal(stock[i]["avg_cost"] or "0") * stock[i]["q"]))[:200]
+        fast = [r["item_id"] for r in self.db.all(
+            "SELECT item_id, -sum(qty_delta) s FROM stock_movements WHERE org_id=? AND branch_id=? AND movement_type='sale'"
+            " AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 200", (org, br, d30))]
+        diff = [r["item_id"] for r in self.db.all(
+            "SELECT item_id, sum(abs(qty_delta)) s FROM stock_movements WHERE org_id=? AND branch_id=?"
+            " AND ref_type='count_session' AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 200", (org, br, d90))]
+        picked, why = [], {}
+        lists = [("diff", diff), ("value", value), ("fast", fast)]
+        while len(picked) < n and any(l for _, l in lists):
+            for tag, l in lists:
+                while l:
+                    i = l.pop(0)
+                    if i in stock and i not in recent and i not in why:
+                        picked.append(i)
+                        why[i] = tag
+                        break
+                if len(picked) >= n:
+                    break
+        label = {"diff": "كان فيه فرق في جرد قريب", "value": "قيمته عالية", "fast": "بيتباع كتير"}
+        return [{"item_id": i, "label": stock[i]["label"], "location": stock[i]["location"], "why": label[why[i]]} for i in picked]
+
+    def create_daily(self, ctx: Context, n: int = 10) -> str:
+        """Opens today's mini-count of the picked items (blind); sales go on, the expected qty follows them."""
+        from ..sales.service import local_today
+        picks = self.daily_pick(ctx, n)
+        if not picks:
+            raise ValidationFailed("مفيش أصناف تتجرد النهارده (كل اللي عليه رصيد اتجرد في آخر أسبوعين)")
+        return self.create(ctx, title=f"جرد يومي صغير {local_today().isoformat()}", scope="items",
+                           item_ids=[p["item_id"] for p in picks], blind=True)
+
     def _session(self, ctx: Context, sid: str, *, open_only: bool = False) -> dict:
         s = self.db.one("SELECT * FROM count_sessions WHERE id=? AND org_id=?", (sid, ctx.org_id))
         if not s:
@@ -208,6 +257,9 @@ class Counting:
                             (ctx.org_id, s["branch_id"], item_id))
             r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"), ROUND_HALF_UP)) \
                 if c and ctx.can("costs.read") else None
+            # U3-5: the order of the report is by value (cost of the difference), high -> low, whoever reads it;
+            # the figure itself is shown only with costs.read
+            r["_order"] = abs(Decimal(c["avg_cost"]) * r["difference"]) if c and c["avg_cost"] else Decimal(abs(r["difference"]))
             r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
                                      (item_id,))["n"]
             if expected_now < 0:
@@ -234,7 +286,9 @@ class Counting:
             if it["id"] in counted_items or not self._in_scope(s, dict(it)):
                 continue
             uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"], "system_qty": it["q"]})
-        out.sort(key=lambda r: abs(r["difference"]), reverse=True)
+        out.sort(key=lambda r: (r["_order"], abs(r["difference"])), reverse=True)
+        for r in out:
+            r.pop("_order", None)
         return {"session": s, "lines": out, "uncounted_with_stock": uncounted,
                 "summary": {"counted_lines": len(out),
                             "shortage_units": -sum(r["difference"] for r in out if r["difference"] < 0),
