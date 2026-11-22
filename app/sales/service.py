@@ -862,8 +862,9 @@ class Sales:
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
                                            "net": net, "cost": cost_piasters(cost)})
-                    elif Decimal(net) - cost < 1 and l.get("discount_source") != "contract":
-                        # the pharmacy's own discount takes it to its cost exactly (U2-33); a contract is the agreement
+                    elif Decimal(net) - cost < 1 and (l.get("discount_source") != "contract" or l["invoice_share"] > 0):
+                        # the pharmacy's own discount takes it to its cost exactly (U2-33); a contract alone is the
+                        # agreement, but an invoice discount on top of it is the pharmacy's (Codex P1 on #414)
                         at_cost.append({"line_no": l["line_no"], "name": l["item"]["name"], "net": net})
                 self.db.execute("UPDATE sale_lines SET line_total=?, discount_amount=?, invoice_share=? WHERE id=?",
                                 (net, fixed_part, l["invoice_share"], l["id"]))

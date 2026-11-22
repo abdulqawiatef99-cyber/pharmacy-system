@@ -167,3 +167,18 @@ class TestBelowCostPaths(TestBelowCost):
         self.assertEqual((d["lines"][0]["discount"], d["version"]), (500, version))
         approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
         self.refused(lambda: self.s.set_details(approved, sid, {"customer_id": cust}))   # the owner's PIN: refused too
+
+
+class TestCodexOn414(TestBelowCostPaths):
+    def test_invoice_discount_on_a_contract_line_to_cost_needs_the_reason(self):
+        from app.core.errors import Conflict
+        from app.sales import contracts
+        k = contracts.save(self.db, self.ctx, {"name": "نقابة", "discount_local_bp": 2000, "discount_imported_bp": 2000})[0]["id"]
+        cust = self.s.create_customer(self.ctx, name="عضو", credit_limit=0)
+        contracts.link_customer(self.db, self.ctx, cust, k)
+        sid = self.s.create(self.ctx, cust)
+        self.s.add_line(self.ctx, sid, self.pan, units=2)                  # 40 - 20% = 32, cost 30
+        d = self.s.set_invoice_discount(self.ctx, sid, amount=200)         # 30 = cost
+        with self.assertRaises(Conflict) as e:
+            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={})
+        self.assertEqual(e.exception.code, "at_cost_reason")
