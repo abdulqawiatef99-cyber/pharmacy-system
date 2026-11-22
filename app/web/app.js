@@ -6065,19 +6065,19 @@ async function viewReports() {
     const maxH = Math.max(1, ...r.by_hour.map((x) => x.total)), sub = rangeText(r.from, r.to);
     $("#rSales").innerHTML = `<section class="panel" id="rSalesBox"><div class="row between"><h2>المبيعات — ${esc(sub)}</h2>${reportTools("sales")}</div>
     <div class="totals"><div>الفواتير<b>${r.totals.n}</b></div><div>المبيعات<b>${money(r.totals.total)}</b></div>
-      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div></div>
+      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div>${r.totals.rounding ? `<div>تقريب النقدي (مش مبيعات)<b>${money(r.totals.rounding)}</b></div>` : ""}</div>
     <div class="grid2 mt"><section class="panel"><h2>يوم بيوم</h2>
-      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
-      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
+      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th><th>تقريب النقدي</th></tr></thead><tbody>
+      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td><td class="num">${money(d.rounding || 0)}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
     <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table>
       <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${hourLabel(h)} — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${hourLabel(h)}</small></div>`; }).join("")}</div></section></div>
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
     wireTools("sales", () => ({ title: "تقرير المبيعات", subtitle: sub, el: $("#rSalesBox"), sheets: [
-      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع")],
-        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns]),
-        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns] },
+      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع"), M("تقريب النقدي")],
+        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns, d.rounding || 0]),
+        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns, r.totals.rounding || 0] },
       { name: "حسب الموظف", columns: [Tx("الموظف"), N("فواتير"), M("الإجمالي"), M("الخصم")], rows: r.by_user.map((u) => [u.name, u.n, u.total, u.discount || 0]) },
       { name: "أكثر الأصناف", columns: [Tx("الصنف"), N("الكمية بالوحدة"), M("المبيعات"), ...(can("costs.read") ? [M("الربح")] : [])],
         rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));

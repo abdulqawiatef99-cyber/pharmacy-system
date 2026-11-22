@@ -333,3 +333,24 @@ class TestHikmaClaimIgnoresRounding(SalesCase):
         ph = hk.claim(self.db, self.ctx, "shibin", today(), today())["pharmacy"]
         self.assertEqual(ph["value"], 1890)                                   # the lines, never the rounding
         self.assertEqual(self.s.balance(self.ctx, self.cust), 1000)           # his statement: exact credit
+
+
+class TestCodexOn415(Rounded):
+    def test_a_void_in_a_later_shift_takes_the_rounding_off_that_shift(self):
+        a, _ = self.sale()
+        self.pay(a, paid_cash=1900)                                      # +0.10 in shift A
+        sa = self.cd.summary(self.ctx)
+        self.cd.close(self.ctx, counted_cash=sa["expected_cash"], note="عدّ تجربة", float_left=sa["expected_cash"])
+        sa = sa["id"]
+        self.cd.open(self.ctx, self.db.one("SELECT counted_cash c FROM cash_shifts WHERE id=?", (sa,))["c"])
+        self.s.void(self.ctx, a, reason="غلط في الفاتورة")               # voided in shift B, same day
+        sb = self.cd.summary(self.ctx)
+        self.assertEqual(sb["rounding_total"], -10)
+        self.assertEqual(self.cd.report(self.ctx, sb["id"])["rounding_total"], -10)
+        self.assertEqual(self.cd.report(self.ctx, sa)["rounding_total"], 10)          # A's report is kept
+
+    def test_the_sales_report_screen_and_export_show_it(self):
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("تقريب النقدي (مش مبيعات)<b>${money(r.totals.rounding)}", js)
+        self.assertIn('M("تقريب النقدي")]', js)
