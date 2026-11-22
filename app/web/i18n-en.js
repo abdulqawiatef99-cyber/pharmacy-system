@@ -3172,4 +3172,10 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"تقريب إجمالي الفاتورة (لأقرب)": "Round the invoice total (to the nearest)",
+"من غير تقريب": "No rounding",
+"التقريب بيظهر سطر لوحده في الفاتورة، وتقدر تغيّره بعدين من الإعدادات.": "The rounding shows as its own line on the invoice; you can change it later in the settings.",
+"منها تقريب 00": "of which rounding 00",
+"التقريب (داخل المبيعات)": "Rounding (inside sales)",
+"التقريب": "Rounding",
 };
