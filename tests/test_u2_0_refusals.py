@@ -176,6 +176,15 @@ class PurchaseRefused(SalesCase):
         self.draft(no="DUP")
         self.refuses(self.draft, no="DUP")
 
+    def test_distributor_margin_negative_or_above_half_the_public_price(self):
+        """B3: a negative margin is refused at entry; a margin above half the public price (a negative pharmacist
+        price) cannot be approved."""
+        inv_id = self.draft(no="MRG")
+        line = self._line(inv_id, (TODAY + timedelta(days=400)).isoformat())["lines"][0]
+        self.refuses(self.pur.update_line, self.ctx, inv_id, line["id"], {"distributor_margin": -100}, None)
+        self.pur.update_line(self.ctx, inv_id, line["id"], {"distributor_margin": 2100}, None)
+        self.refuses(self.pur.approve, self.ctx, inv_id, None)
+
 
 
 class TestKeepChangeIsOnlyChange(__import__("tests.test_sales", fromlist=["SalesCase"]).SalesCase):
