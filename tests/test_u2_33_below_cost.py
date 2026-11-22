@@ -1,8 +1,9 @@
 """U2-33: a discount never takes a line under its cost, and never past the person's own limit. Refused at the
-moment it is typed (line percent, line amount, more units at a discount, invoice discount); only the owner
-(`sales.below_cost`) or his approval gets past. The cost is never shown to someone without costs.read."""
+moment it is typed (line percent, line amount, more units at a discount, invoice discount). Update 3 (owner:
+«امنعه أساساً»): nobody gets past, the owner and his PIN included; down to cost exactly needs `sales.below_cost`
+(owner / manager) and a written reason at payment. The cost is never shown to someone without costs.read."""
 from app.core import accounts, people
-from app.core.errors import Forbidden
+from app.core.errors import Conflict, Forbidden, ValidationFailed
 from tests.test_people import PW, People
 
 
@@ -14,9 +15,10 @@ class TestBelowCost(People):
         self.m = self.login("manager", PW)
 
     def refused(self, fn):
-        with self.assertRaises(Forbidden) as e:
+        with self.assertRaises(ValidationFailed) as e:
             fn()
-        self.assertEqual(e.exception.details["permission"], "sales.below_cost")
+        self.assertEqual(e.exception.code, "below_cost")
+        self.assertNotIn("permission", e.exception.details)       # no PIN can pass it
         return e.exception
 
     def test_percent_on_new_line(self):
@@ -41,13 +43,30 @@ class TestBelowCost(People):
         self.refused(lambda: self.s.set_invoice_discount(self.m, sid, bp=3000))
         self.assertFalse(self.s.get(self.m, sid)["invoice_discount_bp"])
 
-    def test_owner_and_owner_approval_pass(self):
+    def test_owner_and_owner_approval_are_refused_too(self):
         sid = self.s.create(self.ctx)
-        d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=3000)
-        self.assertEqual(d["lines"][0]["discount_bp"], 3000)      # completion still asks the owner to confirm
+        self.refused(lambda: self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=3000))
         approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
         sid = self.s.create(self.m)
-        self.s.add_line(approved, sid, self.pan, units=2, discount_bp=3000)
+        self.refused(lambda: self.s.add_line(approved, sid, self.pan, units=2, discount_bp=3000))
+
+    def test_at_cost_needs_a_reason_and_the_right(self):
+        sid = self.s.create(self.ctx)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=2500)      # 30 = cost exactly
+        with self.assertRaises(Conflict) as e:
+            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={})
+        self.assertEqual(e.exception.code, "at_cost_reason")
+        done = self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={}, cost_reason="عميل دائم")
+        self.assertEqual(done["status"], "completed")
+        a = self.db.one("SELECT after_json FROM audit_log WHERE action='sale.complete' AND entity_id=?", (sid,))
+        self.assertIn("عميل دائم", a["after_json"])
+        # a pharmacist with a discount limit high enough still cannot sell at cost
+        people.set_role_discount(self.db, self.ctx, "pharmacist", 5000)
+        ph = self.login("pharmacist", PW)
+        sid = self.s.create(ph)
+        d = self.s.add_line(ph, sid, self.pan, units=2, discount_bp=2500)
+        with self.assertRaises(Forbidden):
+            self.s.complete(ph, sid, paid_cash=d["total"], safety_decisions={}, cost_reason="سبب")
 
     def test_owner_sees_the_most_allowed_when_approval_is_not_his(self):
         # a person with costs.read but not sales.below_cost is told the most he can give
@@ -108,12 +127,11 @@ class TestBelowCostPaths(TestBelowCost):
         lid = self.pan_line(sid)["id"]
         self.refused(lambda: self.s.update_line(self.m, sid, lid, qty_base=24))
 
-    def test_a_line_approved_under_cost_does_not_block_other_edits(self):
-        approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
+    def test_other_edits_on_an_invoice_at_cost_are_fine(self):
         sid = self.s.create(self.m)
-        self.s.add_line(approved, sid, self.pan, units=2, discount_bp=3000)
-        self.s.add_line(self.m, sid, self.big, units=1, discount_bp=500)    # another item: fine
-        self.s.update_line(self.m, sid, self.pan_line(sid)["id"], qty_base=1)   # a smaller loss: fine
+        self.s.add_line(self.m, sid, self.pan, units=2, discount_bp=2500)     # at cost
+        self.s.add_line(self.m, sid, self.big, units=1, discount_bp=500)      # another item: fine
+        self.s.update_line(self.m, sid, self.pan_line(sid)["id"], qty_base=1)
         self.refused(lambda: self.s.update_line(self.m, sid, self.pan_line(sid)["id"], discount_bp=4000))
 
     def test_typed_check_and_payment_agree_at_the_boundary(self):
@@ -123,7 +141,7 @@ class TestBelowCostPaths(TestBelowCost):
         lid = self.s.add_line(self.m, sid, self.pan, units=2)["lines"][0]["id"]
         self.refused(lambda: self.s.update_line(self.m, sid, lid, discount_amount=1001))   # 29.99 < 29.994
         d = self.s.update_line(self.m, sid, lid, discount_amount=1000)                     # 30.00 >= 29.994
-        self.s.complete(self.m, sid, paid_cash=d["total"], safety_decisions={})
+        self.s.complete(self.m, sid, paid_cash=d["total"], safety_decisions={}, cost_reason="بسعر التكلفة")
 
     def test_a_price_under_cost_without_discount_is_not_a_discount(self):
         with self.db.transaction():
@@ -148,5 +166,4 @@ class TestBelowCostPaths(TestBelowCost):
         self.assertIsNone(d["customer_id"])                                # rolled back: customer, contract, version
         self.assertEqual((d["lines"][0]["discount"], d["version"]), (500, version))
         approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
-        d = self.s.set_details(approved, sid, {"customer_id": cust})       # the owner's PIN: allowed
-        self.assertEqual(d["customer_id"], cust)
+        self.refused(lambda: self.s.set_details(approved, sid, {"customer_id": cust}))   # the owner's PIN: refused too

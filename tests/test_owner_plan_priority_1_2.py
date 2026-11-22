@@ -305,15 +305,13 @@ class TestPriority2(PlanCase):
         sid = self.draft(cust)
         d = self.line(sid, thin, packs=1)
         self.assertEqual(d["total"], 900)
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 403)        # the assistant cannot sell at a loss
-        self.assertEqual(r["error"]["details"].get("permission"), "sales.below_cost", r)
+        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # the assistant cannot sell at a loss
+        self.assertEqual(r["error"]["code"], "below_cost_refused", r)
         self.c.post("/api/auth/logout", headers=H)
         self.http_login()
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # the owner must confirm it
-        self.assertEqual(r["error"]["code"], "below_cost_confirm")
+        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # update 3: nor can the owner
+        self.assertEqual(r["error"]["code"], "below_cost_refused")
         self.assertEqual(self.qty(thin), 5)
-        done = self.complete(sid, [{"method": "cash", "amount": 900}], confirm_below_cost=True)
-        self.assertEqual(done["status"], "completed")
 
     def test_transfer_sale_keeps_its_image_and_warns_on_a_duplicate_upload(self):
         """P2 line 4 (acceptance 17): InstaPay sale + screenshot; the same screenshot on another invoice warns."""

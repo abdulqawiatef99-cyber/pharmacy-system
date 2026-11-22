@@ -2243,7 +2243,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
                                     request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                    confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                    confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None)
         if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
@@ -2286,7 +2286,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                   reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
-                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")),
+                                  safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves

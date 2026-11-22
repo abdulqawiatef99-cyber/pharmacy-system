@@ -725,7 +725,8 @@ class Sales:
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
-                 confirm_below_cost: bool = False, payments: list[dict] | None = None) -> dict:
+                 confirm_below_cost: bool = False, payments: list[dict] | None = None,
+                 cost_reason: str | None = None) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -826,7 +827,7 @@ class Sales:
                     raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
                                    details={"balance": bal, "limit": c["credit_limit"] if c else 0})
             total = subtotal = discount = 0
-            below_cost = []
+            below_cost, at_cost = [], []
             for l in preview["lines"]:
                 item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
                 plan = self._plan(ctx, s, l, item)          # re-plan inside the transaction
@@ -858,14 +859,23 @@ class Sales:
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
                                            "net": net, "cost": cost_piasters(cost)})
+                    elif Decimal(net) - cost < 1:          # the discount takes it to its cost exactly (U2-33)
+                        at_cost.append({"line_no": l["line_no"], "name": l["item"]["name"], "net": net})
                 self.db.execute("UPDATE sale_lines SET line_total=?, discount_amount=?, invoice_share=? WHERE id=?",
                                 (net, fixed_part, l["invoice_share"], l["id"]))
                 total += net
             if below_cost:
+                # U2-33, update 3 (owner: «امنعه أساساً»): refused for everyone, the owner included
+                raise Conflict("الخصم ينزل بالسعر عن التكلفة؛ البيع بخسارة ممنوع لأي حد. قلّل الخصم لحد سعر التكلفة",
+                               code="below_cost_refused",
+                               details={"lines": [{"line_no": b["line_no"], "name": b["name"]} for b in below_cost]})
+            cost_reason = str(cost_reason or "").strip()[:200] or None
+            if at_cost:
+                # down to cost only, by the owner or a manager, with a written reason (U2-33)
                 ctx.require("sales.below_cost")
-                if not confirm_below_cost:
-                    raise Conflict("الخصم ينزل بالسعر عن التكلفة — هذا البيع بخسارة", code="below_cost_confirm",
-                                   details={"lines": below_cost})
+                if not cost_reason or len(cost_reason) < 3:
+                    raise Conflict("الخصم بيوصّل الصنف لسعر التكلفة بالظبط: اكتب السبب", code="at_cost_reason",
+                                   details={"lines": [{"line_no": b["line_no"], "name": b["name"]} for b in at_cost]})
             total += s["delivery_fee"] or 0
             if total != preview["total"]:
                 raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
@@ -902,7 +912,7 @@ class Sales:
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
                          after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
-                                "below_cost": below_cost or None})
+                                "at_cost": at_cost or None, "cost_reason": cost_reason if at_cost else None})
             from . import customers as _cust
             _cust.mark_refilled(self.db, sid)
             disc_lines = [l for l in preview["lines"] if (l["discount_bp"] or l["discount_amount"])
@@ -915,10 +925,10 @@ class Sales:
                     names = "، ".join(x for x in (names, f"خصم على الفاتورة {egp(inv_disc)} ج") if x)
                 notify.emit(self.db, ctx, "discount", "warning",
                             f"خصم {egp(preview['discount_total'])} ج — فاتورة {no}", names, "sale", sid)
-            if below_cost:
-                notify.emit(self.db, ctx, "below_cost", "error", f"بيع تحت التكلفة — فاتورة {no}",
-                            "، ".join(f"{b['name']}: {egp(b['net'])} والتكلفة {egp(b['cost'])}"
-                                     for b in below_cost[:4]), "sale", sid)
+            if at_cost:
+                notify.emit(self.db, ctx, "below_cost", "warning", f"بيع بسعر التكلفة — فاتورة {no}",
+                            "، ".join(f"{b['name']}: {egp(b['net'])}" for b in at_cost[:4]) + f" — السبب: {cost_reason}",
+                            "sale", sid)
         return self.get(ctx, sid)
 
     def _reprice_contract(self, ctx: Context, sid: str) -> bool:
@@ -1108,9 +1118,8 @@ class Sales:
         """U2-33: per line, how much of the pharmacy's own discount goes under the cost (exact Decimal piasters, the
         rule payment uses). A line priced under cost with no discount loses nothing here (that is a price, not a
         discount); a contract's own discount is the customer's agreement and is left to payment. None = this
-        person may sell under cost (`sales.below_cost`, or the owner's approval), nothing to check."""
-        if ctx.allowed("sales.below_cost"):
-            return None
+        person may sell under cost (`sales.below_cost`, or the owner's approval), nothing to check.
+        Update 3 (owner: «امنعه أساساً»): nobody passes, the owner included; None is no longer returned."""
         draft = self.get(ctx, sid)
         out = {}
         for l in draft["lines"]:
@@ -1137,14 +1146,14 @@ class Sales:
             if loss <= (before.get(lid) or (0,))[0]:
                 continue
             name = l["item"]["name"]
-            msg = f"الخصم ده يخلّي {name} تحت التكلفة؛ مينفعش"
-            details = {"permission": "sales.below_cost", "label": f"خصم تحت التكلفة على {name}", "line_id": lid}
+            msg = f"الخصم ده يخلّي {name} تحت التكلفة؛ ممنوع لأي حد (أقصى حاجة سعر التكلفة)"
+            details = {"label": f"خصم تحت التكلفة على {name}", "line_id": lid}
             if ctx.can("costs.read"):
                 import math
                 most = max(0, disc - math.ceil(loss))          # the discount on this line that stays at cost
                 msg += f" (أقصى خصم على الصنف {egp(most)} ج)"
                 details["max_discount"] = most
-            raise Forbidden(msg, code="approval_required", details=details)
+            raise ValidationFailed(msg, code="below_cost", details=details)
 
     def _check_fixed_discounts(self, ctx: Context, sid: str, line_id: str | None) -> None:
         """A fixed discount is held to the same limit as a percent: its share of the line's price (and the invoice
@@ -1478,7 +1487,8 @@ class Sales:
     def exchange(self, ctx: Context, sid: str, lines: dict[str, int], new_sid: str, *, refund_method: str,
                  pay_method: str = "cash", reason: str, channel_id: str | None = None, version: int | None = None,
                  request_id: str | None = None, safety_decisions: dict[int, str] | None = None,
-                 confirm_below_cost: bool = False, expected_new_total: int | None = None) -> dict:
+                 confirm_below_cost: bool = False, expected_new_total: int | None = None,
+                 cost_reason: str | None = None) -> dict:
         """A sale return and its replacement sale as ONE operation (one transaction: both or neither).
 
         The returned value R follows every rule of `return_items` (window, who sold it, no-return sections, the
@@ -1559,7 +1569,8 @@ class Sales:
             if refund_method == "card" and pay_method == "card" and len(payments) == 2:
                 payments = [{"method": "card", "amount": n_total, "channel_id": channel_id}]
             sale = self.complete(ctx, new_sid, payments=payments, version=version, request_id=request_id,
-                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost)
+                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost,
+                                 cost_reason=cost_reason)
             out = {"return_id": ret["return_id"], "original_sale_id": sid, "sale_id": new_sid,
                    "returned": r_value, "new_total": n_total, "net": n_total - r_value,
                    "refund_method": refund_method, "pay_method": pay_method,
