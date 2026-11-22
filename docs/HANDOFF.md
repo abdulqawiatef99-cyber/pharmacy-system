@@ -9,20 +9,28 @@
 
 
 ## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
-Base develop @ `5e4b2b9`. Each PR: tests first, independent fresh-context agent review fixed first, then Codex; label `ci` only on the final head after the local full suite.
+Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; label `ci` only on the final head after the local full suite. Merge order is one at a time (all touch app.js / i18n-en.js): merge develop into the next branch, full suite, `ci`, merge.
 | PR | Item | State |
 |---|---|---|
-| #420 | U3-1 item data health report + safe pack-size correction | Codex asked; full suite 2675 OK on `5ec1c08` |
-| #414 | U2-33 below cost refused for everyone (at cost = owner/manager + reason), U2-17 tablet split removed, U2-21 dispensing notes | Codex asked |
-| #415 | U2-14 invoice rounding (migration 0042, printing) | **PR only: owner approves** |
-| #416 | U3-3 Hikma claim report | Codex asked |
-| #417 | U2-1 purchase grid keys, U2-10 two freezes | Codex asked |
-| #418 | U3-5 daily mini-count, variances by value | Codex asked |
-| #419 | U3-6 customer medicines | Codex asked |
-| branch `claude/u3-7-small-requests` | U3-7 dhikr strip + work-hours reminder (greeting already existed) | agent review running |
-| branch `claude/u3-8-owner-summary` | U3-8 owner shift summary text | agent review running |
-Owner questions: (1) a 100% gift discount on an item with a known cost is now refused (below cost) — exception wanted? (2) a contract that takes an item under cost blocks that item for that customer.
-Not started yet: U3-7 fridge log (needs a table = migration), «تغيّر سعر البيع للمخزون الحالي؟», «بيع بسعر التكلفة» per customer; PR-only list (U2-23/24 receipt, U2-27, U2-6, U2-31, «خليها رصيد للعميل», U3-4 app window, U3-2 reference steps).
+| #417 | U2-1 purchase grid keys, U2-10 two freezes | Codex clean; merging first |
+| #420 | U3-1 item data health + safe pack-size correction | Codex P1/P2 fixed, re-review asked |
+| #414 | U2-33 below cost refused for everyone, U2-17 split removed, U2-21 dispensing notes | Codex P1 fixed, re-review asked |
+| #416 | U3-3 Hikma claim | Codex P1 fixed, re-review asked |
+| #418 | U3-5 daily mini-count | Codex P2 fixed, re-review asked |
+| #419 | U3-6 customer medicines | Codex P2s fixed, re-review asked |
+| #421 | U3-7 dhikr strip + work hours | Codex P2s fixed, re-review asked |
+| #422 | U3-8 owner shift summary | Codex: no findings yet |
+| #415 | U2-14 invoice rounding (migration 0042 + printing) | **PR only, owner approves** |
+| #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** |
+| #424 | «خليها رصيد للعميل» (money rule) | **PR only, owner approves** |
+| #425 | U3-4 app window (launcher) | **PR only, owner approves; device check** |
+Owner questions (for the morning):
+1. A 100% gift discount on an item with a known cost is now refused (below cost). Exception wanted?
+2. A contract that takes an item under cost blocks that item for that customer (refused when added).
+3. #415: should the kept rounding count as profit in the line-based profit reports? Today only the cash/profit summary includes it.
+4. #424: kept change is capped at 50 EGP and below the cash paid; the receipt has no «اتساب رصيد» line yet.
+NOT done this session: U3-2 reference → safety drafts, U2-27 silent printing, U2-6 print time (migration), U2-31 two drawers (migration), U3-7 fridge log (migration), «تغيّر سعر البيع للمخزون الحالي؟», «بيع بسعر التكلفة» per customer, receipt templates/preview (U2-23 part).
+Known P2s left: U3-1 refill/90-day figures keep old units for one window after a pack fix; #423 long rows cut on 58 mm; #424 day review counts kept change as a collection.
 
 ## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
 Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
