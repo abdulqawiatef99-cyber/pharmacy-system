@@ -5340,9 +5340,11 @@ async function estockReportBelow(box, f, t, ours) {
 const estockRepSheet = (f, t) => {                     // the E-Stock sheet of the sales report's Excel, text as it is
   const E = ES_REP; if (!E || E.f !== f || E.t !== t) return [];
   const buy = "purchases" in E.per.total;
-  return [{ name: "إي ستوك", columns: [Tx(E.by === "day" ? "اليوم" : "الشهر"), N("فواتير"), Tx("المبيعات (إي ستوك)"), Tx("المرتجع بتاريخه"), ...(buy ? [Tx("المشتريات")] : [])],
-    rows: E.per.rows.map((r) => [r.period, r.sales_count || 0, r.sales || "0.00", r.returns || "0.00", ...(buy ? [r.purchases || "0.00"] : [])]),
-    total: ["الإجمالي", E.per.total.sales_count || 0, E.per.total.sales || "0.00", E.per.total.returns || "0.00", ...(buy ? [E.per.total.purchases || "0.00"] : [])] }];
+  // an unreadable total is counted, never hidden: the file says the amount is incomplete (Codex P2 on #437)
+  const bad = (r) => (r.sales_unreadable || 0) + (r.returns_unreadable || 0) + (r.purchases_unreadable || 0);
+  return [{ name: "إي ستوك", columns: [Tx(E.by === "day" ? "اليوم" : "الشهر"), N("فواتير"), Tx("المبيعات (إي ستوك)"), Tx("المرتجع بتاريخه"), ...(buy ? [Tx("المشتريات")] : []), N("فواتير إجماليها مش مقروء (المبلغ ناقص)")],
+    rows: E.per.rows.map((r) => [r.period, r.sales_count || 0, r.sales || "0.00", r.returns || "0.00", ...(buy ? [r.purchases || "0.00"] : []), bad(r)]),
+    total: ["الإجمالي", E.per.total.sales_count || 0, E.per.total.sales || "0.00", E.per.total.returns || "0.00", ...(buy ? [E.per.total.purchases || "0.00"] : []), bad(E.per.total)] }];
 };
 
 let ES_PSEQ = 0;

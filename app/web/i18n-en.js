@@ -3383,6 +3383,7 @@ window.I18N_EN = {
 "المشتريات": "Purchases",
 "إي ستوك": "E-Stock",
 "المبيعات (إي ستوك)": "Sales (E-Stock)",
+"فواتير إجماليها مش مقروء (المبلغ ناقص)": "Invoices with an unreadable total (amount incomplete)",
 "فواتير إي ستوك بتاريخ إدخالها فيه، للاطلاع: مش داخلة في المخزون ولا حساب المورد ولا الخزينة (الأرصدة جت مرة واحدة وقت النقل).": "E-Stock invoices by the date they were entered there, for reference: not in stock, the supplier's account or the treasury (balances came once, at the move).",
 "مشتريات إي ستوك في نفس الفترة": "E-Stock purchases in the same period",
 "(إي ستوك بتاريخ الإدخال)": "(E-Stock by entry date)",

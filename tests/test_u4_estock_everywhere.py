@@ -334,3 +334,13 @@ class TestStep2Screens(Step2Base):
         self.assertTrue(out["goneOnSearch"])
         after = self.db_tables()
         self.assertEqual({t for t in after if after[t] != before.get(t)} - {"audit_log"}, set())
+
+
+class TestCodexFixes437(EverywhereBase):
+    def test_excel_sheet_keeps_the_unreadable_count(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        i = js.index("const estockRepSheet")
+        body = js[i:js.index("};", js.index("return [{", i))]
+        self.assertIn("_unreadable", body)
+        self.assertIn("مش مقروء", body)
