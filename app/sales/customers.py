@@ -362,12 +362,17 @@ def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: da
         "   AND b.branch_id=?),0) stock"
         " FROM sale_lines l JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id JOIN items i ON i.id=l.item_id"
         " WHERE s.org_id=? AND s.customer_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
+        + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0") +     # Codex P2 on #419: as search
         " AND (SELECT coalesce(sum(a.qty_base - a.returned_qty),0) FROM sale_allocations a WHERE a.sale_line_id=l.id) > 0"
         " GROUP BY l.item_id ORDER BY times DESC, last_at DESC LIMIT 30", (since, ctx.branch_id, ctx.org_id, cid, since))
     refills = {r["item_id"]: r for r in profile(db, ctx, cid, today)["refills"]}
     out = []
+    from .service import Sales
+    sales = Sales(db)
     for r in rows:
         d = dict(r)
+        if not d["is_service"] and ctx.branch_id:      # what the sale path can really sell: no expired, recalled
+            d["stock"] = sales._held(ctx, ctx.branch_id, d["item_id"])[0]      # or hospital lots (Codex P2 on #419)
         rf = refills.get(d["item_id"])
         d["refill_due"], d["refill_days_left"] = (rf["due"], rf["days_left"]) if rf else (None, None)
         d["in_stock"] = bool(d["is_service"]) or d["stock"] >= (d["last_qty"] or 1)

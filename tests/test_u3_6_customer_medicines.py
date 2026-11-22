@@ -41,3 +41,14 @@ class TestUsualItems(SalesCase):
         _, other = self.second_tenant()
         with self.assertRaises(NotFound):
             cu.usual_items(self.db, other, self.cust)
+
+
+class TestCodexOn419(TestUsualItems):
+    def test_hidden_and_expired(self):
+        from dataclasses import replace
+        self.sell(1)
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET hidden=1 WHERE id=?", (self.pan,))
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"items.hidden"})
+        self.assertEqual(cu.usual_items(self.db, staff, self.cust), [])
+        self.assertEqual(len(cu.usual_items(self.db, self.ctx, self.cust)), 1)
