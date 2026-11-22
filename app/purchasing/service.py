@@ -340,6 +340,12 @@ class Purchasing:
             return None
         if not inv["supplier_id"]:
             raise ValidationFailed("حدد المورد قبل الدفع")
+        from ..procurement import suppliers
+        due = suppliers.balance(self.db, ctx.org_id, inv["supplier_id"]) + net_total
+        if amount > max(due, 0):     # the supplier already holds money of ours: that credit is used first (review P2)
+            raise ValidationFailed(f"المورد عنده رصيد لينا؛ المستحق بعد الفاتورة دي {max(due, 0) / 100:,.2f} ج بس."
+                                   " اكتب المدفوع دلوقتي بحد أقصى ده أو اختار آجل", code="pay_above_due",
+                                   details={"due": max(due, 0), "amount": amount})
         ctx.require("suppliers.pay")
         from ..finance import money
         src = money.check_source(self.db, ctx, plan["source"])
@@ -354,7 +360,9 @@ class Purchasing:
         """«طريقة الدفع» as approval will apply it: the chosen source, or the default by supplier type (a warehouse
         is paid cash from the drawer, anyone else on the account); amount None = the whole invoice."""
         src = inv.get("pay_source")
-        default = src is None
+        default = src is None and inv.get("status", "draft") == "draft"
+        if src is None and not default:
+            src = PAY_CREDIT          # approved before the payment method existed: it went on the account
         if default:
             t = self.db.one("SELECT supplier_type FROM suppliers WHERE id=? AND org_id=?",
                             (inv.get("supplier_id"), ctx.org_id)) if inv.get("supplier_id") else None
@@ -462,8 +470,9 @@ class Purchasing:
                     v = (str(v).strip() or None) if v is not None else None
                     if v not in (None, PAY_CREDIT, "drawer", "treasury", "outside"):
                         from ..finance import money
-                        try:      # an account of this pharmacy; who may pay from it is checked at approval
-                            money.resolve(self.db, ctx, v)
+                        try:      # an active account of this pharmacy, stored by its id; who may pay is checked at approval
+                            v = money.resolve(self.db, ctx, v)
+                            money._account(self.db, ctx, v)
                         except NotFound:
                             raise ValidationFailed("اختر طريقة الدفع من القائمة", code="unknown_source")
                 if k == "pay_ref":
@@ -905,6 +914,10 @@ class Purchasing:
                 self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
                                 " VALUES (?,?,?,?,'purchase',?,?,?)", (new_id(), ctx.org_id, inv["supplier_id"], net_total,
                                                                        inv_id, f"فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
+                plan = self.pay_plan(ctx, inv)        # what was applied, kept: a later supplier-type change never rewrites it
+                self.db.execute("UPDATE purchase_invoices SET pay_source=?, pay_amount=? WHERE id=?",
+                                (plan["source"], pay["amount"] if pay else (0 if plan["source"] != PAY_CREDIT else None),
+                                 inv_id))
                 if pay:     # «طريقة الدفع»: one ordinary supplier payment, in this transaction (the drawer follows)
                     from ..procurement import suppliers
                     suppliers.pay_from(self.db, ctx, inv["supplier_id"], pay["amount"], pay["source"],

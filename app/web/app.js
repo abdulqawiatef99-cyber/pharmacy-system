@@ -1631,7 +1631,7 @@ app.addEventListener("click", async (e) => {
   if (t.id === "approve") {
     const pay = CUR.invoice.pay || {}, payNow = pay.source === "credit" ? 0 : pay.amount ?? CUR.invoice.computed_total ?? 0;
     if (!confirm(["اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.",
-      payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج (${$("#paySrc")?.selectedOptions[0]?.textContent || ""})، والباقي على حسابه.`
+      payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج: ${$("#paySrc")?.selectedOptions[0]?.textContent || ""}` + (payNow < (CUR.invoice.computed_total || 0) ? "، والباقي على حسابه." : ".")
         : "الفاتورة كلها على حساب المورد (آجل)."].join("\n"))) return;
     await save(`${base}/approve`, {}, "POST");
     toast("تم اعتماد الفاتورة وإضافتها للمخزون");

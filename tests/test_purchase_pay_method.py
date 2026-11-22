@@ -151,18 +151,61 @@ class TestPaidNow(Base):
         suppliers.pay(self.db, self.ctx, self.company, 5000, "drawer")
         self.assertEqual(self.balance(self.company), 0)
 
-    def test_cashier_without_pay_right_cannot_approve_with_payment(self):
+    def test_pharmacist_may_approve_but_not_pay(self):
+        """purchases.approve without suppliers.pay (review P1): refused before anything is written, passes on account."""
         from app.core import people
-        people.add_user(self.db, self.ctx, username="buyer1", full_name="م", password="Staff-Pass-2026",
-                        role_code="manager")
-        mgr = self.login("buyer1", "Staff-Pass-2026")
-        if mgr.can("suppliers.pay"):
-            self.skipTest("this role may pay suppliers")
+        people.add_user(self.db, self.ctx, username="ph1", full_name="ص", password="Staff-Pass-2026",
+                        role_code="pharmacist")
+        ph = self.login("ph1", "Staff-Pass-2026")
+        self.assertTrue(ph.can("purchases.approve"))
+        self.assertFalse(ph.can("suppliers.pay"))
         CashDrawer(self.db).open(self.ctx, 20000)
         inv = self.draft(self.store)
         with self.assertRaises(Forbidden):
-            self.approve(inv, mgr)
+            self.approve(inv, ph)
+        self.assertEqual(self.p.get(self.ctx, inv)["invoice"]["status"], "draft")
+        self.assertEqual(self.db.one("SELECT count(*) n FROM stock_movements")["n"], 0)
+        self.assertEqual(self.balance(self.store), 0)
+        self.p.update_header(self.ctx, inv, {"pay_source": "credit"}, None)
+        self.approve(inv, ph)
+        self.assertEqual(self.balance(self.store), 8000)
 
+    def test_supplier_credit_is_used_first(self):
+        """The supplier holds 30 of ours: an 80 invoice can be paid 50 now at most, never an advance (review P2)."""
+        CashDrawer(self.db).open(self.ctx, 20000)
+        suppliers.pay(self.db, self.ctx, self.store, 3000, "drawer", "دفعة مقدمة متفق عليها")
+        inv = self.draft(self.store)
+        with self.assertRaises(ValidationFailed) as e:
+            self.approve(inv)
+        self.assertEqual(e.exception.code, "pay_above_due")
+        self.p.update_header(self.ctx, inv, {"pay_amount": 5000}, None)
+        self.approve(inv)
+        self.assertEqual(self.balance(self.store), 0)
+
+    def test_cancel_after_paid_at_approval_leaves_the_payment(self):
+        CashDrawer(self.db).open(self.ctx, 20000)
+        inv = self.draft(self.store)
+        self.approve(inv)
+        self.p.cancel(self.ctx, inv, "فاتورة غلط", None)
+        self.assertEqual(self.balance(self.store), -8000)      # the money left: the supplier now owes it back
+        self.assertEqual(len(self.payments(self.store)), 1)
+
+    def test_approved_invoice_keeps_the_plan_it_was_paid_with(self):
+        inv = self.draft(self.company)
+        self.approve(inv)
+        suppliers.update(self.db, self.ctx, self.company, {"supplier_type": "warehouse"})
+        pay = self.p.get(self.ctx, inv)["invoice"]["pay"]
+        self.assertEqual((pay["source"], pay["default"]), ("credit", False))
+
+    def test_inactive_account_refused_at_entry_and_stored_by_id(self):
+        w = money.create_account(self.db, self.ctx, "محفظة 3", "wallet", allow_negative=True)["id"]
+        inv = self.p.create_manual(self.ctx, supplier_id=self.company)
+        d = self.p.update_header(self.ctx, inv, {"pay_source": w}, None)
+        self.assertEqual(d["invoice"]["pay_source"], w)
+        with self.db.transaction():
+            self.db.execute("UPDATE money_accounts SET is_active=0 WHERE id=?", (w,))
+        with self.assertRaises(AppError):
+            self.p.update_header(self.ctx, inv, {"pay_source": w}, None)
 
 
 class TestMigration(DBTestCase):
