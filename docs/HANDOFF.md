@@ -8,15 +8,16 @@
 
 
 
-## 22/11 02:00+ — UPDATE-2 continuation (manager night check) (READ THIS FIRST)
+## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
+Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
 - #407 merged `db2350b` (its first CI run failed only on date tests that crossed UTC midnight mid-run; the re-run on the same head passed). #408 (HANDOFF) merged `d33a87b`.
-- Release PR develop → main: #410, opened, NOT merged (owner only). Ships by «تحديث»: no migration, no requirements, nothing under printing/installer. Refresh its body after each merge.
+- Release PR develop → main: #410, opened, NOT merged (owner only); body lists #402–#412. Ships by «تحديث»: no migration, no requirements, nothing under printing/installer. Refresh its body after each merge.
 - New PRs (each: independent agent review fixed first, then Codex, label `ci` needed for CI to run):
   | PR | Item | State |
   |---|---|---|
   | #409 | U2-33 discount never under cost, refused when typed (owner / his PIN still passes and confirms at payment) | merged `cc96008` |
   | #411 | U2-20 «مفيش فكة» suggestions at payment (+ no-coins hint). «خليها رصيد للعميل» REMOVED (Codex P1): needs a real recorded customer-credit flow, not built | merged `bc488b5` |
-  | #412 | U2-19 sale-screen keys in «تخصيص الواجهة» (conflict check, reset; typing keys not offered) | Codex clean on 5ce3fb4; head 68b1fa5 = develop merge only; merge when CI green |
+  | #412 | U2-19 sale-screen keys in «تخصيص الواجهة» (conflict check, reset; typing keys not offered) | merged `48f911c` |
 - U2-17 «remove tablet splitting»: NOT done — question for the owner. Tablet splitting is not on any screen: only an API flag (`tablet_split`) in `app/safety/engine.py` asks the pharmacist when there is no split policy. Partial packs (a strip of a box) are a normal sale since update 1. Ask what he saw before removing anything.
 - Owner decision on U2-33: should even the owner be refused below cost? Now he (or his PIN) can, confirming at payment (one-line change if he wants an absolute refusal).
 - New TODO from U2-20: «خليها رصيد للعميل» = record the change as customer credit in the same transaction as the sale (cash stays in the drawer, customer ledger credit). Not built.
