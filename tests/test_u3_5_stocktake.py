@@ -50,3 +50,11 @@ class TestDailyCount(SalesCase):
             self.db.execute("DELETE FROM stock_balances WHERE org_id=?", (self.ctx.org_id,))
         with self.assertRaises(ValidationFailed):
             self.c.create_daily(self.ctx)
+
+
+class TestDailyTwice(TestDailyCount):
+    def test_second_daily_refused(self):
+        from app.core.errors import Conflict
+        self.c.create_daily(self.ctx, 2)
+        with self.assertRaises(Conflict):
+            self.c.create_daily(self.ctx, 2)

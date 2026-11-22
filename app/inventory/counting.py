@@ -79,7 +79,7 @@ class Counting:
         d14, d30, d90 = (iso(now - timedelta(days=k)) for k in (14, 30, 90))
         recent = {r["item_id"] for r in self.db.all(
             "SELECT DISTINCT e.item_id FROM count_entries e JOIN count_sessions c ON c.id=e.session_id"
-            " WHERE c.org_id=? AND e.counted_at>=?", (org, d14))}
+            " WHERE c.org_id=? AND c.branch_id=? AND c.status<>'cancelled' AND e.counted_at>=?", (org, br, d14))}
         base = ("SELECT i.id, coalesce(i.name_en, i.name_ar) label, i.location, sum(sb.qty) q, c.avg_cost FROM items i"
                 " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
                 " LEFT JOIN item_costs c ON c.item_id=i.id AND c.org_id=i.org_id AND c.branch_id=sb.branch_id"
@@ -110,6 +110,9 @@ class Counting:
     def create_daily(self, ctx: Context, n: int = 10) -> str:
         """Opens today's mini-count of the picked items (blind); sales go on, the expected qty follows them."""
         from ..sales.service import local_today
+        if self.db.one("SELECT 1 FROM count_sessions WHERE org_id=? AND branch_id=? AND status='open' AND title=?",
+                       (ctx.org_id, ctx.branch_id, f"جرد يومي صغير {local_today().isoformat()}")):
+            raise Conflict("جرد النهارده الصغير مفتوح بالفعل: كمّله من القايمة", code="daily_open")
         picks = self.daily_pick(ctx, n)
         if not picks:
             raise ValidationFailed("مفيش أصناف تتجرد النهارده (كل اللي عليه رصيد اتجرد في آخر أسبوعين)")
@@ -259,7 +262,9 @@ class Counting:
                 if c and ctx.can("costs.read") else None
             # U3-5: the order of the report is by value (cost of the difference), high -> low, whoever reads it;
             # the figure itself is shown only with costs.read
-            r["_order"] = abs(Decimal(c["avg_cost"]) * r["difference"]) if c and c["avg_cost"] else Decimal(abs(r["difference"]))
+            # items with a cost rank by money; an item without one comes after them, by units (review P2)
+            r["_order"] = (1, abs(Decimal(c["avg_cost"]) * r["difference"])) if c and c["avg_cost"] and Decimal(c["avg_cost"]) \
+                else (0, Decimal(abs(r["difference"])))
             r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
                                      (item_id,))["n"]
             if expected_now < 0:
@@ -286,7 +291,7 @@ class Counting:
             if it["id"] in counted_items or not self._in_scope(s, dict(it)):
                 continue
             uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"], "system_qty": it["q"]})
-        out.sort(key=lambda r: (r["_order"], abs(r["difference"])), reverse=True)
+        out.sort(key=lambda r: (*r["_order"], abs(r["difference"])), reverse=True)
         for r in out:
             r.pop("_order", None)
         return {"session": s, "lines": out, "uncounted_with_stock": uncounted,
