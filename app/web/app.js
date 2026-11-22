@@ -398,7 +398,8 @@ async function staffUi() {
   if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
   staffUiStop();
   STAFF_UI = cfg;
-  STAFF_TIMERS.push(setInterval(() => {}, 3600000));   // marks "running" even with nothing to show
+  // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
+  STAFF_TIMERS.push(setInterval(() => { STAFF_UI = null; staffUiStop(); staffUi(); }, 600000));
   if (cfg.dhikr.length) {
     const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
     bar.setAttribute("aria-hidden", "true");
@@ -415,6 +416,8 @@ async function staffUi() {
     const tick = () => {
       const now = new Date(), [eh, em] = h.end.split(":").map(Number), end = new Date(now);
       end.setHours(eh, em, 0, 0);
+      // a shift that ends after midnight (Codex P2 on #421): the end that is still ahead within the next day
+      if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
       const left = (end - now) / 60000, key = `endWarn:${uid}:${now.toDateString()}`;
       if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
         sessionStorageSet(key, "1");
