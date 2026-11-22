@@ -34,7 +34,8 @@ EDITABLE_LINE_FIELDS = {"item_id", "qty", "bonus_qty", "public_price", "discount
                         "unit_net_price", "tax_amount", "line_total", "batch_no", "expiry_date",
                         "raw_name", "distributor_margin"}
 EDITABLE_HEADER_FIELDS = {"supplier_id", "invoice_no", "invoice_date", "declared_total",
-                          "extra_discount", "extra_tax", "notes"}
+                          "extra_discount", "extra_tax", "notes", "pay_source", "pay_amount", "pay_ref"}
+PAY_CREDIT = "credit"          # on the supplier's account (آجل)
 
 
 _KEY_MAP = {"discount_pct": "discount_bp"}
@@ -241,7 +242,7 @@ class Purchasing:
             # the distributor's margin only when there is one: invoices without it keep the hash they had (B3)
             ((normalize_text(l["raw_name"]), l["qty"], l["line_total"], *([l["distributor_margin"]]
               if l.get("distributor_margin") else [])) for l in lines),
-            key=lambda t: (t[0], t[1] is None, t[1] or 0, t[2] is None, t[2] or 0)),
+            key=lambda t: (t[0], t[1] is None, t[1] or 0, t[2] is None, t[2] or 0, t[3:])),     # margin last (Codex P2 #440)
             default=str).encode()).hexdigest() if lines else None
         self.db.execute("UPDATE purchase_invoices SET computed_total=?, content_hash=? WHERE id=?",
                         (comp, h, inv_id))
@@ -324,6 +325,51 @@ class Purchasing:
                 out.append(i)
         return out
 
+    def _pay_now(self, ctx: Context, inv: dict, net_total: int) -> dict | None:
+        """What approval pays now, refused before any write: more than the invoice is impossible (an advance goes
+        through the payments screen), a transfer / wallet needs its reference, the person needs the right to pay
+        suppliers and to use that money place, and the drawer needs an open shift with the cash in it."""
+        plan = self.pay_plan(ctx, inv)
+        if plan["source"] == PAY_CREDIT:
+            return None
+        amount = net_total if plan["amount"] is None else plan["amount"]
+        if amount > net_total:
+            raise ValidationFailed(f"المدفوع ({amount / 100:,.2f} ج) أكبر من إجمالي الفاتورة ({net_total / 100:,.2f} ج):"
+                                   " مستحيل، والدفعة المقدمة من شاشة دفع الموردين", code="pay_above_total")
+        if amount <= 0:
+            return None
+        if not inv["supplier_id"]:
+            raise ValidationFailed("حدد المورد قبل الدفع")
+        from ..procurement import suppliers
+        due = suppliers.balance(self.db, ctx.org_id, inv["supplier_id"]) + net_total
+        if amount > max(due, 0):     # the supplier already holds money of ours: that credit is used first (review P2)
+            raise ValidationFailed(f"المورد عنده رصيد لينا؛ المستحق بعد الفاتورة دي {max(due, 0) / 100:,.2f} ج بس."
+                                   " اكتب المدفوع دلوقتي بحد أقصى ده أو اختار آجل", code="pay_above_due",
+                                   details={"due": max(due, 0), "amount": amount})
+        ctx.require("suppliers.pay")
+        from ..finance import money
+        src = money.check_source(self.db, ctx, plan["source"])
+        if src == money.DRAWER:
+            money.drawer_check(self.db, ctx, amount)       # an open shift, and never below zero
+        elif src != money.OUTSIDE and not plan["ref"] and \
+                money._account(self.db, ctx, src)["kind"] in ("bank", "wallet"):    # the kind only, no balance (Codex P2)
+            raise ValidationFailed("اكتب رقم التحويل أو العملية في «مرجع الدفع»", code="pay_ref_required")
+        return {**plan, "amount": amount}
+
+    def pay_plan(self, ctx: Context, inv: dict) -> dict:
+        """«طريقة الدفع» as approval will apply it: the chosen source, or the default by supplier type (a warehouse
+        is paid cash from the drawer, anyone else on the account); amount None = the whole invoice."""
+        src = inv.get("pay_source")
+        default = src is None and inv.get("status", "draft") == "draft"
+        if src is None and not default:
+            src = PAY_CREDIT          # approved before the payment method existed: it went on the account
+        if default:
+            t = self.db.one("SELECT supplier_type FROM suppliers WHERE id=? AND org_id=?",
+                            (inv.get("supplier_id"), ctx.org_id)) if inv.get("supplier_id") else None
+            src = "drawer" if t and t["supplier_type"] == "warehouse" else PAY_CREDIT
+        return {"source": src, "amount": None if src == PAY_CREDIT else inv.get("pay_amount"),
+                "ref": inv.get("pay_ref"), "default": default}
+
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
         ctx.require("purchases.read")
         inv, lines = self._load(ctx, inv_id)
@@ -343,6 +389,7 @@ class Purchasing:
         issues = self.issues(ctx, inv, raw_lines)
         inv["acknowledged_issues"] = json.loads(inv["acknowledged_issues"])
         inv.pop("raw_extraction", None)
+        inv["pay"] = self.pay_plan(ctx, inv)
         if inv["supplier_id"]:
             s = self.db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (inv["supplier_id"], ctx.org_id))
             inv["supplier_name"] = s["name"] if s else None
@@ -412,6 +459,24 @@ class Purchasing:
                         raise ValidationFailed("القيمة لا تكون بالسالب")
                 if k in ("extra_discount", "extra_tax") and v is None:
                     v = 0
+                if k == "pay_amount" and v is not None:
+                    try:
+                        v = whole_number(v)
+                    except (TypeError, ValueError):
+                        raise ValidationFailed("المبلغ المدفوع غير صحيح")
+                    if v < 0:
+                        raise ValidationFailed("المبلغ المدفوع لا يكون بالسالب")
+                if k == "pay_source":
+                    v = (str(v).strip() or None) if v is not None else None
+                    if v not in (None, PAY_CREDIT, "drawer", "treasury", "outside"):
+                        from ..finance import money
+                        try:      # an active account of this pharmacy, stored by its id; who may pay is checked at approval
+                            v = money.resolve(self.db, ctx, v)
+                            money._account(self.db, ctx, v)
+                        except NotFound:
+                            raise ValidationFailed("اختر طريقة الدفع من القائمة", code="unknown_source")
+                if k == "pay_ref":
+                    v = (str(v or "").strip()[:60]) or None
                 if k == "invoice_date" and v:
                     try:
                         d = date.fromisoformat(v)
@@ -780,6 +845,7 @@ class Purchasing:
             if net_total < 0:     # never a negative supplier balance or unit cost, whatever validation said
                 raise Conflict("إجمالي الفاتورة بالسالب (الخصم الإضافي أكبر من إجمالي الأصناف)؛ لا يمكن اعتمادها",
                                code="negative_total", details={"lines_amount": gross, "total": net_total})
+            pay = self._pay_now(ctx, inv, net_total)      # checked before anything is written
             moved = 0
             packs_of = {l["id"]: self.db.one("SELECT pack_size FROM items WHERE id=? AND org_id=?",
                                              (l["item_id"], ctx.org_id))["pack_size"] for l in lines}
@@ -848,6 +914,15 @@ class Purchasing:
                 self.db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
                                 " VALUES (?,?,?,?,'purchase',?,?,?)", (new_id(), ctx.org_id, inv["supplier_id"], net_total,
                                                                        inv_id, f"فاتورة {inv['invoice_no'] or ''}".strip(), ctx.user_id))
+                plan = self.pay_plan(ctx, inv)        # what was applied, kept: a later supplier-type change never rewrites it
+                self.db.execute("UPDATE purchase_invoices SET pay_source=?, pay_amount=? WHERE id=? AND org_id=?",
+                                (plan["source"], pay["amount"] if pay else (0 if plan["source"] != PAY_CREDIT else None),
+                                 inv_id, ctx.org_id))
+                if pay:     # «طريقة الدفع»: one ordinary supplier payment, in this transaction (the drawer follows)
+                    from ..procurement import suppliers
+                    suppliers.pay_from(self.db, ctx, inv["supplier_id"], pay["amount"], pay["source"],
+                                       note=f"دفع فاتورة {inv['invoice_no'] or ''}".strip(), ref=pay["ref"],
+                                       ref_id=inv_id)
             ids = [l["item_id"] for l in lines if l["item_id"]]
             if ids:                     # arrived: no longer short
                 self.db.execute(f"UPDATE items SET shortage_at=NULL, shortage_by=NULL WHERE org_id=? AND id IN"
