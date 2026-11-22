@@ -63,3 +63,72 @@ class TestBelowCost(People):
         with self.assertRaises(Forbidden) as e:
             self.s.add_line(self.ph, sid, self.pan, units=2, discount_bp=500)
         self.assertEqual(e.exception.details["permission"], "discount")
+
+
+class TestBelowCostPaths(TestBelowCost):
+    """Independent review of U2-33: every path that can move a discount under cost, and nothing more."""
+    def setUp(self):
+        super().setUp()
+        from datetime import timedelta
+        from decimal import Decimal
+        from app.catalog import service as cat
+        from app.inventory import service as inv
+        from tests.test_cashier_acceptance import T
+        self.big = cat.create_item(self.db, self.ctx, {"name_en": "Big", "pack_size": 1, "public_price": 10000})
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, self.big, "X1", (T + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.big, qty_delta=20, batch_id=b,
+                              movement_type="purchase", unit_cost=Decimal("10"))
+
+    def pan_line(self, sid):
+        return next(l for l in self.s.get(self.m, sid)["lines"] if l["item_id"] == self.pan)
+
+    def test_invoice_discount_amount_and_remove_line(self):
+        sid = self.s.create(self.m)
+        self.s.add_line(self.m, sid, self.pan, units=2)                    # 40, cost 30
+        lb = next(l["id"] for l in self.s.add_line(self.m, sid, self.big, units=1)["lines"] if l["item_id"] == self.big)
+        self.s.set_invoice_discount(self.m, sid, amount=1200)              # Panadol's share ~3.43: fine
+        self.refused(lambda: self.s.remove_line(self.m, sid, lb))         # all 12 on Panadol: 28 < 30
+        self.assertEqual(len(self.s.get(self.m, sid)["lines"]), 2)         # rolled back
+        self.refused(lambda: self.s.set_invoice_discount(self.m, sid, amount=4000))   # Panadol ~11.43: 28.57 < 30
+
+    def test_more_units_from_a_cheaper_batch(self):
+        from datetime import timedelta
+        from decimal import Decimal
+        from app.inventory import service as inv
+        from tests.test_cashier_acceptance import T
+        with self.db.transaction():
+            b = inv.get_or_create_batch(self.db, self.ctx, self.pan, "B2", (T + timedelta(days=500)).isoformat())
+            self.db.execute("UPDATE batches SET public_price=3000 WHERE id=?", (b,))
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=4, batch_id=b,
+                              movement_type="purchase", unit_cost=Decimal("15"))
+        sid = self.s.create(self.m)
+        self.s.add_line(self.m, sid, self.pan, units=20, discount_bp=2500)   # exactly at cost
+        self.refused(lambda: self.s.add_line(self.m, sid, self.pan, units=4, discount_bp=2500))
+        lid = self.pan_line(sid)["id"]
+        self.refused(lambda: self.s.update_line(self.m, sid, lid, qty_base=24))
+
+    def test_a_line_approved_under_cost_does_not_block_other_edits(self):
+        approved = accounts.with_approval(self.db, self.m, self.ids["owner"], "9753")
+        sid = self.s.create(self.m)
+        self.s.add_line(approved, sid, self.pan, units=2, discount_bp=3000)
+        self.s.add_line(self.m, sid, self.big, units=1, discount_bp=500)    # another item: fine
+        self.s.update_line(self.m, sid, self.pan_line(sid)["id"], qty_base=1)   # a smaller loss: fine
+        self.refused(lambda: self.s.update_line(self.m, sid, self.pan_line(sid)["id"], discount_bp=4000))
+
+    def test_typed_check_and_payment_agree_at_the_boundary(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE item_costs SET avg_cost='14.997' WHERE item_id=?", (self.pan,))
+        sid = self.s.create(self.m)
+        lid = self.s.add_line(self.m, sid, self.pan, units=2)["lines"][0]["id"]
+        self.refused(lambda: self.s.update_line(self.m, sid, lid, discount_amount=1001))   # 29.99 < 29.994
+        d = self.s.update_line(self.m, sid, lid, discount_amount=1000)                     # 30.00 >= 29.994
+        self.s.complete(self.m, sid, paid_cash=d["total"], safety_decisions={})
+
+    def test_a_price_under_cost_without_discount_is_not_a_discount(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE item_costs SET avg_cost='25' WHERE item_id=?", (self.pan,))
+        sid = self.s.create(self.m)
+        lid = self.s.add_line(self.m, sid, self.pan, units=2)["lines"][0]["id"]
+        self.s.update_line(self.m, sid, lid, qty_base=3)                    # no discount: not refused here
+        self.refused(lambda: self.s.update_line(self.m, sid, lid, discount_bp=100))
