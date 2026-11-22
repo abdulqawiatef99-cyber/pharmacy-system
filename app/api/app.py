@@ -802,6 +802,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(people.set_prefs(db, ctx, await body(req)))
 
     @handler
+    async def item_health_api(req):
+        from ..reports.item_health import item_health
+        return J(await off_loop(item_health, db, ctx_of(req)))
+
+    @handler
+    async def item_pack_preview(req):
+        from ..catalog import repack
+        return J(repack.preview(db, ctx_of(req), req.path_params["id"],
+                              int(p) if (p := req.query_params.get("pack") or "").isdigit() else -1))
+
+    @handler
+    async def item_pack_correct(req):
+        from ..catalog import repack
+        b = await body(req)
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
+
+    @handler
     async def item_card_get(req):
         return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
 
@@ -3069,6 +3086,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/pack-fix", item_pack_preview),
+        Route("/api/items/{id}/pack-fix", item_pack_correct, methods=["POST"]),
+        Route("/api/reports/item-health", item_health_api),
         Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
