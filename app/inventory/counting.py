@@ -83,7 +83,9 @@ class Counting:
         base = ("SELECT i.id, coalesce(i.name_en, i.name_ar) label, i.location, sum(sb.qty) q, c.avg_cost FROM items i"
                 " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
                 " LEFT JOIN item_costs c ON c.item_id=i.id AND c.org_id=i.org_id AND c.branch_id=sb.branch_id"
-                " WHERE i.org_id=? AND i.status='active' AND coalesce(i.is_service,0)=0 GROUP BY i.id HAVING sum(sb.qty)>0")
+                " WHERE i.org_id=? AND i.status='active' AND coalesce(i.is_service,0)=0"
+                + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0") +    # Codex P1 on #418: as search
+                " GROUP BY i.id HAVING sum(sb.qty)>0")
         stock = {r["id"]: dict(r) for r in self.db.all(base, (br, org))}       # one query, Decimal in Python
         for i in recent:                       # skipped before the lists are cut (Codex P2 on #418)
             stock.pop(i, None)

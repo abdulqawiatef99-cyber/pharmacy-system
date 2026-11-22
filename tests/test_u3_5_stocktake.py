@@ -69,3 +69,13 @@ class TestCountItemsAPI(PlanCase):
         names = {x["name"] for x in self.call("GET", f"/api/counts/{sid}/items")["items"]}
         self.assertTrue(names)
         self.assertTrue(names <= {"Panadol 500mg 24 tab", "Trial Box 3 strips"})
+
+
+class TestCodexOn418Hidden(TestDailyCount):
+    def test_hidden_items_not_picked_without_the_right(self):
+        from dataclasses import replace
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET hidden=1 WHERE id=?", (self.dear,))
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"items.hidden"})
+        self.assertNotIn(self.dear, {p["item_id"] for p in self.c.daily_pick(staff, 10)})
+        self.assertIn(self.dear, {p["item_id"] for p in self.c.daily_pick(self.ctx, 10)})

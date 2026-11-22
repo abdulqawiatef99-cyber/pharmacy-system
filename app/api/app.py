@@ -1914,8 +1914,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         names = []
         for k in range(0, len(ids), 500):
             part = ids[k:k + 500]
+            hide = "" if ctx.can("items.hidden") else " AND coalesce(hidden,0)=0"     # Codex P1 on #418
             names += [dict(r) for r in db.all(f"SELECT id, coalesce(name_en, name_ar) name, location FROM items"
-                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))})", (ctx.org_id, *part))]
+                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))}){hide}", (ctx.org_id, *part))]
         return J({"items": names if len(ids) <= 50 else []})
 
     @handler
