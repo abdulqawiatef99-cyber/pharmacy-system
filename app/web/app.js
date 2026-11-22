@@ -3859,6 +3859,23 @@ function chanOptions(kind, sel) {
   return list.length ? `<select data-ch>${list.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>` : "";
 }
 
+// U3-6: the chosen customer's usual items (last 6 months), one click adds his usual quantity
+async function posUsual() {
+  const box = $("#posUsual"), cid = SALE?.customer_id;
+  if (!box || !cid) return;
+  try {
+    if (POS.usual?.cid !== cid) POS.usual = { cid, items: (await api(`/api/customers/${cid}/usual`)).items };
+  } catch { return; }
+  if (SALE?.customer_id !== cid || !$("#posUsual")) return;
+  const items = POS.usual.items.slice(0, 8);
+  $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
+      <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
+  $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
+    const x = items[+b.dataset.usual], q = x.last_qty || 1, ps = x.pack_size || 1;
+    addItem({ ...x, id: x.item_id }, q % ps === 0 ? q / ps : 0, q % ps === 0 ? 0 : q);
+  }));
+}
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
@@ -3872,7 +3889,8 @@ function renderSide() {
         <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
-        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
+        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}
+        <div id="posUsual" class="usual"></div>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
         <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
@@ -4000,6 +4018,7 @@ function renderSide() {
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
   $("#posDone").addEventListener("click", () => complete(null));
+  posUsual();
 }
 
 // A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
@@ -5272,6 +5291,7 @@ async function viewCustomer(id) {
     <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
     <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
+    <section class="panel" id="cUsual"><h2>أدوية العميل</h2><p class="muted">بيتحمل…</p></section>
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
       ${c.reminded_at ? `<p class="muted small">آخر تذكير أُرسل: ${esc(dayOf(c.reminded_at))}</p>` : ""}
       <table><thead><tr><th>الصنف</th><th>الكمية</th><th>كل</th><th>ميعاده</th><th>متوفر لدينا؟</th><th></th></tr></thead><tbody>
@@ -5325,6 +5345,12 @@ async function viewCustomer(id) {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { whatsapp: true } }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }
     catch (err) { w?.close(); toast(err.message, true); }
   });
+  api(`/api/customers/${id}/usual`).then(({ items }) => {       // U3-6 «أدوية العميل»: last 6 months
+    if (!$("#cUsual")) return;
+    $("#cUsual").innerHTML = `<h2>أدوية العميل <span class="muted small">(آخر 6 شهور)</span></h2>${items.length ? `<table><thead><tr><th>الصنف</th><th>مرات الشراء</th><th>آخر مرة</th><th>الكمية المعتادة</th><th>ميعاد الطلب الشهري</th><th>متوفر؟</th></tr></thead><tbody>
+      ${items.map((x) => `<tr><td>${itemHtml(x)}</td><td class="num">${x.times}</td><td>${esc(dayOf(x.last_at))}</td><td>${esc(fmtStock(x.last_qty || 1, x))}</td>
+        <td>${x.refill_due ? `${esc(x.refill_due)}${x.refill_days_left <= 0 ? ` <span class="badge b-warn">جه ميعاده</span>` : ""}` : "—"}</td><td>${x.in_stock ? "✓" : `<span class="badge b-err">لأ</span>`}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">مفيش مشتريات في آخر 6 شهور</p>`}`;
+  }).catch(() => { if ($("#cUsual")) $("#cUsual").remove(); });
   $("#cPrep")?.addEventListener("click", async () => {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { prepare: true } }); await toPos(r.sale_id); } catch (err) { toast(err.message, true); }
   });
