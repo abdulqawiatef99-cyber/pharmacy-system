@@ -418,6 +418,8 @@ const routes = [
   [/^#\/stock-check$/, viewStockCheck],
   [/^#\/profit$/, viewProfit],
   [/^#\/day-review$/, viewDayReview],
+  [/^#\/hikma-claim$/, viewHikmaClaim],
+  [/^#\/dispensing-notes$/, viewDispensingNotes],
   [/^#\/item-health$/, viewItemHealth],
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
@@ -523,7 +525,7 @@ const SCREENS = {
   pos: ["شاشة البيع", "sales.create"], sales: ["فواتير البيع", "sales.read"], exchange: ["مرتجع واستبدال", "sales.return"], purchases: ["الشراء", "purchases.read"],
   items: ["الأصناف", "items.read"], counts: ["الجرد", "inventory.count"], shift: ["الشيفت والخزينة", "sales.create"],
   customers: ["العملاء والآجل", "sales.read"], reports: ["التقارير", null], "owner-reports": ["تقارير المالك", "sales.totals"],
-  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"], "day-review": ["مراجعة اليوم", "cash.see_expected"], "item-health": ["فحص بيانات الأصناف", "items.price"],
+  expenses: ["المصروفات", "expenses.record"], transfers: ["مراجعة التحويلات", "sales.totals"], profit: ["الربح", "costs.read"], "day-review": ["مراجعة اليوم", "cash.see_expected"], "hikma-claim": ["مطالبة الحكمة", "costs.read"], "dispensing-notes": ["ملاحظات الصرف", "settings.manage"], "item-health": ["فحص بيانات الأصناف", "items.price"],
   shortages: ["النواقص", "items.read"], suppliers: ["الموردون وحساباتهم", "suppliers.read"], "supplier-returns": ["مرتجعات للموردين", "purchases.read"],
   procurement: ["الطلبية", "purchases.read"], deadstock: ["الرواكد", "purchases.read"], recalls: ["تنبيهات السحب", "items.read"],
   import: ["نقل البيانات", "items.import"], users: ["المستخدمون", "users.permissions"], audit: ["سجل العمليات", "audit.read"],
@@ -556,6 +558,8 @@ const HELP = {
   reports: ["التقارير: المبيعات، وتحذيرات الأصناف، وخسائر المخزون، والصلاحية.", ["كل تقرير له زر Excel وزر طباعة."]],
   "owner-reports": ["تقارير المالك: الموظفون، والعملاء، والخزينة، والمرتجعات، والخصومات، والأسعار.", ["اختر التقرير من الأزرار ثم الفترة."]],
   profit: ["الربح: المبيعات ناقص التكلفة والمصروفات لفترة.", []],
+  "hikma-claim": ["مطالبة مستشفى نور الحكمة لأي فترة، لكل فرع لوحده: مخزن الصيدلية (التكلفة + نص الربح) ومخزن المستشفى (نص الربح).", ["ملف «Excel للمستشفى» من غير تكلفة: ده اللي يتبعت.", "«Excel داخلي» فيه التكلفة والربح: للمالك والمحاسب بس."]],
+  "dispensing-notes": ["ملاحظات الصرف: تذكير بيظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي، ومبيوقفش البيع.", ["الخمس مواد من دليل قرار هيئة الدواء 375 لسنة 2026 شغالة من الأول.", "أي مادة تانية بتبدأ مقفولة «محتاج تأكيد» لحد ما تشغلها."]],
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
@@ -947,6 +951,9 @@ function viewSetup() {
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة المرور (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة المرور <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding" required><option value="">— اختار —</option>
+      <option value="0">من غير تقريب</option><option value="25">ربع جنيه</option><option value="50">نص جنيه</option><option value="100">جنيه</option></select>
+      <span class="muted">التقريب بيظهر سطر لوحده في الفاتورة، وتقدر تغيّره بعدين من الإعدادات.</span></label><br>
     <button class="btn" type="submit">ابدأ</button>
     <p class="muted">احفظ كلمة المرور في مكان آمن، فبدونها لن تستطيع الدخول.</p>
   </form>
@@ -971,7 +978,7 @@ function viewSetup() {
     const f = new FormData(e.target);
     if (f.get("password") !== f.get("password2")) { toast("كلمتا السر غير متطابقتين", true); return; }
     try {
-      const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password"].map((k) => [k, f.get(k)])) });
+      const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password", "rounding"].map((k) => [k, f.get(k)])) });
       ME = r.me; location.hash = "#/import";
       toast("البرنامج جاهز. الخطوة التالية: نقل بياناتك من البرنامج القديم");
     } catch (err) {
@@ -1666,7 +1673,7 @@ async function viewItems() {
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>الأصناف</h1>
-      <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
+      <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/dispensing-notes">ملاحظات الصرف</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
@@ -2523,6 +2530,7 @@ function printLook(dataUrl) {
 }
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
+  const rstep = ME.permissions.includes("settings.manage") ? (await api("/api/settings/rounding")).step : 0;
   const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
@@ -2545,6 +2553,7 @@ async function renderReceiptCfg(c) {
       <p class="muted">الدرج يُفتح فقط مع الطابعة المباشرة (ESC/POS). مع «browser» لا يمكن فتح الدرج إطلاقًا، والشاشة تقول ذلك للكاشير.</p></fieldset>
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
+    <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding">${[[0, "من غير تقريب"], [25, "ربع جنيه"], [50, "نص جنيه"], [100, "جنيه"]].map(([v, t]) => `<option value="${v}" ${rstep === v ? "selected" : ""}>${t}</option>`).join("")}</select></label>
     <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
@@ -2636,6 +2645,7 @@ async function renderReceiptCfg(c) {
     e.preventDefault();
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
+      if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
@@ -3005,7 +3015,7 @@ function cashRefundRoom(s) {
 }
 
 function refundOptions(s) {
-  const room = cashRefundRoom(s), left = (s.total || 0) - (s.returned_total || 0);
+  const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
   const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
   const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
@@ -3107,14 +3117,14 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, confirm_below_cost: !!draft.confirm_below_cost, receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, cost_reason: draft.cost_reason || null, receipt: true } });
           exchangeDevices(r);
           toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) {
-          if (err.code === "below_cost_confirm") {          // as at checkout: an explicit yes, then save again
-            const ls = (err.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
-            if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${ls}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { draft.confirm_below_cost = true; setTimeout(() => btn.click(), 0); }
+          if (err.code === "at_cost_reason") {              // U2-33: down to cost only, with a written reason
+            const why = (prompt(`${err.message}\n${(err.details?.lines || []).map((l) => l.name).join("، ")}`, "") || "").trim();
+            if (why.length >= 3) { draft.cost_reason = why; setTimeout(() => btn.click(), 0); }
             return;
           }
           toast(err.message, true);
@@ -3146,7 +3156,7 @@ async function viewSale(id) {
   app.innerHTML = `
   <section class="panel"><div class="row between"><h1>فاتورة بيع ${s.sale_no ?? ""} ${s.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : ""}</h1>
     <div class="row"><a class="btn secondary" href="/receipt/${s.id}" target="_blank">طباعة</a><a href="#/sales">رجوع للفواتير</a></div></div>
-    <div class="totals"><div>الإجمالي<b>${money(s.total)}</b></div><div>نقدي<b>${money(s.paid_cash)}</b></div>
+    <div class="totals"><div>الإجمالي<b>${money(s.total)}</b>${s.rounding ? `<span>تقريب النقدي ${s.rounding > 0 ? "+" : "−"}${money(Math.abs(s.rounding))} (مش مبيعات)</span>` : ""}</div><div>نقدي<b>${money(s.paid_cash)}</b></div>
       <div>بطاقة<b>${money(s.paid_card)}</b></div>${s.paid_transfer ? `<div>تحويل<b>${money(s.paid_transfer)}</b></div>` : ""}<div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
@@ -3187,7 +3197,7 @@ async function viewSale(id) {
     btn.disabled = true;
     try {
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method: $("#rMethod").value, reason: $("#rReason").value } });
-      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
+      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
     } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
@@ -3211,7 +3221,7 @@ async function viewSale(id) {
   }));
   $("#vGo")?.addEventListener("click", async () => {
     if (!confirmInline($("#vGo"))) return;
-    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }); toast("تم إلغاء الفاتورة"); viewSale(id); }
+    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }).then((v) => { toast(v.change_back ? `تم إلغاء الفاتورة — رجّع للعميل كمان ${money(v.change_back)} ج نقدي (باقي كان سايبه رصيد)` : "تم إلغاء الفاتورة"); }); viewSale(id); }
     catch (e) { toast(e.message, true); }
   });
 }
@@ -3276,6 +3286,105 @@ async function viewDeadstock() {
     const a = Object.assign(document.createElement("a"), { href: url, download: "الرواكد.xlsx" });
     document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   });
+}
+
+// ------------------------------------------------------------------ Hikma claim (U3-3)
+async function viewHikmaClaim() {
+  const t = new Date(), first = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-01`;
+  app.innerHTML = `<section class="panel"><h1>مطالبة مستشفى نور الحكمة</h1>
+    <div class="row"><label class="f">الفرع <select id="hkB"><option value="shibin">شبين</option><option value="mitkhalaf">ميت خلف</option></select></label>
+      <label class="f">من <input type="date" id="hkF" value="${first}"></label><label class="f">إلى <input type="date" id="hkT" value="${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}"></label>
+      <button class="btn" id="hkGo">اعرض</button><button class="btn secondary" id="hkXH" disabled>Excel للمستشفى</button><button class="btn secondary" id="hkXI" disabled>Excel داخلي</button></div>
+    <p class="muted">مخزن الصيدلية: التكلفة + نص الربح. مخزن المستشفى: نص الربح بس. نصيب المستشفى من الربح بيتقرّب مرة واحدة على الإجمالي. ملف «المستشفى» بس هو اللي يتبعت (من غير تكلفة).</p>
+    <details id="hkSet"><summary>عميل كل فرع والدفعة المقدمة</summary><div id="hkSetBox" class="muted">…</div></details>
+    <div id="hkOut"></div></section>`;
+  let R = null;
+  // review P1: the owner picks each branch's customer (E-Stock codes 50 / 10 are only the default) and the advance
+  const drawSet = async () => {
+    const st = await api("/api/settings/hikma-claim");
+    $("#hkSetBox").className = "";
+    $("#hkSetBox").innerHTML = Object.entries(st).map(([k, v]) => `<div class="row" data-b="${esc(k)}"><b>${esc(v.title)}</b>
+      <input data-cq placeholder="دوّر على العميل" autocomplete="off"><span data-cn class="muted">${v.customer_id ? "✓ متحدد" : "⚠ مش متحدد"}</span>
+      <label class="f">الدفعة المقدمة (ج) <input data-adv type="number" min="0" step="0.01" value="${money(v.advance)}"></label>
+      <button class="btn small" data-save>حفظ</button><div data-cr class="cands"></div></div>`).join("");
+    $("#hkSetBox").querySelectorAll("[data-b]").forEach((row) => {
+      let cid = st[row.dataset.b].customer_id;
+      row.querySelector("[data-cq]").addEventListener("input", async (e) => {
+        const v = e.target.value.trim(); if (v.length < 2) return;
+        const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
+        row.querySelector("[data-cr]").innerHTML = cs.slice(0, 8).map((c) => `<button class="btn small secondary" data-c="${esc(c.id)}">${esc(c.name)}</button>`).join("");
+        row.querySelectorAll("[data-c]").forEach((b) => b.addEventListener("click", () => { cid = b.dataset.c; row.querySelector("[data-cn]").textContent = `✓ ${b.textContent}`; row.querySelector("[data-cr]").innerHTML = ""; }));
+      });
+      row.querySelector("[data-save]").addEventListener("click", async () => {
+        try { await api("/api/settings/hikma-claim", { method: "PUT", body: { branch: row.dataset.b, customer_id: cid, advance: toPiasters(row.querySelector("[data-adv]").value) || 0 } }); toast("اتحفظ"); }
+        catch (er) { toast(er.message, true); }
+      });
+    });
+  };
+  $("#hkSet").addEventListener("toggle", () => { if ($("#hkSet").open) drawSet().catch((er) => toast(er.message, true)); });
+  const rowsOf = (part) => part.lines.map((l) => `<tr class="${l.below_cost || l.no_cost ? "has-err" : ""}"><td>${esc(l.name || "")}${l.no_cost ? ` <span class="badge b-warn">⚠ من غير تكلفة</span>` : ""}</td><td class="num">${l.qty}</td><td class="num">${money(l.value)}</td><td class="num">${money(l.cost)}</td><td class="num">${money(l.margin)}</td><td class="num">${pct(l.margin_bp)}%</td></tr>`).join("");
+  const sec = (title, part, dueLabel) => `<h2>${title}</h2>${part.lines.length ? `<table><thead><tr><th>الصنف</th><th>الكمية</th><th>القيمة</th><th>التكلفة</th><th>الربح</th><th>%</th></tr></thead><tbody>${rowsOf(part)}</tbody>
+    <tfoot><tr><th>الإجمالي (${part.lines.length} صنف)</th><th></th><th class="num">${money(part.value)}</th><th class="num">${money(part.cost)}</th><th class="num">${money(part.margin)}</th><th></th></tr></tfoot></table>
+    <p>نصيب المستشفى من الربح ${money(part.hospital_half)} · <b>${dueLabel} ${money(part.due)}</b></p>` : `<p class="muted">مفيش</p>`}`;
+  const load = async () => {
+    R = await api(`/api/reports/hikma-claim?branch=${$("#hkB").value}&from=${$("#hkF").value}&to=${$("#hkT").value}`);
+    const a = R.account;
+    $("#hkOut").innerHTML = `<h2>${esc(R.title)} — ${esc(R.from)} إلى ${esc(R.to)} (${R.invoices} فاتورة)</h2>
+      ${R.no_cost_lines ? `<p class="t-err">⚠ ${R.no_cost_lines} صنف من غير تكلفة متسجلة: التكلفة اتحسبت صفر. راجعها قبل ما تبعت المطالبة.</p>` : ""}
+      <p class="muted small">المطالبة صافية من أي مرتجع لحد النهارده. لو طلعت مطالبة فترة قديمة تاني، مرتجعاتها اللي اتخصمت في فترة بعدها هتتخصم مرتين.</p>
+      ${sec("مخزن الصيدلية", R.pharmacy, "المطلوب")}${sec("مخزن مستشفيات الحكمة", R.hospital, "نصيبنا")}
+      ${R.previous_returns.rows.length ? `<p class="t-warn">يُخصم: مرتجعات عن مطالبات سابقة (${R.previous_returns.rows.length}): ${money(R.previous_returns.due)}</p>` : ""}
+      <div class="totals"><div>إجمالي مستحقات الفترة<b>${money(R.due)}</b></div><div>− الدفعة المقدمة<b>${money(R.advance)}</b></div>
+        <div>صافي الفترة<b>${money(R.net)}</b></div><div>+ دفعة الفترة الجاية<b>${money(R.next_advance)}</b></div><div>إجمالي المطلوب<b>${money(R.total)}</b></div></div>
+      <p class="${a.matched_bp === 10000 ? "t-ok" : "t-warn"}">مطابقة حساب العميل: الفواتير على الحساب ${money(a.debit)} − مرتجع ${money(a.returns)} = ${money(a.net)} · قيمة المطالبة ${money(R.pharmacy.value + R.hospital.value)} · التطابق ${pct(a.matched_bp)}%${a.paid_not_on_account ? ` · اتدفع نقدي/بطاقة ومش على الحساب ${money(a.paid_not_on_account)}` : ""}</p>`;
+    $("#hkXH").disabled = $("#hkXI").disabled = false;
+  };
+  const sheets = (internal) => {
+    const sh = [];
+    for (const [k, title] of [["pharmacy", "مخزن الصيدلية"], ["hospital", "مخزن المستشفى"]]) {
+      const p = R[k];
+      if (!p.lines.length) continue;
+      sh.push(internal
+        ? { name: title, columns: [Tx("الصنف"), N("الكمية"), M("القيمة"), M("التكلفة"), M("الربح"), Tx("ملاحظة")], rows: p.lines.map((l) => [l.name, l.qty, l.value, l.cost, l.margin, l.no_cost ? "من غير تكلفة" : ""]), total: ["الإجمالي", null, p.value, p.cost, p.margin, ""] }
+        : { name: title, columns: [Tx("الصنف"), N("الكمية"), M("الإجمالي")], rows: p.lines.map((l) => [l.name, l.qty, l.value]), total: ["الإجمالي", null, p.value] });
+    }
+    const sum = [["مخزن الصيدلية: المطلوب", R.pharmacy.due], ["مخزن المستشفى: نصيب الصيدلية", R.hospital.due]];
+    if (R.previous_returns.rows.length) sum.push(["يُخصم: مرتجعات عن مطالبات سابقة", -R.previous_returns.due]);
+    sum.push(["إجمالي مستحقات الفترة", R.due], ["الدفعة المقدمة", -R.advance], ["صافي الفترة", R.net], ["دفعة الفترة الجاية", R.next_advance], ["إجمالي المطلوب", R.total]);
+    sh.push({ name: "الملخص", columns: [Tx("البند"), M("المبلغ")], rows: sum });
+    return sh;
+  };
+  $("#hkGo").addEventListener("click", () => load().catch((er) => toast(er.message, true)));
+  $("#hkXH").addEventListener("click", () => exportXlsx(`مطالبة ${R.title} ${R.from} - ${R.to}`, `${R.from} إلى ${R.to}`, sheets(false)));
+  $("#hkXI").addEventListener("click", () => exportXlsx(`مطالبة داخلي ${R.title} ${R.from} - ${R.to}`, `${R.from} إلى ${R.to} — داخلي، ممنوع يتبعت للمستشفى`, sheets(true)));
+}
+
+// ------------------------------------------------------------------ dispensing notes (U2-21)
+async function viewDispensingNotes() {
+  const draw = (notes) => {
+    app.innerHTML = `<section class="panel"><h1>ملاحظات الصرف</h1>
+      <p class="muted">ملاحظة بتظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي. مبتوقفش البيع.</p>
+      <table><thead><tr><th>المادة الفعالة</th><th>شغالة</th><th>اللي بيظهر (سطر لكل قاعدة)</th><th></th></tr></thead><tbody>
+      ${Object.entries(notes).map(([k, v]) => `<tr data-k="${esc(k)}"><td><b>${esc(k)}</b>${v.confirmed ? "" : ` <span class="badge b-warn">محتاج تأكيد</span>`}${v.source ? `<div class="muted small">${esc(v.source)}</div>` : ""}</td>
+        <td><input type="checkbox" data-on ${v.enabled ? "checked" : ""}></td>
+        <td><textarea data-rules rows="3">${esc((v.rules || []).join("\n"))}</textarea></td>
+        <td><button class="btn small" data-save>حفظ</button></td></tr>`).join("")}</tbody></table>
+      <div class="row"><input id="dnNew" placeholder="مادة فعالة جديدة (بالإنجليزي)"><button class="btn secondary" id="dnAdd">إضافة (هتبدأ مقفولة)</button></div></section>`;
+    document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+      const tr = b.closest("tr");
+      try {
+        draw(await api("/api/settings/dispensing-notes", { method: "PUT", body: { notes: { [tr.dataset.k]: {
+          enabled: tr.querySelector("[data-on]").checked, rules: tr.querySelector("[data-rules]").value.split("\n") } } } }));
+        toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    }));
+    $("#dnAdd").addEventListener("click", async () => {
+      const k = $("#dnNew").value.trim();
+      if (!k) return;
+      try { draw(await api("/api/settings/dispensing-notes", { method: "PUT", body: { notes: { [k]: { enabled: false } } } })); } catch (er) { toast(er.message, true); }
+    });
+  };
+  draw(await api("/api/settings/dispensing-notes"));
 }
 
 // ------------------------------------------------------------------ item data health (U3-1)
@@ -3347,7 +3456,7 @@ async function viewDayReview() {
     $("#drOut").innerHTML = `<div class="totals"><div>صافي المبيعات<b>${money(r.net_sales)}</b></div><div>عدد الفواتير<b>${s.n}</b></div>
         <div>الشراء<b>${r.purchases.total == null ? "—" : money(r.purchases.total)}</b></div><div class="${r.drawer.difference ? (r.drawer.difference < 0 ? "t-err" : "t-warn") : "t-ok"}">فرق الخزينة<b>${money(r.drawer.difference)}</b></div></div>
       <div class="grid2"><table><tbody>
-        ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${row("المرتجعات", r.returns.total)}
+        ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${s.rounding ? row("تقريب النقدي (مش مبيعات ولا خصم)", s.rounding) : ""}${row("المرتجعات", r.returns.total)}
         ${row(`ملغاة النهارده (${s.voided_count})`, s.voided_total)}${row("نقدي (بعد المرتجع والإلغاء)", mth.cash)}${row("بطاقة (بعد المرتجع والإلغاء)", mth.card)}
         ${row("تحويل ومحافظ", mth.transfer)}${row("آجل (بعد المرتجع والإلغاء)", mth.credit)}${row("نقدي توصيل (بيدخل الدرج لما المندوب يسلّم)", mth.delivery_cash)}${row("تحصيل آجل", r.credit_collected)}</tbody></table>
       <table><tbody>${row(`فواتير شراء معتمدة (${r.purchases.n})`, r.purchases.total)}
@@ -3895,7 +4004,13 @@ function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
   refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
+  // U2-21: dispensing notes, shown once per invoice (a toast the first time) and kept as one line above the items
+  const dn = s.dispensing_notes || [];
+  POS.dnSeen ||= {};
+  const seen = (POS.dnSeen[s.id] ||= new Set());
+  dn.filter((n) => !seen.has(n.ingredient)).forEach((n) => { seen.add(n.ingredient); toast(`📋 ${n.item}: ${n.rules.join(" · ")}`); });
   $("#posCart").innerHTML = `
+    ${dn.length ? `<div class="badge b-info dnotes" role="note">${dn.map((n) => `📋 <b>${esc(n.item || n.ingredient)}</b>: ${esc(n.rules.join(" · "))}${n.source ? ` <span class="muted small">(${esc(n.source)})</span>` : ""}`).join("<br>")}</div>` : ""}
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف بترتيب إدخالها" : "الأصناف مرتبة أبجديًا A→Z (أسرع في التحضير)"} — آخر صنف مُضاف عليه علامة ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
     <div class="tablewrap"><table class="cart">
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
@@ -3971,7 +4086,8 @@ function chanOptions(kind, sel) {
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
-  const remaining = s.total - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
+  const remaining = dueNow(s) - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
+  const rnd = dueNow(s) - s.total;                       // U2-14: the cash rounding of this payment
   $("#posSide").innerHTML = `
     <section class="panel">
       <div class="seg2" role="radiogroup" aria-label="نوع الفاتورة">
@@ -3981,6 +4097,7 @@ function renderSide() {
         <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
+        ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 ليه رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
@@ -3993,7 +4110,8 @@ function renderSide() {
         <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
-      <div class="sum due"><span>المطلوب</span><b>${money(s.total)}</b></div>
+      ${rnd ? `<div class="sum"><span>تقريب النقدي</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
+      <div class="sum due"><span>المطلوب</span><b>${money(dueNow(s))}</b></div>
     </section>
     <section class="panel">
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
@@ -4008,8 +4126,9 @@ function renderSide() {
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
-        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
+        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
+          ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
             <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
@@ -4082,8 +4201,9 @@ function renderSide() {
   }));
   $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
   $("#payGiven")?.addEventListener("input", (e) => {
-    const g = toPiasters(e.target.value), ch = g - s.total;
-    $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
+    const g = toPiasters(e.target.value), ch = g - dueNow(s);
+    $("#changeBox").hidden = !(g >= dueNow(s)); $("#changeV").textContent = money(ch);
+    if ($("#keepBox")) $("#keepBox").hidden = !(g > dueNow(s) && g - dueNow(s) <= 5000);   // real change only (50 EGP)
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
     if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
@@ -4092,7 +4212,7 @@ function renderSide() {
     } else if ($("#noChangeHint")) $("#noChangeHint").hidden = !POS.noCoins;
   });
   $("#noChangeBtn")?.addEventListener("click", async () => {       // U2-20: an item instead of the coins
-    const given = toPiasters($("#payGiven").value), ch = given - SALE.total;
+    const given = toPiasters($("#payGiven").value), ch = given - dueNow(SALE);
     if (!(ch > 0)) return;
     try {
       const r = await api(`/api/sales/change-fill?change=${ch}&sale=${encodeURIComponent(SALE.id)}`);
@@ -4106,7 +4226,15 @@ function renderSide() {
       }));
     } catch (er) { toast(er.message, true); }
   });
-  $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total }]; renderSide(); });
+  // manager 22/11: the customer's credit (a change he left) in one click, never more than his balance or the invoice;
+  // the rest is cash, so the drawer expects only the cash really paid
+  $("#useCredit")?.addEventListener("click", () => {
+    const use = Math.min(-s.customer.balance, s.total), rest = s.total - use;
+    POS.split = true;
+    POS.parts = [{ method: "credit", amount: use }, ...(rest > 0 ? [{ method: "cash", amount: rest + roundNear(rest, s.rounding_step || 0) }] : [])];
+    renderSide();
+  });
+  $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total + roundNear(s.total, s.rounding_step || 0) }]; renderSide(); });
   $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });
   $("#partAdd")?.addEventListener("click", () => { POS.parts.push({ method: "card", channel_id: CHANNELS.find((c) => c.kind === "card")?.id, amount: Math.max(0, remaining) }); renderSide(); });
   document.querySelectorAll("[data-pm]").forEach((x) => x.addEventListener("change", () => { const p = POS.parts[+x.dataset.pm]; p.method = x.value; p.channel_id = CHANNELS.find((c) => c.kind === x.value)?.id || null; renderSide(); }));
@@ -4185,9 +4313,26 @@ function renderFindings(findings) {
   ($("#posSafety [data-dec]") || $("#posConfirm")).focus({ preventScroll: true });
 }
 
+// U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded to the
+// nearest step (ties up), as the server does
+function roundNear(v, st) {
+  if (!st || v <= 0) return 0;
+  const r = v % st, d = 2 * r >= st ? st - r : -r;
+  return v + d > 0 ? d : 0;                              // never rounds the cash part away
+}
+function cashRoundingOf(s, parts) {
+  if (!parts.some((p) => p.method === "cash")) return 0;  // no cash, no rounding: card and credit are exact
+  const nonCash = parts.filter((p) => p.method !== "cash").reduce((t, p) => t + (p.amount || 0), 0);
+  return roundNear(s.total - nonCash, s.rounding_step || 0);
+}
+// what the customer is asked for with the chosen payment (a single cash payment: the rounded total)
+function dueNow(s) {
+  if (POS.split) return s.total + cashRoundingOf(s, POS.parts);
+  return POS.method === "cash" ? s.total + roundNear(s.total, s.rounding_step || 0) : s.total;
+}
 function currentPayments() {
   if (POS.split) return POS.parts.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount, channel_id: p.channel_id || null }));
-  return [{ method: POS.method, amount: SALE.total, channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
+  return [{ method: POS.method, amount: dueNow(SALE), channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
 }
 
 // a discount still being typed (line or invoice): saved before completion like a delivery field (Codex #400)
@@ -4238,15 +4383,17 @@ async function complete(findings) {
   if (btn.disabled) return;
   btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
+  // «خليها رصيد للعميل»: the change he leaves is his credit, so no receipt says it is still due (Codex P2 on #424)
+  const keepIt = !!$("#keepChange")?.checked && given > cashPart, shown = keepIt ? cashPart : given;
   try {
     const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
-      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given,
-              confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
+      body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: keepIt,
+              cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
     delete POS.rcpt[SALE.id]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
-    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${given ? `?given=${given}` : ""}`);
+    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : ""}`);
     QUICK = null;
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? " (توصيل: المبلغ مع مندوب التوصيل حتى يسلّمه)" : ""}`
       + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
@@ -4274,9 +4421,9 @@ async function complete(findings) {
       } catch { /* the message is already shown */ }
     }
     if (er.code === "no_open_shift") $("#posShift").click();
-    if (er.code === "below_cost_confirm") {
-      const lines = (er.details?.lines || []).map((l) => `${l.name}: ${money(l.net)} والتكلفة ${money(l.cost)}`).join("\n");
-      if (confirm(`⛔ هذا البيع أقل من التكلفة (بخسارة):\n${lines}\n\nهل أنت متأكد أنك تريد المتابعة؟`)) { SALE.confirm_below_cost = true; return complete(findings); }
+    if (er.code === "at_cost_reason") {        // U2-33: down to cost only, by the owner or a manager, with a reason
+      const why = (prompt(`${er.message}\n${(er.details?.lines || []).map((l) => l.name).join("، ")}`, "") || "").trim();
+      if (why.length >= 3) { SALE.cost_reason = why; return complete(findings); }
     }
   }
 }
@@ -4377,7 +4524,7 @@ async function viewShift(opts = {}) {
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
-      <div>مصروفات<b>${money(k.payout || 0)}</b></div><div>المتوقع في الخزينة<b>${money(sh.expected_cash)}</b></div>
+      <div>مصروفات<b>${money(k.payout || 0)}</b></div>${sh.rounding_total ? `<div>منها تقريب النقدي<b>${money(sh.rounding_total)}</b></div>` : ""}<div>المتوقع في الخزينة<b>${money(sh.expected_cash)}</b></div>
       ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "بطاقة" : "تحويل"} — ${esc(c.channel)}<b>${money(c.amount)}</b></div>`).join("")}
       ${sh.with_courier ? `<div>مع مندوب التوصيل<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
     ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
@@ -5593,6 +5740,7 @@ async function viewProfit() {
         <div class="${r.gross_profit >= 0 ? "t-ok" : "t-err"}">مجمل الربح<b>${money(r.gross_profit)}</b>${r.gross_margin_pct != null ? `<span>${r.gross_margin_pct}%</span>` : ""}</div>
         <div>المصروفات المعتمدة<b>${money(r.expenses_total)}</b></div>
         ${r.supplier_discounts ? `<div class="t-ok">خصومات مكتسبة من الموردين<b>${money(r.supplier_discounts)}</b></div>` : ""}
+        ${r.cash_rounding ? `<div>تقريب النقدي (مش مبيعات ولا ربح)<b>${money(r.cash_rounding)}</b></div>` : ""}
         <div class="${r.net_profit >= 0 ? "t-ok" : "t-err"}">${r.net_profit >= 0 ? "✓ صافي الربح" : "✕ صافي خسارة"}<b>${money(Math.abs(r.net_profit))}</b></div></div>
         ${r.pending_expenses.n ? `<p class="badge b-warn mt">⚠ يوجد ${r.pending_expenses.n} مصروف (${money(r.pending_expenses.a)} ج) بانتظار الموافقة وغير محتسب — <a href="#/expenses">راجعها</a></p>` : ""}
         ${r.unknown_cost_lines ? `<p class="badge b-warn mt">⚠ ${r.unknown_cost_lines} سطر بيع بدون تكلفة مسجلة — قد يكون الربح الحقيقي أقل</p>` : ""}
@@ -5920,7 +6068,7 @@ async function viewOwnerReports() {
 
 async function viewReports() {
   const can = (p) => ME.permissions.includes(p);
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${ME.permissions.includes("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${ME.permissions.includes("cash.see_expected") && ME.permissions.includes("sales.totals") ? `<a class="btn secondary" href="#/day-review">مراجعة اليوم</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>التقارير</h1><span class="row">${ME.permissions.includes("sales.totals") ? `<a class="btn" href="#/owner-reports">تقارير المالك: الموظفون، العملاء، الخزينة، المرتجعات، الخصومات، الأسعار…</a>` : ""}${ME.permissions.includes("cash.see_expected") && ME.permissions.includes("sales.totals") ? `<a class="btn secondary" href="#/day-review">مراجعة اليوم</a>` : ""}${ME.permissions.includes("costs.read") && ME.permissions.includes("sales.totals") ? `<a class="btn secondary" href="#/hikma-claim">مطالبة الحكمة</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}${ME.permissions.includes("costs.read") ? `<a href="#/profit">تقرير الربح ←</a>` : ""}</span></div>
     ${can("sales.totals") ? rangeBar("rRange") : `<p class="muted">تقارير المبيعات للمدير والمالك.</p>`}
     <p class="muted noprint">تقارير أخرى: ${can("audit.read") ? `<a href="#/stock-check">مطابقة الأرصدة</a> · ` : ""}<a href="#/customers">العملاء</a> · <a href="#/sales">فواتير البيع</a> · <a href="#/expenses">المصروفات</a> · <a href="#/suppliers">مطالبات الموردين</a> · <a href="#/transfers">مراجعة التحويلات</a> · <a href="#/supplier-returns">مرتجعات للموردين</a> · <a href="#/counts">الجرد</a> · <a href="#/deadstock">الرواكد</a> · <a href="#/shortages">النواقص</a></p></section>
   <div id="rSales"></div>${can("sales.totals") ? `<section class="panel mt" id="rWarn"><div class="row between"><h2>تحذيرات الأصناف المؤكدة وقت البيع</h2>${reportTools("warn")}</div>${rangeBar("warnRange", "week")}<div id="warnBox"></div></section>` : ""}${can("costs.read") ? `<section class="panel mt" id="rLoss"><div class="row between"><h2>خسائر المخزون (منتهي، تالف، مفقود، تسويات الجرد) والمرتجع للموردين</h2>${reportTools("loss")}</div>${rangeBar("lossRange")}<div id="lossBox"></div></section>` : ""}<div id="rStock"></div>`;
@@ -5930,19 +6078,19 @@ async function viewReports() {
     const maxH = Math.max(1, ...r.by_hour.map((x) => x.total)), sub = rangeText(r.from, r.to);
     $("#rSales").innerHTML = `<section class="panel" id="rSalesBox"><div class="row between"><h2>المبيعات — ${esc(sub)}</h2>${reportTools("sales")}</div>
     <div class="totals"><div>الفواتير<b>${r.totals.n}</b></div><div>المبيعات<b>${money(r.totals.total)}</b></div>
-      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div></div>
+      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div>${r.totals.rounding ? `<div>تقريب النقدي (مش مبيعات)<b>${money(r.totals.rounding)}</b></div>` : ""}</div>
     <div class="grid2 mt"><section class="panel"><h2>يوم بيوم</h2>
-      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
-      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
+      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th><th>تقريب النقدي</th></tr></thead><tbody>
+      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td><td class="num">${money(d.rounding || 0)}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
     <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table>
       <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${hourLabel(h)} — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${hourLabel(h)}</small></div>`; }).join("")}</div></section></div>
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
     wireTools("sales", () => ({ title: "تقرير المبيعات", subtitle: sub, el: $("#rSalesBox"), sheets: [
-      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع")],
-        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns]),
-        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns] },
+      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع"), M("تقريب النقدي")],
+        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns, d.rounding || 0]),
+        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns, r.totals.rounding || 0] },
       { name: "حسب الموظف", columns: [Tx("الموظف"), N("فواتير"), M("الإجمالي"), M("الخصم")], rows: r.by_user.map((u) => [u.name, u.n, u.total, u.discount || 0]) },
       { name: "أكثر الأصناف", columns: [Tx("الصنف"), N("الكمية بالوحدة"), M("المبيعات"), ...(can("costs.read") ? [M("الربح")] : [])],
         rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));

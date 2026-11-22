@@ -44,7 +44,7 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
     # local day/hour: completed_at is UTC and the offset of each moment is its own (daylight saving time), so the
     # sums come per UTC quarter-hour and are put on their local day and hour here (R7, 16/11)
     cols = ("count(*) n, sum(s.total) total, sum(s.paid_cash) cash, sum(s.paid_card) card, sum(s.paid_transfer) transfer,"
-            " sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.returned_total) returns")
+            " sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.returned_total) returns, sum((coalesce(s.rounding,0) - coalesce((SELECT sum(r.rounding) FROM sale_returns r WHERE r.sale_id=s.id AND r.org_id=s.org_id),0))) rounding")
     days: dict = {}
     hours: dict = {}
     for when, r in local_buckets(db, "s.completed_at", cols, base, p):
@@ -61,7 +61,7 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
         " GROUP BY s.created_by ORDER BY 3 DESC", p)]
     top = _top_items(db, ctx, p)
     t = db.one(f"SELECT count(*) n, coalesce(sum(s.total),0) total, coalesce(sum(s.returned_total),0) returns,"
-               f" coalesce(sum(s.discount_total),0) discount{base}", p)
+               f" coalesce(sum(s.discount_total),0) discount, coalesce(sum((coalesce(s.rounding,0) - coalesce((SELECT sum(r.rounding) FROM sale_returns r WHERE r.sale_id=s.id AND r.org_id=s.org_id),0))),0) rounding{base}", p)
     return {"from": d1.isoformat(), "to": d2.isoformat(), "totals": dict(t), "daily": daily, "by_user": by_user,
             "by_hour": by_hour, "top_items": top}
 

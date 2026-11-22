@@ -65,4 +65,4 @@ if __name__ == "__main__":
 class TestPaidBoxOnAnEmptyInvoice(unittest.TestCase):
     def test_disabled_until_there_is_a_line(self):
         # launch day 21/11: «العميل دفع» could be typed in on an empty invoice
-        self.assertIn('placeholder="${money(s.total)}" ${s.lines.length ? "" : \'disabled title="ضيف صنف الأول"\'}', JS)
+        self.assertIn('placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : \'disabled title="ضيف صنف الأول"\'}', JS)
