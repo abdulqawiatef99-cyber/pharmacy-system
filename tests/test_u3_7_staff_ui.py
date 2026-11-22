@@ -33,3 +33,25 @@ class TestStaffUi(DBTestCase):
         _, other = self.second_tenant()
         with self.assertRaises(ValidationFailed):                                          # not his employee
             staff_ui.save(self.db, other, {"hours": {self.uid: {"start": "10:00", "end": "18:00"}}})
+
+
+import json as _json                    # noqa: E402
+import shutil as _shutil                # noqa: E402
+import subprocess as _sp                # noqa: E402
+import unittest as _ut                  # noqa: E402
+from pathlib import Path as _P          # noqa: E402
+
+
+@_ut.skipUnless(_shutil.which("node"), "Node not available")
+class TestShiftEndClock(_ut.TestCase):
+    """Codex P1 on #421: the reminder window, by a controlled clock, day and overnight."""
+    def test_minutes_left(self):
+        js = (_P(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        fn = js[js.index("function shiftEndLeft("):js.index("async function staffUi(")]
+        code = fn + """
+const at = (h, m) => { const d = new Date(2026, 10, 22, h, m, 0, 0); return d; };
+console.log(JSON.stringify([shiftEndLeft(at(17, 50), "18:00"), shiftEndLeft(at(23, 50), "00:00"),
+  shiftEndLeft(at(0, 10), "00:30"), shiftEndLeft(at(18, 30), "18:00")]));"""
+        r = _sp.run([_shutil.which("node"), "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_json.loads(r.stdout), [10, 10, 20, -30])     # in the window, overnight, after the end

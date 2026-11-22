@@ -388,18 +388,26 @@ function staffUiStop() {                 // on sign-out and before every reload 
   document.getElementById("dhikrBar")?.remove();
   document.body.style.paddingBottom = "";
 }
-async function staffUi() {
+// minutes left until a shift end «HH:MM» seen from `now` (the end after midnight when it is still ahead)
+function shiftEndLeft(now, endHHMM) {
+  const [eh, em] = endHHMM.split(":").map(Number), end = new Date(now);
+  end.setHours(eh, em, 0, 0);
+  if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
+  return (end - now) / 60000;
+}
+async function staffUi(force = false) {
   const uid = ME?.user?.id;
-  if (!uid || (STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  if (!uid || (!force && STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
   STAFF_LOADING = uid;
   let cfg;
+  // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
   try { cfg = { uid, ...(await api("/api/settings/staff-ui")) }; } catch { STAFF_LOADING = null; return; }
   STAFF_LOADING = null;
   if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
   staffUiStop();
   STAFF_UI = cfg;
   // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
-  STAFF_TIMERS.push(setInterval(() => { STAFF_UI = null; staffUiStop(); staffUi(); }, 600000));
+  STAFF_TIMERS.push(setInterval(() => { staffUi(true); }, 600000));
   if (cfg.dhikr.length) {
     const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
     bar.setAttribute("aria-hidden", "true");
@@ -414,11 +422,7 @@ async function staffUi() {
   const h = cfg.hours;
   if (h?.end) {
     const tick = () => {
-      const now = new Date(), [eh, em] = h.end.split(":").map(Number), end = new Date(now);
-      end.setHours(eh, em, 0, 0);
-      // a shift that ends after midnight (Codex P2 on #421): the end that is still ahead within the next day
-      if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
-      const left = (end - now) / 60000, key = `endWarn:${uid}:${now.toDateString()}`;
+      const now = new Date(), left = shiftEndLeft(now, h.end), key = `endWarn:${uid}:${h.end}:${new Date(now.getTime() + left * 60000).toDateString()}`;
       if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
         sessionStorageSet(key, "1");
         toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
