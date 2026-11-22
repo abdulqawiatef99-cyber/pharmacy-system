@@ -3213,7 +3213,7 @@ async function viewSale(id) {
   }));
   $("#vGo")?.addEventListener("click", async () => {
     if (!confirmInline($("#vGo"))) return;
-    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }); toast("تم إلغاء الفاتورة"); viewSale(id); }
+    try { await api(`/api/sales/${id}/void`, { method: "POST", body: { reason: $("#vReason").value } }).then((v) => { toast(v.change_back ? `تم إلغاء الفاتورة — رجّع للعميل كمان ${money(v.change_back)} ج نقدي (باقي كان سايبه رصيد)` : "تم إلغاء الفاتورة"); }); viewSale(id); }
     catch (e) { toast(e.message, true); }
   });
 }

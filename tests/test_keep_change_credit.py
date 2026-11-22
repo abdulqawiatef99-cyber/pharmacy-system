@@ -115,7 +115,8 @@ class TestKeepChangeFutureTraps(SalesCase):
     def test_void_gives_it_back(self):
         start = self.cd.summary(self.ctx)["expected_cash"]
         sid, _ = self.keep(self.cust)
-        self.s.void(self.ctx, sid, reason="غلط في الفاتورة")
+        v = self.s.void(self.ctx, sid, reason="غلط في الفاتورة")
+        self.assertEqual(v["change_back"], 100)                              # the cashier is told (Codex P1)
         self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start)  # all his 20.00 back
         self.assertEqual(self.s.balance(self.ctx, self.cust), 0)
         self.assertEqual(self.s.kept_change(self.ctx, sid), 0)

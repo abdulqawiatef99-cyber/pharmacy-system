@@ -1689,13 +1689,14 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
-            self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
+            change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
                         f"السبب: {reason.strip()}", "sale", sid)
-        return self.get(ctx, sid)
+        # Codex P1: the kept change paid back with the void, shown to the cashier on its own
+        return {**self.get(ctx, sid), "change_back": change_back}
 
     def kept_change(self, ctx: Context, sid: str) -> int:
         """The change of this sale left as the customer's credit and not yet given back (0 if none)."""

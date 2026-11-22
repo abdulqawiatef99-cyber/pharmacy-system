@@ -3216,4 +3216,5 @@ window.I18N_EN = {
 "من النوع ده": "of this kind",
 "مفيش مشاكل0 في 0 صنف.": "No problems0 in 0 items.",
 "+ رجّع له نقدي 0 ج باقي كان سايبه رصيد (المجموع 0 ج)": "+ give back 0 EGP in cash: change he had left as credit (total 0 EGP)",
+"تم إلغاء الفاتورة — رجّع للعميل كمان 0 ج نقدي (باقي كان سايبه رصيد)": "Invoice voided — also give the customer 0 EGP in cash (change he had left as credit)",
 };
