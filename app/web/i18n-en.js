@@ -3162,5 +3162,9 @@ window.I18N_EN = {
 "0 ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك": "0 EGP — no notes make this exact amount, count it by hand",
 "كل الفلوس هتفضل في الدرج للشيفت الجاي": "All the cash stays in the drawer for the next shift",
 "(محدش استلم)": "(nobody received it)",
+"آخر تقفيل مفيهوش جنيهات فكة": "The last close had no one-pound coins",
+"🪙 مفيش فكة": "🪙 No change",
+"أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
+"مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
 };
