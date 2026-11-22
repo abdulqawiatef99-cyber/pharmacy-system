@@ -80,7 +80,8 @@ def open_program(url: str = None) -> None:
     if exe:
         try:
             flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            subprocess.Popen(app_command(exe, url, home() / "app-window"), close_fds=True, creationflags=flags)
+            subprocess.Popen(app_command(exe, url, home() / "app-window"), close_fds=True, creationflags=flags,
+                             cwd=str(home()))       # never the program folder: uninstall can remove it
             return
         except OSError:
             pass                                   # the browser could not start: the default browser instead

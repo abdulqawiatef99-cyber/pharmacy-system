@@ -1,6 +1,5 @@
 """U3-4 the program in its own window: Edge or Chrome with --app and a profile of its own; the default browser when
 neither is there, off by PHARM_APP_WINDOW=0, and never on Linux."""
-import importlib
 import os
 import unittest
 from pathlib import Path
