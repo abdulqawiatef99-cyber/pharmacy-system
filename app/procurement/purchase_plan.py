@@ -181,8 +181,8 @@ def _status(o: dict) -> str:
         return "sent"
     if st <= {"arrived"}:
         return "arrived"
-    if "sent" in st:
-        return "partial"
+    if st & {"sent", "partial"}:
+        return "partial"                # a partial line stays open: a later delivery can still be ticked (Codex P2)
     return "done"
 
 
@@ -211,7 +211,9 @@ def _invoiced(db: Database, ctx: Context, since: str) -> dict[tuple[str, str], s
 
 def _tracked(db: Database, ctx: Context, today: date, pack: dict) -> tuple[dict, dict, list]:
     """({item: on order units}, {item: arrived-not-entered units}, [ask-about lines])."""
-    orders = [o for o in _load(db, ctx.org_id) if o.get("branch_id") == ctx.branch_id]
+    keep = _now(today - timedelta(days=KEEP_DAYS))
+    orders = [o for o in _load(db, ctx.org_id) if o.get("branch_id") == ctx.branch_id
+              and str(o.get("created_at", "")) >= keep]          # past retention: never counted, write or not (Codex P2)
     if not orders:
         return {}, {}, []
     since = min(str(o["created_at"]) for o in orders)

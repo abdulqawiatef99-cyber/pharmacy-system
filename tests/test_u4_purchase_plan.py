@@ -407,3 +407,23 @@ class TestReviewFixes(PlanBase):
                             "'confirmed')", (new_id(), pid, self.ctx.org_id, self.it))
         r = self.rows()[self.it]
         self.assertEqual(r["best"]["prev_bp"], 2500)
+
+
+class TestCodexFixes(PlanBase):
+    def setUp(self):
+        super().setUp()
+        self.it = self.item("Codex Tab", pack_size=2)
+        self.months(self.it, {m: 60 for m in MONTHS12})
+
+    def test_a_partial_order_stays_open_for_tracking(self):
+        o = pp.create_order(self.db, self.ctx, supplier_id=self.s1, lines=[{"item_id": self.it, "packs": 5}], now=TODAY)
+        o = pp.set_line(self.db, self.ctx, o["id"], self.it, status="partial", got=2, now=TODAY)
+        self.assertEqual(o["status"], "partial")
+        o = pp.set_line(self.db, self.ctx, o["id"], self.it, status="arrived", now=TODAY)
+        self.assertEqual(o["status"], "arrived")
+
+    def test_orders_past_retention_stop_counting_without_a_write(self):
+        o = pp.create_order(self.db, self.ctx, supplier_id=self.s1, lines=[{"item_id": self.it, "packs": 5}],
+                            now=TODAY - timedelta(days=pp.KEEP_DAYS + 2))
+        pp.set_line(self.db, self.ctx, o["id"], self.it, status="arrived", now=TODAY - timedelta(days=pp.KEEP_DAYS + 1))
+        self.assertEqual(self.rows()[self.it]["arrived"], 0)
