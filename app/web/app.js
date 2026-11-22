@@ -2217,6 +2217,9 @@ let COUNT_ITEM = null;
 
 async function viewCountSession(id) {
   const canManage = ME.permissions.includes("inventory.adjust");
+  setTimeout(() => api(`/api/counts/${id}/items`).then(({ items }) => {     // the items this count covers
+    if ($("#cntScope") && items.length) $("#cntScope").textContent = "الأصناف المطلوب جردها: " + items.map((x) => x.name + (x.location ? ` (${x.location})` : "")).join("، ");
+  }).catch(() => {}), 0);
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>تسجيل الجرد</h1><a href="#/counts">رجوع</a></div>
@@ -2225,6 +2228,7 @@ async function viewCountSession(id) {
       <label class="f grow">باركود أو اسم الصنف <input id="cntQ" autocomplete="off" autofocus></label>
       ${"BarcodeDetector" in window ? `<button class="btn secondary" id="cntCam" type="button">كاميرا</button>` : ""}
     </div>
+    <div id="cntScope" class="muted small"></div>
     <video id="cntVideo" playsinline hidden class="scanvideo"></video>
     <div id="cntPick"></div>
     <div id="cntItem" class="mt"></div>

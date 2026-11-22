@@ -1886,6 +1886,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_items(req):
+        """The items an items-scope count covers, by name (Codex P2 on #418: the daily count's picks stay visible)."""
+        ctx = ctx_of(req)
+        ctx.require("inventory.count")
+        s = db.one("SELECT scope, scope_filter FROM count_sessions WHERE id=? AND org_id=?", (req.path_params["id"], ctx.org_id))
+        if not s:
+            raise NotFound("الجرد غير موجود")
+        ids = (json.loads(s["scope_filter"] or "{}").get("item_ids") or []) if s["scope"] == "items" else []
+        names = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            names += [dict(r) for r in db.all(f"SELECT id, coalesce(name_en, name_ar) name, location FROM items"
+                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))})", (ctx.org_id, *part))]
+        return J({"items": names if len(ids) <= 50 else []})
+
+    @handler
     async def safety_rule_create(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -3212,6 +3228,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
         Route("/api/counts/{id}/variances", counts_variances),
+        Route("/api/counts/{id}/items", counts_items),
         Route("/api/counts/{id}/approve", counts_approve, methods=["POST"]),
         Route("/api/counts/{id}/cancel", counts_cancel, methods=["POST"]),
         Route("/api/recalls/extract", recall_extract, methods=["POST"]),

@@ -58,3 +58,14 @@ class TestDailyTwice(TestDailyCount):
         self.c.create_daily(self.ctx, 2)
         with self.assertRaises(Conflict):
             self.c.create_daily(self.ctx, 2)
+
+
+from tests.test_owner_plan_priority_1_2 import PlanCase          # noqa: E402
+
+
+class TestCountItemsAPI(PlanCase):
+    def test_the_daily_picks_stay_visible(self):
+        sid = self.call("POST", "/api/counts", 201, json={"daily": True})["id"]
+        names = {x["name"] for x in self.call("GET", f"/api/counts/{sid}/items")["items"]}
+        self.assertTrue(names)
+        self.assertTrue(names <= {"Panadol 500mg 24 tab", "Trial Box 3 strips"})
