@@ -132,9 +132,9 @@ class TestDiscount(People):
         people.set_role_discount(self.db, self.ctx, "manager", 5000)
         m = self.login("manager", PW)
         sid = self.s.create(m)
-        d = self.s.add_line(m, sid, self.pan, units=2, discount_bp=3000)
-        with self.assertRaises(Forbidden):
-            self.s.complete(m, sid, paid_cash=d["total"], safety_decisions={})
+        with self.assertRaises(Forbidden) as e:          # U2-33: refused when typed, not only at payment
+            self.s.add_line(m, sid, self.pan, units=2, discount_bp=3000)
+        self.assertEqual(e.exception.details["permission"], "sales.below_cost")
         sid = self.s.create(self.ctx)
         d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=3000)
         with self.assertRaises(Conflict) as e:
