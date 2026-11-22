@@ -222,7 +222,7 @@ class TestKeepChangeCodexP2(SalesCase):
 
 class TestKeepChangeManagerExample(SalesCase):
     """Manager 22/11 (correction): invoice 97, he pays 100 in cash, no change given -> the drawer expects +100, the
-    sale is 97, his account holds 3 in his favour. Later: «ليه رصيد 3 ج», one click uses it (never more than his
+    sale is 97, his account holds 3 in his favour. Later: «له رصيد 3 ج», one click uses it (never more than his
     balance), and the drawer expects only the cash he really pays."""
 
     def setUp(self):
@@ -243,7 +243,7 @@ class TestKeepChangeManagerExample(SalesCase):
         mid = self.cd.summary(self.ctx)["expected_cash"]
         b = self.s.create(self.ctx, self.cust)
         d = self.s.add_line(self.ctx, b, self.pan, units=1)
-        self.assertEqual(d["customer"]["balance"], -300)                              # the screen shows «ليه رصيد 3»
+        self.assertEqual(d["customer"]["balance"], -300)                              # the screen shows «له رصيد 3»
         from app.core.errors import Conflict
         with self.assertRaises(Conflict):                                            # more than his 3: refused
             self.s.complete(self.ctx, b, paid_cash=d["total"] - 301, on_credit=301, safety_decisions=self.ack_all(b))
@@ -254,6 +254,6 @@ class TestKeepChangeManagerExample(SalesCase):
     def test_the_one_click_button_uses_at_most_his_balance(self):
         from pathlib import Path
         js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("ليه رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة", js)
+        self.assertIn("له رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة", js)
         self.assertIn("const use = Math.min(-s.customer.balance, s.total), rest = s.total - use;", js)
         self.assertIn('POS.parts = [{ method: "credit", amount: use }', js)
