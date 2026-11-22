@@ -12,7 +12,7 @@ from ..db import Database
 
 # every screen that can sit in the top bar / on the home page / behind a shortcut
 SCREENS = ("pos", "sales", "purchases", "items", "counts", "shift", "customers", "reports", "owner-reports", "expenses",
-           "transfers", "profit", "shortages", "suppliers", "supplier-returns", "procurement", "deadstock", "recalls",
+           "transfers", "profit", "day-review", "shortages", "suppliers", "supplier-returns", "procurement", "deadstock", "recalls",
            "import", "users", "audit", "staff", "system", "me", "feedback", "groups", "notifications", "customize")
 TABLES = {"invoices": 17, "items": 7}            # table -> number of columns that can be hidden (by position)
 MAX_MAIN = 8
