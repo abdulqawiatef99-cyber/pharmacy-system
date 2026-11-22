@@ -222,7 +222,10 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
     lo, _ = local_day_bounds(d1)
     _, hi = local_day_bounds(d2)
     s = db.one("SELECT count(*) n, coalesce(sum(total - delivery_fee),0) sales, coalesce(sum(delivery_fee),0) fees,"
-               " coalesce(sum(discount_total),0) discount, coalesce(sum(returned_total),0) returns FROM sales"
+               " coalesce(sum(discount_total),0) discount, coalesce(sum(returned_total),0) returns,"
+               # U2-14: cash rounding, its own line (not sales), less what returns gave back
+               " coalesce(sum(rounding - coalesce((SELECT sum(r.rounding) FROM sale_returns r WHERE r.sale_id=sales.id"
+               " AND r.org_id=sales.org_id),0)),0) rounding FROM sales"
                " WHERE org_id=? AND branch_id=? AND status='completed' AND completed_at>=? AND completed_at<?",
                (ctx.org_id, ctx.branch_id, lo, hi))
     cost, unknown = Decimal(0), 0
@@ -249,7 +252,7 @@ def profit(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
     return {"from": d1.isoformat(), "to": d2.isoformat(), "invoices": s["n"], "sales": s["sales"], "discount": s["discount"],
             "returns": s["returns"], "revenue": revenue, "delivery_fees": s["fees"], "cost": cost_p, "gross_profit": gross,
             "gross_margin_pct": round(gross / revenue * 100, 1) if revenue else None, "expenses": exp,
-            "claim_discounts": claim, "supplier_discounts": supplier_disc,
+            "claim_discounts": claim, "supplier_discounts": supplier_disc, "cash_rounding": s["rounding"],
             "expenses_total": expenses_total, "net_profit": gross - expenses_total + supplier_disc,
             "unknown_cost_lines": unknown,
             "pending_expenses": dict(pending)}

@@ -489,6 +489,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         name, user, pw = (str(b.get(k, "")).strip() for k in ("pharmacy", "username", "password"))
         if len(name) < 2 or len(user) < 3:
             raise ValidationFailed("اكتب اسم الصيدلية واسم المستخدم (3 حروف على الأقل)")
+        if str(b.get("rounding") if b.get("rounding") is not None else "").strip() not in ("", "0", "25", "50", "100"):
+            raise ValidationFailed("اختار تقريب الفاتورة")
         with setup_lock:
             if not _setup_needed():
                 raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
@@ -499,6 +501,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             pay_channels.ensure_defaults(db)
             fin.ensure_defaults(db)
         res = accounts.login(db, user, pw, ip=client_ip(req), user_agent=req.headers.get("user-agent"))
+        if b.get("rounding") is not None and str(b["rounding"]).strip() != "":   # U2-14: asked at setup
+            from ..sales import rounding as _rnd
+            _rnd.set_step(db, accounts.resolve_session(db, res["token"]), b.get("rounding"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx)}, status_code=201)
         resp.set_cookie(COOKIE, res["token"], httponly=True, samesite="strict", secure=s.cookie_secure,
@@ -747,6 +752,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             db, ctx, str(b.get("sale_id") or ""), str(b.get("item_id") or ""), b.get("note"),
             moved=b.get("moved"), expected=b.get("expected")))
         return J(await run_in_threadpool(integrity.report, db, ctx))
+
+    @handler
+    async def rounding_api(req):
+        from ..sales import rounding as rnd
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J({"step": rnd.set_step(db, ctx, (await body(req)).get("step"))})
+        ctx.require("sales.read")
+        return J({"step": rnd.step(db, ctx.org_id)})
 
     @handler
     async def ui_settings_api(req):
@@ -2662,7 +2676,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         k = r["cash_by_kind"]
         rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
                 ("تحصيل آجل", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
-                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0))]
+                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0)),
+                ("منها تقريب النقدي (مش مبيعات)", r.get("rounding_total", 0))]
         cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
         ch_rows = "".join(f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
                           for c in r["by_channel"])
@@ -2896,7 +2911,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
 {f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
-<tr class="t"><td>المطلوب</td><td>{m(sale['total'])}</td></tr>{pay}</table>
+{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
+<tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -3065,6 +3081,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
         Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
         Route("/api/attachments/{id}", attachment_get),

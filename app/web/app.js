@@ -951,6 +951,9 @@ function viewSetup() {
     <label class="f">اسم المستخدم (للدخول) <input name="username" required minlength="3" autocomplete="username" value="owner"></label><br>
     <label class="f">كلمة المرور (10 حروف أو أرقام على الأقل) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">أعد كتابة كلمة المرور <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
+    <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding" required><option value="">— اختار —</option>
+      <option value="0">من غير تقريب</option><option value="25">ربع جنيه</option><option value="50">نص جنيه</option><option value="100">جنيه</option></select>
+      <span class="muted">التقريب بيظهر سطر لوحده في الفاتورة، وتقدر تغيّره بعدين من الإعدادات.</span></label><br>
     <button class="btn" type="submit">ابدأ</button>
     <p class="muted">احفظ كلمة المرور في مكان آمن، فبدونها لن تستطيع الدخول.</p>
   </form>
@@ -975,7 +978,7 @@ function viewSetup() {
     const f = new FormData(e.target);
     if (f.get("password") !== f.get("password2")) { toast("كلمتا السر غير متطابقتين", true); return; }
     try {
-      const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password"].map((k) => [k, f.get(k)])) });
+      const r = await api("/api/setup", { method: "POST", body: Object.fromEntries(["pharmacy", "full_name", "username", "password", "rounding"].map((k) => [k, f.get(k)])) });
       ME = r.me; location.hash = "#/import";
       toast("البرنامج جاهز. الخطوة التالية: نقل بياناتك من البرنامج القديم");
     } catch (err) {
@@ -2527,6 +2530,7 @@ function printLook(dataUrl) {
 }
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
+  const rstep = ME.permissions.includes("settings.manage") ? (await api("/api/settings/rounding")).step : 0;
   const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
@@ -2549,6 +2553,7 @@ async function renderReceiptCfg(c) {
       <p class="muted">الدرج يُفتح فقط مع الطابعة المباشرة (ESC/POS). مع «browser» لا يمكن فتح الدرج إطلاقًا، والشاشة تقول ذلك للكاشير.</p></fieldset>
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
+    <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding">${[[0, "من غير تقريب"], [25, "ربع جنيه"], [50, "نص جنيه"], [100, "جنيه"]].map(([v, t]) => `<option value="${v}" ${rstep === v ? "selected" : ""}>${t}</option>`).join("")}</select></label>
     <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
@@ -2640,6 +2645,7 @@ async function renderReceiptCfg(c) {
     e.preventDefault();
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
+      if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
@@ -3009,7 +3015,7 @@ function cashRefundRoom(s) {
 }
 
 function refundOptions(s) {
-  const room = cashRefundRoom(s), left = (s.total || 0) - (s.returned_total || 0);
+  const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
   const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
   const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
@@ -3150,7 +3156,7 @@ async function viewSale(id) {
   app.innerHTML = `
   <section class="panel"><div class="row between"><h1>فاتورة بيع ${s.sale_no ?? ""} ${s.status === "voided" ? `<span class="badge b-err">ملغاة</span>` : ""}</h1>
     <div class="row"><a class="btn secondary" href="/receipt/${s.id}" target="_blank">طباعة</a><a href="#/sales">رجوع للفواتير</a></div></div>
-    <div class="totals"><div>الإجمالي<b>${money(s.total)}</b></div><div>نقدي<b>${money(s.paid_cash)}</b></div>
+    <div class="totals"><div>الإجمالي<b>${money(s.total)}</b>${s.rounding ? `<span>تقريب النقدي ${s.rounding > 0 ? "+" : "−"}${money(Math.abs(s.rounding))} (مش مبيعات)</span>` : ""}</div><div>نقدي<b>${money(s.paid_cash)}</b></div>
       <div>بطاقة<b>${money(s.paid_card)}</b></div>${s.paid_transfer ? `<div>تحويل<b>${money(s.paid_transfer)}</b></div>` : ""}<div>آجل<b>${money(s.on_credit)}</b></div><div>مرتجع<b>${money(s.returned_total)}</b></div>
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
@@ -3450,7 +3456,7 @@ async function viewDayReview() {
     $("#drOut").innerHTML = `<div class="totals"><div>صافي المبيعات<b>${money(r.net_sales)}</b></div><div>عدد الفواتير<b>${s.n}</b></div>
         <div>الشراء<b>${r.purchases.total == null ? "—" : money(r.purchases.total)}</b></div><div class="${r.drawer.difference ? (r.drawer.difference < 0 ? "t-err" : "t-warn") : "t-ok"}">فرق الخزينة<b>${money(r.drawer.difference)}</b></div></div>
       <div class="grid2"><table><tbody>
-        ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${row("المرتجعات", r.returns.total)}
+        ${row("المبيعات", s.total)}${row("الخصومات", s.discount)}${s.rounding ? row("تقريب النقدي (مش مبيعات ولا خصم)", s.rounding) : ""}${row("المرتجعات", r.returns.total)}
         ${row(`ملغاة النهارده (${s.voided_count})`, s.voided_total)}${row("نقدي (بعد المرتجع والإلغاء)", mth.cash)}${row("بطاقة (بعد المرتجع والإلغاء)", mth.card)}
         ${row("تحويل ومحافظ", mth.transfer)}${row("آجل (بعد المرتجع والإلغاء)", mth.credit)}${row("نقدي توصيل (بيدخل الدرج لما المندوب يسلّم)", mth.delivery_cash)}${row("تحصيل آجل", r.credit_collected)}</tbody></table>
       <table><tbody>${row(`فواتير شراء معتمدة (${r.purchases.n})`, r.purchases.total)}
@@ -4080,7 +4086,8 @@ function chanOptions(kind, sel) {
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
-  const remaining = s.total - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
+  const remaining = dueNow(s) - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
+  const rnd = dueNow(s) - s.total;                       // U2-14: the cash rounding of this payment
   $("#posSide").innerHTML = `
     <section class="panel">
       <div class="seg2" role="radiogroup" aria-label="نوع الفاتورة">
@@ -4102,7 +4109,8 @@ function renderSide() {
         <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
-      <div class="sum due"><span>المطلوب</span><b>${money(s.total)}</b></div>
+      ${rnd ? `<div class="sum"><span>تقريب النقدي</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
+      <div class="sum due"><span>المطلوب</span><b>${money(dueNow(s))}</b></div>
     </section>
     <section class="panel">
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
@@ -4117,7 +4125,7 @@ function renderSide() {
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
-        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(s.total)}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
+        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
             <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
@@ -4191,8 +4199,8 @@ function renderSide() {
   }));
   $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
   $("#payGiven")?.addEventListener("input", (e) => {
-    const g = toPiasters(e.target.value), ch = g - s.total;
-    $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
+    const g = toPiasters(e.target.value), ch = g - dueNow(s);
+    $("#changeBox").hidden = !(g >= dueNow(s)); $("#changeV").textContent = money(ch);
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
     if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
@@ -4201,7 +4209,7 @@ function renderSide() {
     } else if ($("#noChangeHint")) $("#noChangeHint").hidden = !POS.noCoins;
   });
   $("#noChangeBtn")?.addEventListener("click", async () => {       // U2-20: an item instead of the coins
-    const given = toPiasters($("#payGiven").value), ch = given - SALE.total;
+    const given = toPiasters($("#payGiven").value), ch = given - dueNow(SALE);
     if (!(ch > 0)) return;
     try {
       const r = await api(`/api/sales/change-fill?change=${ch}&sale=${encodeURIComponent(SALE.id)}`);
@@ -4215,7 +4223,7 @@ function renderSide() {
       }));
     } catch (er) { toast(er.message, true); }
   });
-  $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total }]; renderSide(); });
+  $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total + roundNear(s.total, s.rounding_step || 0) }]; renderSide(); });
   $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });
   $("#partAdd")?.addEventListener("click", () => { POS.parts.push({ method: "card", channel_id: CHANNELS.find((c) => c.kind === "card")?.id, amount: Math.max(0, remaining) }); renderSide(); });
   document.querySelectorAll("[data-pm]").forEach((x) => x.addEventListener("change", () => { const p = POS.parts[+x.dataset.pm]; p.method = x.value; p.channel_id = CHANNELS.find((c) => c.kind === x.value)?.id || null; renderSide(); }));
@@ -4294,9 +4302,26 @@ function renderFindings(findings) {
   ($("#posSafety [data-dec]") || $("#posConfirm")).focus({ preventScroll: true });
 }
 
+// U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded to the
+// nearest step (ties up), as the server does
+function roundNear(v, st) {
+  if (!st || v <= 0) return 0;
+  const r = v % st, d = 2 * r >= st ? st - r : -r;
+  return v + d > 0 ? d : 0;                              // never rounds the cash part away
+}
+function cashRoundingOf(s, parts) {
+  if (!parts.some((p) => p.method === "cash")) return 0;  // no cash, no rounding: card and credit are exact
+  const nonCash = parts.filter((p) => p.method !== "cash").reduce((t, p) => t + (p.amount || 0), 0);
+  return roundNear(s.total - nonCash, s.rounding_step || 0);
+}
+// what the customer is asked for with the chosen payment (a single cash payment: the rounded total)
+function dueNow(s) {
+  if (POS.split) return s.total + cashRoundingOf(s, POS.parts);
+  return POS.method === "cash" ? s.total + roundNear(s.total, s.rounding_step || 0) : s.total;
+}
 function currentPayments() {
   if (POS.split) return POS.parts.filter((p) => p.amount > 0).map((p) => ({ method: p.method, amount: p.amount, channel_id: p.channel_id || null }));
-  return [{ method: POS.method, amount: SALE.total, channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
+  return [{ method: POS.method, amount: dueNow(SALE), channel_id: ["card", "transfer"].includes(POS.method) ? ($("#posSide [data-ch]")?.value || POS.channel) : null }];
 }
 
 // a discount still being typed (line or invoice): saved before completion like a delivery field (Codex #400)
@@ -4486,7 +4511,7 @@ async function viewShift(opts = {}) {
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
-      <div>مصروفات<b>${money(k.payout || 0)}</b></div><div>المتوقع في الخزينة<b>${money(sh.expected_cash)}</b></div>
+      <div>مصروفات<b>${money(k.payout || 0)}</b></div>${sh.rounding_total ? `<div>منها تقريب النقدي<b>${money(sh.rounding_total)}</b></div>` : ""}<div>المتوقع في الخزينة<b>${money(sh.expected_cash)}</b></div>
       ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "بطاقة" : "تحويل"} — ${esc(c.channel)}<b>${money(c.amount)}</b></div>`).join("")}
       ${sh.with_courier ? `<div>مع مندوب التوصيل<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
     ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
@@ -5702,6 +5727,7 @@ async function viewProfit() {
         <div class="${r.gross_profit >= 0 ? "t-ok" : "t-err"}">مجمل الربح<b>${money(r.gross_profit)}</b>${r.gross_margin_pct != null ? `<span>${r.gross_margin_pct}%</span>` : ""}</div>
         <div>المصروفات المعتمدة<b>${money(r.expenses_total)}</b></div>
         ${r.supplier_discounts ? `<div class="t-ok">خصومات مكتسبة من الموردين<b>${money(r.supplier_discounts)}</b></div>` : ""}
+        ${r.cash_rounding ? `<div>تقريب النقدي (مش مبيعات ولا ربح)<b>${money(r.cash_rounding)}</b></div>` : ""}
         <div class="${r.net_profit >= 0 ? "t-ok" : "t-err"}">${r.net_profit >= 0 ? "✓ صافي الربح" : "✕ صافي خسارة"}<b>${money(Math.abs(r.net_profit))}</b></div></div>
         ${r.pending_expenses.n ? `<p class="badge b-warn mt">⚠ يوجد ${r.pending_expenses.n} مصروف (${money(r.pending_expenses.a)} ج) بانتظار الموافقة وغير محتسب — <a href="#/expenses">راجعها</a></p>` : ""}
         ${r.unknown_cost_lines ? `<p class="badge b-warn mt">⚠ ${r.unknown_cost_lines} سطر بيع بدون تكلفة مسجلة — قد يكون الربح الحقيقي أقل</p>` : ""}
@@ -6039,19 +6065,19 @@ async function viewReports() {
     const maxH = Math.max(1, ...r.by_hour.map((x) => x.total)), sub = rangeText(r.from, r.to);
     $("#rSales").innerHTML = `<section class="panel" id="rSalesBox"><div class="row between"><h2>المبيعات — ${esc(sub)}</h2>${reportTools("sales")}</div>
     <div class="totals"><div>الفواتير<b>${r.totals.n}</b></div><div>المبيعات<b>${money(r.totals.total)}</b></div>
-      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div></div>
+      <div>المرتجع<b>${money(r.totals.returns)}</b></div><div>الخصومات<b>${money(r.totals.discount)}</b></div>${r.totals.rounding ? `<div>تقريب النقدي (مش مبيعات)<b>${money(r.totals.rounding)}</b></div>` : ""}</div>
     <div class="grid2 mt"><section class="panel"><h2>يوم بيوم</h2>
-      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th></tr></thead><tbody>
-      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
+      <table><thead><tr><th>اليوم</th><th>فواتير</th><th>الإجمالي</th><th>نقدي</th><th>بطاقة</th><th>تحويل</th><th>آجل</th><th>مرتجع</th><th>تقريب النقدي</th></tr></thead><tbody>
+      ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td>${d.n}</td><td class="num"><b>${money(d.total)}</b></td><td class="num">${money(d.cash)}</td><td class="num">${money(d.card)}</td><td class="num">${money(d.transfer)}</td><td class="num">${money(d.credit)}</td><td class="num">${money(d.returns)}</td><td class="num">${money(d.rounding || 0)}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">لا يوجد</td></tr>`}</tbody></table></section>
     <section class="panel"><h2>حسب الموظف</h2><table><tbody>${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.n} فاتورة</td><td class="num">${money(u.total)}</td><td class="num">${u.discount ? `خصم ${money(u.discount)}` : ""}</td></tr>`).join("") || `<tr><td class="muted">لا يوجد</td></tr>`}</tbody></table>
       <h2 class="mt">ساعات العمل</h2><div class="hbars">${Array.from({ length: 24 }, (_, h) => { const x = r.by_hour.find((y) => y.hour === h); return `<div title="${hourLabel(h)} — ${x ? x.n : 0} فاتورة"><span data-h="${Math.round(((x?.total || 0) / maxH) * 100)}"></span><small>${hourLabel(h)}</small></div>`; }).join("")}</div></section></div>
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
     wireTools("sales", () => ({ title: "تقرير المبيعات", subtitle: sub, el: $("#rSalesBox"), sheets: [
-      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع")],
-        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns]),
-        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns] },
+      { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع"), M("تقريب النقدي")],
+        rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns, d.rounding || 0]),
+        total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns, r.totals.rounding || 0] },
       { name: "حسب الموظف", columns: [Tx("الموظف"), N("فواتير"), M("الإجمالي"), M("الخصم")], rows: r.by_user.map((u) => [u.name, u.n, u.total, u.discount || 0]) },
       { name: "أكثر الأصناف", columns: [Tx("الصنف"), N("الكمية بالوحدة"), M("المبيعات"), ...(can("costs.read") ? [M("الربح")] : [])],
         rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));
