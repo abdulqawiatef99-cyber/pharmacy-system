@@ -427,3 +427,22 @@ class TestCodexFixes(PlanBase):
                             now=TODAY - timedelta(days=pp.KEEP_DAYS + 2))
         pp.set_line(self.db, self.ctx, o["id"], self.it, status="arrived", now=TODAY - timedelta(days=pp.KEEP_DAYS + 1))
         self.assertEqual(self.rows()[self.it]["arrived"], 0)
+
+    def test_one_invoice_clears_one_order_only(self):
+        for d in (3, 2):
+            pp.create_order(self.db, self.ctx, supplier_id=self.s1, lines=[{"item_id": self.it, "packs": 5}],
+                            now=TODAY - timedelta(days=d))
+        self.buy(self.it, self.s1, qty=5, status="draft", days_ago=1)
+        r = self.rows()[self.it]
+        self.assertEqual((r["on_order"], r["arrived"]), (10, 10))     # 5 packs still coming, the draft's 5 arrived
+
+    def test_partial_quantity_can_be_corrected(self):
+        o = pp.create_order(self.db, self.ctx, supplier_id=self.s1, lines=[{"item_id": self.it, "packs": 5}], now=TODAY)
+        pp.set_line(self.db, self.ctx, o["id"], self.it, status="partial", got=2, now=TODAY)
+        pp.set_line(self.db, self.ctx, o["id"], self.it, status="partial", got=3, now=TODAY)
+        self.assertEqual(self.rows()[self.it]["arrived"], 6)
+
+    def test_partial_button_stays_on_a_partial_line(self):
+        from pathlib import Path
+        js = Path("app/web/app.js").read_text(encoding="utf-8")
+        self.assertIn('.filter((s) => s !== l.status || s === "partial")', js)

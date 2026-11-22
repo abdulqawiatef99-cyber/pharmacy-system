@@ -195,18 +195,32 @@ def list_orders(db: Database, ctx: Context) -> list[dict]:
     return [_shape(o) for o in reversed(_load(db, ctx.org_id)) if o.get("branch_id") == ctx.branch_id]
 
 
-def _invoiced(db: Database, ctx: Context, since: str) -> dict[tuple[str, str], str]:
-    """(supplier, item) -> the latest time a purchase invoice (draft or approved) of that supplier with that item
-    was created, for invoices since `since`."""
-    out = {}
-    for r in db.all("SELECT p.supplier_id s, l.item_id i, max(p.created_at) t FROM purchase_invoices p"
-                    " JOIN purchase_invoice_lines l ON l.invoice_id=p.id WHERE p.org_id=? AND p.branch_id=?"
-                    " AND p.status IN ('draft','approved') AND p.created_at>=? AND l.item_id IS NOT NULL"
-                    " GROUP BY p.supplier_id, l.item_id", (ctx.org_id, ctx.branch_id, since)):
-        out[(r["s"], r["i"])] = r["t"]
-        if r["t"] > out.get((None, r["i"]), ""):
-            out[(None, r["i"])] = r["t"]          # any supplier: the item was bought elsewhere
-    return out
+def _invoiced(db: Database, ctx: Context, since: str) -> tuple[dict[str, str], dict[tuple[str, str], list]]:
+    """({item: the latest time any supplier's invoice (draft or approved) with it was created},
+        {(supplier, item): [[created_at, packs paid + free], ...] oldest first}) for invoices since `since`."""
+    latest, per = {}, {}
+    for r in db.all("SELECT p.supplier_id s, l.item_id i, p.created_at t, coalesce(l.qty,0) + coalesce(l.bonus_qty,0) n"
+                    " FROM purchase_invoices p JOIN purchase_invoice_lines l ON l.invoice_id=p.id WHERE p.org_id=?"
+                    " AND p.branch_id=? AND p.status IN ('draft','approved') AND p.created_at>=? AND l.item_id IS NOT NULL"
+                    " ORDER BY p.created_at, l.line_no", (ctx.org_id, ctx.branch_id, since)):
+        if r["t"] > latest.get(r["i"], ""):
+            latest[r["i"]] = r["t"]
+        per.setdefault((r["s"], r["i"]), []).append([r["t"], max(int(r["n"]), 0)])
+    return latest, per
+
+
+def _covered(invoices: list, since: str, need: int) -> int:
+    """Packs of `need` that invoices entered since `since` cover, oldest invoice first; what they cover is used up,
+    so one invoice never clears two orders (Codex P2)."""
+    got = 0
+    for cell in invoices:
+        if got >= need:
+            break
+        if cell[0] >= since and cell[1] > 0:
+            take = min(cell[1], need - got)
+            cell[1] -= take
+            got += take
+    return got
 
 
 def _tracked(db: Database, ctx: Context, today: date, pack: dict) -> tuple[dict, dict, list]:
@@ -216,8 +230,8 @@ def _tracked(db: Database, ctx: Context, today: date, pack: dict) -> tuple[dict,
               and str(o.get("created_at", "")) >= keep]          # past retention: never counted, write or not (Codex P2)
     if not orders:
         return {}, {}, []
-    since = min(str(o["created_at"]) for o in orders)
-    inv = _invoiced(db, ctx, since)
+    orders.sort(key=lambda o: str(o["created_at"]))            # the oldest order takes an invoice first
+    latest, per = _invoiced(db, ctx, orders[0]["created_at"])
     old = _now(today - timedelta(days=SENT_DAYS))
     on_order, arrived, ask = {}, {}, []
     for o in orders:
@@ -225,23 +239,24 @@ def _tracked(db: Database, ctx: Context, today: date, pack: dict) -> tuple[dict,
             iid, sid, p = ln["item_id"], o["supplier_id"], pack.get(ln["item_id"])
             if p is None:
                 continue
-            entered = inv.get((sid, iid))
+            invs = per.get((sid, iid), [])
             if ln["status"] == "sent":
-                if (entered and entered >= o["created_at"]) or o["created_at"] < old:
-                    continue                    # its invoice came, or nobody marked it for two weeks
-                on_order[iid] = on_order.get(iid, 0) + int(ln["packs"]) * p
+                left = int(ln["packs"]) - _covered(invs, o["created_at"], int(ln["packs"]))
+                if left > 0 and o["created_at"] >= old:             # nobody marked it for two weeks: not counted
+                    on_order[iid] = on_order.get(iid, 0) + left * p
             elif ln["status"] in ("arrived", "partial"):
-                # its invoice is entered (before or after the line was ticked): the draft or the stock counts it
-                if not (entered and entered >= o["created_at"]):
-                    arrived[iid] = arrived.get(iid, 0) + int(ln.get("got") or 0) * p
-                bought = inv.get((None, iid))
-                if bought and bought >= (ln.get("at") or o["created_at"]):
+                # what came is counted until its invoice is entered (before or after the line was ticked)
+                got = int(ln.get("got") or 0)
+                left = got - _covered(invs, o["created_at"], got)
+                if left > 0:
+                    arrived[iid] = arrived.get(iid, 0) + left * p
+                if latest.get(iid, "") >= (ln.get("at") or o["created_at"]):
                     continue                    # bought since (here or elsewhere): nothing left to ask about
                 if ln["status"] == "partial":
                     ask.append({"item_id": iid, "label": ln.get("label"), "supplier": o.get("supplier"),
-                                "missing_packs": int(ln["packs"]) - int(ln.get("got") or 0), "why": "partial"})
+                                "missing_packs": int(ln["packs"]) - got, "why": "partial"})
             elif ln["status"] == "na":
-                if (inv.get((None, iid)) or "") >= o["created_at"]:
+                if latest.get(iid, "") >= o["created_at"]:
                     continue                    # bought elsewhere since
                 ask.append({"item_id": iid, "label": ln.get("label"), "supplier": o.get("supplier"),
                             "missing_packs": int(ln["packs"]), "why": "na"})
