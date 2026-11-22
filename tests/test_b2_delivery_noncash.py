@@ -42,6 +42,16 @@ class TestNonCashDelivery(V2):
         self.assertIsNotNone(self.db.one("SELECT shift_id FROM sales WHERE id=?", (d["id"],))["shift_id"])
         self.assertEqual(self.cd.summary(self.ctx)["card_total"], 5000)
 
+    def test_closing_with_no_shift_open_is_refused(self):
+        # review P1 (2nd round): settled with no shift open, the card money would belong to no shift ever
+        from app.core.errors import Conflict
+        self.cd.close(self.ctx, self.cd.summary(self.ctx)["expected_cash"])
+        d = self.delivery()
+        self.done(d, [{"method": "card", "amount": 5000, "channel_id": self.visa}])
+        with self.assertRaises(Conflict):
+            self.s.delivery_status(self.ctx, d["id"], "settled")
+        self.assertEqual(self.db.one("SELECT status FROM sale_deliveries WHERE sale_id=?", (d["id"],))["status"], "out")
+
     def test_void_of_a_wallet_delivery_takes_no_cash_from_the_drawer(self):
         d = self.delivery()
         self.done(d, [{"method": "transfer", "amount": 5000, "channel_id": self.insta}])
