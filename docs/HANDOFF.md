@@ -8,6 +8,30 @@
 
 
 
+## 22/11 night — UPDATE-2 worker session: end report (READ THIS FIRST)
+Base develop @ `88cb658` (update 1 = main @ `4f2828f`). Each PR: tests first, an independent fresh-context agent review before Codex (OWNER_RULES §12), then Codex until no P0/P1, CI linux green on the same head, merge commit. Nothing on main, no installer, no migration, no `requirements.txt` change: the whole batch ships through the in-app «تحديث» once the owner merges the release PR.
+| PR | Items | Result |
+|---|---|---|
+| #402 | U2-36 smart order screen | merged `180d472` |
+| #405 | POS U2-11/12/13/18/25/32/34/35 | merged `d22b496` |
+| #403 | U2-0 refusals + OWNER_RULES §13, permissions `sales.refund_other_method`, `suppliers.pay_advance` | merged `b3bf34d` |
+| #404 | shift U2-26/28/29/30 | merged `9216cf4` |
+| #406 | purchases U2-1/2/3/4/5/9/16/22 | merged `603b8d5` |
+| #407 | U2-8 day review, U2-10 slow log, U2-15 RTL/LTR | see below |
+Behaviour changes the owner should know (all his rules, said in each PR):
+- Exchanging a card-paid invoice for cash needs a manager PIN; a cash invoice exchanges as before.
+- Paying a supplier more than his balance (an advance) needs a written reason and owner/manager rights.
+- A refund goes back by the way the money came; cash back for a card invoice = owner/manager PIN.
+- A discount bigger than the line or the invoice is refused (no longer silently cut).
+- A supplier invoice dated after today is refused; short expiry (< 180 days) and "won't sell before it gets near expiry" need a written reason to approve.
+- Sign-out asks first (personal setting «تأكيد الخروج»).
+U2 items, exact state:
+- DONE: U2-0 (#403) · U2-36 (#402) · U2-26, U2-28, U2-29, U2-30 (#404) · U2-11, U2-12, U2-13 (partial: unit kept by quantity, see P2), U2-18, U2-25, U2-32, U2-34, U2-35 (#405) · U2-1 (quick-add row only), U2-2, U2-3, U2-4, U2-5, U2-9, U2-16 (xlsx/csv; text-PDF not tested), U2-22 (#406) · U2-8, U2-10 (log + search speed test), U2-15 (#407) · U2-7 (already in update 1).
+- NOT DONE: U2-23 receipt template, U2-24 sold unit on the receipt (both `app/printing/`, a session may open but not merge them, OWNER_RULES §10; U2-24 also needs a `sale_unit` column = migration) · U2-33 discount limit per user + never below cost (changes an agreed money rule) · U2-14 invoice rounding (money rule + setting + setup question) · U2-27 silent printing (`app/printing/`) · U2-20 «مفيش فكة» · U2-19 shortcuts in Settings · U2-17 remove tablet splitting · U2-31 two drawers (migration) · U2-21 dispensing notes UI · U2-6 print time (migration) · U2-1 arrows/Enter inside the line grid (only the quick-add row has it) · U2-10 the two freezes (not reproducible in the cloud; the log will catch them on the PC).
+Open P2s (next small PR): day review splits wallet refunds into card (#407 thread); unit selector cannot tell 3 strips from 1 box without `sale_unit`; RTL test checks page direction only.
+Git note: in this environment commits pass only with short one-line messages (long multi-line messages and `--amend` were refused by the auto-mode check).
+Next: owner reviews and merges the release PR develop → main, then presses «تحديث» on the cashier PC; device check of the new screens (#18 sheet).
+
 ## 21/11 Cairo — update 1 (launch-day fixes, through the «تحديث» button) (READ THIS FIRST)
 State: main @ `f2af5bd` (#399, tree == develop `6e48238`), installer built and installed, E-Stock moved, the pharmacy is LIVE since 18:04. Owner 19:14 «توكل على الله ونفذ» + 19:39 additions (8b, 10). Branch `claude/update-1`, one PR into develop, then a release PR into main (the owner merges; he stops selling for the 1-2 minutes of the update).
 1. E-Stock import: `Products.deleted='1'` is normal on live rows (30,269 of 30,508): inactive = active '0' OR deleted '0'; reconciliation also compares active counts. The live PC was already fixed by a one-off script (same result). This most likely also explains «3796 found nothing» (the item was inactive then). Customers/suppliers still read `deleted` the old way (no data says otherwise): check on the PC.
