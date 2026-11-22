@@ -127,9 +127,21 @@ class J(JSONResponse):
         return json.dumps(content, ensure_ascii=False, default=_json_default).encode("utf-8")
 
 
+SLOW_MS = 800                      # U2-10: a request slower than this is written to the server log
+SLOW_LOG: deque = deque(maxlen=200)   # and kept here (newest last) for the «البرنامج» screen
+_slow_logger = logging.getLogger("pharmacy.slow")
+
+
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
+        t0 = time.monotonic()
         resp = await call_next(request)
+        ms = int((time.monotonic() - t0) * 1000)
+        if ms > SLOW_MS:                 # the path only, never the query (a customer search carries a phone, #140)
+            org = (request.scope.get("state") or {}).get("org_id")
+            SLOW_LOG.append({"at": time.time(), "method": request.method, "path": request.url.path, "ms": ms,
+                             "status": resp.status_code, "org_id": org})
+            _slow_logger.warning("slow request %s %s %d ms", request.method, request.url.path, ms)
         printable = request.url.path.startswith(PRINT_PAGES)
         resp.headers.setdefault("Content-Security-Policy", CSP_PRINT if printable else CSP)
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -225,6 +237,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
         if approver and req.url.path == "/api/approvals/check":
             # the PIN is typed once and checked here only; every other request carries the approval token (#137)
@@ -787,6 +800,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def my_prefs(req):
         ctx = ctx_of(req)
         return J(people.set_prefs(db, ctx, await body(req)))
+
+    @handler
+    async def item_health_api(req):
+        from ..reports.item_health import item_health
+        return J(await off_loop(item_health, db, ctx_of(req)))
+
+    @handler
+    async def item_pack_preview(req):
+        from ..catalog import repack
+        return J(repack.preview(db, ctx_of(req), req.path_params["id"],
+                              int(p) if (p := req.query_params.get("pack") or "").isdigit() else -1))
+
+    @handler
+    async def item_pack_correct(req):
+        from ..catalog import repack
+        b = await body(req)
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
 
     @handler
     async def item_card_get(req):
@@ -1582,8 +1612,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 f"SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? AND branch_id=?"
                 f" AND item_id IN ({','.join('?' * len(ids))}) GROUP BY item_id",
                 (ctx.org_id, ctx.branch_id, *ids))}
+            from ..sales.service import local_today as _today_local
+            # U2-35: the nearest expiry still to come of what is on the shelf
+            soon = {r["item_id"]: r["e"] for r in db.all(
+                f"SELECT sb.item_id, min(b.expiry_date) e FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                f" WHERE sb.org_id=? AND sb.branch_id=? AND sb.qty>0 AND b.expiry_date>=?"
+                f" AND sb.item_id IN ({','.join('?' * len(ids))}) GROUP BY sb.item_id",
+                (ctx.org_id, ctx.branch_id, _today_local().isoformat(), *ids))}
             for r in rows:
                 r["stock_qty"] = qty.get(r["id"], 0)     # base units
+                r["nearest_expiry"] = soon.get(r["id"])
         hidden_no_stock = 0
         if stock_first and rows and "stock_qty" in rows[0]:
             has = lambda r: bool(r.get("is_service")) or (r["stock_qty"] or 0) > 0      # noqa: E731
@@ -1702,6 +1740,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         b = await body(req)
         return J(purch.delete_line(ctx, req.path_params["id"], req.path_params["line_id"],
+                                   b.get("version")))
+
+    @handler
+    async def line_split(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        try:
+            qty = whole_number(b.get("qty"))
+        except (TypeError, ValueError):
+            raise ValidationFailed("الكمية لازم رقم صحيح")
+        return J(purch.split_line(ctx, req.path_params["id"], req.path_params["line_id"], qty, b.get("expiry_date"),
+                                  b.get("batch_no"), b.get("version")))
+
+    @handler
+    async def line_merge(req):
+        ctx = ctx_of(req)
+        b = await body(req)
+        return J(purch.merge_lines(ctx, req.path_params["id"], req.path_params["line_id"], str(b.get("other_line", "")),
                                    b.get("version")))
 
     @handler
@@ -2009,6 +2065,27 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return Response(suggestions_xlsx(rows, db, ctx), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
+
+    @handler
+    async def proc_smart(req):
+        from ..procurement import smart_order
+        ctx, qp = ctx_of(req), req.query_params
+        try:
+            dear = _hundredths(qp.get("expensive_from") or "300")
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationFailed("قيم غير صحيحة")
+        if not 0 <= dear <= 10_000_000:
+            raise ValidationFailed("حد الصنف الغالي غير صحيح")
+        return J(await off_loop(smart_order.smart_order, db, ctx, scope=qp.get("scope") or "default",
+                                expensive_from=dear, **_sugg_params(req)))
+
+    @handler
+    async def proc_order_xlsx(req):
+        from ..procurement import smart_order
+        b = await body(req)
+        return Response(smart_order.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
 
     @handler
     async def proc_health(req):
@@ -2483,8 +2560,65 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def day_review_api(req):
+        from ..reports.day_review import day_review
+        return J(await off_loop(day_review, db, ctx_of(req), req.query_params.get("day") or None))
+
+    @handler
+    async def slow_requests(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        # only this pharmacy's requests (Codex P1 on #407); requests before sign-in carry no pharmacy and are not shown
+        mine = [{k: v for k, v in x.items() if k != "org_id"} for x in SLOW_LOG if x.get("org_id") == ctx.org_id]
+        return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
+
+    @handler
+    async def cash_float_target(req):
+        from ..sales import shift_tools
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            return J(shift_tools.save_target(db, ctx, (await body(req)).get("target")))
+        ctx.require("cash.close")
+        return J(shift_tools.get_target(db, ctx.org_id))
+
+    @handler
+    async def sales_change_fill(req):
+        """«مفيش فكة» (U2-20): small in-stock items that fit in the customer's change."""
+        from ..sales import change_fill
+        ctx = ctx_of(req)
+        try:
+            change = int(req.query_params.get("change") or 0)
+        except ValueError:
+            raise ValidationFailed("الباقي غير صحيح")
+        return J(await off_loop(change_fill.suggestions, db, ctx, change, req.query_params.get("sale") or None))
+
+    @handler
+    async def cash_float_preview(req):
+        """Which notes stay in the drawer and which go to the treasury, for the count on the close screen."""
+        from ..sales import shift_tools
+        from ..sales.cash import count_total
+        ctx = ctx_of(req)
+        ctx.require("cash.close")
+        b = await body(req)
+        total, clean = count_total(b.get("denominations") or {})
+        fl = b.get("float_left")
+        if fl is not None:              # the closer typed his own float: show the notes for that amount (Codex P2)
+            try:
+                fl = whole_number(fl)
+            except (TypeError, ValueError):
+                raise ValidationFailed("الفكة غير صحيحة")
+            if not 0 <= fl <= total:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
+
+    @handler
+    async def cash_hunt(req):
+        from ..sales import shift_tools
+        return J(await off_loop(shift_tools.difference_hunt, db, ctx_of(req), req.path_params["id"]))
 
     @handler
     async def shift_report_page(req):
@@ -2515,13 +2649,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         drawer = "".join(f"<tr><td><small>{t(d['at'])} {e(d.get('by') or '')} — {e(d.get('reason') or '')}"
                          f"{(' : ' + e(d['note'])) if d.get('note') else ''}{' (فشل)' if d.get('outcome') == 'failed' else ''}</small></td><td></td></tr>"
                          for d in r["drawer_manual"])
-        drawer = (f"<hr><table><tr><td>أوامر فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
-                  f"<tr><td>أوامر فتح الدرج يدويًا</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
+        drawer = (f"<hr><table><tr><td>فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
+                  f"<tr><td>فتح الدرج من غير بيع</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
+        # U2-28: duration, credit sales by customer, discounts by seller, notes kept / moved, signatures
+        dur = ""
+        if r.get("closed_at"):
+            mins = int((accounts.parse_iso(r["closed_at"]) - accounts.parse_iso(r["opened_at"])).total_seconds() // 60)
+            dur = f"<br>مدة الشيفت: {mins // 60} ساعة و{mins % 60} دقيقة"
+        credit_rows = "".join(f"<tr><td>آجل فاتورة {c['sale_no']} — {e(c['customer'] or 'بدون اسم')}</td><td>{m(c['on_credit'])}</td></tr>"
+                              for c in r.get("credit_sales") or [])
+        disc_rows = "".join(f"<tr><td>خصم {e(d['name'] or '')} ({d['n']} فاتورة)</td><td>{m(d['total'])}</td></tr>"
+                            for d in r.get("discount_by_user") or [])
+        sp = r.get("float_split") or {}
+        keep_rows = "".join(f"<tr><td>{int(d) / 100:g} × {n}</td><td>{m(int(d) * n)}</td></tr>"
+                            for d, n in sorted((sp.get("keep") or {}).items(), key=lambda kv: -int(kv[0])))
+        fl = r.get("float_left")
+        kept = ""
+        if r["status"] == "closed" and fl is not None:
+            kept = (f"<hr><table><tr class='t'><td>الفكة اللي فضلت في الدرج</td><td>{m(fl)}</td></tr>{keep_rows}"
+                    f"<tr class='t'><td>اتحوّل للخزنة</td><td>{m((r['counted_cash'] or 0) - fl)}</td></tr></table>")
+        hint = ""
+        if r["status"] == "closed" and diff:
+            hint = "<p><small>دوّر على سبب الفرق من شاشة الشيفت ← «دوّر على الفرق» (قروش الفواتير، فتح الدرج، المرتجعات).</small></p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
 <div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
-إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')})</p>
+إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')}){dur}</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
@@ -2532,10 +2686,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<hr><table>{den_rows}</table>" if den_rows else ""}
 <table><tr class="t"><td>المعدود</td><td>{m(r['counted_cash'])}</td></tr>{res}</table>
 {f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
-{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr></table>" if r['credit_total'] else ""}
+{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr>{credit_rows}</table>" if r['credit_total'] else ""}
+{f"<hr><table>{disc_rows}</table>" if disc_rows else ""}
+{kept}{hint}
 {f"<p>ملاحظة: {e(r['close_note'])}</p>" if r.get('close_note') else ""}
 {drawer}
-<p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
+<p class="f">توقيع الكاشير: ..................</p><p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
     @handler
@@ -2907,6 +3063,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/items/{id}", item_get),
         Route("/api/items/{id}", item_update, methods=["PATCH"]),
         Route("/api/items/{id}/card", item_card_get),
+        Route("/api/items/{id}/pack-fix", item_pack_preview),
+        Route("/api/items/{id}/pack-fix", item_pack_correct, methods=["POST"]),
+        Route("/api/reports/item-health", item_health_api),
         Route("/api/items/{id}/branch-stock", item_branch_stock),
         Route("/api/items/{id}/movements", item_moves),
         Route("/api/audit", audit_list),
@@ -2953,6 +3112,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}", line_update, methods=["PATCH"]),
         Route("/api/purchases/{id}/lines/{line_id}", line_delete, methods=["DELETE"]),
         Route("/api/purchases/{id}/lines/{line_id}/new-item", line_new_item, methods=["POST"]),
+        Route("/api/purchases/{id}/lines/{line_id}/merge", line_merge, methods=["POST"]),
+        Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
@@ -2974,10 +3135,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/procurement/suggestions", proc_suggest),
         Route("/api/procurement/suggestions.xlsx", proc_suggest_xlsx),
         Route("/api/procurement/health", proc_health),
+        Route("/api/procurement/smart", proc_smart),
+        Route("/api/procurement/order.xlsx", proc_order_xlsx, methods=["POST"]),
         Route("/api/procurement/suppliers/{id}", proc_supplier_costs),
         Route("/api/procurement/offer", proc_offer, methods=["POST"]),
         Route("/api/procurement/consumption", proc_consumption, methods=["POST"]),
         Route("/api/procurement/deadstock", proc_deadstock, methods=["POST"]),
+        Route("/api/sales/change-fill", sales_change_fill),
         Route("/api/sales", sales_create, methods=["POST"]),
         Route("/api/sales", sales_list),
         Route("/api/sales/summary", sales_summary),
@@ -3034,7 +3198,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/cash/movements", cash_move, methods=["POST"]),
         Route("/api/cash/close", cash_close, methods=["POST"]),
         Route("/api/cash/shifts", cash_shifts),
+        Route("/api/system/slow-requests", slow_requests),
+        Route("/api/reports/day-review", day_review_api),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/hunt", cash_hunt),
+        Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
+        Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
         Route("/api/money/accounts", money_accounts_view, methods=["GET", "POST"]),
         Route("/api/money/accounts/{id}", money_account_one, methods=["GET", "PATCH"]),
         Route("/api/money/accounts/{id}/statement", money_statement_view),

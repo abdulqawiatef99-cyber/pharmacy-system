@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from fractions import Fraction
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path, PurePosixPath
@@ -270,10 +271,56 @@ class Purchasing:
             "SELECT 1 FROM purchase_invoices WHERE org_id=? AND content_hash=? AND status<>'cancelled'"
             " AND id<>? AND coalesce(supplier_id,'')=coalesce(?, '')",
             (ctx.org_id, inv["content_hash"], inv["id"], inv["supplier_id"])))
-        return validation.validate(inv, lines, items=items, today=date.today(),
-                                   short_expiry_days=self.s.short_expiry_days,
-                                   total_tolerance=self.s.total_tolerance_piasters,
-                                   duplicate_no=dup_no, duplicate_content=dup_content)
+        out = validation.validate(inv, lines, items=items, today=date.today(),
+                                  short_expiry_days=self.s.short_expiry_days,
+                                  total_tolerance=self.s.total_tolerance_piasters,
+                                  duplicate_no=dup_no, duplicate_content=dup_content)
+        return out + self._slow_before_expiry(ctx, inv, lines)
+
+    NEAR_DAYS = 90          # an item is "near expiry" from 3 months before its date (U2-22)
+
+    def _slow_before_expiry(self, ctx: Context, inv: dict, lines: list[dict]) -> list[validation.Issue]:
+        """U2-22: from the last 90 days' sales, how much of this line will sell before it gets near its expiry.
+        More than that needs a written reason to approve. Items never sold here are left out (a new item would
+        always be flagged)."""
+        from ..procurement.service import Procurement
+        today = date.today()
+        acks = {(a.get("code"), a.get("line_id") or "", json.dumps(a.get("details") or {}, sort_keys=True))
+                for a in json.loads(inv.get("acknowledged_issues") or "[]")}
+        p, out, by_item = Procurement(self.db, today=today), [], {}
+        if inv.get("branch_id") and inv["branch_id"] != ctx.branch_id:      # the branch that receives the goods
+            from dataclasses import replace as _replace                       # (Codex P2 on #406)
+            ctx = _replace(ctx, branch_id=inv["branch_id"])
+        for l in lines:
+            if l.get("item_id") and l.get("expiry_date") and l.get("qty") and l["expiry_date"] >= today.isoformat():
+                by_item.setdefault(l["item_id"], []).append(l)       # expired lines: refused by "expired" already
+        for item_id, group in by_item.items():
+            it = self.db.one("SELECT pack_size, is_service FROM items WHERE id=? AND org_id=?", (item_id, ctx.org_id))
+            if not it or it["is_service"]:
+                continue
+            daily = p._usage(ctx, item_id, 90)["daily"]
+            if daily <= 0:
+                continue
+            ahead = max(p._sellable(ctx, item_id)[0], 0)       # the shelf sells first, then the lines, earliest expiry first
+            for l in sorted(group, key=lambda x: (x["expiry_date"], x.get("line_no") or 0)):
+                days = (date.fromisoformat(l["expiry_date"]) - today).days
+                qty = (l["qty"] + (l["bonus_qty"] or 0)) * it["pack_size"]
+                rate = Fraction(daily).limit_denominator(1_000_000)          # 13/90, not 0.14444…
+                cap = rate * max(0, days - self.NEAR_DAYS)
+                will = max(0, int(cap + Fraction(1, 2)) - ahead)             # half up
+                ahead += qty
+                if will >= qty:
+                    continue
+                # the match keeps only what the person accepted (this expiry, this quantity): the sales of the day
+                # and the date moving on do not undo the acceptance (independent review)
+                details = {"item_id": item_id, "expiry": l["expiry_date"], "qty": qty}   # a re-matched item re-asks
+                i = validation.Issue("error", "slow_before_expiry",
+                                     f"هتبيع حوالي {min(will, qty)} من {qty} وحدة قبل ما يقرب ينتهي (البيع حوالي"
+                                     f" {daily * 30:.0f} في الشهر، والصلاحية بعد {days // 30} شهر): اكتب السبب",
+                                     l["id"], "expiry_date", details)
+                i.acknowledged = ("slow_before_expiry", l["id"], json.dumps(details, sort_keys=True)) in acks
+                out.append(i)
+        return out
 
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
         ctx.require("purchases.read")
@@ -364,7 +411,14 @@ class Purchasing:
                 if k in ("extra_discount", "extra_tax") and v is None:
                     v = 0
                 if k == "invoice_date" and v:
-                    date.fromisoformat(v)
+                    try:
+                        d = date.fromisoformat(v)
+                    except (TypeError, ValueError):
+                        raise ValidationFailed("تاريخ فاتورة المورد غير صحيح")
+                    from ..sales.service import local_today
+                    if d > local_today():          # U2-0: a supplier invoice is never dated after today
+                        raise ValidationFailed("تاريخ فاتورة المورد بعد النهارده: مستحيل، راجع التاريخ",
+                                               code="invoice_date_future")
                 clean[k] = v
             if clean:
                 sets = ", ".join(f"{k}=?" for k in clean)
@@ -451,7 +505,7 @@ class Purchasing:
                     upd[k] = v
                 elif k == "expiry_date":
                     if v:
-                        iso, prec = parse_expiry(v)
+                        iso, prec = parse_expiry(v, compact=True)
                         if not iso:
                             raise ValidationFailed("تاريخ صلاحية غير مفهوم (مثال: 05/2027)")
                         upd.update(expiry_date=iso, expiry_precision=prec)
@@ -539,6 +593,111 @@ class Purchasing:
                          before=dict(line))
         return self.get(ctx, inv_id)
 
+    def merge_lines(self, ctx: Context, inv_id: str, line_id: str, other_id: str, version: int | None) -> dict:
+        """U2-3: two lines of the same item, batch, expiry and prices become one (quantities, bonus, totals and
+        tax added). Anything that differs is refused: those are two real lots, not a duplicate."""
+        ctx.require("purchases.edit")
+        with self.db.transaction():
+            self._draft_for_update(ctx, inv_id, version)
+            a, b = (self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=? AND org_id=?",
+                                (x, inv_id, ctx.org_id)) for x in (line_id, other_id))
+            if not a or not b or line_id == other_id:
+                raise NotFound("السطر غير موجود")
+            keys = ("item_id", "public_price", "discount_bp", "unit_net_price", "expiry_date", "expiry_precision")
+            # a value still waiting for a person (low-confidence reading, unconfirmed match) is never merged away
+            # (Codex P1 on #406): it is confirmed first
+            if a["qty"] is None or b["qty"] is None:
+                raise ValidationFailed("اكتب كمية السطرين الأول وبعدين ادمج", code="not_mergeable")
+            for ln in (a, b):
+                src, conf = json.loads(ln["field_sources"] or "{}"), json.loads(ln["field_confidence"] or "{}")
+                if ln["match_status"] == "suggested" or any(c < validation.LOW_CONFIDENCE and src.get(f) != "user"
+                                                            for f, c in conf.items()):
+                    raise ValidationFailed("في السطرين قيمة لسه محتاجة مراجعة؛ أكّدها الأول وبعدين ادمج",
+                                           code="not_mergeable")
+            if not a["item_id"] or any(a[k] != b[k] for k in keys) or \
+                    (a["batch_no"] or "").strip().upper() != (b["batch_no"] or "").strip().upper():
+                raise ValidationFailed("السطرين مش متطابقين (الصنف والتشغيلة والصلاحية والسعر): مينفعش يتدمجوا",
+                                       code="not_mergeable")
+            # in payable amounts (validation.effective_amount): a total printed without tax on one line and with
+            # tax on the other must not change what the invoice pays (Codex P1 on #406)
+            pay_a, pay_b = validation.effective_amount(dict(a)), validation.effective_amount(dict(b))
+            tax = None if a["tax_amount"] is None and b["tax_amount"] is None else (a["tax_amount"] or 0) + (b["tax_amount"] or 0)
+            merged = {**dict(a), "qty": a["qty"] + b["qty"], "tax_amount": tax,
+                      "line_total": None if a["line_total"] is None and b["line_total"] is None
+                      else (pay_a + pay_b if pay_a is not None and pay_b is not None else None)}
+            if (pay_a is None) != (pay_b is None) or (merged["line_total"] is None and (a["line_total"], b["line_total"]) != (None, None)) \
+                    or (pay_a is not None and validation.effective_amount(merged) != pay_a + pay_b):
+                raise ValidationFailed("السطرين مش هيتدمجوا من غير ما إجمالي الفاتورة يتغير؛ عدّل الكمية يدويًا", code="not_mergeable")
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=?"
+                            " WHERE id=? AND org_id=?",
+                            (merged["qty"], (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0), merged["line_total"], tax, line_id,
+                             ctx.org_id))
+            self.db.execute("DELETE FROM purchase_invoice_lines WHERE id=? AND org_id=?", (other_id, ctx.org_id))
+            self._refresh_totals(ctx, inv_id)
+            self._bump(inv_id)
+            audit.record(self.db, ctx, "purchase.line_merge", "purchase_invoice", inv_id,
+                         before={"kept": dict(a), "merged": dict(b)})
+        return self.get(ctx, inv_id)
+
+    def split_line(self, ctx: Context, inv_id: str, line_id: str, qty: int, expiry, batch_no: str | None,
+                   version: int | None) -> dict:
+        """U2-9 «+ صلاحية»: part of a line's paid quantity has another expiry. It becomes its own line (its own lot)
+        with the same item and prices; the original keeps the rest. The bonus stays on the original line."""
+        ctx.require("purchases.edit")
+        if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
+            raise ValidationFailed("الكمية لازم رقم صحيح أكبر من صفر")
+        iso, prec = parse_expiry(expiry, compact=True)
+        if not iso:
+            raise ValidationFailed("الصلاحية مش مفهومة (مثال: 1128 أو 11/2028)")
+        with self.db.transaction():
+            inv = self._draft_for_update(ctx, inv_id, version)
+            a = self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=? AND org_id=?",
+                            (line_id, inv_id, ctx.org_id))
+            if not a:
+                raise NotFound("السطر غير موجود")
+            if not a["qty"] or qty >= a["qty"]:
+                raise ValidationFailed(f"الكمية لازم أقل من كمية السطر ({a['qty'] or 0})", code="split_too_big")
+            if iso == a["expiry_date"]:
+                raise ValidationFailed("دي نفس صلاحية السطر")
+            # whole piasters: the new line takes its share rounded down, the original keeps the rest, so the two always
+            # add up to what the line had (independent review: a None share dropped the tax from the invoice)
+            half_up = lambda v: None if v is None else (2 * v * qty + a["qty"]) // (2 * a["qty"])   # noqa: E731
+            pay = validation.effective_amount(dict(a))
+            moved_tax = half_up(a["tax_amount"])
+            # the new line takes its share of what the line PAYS (tax included, half up); the original keeps the rest,
+            # so the invoice total cannot move (Codex P1 on #406: raw total and tax split apart re-read the tax)
+            moved_total = None if a["line_total"] is None else half_up(pay)
+            n = self.db.one("SELECT coalesce(max(line_no),0)+1 n FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=?",
+                            (inv_id, ctx.org_id))["n"]
+            row = {**dict(a), "id": new_id(), "line_no": n, "qty": qty, "bonus_qty": 0, "line_total": moved_total,
+                   "tax_amount": moved_tax, "expiry_date": iso, "expiry_precision": prec,
+                   "batch_no": (str(batch_no).strip() or None) if batch_no else None,
+                   "field_sources": json.loads(a["field_sources"] or "{}"), "field_confidence": json.loads(a["field_confidence"] or "{}")}
+            row["field_sources"].update(expiry_date="user", qty="user")
+            self._insert_line(row)
+            rest = {**dict(a), "qty": a["qty"] - qty,
+                    "line_total": None if a["line_total"] is None else pay - moved_total,
+                    "tax_amount": None if a["tax_amount"] is None else a["tax_amount"] - moved_tax}
+            if a["line_total"] is not None and pay is not None:
+                # each part stores the total that makes it pay exactly its share: as printed with tax, or, when the
+                # validator would read that one as "before tax", the same share minus its tax
+                for part, share in ((row, moved_total), (rest, pay - moved_total)):
+                    for cand in (share, share - (part["tax_amount"] or 0)):
+                        if validation.effective_amount({**part, "line_total": cand}) == share:
+                            part["line_total"] = cand
+                            break
+                self.db.execute("UPDATE purchase_invoice_lines SET line_total=? WHERE id=? AND org_id=?",
+                                (row["line_total"], row["id"], ctx.org_id))
+            if pay is not None and validation.effective_amount(row) + validation.effective_amount(rest) != pay:
+                raise ValidationFailed("التقسيم كان هيغيّر إجمالي السطر؛ قسّمه يدويًا", code="split_changes_total")
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=? AND org_id=?",
+                            (rest["qty"], rest["line_total"], rest["tax_amount"], line_id, ctx.org_id))
+            self._refresh_totals(ctx, inv_id)
+            self._bump(inv_id)
+            audit.record(self.db, ctx, "purchase.line_split", "purchase_invoice", inv_id,
+                         after={"line_id": line_id, "new_line": row["id"], "qty": qty, "expiry": iso})
+        return self.get(ctx, inv_id)
+
     def create_item_from_line(self, ctx: Context, inv_id: str, line_id: str, item: dict,
                               version: int | None, force: bool = False) -> dict:
         """New product the pharmacy never stocked: create it and link the line."""
@@ -600,6 +759,11 @@ class Purchasing:
             if blocking:
                 raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
                                details={"issues": [i.as_dict() for i in blocking]})
+            if inv["invoice_date"]:
+                from ..sales.service import local_today
+                if date.fromisoformat(inv["invoice_date"]) > local_today():     # U2-0: an import may carry it
+                    raise Conflict("تاريخ فاتورة المورد بعد النهارده: مستحيل، صحّح التاريخ قبل الاعتماد",
+                                   code="invoice_date_future")
             amounts = [validation.effective_amount(l) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []

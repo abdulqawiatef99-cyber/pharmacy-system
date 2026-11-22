@@ -58,7 +58,7 @@ class TestS6X6SupplierRetry(APICase):
     def test_payment_without_suppliers_read_posts_once_and_answers_success(self):
         c = self.staff("suppliers.read")
         hdr = {**H, "Idempotency-Key": "pay-1"}
-        body = {"amount": 5000, "method": "drawer"}
+        body = {"amount": 5000, "method": "drawer", "note": "دفعة مقدمة متفق عليها"}
         first = c.post(f"/api/suppliers/{self.sid}/pay", json=body, headers=hdr)
         self.assertEqual(first.status_code, 200, first.text)
         retry = c.post(f"/api/suppliers/{self.sid}/pay", json=body, headers=hdr)

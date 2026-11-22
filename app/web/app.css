@@ -431,3 +431,5 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 
 /* part 3 C: the cart line chosen with the arrow keys */
 .cart tbody tr.sel { outline: 2px solid var(--brand, #0a7); outline-offset: -2px; }
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]::after { content: " " attr(data-dir); }
