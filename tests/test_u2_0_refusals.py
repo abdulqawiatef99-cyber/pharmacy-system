@@ -95,6 +95,8 @@ class Refused(SalesCase):
 
     def test_invoice_discount_left_bigger_after_line_removed(self):
         sid = self.s.create(self.ctx)
+        with self.db.transaction():   # U2-33: nobody sells under cost; this test is about the invoice discount, so the cost is unknown
+            self.db.execute("DELETE FROM item_costs WHERE item_id=?", (self.pan,))
         d = self.s.add_line(self.ctx, sid, self.pan, units=4)
         d = self.s.set_invoice_discount(self.ctx, sid, amount=d["total"] - 100)
         d = self.s.update_line(self.ctx, sid, d["lines"][0]["id"], qty_base=4)      # unchanged: fine
@@ -173,3 +175,20 @@ class PurchaseRefused(SalesCase):
     def test_duplicate_supplier_invoice_number(self):
         self.draft(no="DUP")
         self.refuses(self.draft, no="DUP")
+
+
+
+class TestKeepChangeIsOnlyChange(__import__("tests.test_sales", fromlist=["SalesCase"]).SalesCase):
+    """«خليها رصيد للعميل»: more than real change (50 EGP, below the cash paid) is an advance, refused here."""
+    def test_refused(self):
+        from app.core.errors import ValidationFailed
+        from app.db import new_id
+        cid = new_id()
+        with self.db.transaction():
+            self.db.execute("INSERT INTO customers (id, org_id, name, credit_limit) VALUES (?,?,?,?)",
+                            (cid, self.ctx.org_id, "عميل", 0))
+        sid = self.s.create(self.ctx, cid)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=1)
+        with self.assertRaises(ValidationFailed) as e:
+            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid), change_to_credit=100_000)
+        self.assertEqual(e.exception.code, "keep_change_too_big")

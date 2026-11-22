@@ -8,6 +8,70 @@
 
 
 
+## 22/11 — UPDATE-4 worker session: progress log (READ THIS FIRST; newest line last)
+Spec: the manager's «Update 4» message (priority U4-0 … U4-13). Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge into develop only with linux CI green and no open Codex P0/P1; one release PR into main at the end (owner pre-approved on the gates, linux AND windows green).
+| PR | Item | State |
+|---|---|---|
+| #430 | U4-0 restore device/printing settings from an older copy + clean start carries them (`device_settings_carry.json`) + first-run printers step | **merged `3eb0325`**; linux + windows-scripts green on 301206b; Codex clean after 2 P2 fixes; agent review 1 P1 + 5 P2 fixed |
+| #431 | U4-1 smart order reads the E-Stock sales archive (`app/procurement/demand.py`; `monthly()` for U4-2) | **merged `ac120f6`**; linux green on a0ef0d1; Codex clean after 1 P1 (permission) + 1 P2 (returns on two lines) fixes; agent review 2 P1 fixed |
+Device check for the owner after «تحديث» (develop now; main only with the release PR): Settings → «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة» → choose the data-trial-* folder → check the printing lines → restore → «اطبع 3 ملصقات تجربة» on one label each.
+Assumption to verify on the PC (#431): E-Stock `amount` on sale lines is in packs (fractions = part of a pack). Compare one item-month of the smart order with E-Stock's own sales report.
+Known P2 left (#431): an item with no matched archive rows loses its manual upload for months the archive covers.
+Not started: U4-2 … U4-13 (this session stopped at a clean point: context high).
+**Part 2 (22/11 evening):**
+| #433 | U4-2 purchases tool («أداة المشتريات», `app/procurement/purchase_plan.py`): regular/semi rules, week/2 weeks/month, supplier split by real discount, order tracking in org_settings JSON (no migration), Excel / ask-about / names to check / prices to update / message draft, supplier name memory via item_aliases | PR open on `be11b1f`; Codex asked, label `ci` set. Full suite before the review fixes 2866 OK (10 skipped); after the fixes the 56 targeted tests OK. Agent review: 1 P1 + 6 P2 fixed; 1 P2 left (arrived line entered under another supplier keeps counting); owner question: >=6 of 12 but <2 of last 3 = irregular (hidden) |
+Environment note: commits pass only with SHORT one-line messages; details go in the PR body.
+Owner additions 17:39 (via the manager): (A) E-Stock history everywhere, as if the program ran two years — read-only, tagged «من إي ستوك», never posted again into stock / drawer / treasury / balances (opening balances came at the move), reports across the cut-off add both sides with no overlap, wrong or missing data shown as is with a note; comes RIGHT AFTER U4-2. (B) U4-17 sale screen: lines directly under the search box, quick sale = one compact sideways row below the invoice that shrinks after the first item, a toggle opens it; then 2-3 invoice looks in settings.
+**#433 merged `c34e884`** (linux green on cdd1ddc; Codex clean after 4 rounds, 9 P2 + 1 P1 fixed with tests). **Release #435 (develop → main, update 4a: #430 #431 #433)** opened on the manager's order (owner 18:01 «فين تصليح الطباعه؟»), merges on linux + windows green (owner pre-approved). After «تحديث»: restore device/printing settings from data-trial-* and print 3 test labels.
+**Release #435 merged into main `b433c31`** (22/11 ~16:41 UTC; linux + windows + windows-scripts green on `c34e884`): update 4a = #430 #431 #433. Owner after «تحديث»: restore device/printing settings from data-trial-*, print 3 test labels. Not checked yet: the signed «update-main» bundle for `b433c31`.
+**#436 merged `608c663`** (linux green + Codex clean on `6828dc8`; agent review 2 P1 + 4 P2, Codex 1 P1 + 3 P2, CI 2 fixes, all with tests). This worker session stopped here (context high).
+**NEXT SESSION starts at E-Stock history step 2** (branch `claude/u4-estock-history-2` from develop): (1) owner reports by period («تقارير المالك», sales / purchases / profit): add an E-Stock column or rows per period from `estock_history.period_with_total`, tagged, same basis as step 1 (sales before returns; returns by their own date shown apart), never added into program totals except one labelled combined line; (2) purchases list: E-Stock purchases of the same period under ours (like `estockSalesBelow`); (3) customer medicines (`customer_items`) inline on the customer page; (4) Hikma claim: confirm it reads only program sales (test). Reuse `tests/test_u4_estock_everywhere.py` (hash proof + browser). Lessons: run the FULL suite before pushing (CI caught a read-only archive and the hand-cut-time rule in tests/test_time_format.py); commit messages must be short one-liners. Then U4-3 E-Stock move button, U4-5 speed, U4-4 purchase entry (+ owner 18:01 additions), U4-6, U4-7, U4-19..U4-24 as listed below.
+**E-Stock history step 1 = PR #436** (`claude/u4-estock-history`, head `3bf43a7`): inline old invoices under the sales list (same period, tagged, «مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك» on the same basis), customer/supplier/item inline last 30, `GET /api/estock/period`, unreadable totals counted. Proof test hashes every table + our reports before/after. Agent review 2 P1 + 4 P2 fixed; Codex asked; label ci. Step 2 next: owner reports by period with both sides of the cut-off, purchases list, customer medicines, Hikma check.
+**Next (A, E-Stock history everywhere):** much already exists, read-only: `app/dataimport/estock_history.py` (invoices / invoice / customer_items / item_history / statement / shift_closes / shortages / period_report) behind `/api/estock/*` and the separate screen `viewEstock` (app.js «تاريخ إي ستوك», badge «من إي ستوك», returns against old invoices). The work is to MERGE them into our own lists, tagged: sales invoices list + search (old invoices after ours, before the cut-off `demand.cutoff`), customer purchases/medicines, item card (sales/purchases/movement), supplier purchase history, sales/purchases/profit reports by period (both sides, no overlap at the cut-off), Hikma claim check. Tests FIRST: snapshot every total (stock_balances, ledgers, drawer/treasury, reports, claim) before/after reading the history → identical. Then U4-3, U4-5; U4-4 additions from the owner 18:01 (bonus shown for شركة / hidden for مخزن; a scan anywhere on the purchase screen goes to the item field, qty defaults to 1 box; supplier invoice number autocomplete off, a used number for the same supplier is already refused; measure the add-item lag; field order الصنف → الكمية → الصلاحية → الخصم/سعر الصيدلي → البونص → التشغيلة → سعر الجمهور → الهامش/الضريبة, Enter walks them, last Enter adds; reorder in purchase settings; «الرصيد» column).
+**Queue additions (owner 18:20 via the manager), after E-Stock history; evaluate first:**
+- U4-19 Delivery: receipt says «توصيل» with customer name/phone/address; courier from a managed list (owner/manager); fee «مجانًا» or an amount; open delivery invoices per courier + «سلّم الفلوس» into the drawer, shown at shift close. Check first what `sale_deliveries` already holds.
+- U4-20 Receipt header: pharmacy phone under the name (the old settings have it); check the data-trial-* restore brings the receipt lines back; first run asks for the phone. Note: printing → owner approval / release gates.
+- U4-21 Autocomplete off wherever old values make no sense (supplier invoice no., batch, quantities, prices).
+- U4-22 Barcode anywhere on sale and purchase screens: a scan from any field adds/selects the item, never types into the focused field (merge with the U4-4 scan item; one shared scan detector by key timing).
+- U4-23 Sanity checks before saving any invoice: impossible refused (server, OWNER_RULES §13), unusual = confirm with reason (qty far above usual, price far from public/last cost); thresholds in settings.
+- U4-24 Speed of every add/save (purchase add line, sale add, save customer, save item): measure, fix, target < 0.3 s (do with U4-5).
+No release PR into main for the rest of update 4 until the manager says so (one combined release).
+
+## 22/11 morning — UPDATE-3 worker session W3: progress log (READ THIS FIRST; newest line last)
+Base develop @ `5e4b2b9`. Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge only with linux CI green and no open Codex P0/P1 on the same head, one at a time (all touch app.js / i18n-en.js / sales service).
+
+**Released to main (owner «موافق» 11:18 Cairo):** #410 merged into main as `77807d1`. The signed «update-main» bundle is published for that commit; the «تحديث» button gets it.
+
+**Released to main — update 3 (owner approval 22/11 via the manager, usual gates):** #426 merged as `a0fb303` at 12:06 UTC; linux + windows green on `9ee5117`; signed «update-main» published for `a0fb303`, manifest lists 0042. The owner presses «تحديث» (the manager tells him).
+
+**What #426 carried** (merged into develop since #410):
+| PR | Item | Merge |
+|---|---|---|
+| #414 | U2-33 below cost refused for everyone (at cost = `sales.below_cost` + reason), U2-17 no split, U2-21 dispensing notes | `745bf15` |
+| #416 | U3-3 Hikma claim (any period, per branch, Excel) | `75bc93d` |
+| #425 | U3-4 app window (launcher; reaches the PC only with the installer) | `aa40585` |
+| #415 | U2-14 rounding of the CASH part only (owner 22/11), migration 0042, receipt + shift print lines | `ff87d8e` |
+| #424 | «خليها رصيد للعميل» + one-click credit use (manager correction 22/11: the drawer includes the kept change) | `c86974d` |
+| #428 | wording «له رصيد» (not «ليه») | `9ee5117` |
+The owner approved #415/#424/#425 at 11:38 with «اعمل حساب خوازيق المستقبل»: each got tests for the traps he listed. #415 was redesigned (cash part only).
+
+**Still open, for the next release** (not in update 3):
+| PR | Item | State |
+|---|---|---|
+| #421 | U3-7 dhikr strip + work hours | needs develop merged in + Codex (one open P2: stop the strip when the session expires) |
+| #419 | U3-6 customer medicines | needs develop merged in + Codex |
+| #418 | U3-5 daily mini-count | needs develop merged in + Codex |
+| #422 | U3-8 owner shift summary | needs develop merged in + Codex |
+| #423 | U2-23/U2-24 receipt (printing) | **PR only, owner approves** (not in the 11:38 approval) |
+
+**Next PRs (manager 22/11, not started).** Update 4 (E-Stock move button, purchases/smart-order rebuild, screen-switch speed, purchase invoice fixed margins) starts in a NEW session with its own spec.
+1. Login security: wrong passwords never lock the real user; growing delay per device/IP; every failed attempt logged (target user, device, time); the bell tells owner/manager in plain Arabic; the owner can block a device; the right password always works. Tests: an attacker cannot lock a user out; brute force stays impractical.
+2. Update UX: the «تحديث» button glows when an update exists; after download one clear choice «حدّث دلوقتي (دقيقة)» or «لما البرنامج يفضى»; rename «إلغاء الميعاد» (e.g. «ماتحدّثش دلوقتي»).
+
+After the update on the PC (in #426's body): device check per #18; traps: rounding is on at 0.50 right after the update; after a confirmed start the old code refuses a database with 0042 (going back = restore the pre-update backup); the app window needs the installer (launcher.py is stage 0).
+NOT done this session: U3-2 reference → safety drafts, U2-27 silent printing, U2-6 print time (migration), U2-31 two drawers (migration), U3-7 fridge log (migration), «تغيّر سعر البيع للمخزون الحالي؟», «بيع بسعر التكلفة» per customer, receipt templates/preview (U2-23 part).
+Known P2s left: U3-1 refill/90-day figures keep old units for one window after a pack fix; #423 long rows cut on 58 mm; the app window's fallback fires only when Edge/Chrome cannot start.
+
 ## 22/11 02:00–03:30 Cairo — UPDATE-2 continuation (manager night check), stopped at a clean point (context limit) (READ THIS FIRST)
 Next session: start from the NOT-done list below; priority stays U2-23+24 receipt (PR only, printing + migration), U2-14 rounding, U2-27, U2-31, U2-21, then purchases U2-1 grid / U2-6.
 - #407 merged `db2350b` (its first CI run failed only on date tests that crossed UTC midnight mid-run; the re-run on the same head passed). #408 (HANDOFF) merged `d33a87b`.

@@ -386,7 +386,9 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         out.append(("row", "خصم", m(sale["discount_total"])))
     if sale.get("delivery_fee"):
         out.append(("row", "رسوم التوصيل", m(sale["delivery_fee"])))
-    out.append(("total", "المطلوب", m(sale["total"])))
+    if sale.get("rounding"):               # U2-14: its own line, signed
+        out.append(("row", "التقريب", ("+" if sale["rounding"] > 0 else "-") + m(abs(sale["rounding"]))))
+    out.append(("total", "المطلوب", m(sale["total"] + (sale.get("rounding") or 0))))   # U2-14: cash rounding on top
     MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
     pays = sale.get("payments") or []
     if pays:
