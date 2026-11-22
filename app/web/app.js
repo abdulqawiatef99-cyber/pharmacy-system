@@ -1155,10 +1155,17 @@ async function viewPurchases() {
     $("#puBox").querySelectorAll("[data-sk]").forEach((h) => h.addEventListener("click", () => {
       PU_SORT = { k: h.dataset.sk, desc: PU_SORT.k === h.dataset.sk ? !PU_SORT.desc : true }; drawList();
     }));
+    // U4: E-Stock's purchases of the same period under ours; only with all / approved shown, no text search, and a
+    // full (uncapped) program list is added up
+    if (asked && !q && (!asked.st || asked.st === "approved")) {
+      estockPurchasesBelow($("#puBox"), asked.f, asked.t, asked.sup, rows.length >= 5000 ? null : ok.reduce((a, i) => a + (amt(i) || 0), 0)).catch(() => {});
+    } else { ES_PSEQ++; document.querySelector("#esPur")?.remove(); }
   };
+  let asked = null;                                    // the request the list answers (not the live controls)
   const loadList = async (f, t) => {
     const qs = new URLSearchParams({ from: f, to: t }); if ($("#puSup").value) qs.set("supplier", $("#puSup").value); if ($("#puSt").value) qs.set("status", $("#puSt").value);
-    rows = await api(`/api/purchases?${qs}`); sub = rangeText(f, t); drawList();
+    const a = { f, t, sup: $("#puSup").value, st: $("#puSt").value };
+    rows = await api(`/api/purchases?${qs}`); sub = rangeText(f, t); asked = a; drawList();
   };
   const getRange = wireRange("puRange", (f, t) => loadList(f, t).catch((e) => toast(e.message, true)));
   ["#puSup", "#puSt"].forEach((id) => $(id).addEventListener("change", () => loadList(...getRange()).catch((e) => toast(e.message, true))));
@@ -5233,6 +5240,16 @@ async function estockPanel(kind, id) {
     let rows = null;
     if (kind === "customer" && can("sales.totals")) rows = (await api(`/api/estock/invoices?kind=sale&party=${encodeURIComponent(id)}&limit=30`)).invoices;
     else if (kind === "supplier" && can("purchases.read")) rows = (await api(`/api/estock/invoices?kind=purchase&party=${encodeURIComponent(id)}&limit=30`)).invoices;
+    if (kind === "customer" && can("sales.read")) {          // U4: his medicines from E-Stock, right on his page
+      const its = (await api(`/api/estock/customers/${encodeURIComponent(id)}/items`)).items.slice(0, 30);
+      if (its.length && sec.isConnected) {
+        const d = document.createElement("div");
+        d.id = "esItems"; d.className = "mt";
+        d.innerHTML = `<h3>أدويته في إي ستوك ${ES_BADGE}</h3><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>عدد الفواتير</th><th>أول مرة</th><th>آخر مرة</th></tr></thead><tbody>
+          ${its.map((i) => `<tr><td>${i.item_id ? `<a href="#/items/${esc(i.item_id)}">${esc(i.item || "")}</a>` : "—"}</td><td class="num">${esc(i.qty)}</td><td class="num">${i.invoices}</td><td>${esc(i.first_day)}</td><td>${esc(i.last_day)}</td></tr>`).join("")}</tbody></table></div>`;
+        sec.appendChild(d);
+      }
+    }
     if (rows && rows.length && sec.isConnected) {
       $("#esInline").innerHTML = `<p class="muted">آخر ${rows.length} فاتورة من إي ستوك (للاطلاع، مش داخلة في أرصدة البرنامج)</p>
         <div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>الفاتورة</th><th>الإجمالي</th><th>نقدي</th></tr></thead><tbody>
@@ -5285,6 +5302,68 @@ async function estockSalesBelow(box, f, t, q, ours, itemId) {
     <div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>نقدي</th><th>شبكة</th></tr></thead><tbody>
     ${rows.map((r) => `<tr class="clickable" data-go="sale/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.day)}</td>
       <td>${esc(r.party || "—")}</td><td class="num"><b>${esMoney(r.total)}</b></td><td class="num">${esMoney(r.cash)}</td><td class="num">${esMoney(r.network)}</td></tr>`).join("")}</tbody></table></div>`;
+  box.appendChild(sec);
+  sec.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
+}
+
+// U4 history step 2: the sales report and the purchases list show E-Stock's figures of the same period under the
+// program's own, tagged, read only; added to ours only in one labelled line, on the same basis, when nothing is unreadable
+let ES_RSEQ = 0, ES_REP = null;
+async function estockReportBelow(box, f, t, ours) {
+  const seq = ++ES_RSEQ;                               // a late answer never lands under a newer period
+  ES_REP = null; document.querySelector("#esRep")?.remove();
+  if (!(await estockOn()) || !ME.permissions.includes("sales.totals") || !box.isConnected) return;
+  const by = (Date.parse(t) - Date.parse(f)) / 864e5 <= 62 ? "day" : "month";
+  const per = await api(`/api/estock/period?${new URLSearchParams({ from: f, to: t, by })}`);
+  if (!box.isConnected || seq !== ES_RSEQ || !per.rows.length) return;
+  const T = per.total, bad = T.sales_unreadable || 0, buy = "purchases" in T, sales = esP(T.sales || "0");
+  const warn = (n) => (n ? ` <span class="badge b-warn" title="إجماليها مش مقروء">⚠ ${n}</span>` : "");
+  const sec = document.createElement("div");
+  sec.id = "esRep"; sec.className = "mt";
+  sec.innerHTML = `<div class="row between"><h2>إي ستوك في نفس الفترة (${by === "day" ? "يوم بيوم" : "شهر بشهر"})</h2>${ES_BADGE}</div>
+    ${ours != null && sales !== null && !bad ? `<p><b>مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك: ${money(ours + sales)} ج</b></p>` : ""}
+    ${bad ? `<p class="badge b-warn">⚠ ${bad} فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ، ومفيش جمع مع البرنامج</p>` : ""}
+    <div class="tablewrap"><table><thead><tr><th>${by === "day" ? "اليوم" : "الشهر"}</th><th>فواتير</th><th>المبيعات</th><th>المرتجع بتاريخه</th>${buy ? "<th>المشتريات</th>" : ""}</tr></thead><tbody>
+    ${per.rows.map((r) => `<tr><td>${esc(r.period)} ${ES_BADGE}</td><td class="num">${r.sales_count || 0}</td><td class="num">${esMoney(r.sales || "0.00")}${warn(r.sales_unreadable)}</td>
+      <td class="num">${esMoney(r.returns || "0.00")}${warn(r.returns_unreadable)}</td>${buy ? `<td class="num">${esMoney(r.purchases || "0.00")}${warn(r.purchases_unreadable)}</td>` : ""}</tr>`).join("")}</tbody>
+    <tfoot><tr><th>الإجمالي</th><th class="num">${T.sales_count || 0}</th><th class="num">${esMoney(T.sales || "0.00")}</th><th class="num">${esMoney(T.returns || "0.00")}</th>${buy ? `<th class="num">${esMoney(T.purchases || "0.00")}</th>` : ""}</tr></tfoot></table></div>
+    <p class="muted"><span>أرقام إي ستوك زي ما هي، للاطلاع: مش داخلة في الخزينة ولا الأرصدة ولا أرقام البرنامج فوق.</span> <span>مرتجع إي ستوك محسوب بتاريخ رجوعه، وربح إي ستوك مش محسوب هنا.</span></p>`;
+  box.appendChild(sec);
+  ES_REP = { f, t, by, per };
+}
+const estockRepSheet = (f, t) => {                     // the E-Stock sheet of the sales report's Excel, text as it is
+  const E = ES_REP; if (!E || E.f !== f || E.t !== t) return [];
+  const buy = "purchases" in E.per.total;
+  return [{ name: "إي ستوك", columns: [Tx(E.by === "day" ? "اليوم" : "الشهر"), N("فواتير"), Tx("المبيعات (إي ستوك)"), Tx("المرتجع بتاريخه"), ...(buy ? [Tx("المشتريات")] : [])],
+    rows: E.per.rows.map((r) => [r.period, r.sales_count || 0, r.sales || "0.00", r.returns || "0.00", ...(buy ? [r.purchases || "0.00"] : [])]),
+    total: ["الإجمالي", E.per.total.sales_count || 0, E.per.total.sales || "0.00", E.per.total.returns || "0.00", ...(buy ? [E.per.total.purchases || "0.00"] : [])] }];
+};
+
+let ES_PSEQ = 0;
+let ES_PKEY = "";
+async function estockPurchasesBelow(box, f, t, supplier, ours) {
+  const key = [f, t, supplier, ours].join("|"), cur = document.querySelector("#esPur");
+  if (cur && cur.isConnected && key === ES_PKEY && box.contains(cur)) return;   // a sort or a cleared search: same answer
+  const seq = ++ES_PSEQ;
+  ES_PKEY = key; cur?.remove();
+  if (!(await estockOn()) || !ME.permissions.includes("purchases.read") || !box.isConnected) return;
+  const p = new URLSearchParams({ kind: "purchase", from: f, to: t, limit: "500" }), q = new URLSearchParams({ from: f, to: t, by: "month" });
+  if (supplier) { p.set("party", supplier); q.set("supplier", supplier); }
+  const [rows, per] = await Promise.all([api(`/api/estock/invoices?${p}`).then((r) => r.invoices),
+    // the period total needs sales.totals for the whole pharmacy; one supplier's total needs purchases.read only
+    supplier || ME.permissions.includes("sales.totals") ? api(`/api/estock/period?${q}`) : Promise.resolve(null)]);
+  if (!rows.length || !box.isConnected || seq !== ES_PSEQ) return;
+  const T = per ? per.total : null, bad = T ? (T.purchases_unreadable || 0) : 0, es = T && T.purchases != null ? esP(T.purchases) : null;
+  const sec = document.createElement("div");
+  sec.id = "esPur"; sec.className = "mt";
+  sec.innerHTML = `<div class="row between"><h2>مشتريات إي ستوك في نفس الفترة</h2>${ES_BADGE}</div>
+    ${T ? `<p><b>${T.purchases_count || 0} فاتورة — ${esMoney(T.purchases || "0.00")} ج</b>
+      ${ours != null && es !== null && !bad ? ` · <b>مشتريات الفترة، المعتمد في البرنامج + إي ستوك: ${money(ours + es)} ج</b>` : ""}</p>
+      ${bad ? `<p class="badge b-warn">⚠ ${bad} فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ</p>` : ""}` : ""}
+    <p class="muted"><span>فواتير إي ستوك بتاريخ إدخالها فيه، للاطلاع: مش داخلة في المخزون ولا حساب المورد ولا الخزينة (الأرصدة جت مرة واحدة وقت النقل).</span> ${rows.length >= 500 ? "<span>ظاهر أول 500 فاتورة بس.</span>" : ""}</p>
+    <div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>المورد</th><th>الإجمالي</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr class="clickable" data-go="purchase/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.day)}</td>
+      <td>${esc(r.party || "—")}</td><td class="num"><b>${esMoney(r.total)}</b></td></tr>`).join("")}</tbody></table></div>`;
   box.appendChild(sec);
   sec.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
 }
@@ -6344,13 +6423,15 @@ async function viewReports() {
     <section class="panel mt"><h2>أكثر الأصناف مبيعًا</h2><table><thead><tr><th>الصنف</th><th>الكمية</th><th>المبيعات</th>${can("costs.read") ? "<th>الربح</th>" : ""}</tr></thead><tbody>
       ${r.top_items.map((x) => `<tr><td>${itemHtml(x)}</td><td>${esc(fmtStock(x.qty, it(x)))}</td><td class="num">${money(x.revenue)}</td>${can("costs.read") ? `<td class="num">${x.profit != null ? money(x.profit) : "—"}</td>` : ""}</tr>`).join("") || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section></section>`;
     document.querySelectorAll(".hbars [data-h]").forEach((el) => { el.style.height = `${el.dataset.h}%`; });
+    estockReportBelow($("#rSalesBox"), r.from, r.to, r.totals.total).catch(() => {});   // U4: same basis, before returns
     wireTools("sales", () => ({ title: "تقرير المبيعات", subtitle: sub, el: $("#rSalesBox"), sheets: [
       { name: "يوم بيوم", columns: [Dt("اليوم"), N("فواتير"), M("الإجمالي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), M("مرتجع"), M("تقريب النقدي")],
         rows: r.daily.map((d) => [d.day, d.n, d.total, d.cash, d.card, d.transfer, d.credit, d.returns, d.rounding || 0]),
         total: ["الإجمالي", r.totals.n, r.totals.total, null, null, null, null, r.totals.returns, r.totals.rounding || 0] },
       { name: "حسب الموظف", columns: [Tx("الموظف"), N("فواتير"), M("الإجمالي"), M("الخصم")], rows: r.by_user.map((u) => [u.name, u.n, u.total, u.discount || 0]) },
       { name: "أكثر الأصناف", columns: [Tx("الصنف"), N("الكمية بالوحدة"), M("المبيعات"), ...(can("costs.read") ? [M("الربح")] : [])],
-        rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) }] }));
+        rows: r.top_items.map((x) => [x.name_en || x.name_ar, x.qty, x.revenue, ...(can("costs.read") ? [x.profit] : [])]) },
+      ...estockRepSheet(r.from, r.to)] }));
   };
   if (can("sales.totals")) wireRange("rRange", (f, t) => sales(f, t).catch((e) => toast(e.message, true)));
   if (can("sales.totals")) {
