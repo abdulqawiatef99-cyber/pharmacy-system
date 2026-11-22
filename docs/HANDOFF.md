@@ -25,12 +25,9 @@ Behaviour changes the owner should know (all his rules, said in each PR):
 - A discount bigger than the line or the invoice is refused (no longer silently cut).
 - A supplier invoice dated after today is refused; short expiry (< 180 days) and "won't sell before it gets near expiry" need a written reason to approve.
 - Sign-out asks first (personal setting «تأكيد الخروج»).
-Not done, with the reason:
-- U2-27 silent printing, U2-23/U2-24 receipt template and sold unit: `app/printing/` (OWNER_RULES §10) and U2-24 needs a `sale_unit` column (migration).
-- U2-31 two drawers with their own shifts: migration (one open shift per branch today). U2-6 print time: migration.
-- U2-14 rounding, U2-33 below-cost refused: change agreed money rules; need the owner's go-ahead on the exact rule.
-- U2-17, U2-19, U2-20, U2-21: not started (lowest priority).
-- U2-10 the two freezes: not reproduced in the cloud; the slow-request log now records them on the PC (owner opens `/api/system/slow-requests`).
+U2 items, exact state:
+- DONE: U2-0 (#403) · U2-36 (#402) · U2-26, U2-28, U2-29, U2-30 (#404) · U2-11, U2-12, U2-13 (partial: unit kept by quantity, see P2), U2-18, U2-25, U2-32, U2-34, U2-35 (#405) · U2-1 (quick-add row only), U2-2, U2-3, U2-4, U2-5, U2-9, U2-16 (xlsx/csv; text-PDF not tested), U2-22 (#406) · U2-8, U2-10 (log + search speed test), U2-15 (#407) · U2-7 (already in update 1).
+- NOT DONE: U2-23 receipt template, U2-24 sold unit on the receipt (both `app/printing/`, a session may open but not merge them, OWNER_RULES §10; U2-24 also needs a `sale_unit` column = migration) · U2-33 discount limit per user + never below cost (changes an agreed money rule) · U2-14 invoice rounding (money rule + setting + setup question) · U2-27 silent printing (`app/printing/`) · U2-20 «مفيش فكة» · U2-19 shortcuts in Settings · U2-17 remove tablet splitting · U2-31 two drawers (migration) · U2-21 dispensing notes UI · U2-6 print time (migration) · U2-1 arrows/Enter inside the line grid (only the quick-add row has it) · U2-10 the two freezes (not reproducible in the cloud; the log will catch them on the PC).
 Open P2s (next small PR): day review splits wallet refunds into card (#407 thread); unit selector cannot tell 3 strips from 1 box without `sale_unit`; RTL test checks page direction only.
 Git note: in this environment commits pass only with short one-line messages (long multi-line messages and `--amend` were refused by the auto-mode check).
 Next: owner reviews and merges the release PR develop → main, then presses «تحديث» on the cashier PC; device check of the new screens (#18 sheet).
