@@ -884,6 +884,11 @@ async function viewCustomize() {
       <section class="panel"><h2>الاختصارات</h2><p class="muted">اضغط Alt مع الرقم من أي مكان للانتقال إلى الشاشة. Alt+0 يفتح المساعدة.</p>
         <div class="formgrid">${"123456789".split("").map((n) => `<label class="f"><kbd>Alt+${n}</kbd><select data-sc="${n}"><option value="">—</option>
           ${keys.map((k) => `<option value="${k}" ${ui.shortcuts[n] === k ? "selected" : ""}>${esc(SCREENS[k][0])}</option>`).join("")}</select></label>`).join("")}</div></section>
+      <section class="panel"><div class="row between"><h2>زراير شاشة البيع</h2><button class="btn small secondary" id="cuPkReset">رجوع للافتراضي</button></div>
+        <p class="muted">كل زرار لحاجة واحدة بس. الأسهم وDelete وEsc وF8 (فتح الدرج) وF12 (الباركود) ثابتين.</p>
+        <div class="formgrid">${Object.keys(POS_KEY_DEFAULTS).map((a) => `<label class="f">${esc(POS_KEY_NAMES[a])}<select data-pk="${a}">
+          ${POS_KEY_CHOICES.map((k) => { const used = Object.keys(POS_KEY_DEFAULTS).find((b) => b !== a && ui.pos_keys[b] === k);
+            return `<option value="${k}" ${ui.pos_keys[a] === k ? "selected" : ""}>${k}${used ? ` (${esc(POS_KEY_NAMES[used])})` : ""}</option>`; }).join("")}</select></label>`).join("")}</div></section>
       <section class="panel"><h2>الأعمدة</h2><p class="muted">تُضبط من زر "⚙ الأعمدة" فوق جدول فواتير البيع وجدول الأصناف.</p>
         ${Object.keys(ui.columns).some((t) => ui.columns[t].length) ? `<button class="btn small secondary" id="cuCols">إظهار كل الأعمدة</button>` : `<p class="muted">كل الأعمدة ظاهرة.</p>`}</section>`;
     const save = async (changes) => {
@@ -898,6 +903,12 @@ async function viewCustomize() {
     app.querySelectorAll("[data-sc]").forEach((s) => s.addEventListener("change", () => {
       const sc = { ...ui.shortcuts }; if (s.value) sc[s.dataset.sc] = s.value; else delete sc[s.dataset.sc]; save({ shortcuts: sc });
     }));
+    app.querySelectorAll("[data-pk]").forEach((s) => s.addEventListener("change", () => {
+      const a = s.dataset.pk, k = s.value, other = Object.keys(POS_KEY_DEFAULTS).find((b) => b !== a && ui.pos_keys[b] === k);
+      if (other) { toast(`الزرار ${k} متاخد لـ«${POS_KEY_NAMES[other]}» — غيّره هناك الأول`, true); s.value = ui.pos_keys[a]; return; }
+      save({ pos_keys: { [a]: k } });
+    }));
+    $("#cuPkReset")?.addEventListener("click", (e) => { if (confirmInline(e.target)) save({ pos_keys: {} }); });
     $("#cuCols")?.addEventListener("click", () => save({ columns: Object.fromEntries(Object.keys(ui.columns).map((t) => [t, []])) }));
     $("#cuReset").addEventListener("click", (e) => { if (confirmInline(e.target)) save({ reset: true }); });
   };
@@ -3459,7 +3470,7 @@ async function viewPos() {
   <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
       <span class="x" data-close="${esc(d.id)}" title="أغلق هذه الفاتورة" aria-label="إغلاق">✕</span></button>`).join("")}
-    <button class="tab add" id="tabNew" title="فاتورة جديدة (Insert)">+ فاتورة <kbd>Insert</kbd></button></nav>
+    <button class="tab add" id="tabNew" title="فاتورة جديدة (${esc(posKey("new_sale"))})">+ فاتورة <kbd>${esc(posKey("new_sale"))}</kbd></button></nav>
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
@@ -3603,14 +3614,23 @@ document.addEventListener("keydown", (e) => {
 // Part 3 (owner C): selling by keyboard only. Fixed defaults in this table; changing them from Settings comes later
 // (the same table, so nothing else moves). F1 on the empty line searches, F2/F3/F6/Delete act on the chosen line
 // (↑ ↓ choose it), F10 goes to the payment first and saves on the second press, F11 opens the drawer.
-const POS_KEYS = [["F1", "بحث عن صنف"], ["↑ ↓", "اختار صنف"], ["F2", "رصيد الصنف في الفروع"], ["F3", "كارت الصنف"],
-  ["F6", "الكمية"], ["Delete", "شيل الصنف"], ["F4", "إيصال"], ["F10", "الدفع ثم الحفظ"], ["F11", "فتح الدرج"],
-  ["F7", "مرتجع واستبدال"], ["Insert", "فاتورة جديدة"], ["Ctrl+Tab", "الفاتورة اللي بعدها"], ["Ctrl+Delete", "إلغاء الفاتورة"],
-  ["Esc", "رجوع للبحث"]];
+// U2-19: the keys come from «تخصيص الواجهة» (ME.ui.pos_keys, the server checks conflicts); these are the defaults.
+const POS_KEY_DEFAULTS = { search: "F1", branch_stock: "F2", item_card: "F3", receipt: "F4", qty: "F6", exchange: "F7",
+  done: "F9", pay: "F10", drawer: "F11", new_sale: "Insert", next_tab: "Ctrl+Tab", cancel_sale: "Ctrl+Delete" };
+const POS_KEY_NAMES = { search: "بحث عن صنف", branch_stock: "رصيد الصنف في الفروع", item_card: "كارت الصنف", receipt: "إيصال",
+  qty: "الكمية", exchange: "مرتجع واستبدال", done: "إتمام البيع", pay: "الدفع ثم الحفظ", drawer: "فتح الدرج",
+  new_sale: "فاتورة جديدة", next_tab: "الفاتورة اللي بعدها", cancel_sale: "إلغاء الفاتورة" };
+const POS_KEY_CHOICES = ["F1", "F2", "F3", "F4", "F6", "F7", "F9", "F10", "F11", "Insert", "Home", "End", "PageUp", "PageDown",
+  "Ctrl+Tab", "Ctrl+Delete", "Ctrl+Enter", "Ctrl+Insert"];
+const posKey = (a) => ME?.ui?.pos_keys?.[a] || POS_KEY_DEFAULTS[a];
+const posAction = (k) => Object.keys(POS_KEY_DEFAULTS).find((a) => posKey(a) === k);
+const POS_KEYS_ORDER = ["search", "↑ ↓", "branch_stock", "item_card", "qty", "Delete", "receipt", "pay", "drawer", "exchange",
+  "new_sale", "next_tab", "cancel_sale", "Esc"];
 let POS_SEL = -1;                 // the chosen cart line; -1 = the empty search line
 function posKeysHtml() {
-  return POS_KEYS.filter(([k]) => k !== "F11" || ME.permissions.includes("cash.manage"))
-    .map(([k, t]) => `<kbd>${esc(k)}</kbd> ${esc(t)}`).join(" · ");
+  const fixed = { "↑ ↓": "اختار صنف", Delete: "شيل الصنف", Esc: "رجوع للبحث" };
+  return POS_KEYS_ORDER.filter((a) => a !== "drawer" || ME.permissions.includes("cash.manage"))
+    .map((a) => fixed[a] ? `<kbd>${esc(a)}</kbd> ${esc(fixed[a])}` : `<kbd>${esc(posKey(a))}</kbd> ${esc(POS_KEY_NAMES[a])}`).join(" · ");
 }
 function posMark() {
   const rows = [...document.querySelectorAll("#posCart tbody tr")].filter((r) => !r.querySelector("td[colspan]"));
@@ -3636,32 +3656,33 @@ document.addEventListener("keydown", async (e) => {
   if (!location.hash.startsWith("#/pos") || $("dialog[open]")) return;
   const k = (e.ctrlKey ? "Ctrl+" : "") + e.key, typing = e.target.matches?.("input, select, textarea") && e.target.id !== "posQ";
   const go = (fn) => { e.preventDefault(); Promise.resolve().then(fn).catch((er) => toast(er.message, true)); };
-  if (k === "F1") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
-  if (k === "F2" || k === "F3" || k === "F6") {
+  const act = posAction(k);
+  if (act === "search") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
+  if (act === "branch_stock" || act === "item_card" || act === "qty") {
     const l = posLine();
     if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
-    if (k === "F2") return go(() => posBranchStock(l));
-    if (k === "F3") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
+    if (act === "branch_stock") return go(() => posBranchStock(l));
+    if (act === "item_card") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
     return go(() => {
       const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
       const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
       if (Number(v) > 0) patchLine(l.id, { qty_base: packs ? Number(v) * l.item.pack_size : Number(v) });
     });
   }
-  if (k === "F4") return go(() => $("#posRcpt")?.click());
-  if (k === "F9") return go(() => $("#posDone")?.click());
-  if (k === "F10") return go(() => {
+  if (act === "receipt") return go(() => $("#posRcpt")?.click());
+  if (act === "done") return go(() => $("#posDone")?.click());
+  if (act === "pay") return go(() => {
     if ($("#posSide")?.contains(document.activeElement)) { $("#posDone")?.click(); return; }
     ($("#posSide select, #posSide input:not([type=hidden]), #posSide button") || $("#posDone"))?.focus();
   });
-  if ((k === "F11" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
-  if (k === "F7") return go(() => { location.hash = "#/exchange"; });
-  if (k === "Insert") return go(() => newTab());
-  if (k === "Ctrl+Tab") return go(() => {
+  if ((act === "drawer" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
+  if (act === "exchange") return go(() => { location.hash = "#/exchange"; });
+  if (act === "new_sale") return go(() => newTab());
+  if (act === "next_tab") return go(() => {
     const tabs = [...document.querySelectorAll("[data-tab]")], i = tabs.findIndex((t) => t.classList.contains("on"));
     if (tabs.length > 1) tabs[(i + 1) % tabs.length].click();
   });
-  if (k === "Ctrl+Delete") return go(() => document.querySelector(`[data-close="${SALE?.id}"]`)?.click());
+  if (act === "cancel_sale") return go(() => document.querySelector(`[data-close="${SALE?.id}"]`)?.click());
   if (typing) return;
   const q = $("#posQ"), onEmptySearch = !q || document.activeElement !== q || !q.value;
   if ((k === "ArrowUp" || k === "ArrowDown") && onEmptySearch && SALE?.lines.length) {
@@ -3850,9 +3871,9 @@ function renderSide() {
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
         <p><a href="#" id="splitOn">تقسيم الدفع (جزء نقدًا وجزء فيزا أو محفظة)</a></p>`}
       <div class="row rcpt">
-        <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : "اطبع إيصال لهذا البيع (F4)"}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>F4</kbd></label>
+        <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : `اطبع إيصال لهذا البيع (${esc(posKey("receipt"))})`}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>${esc(posKey("receipt"))}</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
-      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع <kbd>F9</kbd></button>
+      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
     </section>`;
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;

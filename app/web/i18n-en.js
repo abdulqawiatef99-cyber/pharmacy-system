@@ -3143,4 +3143,8 @@ window.I18N_EN = {
 "0 ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك": "0 EGP — no notes make this exact amount, count it by hand",
 "كل الفلوس هتفضل في الدرج للشيفت الجاي": "All the cash stays in the drawer for the next shift",
 "(محدش استلم)": "(nobody received it)",
+"اطبع إيصال لهذا البيع (0)": "Print a receipt for this sale (0)",
+"زراير شاشة البيع": "Sale screen keys",
+"كل زرار لحاجة واحدة بس. الأسهم وDelete وEsc وF8 (فتح الدرج) وF12 (الباركود) ثابتين.": "Each key does one thing only. The arrows, Delete, Esc, F8 (open the drawer) and F12 (the barcode) are fixed.",
+"الزرار 0 متاخد لـ«0» — غيّره هناك الأول": "Key 0 is already used for «0» — change it there first",
 };
