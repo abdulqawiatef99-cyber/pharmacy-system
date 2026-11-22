@@ -1178,6 +1178,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                              limit=_int(qp.get("limit") or 200, "limit"))})
 
     @handler
+    async def estock_period(req):
+        """E-Stock's own totals per day or month (read-only, tagged), with the period's total: the history side of a
+        report that crosses the move. Never added into the program's own figures."""
+        from decimal import Decimal
+        from ..dataimport import estock_history as eh
+        qp = req.query_params
+        rows = await off_loop(eh.period_report, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
+                              by=qp.get("by") or "month")
+        tot: dict = {"source": eh.SOURCE}
+        for r in rows:
+            for k in ("sales", "returns", "purchases"):
+                if k in r:
+                    tot[k] = str(Decimal(tot.get(k, "0")) + Decimal(r[k]))
+                    tot[k + "_count"] = tot.get(k + "_count", 0) + r[k + "_count"]
+        return J({"source": eh.SOURCE, "rows": rows, "total": tot})
+
+    @handler
     async def estock_invoice(req):
         from ..dataimport import estock_history as eh
         return J(await off_loop(eh.invoice, db, ctx_of(req), req.path_params["kind"], req.path_params["id"]))
@@ -3309,6 +3326,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
+        Route("/api/estock/period", estock_period),
         Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
         Route("/api/estock/customers/{id}/items", estock_customer_items),
         Route("/api/estock/items/{id}/history", estock_item_history),

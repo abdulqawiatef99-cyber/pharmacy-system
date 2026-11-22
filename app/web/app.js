@@ -2969,6 +2969,11 @@ async function viewSalesAdvanced() {
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
     $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
+    // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
+    if (!types.size && !$("#iUser").value) {
+      estockSalesBelow($("#iBox"), $("#iF").value.slice(0, 10), $("#iT").value.slice(0, 10), $("#iQ").value.trim(),
+        item ? null : T.net, item ? item.id : "").catch(() => {});
+    }
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
       const ids = [...new Set([...sel].flatMap((i) => (R.rows[i].items || []).map((x) => x.item_id)))];
@@ -5216,8 +5221,61 @@ async function estockPanel(kind, id) {
   if (!links.length || !app.isConnected) return;
   const sec = document.createElement("section");
   sec.className = "panel"; sec.id = "esPanel";
-  sec.innerHTML = `<div class="row between"><h2>تاريخ إي ستوك</h2>${ES_BADGE}</div><div class="row">${links.join("")}</div>`;
+  sec.innerHTML = `<div class="row between"><h2>تاريخ إي ستوك</h2>${ES_BADGE}</div><div class="row">${links.join("")}</div><div id="esInline" class="mt"></div>`;
   app.appendChild(sec);
+  // U4 (owner 17:39): the history shows right here, as if the program had run for years; read only, never posted
+  try {
+    let rows = null;
+    if (kind === "customer" && can("sales.totals")) rows = (await api(`/api/estock/invoices?kind=sale&party=${encodeURIComponent(id)}&limit=30`)).invoices;
+    else if (kind === "supplier" && can("purchases.read")) rows = (await api(`/api/estock/invoices?kind=purchase&party=${encodeURIComponent(id)}&limit=30`)).invoices;
+    if (rows && rows.length && sec.isConnected) {
+      $("#esInline").innerHTML = `<p class="muted">آخر ${rows.length} فاتورة من إي ستوك (للاطلاع، مش داخلة في أرصدة البرنامج)</p>
+        <div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>الفاتورة</th><th>الإجمالي</th><th>نقدي</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr class="clickable" data-go="${esc(r.kind)}/${esc(r.estock_id)}"><td>${esc(r.day)} ${ES_BADGE}</td><td>${esc(r.bill_number || r.estock_id)}</td>
+          <td class="num">${esMoney(r.total)}</td><td class="num">${esMoney(r.cash)}</td></tr>`).join("")}</tbody></table></div>`;
+    }
+    if (kind === "item" && can("items.read")) {
+      const h = (await api(`/api/estock/items/${encodeURIComponent(id)}/history`)).history.slice(0, 30);
+      if (h.length && sec.isConnected) {
+        $("#esInline").innerHTML = `<p class="muted">آخر ${h.length} حركة من إي ستوك (للاطلاع، مش داخلة في رصيد البرنامج)</p>
+          <div class="tablewrap"><table><thead><tr><th>التاريخ</th><th>النوع</th><th>الفاتورة</th><th>العميل أو المورد</th><th>الكمية</th><th>السعر</th></tr></thead><tbody>
+          ${h.map((r) => `<tr class="clickable" data-go="${esc(r.kind)}/${esc(r.estock_id)}"><td>${esc(r.day)} ${ES_BADGE}</td><td>${ES_KIND[r.kind]}</td><td>${esc(r.bill_number || r.estock_id)}</td>
+            <td>${esc(r.party || "—")}</td><td class="num">${esc(r.qty ?? "")}</td><td class="num">${esMoney(r.price)}</td></tr>`).join("")}</tbody></table></div>`;
+      }
+    }
+    sec.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
+  } catch { /* the links above still lead to the history */ }
+}
+
+// E-Stock amounts come as EGP text ("12.50"): exact piasters for sums, never a float (null when not a number)
+const esP = (v) => {
+  const m = /^(-?)(\d+)(?:\.(\d{1,2})\d*)?$/.exec(String(v ?? "").trim());
+  return m ? (m[1] ? -1 : 1) * (Number(m[2]) * 100 + Number((m[3] || "0").padEnd(2, "0"))) : null;
+};
+
+// the sales list: the same period's E-Stock invoices right under the program's own, with both totals and the sum
+async function estockSalesBelow(box, f, t, q, ours, itemId) {
+  if (!(await estockOn()) || !ME.permissions.includes("sales.totals") || !box.isConnected) return;
+  const p = new URLSearchParams({ kind: "sale", from: f, to: t, limit: "500" });
+  if (/^\d+$/.test(q || "")) p.set("q", q);
+  else if (q) return;                                  // a name search is the program's own (E-Stock keeps no names here)
+  if (itemId) p.set("item", itemId);
+  const [rows, per] = await Promise.all([api(`/api/estock/invoices?${p}`).then((r) => r.invoices),
+    q || itemId ? Promise.resolve(null) : api(`/api/estock/period?${new URLSearchParams({ from: f, to: t, by: "month" })}`)]);
+  if (!rows.length || !box.isConnected) return;
+  const T = per ? per.total : null, sales = T ? esP(T.sales || "0") : null, ret = T ? esP(T.returns || "0") : null;
+  const net = sales !== null && ret !== null ? sales - ret : null;
+  const sec = document.createElement("div");
+  sec.id = "esBelow"; sec.className = "mt";
+  sec.innerHTML = `<div class="row between"><h2>فواتير إي ستوك في نفس الفترة</h2>${ES_BADGE}</div>
+    ${T ? `<p><b>${T.sales_count || 0} فاتورة — ${esMoney(T.sales || "0.00")} ج</b>${T.returns ? ` · مرتجع ${esMoney(T.returns)} · الصافي ${money(net)} ج` : ""}
+      ${ours !== null && net !== null ? ` · <b>البرنامج + إي ستوك: ${money(ours + net)} ج</b>` : ""}</p>` : ""}
+    <p class="muted"><span>أرقام إي ستوك زي ما هي، للاطلاع: مش داخلة في الخزينة ولا الأرصدة ولا تقارير البرنامج.</span> ${rows.length >= 500 ? "<span>ظاهر أول 500 فاتورة بس.</span>" : ""}</p>
+    <div class="tablewrap"><table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>نقدي</th><th>شبكة</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr class="clickable" data-go="sale/${esc(r.estock_id)}"><td><b>${esc(r.bill_number || r.estock_id)}</b> ${ES_BADGE}</td><td>${esc(r.at ? String(r.at).slice(0, 16).replace("T", " ") : r.day)}</td>
+      <td>${esc(r.party || "—")}</td><td class="num"><b>${esMoney(r.total)}</b></td><td class="num">${esMoney(r.cash)}</td><td class="num">${esMoney(r.network)}</td></tr>`).join("")}</tbody></table></div>`;
+  box.appendChild(sec);
+  sec.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/estock/${tr.dataset.go}`; }));
 }
 
 // ------------------------------------------------------------------ suppliers and their accounts
