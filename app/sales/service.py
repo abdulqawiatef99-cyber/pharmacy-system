@@ -808,6 +808,16 @@ class Sales:
                 raise ValidationFailed("الباقي يتساب رصيد لعميل متسجل بس: اختار العميل", code="customer_required")
             if not paid_cash or delivery:
                 raise ValidationFailed("الباقي بيتساب رصيد من دفع نقدي في الصيدلية بس")
+            # a real person only (owner 22/11): not the pharmacy's own account (E-Stock customer 1) and not a
+            # contract customer (Hikma and the others), whose account is the contract's claim
+            who = self.db.one("SELECT c.name, c.notes, c.contract_id, o.name org FROM customers c JOIN organizations o"
+                              " ON o.id=c.org_id WHERE c.id=? AND c.org_id=?", (preview["customer_id"], ctx.org_id))
+            if who["contract_id"] or preview.get("contract_id"):
+                raise ValidationFailed("عميل التعاقد مايتسابلوش باقي رصيد: حسابه مطالبة التعاقد", code="keep_change_contract")
+            import re
+            if (who["name"] or "").strip() == (who["org"] or "").strip() or re.search(
+                    r"(^|؛ )كود إي ستوك: 1(؛|$)", who["notes"] or ""):
+                raise ValidationFailed("ده حساب الصيدلية نفسها: اختار العميل الحقيقي", code="keep_change_house")
             # only real change (review P1, OWNER_RULES §13): less than the cash paid and at most 50 EGP. Anything more
             # is an advance payment, which goes through the customer's account by the owner / a manager
             if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
@@ -1425,6 +1435,13 @@ class Sales:
                 from ..finance import money
                 money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
                                    meta={"return_id": rid})
+            # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
+            # refunded to his account, that change is already his credit and stays
+            if refund_method != "credit" and not self.db.one(
+                    "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
+                self._give_back_kept_change(ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي",
+                                            kind="return")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds})
@@ -1648,12 +1665,35 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
+            self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
                         f"السبب: {reason.strip()}", "sale", sid)
         return self.get(ctx, sid)
+
+    def kept_change(self, ctx: Context, sid: str) -> int:
+        """The change of this sale left as the customer's credit and not yet given back (0 if none)."""
+        # from the sale's own audit rows (append-only): what completion kept, less what was given back
+        r = self.db.one("SELECT coalesce(sum(CASE action WHEN 'sale.complete' THEN json_extract(after_json,'$.change_to_credit')"
+                        " ELSE -json_extract(after_json,'$.amount') END),0) k FROM audit_log WHERE org_id=?"
+                        " AND entity_type='sale' AND entity_id=? AND action IN ('sale.complete','sale.kept_change_back')",
+                        (ctx.org_id, sid))
+        return int(r["k"] or 0)
+
+    def _give_back_kept_change(self, ctx: Context, s, note: str, kind: str = "void") -> int:
+        """Inside the caller's transaction: the kept change of sale `s` leaves the drawer in cash and his credit
+        goes with it (owner 22/11: a void, or the return that empties the invoice, reverses it)."""
+        kept = self.kept_change(ctx, s["id"]) if s["customer_id"] else 0
+        if kept <= 0:
+            return 0
+        cash.record(self.db, ctx, -kept, "refund", s["id"], note, branch_id=s["branch_id"])
+        self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note, created_by)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (new_id(), ctx.org_id, s["customer_id"], kept, kind, s["id"], note, ctx.user_id))
+        audit.record(self.db, ctx, "sale.kept_change_back", "sale", s["id"], after={"amount": kept, "note": note})
+        return kept
 
     # ------------------------------------------------------------ reports
     def list_sales(self, ctx: Context, *, day: str | None = None, sale_no: int | None = None,
