@@ -1,6 +1,9 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"أول تشغيل: اختار طابعة الإيصال وطابعة الملصقات واطبع تجربة قبل نقل البيانات.": "First run: choose the receipt printer and the label printer and print a test before moving the data.",
+"لو الصفحة في ويندوز فيها ملصقين فوق بعض اختار 2.": "If the Windows page holds two labels one above the other, choose 2.",
+"تقدر تغيّر الطابعات بعدين من «البرنامج والنسخ الاحتياطي».": "You can change the printers later in «Program and backup».",
 "✓ اترجعت إعدادات الطباعة والأجهزة من البيانات القديمة. اطبع ملصق تجربة واتأكد إنه طالع على ملصق واحد.": "✓ The printing and device settings were brought back from the old data. Print a test label and check it fits on one label.",
 "اختار طابعة الإيصال وطابعة الملصقات، واطبع ملصق تجربة. تقدر تغيّرها بعدين من «البرنامج والنسخ الاحتياطي».": "Choose the receipt printer and the label printer, and print a test label. You can change them later in «Program and backup».",
 "كان البرنامج شغال قبل كده؟ ممكن ترجع الإعدادات القديمة كلها من «البرنامج والنسخ الاحتياطي» ← «رجّع إعدادات الأجهزة والطباعة من نسخة قديمة».": "Was the program running before? You can bring all the old settings back from «Program and backup» → «Restore device and printing settings from an older copy».",
