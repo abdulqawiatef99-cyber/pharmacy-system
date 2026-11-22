@@ -570,6 +570,8 @@ class Sales:
                 from . import contracts
                 contracts.apply(self.db, sid)
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+            if discount_bp or s.get("invoice_discount_amount") or s.get("invoice_discount_bp"):
+                self._check_below_cost(ctx, sid)
         return self.get(ctx, sid)
 
     def remove_line(self, ctx: Context, sid: str, line_id: str) -> dict:
@@ -1093,7 +1095,36 @@ class Sales:
                                 (discount_amount, ctx.user_id if discount_amount else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
             self._check_fixed_discounts(ctx, sid, line_id if (discount_amount or qty_base is not None) else None)
+            if discount_bp or discount_amount or qty_base is not None:
+                self._check_below_cost(ctx, sid)
         return self.get(ctx, sid)
+
+    def _check_below_cost(self, ctx: Context, sid: str) -> None:
+        """U2-33: a discount may never take a line under its cost. Refused when the discount is typed, not only at
+        payment; only someone with `sales.below_cost` (the owner, or his approval) gets past, and payment still
+        asks him to confirm. The cost itself is never shown to someone without costs.read."""
+        if ctx.allowed("sales.below_cost"):
+            return
+        draft = self.get(ctx, sid)
+        for l in draft["lines"]:
+            own = l["discount"] - (l.get("invoice_share") or 0) if l.get("discount_source") != "contract" else 0
+            if own <= 0 and not l.get("invoice_share"):
+                continue
+            c = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
+                            (ctx.org_id, draft["branch_id"], l["item_id"]))
+            if not c or c["avg_cost"] is None:
+                continue
+            cost = cost_piasters(Decimal(c["avg_cost"]) * l["qty_base"] * 100)
+            if l["net"] < cost:
+                name = l["item"]["name"]
+                msg = f"الخصم ده يخلّي {name} تحت التكلفة؛ مينفعش"
+                details = {"permission": "sales.below_cost", "label": f"خصم تحت التكلفة على {name}",
+                           "line_id": l["id"]}
+                if ctx.can("costs.read"):
+                    most = max(0, l["gross"] - cost)
+                    msg += f" (أقصى خصم {egp(most)} ج)"
+                    details["max_discount"] = most
+                raise Forbidden(msg, code="approval_required", details=details)
 
     def _check_fixed_discounts(self, ctx: Context, sid: str, line_id: str | None) -> None:
         """A fixed discount is held to the same limit as a percent: its share of the line's price (and the invoice
@@ -1148,6 +1179,8 @@ class Sales:
                             " invoice_discount_approved_by=NULL, invoice_discount_approved_bp=NULL, version=version+1 WHERE id=?",
                             (amount, bp, ctx.user_id if amount or bp else None, sid))
             self._check_fixed_discounts(ctx, sid, None)
+            if amount or bp:
+                self._check_below_cost(ctx, sid)
             audit.record(self.db, ctx, "sale.invoice_discount", "sale", sid, before=before,
                          after={"amount": amount, "bp": bp, "approved_by": ctx.approver_id})
         return self.get(ctx, sid)
