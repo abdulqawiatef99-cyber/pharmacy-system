@@ -1453,8 +1453,9 @@ class Sales:
                 money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
                                    meta={"return_id": rid})
             # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
-            # refunded to his account, that change is already his credit and stays
-            if refund_method != "credit" and not self.db.one(
+            # refunded to his account or his card, that change is already his credit and stays
+            # in cash only (review P2): a card refund never needs the drawer or an open shift; his change stays credit
+            if refund_method == "cash" and not self.db.one(
                     "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
                     " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
                 self._give_back_kept_change(ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي",
@@ -1705,9 +1706,12 @@ class Sales:
         """Inside the caller's transaction: the kept change of sale `s` leaves the drawer in cash and his credit
         goes with it (owner 22/11: a void, or the return that empties the invoice, reverses it)."""
         kept = self.kept_change(ctx, s["id"]) if s["customer_id"] else 0
+        # review P1: only the credit he still holds goes back; what he already spent at a later sale stays spent
+        # (else he would have it twice: the goods and the cash)
+        kept = min(kept, max(0, -self.balance(ctx, s["customer_id"]))) if kept > 0 else 0
         if kept <= 0:
             return 0
-        cash.record(self.db, ctx, -kept, "refund", s["id"], note, branch_id=s["branch_id"])
+        cash.record(self.db, ctx, -kept, "void" if kind == "void" else "refund", s["id"], note, branch_id=s["branch_id"])
         self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note, created_by)"
                         " VALUES (?,?,?,?,?,?,?,?)",
                         (new_id(), ctx.org_id, s["customer_id"], kept, kind, s["id"], note, ctx.user_id))

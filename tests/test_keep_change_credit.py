@@ -132,3 +132,25 @@ class TestKeepChangeFutureTraps(SalesCase):
         sid, d = self.keep(self.cust)                                         # refunded to his account: stays
         self.s.return_items(self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="credit", reason="test")
         self.assertEqual(self.s.balance(self.ctx, self.cust), -100 - 1900)
+
+    def test_review_p1_credit_already_spent_is_not_paid_out_again(self):
+        start = self.cd.summary(self.ctx)["expected_cash"]
+        a, _ = self.keep(self.cust)                                           # he has 1.00
+        b = self.s.create(self.ctx, self.cust)
+        d = self.s.add_line(self.ctx, b, self.pan, units=1)
+        self.s.complete(self.ctx, b, paid_cash=d["total"] - 100, on_credit=100, safety_decisions=self.ack_all(b))
+        self.s.void(self.ctx, a, reason="غلط في الفاتورة")                     # he spent the 1.00 already
+        self.assertEqual(self.s.balance(self.ctx, self.cust), 0)             # never owes for it
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start + 100 + 1800)   # B 18.00 cash + the 1.00 he spent at B
+
+    def test_review_p2_a_card_refund_needs_no_open_shift(self):
+        sid, d = self.keep(self.cust)
+        before = self.s.balance(self.ctx, self.cust)
+        with self.db.transaction():
+            self.db.execute("UPDATE cash_shifts SET status='closed', closed_at=opened_at")
+        try:
+            self.s.return_items(self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="card", reason="test")
+        except Exception as e:                                                # a card refund may be refused for
+            self.assertNotEqual(getattr(e, "code", None), "no_open_shift")   # its own reasons, never the drawer
+            return
+        self.assertEqual(self.s.balance(self.ctx, self.cust), before)        # his change stays credit
