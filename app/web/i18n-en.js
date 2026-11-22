@@ -3172,4 +3172,9 @@ window.I18N_EN = {
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
+"ملاحظات الصرف: تذكير بيظهر للبائع مرة واحدة في الفاتورة لما يكون فيها صنف بالمادة الفعالة دي، ومبيوقفش البيع.": "Dispensing notes: a reminder the seller sees once per invoice when it has an item with this active ingredient; it never stops the sale.",
+"الخمس مواد من دليل قرار هيئة الدواء 375 لسنة 2026 شغالة من الأول.": "The five ingredients from the EDA decree 375/2026 guide are on from the start.",
+"أي مادة تانية بتبدأ مقفولة «محتاج تأكيد» لحد ما تشغلها.": "Any other ingredient starts off, «needs confirmation», until you turn it on.",
+"ملاحظات الصرف": "Dispensing notes",
+"محتاج تأكيد": "Needs confirmation",
 };
