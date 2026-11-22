@@ -11,8 +11,7 @@ What it does now (no clinical knowledge needed):
 What it can do once approved, sourced rules exist (none are shipped):
   * interaction           params {"ingredients": [id_a, id_b]}
   * max_qty               params {"item_id" | "ingredient_id", "max_base_units"}
-  * split_policy          params {"item_id", "allow_partial_pack": bool,
-                                  "allow_tablet_split": bool}
+  (split_policy was removed in U2-17: no tablet splitting; old rows are ignored)
 
 Governance: rules are created as drafts with a cited knowledge source, become
 active only after approval (by a different authorized user when one exists),
@@ -37,7 +36,7 @@ from ..db import Database, new_id
 SEVERITY_ORDER = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "info": 0}
 SEVERITY_AR = {"critical": "حرجة", "high": "مرتفعة", "moderate": "متوسطة", "low": "منخفضة",
                "info": "معلومة", "insufficient": "لا توجد بيانات كافية"}
-RULE_TYPES = ("duplicate_ingredient", "interaction", "max_qty", "split_policy", "lookalike")
+RULE_TYPES = ("duplicate_ingredient", "interaction", "max_qty", "lookalike")   # split_policy removed (U2-17)
 # Notices that state a constant fact about an item (no decision asked): written to safety_events once per
 # item and month, not on every sale. Kept in memory: after a restart each is written once more at most.
 ONCE_A_MONTH = ("insufficient_data",)
@@ -158,7 +157,7 @@ class SafetyEngine:
             raise ValidationFailed("نوع قاعدة غير معروف")
         if severity not in ("critical", "high", "moderate", "low"):
             raise ValidationFailed("مستوى خطورة غير صحيح")
-        if rule_type in ("interaction", "max_qty", "split_policy") and not source_id:
+        if rule_type in ("interaction", "max_qty") and not source_id:
             raise ValidationFailed("القواعد السريرية يجب أن يكون لها مرجع موثق", code="source_required")
         if source_id and not self.db.one("SELECT 1 FROM knowledge_sources WHERE id=? AND"
                                          " (org_id IS NULL OR org_id=?)", (source_id, ctx.org_id)):
@@ -194,11 +193,6 @@ class SafetyEngine:
         elif rule_type == "max_qty":
             if not (p.get("item_id") or p.get("ingredient_id")) or int(p.get("max_base_units", 0)) <= 0:
                 raise ValidationFailed("حدد الصنف أو المادة والحد الأقصى")
-        elif rule_type == "split_policy":
-            if not (p.get("item_id") or p.get("scope") == "all_items") \
-                    or not isinstance(p.get("allow_partial_pack"), bool) \
-                    or not isinstance(p.get("allow_tablet_split"), bool):
-                raise ValidationFailed("سياسة التقسيم تحتاج الصنف (أو كل الأصناف) وقيم صريحة (نعم/لا)")
 
     def approve_rule(self, ctx: Context, rule_id: str, *, self_approval_reason: str | None = None) -> None:
         ctx.require("safety.approve")
@@ -269,7 +263,7 @@ class SafetyEngine:
 
     def check(self, ctx: Context, lines: list[dict], *, context_type: str = "check",
               context_id: str | None = None, log: bool = True) -> list[Finding]:
-        """lines: [{"item_id", "base_qty"?, "partial_pack"?: bool, "tablet_split"?: bool}]"""
+        """lines: [{"item_id", "base_qty"?}] (partial_pack / tablet_split are ignored since U2-17)"""
         ctx.require("safety.read")
         item_ids = []
         for l in lines:
@@ -350,30 +344,8 @@ class SafetyEngine:
                                         [l["item_id"] for l in lines], rule["id"], rule["version"],
                                         self._src(rule), requires=self._requires(rule["severity"])))
 
-        # partial pack / tablet split: absent policy => ask the pharmacist (never assume)
-        split_rules = self._rules(ctx, "split_policy")
-        policies = {r["params"]["item_id"]: r for r in split_rules if r["params"].get("item_id")}
-        default_policy = next((r for r in split_rules if r["params"].get("scope") == "all_items"), None)
-        for l in lines:
-            for flag, key, label in (("partial_pack", "allow_partial_pack", "صرف جزء من العبوة"),
-                                     ("tablet_split", "allow_tablet_split", "تقسيم القرص")):
-                if not l.get(flag):
-                    continue
-                pol = policies.get(l["item_id"]) or default_policy   # item policy wins
-                if pol is None and flag == "partial_pack":
-                    # launch day 21/11 (owner): selling one of the item's own sale units (a strip of a box of
-                    # strips, a piece) is a normal sale, not a warning; only a policy that forbids it says so
-                    continue
-                if pol is None:
-                    sev, req = "high", "override"                  # splitting a tablet: ask the pharmacist
-                    findings.append(Finding("split_unknown", sev,
-                                            f"لا توجد سياسة موثقة لـ {label} للصنف {labels[l['item_id']]} — يلزم قرار الصيدلي",
-                                            [l["item_id"]], requires=req))
-                elif not pol["params"][key]:
-                    findings.append(Finding("split_forbidden", pol["severity"],
-                                            f"{label} غير مسموح للصنف {labels[l['item_id']]}: {pol['explanation']}",
-                                            [l["item_id"]], pol["id"], pol["version"], self._src(pol),
-                                            requires=self._requires(pol["severity"])))
+        # U2-17 (owner, update 3): no tablet splitting and no split setting. A strip or a unit of the item's own pack
+        # is a normal sale (update 1); old split_policy rows in the database are not read.
 
         # look-alike neighbours (heuristic, informational)
         for i in dict.fromkeys(item_ids):
