@@ -218,3 +218,42 @@ class TestKeepChangeCodexP2(SalesCase):
         b = cd.summary(self.ctx)
         self.assertEqual(b["rounding_total"], -10)                                   # once, not -0.20
         self.assertEqual(cd.report(self.ctx, b["id"])["rounding_total"], -10)
+
+
+class TestKeepChangeManagerExample(SalesCase):
+    """Manager 22/11 (correction): invoice 97, he pays 100 in cash, no change given -> the drawer expects +100, the
+    sale is 97, his account holds 3 in his favour. Later: «ليه رصيد 3 ج», one click uses it (never more than his
+    balance), and the drawer expects only the cash he really pays."""
+
+    def setUp(self):
+        super().setUp()
+        self.cust = self.s.create_customer(self.ctx, name="عميل المثال", phone="01000000111")
+        self.cd = CashDrawer(self.db)
+
+    def test_97_paid_with_100_then_the_3_used_later(self):
+        start = self.cd.summary(self.ctx)["expected_cash"]
+        sid = self.s.create(self.ctx, self.cust)
+        d = self.s.add_line(self.ctx, sid, self.pan, units=5)                 # 3 x 19.00 + 2 x 20.00 = 97.00
+        self.assertEqual(d["total"], 9700)
+        self.s.complete(self.ctx, sid, paid_cash=9700, safety_decisions=self.ack_all(sid), change_to_credit=300)
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start + 10000)    # the whole 100 is there
+        self.assertEqual(self.db.one("SELECT total FROM sales WHERE id=?", (sid,))["total"], 9700)   # sale 97
+        self.assertEqual(self.s.balance(self.ctx, self.cust), -300)                    # we owe him 3
+        # later: 20.00, he uses his 3 and pays 17 in cash
+        mid = self.cd.summary(self.ctx)["expected_cash"]
+        b = self.s.create(self.ctx, self.cust)
+        d = self.s.add_line(self.ctx, b, self.pan, units=1)
+        self.assertEqual(d["customer"]["balance"], -300)                              # the screen shows «ليه رصيد 3»
+        from app.core.errors import Conflict
+        with self.assertRaises(Conflict):                                            # more than his 3: refused
+            self.s.complete(self.ctx, b, paid_cash=d["total"] - 301, on_credit=301, safety_decisions=self.ack_all(b))
+        self.s.complete(self.ctx, b, paid_cash=d["total"] - 300, on_credit=300, safety_decisions=self.ack_all(b))
+        self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], mid + d["total"] - 300)   # only the cash paid
+        self.assertEqual(self.s.balance(self.ctx, self.cust), 0)
+
+    def test_the_one_click_button_uses_at_most_his_balance(self):
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("ليه رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة", js)
+        self.assertIn("const use = Math.min(-s.customer.balance, s.total), rest = s.total - use;", js)
+        self.assertIn('POS.parts = [{ method: "credit", amount: use }', js)

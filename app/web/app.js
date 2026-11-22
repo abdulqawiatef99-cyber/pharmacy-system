@@ -4097,6 +4097,7 @@ function renderSide() {
         <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
+        ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 ليه رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
@@ -4224,6 +4225,14 @@ function renderSide() {
         });
       }));
     } catch (er) { toast(er.message, true); }
+  });
+  // manager 22/11: the customer's credit (a change he left) in one click, never more than his balance or the invoice;
+  // the rest is cash, so the drawer expects only the cash really paid
+  $("#useCredit")?.addEventListener("click", () => {
+    const use = Math.min(-s.customer.balance, s.total), rest = s.total - use;
+    POS.split = true;
+    POS.parts = [{ method: "credit", amount: use }, ...(rest > 0 ? [{ method: "cash", amount: rest + roundNear(rest, s.rounding_step || 0) }] : [])];
+    renderSide();
   });
   $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total + roundNear(s.total, s.rounding_step || 0) }]; renderSide(); });
   $("#splitOff")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = false; renderSide(); });

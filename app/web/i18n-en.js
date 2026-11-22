@@ -3268,4 +3268,5 @@ window.I18N_EN = {
 "منها تقريب النقدي": "of which cash rounding",
 "تقريب النقدي (مش مبيعات ولا ربح)": "Cash rounding (not sales, not profit)",
 "تقريب النقدي (مش مبيعات)": "Cash rounding (not sales)",
+"💰 ليه رصيد 0 ج — استخدمه في الفاتورة": "💰 Has 0 EGP credit — use it on this invoice",
 };
