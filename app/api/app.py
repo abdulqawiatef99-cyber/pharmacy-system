@@ -2551,7 +2551,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             change = int(req.query_params.get("change") or 0)
         except ValueError:
             raise ValidationFailed("الباقي غير صحيح")
-        return J(await off_loop(change_fill.suggestions, db, ctx, change))
+        return J(await off_loop(change_fill.suggestions, db, ctx, change, req.query_params.get("sale") or None))
 
     @handler
     async def cash_float_preview(req):

@@ -3914,21 +3914,24 @@ function renderSide() {
     $("#changeBox").hidden = !(g >= s.total); $("#changeV").textContent = money(ch);
     $("#noChange").hidden = !(ch > 0);
     $("#noChangeRes").innerHTML = "";
-    if (!$("#noChange").hidden && POS.noCoins == null) {          // the hint: once per screen, from the last close
-      POS.noCoins = false;
+    if (!$("#noChange").hidden && !POS.noCoinsAsked) {          // the hint: from the last close, once per invoice
+      POS.noCoinsAsked = true;
       api(`/api/sales/change-fill?change=0`).then((r) => { POS.noCoins = r.no_pound_coins; if ($("#noChangeHint")) $("#noChangeHint").hidden = !r.no_pound_coins; }).catch(() => {});
     } else if ($("#noChangeHint")) $("#noChangeHint").hidden = !POS.noCoins;
   });
   $("#noChangeBtn")?.addEventListener("click", async () => {       // U2-20: an item instead of the coins
-    const ch = toPiasters($("#payGiven").value) - SALE.total;
+    const given = toPiasters($("#payGiven").value), ch = given - SALE.total;
     if (!(ch > 0)) return;
     try {
-      const r = await api(`/api/sales/change-fill?change=${ch}`);
+      const r = await api(`/api/sales/change-fill?change=${ch}&sale=${encodeURIComponent(SALE.id)}`);
       $("#noChangeRes").innerHTML = `${r.items.length ? `<p class="muted small">أصناف بسعر يناسب الباقي (${money(ch)} ج):</p>${r.items.map((it) => `<button class="btn small secondary" type="button" data-cf="${esc(it.id)}">${esc(it.name)} — ${money(it.price)} ج</button>`).join(" ")}` : `<p class="muted small">مفيش صنف متاح بسعر يناسب الباقي</p>`}
         <p><a href="#" id="cfCredit">خليها رصيد للعميل</a></p>`;
       $("#noChangeRes").querySelectorAll("[data-cf]").forEach((x) => x.addEventListener("click", () => {
         const it = r.items.find((i) => i.id === x.dataset.cf);
-        if (it) addItem({ id: it.id }, 1, 0);
+        if (!it) return;
+        addItem({ id: it.id }, 1, 0).then(() => {      // the customer's money stays typed: the new change shows
+          const g = $("#payGiven"); if (g) { g.value = money(given); g.dispatchEvent(new Event("input")); }
+        });
       }));
       $("#cfCredit").addEventListener("click", (e) => { e.preventDefault(); $("#posCust")?.focus(); toast("اختار العميل"); });
     } catch (er) { toast(er.message, true); }
@@ -4071,7 +4074,7 @@ async function complete(findings) {
               confirm_below_cost: !!SALE.confirm_below_cost, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
     // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
     const dv = done.devices || { receipt: "none", drawer: "none" };
-    delete POS.rcpt[SALE.id];
+    delete POS.rcpt[SALE.id]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
     if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${given ? `?given=${given}` : ""}`);
     QUICK = null;
