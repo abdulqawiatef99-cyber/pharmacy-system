@@ -1451,14 +1451,62 @@ const CONVERT = {
   bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
+// U2-1 / U2-10: keyboard moves inside the purchase line grid. Enter = next box (the last box of a row goes to the
+// next row), arrows up/down = same box in the row above/below, left/right = the box beside (RTL aware). The grid
+// is redrawn after each saved change, so the box to land on is kept by line and field and focused again after it.
+const PG_FIELDS = ["qty", "bonus_qty", "public_price", "discount_bp", "unit_net_price", "line_total", "batch_no", "expiry_date"];
+let PG_FOCUS = null, PG_SAVING = 0;
+function pgFocus() {
+  if (!PG_FOCUS) return;
+  const el = app.querySelector(`input[data-line="${CSS.escape(PG_FOCUS.line)}"][data-field="${PG_FOCUS.field}"]`);
+  PG_FOCUS = null;
+  if (el && !el.disabled) { el.focus(); try { el.select(); } catch { /* not selectable */ } }
+}
+function pgTarget(el, key) {
+  const rows = [...new Set([...app.querySelectorAll("input[data-line][data-field]")].map((x) => x.dataset.line))];
+  const r = rows.indexOf(el.dataset.line), c = PG_FIELDS.indexOf(el.dataset.field);
+  if (r < 0 || c < 0) return null;
+  const rtl = document.dir === "rtl";
+  let [nr, nc] = [r, c];
+  if (key === "Enter") { nc = c + 1; if (nc >= PG_FIELDS.length) { nc = 0; nr = r + 1; } }
+  else if (key === "ArrowDown") nr = r + 1;
+  else if (key === "ArrowUp") nr = r - 1;
+  else if (key === (rtl ? "ArrowLeft" : "ArrowRight")) nc = c + 1;
+  else if (key === (rtl ? "ArrowRight" : "ArrowLeft")) nc = c - 1;
+  if (nr < 0 || nr >= rows.length || nc < 0 || nc >= PG_FIELDS.length) return null;
+  return { line: rows[nr], field: PG_FIELDS[nc] };
+}
+app.addEventListener("focusin", (e) => {       // U2-2 in the grid too: typing replaces the box
+  const el = e.target;
+  if (CUR && el instanceof HTMLInputElement && el.dataset.field && el.dataset.line) { try { el.select(); } catch { /* not selectable */ } }
+});
+app.addEventListener("keydown", (e) => {
+  const el = e.target;
+  if (!CUR || !(el instanceof HTMLInputElement) || !el.dataset.field || !el.dataset.line) return;
+  if (!["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+  const side = e.key === "ArrowLeft" || e.key === "ArrowRight";
+  // in a text box the side arrows move the caret until it reaches the edge
+  if (side && el.type !== "number" && el.selectionStart !== (e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft") ? 0 : el.value.length)) return;
+  e.preventDefault();                       // never a form submit or a number spin: that was the Enter stall
+  if (PG_SAVING) return;                    // one save at a time, for the arrows too (review P2)
+  const to = pgTarget(el, e.key);
+  if (!to) return;
+  PG_FOCUS = to;
+  if (el.value !== el.defaultValue) el.blur();  // the change saves, the redraw then lands on the target
+  else pgFocus();
+});
+
 async function save(path, body, method = "PATCH") {
+  PG_SAVING++;
   try {
     CUR = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
     renderInvoice();
+    pgFocus();
   } catch (e) {
     toast(e.message, true);
+    PG_FOCUS = null;                       // a failed save keeps no pending move (review P2)
     if (e.code === "stale_version") await viewInvoice(CUR.invoice.id);
-  }
+  } finally { PG_SAVING--; if (PG_FOCUS && !CUR) PG_FOCUS = null; }
 }
 
 async function viewInvoice(id) {
@@ -3916,9 +3964,22 @@ function renderSide() {
       toast(r.duplicate_of ? `⚠ هذه الصورة نفسها مسجلة مع الفاتورة ${r.duplicate_of}` : "✓ تم حفظ صورة التحويل مع الفاتورة", !!r.duplicate_of); renderSide(); }
     catch (err) { toast(err.message, true); }
   });
-  document.querySelectorAll("[data-kind]").forEach((b) => b.addEventListener("click", async () => {
-    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { kind: b.dataset.kind } }); renderSide(); refreshTabLabel(); }
+  // U2-10 (owner: the screen froze on customer → «توصيل للمنزل»): one change at a time (the buttons are off while
+  // it saves, so a second click cannot race the first), the chosen customer's phone and address fill the delivery,
+  // and any error is shown instead of leaving the screen waiting
+  const fillFromCustomer = async () => {
+    const fill = {};
+    if (SALE.kind === "delivery" && SALE.customer?.phone && !SALE.delivery?.phone) fill.phone = SALE.customer.phone;
+    if (SALE.kind === "delivery" && SALE.customer?.address1 && !SALE.delivery?.address) fill.address = SALE.customer.address1;
+    if (Object.keys(fill).length) SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: fill } });
+  };
+  document.querySelectorAll("#posSide [data-kind]").forEach((b) => b.addEventListener("click", async () => {
+    if (POS.kindBusy || (b.dataset.kind === "delivery") === (SALE.kind === "delivery")) return;
+    POS.kindBusy = true;
+    document.querySelectorAll("#posSide [data-kind]").forEach((x) => { x.disabled = true; });
+    try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { kind: b.dataset.kind } }); await fillFromCustomer(); }
     catch (er) { toast(er.message, true); }
+    finally { POS.kindBusy = false; renderSide(); refreshTabLabel(); }
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
@@ -3933,11 +3994,8 @@ function renderSide() {
     const cs = await api(`/api/customers?q=${encodeURIComponent(v)}`);
     $("#posCustRes").innerHTML = cs.map((c) => `<button class="btn small secondary" data-cust="${esc(c.id)}">${esc(c.name)}${c.name_alt ? ` / ${esc(c.name_alt)}` : ""}${c.phone ? ` — ${esc(c.phone)}` : ""}${c.estock_code != null ? ` <span class="muted">كود ${esc(c.estock_code)}</span>` : ""}</button>`).join("") || `<p class="muted">لا يوجد عميل بهذا الاسم</p>`;
     $("#posCustRes").querySelectorAll("[data-cust]").forEach((b) => b.addEventListener("click", async () => {
-      SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } });
-      const fill = {};
-      if (SALE.kind === "delivery" && SALE.customer?.phone && !SALE.delivery?.phone) fill.phone = SALE.customer.phone;
-      if (SALE.kind === "delivery" && SALE.customer?.address1 && !SALE.delivery?.address) fill.address = SALE.customer.address1;
-      if (Object.keys(fill).length) SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { delivery: fill } });
+      try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: b.dataset.cust } }); await fillFromCustomer(); }
+      catch (er) { toast(er.message, true); }
       renderSide();
     }));
   });
