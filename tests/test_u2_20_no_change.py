@@ -101,7 +101,7 @@ class TestNoChangeSellable(TestNoChange):
         self.assertNotIn("Hidden", names)
 
     def test_what_is_in_the_cart_is_not_offered_again(self):
-        i = self.item("Last one", 300, qty=1)
+        i = self.item("Last one", 300, qty=5)      # even with more on the shelf: a merge can reprice the line
         sid = self.s.create(self.ctx)
         self.assertIn("Last one", [x["name_en"] for x in change_fill.suggestions(self.db, self.ctx, 500, sid)["items"]])
         self.s.add_line(self.ctx, sid, i, packs=1)

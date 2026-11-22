@@ -3165,8 +3165,6 @@ window.I18N_EN = {
 "آخر تقفيل مفيهوش جنيهات فكة": "The last close had no one-pound coins",
 "🪙 مفيش فكة": "🪙 No change",
 "أصناف بسعر يناسب الباقي (0 ج):": "Items priced to fit the change (0 EGP):",
-"خليها رصيد للعميل": "Keep it as the customer's credit",
 "مفيش صنف متاح بسعر يناسب الباقي": "No item in stock fits the change",
-"اختار العميل": "Choose the customer",
 "أقصى عدد في المرة 500 ملصق؛ المختار 0. قلّل العدد أو اطبع على دفعات": "At most 500 labels per job; 0 selected. Lower the counts or print in batches",
 };

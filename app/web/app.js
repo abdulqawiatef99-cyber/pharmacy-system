@@ -3954,8 +3954,7 @@ function renderSide() {
     if (!(ch > 0)) return;
     try {
       const r = await api(`/api/sales/change-fill?change=${ch}&sale=${encodeURIComponent(SALE.id)}`);
-      $("#noChangeRes").innerHTML = `${r.items.length ? `<p class="muted small">أصناف بسعر يناسب الباقي (${money(ch)} ج):</p>${r.items.map((it) => `<button class="btn small secondary" type="button" data-cf="${esc(it.id)}">${esc(it.name)} — ${money(it.price)} ج</button>`).join(" ")}` : `<p class="muted small">مفيش صنف متاح بسعر يناسب الباقي</p>`}
-        <p><a href="#" id="cfCredit">خليها رصيد للعميل</a></p>`;
+      $("#noChangeRes").innerHTML = `${r.items.length ? `<p class="muted small">أصناف بسعر يناسب الباقي (${money(ch)} ج):</p>${r.items.map((it) => `<button class="btn small secondary" type="button" data-cf="${esc(it.id)}">${esc(it.name)} — ${money(it.price)} ج</button>`).join(" ")}` : `<p class="muted small">مفيش صنف متاح بسعر يناسب الباقي</p>`}`;
       $("#noChangeRes").querySelectorAll("[data-cf]").forEach((x) => x.addEventListener("click", () => {
         const it = r.items.find((i) => i.id === x.dataset.cf);
         if (!it) return;
@@ -3963,7 +3962,6 @@ function renderSide() {
           const g = $("#payGiven"); if (g) { g.value = money(given); g.dispatchEvent(new Event("input")); }
         });
       }));
-      $("#cfCredit").addEventListener("click", (e) => { e.preventDefault(); $("#posCust")?.focus(); toast("اختار العميل"); });
     } catch (er) { toast(er.message, true); }
   });
   $("#splitOn")?.addEventListener("click", (e) => { e.preventDefault(); POS.split = true; POS.parts = [{ method: "cash", amount: s.total }]; renderSide(); });

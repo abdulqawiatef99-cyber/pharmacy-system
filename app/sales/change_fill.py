@@ -54,9 +54,10 @@ def suggestions(db: Database, ctx: Context, change: int, sale_id: str | None = N
         cand = []
         for r in rows:
             ps = r["pack_size"] or 1
-            # FEFO, as the sale takes it: the next pack starts after the units already in the cart, and must lie in
-            # one batch, so it has one price
-            start, first, pos = in_cart.get(r["id"], 0), None, 0
+            if r["id"] in in_cart:
+                continue          # already on the invoice: a merge into its line can reprice it (Codex P2 on #411)
+            # FEFO, as the sale takes it: the first whole pack, in one batch, so it has one price
+            start, first, pos = 0, None, 0
             for bt in sales._sellable(ctx, b, r["id"]):
                 if pos <= start < pos + bt["qty"]:
                     first = bt if start + ps <= pos + bt["qty"] else None
