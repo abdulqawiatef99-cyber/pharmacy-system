@@ -3215,4 +3215,5 @@ window.I18N_EN = {
 "تقريب النقدي (مش مبيعات ولا خصم)": "Cash rounding (not sales, not discount)",
 "تقريب النقدي": "Cash rounding",
 "منها تقريب النقدي": "of which cash rounding",
+"تقريب النقدي (مش مبيعات ولا ربح)": "Cash rounding (not sales, not profit)",
 };

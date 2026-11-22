@@ -258,3 +258,53 @@ class TestMigration(SalesCase):
         with self.assertRaises(sqlite3.OperationalError):                 # a plain re-run would fail: only the
             c.execute("ALTER TABLE sales ADD COLUMN rounding INTEGER NOT NULL DEFAULT 0")   # tracked runner applies it
         c.close()
+
+
+class TestIndependentReviewFindings(Rounded):
+    """The second agent's review of the cash-only rounding."""
+
+    def test_p1_a_return_rounding_never_lands_in_sales_or_profit(self):
+        from app.finance.expenses import profit as profit_report
+        from app.reports.day_review import day_review
+        from tests.helpers import today
+        sid, d = self.sale(units=2, disc=20)                             # 37.80 paid 38.00
+        lid = d["lines"][0]["id"]
+        self.pay(sid, paid_cash=3800)
+        self.s.return_items(self.ctx, sid, {lid: 2}, refund_method="cash", reason="test")
+        row = self.db.one("SELECT total, returned_total FROM sales WHERE id=?", (sid,))
+        self.assertEqual(tuple(row), (3780, 3780))                     # line values: net sales 0, not -0.20
+        ret = self.db.one("SELECT total, rounding FROM sale_returns WHERE sale_id=?", (sid,))
+        self.assertEqual(tuple(ret), (3800, 20))                       # what he got back, with its rounding
+        dr = day_review(self.db, self.ctx, today())
+        self.assertEqual((dr["net_sales"], dr["sales"]["rounding"]), (0, 0))
+        p = profit_report(self.db, self.ctx, today(), today())
+        self.assertEqual((p["revenue"], p["cash_rounding"]), (0, 0))
+
+    def test_p2_shift_and_day_rounding_net_of_returns_and_voids(self):
+        from app.reports.day_review import day_review
+        from tests.helpers import today
+        a, d = self.sale()                                               # +0.10
+        self.pay(a, paid_cash=1900)
+        b, _ = self.sale()                                               # +0.10, voided
+        self.pay(b, paid_cash=1900)
+        self.s.void(self.ctx, b, reason="غلط في الفاتورة")
+        self.s.return_items(self.ctx, a, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="test")
+        sh = self.cd.summary(self.ctx)
+        self.assertEqual(sh["rounding_total"], 0)
+        self.assertEqual(self.cd.report(self.ctx, sh["id"])["rounding_total"], 0)
+        self.assertEqual(day_review(self.db, self.ctx, today())["sales"]["rounding"], 0)
+
+    def test_p2_no_cash_no_rounding_a_card_is_never_short(self):
+        sid, _ = self.sale()                                             # 18.90
+        for card in (1880, 1850):                                        # 0.10 / 0.40 short, no cash
+            with self.assertRaises(ValidationFailed):
+                self.pay(sid, paid_card=card)
+        cust = self.s.create_customer(self.ctx, name="عميل", phone="01000000003", credit_limit=100000)
+        sid, _ = self.sale(customer=cust)
+        with self.assertRaises(ValidationFailed):
+            self.pay(sid, on_credit=1880)
+
+    def test_p2_a_tiny_cash_part_is_not_rounded_to_nothing(self):
+        sid, _ = self.sale()                                             # 18.90
+        self.pay(sid, paid_card=1880, paid_cash=10)                     # 0.10 in cash stays 0.10
+        self.assertEqual(self.row(sid)["rounding"], 0)

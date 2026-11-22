@@ -693,7 +693,8 @@ class Sales:
             from .rounding import nearest, step
             s["rounding"] = 0
             s["rounding_step"] = step(self.db, ctx.org_id)
-            s["cash_rounding"] = nearest(s["total"], s["rounding_step"])
+            r = nearest(s["total"], s["rounding_step"])
+            s["cash_rounding"] = r if s["total"] + r > 0 else 0            # never rounded away to nothing
             s["cash_total"] = s["total"] + s["cash_rounding"]
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
@@ -806,7 +807,9 @@ class Sales:
         from .rounding import nearest, step
         cash_due = preview["total"] - paid_card - paid_transfer - on_credit
         # an exchange settles exactly: a return is never rounded (owner 22/11)
-        rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and round_cash else 0
+        rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and paid_cash > 0 and round_cash else 0
+        if cash_due + rounding <= 0:          # review P2: no cash part rounded away (a card a little short)
+            rounding = 0
         if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"], "cash_due": max(0, cash_due),
@@ -1360,7 +1363,9 @@ class Sales:
             rounding_back = 0
             if s["rounding"]:
                 # the invoice took for its items: the exact total plus its cash rounding, less the delivery fee
-                left = max(0, s["total"] + s["rounding"] - (s["delivery_fee"] or 0) - s["returned_total"])
+                paid_back = self.db.one("SELECT coalesce(sum(total),0) t FROM sale_returns WHERE sale_id=? AND org_id=?",
+                                        (sid, ctx.org_id))["t"]
+                left = max(0, s["total"] + s["rounding"] - (s["delivery_fee"] or 0) - paid_back)
                 emptied = not self.db.one(
                     "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
                     " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id))
@@ -1417,7 +1422,9 @@ class Sales:
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
                             " created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                             (rid, ctx.org_id, sid, refund, rounding_back, refund_method, reason.strip(), ctx.user_id, _now()))
-            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund, sid))
+            # review P1: the sale's returns are line values (sales and profit stay exact); the money paid back,
+            # with its rounding, is the return's own total and moves the drawer / card / account
+            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund - rounding_back, sid))
             if refund_method == "credit":
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'return', ?, ?)",
