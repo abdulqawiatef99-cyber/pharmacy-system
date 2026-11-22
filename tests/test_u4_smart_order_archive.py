@@ -168,3 +168,14 @@ class ArchiveDemand(Base):
         demand._cache.clear()
         per = demand.monthly(self.db, self.ctx, today=TODAY)["items"][self.item("100")["id"]]
         self.assertEqual(per["2026-11"], {"units": 3, "events": 1})       # 2 packs sold, 1 back: one pack left
+
+    def test_both_reads_check_the_permission(self):
+        """Codex P1 on #431: archive_window returned archived sales without purchases.read."""
+        from dataclasses import replace as dc_replace
+        from app.core.errors import Forbidden
+        self.build()
+        nobody = dc_replace(self.ctx, permissions=frozenset())
+        with self.assertRaises(Forbidden):
+            demand.archive_window(self.db, nobody, "2026-08-01T00:00:00")
+        with self.assertRaises(Forbidden):
+            demand.monthly(self.db, nobody, today=TODAY)

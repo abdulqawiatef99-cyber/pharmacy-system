@@ -251,6 +251,7 @@ def _utc(local_iso: str) -> str:
 def archive_window(db: Database, ctx: Context, start_local: str) -> tuple[dict[str, tuple[int, int]], str | None]:
     """For the smart order's window: ({item_id: (base units net, invoices)}, first archived day in the window) of
     the archive from start_local (local time) up to the cut-off. ({}, None) without an archive."""
+    ctx.require("purchases.read")
     arch = _archive_months(db, ctx, cutoff(db, ctx), lo=start_local)
     if not arch:
         return {}, None
