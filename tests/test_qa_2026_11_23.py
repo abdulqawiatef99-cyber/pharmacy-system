@@ -79,6 +79,19 @@ const { chromium } = require('playwright');
     // Wait for the older response's render turn. The stale response may be ignored by a fixed screen.
     await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     out = { current, stale, visible: await p.evaluate(visibleCount) };
+  } else if (probe === 'repeat-return') {
+    const ids = [];
+    for (let n = 0; n < 2; n++) {
+      await p.locator('[data-ret]').fill('1');
+      await p.fill('#rReason', 'QA repeat return');
+      const response = p.waitForResponse(r => r.url().endsWith('/return') && r.request().method() === 'POST');
+      await p.click('#rGo');
+      const result = await (await response).json();
+      ids.push(result.return_id);
+      await p.waitForFunction(count => document.querySelectorAll('a[href^="/return-receipt/"]').length >= count, n + 1,
+                              { timeout: 5000 });
+    }
+    out = { ids };
   } else if (probe === 'wallet') {
     const options = await p.locator('#rMethod option').evaluateAll(options =>
       options.filter(o => !o.disabled).map(o => o.textContent));
@@ -206,6 +219,57 @@ class QA20261123(APICase):
         with self.assertRaises(Conflict) as e:
             sales.add_line(self.ctx, sales.create(self.ctx), self.item, packs=1)
         self.assertEqual(e.exception.code, "insufficient_stock")
+
+    def test_cannot_mark_a_recalled_lot_handled_with_a_price_variant_on_the_shelf(self):
+        from app.recalls.service import Recalls
+
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        line = purchasing.get(self.ctx, sid)["lines"][0]
+        purchasing.update_line(self.ctx, sid, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        review = purchasing.price_review(self.ctx, sid)
+        purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        recalls = Recalls(self.db)
+        recalls.add_notice(self.ctx, title="QA synthetic recall",
+                           items=[{"product_name": "QA Amber 20TAB", "batch_numbers": ["QA-old"]}])
+        original = next(a for a in recalls.alerts(self.ctx) if a["qty_in_stock"] == 20)
+        recalls.decide(self.ctx, original["id"], "confirmed")
+        with self.db.transaction():
+            inventory.post_movement(self.db, self.ctx, item_id=self.item, batch_id=original["batch_id"],
+                                    qty_delta=-20, movement_type="damage")
+        with self.assertRaises(Conflict):
+            recalls.decide(self.ctx, original["id"], "handled")
+        sales = Sales(self.db)
+        with self.assertRaises(Conflict):
+            sales.add_line(self.ctx, sales.create(self.ctx), self.item, packs=1)
+
+    def test_purchase_price_update_invalidates_a_draft_even_when_total_is_unchanged(self):
+        other = catalog.create_item(self.db, self.ctx, {"name_en": "QA second box", "public_price": 10000})
+        with self.db.transaction():
+            batch = inventory.get_or_create_batch(self.db, self.ctx, other, "QA-second", self.expiry)
+            inventory.post_movement(self.db, self.ctx, item_id=other, batch_id=batch,
+                                    qty_delta=5, movement_type="opening", unit_cost=Decimal("20"))
+        sales = Sales(self.db)
+        sid = sales.create(self.ctx)
+        sales.add_line(self.ctx, sid, self.item, packs=1)
+        priced = sales.add_line(self.ctx, sid, other, packs=1)
+        self.assertEqual(priced["total"], 18000)
+
+        purchasing = Purchasing(self.db, self.s)
+        draft = self.purchase_draft()
+        line = purchasing.get(self.ctx, draft)["lines"][0]
+        purchasing.update_line(self.ctx, draft, line["id"], {"public_price": 9000}, None)
+        purchasing.add_line(self.ctx, draft, {"item_id": other, "qty": 1, "public_price": 9000, "discount_bp": 2000,
+                                               "batch_no": "QA-new-second", "expiry_date": self.expiry}, None)
+        purchasing.update_header(self.ctx, draft, {"declared_total": 21600}, None)
+        review = purchasing.price_review(self.ctx, draft)
+        purchasing.approve(self.ctx, draft, review["version"], require_price_review=True, price_token=review["token"],
+                           price_decisions={item: {"mode": "all"} for item in (self.item, other)})
+        self.assertEqual(sales.get(self.ctx, sid)["total"], 18000)
+        with self.assertRaises(Conflict) as e:
+            sales.complete(self.ctx, sid, paid_cash=18000, version=priced["version"])
+        self.assertEqual(e.exception.code, "stale_version")
 
     def test_purchase_keep_preserves_legacy_untracked_stock(self):
         with self.db.transaction():
@@ -446,6 +510,12 @@ class QA20261123(APICase):
         self.assertIsNone(self.db.one("SELECT id FROM money_movements WHERE org_id=? AND ref_id=?",
                                       (self.ctx.org_id, sid)))
         self.assertEqual(sales.get(self.ctx, sid)["returns"][0]["channel_id"], channel)
+
+    def test_two_identical_partial_returns_after_success_each_post_once(self):
+        sid = self.finish_sale({"method": "cash"})
+        result = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/sales/{sid}", "repeat-return")
+        self.assertEqual(len(set(result["ids"])), 2)
+        self.assertEqual(len(Sales(self.db).get(self.ctx, sid)["returns"]), 2)
 
     def test_QA_005_latest_invoice_filter_owns_the_totals(self):
         self.http_login()
