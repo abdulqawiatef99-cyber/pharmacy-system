@@ -4,6 +4,11 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **73.25%**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 23/11 — UX-1 invoice item card
+
+- Branch `codex/ux-1-invoice-item-card` starts at `develop` `12ba4e4`. The purchase lines, item picker and sale lines open the shared card in place. Purchase prices show a warning as they are entered and use the existing three choices at approval.
+- The independent review caught the branch context and untracked stock price. The new tests cover both. The targeted Linux run passed 34 tests and measured 85.3 ms to show the loaded card on a 30,000-item synthetic catalog.
+- The owner test plan covers opening, editing and closing the card and checking the price prompt. Track the full CI results on the UX-1 PR.
 
 
 

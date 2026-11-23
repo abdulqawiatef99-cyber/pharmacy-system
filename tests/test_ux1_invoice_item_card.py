@@ -3,11 +3,14 @@ import json
 import shutil
 import subprocess
 import unittest
+from dataclasses import replace
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from app.catalog import service as cat
 from app.core import people
+from app.inventory import service as inventory
 from app.purchasing.service import Purchasing
 from tests.helpers import OWNER_PW, needs_browser
 from tests.pos_browser import LOGIN, run_node
@@ -30,13 +33,59 @@ console.log(JSON.stringify([
   purchasePriceWarning(4000, "40.0"), purchasePriceWarning(4000, ""),
   purchasePriceWarning(null, "42.5"), purchasePriceWarning(4000, "40.005"),
   purchasePriceWarning(4000, "42.5"), purchasePriceWarning(0, "0.01"),
-  purchasePriceWarning(4000, "0"), purchasePriceWarning(4000, "-1")
+  purchasePriceWarning(4000, "0"), purchasePriceWarning(4000, "-1"),
+  purchasePriceWarning(0, ".50"), purchasePriceWarning(0, "2.500"),
+  purchasePriceWarning(4000, "4.25e1")
 ]));
 """
         values = json.loads(subprocess.check_output(["node", "-e", code], encoding="utf-8"))
-        self.assertEqual(values, ["", "", "", "", "سعر الجمهور اتغير من 40.00 لـ 42.50",
+        self.assertEqual(values, ["", "", "", "سعر الجمهور اتغير من 40.00 لـ 40.01", "سعر الجمهور اتغير من 40.00 لـ 42.50",
                                   "سعر الجمهور اتغير من 0.00 لـ 0.01",
-                                  "سعر الجمهور اتغير من 40.00 لـ 0.00", ""])
+                                  "سعر الجمهور اتغير من 40.00 لـ 0.00", "",
+                                  "سعر الجمهور اتغير من 0.00 لـ 0.50", "سعر الجمهور اتغير من 0.00 لـ 2.50",
+                                  "سعر الجمهور اتغير من 40.00 لـ 42.50"])
+
+
+class TestRecentInvoicePurchases(APICase):
+    def test_purchase_card_batches_and_cost_use_the_receiving_branch(self):
+        branch = "ux1-second-branch"
+        receiving = replace(self.ctx, branch_id=branch)
+        with self.db.transaction():
+            self.db.execute("INSERT INTO branches (id, org_id, name) VALUES (?, ?, 'Fixture branch')",
+                            (branch, self.ctx.org_id))
+            inventory.post_movement(self.db, receiving, item_id=self.pan, qty_delta=4,
+                                    movement_type="opening", unit_cost=Decimal("10"))
+        purch = Purchasing(self.db, self.s)
+        invoice = purch.create_manual(receiving)
+        _, other = self.second_tenant()
+        foreign = purch.create_manual(other)
+        self.http_login()
+        path = f"/api/items/{self.pan}/card?recent_purchases=1"
+        self.assertEqual(self.c.get(path).json()["stock_qty"], 0)
+        scoped = self.c.get(path + f"&purchase={invoice}").json()
+        self.assertEqual((scoped["stock_qty"], scoped["avg_cost_pack"]), (4, 2000))
+        self.assertEqual(self.c.get(path + f"&purchase={foreign}").status_code, 404)
+
+    def test_history_keeps_multiple_purchases_from_one_supplier_and_respects_cost_access(self):
+        supplier = cat.create_supplier(self.db, self.ctx, name="Synthetic History Supplier")
+        purch = Purchasing(self.db, self.s)
+        for days, qty in [(2, 2), (1, 3), (0, 4)]:
+            invoice = purch.create_manual(self.ctx, supplier_id=supplier)
+            inv_date = (date.today() - timedelta(days=days)).isoformat()
+            purch.update_header(self.ctx, invoice, {"invoice_no": f"HISTORY-{days}", "invoice_date": inv_date}, None)
+            state = purch.add_line(self.ctx, invoice, {"item_id": self.pan, "qty": qty, "public_price": 4000,
+                                                       "discount_bp": 2500, "expiry_date": EXPIRY}, None)
+            if days:
+                purch.approve(self.ctx, invoice, state["invoice"]["version"])
+        path = f"/api/items/{self.pan}/card"
+        self.http_login()
+        self.assertNotIn("recent_purchases", self.c.get(path).json())
+        entries = self.c.get(path + "?recent_purchases=1").json()["recent_purchases"]
+        self.assertEqual([(p["qty"], p["unit_net_price"]) for p in entries], [(3, 3000), (2, 3000)])
+        people.add_user(self.db, self.ctx, username="staff", full_name="Synthetic Staff", password=PW,
+                        role_code="pharmacist")
+        self.http_login("staff", PW)
+        self.assertNotIn("recent_purchases", self.c.get(path + "?recent_purchases=1").json())
 
 
 PURCHASE = r"""
@@ -87,15 +136,32 @@ const { chromium } = require('playwright');
   await check(card.getByText('Synthetic Counter Supplier', {exact:true}).first().isVisible(), 'purchase history');
   await check(card.getByText(barcode, {exact:true}).isVisible(), 'barcode');
   await check(card.getByText('UX1-TEST', {exact:true}).isVisible(), 'code');
+  await check(card.getByRole('row').filter({hasText:'من غير تشغيلة'}).getByText('35.00', {exact:true}).isVisible(),
+              'public price of existing untracked stock');
+  await card.getByRole('button', {name:'تعديل', exact:true}).click();
+  await card.locator('#bcNew').fill('2000007190023');
+  await card.locator('#bcAdd').click();
+  await card.getByText('2000007190023', {exact:true}).waitFor();
+  await p.keyboard.press('Escape');
+  await card.waitFor({state:'hidden'});
+  await p.keyboard.press('F3');
+  await card.getByText(barcode, {exact:true}).waitFor();
+  await check(card.getByText('2000007190023', {exact:true}).count().then(n => n === 0), 'cancelled barcode edit');
   await card.getByRole('button', {name:'تعديل', exact:true}).click();
   await card.locator('[name="name_en"]').fill('Synthetic Counter Renamed');
+  await card.locator('[name="code"]').fill('UX1-UPDATED');
+  await card.locator('[name="base_unit_name"]').fill('شريط');
+  await card.locator('[name="public_price"]').fill('41');
   await card.getByRole('button', {name:'احفظ', exact:true}).click();
   await card.waitFor({state:'hidden'});
   await line.getByText('Synthetic Counter Renamed', {exact:false}).waitFor();
   await check(price.evaluate(el => el === document.activeElement), 'edited line focus');
   await check(price.inputValue().then(v => +v === 42.5), 'typed invoice price');
+  await check(line.getByText('سعر الجمهور اتغير من 41.00 لـ 42.50').isVisible(), 'refreshed price comparison');
+  await check(line.getByText('UX1-UPDATED · علبة · 2 شريط', {exact:true}).isVisible(), 'refreshed code and pack');
   await check(p.locator('#qaQty').inputValue().then(v => v === '7'), 'pending picker quantity');
   await check(p.locator('#qaPrice').inputValue().then(v => +v === 41), 'pending picker price');
+  await check(p.locator('#qaPriceWarning').isHidden(), 'refreshed picker price comparison');
 
   await unlinked.getByRole('button', {name:'كارت الصنف', exact:true}).click();
   await card.getByRole('searchbox').fill('Synthetic Counter Renamed');
@@ -124,14 +190,14 @@ const { chromium } = require('playwright');
 SALE = r"""
 const { chromium } = require('playwright');
 (async () => {
-  const [base, user, pw, barcode] = process.argv.slice(1);
+  const [base, user, pw, barcode, second] = process.argv.slice(1);
 """ + LOGIN + r"""
   p.setDefaultTimeout(5000);
   await p.goto(base + '/#/pos');
   const search = p.locator('#posQ');
   await search.fill(barcode);
   await search.press('Enter');
-  const line = p.locator('table.cart tbody tr').first();
+  const line = p.locator('table.cart tbody tr').filter({hasText:'Synthetic Counter Item'});
   await line.locator('[data-minus]').waitFor();
   const card = p.getByRole('dialog', { name: 'كارت الصنف', exact: true });
   await search.focus();
@@ -143,7 +209,16 @@ const { chromium } = require('playwright');
   await p.keyboard.press('Escape');
   await card.waitFor({state:'hidden'});
   const focus = await search.evaluate(el => el === document.activeElement);
-  await line.getByRole('button', {name:'كارت الصنف', exact:true}).click();
+  await search.fill(second);
+  await search.press('Enter');
+  await p.getByText('Synthetic Service Fixture', {exact:true}).first().waitFor();
+  const button = line.getByRole('button', {name:'كارت الصنف', exact:true});
+  await button.focus();
+  await p.keyboard.press('F3');
+  await card.getByText('UX1-BATCH', {exact:true}).waitFor();
+  await p.keyboard.press('Escape');
+  await card.waitFor({state:'hidden'});
+  await button.click();
   await card.getByText('UX1-BATCH', {exact:true}).waitFor();
   console.log(JSON.stringify({readOnly, hidesCosts, focus, pages:b.contexts()[0].pages().length,
                              hash:new URL(p.url()).hash}));
@@ -154,7 +229,7 @@ const { chromium } = require('playwright');
 
 @needs_browser
 class TestInvoiceItemCard(APICase):
-    barcode = "6221043010373"
+    barcode = "2000007190016"
 
     def setUp(self):
         super().setUp()
@@ -167,6 +242,11 @@ class TestInvoiceItemCard(APICase):
         self.add(history, {"item_id": self.it, "qty": 5, "public_price": 4000,
                            "discount_bp": 2500, "batch_no": "UX1-BATCH"})
         self.purch.approve(self.ctx, history, self.purch.get(self.ctx, history)["invoice"]["version"])
+        with self.db.transaction():
+            inventory.post_movement(self.db, self.ctx, item_id=self.it, qty_delta=2, batch_id=None,
+                                    movement_type="opening", unit_cost=Decimal("15"))
+            self.db.execute("UPDATE items SET untracked_public_price=3500 WHERE org_id=? AND id=?",
+                            (self.ctx.org_id, self.it))
 
     def draft(self, number):
         invoice = self.purch.create_manual(self.ctx, supplier_id=self.supplier)
@@ -181,7 +261,7 @@ class TestInvoiceItemCard(APICase):
         self.add(draft, {"item_id": self.it, "qty": 1, "public_price": 4000, "discount_bp": 2500,
                          "batch_no": "UX1-NEXT"})
         for no, name in enumerate(("Unlinked Fixture", "New Fixture"), 1):
-            self.add(draft, {"raw_name": name, "qty": 1, "public_price": 4000, "discount_bp": 2500,
+            self.add(draft, {"raw_name": name, "qty": 1, "public_price": 4250, "discount_bp": 2500,
                              "batch_no": f"UX1-OTHER-{no}"})
         with self.db.transaction():
             self.db.execute(
@@ -197,8 +277,12 @@ class TestInvoiceItemCard(APICase):
         self.assertEqual(self.purch.get(self.ctx, draft)["invoice"]["status"], "draft")
 
     def test_sale_key_and_button_open_the_same_permission_filtered_card(self):
+        second = "2000007190030"
+        fixture = cat.create_item(self.db, self.ctx, {"name_en": "Synthetic Service Fixture",
+                                                       "public_price": 1000, "is_service": True})
+        cat.add_barcode(self.db, self.ctx, fixture, second)
         people.add_user(self.db, self.ctx, username="cashier", full_name="Synthetic Cashier", password=PW,
                         role_code="assistant")
-        out = run_node(self, SALE, "cashier", PW, self.barcode)
+        out = run_node(self, SALE, "cashier", PW, self.barcode, second)
         self.assertEqual(out, {"readOnly": True, "hidesCosts": True, "focus": True,
                                "pages": 1, "hash": "#/pos"})
