@@ -65,7 +65,8 @@ class TestMove(DBTestCase):
                                product(98, "EA98", "Synthetic 500 mg tablet"),
                                product(97, "EA97", "Synthetic 1 capsule"),
                                product(96, "EA96", "Synthetic Omega 3 capsules"),
-                               product(95, "EA95", "Synthetic Age 50+ Tablets")]
+                               product(95, "EA95", "Synthetic Age 50+ Tablets"),
+                               product(94, "EA94", "Synthetic 8 units")]
         tables["Customer"][0].update(customer_name_ar="عميل الاختبار", customer_name_en="Synthetic Customer")
         tables["Customer"][1].update(customer_name_en=tables["Customer"][1]["customer_name_ar"])
         progress("reading", 2)
@@ -93,6 +94,7 @@ class TestMove(DBTestCase):
         self.assertIn("عميل الاختبار", result["report"])
         self.assertIn("Synthetic Customer", result["report"])
         self.assertIn("EA99", result["report"])
+        self.assertIn("EA94", result["report"])
         self.assertNotIn("EA98", result["report"])
         self.assertNotIn("EA97", result["report"])
         self.assertNotIn("EA96", result["report"])
@@ -323,7 +325,14 @@ const { chromium } = require('playwright');
   const text = await report.textContent();
   await p.reload();
   await report.waitFor();
-  console.log(JSON.stringify({ text, reopened: await report.textContent(), safe: !await p.locator('#synthetic-markup').count() }));
+  const reopened = await report.textContent();
+  await p.evaluate(() => fetch('/api/me/prefs', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' }, body: JSON.stringify({ lang: 'en' }) }));
+  await p.reload();
+  await p.getByRole('heading', { name: 'Move from E-Stock' }).waitFor();
+  await report.waitFor();
+  console.log(JSON.stringify({ text, reopened, englishUi: await report.textContent(),
+    safe: !await p.locator('#synthetic-markup').count() }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -350,4 +359,5 @@ class TestMoveScreen(DBTestCase):
         self.assertIn("٢. المطابقة", result["text"])
         self.assertIn('<b id="synthetic-markup">Synthetic Customer</b>', result["text"])
         self.assertEqual(result["text"], result["reopened"])
+        self.assertEqual(result["text"], result["englishUi"])
         self.assertTrue(result["safe"])

@@ -342,7 +342,7 @@ def _names_and_packs(plan) -> list[str]:
 
 _UNIT_COUNT = re.compile(
     r"(?<![\w./])(?:(\d{1,4})\s*x\s*)?(\d{1,4})\s*"
-    r"(?:tablets?|tabs?|capsules?|caps?|strips?|ampoules?|amps?|vials?|sachets?|suppositor(?:y|ies)|"
+    r"(?:tablets?|tabs?|capsules?|caps?|strips?|ampoules?|amps?|vials?|sachets?|suppositor(?:y|ies)|units?|pieces?|pcs|"
     r"قرص|اقراص|اقرص|كبسوله|كبسولات|شريط|شرائط|امبول|امبولات|فيال|لبوس|كيس|اكياس|وحده|وحدات)\b"
 )
 

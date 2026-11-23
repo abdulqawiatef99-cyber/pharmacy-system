@@ -2525,13 +2525,13 @@ async function viewEstockMove() {
     <p id="estockMoveStatus" role="status"></p>
     <progress aria-label="تقدّم تجربة النقل" hidden></progress>
     <div class="row"><button class="btn" type="button" hidden></button><a class="btn secondary" href="#/system">ارجع للبرنامج</a></div>
-    <pre id="estockMoveReport" dir="rtl" hidden></pre>
+    <pre id="estockMoveReport" dir="rtl" data-raw hidden></pre>
   </section>`;
   const panel = $("#estockMove"), button = panel.querySelector("button"), bar = panel.querySelector("progress");
   const status = $("#estockMoveStatus"), report = $("#estockMoveReport");
   const path = "/api/estock/move";
   const isCurrent = () => panel.isConnected && location.hash === "#/estock-move";
-  let state;
+  let state, lastMessage;
 
   async function refresh() {
     if (!isCurrent()) return;
@@ -2551,16 +2551,21 @@ async function viewEstockMove() {
       const actions = { idle: "ابدأ تجربة النقل", failed: "جرّب تاني", interrupted: "كمّل التجربة", done: "اعمل تجربة جديدة" };
       const working = ["finding", "reading", "rehearsing"].includes(next.phase);
       const message = next.supported ? labels[next.phase] : "تجربة نقل إي ستوك متاحة على ويندوز ١٠ و١١.";
-      if (status.textContent !== message) status.textContent = message;
+      if (lastMessage !== message) status.textContent = lastMessage = message;
       bar.hidden = !working;
       button.hidden = !next.supported || working;
       button.textContent = actions[next.phase] || "";
       report.hidden = next.phase !== "done";
-      report.textContent = next.report || "";
+      if (next.report) {
+        const content = document.createElement("span");
+        content.textContent = next.report;
+        report.replaceChildren(content);
+      } else report.replaceChildren();
       if (working) setTimeout(refresh, 1000);
     } catch (err) {
       if (!isCurrent()) return;
       status.textContent = err.message;
+      lastMessage = undefined;
       // A running job can outlive a brief disconnect or browser reload.
       if (!err.code) setTimeout(refresh, 2000);
       else { bar.hidden = true; button.hidden = true; report.hidden = true; report.textContent = ""; }
