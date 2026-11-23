@@ -8,6 +8,12 @@
 
 
 
+## 23/11 — DEV-3 purchase and sale QA
+
+- Branch `codex/dev3-qa-fixes` includes `develop` at `fdab91c` (checkout speed merged). Covers QA-001–006, QA-011 and QA-013 using synthetic data. Purchase price review records the selected stock changes. Receipt and invoice detail read official prices from saved allocations and preserve the discount amounts used by returns.
+- Migration `0045_purchase_vat_wallet_returns` adds explicit line VAT treatment, wallet return channels and support for two official prices on the same supplier lot. The protocol-1 updater requires an installer for this migration.
+- Verification on the merged branch is running. The next gate is the PR review and green CI on its final head, followed by browser and thermal receipt checks on a Windows test PC.
+
 ## 22/11 — UPDATE-4 worker session: progress log (READ THIS FIRST; newest line last)
 Spec: the manager's «Update 4» message (priority U4-0 … U4-13). Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge into develop only with linux CI green and no open Codex P0/P1; one release PR into main at the end (owner pre-approved on the gates, linux AND windows green).
 | PR | Item | State |

@@ -61,7 +61,9 @@ function trString(s) {
   const t = s.replace(/\s+/g, " ").trim();
   let out = I18N.map.get(t);
   if (out === undefined) {
-    out = I18N.re ? t.replace(I18N.re, (m) => I18N.map.get(m) ?? m) : t;
+    out = t;
+    for (const [re, rep] of I18N_FULL_TEXT) out = out.replace(re, rep);
+    if (I18N.re) out = out.replace(I18N.re, (m) => I18N.map.get(m) ?? m);
     // then each piece between separators, only when the whole piece is a known phrase
     out = out.replace(/[^—·():/،|\n]+/g, (seg) => { const k = seg.trim(); const v = k && I18N.map.get(k); return v ? seg.replace(k, v) : seg; });
     for (const [re, rep] of I18N_PATTERNS) out = out.replace(re, rep);
@@ -79,6 +81,11 @@ const I18N_AFTER = { "صورة": "pictures", "اختلاف": "differences", "ت�
   "يومًا": "days", "فقط": "only", "والتكلفة": "and the cost" };
 // words that come next to numbers ("3 فاتورة", "76.45 ج", "5 يوم") and a few fixed bits
 const NUM = "(\\d[\\d.,]*)";
+const I18N_FULL_TEXT = [
+  [/السعر اتغير من ([\d.,]+) لـ ([\d.,]+): تغيّر سعر الرصيد الحالي \(([^)]*)\) للسعر الجديد؟/g,
+    "The price changed from $1 to $2. Reprice the current stock ($3)?"],
+  [/مبيعات ([\d.,]+) · مرتجع ([\d.,]+)/g, "Sales $1 · Refunds $2"],
+];
 const I18N_PATTERNS = [
   [new RegExp(`${NUM}\\s*فواتير|${NUM}\\s*فاتورة`, "g"), (m, a, b) => `${a || b} invoices`],
   [new RegExp(`${NUM}\\s*(?:يوم|أيام)(?![\\u0600-\\u06FF])`, "g"), "$1 days"],

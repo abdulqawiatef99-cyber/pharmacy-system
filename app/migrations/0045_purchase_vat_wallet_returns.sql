@@ -45,3 +45,4 @@ DROP TABLE sale_returns;
 ALTER TABLE sale_returns_next RENAME TO sale_returns;
 CREATE INDEX ix_sale_returns_sale ON sale_returns(sale_id);
 CREATE INDEX ix_sale_returns_at ON sale_returns(org_id, created_at);
+CREATE INDEX ix_sale_returns_sale_org_at ON sale_returns(sale_id, org_id, created_at);

@@ -1670,8 +1670,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 hidden_no_stock = sum(not has(r) for r in rows)
                 rows = [r for r in rows if has(r)]
         rows = rows[:limit]
-        if req.query_params.get("sale"):
-            Sales(db).quote_items(ctx, req.query_params["sale"], rows)
+        if query.get("sale"):
+            Sales(db).quote_items(ctx, query["sale"], rows)
         hint = res["hint"]
         if not hint and rows and all(r.get("match") == "spelling" for r in rows):
             hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)

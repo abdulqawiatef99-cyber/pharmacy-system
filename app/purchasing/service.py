@@ -962,7 +962,8 @@ class Purchasing:
                                code="negative_total", details={"lines_amount": gross, "total": net_total})
             pay = self._pay_now(ctx, inv, net_total)      # checked before anything is written
             price_review = self._price_review(ctx, lines)
-            if require_price_review and price_token is not None and price_token != price_review["token"]:
+            if require_price_review and (price_token is not None or price_review["changes"]) and (
+                    version is None or price_token != price_review["token"]):
                 raise Conflict("الرصيد أو السعر اتغير. راجع الأسعار تاني قبل الاعتماد", code="purchase_price_review")
             reviewed = self._apply_price_review(ctx, price_review, price_decisions, price_token,
                                                 require_review=require_price_review)

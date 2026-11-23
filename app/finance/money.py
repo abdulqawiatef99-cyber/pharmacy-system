@@ -750,8 +750,9 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
     card = (" AND (json_extract(meta, '$.method')='card' OR"
             " (kind='refund' AND json_extract(meta, '$.method') IS NULL))") if card_only else ""
     rows = db.all("SELECT account_id, sum(amount) net FROM money_movements WHERE org_id=? AND ref_id=?"
-                  " AND kind IN ('sale','refund')" + card + " GROUP BY account_id ORDER BY min(rowid)",
-                  (ctx.org_id, sale_id))
+                  " AND kind IN ('sale','refund')" + card + " GROUP BY account_id"
+                  + (" HAVING sum(CASE WHEN kind='sale' THEN amount ELSE 0 END)>0" if card_only else "")
+                  + " ORDER BY min(rowid)", (ctx.org_id, sale_id))
     left, out = amount, []
     for r in rows:
         take = r["net"] if left is None else min(r["net"], left)

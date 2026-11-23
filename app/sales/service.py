@@ -491,12 +491,18 @@ class Sales:
             columns = {r["name"] for r in self.db.all("PRAGMA table_info(batches)")}
             self._owner_sql = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if "owner" in columns else ""
             self._batch_order = ", b.created_at, b.price_variant, sb.batch_key" if "price_variant" in columns else ""
+        recalled_lot = (
+            " AND m.batch_id IN (SELECT rb.id FROM batches rb WHERE rb.org_id=sb.org_id AND rb.item_id=sb.item_id"
+            " AND rb.batch_no=b.batch_no AND rb.expiry_date IS b.expiry_date"
+            " AND (rb.id=b.id OR b.batch_no<>''))"
+            if self._batch_order else " AND m.batch_id=sb.batch_key"
+        )
         rows = self.db.all(
             "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price,"
-            " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.batch_id=sb.batch_key"
-            "         AND (m.status='confirmed' OR (m.status='handled' AND EXISTS ("
+            " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.item_id=sb.item_id"
+            + recalled_lot + " AND (m.status='confirmed' OR (m.status='handled' AND EXISTS ("
             "              SELECT 1 FROM stock_movements sm WHERE sm.org_id=sb.org_id AND sm.branch_id=sb.branch_id"
-            "              AND sm.item_id=sb.item_id AND sm.batch_id=m.batch_id"
+            "              AND sm.item_id=sb.item_id AND sm.batch_id=sb.batch_key"
             "              AND sm.qty_delta>0 AND sm.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', m.decided_at))))) recalled"
             " FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'') AND b.org_id=sb.org_id"
             " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0" + self._owner_sql +
@@ -793,6 +799,9 @@ class Sales:
             "SELECT p.method, p.amount, p.channel_id, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id AND c.org_id=p.org_id WHERE p.sale_id=? AND p.org_id=? ORDER BY p.rowid",
             (sid, ctx.org_id))]
+        for payment in s["payments"]:
+            if payment["method"] != "transfer":
+                payment.pop("channel_id")
         if s["customer_id"]:
             from .customers import CODE_SQL
             c = self.db.one(f"SELECT c.id, c.name, c.name_alt, c.phone, c.address1, c.credit_limit, {CODE_SQL} estock_code"
