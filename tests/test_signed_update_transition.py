@@ -141,6 +141,11 @@ print("TRANSITION " + entry["active"]["sha"])
 """
 
 
+def releases_home_resolved(data):
+    from release_bootstrap import code_home
+    return code_home(Path(data).resolve())
+
+
 class TestSignedUpdateTransition(SmartUpdateBase):
     def test_live_main_signed_button_upgrades_with_the_existing_launcher(self):
         shutil.rmtree(self.legacy)
@@ -184,7 +189,14 @@ class TestSignedUpdateTransition(SmartUpdateBase):
                                 text=True, capture_output=True, timeout=60)
         self.assertEqual(verify.returncode, 0, verify.stderr + verify.stdout)
         self.assertIn('"up_to_date": true', verify.stdout)
-        self.assertEqual(version_floor(self.home, "main")["sha"], active["sha"])
+        floor_file = self.home / "version-floor.json"
+        self.assertEqual(version_floor(self.home, "main").get("sha"), active["sha"], json.dumps({
+            "floor_file": floor_file.read_text(encoding="utf-8") if floor_file.exists() else None,
+            "state": read_state(self.home), "candidate": str(candidate),
+            "build_info": (candidate / "build_info.json").is_file(),
+            "home_files": sorted(f.name for f in self.home.iterdir()),
+            "resolved": [str(candidate.resolve()), str(releases_home_resolved(self.data))],
+            "verify_stdout": verify.stdout[-1500:], "verify_stderr": verify.stderr[-1500:]}, indent=1))
         original = subprocess.check_output(["git", "show", f"{LAST_INSTALLER}:launcher.py"], cwd=REPO)
         self.assertEqual((self.legacy / "launcher.py").read_bytes(), original)
         direct_env = {key: value for key, value in env.items()
