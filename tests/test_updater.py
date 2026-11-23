@@ -77,6 +77,7 @@ from unittest import mock as _mock
 from tests.test_api import APICase, H as _H
 
 
+@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateAPI(APICase):
     def test_owner_sees_status_and_can_run_update(self):
         self.http_login()
@@ -98,6 +99,7 @@ class TestUpdateAPI(APICase):
         self.assertEqual(n, 1)
 
 
+@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateWithoutKey(APICase):
     def test_a_pc_without_a_key_file_still_sees_updates(self):
         """Heikal PC: no %USERPROFILE%\\.pharmacy\\github_token.txt; the public repository is read anonymously."""
@@ -116,6 +118,7 @@ class TestUpdateWithoutKey(APICase):
         self.assertEqual((st["latest"], st["available"], seen), ("e" * 40, True, [None]))
 
 
+@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateChannel(APICase):
     """#107: the settings button follows the install's own channel; develop test installs can update."""
 

@@ -3907,7 +3907,8 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
-const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null };
+const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null,
+              adding: new Map(), completing: false };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -3944,17 +3945,20 @@ async function openDraft(id) {
   POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = [];
 }
 
-async function viewPos() {
+async function viewPos(afterCheckout = false) {
   QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "نفد" (11/01; «ناقص» = not in the market, update 1)
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
-  RCFG = await api("/api/settings/receipt").catch(() => RCFG);
-  // another PC may have changed the sale screen's keys since this one loaded (U2-19)
-  ME.ui = await api("/api/settings/ui").catch(() => ME.ui);
-  const drafts = (await api("/api/sales/drafts")).drafts;
-  if (!SALE || SALE.status !== "draft" || !drafts.some((d) => d.id === SALE.id)) {
-    await openDraft(drafts.length ? drafts[drafts.length - 1].id : null);
+  if (!afterCheckout) {
+    // Another PC may have changed the settings since this screen was opened.
+    [RCFG, ME.ui] = await Promise.all([
+      api("/api/settings/receipt").catch(() => RCFG), api("/api/settings/ui").catch(() => ME.ui),
+    ]);
   }
   const tabs = (await api("/api/sales/drafts")).drafts;
+  if (!SALE || SALE.status !== "draft" || !tabs.some((d) => d.id === SALE.id)) {
+    await openDraft(tabs.at(-1)?.id);
+    if (!tabs.length) tabs.push({ id: SALE.id, kind: SALE.kind, lines: SALE.lines.length });
+  }
   app.innerHTML = `
   <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
@@ -3998,15 +4002,17 @@ async function viewPos() {
   // is dropped. A search submitted with Enter (a scan) always completes: rapid scans must all reach the sale.
   const search = async (unit, live = false, given = null) => {
     const v = given ?? q.value.trim(); if (!v) return;
-    const mine = live ? ++liveSeq : null;
+    const mine = live ? ++liveSeq : null, saleId = SALE.id;
     const isScan = /^\d{6,}$/.test(v) || /^01\d{14}/.test(v);
     // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
     const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only");
-    if (live && mine !== liveSeq) return;
+    if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) { await addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null); return; }
+    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) {
+      return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
+    }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
       + res.map((r, i) => `<div class="res ${r.stock_qty ? "" : "out"}"><div class="grow"><b>${itemHtml(r)}</b> ${markChip(r.mark)}
@@ -4023,6 +4029,7 @@ async function viewPos() {
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
     if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
+    if (!live && (isScan || scanned)) return false;       // an unresolved scan needs the cashier's attention
   };
   q.addEventListener("input", () => {
     clearTimeout(liveT);
@@ -4044,11 +4051,11 @@ async function viewPos() {
     const v = q.value.trim();
     if (/^\d{6,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
       q.value = ""; delete q.dataset.searched;
-      search(e.shiftKey, false, v).catch((er) => toast(er.message, true));
+      trackPosAdd(search(e.shiftKey, false, v));
       return;
     }
     q.dataset.searched = v;
-    search(e.shiftKey).catch((er) => toast(er.message, true));
+    trackPosAdd(search(e.shiftKey));
   });
   bindPosExtras();
 }
@@ -4146,6 +4153,7 @@ document.addEventListener("keydown", async (e) => {
   const k = (e.ctrlKey ? "Ctrl+" : "") + e.key, typing = e.target.matches?.("input, select, textarea") && e.target.id !== "posQ";
   const go = (fn) => { e.preventDefault(); Promise.resolve().then(fn).catch((er) => toast(er.message, true)); };
   const act = posAction(k);
+  if (POS.completing) { if (act) e.preventDefault(); return; }
   if (act === "search") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
   if (act === "branch_stock" || act === "item_card" || act === "qty") {
     const l = posLine();
@@ -4159,9 +4167,15 @@ document.addEventListener("keydown", async (e) => {
     });
   }
   if (act === "receipt") return go(() => $("#posRcpt")?.click());
-  if (act === "done") return go(() => $("#posDone")?.click());
+  const finish = () => {
+    if (e.repeat) return;
+    const confirmButton = $("#posConfirm");
+    if (confirmButton) confirmButton.click();
+    else complete();
+  };
+  if (act === "done") return go(finish);
   if (act === "pay") return go(() => {
-    if ($("#posSide")?.contains(document.activeElement)) { $("#posDone")?.click(); return; }
+    if ($("#posSide")?.contains(document.activeElement)) { finish(); return; }
     ($("#posSide select, #posSide input:not([type=hidden]), #posSide button") || $("#posDone"))?.focus();
   });
   if ((act === "drawer" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
@@ -4207,18 +4221,43 @@ function drawerDialog() {
   f.reason.focus();
 }
 
+function pendingPosAdds(sid) {
+  return [...POS.adding].filter(([, saleId]) => saleId === sid).map(([work]) => work);
+}
+
+function trackPosAdd(work) {
+  const sid = SALE.id;
+  const pending = work.catch((er) => {
+    if (SALE?.id === sid) toast(er.message, true);
+    return false;
+  }).finally(() => {
+    POS.adding.delete(pending);
+    if (SALE?.id === sid && $("#posDone") && !SALE.lines.length && !pendingPosAdds(sid).length) {
+      $("#posDone").disabled = true;
+    }
+  });
+  POS.adding.set(pending, sid);
+  if ($("#posDone")) $("#posDone").disabled = false;
+  return pending;
+}
+
 // scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
-async function addItem(item, packs, units, scanned = false) {
-  try {
-    SALE = await api(`/api/sales/${SALE.id}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
-    const added = SALE.lines.find((l) => l.item_id === item.id);
-    if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
-      toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
-    $("#posRes").innerHTML = "";
-    if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
-    $("#posQ").focus();
-    renderCart(); renderSide();
-  } catch (er) { toast(er.message, true); }
+function addItem(item, packs, units, scanned = false) {
+  return trackPosAdd(addPosLine(item, packs, units, scanned));
+}
+
+async function addPosLine(item, packs, units, scanned) {
+  const sid = SALE.id;
+  const update = await api(`/api/sales/${sid}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
+  if (SALE?.id !== sid || !$("#posCart") || update.version < SALE.version) return;
+  SALE = update;
+  const added = SALE.lines.find((l) => l.item_id === item.id);
+  if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
+    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
+  $("#posRes").innerHTML = "";
+  if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
+  $("#posQ").focus();
+  renderCart(); renderSide();
 }
 
 // a typed discount: "5" / "5%" = percent, "3ج" / "3 ج" / "3egp" = EGP (update 1); null when not a number
@@ -4314,7 +4353,7 @@ function renderCart(findings = null) {
   $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
     SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart(); renderSide();
   }));
-  if (findings) renderFindings(findings);
+  if (findings) { app.inert = false; renderFindings(findings); }
 }
 
 function chanOptions(kind, sel) {
@@ -4374,7 +4413,7 @@ function renderSide() {
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : `اطبع إيصال لهذا البيع (${esc(posKey("receipt"))})`}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>${esc(posKey("receipt"))}</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
-      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
+      <button class="btn big" id="posDone" ${s.lines.length || pendingPosAdds(s.id).length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
     </section>`;
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -4485,7 +4524,11 @@ function renderSide() {
     POS.rcpt[s.id] = e.target.checked;              // an explicit choice for this sale, kept when the total changes
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
-  $("#posDone").addEventListener("click", () => complete(null));
+  $("#posDone").addEventListener("click", () => {
+    const confirmButton = $("#posConfirm");
+    if (confirmButton) confirmButton.focus();
+    else complete();
+  });
 }
 
 // A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
@@ -4576,11 +4619,31 @@ function currentPayments() {
 
 // a discount still being typed (line or invoice): saved before completion like a delivery field (Codex #400)
 const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");
-async function complete(findings) {
-  // a delivery field still being typed in (F9 without leaving it) is saved first, or the sale is refused
-  // for a missing address that is right there on the screen (device test 11/01)
-  if (document.activeElement?.dataset?.dl || isDiscField(document.activeElement)) document.activeElement.blur();
+async function complete(findings = null) {
+  if (POS.completing || !SALE || !$("#posDone")) return;
+  POS.completing = true;
+  const sid = SALE.id;
+  try {
+    // A delivery field or discount still being typed must dispatch its change before the till is frozen.
+    const active = document.activeElement;
+    if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
+    app.inert = true;
+    // A barcode can be resolving while the cart is still empty. Wait for work started before F9.
+    const added = await Promise.all(pendingPosAdds(sid));
+    if (added.includes(false) || SALE?.id !== sid || !SALE.lines.length || !$("#posDone")) return;
+    while (await finishSale(findings, sid)) { /* retry with the reason the cashier entered */ }
+  } catch (er) { toast(er.message, true); }
+  finally {
+    app.inert = false;
+    POS.completing = false;
+    if (!document.activeElement?.closest(".pos") && !$("dialog[open]")) $("#posQ")?.focus();
+  }
+}
+
+async function finishSale(findings, sid) {
+  app.inert = true;
   const saved = await POS.saving;
+  if (SALE?.id !== sid || !$("#posDone")) return;
   if (saved === false) { POS.saving = null; return; }   // a field not saved: no sale at the old total (Codex #400)
   // The customer box is a search field: a name typed there and not chosen from the list changes nothing. The
   // invoice (its credit, its contract discount) would go to the customer chosen before while the screen shows
@@ -4588,12 +4651,14 @@ async function complete(findings) {
   const custBox = $("#posCust"), bare = (v) => String(v ?? "").replace(/\s+/g, "");
   if (SALE.customer && custBox && bare(custBox.value) !== bare(SALE.customer.name)) {
     toast(`الفاتورة مسجلة على العميل «${SALE.customer.name}» والمكتوب في خانة العميل غيره. اختر العميل من القائمة أو اضغط «إزالة العميل»، ثم أتمم البيع`, true);
+    app.inert = false;
     custBox.focus();
     return;
   }
   const payments = currentPayments();
   if (!findings) {
-    const r = await api(`/api/sales/${SALE.id}/check`, { method: "POST", body: {} });
+    const r = await api(`/api/sales/${sid}/check`, { method: "POST", body: {} });
+    if (SALE?.id !== sid || !$("#posDone")) return;
     const blocking = r.findings.filter((f) => ["override", "block", "acknowledge"].includes(f.requires));
     // launch day 21/11 (owner): only a real risk stops the sale; «no data» notes (no active ingredient, no
     // interaction list) and look-alike hints never ask for a click
@@ -4615,38 +4680,32 @@ async function complete(findings) {
   const cashPart = payments.filter((p) => p.method === "cash").reduce((t, p) => t + (p.amount || 0), 0);
   if (given && given < cashPart) {
     toast(`المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع (${money(given)} / ${money(cashPart)})`, true);
+    app.inert = false;
     $("#payGiven")?.focus();
     return;
   }
-  const btn = $("#posDone");
-  if (btn.disabled) return;
-  btn.disabled = true;
   SALE.request_id = SALE.request_id || newKey();
   // «خليها رصيد للعميل»: the change he leaves is his credit, so no receipt says it is still due (Codex P2 on #424)
   const keepIt = !!$("#keepChange")?.checked && given > cashPart, shown = keepIt ? cashPart : given;
   try {
-    const done = await api(`/api/sales/${SALE.id}/complete`, { method: "POST",
+    const done = await api(`/api/sales/${sid}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: keepIt,
-              cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id]) } });
-    // the receipt and the drawer pulse were handled by the server once, after the sale was saved (#81)
-    const dv = done.devices || { receipt: "none", drawer: "none" };
-    delete POS.rcpt[SALE.id]; POS.noCoinsAsked = false;
+              cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[sid]), defer_devices: true } });
+    delete POS.rcpt[sid]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
-    if (dv.receipt === "browser" || dv.receipt === "failed") printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : ""}`);
-    QUICK = null;
-    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`
-      + (dv.receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (dv.drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
-    // #98: one toast holds every device warning (each toast replaces the last, so the receipt warning was lost
-    // under the drawer one when the printer was off), and it stays longer than a normal error
-    const warn = [];
-    if (dv.receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${dv.message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
-    if (dv.drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
-    if (dv.drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»");
-    if (warn.length) toast(warn.join("\n"), true, 15000);
-    SALE = null; viewPos();
+    toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`);
+    if (SALE?.id === sid) SALE = null;
+    try {
+      if (location.hash.startsWith("#/pos")) await viewPos(true);
+    } finally {
+      app.inert = false;
+      $("#posQ")?.focus();
+      showCheckoutDevices(done, shown).catch(() => checkoutDeviceNotice(done, "unknown", "unknown"));
+    }
   } catch (er) {
     toast(er.message, true);
-    btn.disabled = false;
+    app.inert = false;
+    if (SALE?.id !== sid || !$("#posDone")) return;
     if (er.code === "safety_unresolved") renderCart(er.details.findings);
     if (er.code === "not_draft") { SALE = null; viewPos(); }
     // the invoice on the server is not the one on the screen (a price, a contract discount or the stock
@@ -4662,9 +4721,40 @@ async function complete(findings) {
     if (er.code === "no_open_shift") $("#posShift").click();
     if (er.code === "at_cost_reason") {        // U2-33: down to cost only, by the owner or a manager, with a reason
       const why = (prompt(`${er.message}\n${(er.details?.lines || []).map((l) => l.name).join("، ")}`, "") || "").trim();
-      if (why.length >= 3) { SALE.cost_reason = why; return complete(findings); }
+      if (why.length >= 3) { SALE.cost_reason = why; return true; }
     }
   }
+}
+
+const checkoutPrinted = new Set();
+async function showCheckoutDevices(sale, given) {
+  let dv = sale.devices;
+  if (sale.devices_pending) {
+    const end = Date.now() + 60000;
+    while (!dv && Date.now() < end) {
+      ({ devices: dv } = await api(`/api/sales/${sale.id}/devices`));
+      if (!dv) await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  if (!dv && !sale.devices_pending) return;
+  if ((dv?.receipt === "browser" || dv?.receipt === "failed") && !checkoutPrinted.has(sale.id)) {
+    if (checkoutPrinted.size >= 512) checkoutPrinted.delete(checkoutPrinted.values().next().value);
+    checkoutPrinted.add(sale.id);
+    printInFrame(`/receipt/${sale.id}${given ? `?given=${given}` : ""}`);
+  }
+  checkoutDeviceNotice(sale, dv?.receipt || "unknown", dv?.drawer || "unknown", dv?.message);
+}
+
+function checkoutDeviceNotice(sale, receipt, drawer, message) {
+  const warn = [];
+  if (receipt === "failed") warn.push(`⚠ الإيصال لم يُطبع مباشرة: ${message || ""} — فُتحت الطباعة من المتصفح، وتقدر تعيد من «اطبع إيصال آخر فاتورة»`);
+  if (drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
+  if (drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»");
+  if (receipt === "unknown" || drawer === "unknown") warn.push("حفظ البيع تم، لكن نتيجة أمر الطباعة أو فتح الدرج غير متاحة");
+  if (warn.length) toast(`فاتورة ${sale.sale_no}
+${warn.join("\n")}`, true, 15000);
+  else if (receipt === "sent" || drawer === "sent") toast(`فاتورة ${sale.sale_no}`
+    + (receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
 }
 
 function bindPosExtras() {

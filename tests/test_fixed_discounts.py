@@ -351,8 +351,14 @@ class CodexReview400Round4(FixedCase):
 
 class CodexKeyboardCompletion(unittest.TestCase):
     def test_a_discount_being_typed_is_saved_before_f9(self):
-        body = _re.search(r"\nasync function complete\(findings\) \{.*?const saved = await POS\.saving;\n  if \(saved === false\) \{ POS\.saving = null; return; \}", _JS, _re.S).group(0)
-        self.assertIn("isDiscField(document.activeElement)) document.activeElement.blur()", body)
+        start = _JS.index("async function complete(findings = null) {")
+        submit = _JS.index("async function finishSale(findings, sid) {", start)
+        body = _JS[start:submit]
+        self.assertIn("isDiscField(active)) active.blur()", body)
+        self.assertLess(body.index("active.blur()"), body.index("await finishSale("))
+        handler = _JS[submit:submit + 550]
+        self.assertIn("const saved = await POS.saving;", handler)
+        self.assertIn("if (saved === false) { POS.saving = null; return; }", handler)
         self.assertIn('const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");', _JS)
         for fn in (r"\nasync function patchLine\(", r"const invDisc = async \(\) =>"):
             block = _JS[_re.search(fn, _JS).start():][:900]

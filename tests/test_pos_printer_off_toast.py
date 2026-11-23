@@ -96,4 +96,6 @@ class TestPrinterOffWarningInBrowser(APICase):
         self.assertNotIn("أُرسل", out["toast"])
         self.assertEqual(out["printFrame"], 1)
         self.assertEqual(out["stillShown"], 1)
-        self.assertEqual((spool.deleted, spool.jobs), ([7], {}))                  # nothing prints or opens later
+        self.assertEqual((spool.deleted, spool.jobs), ([7, 7], {}))   # both jobs cancelled; nothing happens later
+        self.assertEqual(spool.data[0], escpos.INIT + escpos.DRAWER_KICK)
+        self.assertNotIn(escpos.DRAWER_KICK, spool.data[1])

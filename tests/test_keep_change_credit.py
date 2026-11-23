@@ -178,7 +178,9 @@ class TestKeepChangeBrowserReceipt(__import__("unittest").TestCase):
         from pathlib import Path
         js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn("shown = keepIt ? cashPart : given", js)                 # Codex P2: given less the kept change
-        self.assertIn("printInFrame(`/receipt/${done.id}${shown ? `?given=${shown}` : \"\"}`)", js)
+        self.assertIn("showCheckoutDevices(done, shown)", js)
+        self.assertIn("async function showCheckoutDevices(sale, given)", js)
+        self.assertIn('printInFrame(`/receipt/${sale.id}${given ? `?given=${given}` : ""}`)', js)
         self.assertIn("keep_change: keepIt,", js)
 
 
