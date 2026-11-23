@@ -3908,7 +3908,7 @@ const SEV = {
 let SALE = null;
 let CHANNELS = null;
 const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null,
-              adding: new Set(), completing: false };
+              adding: new Map(), completing: false };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
 // over the rule for that sale only (POS.rcpt is keyed by sale id, so the next sale starts fresh).
 // A delivery sale always prints one receipt on completion.
@@ -4029,7 +4029,7 @@ async function viewPos(afterCheckout = false) {
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
     if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
-    if (!live && scanned) return false;       // an unresolved scan needs the cashier's attention
+    if (!live && (isScan || scanned)) return false;       // an unresolved scan needs the cashier's attention
   };
   q.addEventListener("input", () => {
     clearTimeout(liveT);
@@ -4221,10 +4221,23 @@ function drawerDialog() {
   f.reason.focus();
 }
 
+function pendingPosAdds(sid) {
+  return [...POS.adding].filter(([, saleId]) => saleId === sid).map(([work]) => work);
+}
+
 function trackPosAdd(work) {
-  const pending = work.catch((er) => { toast(er.message, true); return false; })
-    .finally(() => POS.adding.delete(pending));
-  POS.adding.add(pending);
+  const sid = SALE.id;
+  const pending = work.catch((er) => {
+    if (SALE?.id === sid) toast(er.message, true);
+    return false;
+  }).finally(() => {
+    POS.adding.delete(pending);
+    if (SALE?.id === sid && $("#posDone") && !SALE.lines.length && !pendingPosAdds(sid).length) {
+      $("#posDone").disabled = true;
+    }
+  });
+  POS.adding.set(pending, sid);
+  if ($("#posDone")) $("#posDone").disabled = false;
   return pending;
 }
 
@@ -4400,7 +4413,7 @@ function renderSide() {
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : `اطبع إيصال لهذا البيع (${esc(posKey("receipt"))})`}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>${esc(posKey("receipt"))}</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
-      <button class="btn big" id="posDone" ${s.lines.length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
+      <button class="btn big" id="posDone" ${s.lines.length || pendingPosAdds(s.id).length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
     </section>`;
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -4616,7 +4629,7 @@ async function complete(findings = null) {
     if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
     app.inert = true;
     // A barcode can be resolving while the cart is still empty. Wait for work started before F9.
-    const added = await Promise.all([...POS.adding]);
+    const added = await Promise.all(pendingPosAdds(sid));
     if (added.includes(false) || SALE?.id !== sid || !SALE.lines.length || !$("#posDone")) return;
     while (await finishSale(findings, sid)) { /* retry with the reason the cashier entered */ }
   } catch (er) { toast(er.message, true); }
@@ -4681,12 +4694,13 @@ async function finishSale(findings, sid) {
     delete POS.rcpt[sid]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`);
-    showCheckoutDevices(done, shown).catch(() => checkoutDeviceNotice(done, "unknown", "unknown"));
     if (SALE?.id === sid) SALE = null;
-    if (location.hash.startsWith("#/pos")) {
-      await viewPos(true);
+    try {
+      if (location.hash.startsWith("#/pos")) await viewPos(true);
+    } finally {
       app.inert = false;
       $("#posQ")?.focus();
+      showCheckoutDevices(done, shown).catch(() => checkoutDeviceNotice(done, "unknown", "unknown"));
     }
   } catch (er) {
     toast(er.message, true);

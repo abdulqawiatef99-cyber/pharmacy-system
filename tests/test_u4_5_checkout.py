@@ -250,3 +250,38 @@ const { chromium } = require('playwright');
 """
         self.assertEqual(run_node(self, script, "owner", OWNER_PW), {"posted": 0})
         self.assertEqual(self.call("GET", f"/api/sales/{sid}")["status"], "draft")
+
+    def test_checkout_waits_only_for_scans_on_its_draft(self):
+        from app.sales.cash import CashDrawer
+
+        CashDrawer(self.db).open(self.ctx, 10000)
+        other, current = self.draft(), self.draft()
+        self.line(other, self.box, packs=1)
+        self.line(current, self.box, packs=1)
+        script = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, other, current] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector(`[data-tab="${current}"].on`);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await p.route('**/api/items?**', async r => { await held; await r.abort(); });
+  const lookup = p.waitForRequest('**/api/items?**');
+  await p.fill('#posQ', '6221025012345');
+  await p.press('#posQ', 'Enter');
+  await lookup;
+  await p.click(`[data-tab="${other}"]`);
+  await p.waitForSelector(`[data-tab="${other}"].on`);
+  const finished = p.waitForResponse(`**/api/sales/${other}/complete`, { timeout: 3000 });
+  await p.keyboard.press('F9');
+  const response = await finished;
+  release();
+  console.log(JSON.stringify({status: response.status()}));
+  await b.close();
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+        out = run_node(self, script, "owner", OWNER_PW, other, current)
+        self.assertEqual(out, {"status": 200})
+        self.assertEqual(self.call("GET", f"/api/sales/{current}")["status"], "draft")
