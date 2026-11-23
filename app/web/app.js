@@ -1421,7 +1421,7 @@ function bindQuickAdd() {
     if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
     $("#qaQty").focus();
   };
-  let timer, seq = 0, res = [];
+  let timer, seq = 0, res = [], resultsFor = "";
   const current = onThisScreen();
   const search = async (v, select) => {
     const request = ++seq;
@@ -1429,6 +1429,7 @@ function bindQuickAdd() {
     const found = await findItems(v);
     if (request !== seq || !q.isConnected || v !== q.value.trim()) return;
     res = found.items;
+    resultsFor = v;
     if (found.hint?.kind === "gs1") {
       if (!res.length) { $("#qaRes").innerHTML = '<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. سجّله من بطاقة الصنف.</p>'; return; }
       pick(res[0]);
@@ -1447,13 +1448,16 @@ function bindQuickAdd() {
   };
   const runSearch = (select) => search(q.value.trim(), select).catch((err) => { if (current()) toast(err.message, true); });
   q.addEventListener("input", () => {
-    QA_ITEM = null; seq++; clearTimeout(timer);
+    QA_ITEM = null; resultsFor = ""; seq++; clearTimeout(timer);
     $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
     timer = setTimeout(() => runSearch(false), 250);
   });
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || QA_ITEM) return;
-    e.preventDefault(); clearTimeout(timer); runSearch(true);
+    e.preventDefault(); clearTimeout(timer);
+    const v = q.value.trim();
+    if (resultsFor === v && res.length && !/^\d+$/.test(v)) pick(res[0]);
+    else runSearch(true);
   });
   const add = async () => {
     if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
