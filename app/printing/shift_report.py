@@ -69,6 +69,8 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
         out.append(("row", f"مرتجعات ({r['returns_count']})", egp(r["returns_total"])))
     if r.get("card_refunds"):
         out.append(("row", "منها مرتجع على البطاقة", egp(r["card_refunds"])))
+    if r.get("transfer_refunds"):
+        out.append(("row", "منها مرتجع للمحفظة", egp(r["transfer_refunds"])))
     if r.get("credit_refunds"):
         out.append(("row", "منها مرتجع على حساب العميل", egp(r["credit_refunds"])))
     if r["voided_count"]:
@@ -94,7 +96,10 @@ def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
     if r["by_channel"]:
         out.append(("rule",))
         for c in r["by_channel"]:
-            out.append(("row", f"{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {c['channel']}", egp(c["amount"])))
+            refunded = c.get("refunded") or 0          # net of refunds back to the same machine / wallet
+            out.append(("row", f"{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {c['channel']}", egp(c["amount"] - refunded)))
+            if refunded:
+                out.append(("row", "مرتجع على نفس المحفظة", egp(refunded)))
     if r["credit_total"]:
         out.append(("row", "آجل", egp(r["credit_total"])))
         for c in r.get("credit_sales") or []:                                              # U2-28

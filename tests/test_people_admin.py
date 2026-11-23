@@ -82,13 +82,14 @@ class PeopleAdmin(APICase):
         self.assertEqual(self.c.get("/api/me").status_code, 200)
 
     # ------------------------------------------------------------------ password reset
-    def test_reset_password_replaces_it_ends_sessions_and_clears_a_lockout(self):
-        for _ in range(3):
-            self.c.post("/api/auth/login", json={"username": "asst", "password": "wrong-one"}, headers=H)
-        self.assertGreater(self.db.one("SELECT failed_logins FROM users WHERE id=?", (self.uid,))["failed_logins"], 0)
+    def test_reset_password_ends_sessions_and_clears_legacy_failure_state(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE users SET failed_logins=3, locked_until=? WHERE id=?",
+                            ("2099-01-01T00:00:00.000000Z", self.uid))
         self.act("password", password=NEW)
         self.assertEqual(self.a.get("/api/me").status_code, 401)                     # his open session ends
-        self.assertEqual(self.db.one("SELECT failed_logins FROM users WHERE id=?", (self.uid,))["failed_logins"], 0)
+        state = self.db.one("SELECT failed_logins, locked_until FROM users WHERE id=?", (self.uid,))
+        self.assertEqual((state["failed_logins"], state["locked_until"]), (0, None))
         fresh = TestClient(self.app)
         self.assertEqual(fresh.post("/api/auth/login", json={"username": "asst", "password": PW},
                                     headers=H).status_code, 401)

@@ -8,18 +8,23 @@ import unittest
 from pathlib import Path
 
 JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
-FN = re.search(r"\nfunction linePrice\(.*?\n\}\n", JS, re.S).group(0)
-RUN = "const money = (p) => (p == null ? '' : (p / 100).toFixed(2));\n" + FN + r"""
-const it3 = { pack_size: 3 }, it1 = { pack_size: 1 };
-const a = (unit, pack) => ({ unit_price: unit, pack_price: pack });
+FN = re.search(r"\nfunction salePriceQty\(.*?\nasync function openDraft", JS, re.S).group(0).rsplit("\nasync", 1)[0]
+RUN = r"""
+const money = (p) => (p / 100).toFixed(2);
+const esc = (s) => s;
+const unitName = ({base_unit_name}) => base_unit_name || "وحدة";
+""" + FN + r"""
+const pack = (qty, price) => ({qty, price, pack: true});
+const unit = (qty, price) => ({qty, price, pack: false});
+const line = (...official_prices) => linePrice({item: {base_unit: "شريط"}, official_prices});
 console.log(JSON.stringify([
-  linePrice({ qty_base: 3, item: it3, allocations: [a(3200, 9600)] }),          // 1 box
-  linePrice({ qty_base: 6, item: it3, allocations: [a(3200, 9600)] }),          // 2 boxes
-  linePrice({ qty_base: 1, item: it3, allocations: [a(3200, 9600)] }),          // 1 strip
-  linePrice({ qty_base: 4, item: it3, allocations: [a(3200, 9600)] }),          // 1 box + 1 strip
-  linePrice({ qty_base: 2, item: it1, allocations: [a(1500, 1500)] }),          // a single-unit item
-  linePrice({ qty_base: 3, item: it3, allocations: [a(3200, 9600), a(3400, 10200)] }),  // two batches, two prices
-  linePrice({ qty_base: 3, item: it3, allocations: [a(3334, null)] }),          // no pack price stored
+  line(pack(1, 9600)),
+  line(pack(2, 9600)),
+  line(unit(1, 3200)),
+  line(pack(1, 9600), unit(1, 3200)),
+  line(unit(2, 1500)),
+  line(pack(1, 9600), pack(1, 10200)),
+  line(unit(3, 3334)),
 ]));
 """
 
@@ -29,8 +34,8 @@ class TestLinePrice(unittest.TestCase):
     def test_price_of_the_sold_unit(self):
         r = subprocess.run([shutil.which("node"), "-e", RUN], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), ["96.00", "96.00", "32.00", "96.00 / 32.00", "15.00",
-                                                "96.00 ، 102.00", "100.02"])
+        self.assertEqual(json.loads(r.stdout), ["96.00", "96.00", "32.00", "1 علبة × 96.00<br>1 شريط × 32.00",
+                                                "15.00", "1 علبة × 96.00<br>1 علبة × 102.00", "33.34"])
 
     def test_the_cart_uses_it(self):
         self.assertIn('<td class="num">${linePrice(l)}</td>', JS)

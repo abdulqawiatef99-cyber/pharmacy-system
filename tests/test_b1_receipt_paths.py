@@ -84,7 +84,7 @@ class TestBothPathsSameCustomer(PlanCase):
 class TestCodexRound2(__import__("tests.test_sales", fromlist=["SalesCase"]).SalesCase):
     """Codex on #423: no averaged unit price for a line from batches at different prices; a long policy row is
     wrapped on thermal paper, never cut."""
-    def test_two_batch_prices_print_no_invented_unit_price(self):
+    def test_two_batch_prices_print_each_official_price(self):
         sid = self.s.create(self.ctx)
         d = self.s.add_line(self.ctx, sid, self.pan, units=6)      # 3 units from OLD @38/2, 3 from NEW @40/2
         self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
@@ -93,7 +93,10 @@ class TestCodexRound2(__import__("tests.test_sales", fromlist=["SalesCase"]).Sal
         self.assertEqual(len({a["pack_price"] for a in line["allocations"]}), 2)
         self.assertIsNone(escpos.unit_price(line))
         rows = texts(escpos.receipt_lines("صيدلية", sale, "اليوم", {}))
-        self.assertNotIn("×", rows)
+        self.assertIn("1 علبة × 38.00", rows)
+        self.assertIn("1 علبة × 40.00", rows)
+        self.assertIn("1 وحدة × 19.00", rows)
+        self.assertIn("1 وحدة × 20.00", rows)
 
     def test_one_batch_price_keeps_the_unit_price(self):
         sid = self.s.create(self.ctx)

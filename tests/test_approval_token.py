@@ -44,14 +44,14 @@ class ApprovalToken(APICase):
         self.assertEqual(self.a.get(SUMMARY, headers=hdr).status_code, 200)      # same screen, within 90 s
         r = self.a.get(USERS, headers=hdr)                                       # another action
         self.assertEqual(r.status_code, 403, r.text)
-        self.assertEqual(r.json()["error"]["code"], "approval_required")
+        self.assertEqual(r.json()["error"]["code"], "approval_mismatch")
 
     def test_a_token_is_for_one_method_too(self):
         hdr = approval_headers(self.a, self.owner, "9753", "settings.manage", SUMMARY)   # GET: read the status
         self.assertEqual(self.a.get(SUMMARY, headers=hdr).status_code, 200)
-        r = self.a.put(SUMMARY, headers=hdr, json={})                                  # PUT: change settings
+        r = self.a.put(SUMMARY, headers={**hdr, "Idempotency-Key": "different-method"}, json={})                                  # PUT: change settings
         self.assertEqual(r.status_code, 403, r.text)
-        self.assertEqual(r.json()["error"]["code"], "approval_required")
+        self.assertEqual(r.json()["error"]["code"], "approval_mismatch")
 
     def test_a_token_lends_only_the_permission_approved(self):
         hdr = approval_headers(self.a, self.owner, "9753", "sales.void", USERS)  # approved: void, asked on /users
@@ -116,13 +116,14 @@ class ApprovalToken(APICase):
         self.assertEqual(self.a.post("/api/cash/open", json={"opening_cash": 0}, headers=H).status_code, 201)
         path = f"/api/customers/{cid}/payments"
         key = {"Idempotency-Key": "pay-once-1"}
-        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST")
+        payout = {"amount": 1500, "method": "cash"}
+        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST", payload=payout, key=key["Idempotency-Key"])
         first = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
         self.assertEqual(first.status_code, 200, first.text)
         self.expire_all()
         r = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
         self.assertEqual(r.json()["error"]["code"], "approval_expired")
-        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST")
+        hdr = approval_headers(self.a, self.owner, "9753", "customers.manage", path, "POST", payload=payout, key=key["Idempotency-Key"])
         again = self.a.post(path, json={"amount": 1500, "method": "cash"}, headers={**hdr, **key})
         self.assertEqual(again.status_code, 200, again.text)
         self.assertEqual(again.headers.get("Idempotent-Replay"), "true")
@@ -332,7 +333,7 @@ function approvalHeaders() { return {}; }
 async function askApproval(details) { asked.push(details.permission); if (GRANTS) granted.add(details.permission); return true; }
 async function fetch() {
   const missing = NEEDED.find((p) => !granted.has(p));
-  if (missing) return { ok: false, status: 403, json: async () => ({ error: { code: "approval_required", message: "no", details: { permission: missing, label: missing } } }) };
+  if (missing) return { ok: false, status: 403, json: async () => ({ error: { code: "approval_required", message: "no", details: { permission: missing, label: missing, challenge: "fixture-challenge" } } }) };
   return { ok: true, status: 200, json: async () => ({ ok: true }) };
 }
 """ % (json.dumps(needed), "true" if grants else "false")

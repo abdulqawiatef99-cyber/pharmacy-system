@@ -124,6 +124,14 @@ class TestReportLines(ShiftBase):
         two, _ = rows(self.lines({**r, "rounding_total": 25}))
         self.assertEqual(two["منها تقريب النقدي (مش مبيعات)"], "0.25")
 
+    def test_wallet_refund_rows_net_of_the_channel(self):
+        r = self.close({"10000": 1})
+        r = {**r, "transfer_refunds": 1500,
+             "by_channel": [{"method": "transfer", "channel": "إنستاباي", "amount": 5000, "refunded": 1500}]}
+        two, _ = rows(self.lines(r))
+        self.assertEqual((two["منها مرتجع للمحفظة"], two["تحويل — إنستاباي"], two["مرتجع على نفس المحفظة"]),
+                         ("15.00", "35.00", "15.00"))
+
     def test_open_shift_has_no_result_rows(self):
         r = self.cd.report(self.ctx, self.cd.summary(self.ctx)["id"])
         two, _ = rows(self.lines(r))
