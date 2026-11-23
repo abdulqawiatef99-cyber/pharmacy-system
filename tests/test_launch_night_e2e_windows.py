@@ -163,6 +163,9 @@ class LaunchNightOnWindows(unittest.TestCase):
         self.assertEqual(count(trial[0] / "pharmacy.db", "SELECT count(*) FROM organizations"), 1)
         self.assertEqual(count(self.data / "pharmacy.db", "SELECT count(*) FROM organizations"), 0)
         self.assertTrue((self.data / "code-releases" / "releases" / self.rid / "manage.py").is_file())
+        # U4-0: the printing / device settings go along for the setup screen to apply
+        self.assertIn("PASS - device and printing settings kept", text)
+        self.assertTrue((self.data / "device_settings_carry.json").is_file())
         zips = list((self.home / "backups").glob("fresh-start-*/*.zip"))
         self.assertEqual(len(zips), 1)
         if Path("D:\\").exists():

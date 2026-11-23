@@ -381,6 +381,15 @@ def fresh_start_refusal(db, answer: str | None, sales_confirmed: bool = False) -
     return None
 
 
+def cmd_export_device_settings(a, s):
+    """U4-0: launch-fresh-start.bat writes the printing / device / screen settings to a small file before it
+    renames the data folder; the first-run setup of the new empty data applies it (no business data, no users)."""
+    from app.core import device_settings
+    out = Path(a.out)
+    info = device_settings.carry_out(_db(s), out)
+    print(f"device settings written: {out} ({', '.join(info['keys']) or 'none'}; {info['channels']} payment channels)")
+
+
 def cmd_fresh_start_check(a, s):
     """Asked by launch-fresh-start.bat before it stops anything. Python reads the answer (cmd's set /p
     cannot read Arabic typing reliably). Exit 0 = go on, 1 = refused (reason printed)."""
@@ -855,6 +864,8 @@ def main(argv=None):
                     help="trial on a new empty database (the program still holds trial data); never applies")
     ed.add_argument("--backup-dir", default=None)
     sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
+    xd = sub.add_parser("export-device-settings", help="launch-fresh-start.bat: keep printing/device settings")
+    xd.add_argument("--out", required=True)
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
@@ -878,7 +889,7 @@ def main(argv=None):
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
+     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check, "export-device-settings": cmd_export_device_settings,
      "reset-owner-password": cmd_reset_owner_password, "ask-password": cmd_ask_password}[a.cmd](a, s)
 
 

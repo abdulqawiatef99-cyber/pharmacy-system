@@ -55,8 +55,10 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     try:
         width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
         who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
+        from ..sales.service import return_window_days
         body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
-                                                          given=given), width=width)
+                                                          given=given, return_days=return_window_days(db, ctx.org_id)),
+                                     width=width)
         img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
@@ -109,7 +111,8 @@ def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
     return True
 
 
-def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, given: int = 0) -> dict:
+def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, given: int = 0, *,
+                     drawer_first: bool = False) -> dict:
     """After a sale is committed (#81), once: the call site skips replays of the same request_id.
     The drawer opens on any cash part of a store sale, with or without a receipt; a delivery sale prints
     one receipt and never opens the drawer. A failure here never touches the saved sale.
@@ -126,17 +129,20 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, give
         out["receipt"] = "browser" if want_receipt else "none"
         out["drawer"] = "unsupported" if want_drawer else "none"
         return out
+    pulse_with_receipt = want_drawer and want_receipt and not drawer_first
     try:
+        if want_drawer and not pulse_with_receipt:
+            out["drawer"] = "sent" if _kick(db, ctx, dest, sale["id"]) else "failed"
         if want_receipt:
             try:
-                print_receipt(db, ctx, sale["id"], open_drawer=want_drawer, target=dest, given=given)
-                out["receipt"], out["drawer"] = "sent", "sent" if want_drawer else "none"
+                print_receipt(db, ctx, sale["id"], open_drawer=pulse_with_receipt, target=dest, given=given)
+                out["receipt"] = "sent"
+                if pulse_with_receipt:
+                    out["drawer"] = "sent"
             except PrintFailed as e:
                 out["receipt"], out["message"] = "failed", e.message
-                if want_drawer:
+                if pulse_with_receipt:
                     out["drawer"] = "sent" if (e.details or {}).get("drawer_opened") else "failed"
-        elif want_drawer:
-            out["drawer"] = "sent" if _kick(db, ctx, dest, sale["id"]) else "failed"
     except Exception as e:  # noqa: BLE001 — the sale is saved; report the device problem, never fail the sale
         log.exception("checkout devices failed for sale %s", sale.get("id"))
         out["message"] = str(e)

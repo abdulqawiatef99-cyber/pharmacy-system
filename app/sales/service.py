@@ -711,8 +711,22 @@ class Sales:
             "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
             " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
         if s["customer_id"]:
-            c = self.db.one("SELECT id, name, name_alt, phone, address1, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
+            from .customers import CODE_SQL
+            c = self.db.one(f"SELECT c.id, c.name, c.name_alt, c.phone, c.address1, c.credit_limit, {CODE_SQL} estock_code"
+                            " FROM customers c WHERE c.id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
+            if s["status"] == "completed" and s.get("on_credit"):
+                # U2-23: the balance before / after this invoice, printed only while nothing else moved his account
+                # since it (review P1: a reprint after a payment or a return would print wrong figures)
+                # this sale's own rows: its credit and the change kept as credit (both written at completion); any
+                # other row after it (a payment, a return, kept change given back) means his account moved (#423 P1)
+                own = "coalesce(ref_id,'')=? AND kind IN ('credit_sale','payment')"
+                later = self.db.one(f"SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? AND created_at>?"
+                                    f" AND NOT ({own}) LIMIT 1", (ctx.org_id, c["id"], s["completed_at"], sid))
+                if not later:
+                    mine = self.db.one(f"SELECT coalesce(sum(amount),0) a FROM customer_ledger WHERE org_id=? AND"
+                                       f" customer_id=? AND {own}", (ctx.org_id, c["id"], sid))["a"]
+                    s["customer"]["balance_before"] = s["customer"]["balance"] - mine
         if s.get("contract_id"):
             k = self.db.one("SELECT id, name, discount_local_bp, discount_imported_bp FROM contracts WHERE id=?", (s["contract_id"],))
             s["contract"] = dict(k) if k else None
@@ -927,6 +941,9 @@ class Sales:
                 raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
             if delivery:              # the courier carries the cash until he hands it in
+                # B2: a delivery paid by card / InstaPay / wallet / credit has cash_due 0: the goods are on the road
+                # (still 'out', so a return waits and the sale joins a shift when it is closed), but the courier hands
+                # in nothing; the screen lists it apart from the cash to hand in
                 shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
                 self.db.execute("UPDATE sale_deliveries SET status='out', cash_due=?, out_at=? WHERE sale_id=?",
                                 (paid_cash, _now(), sid))
@@ -1279,7 +1296,7 @@ class Sales:
         if status not in ("delivered", "settled"):
             raise ValidationFailed("الحالة غير صحيحة")
         with self.db.transaction():
-            d = self.db.one("SELECT d.*, s.status sale_status, s.branch_id, s.sale_no FROM sale_deliveries d"
+            d = self.db.one("SELECT d.*, s.status sale_status, s.branch_id, s.sale_no, s.shift_id FROM sale_deliveries d"
                             " JOIN sales s ON s.id=d.sale_id WHERE d.sale_id=? AND d.org_id=?", (sid, ctx.org_id))
             if not d or d["sale_status"] != "completed":
                 raise NotFound("فاتورة التوصيل غير موجودة")
@@ -1287,6 +1304,10 @@ class Sales:
             if d["status"] not in order or order.index(status) <= order.index(d["status"]):
                 raise Conflict("هذه الحالة سُجّلت من قبل", code="delivery_state")
             if status == "settled":
+                if not d["shift_id"]:
+                    # B2 review P1: a sale in no shift yet joins the open one; with none open (a 0-cash delivery
+                    # records nothing) its card / wallet / credit amount would belong to no shift ever
+                    cash.require_open_shift(self.db, ctx, d["branch_id"])
                 shift = cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم مبلغ توصيل الفاتورة {d['sale_no']}",
                                     branch_id=d["branch_id"]) or cash.open_shift_id(self.db, ctx, d["branch_id"])
                 # completed while no shift was open: it belongs to the shift its cash came into (#324 M9)

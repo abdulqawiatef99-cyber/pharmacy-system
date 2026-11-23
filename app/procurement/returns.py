@@ -238,7 +238,9 @@ def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
                     "pack_size": ps, "batch_id": mv["batch_id"] if mv else None, "batch_no": l["batch_no"],
                     "expiry_date": l["expiry_date"], "paid_units": paid_units, "bonus_units": bonus_units,
                     "paid_returned": paid_back, "bonus_returned": min(bonus_back, bonus_units), "receipt_left": left,
-                    "qty_packs": l["qty"] or 0, "unit_net_price": l["unit_net_price"], "tax_amount": l["tax_amount"] or 0,
+                    "qty_packs": l["qty"] or 0, "unit_net_price": None if l["unit_net_price"] is None
+                    else l["unit_net_price"] + (l["distributor_margin"] or 0),     # the pack's cost (B3)
+                    "tax_amount": l["tax_amount"] or 0,
                     "amount": amount + share, "invoice_adjustment": share,
                     "line_total": l["line_total"], "on_hand": inv.batch_qty(db, ctx.org_id, mv["branch_id"], l["item_id"],
                                                                             mv["batch_id"]) if mv else 0})
