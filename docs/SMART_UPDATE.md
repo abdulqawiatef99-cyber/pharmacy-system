@@ -8,17 +8,17 @@ database untouched; data and settings in the data folder survive; every step is 
 ## 1. Two stages
 | | Stage 0 (frozen) | Stage 1 (updatable) |
 |---|---|---|
-| Files | installed `launcher.py` + `release_bootstrap.py` (stdlib only) | everything in a release: `manage.py update …`, `app/core/smart_update.py`, `app/core/update_sign.py`, `app/core/updater.py` |
+| Files | installed `launcher.py`, `release_bootstrap.py` and installed signature verifier | everything in a release: `manage.py update …`, `app/core/smart_update.py`, `app/core/update_sign.py`, `app/core/updater.py` |
 | Changes by | installer only | the «تحديث» button |
 | Does | select the verified release pointer; run the prepared *apply* step once; swap files from a hash-checked journal; supervise the first start; on failure undo the swap and the pointer | download, verify signature and hashes, stage code and packages, rehearse, apply on a copy, decide when |
 
 Stage 0 is deliberately small and generic (file swaps from a journal, health check, rollback), so a
-future change to the update logic lives in stage 1 and ships by the button. A new updater is checked
+changes to download and rehearsal typically ship in stage 1. Stage 0 verifies the selected code and packages against the signed bundle before launch. A new updater is checked
 before it is selected: the candidate's own `update --self-check` (keys load, signature verify, deps
 path) must pass. Recovery never depends on stage 1: stage 0 can always undo, and the installer
-remains the last resort. Stage 0 tells the program it starts what it can apply: `PHARM_BOOTSTRAP=2` in
+remains the last resort. Stage 0 tells the program it starts what it can apply: `PHARM_BOOTSTRAP=3` in
 the server's environment; stage 1 refuses every smart batch when that capability is missing (old
-launcher: installer first; the button keeps today's code-only path there). Under a launcher only the
+launcher: install a current, approved installer first). Under a launcher only the
 environment counts: `code-releases/bootstrap.json` (also written by stage 0) outlives the launcher when
 an older installer is put back, and that launcher never applies a batch, so exit 75 would only restart
 the program again and again (second review). The file is read only by commands run by hand.
@@ -34,8 +34,8 @@ On a push to `main` or `develop`, CI publishes release `update-<channel>` with:
 - `manifest.json` — `{format, channel, sha, commit_time, version, python, platform, code:{sha256,size},
   deps:{id,sha256,size}, migrations:[…]}` and `manifest.sig` (Ed25519, base64).
 Signing key: repository secret `UPDATE_SIGNING_KEY`; public keys in `release_keys/*.pub`. No secret →
-CI publishes nothing (fail closed). Trust root = the keys in the **active** release, never the
-downloaded one; a new key ships inside a release signed by the old key. The secret reaches only the two
+CI fails the bundle build and publishes nothing. The trust root is the key set in the installed
+program directory. Key rotation requires a trusted installer with the new key set. The secret reaches only the two
 steps that read it. The build log names the committed key that verified the signature (`update-2.pub`
 since 21/11; the next spare, `update-3.pub`, stays offline for rotation and must never be the one signing).
 **Dry run:** a PR labelled `ci` that touches the signing path (this workflow, `scripts/release/`,
@@ -84,12 +84,14 @@ then it is offered nothing. The first update from `main` records `ref = main`, s
    --quick` and `update --self-check` on temporary data; **rehearsal**: online snapshot of the live DB
    (SQLite backup API, read only) → candidate code migrates the snapshot → integrity, foreign keys,
    stock balances, audit chain, row counts, app start + `/api/health`. Result: `prepared.json`.
-   No network needed after this point.
+   No network is needed after this point. Keep the cached signed assets and the proof in
+   `code-releases/proofs/` for application, restart and compatible rollback.
 3. **Choose**: «حدّث دلوقتي» or «حدّث بعد قفل الوردية». Recorded in `apply-request.json` and audited.
 4. **Trigger** (server, every 30 s): never during a sale — no write in the last 60 s, no draft sale with
    lines from the last 30 min; «بعد القفل» also waits until no shift is open. The last check runs while
    holding the database write lock and with no HTTP request in flight; then `apply-go.json`, exit 75.
-5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min). Code-only batch: verified backup,
+5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min). Reverify the publisher proof
+   and exact staged files. Code-only batch: verified backup,
    select the pointer (pending), done. Database batch: verified backup of the live DB →
    copy (backup API) to `data/update-candidate/pharmacy.db` → candidate code migrates **the copy** and
    runs the same checks as the rehearsal → journal `update-journal.json` (`ready`: live, candidate,
@@ -119,5 +121,9 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
 - A new Python version or a changed launcher still needs an installer (manifest `python`, bootstrap).
 - `pywin32` loads DLLs from the installed set at interpreter start; a pywin32 upgrade is caught by the
   candidate selftest (import check) and then needs an installer.
-- Until the owner adds the signing secret, the button keeps today's code-only path (zipball,
-  migrations and requirements refused).
+- With no signing key in CI, distribution waits for a signed bundle. The branch and raw ZIP update
+  paths are retired. A legacy installation needs the current installer once.
+- Production installer publication requires a valid Authenticode signature. Configure the signing
+  certificate and password in the installer workflow secrets and pin its public certificate SHA-256.
+- The installer records its commit time. A healthy signed update raises the per-channel version floor,
+  which also applies to offline updates and survives a compatible rollback.

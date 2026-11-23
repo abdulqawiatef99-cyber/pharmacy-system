@@ -118,7 +118,8 @@ jobs:
           Expand-Archive program.zip -DestinationPath build/program
           # what this installer contains: the launcher adopts it once over an older in-app update (#45),
           # and the update badge compares it with main
-          @{ sha = "$env:GITHUB_SHA"; ref = "$env:GITHUB_REF_NAME" } | ConvertTo-Json -Compress |
+          $commitTime = [long](git show -s --format=%ct HEAD)
+          @{ sha = "$env:GITHUB_SHA"; ref = "$env:GITHUB_REF_NAME"; commit_time = $commitTime } | ConvertTo-Json -Compress |
             Set-Content -Encoding ascii build/program/build_info.json
 
       - name: Smoke test of the embedded build
@@ -136,11 +137,8 @@ jobs:
           build/python/python.exe build/program/manage.py selftest --quick
           build/python/python.exe build/program/manage.py init --pharmacy smoke --username owner --password Smoke-Pass-2026
           build/python/python.exe build/program/manage.py verify
-          # R8 on Windows with the shipped runtime: stage and select a candidate from a local zip (same
-          # requirements/migrations), then roll back; the data still verifies. The owner repeats it on the PC.
-          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --prefix=candidate/ HEAD -o "$env:RUNNER_TEMP\candidate.zip"
-          build/python/python.exe build/program/manage.py update --from-zip "$env:RUNNER_TEMP\candidate.zip" --backup-dir "$env:RUNNER_TEMP\upd-backups"
-          build/python/python.exe build/program/manage.py update --rollback
+          # R8 on Windows with a generated test key in a temporary installation.
+          build/python/python.exe -c "import sys; sys.path.insert(0, 'build/program'); import unittest; unittest.main(module='tests.test_smart_update', argv=['unittest', 'TestApply'])"
           build/python/python.exe build/program/manage.py verify
 
       # #100: labels through the Windows printer driver, printed for real (into a file) with the shipped runtime
@@ -159,6 +157,38 @@ jobs:
         run: |
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
+
+      - name: Sign the production installer
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          INSTALLER_SIGNING_PFX: ${{ secrets.INSTALLER_SIGNING_PFX }}
+          INSTALLER_SIGNING_PASSWORD: ${{ secrets.INSTALLER_SIGNING_PASSWORD }}
+          INSTALLER_SIGNER_SHA256: ${{ vars.INSTALLER_SIGNER_SHA256 }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:INSTALLER_SIGNING_PFX -or $env:INSTALLER_SIGNER_SHA256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'Production installer signing material is unavailable.'
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'installer-signer.pfx'
+          $certificate = $null
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:INSTALLER_SIGNING_PFX))
+            $password = ConvertTo-SecureString $env:INSTALLER_SIGNING_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+              Where-Object { $_.HasPrivateKey -and $_.GetCertHashString('SHA256') -eq $env:INSTALLER_SIGNER_SHA256 } |
+              Select-Object -First 1
+            if (-not $certificate) { throw 'Installer signer fingerprint does not match.' }
+            $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin/*/x64/signtool.exe'
+            $signTool = Get-ChildItem $sdk |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signTool) { throw 'Windows SDK signing tool is unavailable.' }
+            & $signTool.FullName sign /sha1 $certificate.Thumbprint /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 dist/PharmacySetup.exe
+          } finally {
+            if ($certificate) { Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" }
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
 
       # Artifact storage is small on GitHub Free (#122): keep review builds 14 days, not 90.
       # The artifact is only a convenience copy: a push to main delivers "installer-latest"
@@ -187,6 +217,12 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALLER_SIGNER_SHA256: ${{ vars.INSTALLER_SIGNER_SHA256 }}
         run: |
+          $signature = Get-AuthenticodeSignature dist/PharmacySetup.exe
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.GetCertHashString('SHA256') -ne $env:INSTALLER_SIGNER_SHA256) {
+            throw 'The published installer must have the pinned Authenticode signature.'
+          }
           gh release delete installer-latest --yes --cleanup-tag 2>$null
           gh release create installer-latest dist/PharmacySetup.exe --title "منصة الصيدلية — آخر نسخة" --notes "ملف التثبيت لآخر نسخة على main (${{ github.sha }}). بياناتك محفوظة في %LOCALAPPDATA%\PharmacyPlatform ومش بتتلمس عند إعادة التثبيت." --target ${{ github.sha }}

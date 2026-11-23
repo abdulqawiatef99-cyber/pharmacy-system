@@ -48,8 +48,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     key = os.environ.get("UPDATE_SIGNING_KEY", "").strip()
     if not key:
-        print("UPDATE_SIGNING_KEY is not set: no bundle is built (the button keeps the code-only path).")
-        return 0
+        print("UPDATE_SIGNING_KEY is not set: a release signature is required.", file=sys.stderr)
+        return 1
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sha = git("rev-parse", "HEAD")

@@ -213,6 +213,25 @@ class TestPrepare(SmartUpdateBase):
 
 
 class TestApply(SmartUpdateBase):
+    def test_prepared_release_signature_is_checked_before_activation(self):
+        self.build()
+        prepared = self.prepare()
+        proof = self.home / "proofs" / f"{prepared['release']}.json"
+        releases.atomic_json(proof, {"manifest": "{}", "signature": "invalid"})
+        with self.assertRaises(UpdateError):
+            su.select_code_only(self.s, self.legacy, self.backups)
+        self.assertFalse(releases.read_state(self.home).get("active"))
+
+    def test_installed_launcher_checks_publisher_proof_and_exact_release_files(self):
+        self.build()
+        p = self.prepare()
+        su.select_code_only(self.s, self.legacy, self.backups)
+        candidate = releases.verified_program(self.legacy, self.home)
+        self.assertEqual(candidate.name, p["release"])
+        (candidate / "extra.txt").write_text("Synthetic unexpected file", encoding="utf-8")
+        with self.assertRaises(releases.ReleaseError):
+            releases.verified_program(self.legacy, self.home)
+
     def test_apply_migrates_a_copy_then_stage0_swaps_it_in_and_can_undo(self):
         self.add_migration()
         self.build()
@@ -484,7 +503,7 @@ class TestBundleBuilder(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             with patch.dict(os.environ, {"UPDATE_SIGNING_KEY": ""}):
-                self.assertEqual(build_bundle.main(["--channel", "main", "--out", str(out)]), 0)
+                self.assertEqual(build_bundle.main(["--channel", "main", "--out", str(out)]), 1)
             self.assertFalse(out.exists())                                         # no key: nothing published
             site = Path(tmp) / "site"
             (site / "pkg").mkdir(parents=True)
