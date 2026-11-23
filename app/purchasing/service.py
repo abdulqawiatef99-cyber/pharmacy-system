@@ -797,7 +797,9 @@ class Purchasing:
             line = next((l for l in lines if l["id"] == line_id), None)
             if not line:
                 raise NotFound("السطر غير موجود")
-            data = {"name_en": line["raw_name"], "public_price": line["public_price"], **item}
+            data = {"name_en": line["raw_name"], **item}
+            if ctx.allowed("items.price"):
+                data.setdefault("public_price", line["public_price"])
             barcodes = [line["raw_barcode"]] if line["raw_barcode"] else []
             item_id = catalog.create_item(self.db, ctx, data, barcodes=barcodes, force=force,
                                           source="purchase_invoice")
@@ -895,6 +897,8 @@ class Purchasing:
             if not isinstance(choice, dict) or choice.get("mode") not in ("keep", "all", "per_batch"):
                 raise ValidationFailed("اختار طريقة تسعير الرصيد")
             mode = choice["mode"]
+            if mode != "keep":
+                ctx.require("items.price")      # #448: repricing stock needs price authority; "keep" does not
             selected = choice.get("batches", []) if mode == "per_batch" else []
             ids = {b["id"] for b in change["batches"]}
             if not isinstance(selected, list) or any(not isinstance(b, str) or b not in ids for b in selected):
@@ -975,8 +979,12 @@ class Purchasing:
             reviewed = self._apply_price_review(ctx, price_review, price_decisions, price_token,
                                                 require_review=require_price_review)
             moved = 0
-            packs_of = {l["id"]: self.db.one("SELECT pack_size FROM items WHERE id=? AND org_id=?",
-                                             (l["item_id"], ctx.org_id))["pack_size"] for l in lines}
+            may_price = ctx.allowed("items.price")
+            items = {item_id: self.db.one("SELECT pack_size, public_price FROM items WHERE id=? AND org_id=?",
+                                          (item_id, ctx.org_id)) for item_id in {l["item_id"] for l in lines}}
+            if any(l["public_price"] is not None and items[l["item_id"]]["public_price"] is None for l in lines):
+                ctx.require("items.price")
+            packs_of = {l["id"]: items[l["item_id"]]["pack_size"] for l in lines}
             units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * packs_of[l["id"]] for l in lines}
             all_units = sum(units.values())
             for l, amount in zip(lines, amounts):
@@ -989,7 +997,7 @@ class Purchasing:
                     Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
                 base_qty = units[l["id"]]                       # bonus is free stock
                 unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
-                price = l["public_price"]
+                price = l["public_price"] if may_price else None   # #448: price authority
                 if price is not None and item["public_price"] is not None and price != item["public_price"]:
                     # Legacy lots without an explicit price can receive returns as well as hold old stock.
                     self.db.execute("UPDATE batches SET public_price=? WHERE org_id=? AND item_id=?"
@@ -1027,11 +1035,14 @@ class Purchasing:
                                         ref_id=inv_id, ref_line_id=l["id"],
                                         branch_id=inv["branch_id"])
                 moved += base_qty
-                if l["public_price"] is not None and l["public_price"] != item["public_price"]:
-                    self.db.execute("UPDATE items SET public_price=?, updated_at=? WHERE id=?",
-                                    (l["public_price"], accounts.iso(accounts.utcnow()), item["id"]))
+                if may_price and l["public_price"] is not None and l["public_price"] != item["public_price"]:
+                    self.db.execute("UPDATE items SET public_price=?, updated_at=? WHERE id=? AND org_id=?",
+                                    (l["public_price"], accounts.iso(accounts.utcnow()), item["id"], ctx.org_id))
                     catalog.record_price(self.db, ctx, item["id"], l["public_price"],
                                          item["public_price"], "purchase_invoice", inv_id)
+                    audit.record(self.db, ctx, "purchase.catalog_price", "item", item["id"],
+                                 before={"public_price": item["public_price"]},
+                                 after={"public_price": l["public_price"], "invoice_id": inv_id})
                     price_changes.append(f"{item['name_en'] or item['name_ar']}: "
                                          f"{(item['public_price'] or 0) / 100:,.2f} ← {l['public_price'] / 100:,.2f}")
                 # learn from human confirmations only

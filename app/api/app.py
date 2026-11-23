@@ -9,17 +9,18 @@ only translate HTTP <-> service calls.
 """
 from __future__ import annotations
 
-import re
-
+import asyncio
 import base64
 import functools
 import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
+from collections.abc import Hashable
 from decimal import Decimal
 from pathlib import Path
 
@@ -161,16 +162,25 @@ class SecurityHeaders(BaseHTTPMiddleware):
 class RateLimiter:
     def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
         self.limit, self.window, self.message = limit, window_s, message
-        self.hits: dict[str, deque] = defaultdict(deque)
+        self.hits: dict[Hashable, deque[float]] = defaultdict(deque)
+        self.lock = threading.Lock()
 
-    def check(self, key: str) -> None:
-        now = time.monotonic()
-        q = self.hits[key]
-        while q and now - q[0] > self.window:
-            q.popleft()
-        if len(q) >= self.limit:
+    def check(self, key: Hashable) -> None:
+        if self.record(key):
             raise DomainError(self.message, code="rate_limited")
-        q.append(now)
+
+    def record(self, key: Hashable) -> bool:
+        with self.lock:
+            if key not in self.hits and len(self.hits) >= 4096:
+                del self.hits[next(iter(self.hits))]
+            now = time.monotonic()
+            q = self.hits[key]
+            while q and now - q[0] > self.window:
+                q.popleft()
+            if len(q) >= self.limit:
+                return True
+            q.append(now)
+            return False
 
 
 def create_app(db: Database | None = None, settings: config_mod.Settings | None = None,
@@ -200,7 +210,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
-    login_limiter = RateLimiter(10, 60)
+    password_workers = CapacityLimiter(2)
+    password_failures = RateLimiter(5, 60)
+    pin_limiter = RateLimiter(10, 60)
+    setup_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
     # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
     # session cannot be used to guess the password at full speed
@@ -227,6 +240,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return accounts.effective_access(db, org_id, who)
 
     def ctx_of(req: Request):
+        cached = getattr(req.state, "authorization_context", None)
+        if cached is not None:
+            return cached
         token = None
         auth = req.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
@@ -239,21 +255,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
         if approver and req.url.path == "/api/approvals/check":
             # the PIN is typed once and checked here only; every other request carries the approval token (#137)
-            approver_limiter.check(client_ip(req))
+            approver_limiter.check(ctx.user_id)
             ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
-            req.state.session_token = token
-        elif req.headers.get("x-approval"):
-            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
-                                  lambda who: approver_access(ctx.org_id, who),
-                                  body=getattr(req.state, "approval_body", None))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
                 break
+        req.state.authorization_context = ctx
         return ctx
 
     def _length_guard(req: Request, limit: int, *, required: bool = False) -> None:
@@ -322,6 +335,34 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return raw
         return raw.replace(b"--" + m.group(1).encode("latin-1"), b"--\x00boundary")
 
+    async def _approval_intent(req: Request) -> approvals.Intent | None:
+        key = req.headers.get("idempotency-key", "").strip()
+        if req.method in ("GET", "HEAD") or not key or len(key) > 100:
+            return None
+        raw = await _read_body(req)
+        media = req.headers.get("content-type", "")
+        media = media.partition(";")[0].strip().lower() if media.lower().startswith("multipart/form-data") else media
+        fingerprint = hashlib.sha256(req.method.encode() + b" " + req.url.path.encode() + _query_part(req)
+                                     + b"\0" + media.encode() + b"\0" + _same_form(req, raw)).hexdigest()
+        return approvals.Intent(key, fingerprint)
+
+    async def _approval_summary(req: Request) -> dict:
+        summary = {"method": req.method, "target": req.url.path}
+        if req.headers.get("content-type", "").partition(";")[0].lower() != "application/json":
+            return summary
+        try:
+            payload = json.loads(await _read_body(req))
+        except (ValueError, UnicodeError):
+            return summary
+        if isinstance(payload, dict):
+            for field in ("amount", "public_price", "qty", "version"):
+                if type(payload.get(field)) is int:
+                    summary[field] = payload[field]
+            lines = payload.get("lines")
+            if isinstance(lines, dict) and lines and all(type(qty) is int for qty in lines.values()):
+                summary["qty"] = sum(lines.values())
+        return summary
+
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
@@ -330,24 +371,30 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
-        if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
+        if ((req.method != "POST" and not getattr(req.state, "reserved_approval", False))
+                or not key or len(key) > 100 or req.url.path.startswith("/api/auth/")):
             return await fn(req)
         ctx = await run_in_threadpool(ctx_of, req)
         raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
                                + _same_form(req, raw)).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
+        current_permissions = ctx.permissions | ctx.approver_permissions
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its
         # response, finds the reservation and is refused instead of posting a second time.
+        replay_only = getattr(req.state, "approval_replay_only", False)
+
         def reserve():
             with db.transaction():
                 hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
                 if not hit:
-                    idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)   # at most once an hour, not a scan per POST (#324 M2-25)
+                    if replay_only:
+                        raise Forbidden("الموافقة استُخدمت بالفعل", code="approval_used")
+                    idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)
                     db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
                                " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
-                               (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(ctx.permissions))))
+                               (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(current_permissions))))
             return hit
 
         hit = await run_in_threadpool(reserve)
@@ -365,7 +412,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             else:
                 # the stored answer was built under the permissions held then: after one of them was taken away
                 # it is not handed out again (a payroll answer after payroll.manage was revoked, #324 X7)
-                if held and not set(held.split(",")) <= set(ctx.permissions):
+                if held and not set(held.split(",")) <= current_permissions:
                     raise Forbidden("صلاحياتك اتغيّرت بعد العملية دي؛ راجع نتيجتها من شاشتها",
                                     code="permissions_changed")
                 resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
@@ -380,6 +427,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # every write is saved together with its audit row: a rule error raised AFTER one (a 403 while
         # building the answer) must keep the key, or the retry posts a second time (#324 S6, as #331)
         audit_mark = await run_in_threadpool(_audit_mark, ctx)
+        req.state.action_audit_mark = audit_mark
         try:
             resp = await fn(req)
         except DomainError:
@@ -415,19 +463,43 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     def handler(fn):
         async def wrapped(req: Request):
+            token = req.headers.get("x-approval", "")[:128]
+            action = f"{req.method} {req.url.path}"
+            before = None
             try:
-                approval = req.headers.get("x-approval", "")[:128]
-                if approval and req.method not in ("GET", "HEAD"):
-                    # an approval is bound to the exact request it is first used on and spent once it succeeds:
-                    # one PIN = one action with one quantity (#324 X5)
-                    req.state.approval_body = hashlib.sha256(await _read_body(req)).hexdigest()
-                resp = await _idempotent(req, fn)
-                if approval and req.method not in ("GET", "HEAD") and 200 <= resp.status_code < 300:
-                    approvals.consume(approval)
-                return resp
+                if token and req.url.path != "/api/approvals/check":
+                    ctx = await run_in_threadpool(ctx_of, req)
+                    intent = await _approval_intent(req)
+                    if req.method not in ("GET", "HEAD") and intent is None:
+                        raise ValidationFailed("العملية تحتاج مفتاح طلب للموافقة", code="approval_intent_required")
+                    if intent is not None:
+                        before = await run_in_threadpool(_audit_mark, ctx)
+                    authorized, replay_only = await run_in_threadpool(
+                        approvals.apply, ctx, req.state.session_token, token, action,
+                        lambda who: approver_access(ctx.org_id, who), intent=intent)
+                    req.state.authorization_context = authorized
+                    req.state.reserved_approval = intent is not None
+                    req.state.approval_replay_only = replay_only
+                    if replay_only:
+                        before = None
+                return await _idempotent(req, fn)
             except DomainError as e:
+                details = e.details
+                ctx = getattr(req.state, "authorization_context", None)
+                permission = details.get("permission") if isinstance(details, dict) else None
+                original_mark = getattr(req.state, "action_audit_mark", before)
+                if (ctx is not None and e.code == "approval_required" and isinstance(permission, str)
+                        and req.method not in ("GET", "HEAD") and approvals.eligible(ctx, permission)
+                        and req.url.path != "/api/approvals/check"):
+                    intent = await _approval_intent(req)
+                    if intent is not None and (original_mark is None or not await run_in_threadpool(_committed_since, original_mark, ctx)):
+                        if before is not None:
+                            await run_in_threadpool(approvals.restore_for_next_permission, token)
+                        challenge = await run_in_threadpool(
+                            approvals.challenge, ctx, req.state.session_token, action, permission, intent)
+                        details = {**details, "summary": await _approval_summary(req), "challenge": challenge}
                 status = 429 if e.code == "rate_limited" else e.status
-                return J({"error": {"code": e.code, "message": e.message, "details": e.details}},
+                return J({"error": {"code": e.code, "message": e.message, "details": details}},
                          status_code=status)
             except Exception:   # never leak internals
                 log.exception("unhandled error on %s %s", req.method, req.url.path)
@@ -444,18 +516,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return await run_in_threadpool(run)
 
     # ------------------------------------------------------------- auth
+    def _auth_screen(req: Request, *, screen_only: bool = False) -> None:
+        origin = req.headers.get("origin")
+        site = req.headers.get("sec-fetch-site")
+        media = req.headers.get("content-type", "").partition(";")[0].strip().lower()
+        marker = req.headers.get("x-requested-with") == "pharm"
+        if (origin is not None and origin != f"{req.url.scheme}://{req.url.netloc}"
+                or site not in (None, "none", "same-origin")
+                or site == "same-origin" and origin is None
+                or media != "application/json"
+                or (screen_only or origin is not None) and not marker):
+            raise Unauthorized("طلب غير موثّق", code="csrf")
+
     @handler
     async def login(req):
-        # only from the program's own screen or a JSON client: a form on another site (text/plain) cannot sign a
-        # browser in to someone else's account (#324 X25)
-        if req.headers.get("x-requested-with") != "pharm" and \
-                not req.headers.get("content-type", "").lower().startswith("application/json"):
-            raise Unauthorized("طلب غير موثّق", code="csrf")
-        login_limiter.check(client_ip(req))
+        _auth_screen(req)
         b = await body(req)
-        res = accounts.login(db, str(b.get("username", "")), str(b.get("password", "")),
-                             org_id=b.get("org_id"), ip=client_ip(req),
-                             user_agent=req.headers.get("user-agent"))
+        username = str(b.get("username", "")).strip()
+        peer = client_ip(req)
+        try:
+            res = await to_thread.run_sync(functools.partial(
+                accounts.login, db, username, str(b.get("password", "")), org_id=b.get("org_id"),
+                ip=peer, user_agent=req.headers.get("user-agent")), limiter=password_workers)
+        except Unauthorized:
+            if password_failures.record((peer, username)):
+                await asyncio.sleep(1)
+            raise
         ctx = accounts.resolve_session(db, res["token"])
         out = {"me": accounts.me(db, ctx), "expires_at": res["expires_at"]}
         if b.get("token_in_body"):        # mobile/integration clients
@@ -489,10 +575,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         pharmacy exists, and (unless PHARM_ALLOW_REMOTE_SETUP=1) from any machine but this PC."""
         import os as _os
         _own_screen_only(req)
+        _auth_screen(req, screen_only=True)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
             raise Forbidden("الإعداد الأول يتم من جهاز الصيدلية نفسه فقط")
-        login_limiter.check(client_ip(req))
+        setup_limiter.check(client_ip(req))
         if not _setup_needed():
             raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
         b = await body(req)
@@ -548,14 +635,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             upd_cache.update(at=now, v=out, offline=True)
             return out
         if chan is None:
-            out["candidate"] = info["ref"]        # a review installer main does not contain yet: no channel
-            upd_cache.update(at=now, v=out, offline=False)
-            return out
-        try:
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, token)
-            out["available"] = out["latest"] != cur
-        except updater.UpdateError as e:
-            out["error"] = str(e)
+            out["candidate"] = info.get("ref")
+        out.update(latest=out["smart"].get("sha"), available=out["smart"].get("available", False))
         upd_cache.update(at=now, v=out, offline=False)
         return out
 
@@ -564,19 +645,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _smart_status(chan, info) -> dict:
         """docs/SMART_UPDATE.md: signed bundles (migrations and packages too) once this PC trusts a key."""
         from ..core import smart_update as su, update_sign, updater
+        import release_bootstrap as releases
         out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
                "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
         try:
-            keys = update_sign.trusted_keys(upd_root)
-        except (OSError, update_sign.SignatureError):
+            home = su.home_of(s.data_dir)
+            legacy = releases.installer_root(upd_root)
+            keys = update_sign.trusted_keys(legacy)
+        except (OSError, releases.ReleaseError, update_sign.SignatureError):
             keys = []
-        if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
-            return out                                # old launcher: today's code-only button
+        if not keys or chan is None or su.bootstrap_level(home) < releases.BOOTSTRAP:
+            return out
         token = updater.read_token()
         try:
             m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, token), keys)
-            forward = su.is_forward(m, info, updater.DEFAULT_REPO, token)   # never an older bundle
-        except updater.UpdateError as e:
+            if m["channel"] != chan:
+                raise updater.UpdateError("حزمة التحديث لقناة تانية")
+            forward = su.meets_version_floor(home, m, info, updater.DEFAULT_REPO, token)   # never an older bundle
+        except (releases.ReleaseError, updater.UpdateError) as e:
             out["error"] = str(e)
             return out
         out.update(enabled=True, sha=m["sha"], available=forward, needs_installer=m["python"] != su.python_tag(),
@@ -623,30 +709,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("settings.manage")
         b = await body(req)
-        action = (b or {}).get("action") or "classic"
-        if action != "classic":
-            return J(await _smart_action(ctx, action, b))
-        import subprocess
-        import sys as _sys
-        from ..core import updater
-        chan = updater.follow(updater.installed(s.data_dir), updater.DEFAULT_REPO, updater.read_token())
-        if chan is None:
-            raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
-        root = Path(__file__).resolve().parents[2]
-        proc = await run_in_threadpool(lambda: subprocess.run(
-            [_sys.executable, str(root / "manage.py"), "update", "--ref", chan], cwd=os.getcwd(), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=900,
-            env={**os.environ, "PYTHONUTF8": "1"}))
-        ok = proc.returncode == 0
-        with db.transaction():
-            audit.record(db, ctx, "system.update", "system", None,
-                         after={"ok": ok, "channel": chan, "tail": (proc.stdout or "")[-500:]})
-        upd_cache.clear()
-        restart = ok and os.environ.get("PHARM_LAUNCHER") == "1"
-        if restart:          # the launcher starts the new version when we exit with 75
-            threading.Timer(1.5, lambda: os._exit(75)).start()
-        return J({"ok": ok, "restarting": restart,
-                  "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
+        action = b.get("action")
+        if not action or action == "classic":
+            raise ValidationFailed("التحديث يتطلب حزمة إصدار موقّعة", code="signed_update_required")
+        return J(await _smart_action(ctx, action, b))
 
     async def _smart_action(ctx, action: str, b: dict) -> dict:
         """prepare (download, verify, rehearse) / schedule (now | after_close) / cancel; each one audited."""
@@ -813,13 +879,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def pin_login(req):
         _local_only(req)
-        login_limiter.check(client_ip(req))
+        _auth_screen(req, screen_only=True)
         b = await body(req)
         users = {u["id"]: u for u in people.quick_users(db)}
         u = users.get(str(b.get("user_id", "")))
         if not u:
             raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
-        res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", ""))[:6], ip=client_ip(req),
+        pin_limiter.check((client_ip(req), u["id"]))
+        res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", "")), ip=client_ip(req),
                                user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx), "expires_at": res["expires_at"]})
@@ -1497,19 +1564,21 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def approval_check(req):
         """The approver typed his PIN: confirm it before the screen retries the action."""
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         if not ctx.approver_id:
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
         perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
         method = str(b.get("method") or "GET").upper()
-        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT
+        ok = approvals.eligible(ctx, perm) and (
+            ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT)
         out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
         if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check" \
                 and method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
             # #137: lend only this permission, only on the action (method + path) that asked for it, for 90 s
-            out["token"], out["expires_in"] = approvals.issue(
-                ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+            out["token"], out["expires_in"] = await run_in_threadpool(
+                approvals.issue, ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+                challenge_token=str(b.get("challenge") or "")[:128],
                 previous=str(b.get("previous") or "")[:128] or None)
         return J(out)
 
@@ -2525,7 +2594,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # Database-only operation; no await or external effect inside this transaction.
         status, payload, replayed = idempotency.run(
             db, ctx, key=key, method=req.method, path=req.url.path,
-            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform,
+            replay_only=getattr(req.state, "approval_replay_only", False))
         resp = Response(payload, status_code=status, media_type="application/json")
         if replayed:
             resp.headers["Idempotent-Replay"] = "true"
@@ -2566,7 +2636,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # All awaits are above: the transaction below never spans an async yield.
         status, payload, replayed = idempotency.run(
             db, ctx, key=key, method=req.method, path=req.url.path,
-            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform,
+            replay_only=getattr(req.state, "approval_replay_only", False))
         # A stored response must not restore visibility removed since the write.
         resp = J(redact_summary(ctx, json.loads(payload)), status_code=status)
         if replayed:

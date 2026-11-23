@@ -179,7 +179,7 @@ class QA20261123(APICase):
                                price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
         review = purchasing.price_review(assistant, sid)
         approver = replace(assistant, approver_id=self.ctx.user_id,
-                           approver_permissions=frozenset({"purchases.approve"}))
+                           approver_permissions=frozenset({"purchases.approve", "items.price"}))
         purchasing.approve(approver, sid, review["version"], require_price_review=True,
                            price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
         prices = self.db.all("SELECT public_price FROM batches WHERE org_id=? AND item_id=? AND batch_no='QA-OLD'"
@@ -192,6 +192,27 @@ class QA20261123(APICase):
         after = json.loads(audit["after_json"])
         self.assertEqual(after["approved_by"], self.ctx.user_id)
         self.assertEqual(after["stock_price_decisions"][0]["mode"], "keep")
+
+    def test_repricing_stock_needs_price_authority_and_keep_ignores_the_new_price(self):
+        from app.core.permissions import DEFAULT_ROLES
+
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        assistant = replace(self.ctx, role_code="assistant", permissions=frozenset(DEFAULT_ROLES["assistant"][1]))
+        approver = replace(assistant, approver_id=self.ctx.user_id,
+                           approver_permissions=frozenset({"purchases.approve"}))
+        review = purchasing.price_review(assistant, sid)
+        self.assertTrue(review["changes"])
+        with self.assertRaises(Forbidden):
+            purchasing.approve(approver, sid, review["version"], require_price_review=True,
+                               price_token=review["token"], price_decisions={self.item: {"mode": "all"}})
+        self.assertEqual(purchasing.get(self.ctx, sid)["invoice"]["status"], "draft")
+        purchasing.approve(approver, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        self.assertEqual(catalog.get_item(self.db, self.ctx, self.item)["public_price"], 10000)
+        prices = {r["public_price"] for r in self.db.all(
+            "SELECT public_price FROM batches WHERE org_id=? AND item_id=?", (self.ctx.org_id, self.item))}
+        self.assertNotIn(12000, prices)
 
     def test_depleted_lot_keeps_its_price_when_the_old_boxes_return(self):
         sales = Sales(self.db)

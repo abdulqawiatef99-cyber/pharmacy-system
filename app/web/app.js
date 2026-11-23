@@ -231,13 +231,13 @@ const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now(
 // token for that one action (permission + API path) for 90 seconds, on this screen only (cleared when
 // leaving it). The PIN itself is never kept (#137).
 let APPROVAL = null;
-const approvalHeaders = (action) => {
-  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.action === action ? { "X-Approval": APPROVAL.token } : {};
+const approvalHeaders = (action, operation) => {
+  if (APPROVAL && APPROVAL.until > Date.now()) return APPROVAL.action === action && APPROVAL.operation === operation ? { "X-Approval": APPROVAL.token } : {};
   APPROVAL = null; return {};
 };
 window.addEventListener("hashchange", () => { APPROVAL = null; });
 
-async function askApproval(details, message, method, path) {
+async function askApproval(details, message, method, path, operation) {
   let list = [];
   try { list = (await api("/api/approvers")).approvers; } catch { /* offline */ }
   if (!list.length) {
@@ -246,10 +246,17 @@ async function askApproval(details, message, method, path) {
   }
   let dlg = $("#approveDlg");
   if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "approveDlg"; document.body.append(dlg); }
+  const summary = details?.summary;
+  const facts = summary ? [
+    summary.amount == null ? null : `المبلغ: ${money(summary.amount)} ج`,
+    summary.public_price == null ? null : `السعر: ${money(summary.public_price)} ج`,
+    summary.qty == null ? null : `الكمية: ${summary.qty}`,
+  ].filter(Boolean) : [];
   dlg.innerHTML = `<form method="dialog" class="approve">
     <h2>يحتاج إلى موافقة</h2>
     <p class="badge b-warn">⚠ ${esc(details?.label || message)}</p>
     <p class="muted">${esc(message)}</p>
+    ${summary ? `<p class="small"><bdi>${esc(summary.target)}</bdi>${facts.map((fact) => ` · <span>${esc(fact)}</span>`).join("")}</p>` : ""}
     <label class="f">من سيوافق <select name="who">${list.map((a) => `<option value="${esc(a.id)}">${esc(a.full_name)} — ${esc(a.role_name)}</option>`).join("")}</select></label>
     <label class="f">رقمه السري <input name="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required></label>
     <p class="badge b-err" data-err hidden></p>
@@ -265,8 +272,8 @@ async function askApproval(details, message, method, path) {
       const who = form.who.value, pin = form.pin.value.trim(), err = dlg.querySelector("[data-err]");
       const r = await fetch("/api/approvals/check", { method: "POST", credentials: "same-origin",
         headers: { "X-Requested-With": "pharm", "Content-Type": "application/json", "X-Approver": who, "X-Approver-Pin": pin },
-        body: JSON.stringify({ permission: details?.permission || "", method, path,
-          previous: APPROVAL && APPROVAL.id === who && APPROVAL.action === `${method} ${path}` && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
+        body: JSON.stringify({ permission: details?.permission || "", method, path, challenge: details?.challenge,
+          previous: APPROVAL && APPROVAL.id === who && APPROVAL.action === `${method} ${path}` && APPROVAL.operation === operation && APPROVAL.until > Date.now() ? APPROVAL.token : null }) });
       const d = await r.json().catch(() => ({}));
       const enough = r.ok && d.ok && d.token && (details?.permission !== "discount" || d.discount_limit_bp >= (details.requested_bp || 0));
       if (!enough) {
@@ -274,7 +281,7 @@ async function askApproval(details, message, method, path) {
         err.textContent = !r.ok ? `✕ ${d?.error?.message || "الرقم السري غير صحيح"}` : "✕ الشخص الذي اخترته لا يملك هذه الصلاحية";
         form.pin.value = ""; form.pin.focus(); return;
       }
-      APPROVAL = { id: who, action: `${method} ${path}`, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
+      APPROVAL = { id: who, action: `${method} ${path}`, operation, token: d.token, until: Date.now() + Math.max(0, (d.expires_in || 90) - 5) * 1000 };
       dlg.close(); resolve(true);
     });
     dlg.addEventListener("cancel", () => resolve(false), { once: true });
@@ -322,7 +329,7 @@ onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !
 async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
   let sig = null;
-  const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
+  const opts = { method, headers: { "X-Requested-With": "pharm" }, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -330,9 +337,9 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
     _key = _key || onceKey(method, apiPath, opts.body);
     if (onceKey.applies(method, apiPath, opts.body)) sig = `${method} ${apiPath} ${opts.body}`;
   }
-  // every POST carries an idempotency key; on a network failure it is retried with
-  // the SAME key, so the server either replays the first result or runs it once.
-  if (method === "POST" && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = _key || newKey();
+  // A write approval uses the same operation key as the request and its retries.
+  if (!["GET", "HEAD"].includes(method) && !path.startsWith("/api/auth/") && !path.startsWith("/api/setup")) opts.headers["Idempotency-Key"] = _key || newKey();
+  Object.assign(opts.headers, approvalHeaders(`${method} ${apiPath}`, opts.headers["Idempotency-Key"]));
   let r, data;
   API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
   try {
@@ -357,10 +364,11 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
   const perm = data?.error?.details?.permission;
-  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)) {
-    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
+  if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)
+      && (method === "GET" || data.error.details?.challenge)) {
+    if (await askApproval(data.error.details, data.error.message, method, apiPath, opts.headers["Idempotency-Key"])) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
-  if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
+  if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approval_mismatch", "approval_used", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;
     // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
     if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
@@ -2639,8 +2647,7 @@ async function viewSystem() {
       <div>آخر نسخة<b>${esc((st.latest || "—").slice(0, 7))}</b></div>
       <div>قناة التحديث<b>${st.channel === "develop" ? "develop (تجربة)" : st.channel === "main" ? "main (الصيدلية)" : `لا توجد (فرع ${esc(st.candidate || "?")})`}</b></div></div>
     ${st.parties_reactivated && (st.parties_reactivated.customers || st.parties_reactivated.suppliers) ? `<p class="badge b-ok">✓ بعد التحديث رجع يظهر في البحث ${st.parties_reactivated.customers} عميل و${st.parties_reactivated.suppliers} مورد كانوا مستخبيين من نقل إي ستوك</p>` : ""}
-    ${updatePanelHtml(st)}
-    <pre id="updOut" class="muted" hidden></pre>`;
+    ${updatePanelHtml(st)}`;
   bindSmartUpdate();
   api("/api/system/storage").then((x) => {
     const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} ميجا`;
@@ -2651,26 +2658,13 @@ async function viewSystem() {
       <p class="muted">النسخ الاحتياطية مضغوطة (تشغل نحو عُشر حجم قاعدة البيانات). إذا قلّت المساحة يومًا، يمكن عمل أرشيف مضغوط للسنوات القديمة — وهذا يحتاج إلى قرارك.</p>
       <p class="muted">عدد الفواتير: ${x.rows.sales} · سطور البيع: ${x.rows.sale_lines} · فواتير الشراء: ${x.rows.purchase_invoices} · حركات المخزون: ${x.rows.stock_movements}</p>`;
   }).catch((e) => { $("#stoBox").innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; });
-  $("#updGo")?.addEventListener("click", async () => {
-    const b = $("#updGo"); b.disabled = true; b.textContent = "جارٍ التحديث… (دقيقة أو دقيقتان)";
-    try {
-      const r = await api("/api/system/update", { method: "POST", body: {} });
-      $("#updOut").hidden = false; $("#updOut").textContent = r.output;
-      if (r.restarting) {
-        b.textContent = "يعيد البرنامج تشغيل نفسه…";
-        const wait = async () => { try { await fetch("/api/health"); location.reload(true); } catch { setTimeout(wait, 1500); } };
-        setTimeout(wait, 4000);
-      } else { b.textContent = "اكتمل. أغلق البرنامج وافتحه مرة أخرى"; }
-    } catch (e) { b.disabled = false; b.textContent = "حدّث البرنامج الآن"; toast(e.message, true); }
-  });
 }
-// docs/SMART_UPDATE.md: one batch, plain Arabic list, «now» or «after closing», never during a sale.
-// the last smart result is shown on its own: it never hides the classic button (Codex P2 on e9f9f20)
 function updatePanelHtml(st) {
-  return smartLastHtml(st.smart || {}) + (smartUpdateHtml(st.smart || {}) || (st.error ? `<p class="badge b-err">${esc(st.error)}</p>` : st.available
-    ? `<p>يوجد تحديث جديد. يأخذ التحديث نسخة احتياطية من بياناتك أولًا، ولا تُمَس بياناتك.</p>
-         <button class="btn" id="updGo">حدّث البرنامج الآن</button>`
-    : `<p class="badge b-ok">البرنامج محدّث</p>`));
+  const signed = st.smart || {};
+  return smartLastHtml(signed) + (smartUpdateHtml(signed) || (signed.error
+    ? `<p class="badge b-err">${esc(signed.error)}</p>`
+    : signed.enabled ? '<p class="badge b-ok">البرنامج محدّث</p>'
+    : '<p class="badge b-warn">مفيش تحديث موقّع متاح للجهاز ده</p>'));
 }
 function smartLastHtml(u) {
   const res = u.result || {};

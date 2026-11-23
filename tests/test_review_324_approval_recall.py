@@ -13,7 +13,7 @@ from app.recalls.service import Recalls
 from app.sales.cash import CashDrawer
 from app.sales.service import Sales
 from tests.helpers import DBTestCase
-from tests.test_api import APICase, H
+from tests.test_api import APICase, H, approval_headers
 from tests.test_review_324_money import PW, _sell
 
 T = date.today()
@@ -51,28 +51,28 @@ class TestApprovalAfterACorrectedRequest(APICase):
         self.path = f"/api/sales/{self.sale['id']}/return"
         self.line = self.sale["lines"][0]["id"]
 
-    def approve(self, previous=None):
-        r = self.a.post("/api/approvals/check", headers={**H, "X-Approver": self.ctx.user_id, "X-Approver-Pin": "9753"},
-                        json={"permission": "sales.return_restricted", "method": "POST", "path": self.path,
-                              "previous": previous})
-        return r.json()["token"]
+    def payload(self, qty):
+        return {"lines": {self.line: qty}, "refund_method": "cash", "reason": "مرتجع"}
 
-    def ret(self, token, qty):
-        return self.a.post(self.path, json={"lines": {self.line: qty}, "refund_method": "cash", "reason": "مرتجع"},
-                           headers={**H, "X-Approval": token})
+    def approve(self, qty, previous=None):
+        return approval_headers(self.a, self.ctx.user_id, "9753", "sales.return_restricted", self.path,
+                                "POST", payload=self.payload(qty), previous=previous)
+
+    def ret(self, headers, qty):
+        return self.a.post(self.path, json=self.payload(qty), headers=headers)
 
     def test_a_fresh_pin_approval_works_for_the_corrected_request(self):
-        first = self.approve()
-        bad = self.ret(first, 9)                                     # more than was sold: refused
+        first = self.approve(9)
+        bad = self.ret(first, 9)
         self.assertIn(bad.status_code, (409, 422), bad.text)
-        fresh = self.approve(previous=first)                         # the PIN is typed again
+        fresh = self.approve(1, previous=first["X-Approval"])
         ok = self.ret(fresh, 1)
         self.assertEqual(ok.status_code, 200, ok.text)
 
     def test_the_fresh_approval_is_still_used_once(self):
-        fresh = self.approve(previous=self.approve())
+        fresh = self.approve(1, previous=self.approve(1)["X-Approval"])
         self.assertEqual(self.ret(fresh, 1).status_code, 200)
-        self.assertEqual(self.ret(fresh, 1).status_code, 403)
+        self.assertEqual(self.ret(fresh, 1).headers.get("Idempotent-Replay"), "true")
 
 
 class TestS1RecalledLotReceivedAgain(DBTestCase):

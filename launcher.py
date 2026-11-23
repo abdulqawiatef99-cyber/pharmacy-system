@@ -123,6 +123,12 @@ def _log_update(h: Path, text: str) -> None:
         log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
 
 
+def _selected_program(code_home: Path) -> Path:
+    if (ROOT / "build_info.json").is_file():
+        return releases.verified_program(ROOT, code_home)
+    return releases.current_root(ROOT, code_home)
+
+
 def settle(code_home: Path, h: Path, env: dict, flags: int, attempts: int = 3) -> bool:
     """Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, run a prepared apply once
     if the program asked for it, swap the checked copy in. Nothing here migrates. False = do not start."""
@@ -130,7 +136,7 @@ def settle(code_home: Path, h: Path, env: dict, flags: int, attempts: int = 3) -
         try:
             releases.resume_journal(code_home)
             if (code_home / "apply-go.json").exists():
-                releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+                releases.run_apply(code_home, _selected_program(code_home), env, h / "logs", flags)
                 releases.resume_journal(code_home)
             if releases.settled(code_home):
                 return True
@@ -178,7 +184,10 @@ def _main(h: Path) -> int:
         (h / d).mkdir(parents=True, exist_ok=True)
     # PHARM_BOOTSTRAP: what this launcher can apply (docs/SMART_UPDATE.md §1); an older launcher sets none
     env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
-           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PYTHONPATH": str(ROOT)}
+           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PHARM_INSTALL_ROOT": str(ROOT),
+           "PYTHONPATH": str(ROOT)}
+    env.pop("PHARM_RELEASE_CANDIDATE", None)
+    env.pop("PHARM_DEPS_DIR", None)
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     code_home = releases.code_home(h / "data")
@@ -195,7 +204,7 @@ def _main(h: Path) -> int:
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
         try:
-            program = releases.current_root(ROOT, code_home)
+            program = _selected_program(code_home)
         except releases.ReleaseError:
             if not state.get("pending"):
                 raise
