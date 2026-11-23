@@ -61,21 +61,25 @@ class TestX5ApprovalUsedOnce(APICase):
         self.path = f"/api/sales/{self.sale['id']}/return"
         self.line = self.sale["lines"][0]["id"]
 
+    def payload(self, qty):
+        return {"lines": {self.line: qty}, "refund_method": "cash", "reason": "مرتجع"}
+
     def ret(self, hdr, qty):
-        return self.a.post(self.path, json={"lines": {self.line: qty}, "refund_method": "cash", "reason": "مرتجع"},
-                           headers=hdr)
+        return self.a.post(self.path, json=self.payload(qty), headers=hdr)
 
     def test_one_approval_returns_one_quantity_once(self):
-        hdr = approval_headers(self.a, self.ctx.user_id, "9753", "sales.return_restricted", self.path, "POST")
+        hdr = approval_headers(self.a, self.ctx.user_id, "9753", "sales.return_restricted", self.path, "POST",
+                               payload=self.payload(1))
         self.assertEqual(self.ret(hdr, 1).status_code, 200)
-        again = self.ret(hdr, 1)                                    # same token, another unit
-        self.assertEqual(again.status_code, 403, again.text)
-        self.assertEqual(again.json()["error"]["code"], "approval_required")
+        again = self.ret(hdr, 1)
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertEqual(again.headers.get("Idempotent-Replay"), "true")
 
-    def test_the_approval_is_for_the_request_it_was_first_used_on(self):
-        hdr = approval_headers(self.a, self.ctx.user_id, "9753", "sales.return_restricted", self.path, "POST")
-        self.assertEqual(self.ret({**H, "X-Approval": hdr["X-Approval"]}, 2).status_code, 200)
-        self.assertEqual(self.ret(hdr, 1).status_code, 403)
+    def test_approval_checks_the_intent_before_the_action_starts(self):
+        hdr = approval_headers(self.a, self.ctx.user_id, "9753", "sales.return_restricted", self.path, "POST",
+                               payload=self.payload(1))
+        self.assertEqual(self.ret(hdr, 2).json()["error"]["code"], "approval_mismatch")
+        self.assertEqual(self.ret(hdr, 1).status_code, 200)
 
 
 # ---------------------------------------------------------------- X7: cached reply after a permission is revoked

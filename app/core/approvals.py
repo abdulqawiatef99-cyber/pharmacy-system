@@ -1,9 +1,7 @@
-"""On-screen approvals (#137): the owner or a manager types his PIN once, the server checks it and
-hands the screen a short-lived approval token. The token is bound to the person's sign-in session, the
-approver, the permission(s) he approved and the one action (method + API path) that asked for them; it
-never lends the approver's other permissions, and the screen never keeps the PIN.
+"""Short-lived authorization for a supervisor's on-screen approval.
 
-Tokens live in this process only (a restart clears them: the screen simply asks again).
+A write challenge comes from a permission refusal and identifies the exact
+request the supervisor sees. A grant may authorize that write once.
 """
 from __future__ import annotations
 
@@ -13,100 +11,131 @@ import threading
 import time
 from dataclasses import dataclass, replace
 
-from .errors import Forbidden
-from .permissions import APPROVER_ROLES, PERMISSIONS, Context
+from .errors import Forbidden, ValidationFailed
+from .permissions import APPROVER_ROLES, PASSWORD_SESSION_PERMISSIONS, PERMISSIONS, Context
 
 TTL_SECONDS = 90
+CHALLENGE_TTL = 300
 MAX_GRANTS = 500
-DISCOUNT = "discount"            # not a permission: the approver's discount limit for this screen
+DISCOUNT = "discount"
+
+
+@dataclass(frozen=True)
+class Intent:
+    operation: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class Challenge:
+    subject: tuple[str, str, str]
+    action: str
+    permission: str
+    intent: Intent
+    until: float
 
 
 @dataclass(frozen=True)
 class Grant:
-    org_id: str
-    user_id: str
-    session: str                 # sha256 of the actor's session token
+    subject: tuple[str, str, str]
     approver_id: str
     action: str
     perms: frozenset[str]
     until: float
-    body: str | None = None      # sha256 of the write it was first used on (#324 X5)
-    used: bool = False           # a write it allowed succeeded: it lends nothing more
+    intent: Intent | None
+    used: bool = False
 
 
 _lock = threading.Lock()
 _grants: dict[str, Grant] = {}
+_challenges: dict[str, Challenge] = {}
 
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _subject(ctx: Context, session: str) -> tuple[str, str, str]:
+    return ctx.org_id, ctx.user_id, _digest(session)
+
+
+def _store(entries: dict, value, now: float) -> str:
+    for key in [k for k, entry in entries.items() if entry.until <= now]:
+        del entries[key]
+    if len(entries) >= MAX_GRANTS:
+        del entries[min(entries, key=lambda key: entries[key].until)]
+    token = secrets.token_urlsafe(32)
+    entries[_digest(token)] = value
+    return token
+
+
 def clear() -> None:
     with _lock:
         _grants.clear()
+        _challenges.clear()
 
 
-def issue(ctx: Context, session_token: str, approver_id: str, action: str, perm: str,
-          previous: str | None = None, now: float | None = None) -> tuple[str, int]:
-    """A token for `perm` on `action`, after the approver's PIN was verified for this request. A still valid
-    token of the same session, approver and action keeps what it already allowed (an action that needs
-    two approvals asks twice, once per permission). Returns (token, seconds it lasts)."""
-    now = time.monotonic() if now is None else now
-    session = _digest(session_token)
-    perms = {perm}
+def challenge(ctx: Context, session: str, action: str, permission: str, intent: Intent) -> str:
+    now = time.monotonic()
     with _lock:
-        for k in [k for k, g in _grants.items() if g.until <= now]:
-            del _grants[k]
+        return _store(_challenges, Challenge(_subject(ctx, session), action, permission, intent,
+                                             now + CHALLENGE_TTL), now)
+
+
+def eligible(ctx: Context, perm: str) -> bool:
+    return ctx.auth_method != "pin" or perm not in PASSWORD_SESSION_PERMISSIONS
+
+
+def issue(ctx: Context, session: str, approver_id: str, action: str, perm: str, *,
+          challenge_token: str = "", previous: str | None = None) -> tuple[str, int]:
+    now = time.monotonic()
+    subject = _subject(ctx, session)
+    perms = {perm}
+    intent = None
+    with _lock:
+        if not action.startswith("GET "):
+            origin = _challenges.get(_digest(challenge_token))
+            if (origin is None or origin.until <= now
+                    or (origin.subject, origin.action, origin.permission) != (subject, action, perm)):
+                raise ValidationFailed("اطلب الموافقة من العملية نفسها", code="approval_intent_required")
+            intent = origin.intent
         key = _digest(previous) if previous else None
-        old = _grants.get(key) if key else None
-        if old and (old.org_id, old.user_id, old.session, old.approver_id, old.action) == \
-                (ctx.org_id, ctx.user_id, session, approver_id, action) and old.until > now and not old.used:
+        old = _grants.get(key)
+        if (old and not old.used and old.until > now and (old.subject, old.approver_id, old.action, old.intent)
+                == (subject, approver_id, action, intent)):
             perms |= old.perms
             del _grants[key]
-        # a new PIN approval is never bound to the request the old token was tried on: that request may have
-        # been refused and then corrected (#337 review). It binds again on its first use, as any token does.
-        if len(_grants) >= MAX_GRANTS:
-            del _grants[min(_grants, key=lambda k: _grants[k].until)]
-        token = secrets.token_urlsafe(32)
-        _grants[_digest(token)] = Grant(ctx.org_id, ctx.user_id, session, approver_id, action, frozenset(perms),
-                                        now + TTL_SECONDS)
-    return token, TTL_SECONDS
+        grant = Grant(subject, approver_id, action, frozenset(perms), now + TTL_SECONDS, intent)
+        return _store(_grants, grant, now), TTL_SECONDS
 
 
-def apply(ctx: Context, session_token: str, token: str, action: str, access_of, now: float | None = None,
-          body: str | None = None) -> Context:
-    """The request carries an approval token: lend the approved permissions (only those the approver
-    still has) for this action. `access_of(approver_id)` is accounts.effective_access for the org.
-    For a write (`body` = sha256 of its body) the token belongs to the first request it is used on and is
-    spent once that request succeeds (consume): one approval is one action with one quantity, not every
-    return of the same invoice for 90 s (#324 X5). Reads (GET) stay reusable for the screen's 90 s."""
-    now = time.monotonic() if now is None else now
+def apply(ctx: Context, session: str, token: str, action: str, access_of,
+          *, intent: Intent | None = None) -> tuple[Context, bool]:
+    """Validate and reserve the grant before the handler can start the write."""
     key = _digest(token)
     with _lock:
-        g = _grants.get(key)
-        if g is None or g.until <= now or g.org_id != ctx.org_id or g.user_id != ctx.user_id \
-                or g.session != _digest(session_token):
+        grant = _grants.get(key)
+        if grant is None or grant.until <= time.monotonic() or grant.subject != _subject(ctx, session):
             raise Forbidden("انتهت مدة الموافقة، اطلبها مرة أخرى", code="approval_expired")
-        if g.action != action:
-            return ctx                               # approved for another action: lends nothing here
-        if body is not None:
-            if g.used or (g.body is not None and g.body != body):
-                return ctx                           # spent, or approved for another request: lends nothing
-            if g.body is None:
-                g = _grants[key] = replace(g, body=body)
-    access = access_of(g.approver_id)
-    if access["role_code"] not in APPROVER_ROLES:
-        raise Forbidden("الموافقة من المالك أو المدير فقط", code="approver_invalid")
-    perms = frozenset(p for p in g.perms if p in PERMISSIONS and p in access["permissions"])
-    return replace(ctx, approver_id=g.approver_id, approver_permissions=perms,
-                   approver_discount_bp=access["max_discount_bp"] if DISCOUNT in g.perms else 0)
+        if grant.action != action or grant.intent != intent:
+            raise Forbidden("الموافقة لعملية مختلفة", code="approval_mismatch")
+        access = access_of(grant.approver_id)
+        if access["role_code"] not in APPROVER_ROLES:
+            raise Forbidden("الموافقة من المالك أو المدير فقط", code="approver_invalid")
+        perms = frozenset(p for p in grant.perms if p in PERMISSIONS and p in access["permissions"] and eligible(ctx, p))
+        if len(perms) + (DISCOUNT in grant.perms) != len(grant.perms):
+            raise Forbidden("صلاحية الموافقة اتغيّرت", code="approver_invalid")
+        if intent is not None and not grant.used:
+            _grants[key] = replace(grant, used=True)
+        authorized = replace(ctx, approver_id=grant.approver_id, approver_permissions=perms,
+                             approver_discount_bp=access["max_discount_bp"] if DISCOUNT in grant.perms else 0)
+        return authorized, grant.used
 
 
-def consume(token: str) -> None:
-    """The write this token allowed succeeded: it lends nothing more (#324 X5)."""
+def restore_for_next_permission(token: str) -> None:
+    """The action refused another required permission before committing."""
     key = _digest(token)
     with _lock:
-        g = _grants.get(key)
-        if g is not None:
-            _grants[key] = replace(g, used=True)
+        grant = _grants.get(key)
+        if grant and grant.used:
+            _grants[key] = replace(grant, used=False)
