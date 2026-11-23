@@ -177,10 +177,27 @@ class Recalls:
         if status == "not_ours" and len((note or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب أن التشغيلة لا تخصنا")
         with self.db.transaction():
-            n = self.db.execute("UPDATE recall_matches SET status=?, note=?, decided_by=?, decided_at=?"
-                                " WHERE id=? AND org_id=?",
-                                (status, note, ctx.user_id, _now(), match_id, ctx.org_id)).rowcount
-            if not n:
+            selected = self.db.one(
+                "SELECT b.id, b.item_id, b.batch_no, b.expiry_date, m.notice_item_id FROM recall_matches m"
+                " JOIN batches b ON b.id=m.batch_id AND b.org_id=m.org_id WHERE m.id=? AND m.org_id=?",
+                (match_id, ctx.org_id))
+            if not selected:
                 raise NotFound("التنبيه غير موجود")
+            batch_ids = [selected["id"]]
+            if selected["batch_no"]:
+                batch_ids = [r["id"] for r in self.db.all(
+                    "SELECT id FROM batches WHERE org_id=? AND item_id=? AND batch_no=? AND expiry_date IS ?",
+                    (ctx.org_id, selected["item_id"], selected["batch_no"], selected["expiry_date"]))]
+            slots = ",".join("?" for _ in batch_ids)
+            if status == "handled" and len(batch_ids) > 1 and self.db.one(
+                    f"SELECT 1 FROM stock_balances WHERE org_id=? AND item_id=? AND batch_key IN ({slots})"
+                    " AND qty>0 LIMIT 1", (ctx.org_id, selected["item_id"], *batch_ids)):
+                raise Conflict("لسه فيه رصيد من التشغيلة دي. راجع كل أسعارها قبل تسجيل المعالجة",
+                               code="recall_lot_has_stock")
+            self.db.execute(
+                f"UPDATE recall_matches SET status=?, note=?, decided_by=?, decided_at=?"
+                f" WHERE org_id=? AND notice_item_id=? AND batch_id IN ({slots})",
+                (status, note, ctx.user_id, _now(), ctx.org_id, selected["notice_item_id"], *batch_ids))
             audit.record(self.db, ctx, "recall.decide", "recall_match", match_id,
-                         after={"status": status, "note": note})
+                         after={"status": status, "note": note,
+                                **({"affected_batches": batch_ids} if len(batch_ids) > 1 else {})})

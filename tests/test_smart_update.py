@@ -40,6 +40,8 @@ def zip_tree(src: Path, out: Path, prefix: str = "program/") -> None:
 
 
 class SmartUpdateBase(unittest.TestCase):
+    legacy_pending = ()
+
     @classmethod
     def setUpClass(cls):
         cls.priv, cls.pub = update_sign.generate()
@@ -54,6 +56,8 @@ class SmartUpdateBase(unittest.TestCase):
         for d in (self.legacy, self.new, self.bundle, self.data):
             d.mkdir(parents=True)
         copy_program(self.legacy)
+        for migration in self.legacy_pending:
+            (self.legacy / "app" / "migrations" / f"{migration}.sql").unlink()
         (self.legacy / "release_keys").mkdir()
         (self.legacy / "release_keys" / "test.pub").write_text(self.pub, encoding="ascii")
         copy_program(self.new)

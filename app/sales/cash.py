@@ -60,6 +60,28 @@ def _sales_of(s) -> tuple[str, tuple]:
     return "x.shift_id=? AND x.status='completed'", (s["id"],)
 
 
+def _channels_of(db: Database, shift, where: str, args: tuple) -> list[dict]:
+    channels = [dict(r) for r in db.all(
+        "SELECT p.method, p.channel_id, coalesce(c.name,'') channel, sum(p.amount) amount FROM sale_payments p"
+        " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id AND c.org_id=p.org_id"
+        f" WHERE {where} AND p.org_id=x.org_id AND p.method IN ('card','transfer') GROUP BY 1,2,3", args)]
+    by_id = {(r["method"], r.pop("channel_id")): r for r in channels}
+    for r in db.all(
+        "SELECT r.channel_id, coalesce(c.name,'') channel, sum(r.total) amount"
+        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
+        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
+        " WHERE r.org_id=? AND x.branch_id=? AND r.refund_method='transfer'"
+        " AND r.created_at>=? AND (? IS NULL OR r.created_at<=?) GROUP BY 1,2",
+        (shift["org_id"], shift["branch_id"], shift["opened_at"], shift["closed_at"], shift["closed_at"])):
+        key = ("transfer", r["channel_id"])
+        row = by_id.get(key)
+        if row is None:
+            row = {"method": "transfer", "channel": r["channel"], "amount": 0}
+            channels.append(row)
+        row["refunded"] = r["amount"]
+    return channels
+
+
 def _voided_elsewhere(db: Database, s) -> int:
     """U2-14 (Codex P2 on #415): the cash rounding of sales of an earlier shift voided in this one. Their cash left
     this drawer here, so their rounding leaves this shift's figure too; the earlier shift keeps its report."""
@@ -76,7 +98,7 @@ def _returns_of(db: Database, s) -> dict:
     through their drawer movement in this shift, so the report always reconciles with the drawer. Card and
     credit refunds (and a cash refund of 0, which moves no cash) by the shift's open-close window: return
     times are written by the same clock and format as the shift's (Codex P2 on #323)."""
-    by = {m: {"count": 0, "total": 0, "rounding": 0} for m in ("cash", "card", "credit")}
+    by = {m: {"count": 0, "total": 0, "rounding": 0} for m in ("cash", "card", "credit", "transfer")}
     c = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd FROM sale_returns r"
                " JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' WHERE m.shift_id=? AND m.org_id=?",
                (s["id"], s["org_id"]))
@@ -85,7 +107,7 @@ def _returns_of(db: Database, s) -> dict:
                     " FROM sale_returns r"
                     " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
                     " AND (? IS NULL OR r.created_at<=?) AND x.org_id=? AND x.branch_id=?"
-                    " AND (r.refund_method IN ('card','credit') OR r.total=0) GROUP BY 1",
+                    " AND (r.refund_method IN ('card','credit','transfer') OR r.total=0) GROUP BY 1",
                     (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"])):
         cur = by[r["m"]]
         by[r["m"]] = {"count": cur["count"] + r["n"], "total": cur["total"] + r["t"], "rounding": cur["rounding"] + r["rd"]}
@@ -125,7 +147,7 @@ def redact_summary(ctx: Context, summary: dict) -> dict:
         return summary
     out = dict(summary)
     for key in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
-                "by_channel", "card_refunds", "credit_refunds", "rounding_total"):
+                "by_channel", "card_refunds", "credit_refunds", "transfer_refunds", "rounding_total"):
         out.pop(key, None)
     out["blind"] = True
     return out
@@ -162,10 +184,7 @@ class CashDrawer:
         where, args = _sales_of(s)
         card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t, coalesce(sum(rounding),0) rd,"
                            f" coalesce(sum(on_credit),0) cr, count(*) n FROM sales x WHERE {where}", args)
-        by_channel = [dict(r) for r in self.db.all(
-            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
-            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
+        by_channel = _channels_of(self.db, s, where, args)
         rets = _returns_of(self.db, s)
         # from the deliveries still with a courier (few), not from every sale of the branch (#113)
         with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d CROSS JOIN sales s"
@@ -177,7 +196,8 @@ class CashDrawer:
                # U2-14: the shift's cash rounding, less what its returns gave back (review P2)
                "rounding_total": card["rd"] - sum(r.pop("rounding") for r in rets.values()) - _voided_elsewhere(self.db, s),
                "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier,
-               "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"]}
+               "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"],
+               "transfer_refunds": rets["transfer"]["total"]}
         return redact_summary(ctx, out)
 
     def _expected(self, shift_id: str) -> int:
@@ -320,10 +340,7 @@ class CashDrawer:
                               (ctx.org_id, s["branch_id"], day0, s["closed_at"] or "9999-12-31", shift_id,
                                s["opened_at"], s["closed_at"], s["closed_at"]))["n"]
         rets = _returns_of(self.db, s)
-        by_channel = [dict(r) for r in self.db.all(
-            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
-            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
+        by_channel = _channels_of(self.db, s, where, args)
         names = {u["id"]: u["full_name"] for u in self.db.all(
             "SELECT id, full_name FROM users WHERE id IN (?,?)", (s["opened_by"], s["closed_by"] or ""))}
         # drawer-open commands (#81): manual ones with their reason, apart from the automatic checkout pulses.
@@ -344,7 +361,8 @@ class CashDrawer:
                     - _voided_elsewhere(self.db, s),
                     voided_count=voided, returns_count=sum(r["count"] for r in rets.values()),
                     returns_total=sum(r["total"] for r in rets.values()), returns_by_method=rets,
-                    card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"], by_channel=by_channel,
+                    card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"],
+                    transfer_refunds=rets["transfer"]["total"], by_channel=by_channel,
                     expected_cash=expected, opened_by_name=names.get(s["opened_by"]),
                     closed_by_name=names.get(s["closed_by"]),
                     counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None,
