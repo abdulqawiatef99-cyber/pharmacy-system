@@ -129,7 +129,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $out = Join-Path $env:RUNNER_TEMP 'pharmacy-validation'
           $stdout = Join-Path $env:RUNNER_TEMP 'validate-stdout.log'
-          python -m unittest -v tests.test_signed_update_transition *>&1 | Tee-Object -FilePath $stdout
+          python scripts/validate_local_release.py --output $out *>&1 | Tee-Object -FilePath $stdout
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             # Job logs are not reachable from agent sessions, so the failure goes into annotations

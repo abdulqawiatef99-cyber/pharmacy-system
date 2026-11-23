@@ -167,7 +167,10 @@ class TestSignedUpdateTransition(SmartUpdateBase):
         (self.legacy / "build_info.json").write_text(
             json.dumps({"sha": LAST_INSTALLER, "ref": "main"}), encoding="ascii")
         self.s.db_path.unlink()
-        env = {**os.environ, "PYTHONPATH": str(self.legacy), "PHARM_DATA_DIR": str(self.data),
+        # inherited PHARM_* settings (the Windows validator sets PHARM_RELEASE_CANDIDATE=1 for the whole suite)
+        # would make the selected program skip its own startup checks, so the subprocesses start without them
+        inherited = {key: value for key, value in os.environ.items() if not key.startswith("PHARM_")}
+        env = {**inherited, "PYTHONPATH": str(self.legacy), "PHARM_DATA_DIR": str(self.data),
                "PHARM_LAUNCHER": "1", "PHARM_BOOTSTRAP": "2", "PHARM_TEST_OFFLINE_UPDATE": "0", "TEST_LIVE_SHA": LIVE}
         subprocess.run([sys.executable, "manage.py", "init", "--pharmacy", "Synthetic transition",
                         "--username", "owner", "--password", "Smoke-Pass-2026"],
@@ -198,7 +201,9 @@ class TestSignedUpdateTransition(SmartUpdateBase):
             "resolved": [str(candidate.resolve()), str(releases_home_resolved(self.data))],
             "verify_stdout": verify.stdout[-1500:], "verify_stderr": verify.stderr[-1500:]}, indent=1))
         original = subprocess.check_output(["git", "show", f"{LAST_INSTALLER}:launcher.py"], cwd=REPO)
-        self.assertEqual((self.legacy / "launcher.py").read_bytes(), original)
+        # `git archive` writes CRLF on a Windows checkout and `git show` the stored LF: same file either way
+        self.assertEqual((self.legacy / "launcher.py").read_bytes().replace(b"\r\n", b"\n"),
+                         original.replace(b"\r\n", b"\n"))
         direct_env = {key: value for key, value in env.items()
                       if key not in {"PYTHONPATH", "PHARM_LAUNCHER", "PHARM_BOOTSTRAP"}}
         maintenance = subprocess.run([sys.executable, "manage.py", "verify"], cwd=self.legacy,
