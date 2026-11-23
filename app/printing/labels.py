@@ -11,6 +11,7 @@ Not yet tried on a physical label printer: the owner's printers are the test.
 from __future__ import annotations
 
 import math
+import re
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -29,7 +30,6 @@ TEST_LABELS = 3         # #100: a test run is 3 labels, so a blank label between
 
 def parse_size(size: str) -> tuple[float, float]:
     """'38x25' or a custom 'W x H' in mm (one decimal allowed): width 20–110, height 10–80."""
-    import re
     m = re.fullmatch(r"(\d{2,3}(?:\.\d)?)x(\d{2}(?:\.\d)?)", str(size or ""))
     w, h = (float(m.group(1)), float(m.group(2))) if m else (0, 0)
     if not (20 <= w <= 110 and 10 <= h <= 80):
@@ -47,9 +47,15 @@ def dots(mm: float, dpi: int) -> int:
     return int(round(mm * dpi / 25.4))
 
 
-def label_value(item: dict, codes: list[str]) -> str:
-    """Same choice as the browser labels: a 13-digit code, else the first barcode, else the item code."""
-    return next((c for c in codes if len(c) == 13), None) or (codes[0] if codes else None) or item.get("code") or item["id"][-12:]
+BARCODE_SOURCES = ("internal", "international")
+
+
+def label_value(item: dict, codes: list[str], source: str = "internal") -> str:
+    """Prefer the short numeric item code. For other items use the existing barcode fallback."""
+    internal = item.get("code")
+    if source == "internal" and internal and re.fullmatch(r"[0-9]{3,5}", internal):
+        return internal
+    return next((c for c in codes if len(c) == 13), None) or (codes[0] if codes else None) or internal or item["id"][-12:]
 
 
 # What can go on a label (#84) and the owner's defaults (the fields printed before #84).
@@ -77,8 +83,10 @@ def layout(fields: dict, data: dict, w_mm: float, h_mm: float, dpi: int = 203) -
     hold. Raises PrinterError when even then the barcode would be too short or too narrow to scan."""
     on = {k: bool(fields.get(k, DEFAULT_FIELDS[k])) and bool(data.get("value" if k in ("barcode", "digits") else k))
           for k in FIELDS}
-    if on["digits"] and on["code"]:
-        on["digits"] = False            # one code at the bottom left: the internal code wins, as in E-Stock
+    if data.get("internal_barcode") and on["barcode"]:
+        on["digits"], on["code"] = True, False  # always show the exact value the scanner reads
+    elif on["digits"] and on["code"]:
+        on["digits"] = False
     H = dots(h_mm, dpi)
     line, row = text_metrics(h_mm, dpi)
     pad = max(3, dots(PAD_MM, dpi))
@@ -175,6 +183,8 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
         y += row
     bottom_y = H - pad - row if (on["code"] or on["digits"] or on["expiry"] or on["price"]) else H - pad
     name_y = bottom_y - row if on["name"] else bottom_y
+    digits_first = data.get("internal_barcode") and on["barcode"]
+    info_y, title_y = (name_y, bottom_y) if digits_first and on["name"] else (bottom_y, name_y)
     if on["barcode"]:
         bits = bar_bits(str(data["value"]))
         module = bar_module(str(data["value"]), w_mm, dpi)
@@ -183,16 +193,16 @@ def render_label(data: dict, w_mm: float, h_mm: float, dpi: int = 203, fields: d
             if b == "1":
                 d.rectangle([x0 + i * module, y, x0 + (i + 1) * module - 1, name_y - 2], fill=0)
     if on["name"]:
-        text("center", data["name"], font, name_y, W - 2 * edge, rtl=True)
+        text("center", data["name"], font, title_y, W - 2 * edge, rtl=True)
     if bottom_y < H - pad:
         third = (W - 2 * edge) // 3
         left = data["code"] if on["code"] else data.get("value") if on["digits"] else ""
         if left:
-            text("left", str(left), small, bottom_y, third if on["expiry"] else 2 * third)
+            text("left", str(left), small, info_y, third if on["expiry"] else 2 * third)
         if on["expiry"]:
-            text("center", data["expiry"], small, bottom_y, third)
+            text("center", data["expiry"], small, info_y, third)
         if on["price"]:
-            text("right", data["price"], small, bottom_y, third)
+            text("right", data["price"], small, info_y, third)
     return img.point(lambda p: 255 if p > 160 else 0, mode="1"), dropped
 
 
