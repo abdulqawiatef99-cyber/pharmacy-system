@@ -29,6 +29,7 @@ from .updater import UpdateError
 
 FORMAT = 1
 MANIFEST, SIGNATURE = "manifest.json", "manifest.sig"
+STARTUP_PROOF = ".startup-proof.json"
 NOTES = "docs/CHANGES_AR.md"
 QUIET_SECONDS = 60           # no write in the last minute
 SALE_MINUTES = 30            # a draft sale with lines from the last 30 min is a sale in progress
@@ -408,7 +409,7 @@ def _archive_files(path: Path, *, packages: bool) -> dict:
         return files
 
 
-def _verify_tree(root: Path, expected: dict, manifest_name: str) -> None:
+def _verify_tree(root: Path, expected: dict, *metadata: str) -> None:
     if not root.is_dir() or root.is_symlink() or root.is_junction():
         raise UpdateError("مجلد التحديث غير صالح")
     found = set()
@@ -416,7 +417,7 @@ def _verify_tree(root: Path, expected: dict, manifest_name: str) -> None:
         if path.is_symlink() or path.is_junction():
             raise UpdateError("ملفات التحديث لا تطابق التوقيع")
         name = path.relative_to(root).as_posix()
-        if path.is_dir() or name == manifest_name:
+        if path.is_dir() or name in metadata:
             continue
         if name not in expected or releases.file_sha256(path) != expected[name]:
             raise UpdateError("ملفات التحديث لا تطابق التوقيع")
@@ -425,35 +426,74 @@ def _verify_tree(root: Path, expected: dict, manifest_name: str) -> None:
         raise UpdateError("ملفات التحديث لا تطابق التوقيع")
 
 
-def _verify_signed_files(home: Path, legacy: Path, m: dict) -> tuple[Path, str | None]:
-    candidate = releases.release_path(home, m["code"]["sha256"])
-    code = _asset_path(home, m["code"])
-    _verify_tree(candidate, _archive_files(code, packages=False), ".release-source.json")
+def add_startup_proof(code: Path, manifest: dict, signing_key: str) -> None:
+    """Embed a signed tree attestation for launchers that do not retain the outer manifest."""
+    from .updater import _members
+
+    files = _archive_files(code, packages=False)
+    if STARTUP_PROOF in files:
+        raise UpdateError("Reserved startup proof member in release source")
+    payload = json.dumps({"purpose": "pharmacy-startup-v1", "release": manifest, "files": files},
+                         ensure_ascii=False, sort_keys=True)
+    proof = {"payload": payload, "signature": update_sign.sign(payload.encode("utf-8"), signing_key)}
+    with zipfile.ZipFile(code, "a", zipfile.ZIP_DEFLATED) as bundle:
+        top, _ = _members(bundle)
+        bundle.writestr(f"{top}/{STARTUP_PROOF}", json.dumps(proof, ensure_ascii=False))
+
+
+def _startup_proof(candidate: Path, keys: list[bytes]) -> tuple[dict, dict]:
+    proof = _json(candidate / STARTUP_PROOF)
+    try:
+        raw = proof["payload"].encode("utf-8")
+        update_sign.verify(raw, proof["signature"], keys)
+        payload = json.loads(raw)
+        if payload["purpose"] != "pharmacy-startup-v1" or not isinstance(payload["files"], dict):
+            raise ValueError("startup proof format")
+        return payload["release"], payload["files"]
+    except (AttributeError, KeyError, TypeError, ValueError, update_sign.SignatureError) as exc:
+        raise UpdateError("إثبات توقيع ملفات التشغيل ناقص أو غير صحيح") from exc
+
+
+def _verify_signed_deps(home: Path, legacy: Path, m: dict) -> str | None:
     requirements = legacy / "requirements.txt"
     base = deps_id(requirements.read_bytes() if requirements.exists() else b"", m["python"], m["platform"])
     deps = m["deps"]["id"]
     if deps == base:
-        return candidate, None
+        return None
     if "sha256" not in m["deps"]:
         raise UpdateError("التحديث بيغيّر المكتبات من غير حزمة مكتبات")
     packages = _asset_path(home, m["deps"])
     _verify_tree(deps_dir(home, deps), _archive_files(packages, packages=True), ".deps-files.json")
-    return candidate, deps
+    return deps
+
+
+def _verify_signed_files(home: Path, legacy: Path, m: dict) -> tuple[Path, str | None]:
+    candidate = releases.release_path(home, m["code"]["sha256"])
+    code = _asset_path(home, m["code"])
+    _verify_tree(candidate, _archive_files(code, packages=False), ".release-source.json")
+    return candidate, _verify_signed_deps(home, legacy, m)
 
 
 def verify_selected_release(home: Path, legacy: Path, entry: dict) -> Path:
     release_id = entry["id"]
     candidate = releases.release_path(home, release_id)
-    proof = _json(home / "proofs" / f"{release_id}.json")
-    m = _verify_proof(proof, update_sign.trusted_keys(legacy))
-    if (m["code"]["sha256"] != release_id or m["sha"] != entry.get("sha")
-            or m["commit_time"] != entry.get("commit_time")
-            or m["channel"] != entry.get("ref")
-            or m["python"] != python_tag() or m["platform"] != platform_tag()):
+    proof_path = home / "proofs" / f"{release_id}.json"
+    keys = update_sign.trusted_keys(legacy)
+    if proof_path.exists():
+        m = _verify_proof(_json(proof_path), keys)
+        if m["code"]["sha256"] != release_id:
+            raise UpdateError("بيانات التحديث مش مطابقة للتوقيع")
+        _, deps = _verify_signed_files(home, legacy, m)
+    else:
+        # The deployed updater already checked the signed outer bundle before
+        # staging this release. Its selected tree carries its own signed proof.
+        m, files = _startup_proof(candidate, keys)
+        _verify_tree(candidate, files, ".release-source.json", STARTUP_PROOF)
+        deps = _verify_signed_deps(home, legacy, m)
+    if (m["sha"] != entry.get("sha") or m["commit_time"] != entry.get("commit_time")
+            or m["channel"] != entry.get("ref") or m["python"] != python_tag()
+            or m["platform"] != platform_tag() or deps != entry.get("deps")):
         raise UpdateError("بيانات التحديث مش مطابقة للتوقيع")
-    _, deps = _verify_signed_files(home, legacy, m)
-    if deps != entry.get("deps"):
-        raise UpdateError("المكتبات المختارة مش مطابقة للتوقيع")
     return candidate
 
 
@@ -463,7 +503,7 @@ def prepare(settings, source, *, legacy: Path, run=subprocess.run) -> dict:
     from ..db import Database
     home = home_of(settings.data_dir)
     if bootstrap_level(home) < releases.BOOTSTRAP:     # every smart batch is applied by the new launcher
-        raise UpdateError("التحديث الذكي محتاج المثبّت الجديد مرة واحدة الأول؛ لم يتغير شيء")
+        raise UpdateError("التحديث الموقّع محتاج إصدار المشغّل اللي بيدعم تطبيق الحزم؛ لم يتغير شيء")
     active_root = releases.current_root(legacy, home)
     proof = _manifest_proof(source)
     m = _verify_proof(proof, update_sign.trusted_keys(legacy))
@@ -668,6 +708,8 @@ def _verify_prepared(settings, legacy: Path, home: Path, p: dict) -> Path:
 
     if (releases.read_state(home).get("active") or {}).get("id") != p.get("active"):
         raise UpdateError("النسخة الشغالة اتغيرت من وقت التجهيز؛ جهّز التحديث تاني")
+    if not (home / "proofs" / f"{p['release']}.json").is_file():
+        raise UpdateError("التحديث المجهّز محتاج إثبات توقيع الحزمة")
     candidate = verify_selected_release(home, legacy, {**p, "id": p["release"], "ref": p.get("channel")})
     info = updater.installed(settings.data_dir)
     if p["channel"] != (updater.channel(info) or "main") or not meets_version_floor(home, p, info):

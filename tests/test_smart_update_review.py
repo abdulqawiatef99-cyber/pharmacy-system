@@ -194,7 +194,7 @@ class TestOnlyALauncherThatCanApply(SmartUpdateBase):
             with mock.patch.object(su, "due", return_value={"release": "c" * 64, "when": "now", "needs_db": True}):
                 self.assertFalse(su.trigger(self.s, self.db(), in_flight=lambda: 0, exit=leave))
             self.build()
-            with self.assertRaisesRegex(UpdateError, "المثبّت"):
+            with self.assertRaisesRegex(UpdateError, "المشغّل"):
                 self.prepare()
         leave.assert_not_called()                                      # no exit 75, so no restart loop
         self.assertFalse((self.home / "apply-go.json").exists())

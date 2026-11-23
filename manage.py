@@ -29,8 +29,19 @@ sys.path.insert(0, str(_program_root))
 if (_program_root / ".release-source.json").is_file():
     sys.dont_write_bytecode = True
 if __name__ == "__main__":
-    from release_bootstrap import run_selected
-    run_selected(Path(__file__).resolve().parent)
+    import release_bootstrap as _bootstrap
+
+    _bootstrap_root = Path(_bootstrap.__file__).resolve().parent
+    if _bootstrap_root != _program_root and (_program_root / ".release-source.json").is_file():
+        # The deployed bootstrap delegates with runpy and keeps its module in
+        # memory. Restart the selected CLI with its own verifier and the real
+        # installed trust root before it opens packages or data.
+        import subprocess
+
+        _env = {**os.environ, "PHARM_INSTALL_ROOT": str(_bootstrap_root)}
+        raise SystemExit(subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], env=_env))
+    _bootstrap.run_selected(_program_root)
+    _bootstrap.verify_running_release(_program_root)
 
 
 def _use_packages() -> None:

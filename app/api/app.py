@@ -163,22 +163,24 @@ class RateLimiter:
     def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
         self.limit, self.window, self.message = limit, window_s, message
         self.hits: dict[Hashable, deque[float]] = defaultdict(deque)
+        self.lock = threading.Lock()
 
     def check(self, key: Hashable) -> None:
         if self.record(key):
             raise DomainError(self.message, code="rate_limited")
 
     def record(self, key: Hashable) -> bool:
-        if key not in self.hits and len(self.hits) >= 4096:
-            del self.hits[next(iter(self.hits))]
-        now = time.monotonic()
-        q = self.hits[key]
-        while q and now - q[0] > self.window:
-            q.popleft()
-        if len(q) >= self.limit:
-            return True
-        q.append(now)
-        return False
+        with self.lock:
+            if key not in self.hits and len(self.hits) >= 4096:
+                del self.hits[next(iter(self.hits))]
+            now = time.monotonic()
+            q = self.hits[key]
+            while q and now - q[0] > self.window:
+                q.popleft()
+            if len(q) >= self.limit:
+                return True
+            q.append(now)
+            return False
 
 
 def create_app(db: Database | None = None, settings: config_mod.Settings | None = None,
@@ -492,9 +494,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                     intent = await _approval_intent(req)
                     if intent is not None and (original_mark is None or not await run_in_threadpool(_committed_since, original_mark, ctx)):
                         if before is not None:
-                            approvals.restore_for_next_permission(token)
-                        details = {**details, "summary": await _approval_summary(req), "challenge": approvals.challenge(
-                            ctx, req.state.session_token, action, permission, intent)}
+                            await run_in_threadpool(approvals.restore_for_next_permission, token)
+                        challenge = await run_in_threadpool(
+                            approvals.challenge, ctx, req.state.session_token, action, permission, intent)
+                        details = {**details, "summary": await _approval_summary(req), "challenge": challenge}
                 status = 429 if e.code == "rate_limited" else e.status
                 return J({"error": {"code": e.code, "message": e.message, "details": details}},
                          status_code=status)
@@ -1561,7 +1564,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def approval_check(req):
         """The approver typed his PIN: confirm it before the screen retries the action."""
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         if not ctx.approver_id:
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
@@ -1573,8 +1576,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check" \
                 and method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
             # #137: lend only this permission, only on the action (method + path) that asked for it, for 90 s
-            out["token"], out["expires_in"] = approvals.issue(
-                ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+            out["token"], out["expires_in"] = await run_in_threadpool(
+                approvals.issue, ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
                 challenge_token=str(b.get("challenge") or "")[:128],
                 previous=str(b.get("previous") or "")[:128] or None)
         return J(out)

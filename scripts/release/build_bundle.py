@@ -9,6 +9,7 @@ nothing is written (fail closed). Output: manifest.json, manifest.sig, code-<sha
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -68,8 +69,10 @@ def main(argv=None) -> int:
                            deps_zip=deps, deps=ident,
                            migrations=[p.stem for p in (REPO / "app" / "migrations").glob("*.sql")],
                            notes=su.notes_of(REPO))
-    import json
     m = json.loads(raw)
+    su.add_startup_proof(code, m, key)
+    m["code"].update(size=code.stat().st_size, sha256=su.releases.file_sha256(code))
+    raw = json.dumps(m, ensure_ascii=False, sort_keys=True, indent=1).encode("utf-8")
     os.replace(code, out / m["code"]["name"])
     if deps:
         os.replace(deps, out / m["deps"]["name"])

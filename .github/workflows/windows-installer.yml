@@ -1,13 +1,7 @@
 name: Windows installer
 
-# main is the pharmacy update channel (the in-app updater pulls main), so main only
-# moves with the owner's approval. Only a push to main publishes "installer-latest";
-# a manual run on any other branch builds a review installer artifact and publishes nothing.
-
+# Production updates ship through signed bundles. This is an explicit review build.
 on:
-  push:
-    branches: [main]
-    paths-ignore: ["docs/**", "**.md"]
   workflow_dispatch:
 
 permissions:
@@ -18,36 +12,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Publish gate: a push to main builds and publishes only if it is the merge of a PR whose
-  # "CI / linux" passed (free substitute for branch protection; see branch-guard.yml).
-  gate:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-      checks: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-      - name: Verify the push
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          FORCED: ${{ github.event.forced }}
-        run: .github/scripts/verify_push.sh
-
   build:
-    needs: gate
-    if: ${{ !cancelled() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -158,42 +129,7 @@ jobs:
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pharmacy.iss
 
-      - name: Sign the production installer
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: pwsh
-        env:
-          INSTALLER_SIGNING_PFX: ${{ secrets.INSTALLER_SIGNING_PFX }}
-          INSTALLER_SIGNING_PASSWORD: ${{ secrets.INSTALLER_SIGNING_PASSWORD }}
-          INSTALLER_SIGNER_SHA256: ${{ vars.INSTALLER_SIGNER_SHA256 }}
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:INSTALLER_SIGNING_PFX -or $env:INSTALLER_SIGNER_SHA256 -notmatch '^[0-9a-fA-F]{64}$') {
-            throw 'Production installer signing material is unavailable.'
-          }
-          $pfx = Join-Path $env:RUNNER_TEMP 'installer-signer.pfx'
-          $certificate = $null
-          try {
-            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:INSTALLER_SIGNING_PFX))
-            $password = ConvertTo-SecureString $env:INSTALLER_SIGNING_PASSWORD -AsPlainText -Force
-            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password |
-              Where-Object { $_.HasPrivateKey -and $_.GetCertHashString('SHA256') -eq $env:INSTALLER_SIGNER_SHA256 } |
-              Select-Object -First 1
-            if (-not $certificate) { throw 'Installer signer fingerprint does not match.' }
-            $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin/*/x64/signtool.exe'
-            $signTool = Get-ChildItem $sdk |
-              Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $signTool) { throw 'Windows SDK signing tool is unavailable.' }
-            & $signTool.FullName sign /sha1 $certificate.Thumbprint /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 dist/PharmacySetup.exe
-          } finally {
-            if ($certificate) { Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" }
-            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
-          }
-
-      # Artifact storage is small on GitHub Free (#122): keep review builds 14 days, not 90.
-      # The artifact is only a convenience copy: a push to main delivers "installer-latest"
-      # and a manual review build delivers the "installer-review" pre-release below (release
-      # assets do not count against the Actions storage quota), so a full quota blocks neither.
+      # Review artifacts expire automatically. The last production installer stays published.
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
@@ -211,18 +147,3 @@ jobs:
           gh release delete installer-review --yes --cleanup-tag 2>$null
           gh release create installer-review dist/PharmacySetup.exe --prerelease --title "منصة الصيدلية — نسخة تجربة" --notes "نسخة تجربة من فرع ${{ github.ref_name }} (${{ github.sha }})، تشغيلة ${{ github.run_id }}. sha256: $hash" --target ${{ github.sha }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Publish as release "installer-latest"
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INSTALLER_SIGNER_SHA256: ${{ vars.INSTALLER_SIGNER_SHA256 }}
-        run: |
-          $signature = Get-AuthenticodeSignature dist/PharmacySetup.exe
-          if ($signature.Status -ne 'Valid' -or
-              $signature.SignerCertificate.GetCertHashString('SHA256') -ne $env:INSTALLER_SIGNER_SHA256) {
-            throw 'The published installer must have the pinned Authenticode signature.'
-          }
-          gh release delete installer-latest --yes --cleanup-tag 2>$null
-          gh release create installer-latest dist/PharmacySetup.exe --title "منصة الصيدلية — آخر نسخة" --notes "ملف التثبيت لآخر نسخة على main (${{ github.sha }}). بياناتك محفوظة في %LOCALAPPDATA%\PharmacyPlatform ومش بتتلمس عند إعادة التثبيت." --target ${{ github.sha }}
