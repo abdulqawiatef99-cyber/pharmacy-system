@@ -218,7 +218,12 @@ class TestPriority1(PlanCase):
         self.assertEqual(d["invoice"]["computed_total"], 32800)
         self.assertTrue(d["can_approve"], d["issues"])
         self.assertEqual((self.qty(self.pan), self.qty(self.box)), (20, 30))        # a draft moves nothing
-        d = self.call("POST", f"/api/purchases/{inv_id}/approve", json={"version": d["invoice"]["version"]})
+        review = self.call("GET", f"/api/purchases/{inv_id}/approve")
+        self.assertEqual([change["item_id"] for change in review["changes"]], [self.pan])
+        d = self.call("POST", f"/api/purchases/{inv_id}/approve", json={
+            "version": d["invoice"]["version"], "price_token": review["token"],
+            "price_decisions": {self.pan: {"mode": "keep"}},
+        })
         self.assertEqual(d["invoice"]["status"], "approved")
         self.assertEqual(self.qty(self.pan), 20 + (5 + 1) * 2)                      # quantity + bonus, in strips
         self.assertEqual(self.qty(self.box), 30 + 2 * 3)
