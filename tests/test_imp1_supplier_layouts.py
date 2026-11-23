@@ -121,7 +121,7 @@ def supplier_pdf(*, repeat_header=True, rich_on_right=True):
     return _minimal_text_pdf(pages)
 
 
-def _minimal_text_pdf(pages):
+def _minimal_text_pdf(pages, *, exact_words=False):
     """A Unicode CID text layer for extraction on hosts without an Arabic test font."""
     def stream(data):
         return b"<< /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
@@ -145,8 +145,20 @@ endcmap CMapName currentdict /CMap defineresource pop end end """
         content_obj = len(objects) + 2
         objects.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] "
                        b"/Resources << /Font << /F 3 0 R >> >> /Contents %d 0 R >>" % content_obj)
-        content = "\n".join(f"BT /F 7 Tf 1 0 0 1 {x - len(s) * 1.89:.3f} {595 - top} Tm "
-                            f"<{s.encode('utf-16-be').hex()}> Tj ET" for x, top, s in cells)
+        commands = []
+        for x, top, text in cells:
+            if exact_words:
+                # Leave a word boundary even if a synthetic replacement has wider glyphs.
+                next_x = min((xx for xx, tt, _ in cells if xx > x and abs(tt - top) <= 2), default=842)
+                scale = min(1, (next_x - x - 2) / (len(text) * 3.78))
+                baseline = 595 - top - 5.6
+            else:
+                scale = 1
+                x -= len(text) * 1.89
+                baseline = 595 - top
+            commands.append(f"BT /F 7 Tf {scale:.5f} 0 0 1 {x:.3f} {baseline:.3f} Tm "
+                            f"<{text.encode('utf-16-be').hex()}> Tj ET")
+        content = "\n".join(commands)
         objects.append(stream(content.encode("ascii")))
 
     objects.append(b"<< /Type /FontDescriptor /FontName /TestUnicode /Flags 4 "
@@ -196,6 +208,36 @@ class TestSupplierPdf(unittest.TestCase):
         invoice = extract_structured("csv", "\n".join(lines).encode())
         self.assertEqual(invoice.lines[0].discount_pct, Decimal("0.5"))
 
+
+    def test_standalone_payment_next_to_an_item_is_not_a_name_fragment(self):
+        first_page = _invoice_page(0, 10, header=True, last_page=False, rich_on_right=True)
+        second_page = _invoice_page(10, 17, header=True, last_page=True, rich_on_right=True)
+        second_page.append((678, 360, _visual("شهرى")))
+        invoice = extract_structured("pdf", _minimal_text_pdf([first_page, second_page]))
+        self.assertEqual(len(invoice.lines), 17, invoice.warnings)
+        self.assertEqual(invoice.lines[-1].raw_name, "نباتيل تجريبي Neo-17 250 مجم")
+        self.assertEqual(invoice.to_json()["payment_method"], "credit")
+
+    def test_net_summary_above_header_does_not_end_the_table(self):
+        first_page = _invoice_page(0, 10, header=True, last_page=False, rich_on_right=True)
+        first_page.append((646, 80, f"1,614.67 : {_visual('صافى الفاتورة')}"))
+        second_page = _invoice_page(10, 17, header=True, last_page=True, rich_on_right=True)
+        invoice = extract_structured("pdf", _minimal_text_pdf([first_page, second_page]))
+        self.assertEqual(len(invoice.lines), 17, invoice.warnings)
+        self.assertEqual(invoice.declared_total, Decimal("1614.67"))
+
+    def test_item_amounts_can_continue_below_its_serial(self):
+        first_page = _invoice_page(0, 10, header=True, last_page=False, rich_on_right=True)
+        first_page = [(x, 132 if top == 121 and x in (494, 525, 553, 590) else top, value)
+                      for x, top, value in first_page]
+        second_page = _invoice_page(10, 17, header=True, last_page=True, rich_on_right=True)
+        invoice = extract_structured("pdf", _minimal_text_pdf([first_page, second_page]))
+        self.assertEqual(len(invoice.lines), 17, invoice.warnings)
+        self.assertEqual(invoice.warnings, [])
+        line = invoice.lines[0]
+        self.assertEqual((line.qty, line.public_price, line.discount_pct, line.line_total),
+                         (2, Decimal("49"), Decimal("21"), Decimal("77.42")))
+        self.assertEqual(line.sources["line_total"], "read")
 
     def test_two_copies_two_pages_read_only_the_customer_items(self):
         for repeat_header, rich_on_right in ((True, True), (False, True), (True, False)):
