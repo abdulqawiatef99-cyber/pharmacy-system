@@ -81,7 +81,7 @@ class SmartUpdateBase(unittest.TestCase):
     def add_migration(self, sql="CREATE TABLE smart_update_probe (id INTEGER PRIMARY KEY);\n"):
         (self.new / "app" / "migrations" / "0999_smart_update_probe.sql").write_text(sql, encoding="utf-8")
 
-    def build(self, *, deps_files=None, tamper_code=False, key=None, channel="main"):
+    def build(self, *, deps_files=None, tamper_code=False, key=None, channel="main", commit_time=2000):
         code = self.bundle / "code.zip"
         zip_tree(self.new, code)
         req = (self.new / "requirements.txt").read_bytes()
@@ -92,7 +92,7 @@ class SmartUpdateBase(unittest.TestCase):
             with zipfile.ZipFile(deps_zip, "w") as z:
                 for name, body in deps_files.items():
                     z.writestr(name, body)
-        raw = su.make_manifest(channel=channel, sha=SHA_NEW, commit_time=2000, version="0.5.0",
+        raw = su.make_manifest(channel=channel, sha=SHA_NEW, commit_time=commit_time, version="0.5.0",
                                python=su.python_tag(), platform=su.platform_tag(), code_zip=code,
                                deps_zip=deps_zip, deps=ident,
                                migrations=[p.stem for p in (self.new / "app" / "migrations").glob("*.sql")])

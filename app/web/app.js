@@ -248,7 +248,7 @@ async function askApproval(details, message, method, path, operation) {
     <h2>يحتاج إلى موافقة</h2>
     <p class="badge b-warn">⚠ ${esc(details?.label || message)}</p>
     <p class="muted">${esc(message)}</p>
-    ${summary ? `<p class="small"><bdi>${esc(summary.target)}</bdi>${facts.length ? ` · ${esc(facts.join(" · "))}` : ""}</p>` : ""}
+    ${summary ? `<p class="small"><bdi>${esc(summary.target)}</bdi>${facts.map((fact) => ` · <span>${esc(fact)}</span>`).join("")}</p>` : ""}
     <label class="f">من سيوافق <select name="who">${list.map((a) => `<option value="${esc(a.id)}">${esc(a.full_name)} — ${esc(a.role_name)}</option>`).join("")}</select></label>
     <label class="f">رقمه السري <input name="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" required></label>
     <p class="badge b-err" data-err hidden></p>
