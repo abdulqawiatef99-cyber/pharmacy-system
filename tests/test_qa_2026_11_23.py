@@ -113,10 +113,10 @@ class QA20261123(APICase):
         CashDrawer(self.db).open(self.ctx, 100000)
         self.supplier = catalog.create_supplier(self.db, self.ctx, name="QA Company", supplier_type="company")
 
-    def purchase_draft(self):
+    def purchase_draft(self, invoice_no="QA-HIGHER"):
         p = Purchasing(self.db, self.s)
         sid = p.create_manual(self.ctx, supplier_id=self.supplier)
-        p.update_header(self.ctx, sid, {"invoice_no": "QA-HIGHER"}, None)
+        p.update_header(self.ctx, sid, {"invoice_no": invoice_no}, None)
         p.add_line(self.ctx, sid, {"item_id": self.item, "qty": 2, "public_price": 12000,
                                   "discount_bp": 2000, "batch_no": "QA-new",
                                   "expiry_date": (self.today + timedelta(days=800)).isoformat()}, None)
@@ -154,7 +154,7 @@ class QA20261123(APICase):
         sales = Sales(self.db)
         sid = sales.create(self.ctx)
         sale = sales.add_line(self.ctx, sid, self.item, packs=11)
-        sale = sales.set_invoice_discount(self.ctx, sid, version=sale["version"], bp=1000)
+        sale = sales.set_invoice_discount(self.ctx, sid, bp=1000)
         sales.complete(self.ctx, sid, payments=[{"method": "cash", "amount": sale["total"]}], version=sale["version"])
         sale = sales.get(self.ctx, sid)
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/sales/{sid}", "official")
@@ -174,8 +174,7 @@ class QA20261123(APICase):
         purchasing = Purchasing(self.db, self.s)
         sid = self.purchase_draft()
         purchasing.approve(self.ctx, sid, None)
-        other = self.purchase_draft()
-        purchasing.update_header(self.ctx, other, {"invoice_no": "QA-OTHER"}, None)
+        other = self.purchase_draft("QA-OTHER")
         purchasing.approve(self.ctx, other, None)
         out = run_node(self, SCRIPT, "owner", OWNER_PW, "#/purchases", "purchase-search")
         self.assertEqual(out["count"], 1)
