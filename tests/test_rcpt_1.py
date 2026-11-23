@@ -104,6 +104,14 @@ class ReceiptContentTests(unittest.TestCase):
         self.assertIn(("row", "رسوم التوصيل", "2.00"), out)
         self.assertIn(("row", "مدفوع محفظة · محفظة تجربة", "52.00"), out)
 
+    def test_cash_delivery_shows_cash_due_until_customer_receives_order(self):
+        sale = sample_sale()
+        sale.update(kind="delivery", delivery={"address": "عنوان التوصيل", "status": "out"})
+        self.assertIn(("row", "كاش عند الاستلام", "50.00"), rows(sale))
+        self.assertNotIn(("row", "مدفوع كاش", "50.00"), rows(sale))
+        sale["delivery"]["status"] = "delivered"
+        self.assertIn(("row", "مدفوع كاش", "50.00"), rows(sale))
+
 
 @unittest.skipUnless(escpos.shaping_available(), "The thermal raster requires libraqm")
 class ReceiptRasterTests(unittest.TestCase):
