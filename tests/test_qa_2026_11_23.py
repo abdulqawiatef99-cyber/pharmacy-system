@@ -170,6 +170,25 @@ class QA20261123(APICase):
         self.assertEqual(after["approved_by"], self.ctx.user_id)
         self.assertEqual(after["stock_price_decisions"][0]["mode"], "keep")
 
+    def test_receiving_a_new_price_never_releases_a_recalled_lot(self):
+        from app.recalls.service import Recalls
+
+        recalls = Recalls(self.db)
+        recalls.add_notice(self.ctx, title="QA synthetic recall",
+                           items=[{"product_name": "QA Amber 20TAB", "batch_numbers": ["QA-old"]}])
+        recalls.decide(self.ctx, recalls.alerts(self.ctx)[0]["id"], "confirmed")
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        line = purchasing.get(self.ctx, sid)["lines"][0]
+        purchasing.update_line(self.ctx, sid, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        review = purchasing.price_review(self.ctx, sid)
+        purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        sales = Sales(self.db)
+        with self.assertRaises(Conflict) as e:
+            sales.add_line(self.ctx, sales.create(self.ctx), self.item, packs=1)
+        self.assertEqual(e.exception.code, "insufficient_stock")
+
     def test_purchase_keep_preserves_legacy_untracked_stock(self):
         with self.db.transaction():
             inventory.post_movement(self.db, self.ctx, item_id=self.item, qty_delta=2,
