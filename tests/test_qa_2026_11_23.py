@@ -1,9 +1,14 @@
 """Regressions from QA-1, using synthetic stock and the real browser screens."""
+import json
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
 from app.catalog import service as catalog
+from app.core.errors import Conflict, Forbidden
+from app.finance import money
+from app.sales import attachments
 from app.inventory import service as inventory
 from app.purchasing.service import Purchasing
 from app.sales.cash import CashDrawer
@@ -131,6 +136,84 @@ class QA20261123(APICase):
         self.assertEqual(out["options"], ["keep", "all", "per_batch"])
         self.assertEqual(out["chosen"], ["keep"])
 
+    def test_purchase_prices_require_current_decision_and_keep_same_lot(self):
+        from app.core.permissions import DEFAULT_ROLES
+
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        line = purchasing.get(self.ctx, sid)["lines"][0]
+        purchasing.update_line(self.ctx, sid, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        assistant = replace(self.ctx, role_code="assistant", permissions=frozenset(DEFAULT_ROLES["assistant"][1]))
+        self.assertEqual(purchasing.price_review(assistant, sid)["default"], "keep")
+        review = purchasing.price_review(self.ctx, sid)
+        with self.assertRaises(Forbidden):
+            purchasing.approve(assistant, sid, review["version"], require_price_review=True)
+        with self.assertRaises(Conflict):
+            purchasing.approve(self.ctx, sid, review["version"], require_price_review=True)
+        self.add_new_stock()
+        with self.assertRaises(Conflict):
+            purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                               price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        review = purchasing.price_review(assistant, sid)
+        approver = replace(assistant, approver_id=self.ctx.user_id,
+                           approver_permissions=frozenset({"purchases.approve"}))
+        purchasing.approve(approver, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        prices = self.db.all("SELECT public_price FROM batches WHERE org_id=? AND item_id=? AND batch_no='QA-OLD'"
+                             " ORDER BY price_variant", (self.ctx.org_id, self.item))
+        self.assertEqual([r["public_price"] for r in prices], [8000, 12000])
+        sale = Sales(self.db).add_line(self.ctx, Sales(self.db).create(self.ctx), self.item, packs=1)
+        self.assertEqual(sale["total"], 8000)
+        audit = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_id=?"
+                            " AND action='purchase.approve'", (self.ctx.org_id, sid))
+        after = json.loads(audit["after_json"])
+        self.assertEqual(after["approved_by"], self.ctx.user_id)
+        self.assertEqual(after["stock_price_decisions"][0]["mode"], "keep")
+
+    def test_purchase_keep_preserves_legacy_untracked_stock(self):
+        with self.db.transaction():
+            inventory.post_movement(self.db, self.ctx, item_id=self.item, qty_delta=2,
+                                    movement_type="opening", unit_cost=Decimal("20"))
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        review = purchasing.price_review(self.ctx, sid)
+        purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        sales = Sales(self.db)
+        quote = {"id": self.item, "pack_size": 2, "public_price": 12000,
+                 "untracked_public_price": 10000, "is_service": 0}
+        sales.quote_items(self.ctx, sales.create(self.ctx), [quote])
+        self.assertEqual({r["price"]: r["qty"] for r in quote["price_stock"]}, {8000: 20, 12000: 4, 10000: 2})
+
+    def test_purchase_reprices_all_or_the_selected_batch(self):
+        self.add_new_stock()
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET public_price=11000 WHERE org_id=? AND batch_no='QA-LATER'",
+                            (self.ctx.org_id,))
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        review = purchasing.price_review(self.ctx, sid)
+        chosen = review["changes"][0]["batches"][0]["id"]
+        purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                           price_token=review["token"],
+                           price_decisions={self.item: {"mode": "per_batch", "batches": [chosen]}})
+        self.assertEqual(self.db.one("SELECT public_price FROM batches WHERE id=?", (chosen,))[0], 12000)
+        later = self.db.one("SELECT public_price FROM batches WHERE org_id=? AND batch_no='QA-LATER'", (self.ctx.org_id,))
+        self.assertEqual(later[0], 11000)
+
+        another = self.purchase_draft("QA-ALL")
+        line = purchasing.get(self.ctx, another)["lines"][0]
+        purchasing.update_line(self.ctx, another, line["id"], {"public_price": 14000}, None)
+        purchasing.update_header(self.ctx, another, {"declared_total": 22400}, None)
+        purchasing.set_price_review_default(self.ctx, "all")
+        review = purchasing.price_review(self.ctx, another)
+        self.assertEqual(review["default"], "all")
+        purchasing.approve(self.ctx, another, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "all"}})
+        prices = self.db.all("SELECT DISTINCT public_price FROM batches WHERE org_id=? AND item_id=?",
+                             (self.ctx.org_id, self.item))
+        self.assertEqual([x[0] for x in prices], [14000])
+
     def test_QA_002_sale_result_exposes_the_price_it_will_charge(self):
         self.add_new_stock()
         out = run_node(self, SCRIPT, "owner", OWNER_PW, "#/pos", "pos")
@@ -170,6 +253,24 @@ class QA20261123(APICase):
             self.assertIn("828.00", screen)
         self.assertEqual(sale["lines"][0]["invoice_share"], 9200)
 
+    def test_official_prices_leave_the_discounted_strip_refund_unchanged(self):
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET public_price=10000 WHERE org_id=? AND batch_no='QA-OLD'",
+                            (self.ctx.org_id,))
+        other = catalog.create_item(self.db, self.ctx, {"name_en": "QA Cyan", "public_price": 20000,
+                                                        "is_service": 1})
+        sales = Sales(self.db)
+        sid = sales.create(self.ctx)
+        sales.add_line(self.ctx, sid, self.item, packs=1, units=1, discount_bp=1000)
+        sales.add_line(self.ctx, sid, other, packs=1)
+        sale = sales.set_invoice_discount(self.ctx, sid, bp=1000)
+        sale = sales.complete(self.ctx, sid, payments=[{"method": "cash", "amount": sale["total"]}],
+                              version=sale["version"])
+        self.assertEqual((sale["subtotal"], sale["discount_total"], sale["total"]), (35000, 4850, 30150))
+        line = next(l for l in sale["lines"] if l["item_id"] == self.item)
+        self.assertEqual(sales.return_items(self.ctx, sid, {line["id"]: 1}, refund_method="cash",
+                                            reason="QA customer return")["refund"], 4050)
+
     def test_QA_013_purchase_search_filters_the_approved_total(self):
         purchasing = Purchasing(self.db, self.s)
         sid = self.purchase_draft()
@@ -186,6 +287,22 @@ class QA20261123(APICase):
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/purchases/{sid}", "vat")
         self.assertTrue(out["vat"], "QA-003: the owner needs to enter the paper's line VAT")
 
+    def test_manual_vat_modes_use_exact_payable_and_preserve_line_tax(self):
+        purchasing = Purchasing(self.db, self.s)
+        for mode, expected in ((0, 607), (1, 606)):
+            sid = purchasing.create_manual(self.ctx, supplier_id=self.supplier)
+            purchasing.update_header(self.ctx, sid, {"invoice_no": f"QA-VAT-{mode}", "declared_total": expected}, None)
+            purchase = purchasing.add_line(self.ctx, sid, {
+                "item_id": self.item, "qty": 10, "public_price": 101, "discount_bp": 4000,
+                "tax_amount": 1, "tax_included": mode, "batch_no": f"QA-VAT-{mode}", "expiry_date": self.expiry,
+            }, None)
+            self.assertEqual(purchase["invoice"]["computed_total"], expected)
+            self.assertEqual((purchase["lines"][0]["tax_amount"], purchase["lines"][0]["tax_included"]), (1, mode))
+            self.assertTrue(purchase["can_approve"])
+            purchasing.approve(self.ctx, sid, None)
+            self.assertEqual(self.db.one("SELECT amount FROM supplier_ledger WHERE org_id=? AND ref_id=?",
+                                         (self.ctx.org_id, sid))[0], expected)
+
     def finish_sale(self, payment):
         sales = Sales(self.db)
         sid = sales.create(self.ctx)
@@ -200,6 +317,33 @@ class QA20261123(APICase):
         sid = self.finish_sale({"method": "transfer", "channel_id": channel})
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/sales/{sid}", "wallet")
         self.assertTrue(out["wallet"], "QA-004: a transfer-paid sale needs a same-method refund choice")
+
+    def test_wallet_refund_requires_confirmation_and_debits_the_original_route(self):
+        self.http_login()
+        channel = next(c["id"] for c in self.c.get("/api/payment-channels").json()["channels"] if c["kind"] == "transfer")
+        original = money.create_account(self.db, self.ctx, "QA wallet A", "wallet")["id"]
+        rerouted = money.create_account(self.db, self.ctx, "QA wallet B", "wallet")["id"]
+        money.set_route(self.db, self.ctx, "transfer", channel, original)
+        sid = self.finish_sale({"method": "transfer", "channel_id": channel})
+        sales = Sales(self.db)
+        line = sales.get(self.ctx, sid)["lines"][0]["id"]
+        with self.assertRaises(Conflict):
+            sales.return_items(self.ctx, sid, {line: 1}, refund_method="transfer", reason="QA return")
+        proof = attachments.attach(self.db, self.tmp, self.ctx, sid, b"%PDF synthetic transfer proof")
+        attachments.review(self.db, self.ctx, proof["attachments"][0]["id"], True, amount=4000)
+        money.set_route(self.db, self.ctx, "transfer", channel, rerouted)
+        with self.assertRaises(Conflict):
+            sales.return_items(self.ctx, sid, {line: 2}, refund_method="transfer", reason="QA return")
+        returned = sales.return_items(self.ctx, sid, {line: 1}, refund_method="transfer", reason="QA return")
+        self.assertEqual(returned["refund"], 4000)
+        debit = self.db.one("SELECT account_id, amount FROM money_movements WHERE org_id=? AND ref_id=? AND kind='refund'",
+                            (self.ctx.org_id, sid))
+        self.assertEqual(tuple(debit), (original, -4000))
+        self.assertEqual(sales.get(self.ctx, sid)["returns"][0]["channel_id"], channel)
+        summary = CashDrawer(self.db).summary(self.ctx)
+        self.assertEqual(summary["transfer_refunds"], 4000)
+        wallet = next(ch for ch in summary["by_channel"] if ch["method"] == "transfer")
+        self.assertEqual((wallet["amount"], wallet["refunded"]), (8000, 4000))
 
     def test_QA_005_latest_invoice_filter_owns_the_totals(self):
         self.http_login()
