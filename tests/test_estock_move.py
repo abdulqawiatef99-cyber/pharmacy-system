@@ -249,6 +249,18 @@ class TestMove(DBTestCase):
 
     @skipUnless(POWERSHELL, "PowerShell executable unavailable")
     def test_reader_checks_app_config_even_when_windows_sign_in_finds_a_restored_database(self):
+        result = self.synthetic_sql_reader("Live")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ESTOCK: AMBIGUOUS", result.stdout)
+        self.assertNotIn("ESTOCK: FOUND", result.stdout)
+
+    @skipUnless(POWERSHELL, "PowerShell executable unavailable")
+    def test_reader_prefers_sql_login_with_select_access_to_the_same_database(self):
+        result = self.synthetic_sql_reader("Restored")
+        self.assertIn("ESTOCK: FOUND", result.stdout)
+        self.assertIn("SYNTHETIC PERMITTED QUERY", result.stdout)
+
+    def synthetic_sql_reader(self, config_db):
         """Exercise discovery through the script with synthetic SQL metadata and no network."""
         source = estock_move.SCRIPT.read_text(encoding="utf-8-sig")
         source = re.sub(r"Get-Service -ErrorAction SilentlyContinue \| Where-Object \{ .*? \}",
@@ -259,7 +271,8 @@ class TestMove(DBTestCase):
 class SyntheticConnection {
     [string]$DataSource = '(local)'
     [string]$Database
-    SyntheticConnection([string]$database) { $this.Database = $database }
+    [int]$CanRead
+    SyntheticConnection([string]$database, [int]$canRead) { $this.Database = $database; $this.CanRead = $canRead }
     [void] ChangeDatabase([string]$database) {}
     [void] Close() {}
 }
@@ -268,8 +281,9 @@ function Q($conn, [string]$sql) {
         return @{Rows=@(@{name=$conn.Database; state_desc='ONLINE'})}
     }
     if ($sql -like '*FROM INFORMATION_SCHEMA.TABLES*') {
-        return @{Rows=@('Products','Customer','Vendor','Product_Amount' | ForEach-Object { @{nm=$_} })}
+        return @{Rows=@('Products','Customer','Vendor','Product_Amount' | ForEach-Object { @{nm=$_; allowed=$conn.CanRead} })}
     }
+    if ($conn.CanRead) { [Console]::WriteLine('SYNTHETIC PERMITTED QUERY') }
     throw 'Discovery selected a database and reached the export phase.'
 }
 """ + source[end:]
@@ -278,23 +292,21 @@ function Q($conn, [string]$sql) {
         first, end = source.index("function Try-Open("), source.index("$conns = @()")
         source = source[:first] + """
 function Try-Open([string]$cs) {
-    if ($cs -like '*Initial Catalog=Live*') { return [SyntheticConnection]::new('Live') }
-    return [SyntheticConnection]::new('Restored')
+    if ($cs -like '*Initial Catalog=*') { return [SyntheticConnection]::new($env:TEST_CATALOG, 1) }
+    return [SyntheticConnection]::new('Restored', 0)
 }
 """ + source[end:]
         script = self.tmp / "synthetic-reader.ps1"
         script.write_text(source, encoding="utf-8-sig")
         install = self.tmp / "test-install"
         install.mkdir()
-        (install / "data.config").write_text("Server=(local);Initial Catalog=Live;Integrated Security=True")
-        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        (install / "data.config").write_text(f"Server=(local);Initial Catalog={config_db};Integrated Security=True")
+        return subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                  "-File", str(script), "-Guided", "-OutputDirectory", str(self.tmp / "export-test")],
-                                env={**os.environ, "LOCALAPPDATA": str(self.tmp), "COMPUTERNAME": "SYNTHETIC"},
+                                env={**os.environ, "LOCALAPPDATA": str(self.tmp), "COMPUTERNAME": "SYNTHETIC",
+                                     "TEST_CATALOG": config_db},
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("ESTOCK: AMBIGUOUS", result.stdout)
-        self.assertNotIn("ESTOCK: FOUND", result.stdout)
 
 
 SCREEN = r"""

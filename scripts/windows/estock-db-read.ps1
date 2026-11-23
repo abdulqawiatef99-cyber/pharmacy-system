@@ -93,11 +93,14 @@ function Find-Estock($c) {
     foreach ($db in $dbs.Rows) {
         try {
             $c.ChangeDatabase($db.name)
-            $tl = Q $c "SELECT TABLE_NAME nm FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
+            $tl = Q $c "SELECT TABLE_NAME nm, HAS_PERMS_BY_NAME(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME), 'OBJECT', 'SELECT') allowed FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
             $names = @($tl.Rows | ForEach-Object { $_.nm })
             if ($names -contains 'Products' -and $names -contains 'Customer' -and $names -contains 'Vendor' -and
                 ($names -contains 'Product_Amount' -or $names -contains 'Branches_Product_Amount')) {
-                [string]$db.name
+                $readable = @($tl.Rows | Where-Object { $_.allowed -eq 1 } | ForEach-Object { $_.nm })
+                $core = $readable -contains 'Products' -and $readable -contains 'Customer' -and $readable -contains 'Vendor' -and
+                    ($readable -contains 'Product_Amount' -or $readable -contains 'Branches_Product_Amount')
+                [pscustomobject]@{ Connection = $c; Database = [string]$db.name; CoreReadable = $core; ReadableTables = $readable.Count }
             }
         } catch { }
     }
@@ -157,10 +160,13 @@ function Register-Guided($c) {
     try { $id = Who $c } catch { return 0 }
     if ($id.Split('\')[0] -ne $env:COMPUTERNAME) { return 0 }
     $added = 0
-    foreach ($name in (Find-Estock $c)) {
-        $key = "$id/$name"
-        if (-not $guidedCandidates.ContainsKey($key)) {
-            $guidedCandidates.Add($key, [pscustomobject]@{Connection = $c; Database = $name})
+    foreach ($match in (Find-Estock $c)) {
+        $key = "$id/$($match.Database)"
+        $previous = $guidedCandidates[$key]
+        # The Windows login may see the table names without having permission to read the rows.
+        if (-not $previous -or ($match.CoreReadable -and -not $previous.CoreReadable) -or
+            ($match.CoreReadable -eq $previous.CoreReadable -and $match.ReadableTables -gt $previous.ReadableTables)) {
+            $guidedCandidates[$key] = $match
             $added++
         }
     }
@@ -213,7 +219,9 @@ if ($Guided -or ($conns.Count -eq 0 -or (& $missing) -gt 0)) {
         if (-not $Guided -and $conns.Count -gt 0 -and (& $missing) -eq 0) { break }
     }
 }
-foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
+if (-not $Guided) {
+    foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
+}
 if ($conns.Count -eq 0) {
     Say 'RESULT: FAIL - could not open any database on a local SQL Server. Nothing was read or changed.'
     if ($Guided) { [Console]::WriteLine('ESTOCK: NOT FOUND') }
@@ -231,7 +239,6 @@ if ($Guided) {
         Save; exit 2
     }
     $selected = $candidates[0]
-    $failed.Clear()
     [Console]::WriteLine('ESTOCK: FOUND')
 }
 
