@@ -105,8 +105,9 @@ class TestCheckoutRequests(PlanCase):
                             "/api/items", json={"item": {"name_en": "Synthetic Lock Proof", "public_price": 200}},
                             headers={**H, "Idempotency-Key": "synthetic-lock"}))
                         self.assertTrue(await asyncio.to_thread(entered.wait, 1))
-                        health = await client.get("/api/backup/health")
-                        self.assertEqual(health.status_code, 200)
+                        polls = await asyncio.gather(*(client.get(url) for url in
+                            ("/api/backup/health", "/api/stock/alert", "/api/notifications")))
+                        self.assertEqual([r.status_code for r in polls], [200, 200, 200])
                         self.assertFalse(pending.done(), "the event loop waited for the SQLite writer")
                 finally:
                     release.set()
