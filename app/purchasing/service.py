@@ -594,7 +594,7 @@ class Purchasing:
                         src["expiry_date"] = "user"
             # a user edit of a price/qty invalidates previously *inferred* values
             for dep in ("unit_net_price", "discount_bp", "line_total"):
-                if dep not in changes and src.get(dep) == "inferred" and \
+                if dep not in changes and src.get(dep) in ("inferred", "allocated") and \
                         any(k in changes for k in ("public_price", "discount_bp", "unit_net_price",
                                                    "qty", "tax_amount", "tax_included", "distributor_margin")):
                     upd[dep] = None
@@ -681,6 +681,8 @@ class Purchasing:
             if a["qty"] is None or b["qty"] is None:
                 raise ValidationFailed("اكتب كمية السطرين الأول وبعدين ادمج", code="not_mergeable")
             for ln in (a, b):
+                if ln["tax_included"] is not None and validation.line_total_mismatch(dict(ln)):
+                    raise ValidationFailed("صحّح ضريبة السطر وإجماليه قبل الدمج", code="line_total_mismatch")
                 src, conf = json.loads(ln["field_sources"] or "{}"), json.loads(ln["field_confidence"] or "{}")
                 if ln["match_status"] == "suggested" or any(c < validation.LOW_CONFIDENCE and src.get(f) != "user"
                                                             for f, c in conf.items()):
@@ -701,10 +703,13 @@ class Purchasing:
             if (pay_a is None) != (pay_b is None) or (merged["line_total"] is None and (a["line_total"], b["line_total"]) != (None, None)) \
                     or (pay_a is not None and validation.line_amount(merged) != pay_a + pay_b):
                 raise ValidationFailed("السطرين مش هيتدمجوا من غير ما إجمالي الفاتورة يتغير؛ عدّل الكمية يدويًا", code="not_mergeable")
-            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=?"
+            sources = json.loads(a["field_sources"])
+            if a["tax_included"] is not None and merged["line_total"] is not None:
+                sources["line_total"] = "allocated"
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, bonus_qty=?, line_total=?, tax_amount=?, field_sources=?"
                             " WHERE id=? AND org_id=?",
-                            (merged["qty"], (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0), merged["line_total"], tax, line_id,
-                             ctx.org_id))
+                            (merged["qty"], (a["bonus_qty"] or 0) + (b["bonus_qty"] or 0), merged["line_total"], tax,
+                             json.dumps(sources), line_id, ctx.org_id))
             self.db.execute("DELETE FROM purchase_invoice_lines WHERE id=? AND org_id=?", (other_id, ctx.org_id))
             self._refresh_totals(ctx, inv_id)
             self._bump(inv_id)
@@ -732,6 +737,8 @@ class Purchasing:
                 raise ValidationFailed(f"الكمية لازم أقل من كمية السطر ({a['qty'] or 0})", code="split_too_big")
             if iso == a["expiry_date"]:
                 raise ValidationFailed("دي نفس صلاحية السطر")
+            if a["tax_included"] is not None and validation.line_total_mismatch(dict(a)):
+                raise ValidationFailed("صحّح ضريبة السطر وإجماليه قبل التقسيم", code="line_total_mismatch")
             # whole piasters: the new line takes its share rounded down, the original keeps the rest, so the two always
             # add up to what the line had (independent review: a None share dropped the tax from the invoice)
             half_up = lambda v: None if v is None else (2 * v * qty + a["qty"]) // (2 * a["qty"])   # noqa: E731
@@ -748,6 +755,9 @@ class Purchasing:
                    "batch_no": (str(batch_no).strip() or None) if batch_no else None,
                    "field_sources": json.loads(a["field_sources"] or "{}"), "field_confidence": json.loads(a["field_confidence"] or "{}")}
             row["field_sources"].update(expiry_date="user", qty="user")
+            rest_sources = json.loads(a["field_sources"])
+            if a["tax_included"] is not None and moved_total is not None:
+                row["field_sources"]["line_total"] = rest_sources["line_total"] = "allocated"
             self._insert_line(row)
             rest = {**dict(a), "qty": a["qty"] - qty,
                     "line_total": None if a["line_total"] is None else pay - moved_total,
@@ -764,8 +774,10 @@ class Purchasing:
                                 (row["line_total"], row["id"], ctx.org_id))
             if pay is not None and validation.line_amount(row) + validation.line_amount(rest) != pay:
                 raise ValidationFailed("التقسيم كان هيغيّر إجمالي السطر؛ قسّمه يدويًا", code="split_changes_total")
-            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=? WHERE id=? AND org_id=?",
-                            (rest["qty"], rest["line_total"], rest["tax_amount"], line_id, ctx.org_id))
+            self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=?, field_sources=?"
+                            " WHERE id=? AND org_id=?",
+                            (rest["qty"], rest["line_total"], rest["tax_amount"], json.dumps(rest_sources),
+                             line_id, ctx.org_id))
             self._refresh_totals(ctx, inv_id)
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_split", "purchase_invoice", inv_id,
@@ -911,18 +923,13 @@ class Purchasing:
         if price is None:
             return inventory.get_or_create_batch(self.db, ctx, item_id, batch_no, expiry, line["expiry_precision"])
         lots = self.db.all(
-            "SELECT b.id, b.owner, b.price_variant, b.public_price, EXISTS (SELECT 1 FROM stock_balances sb"
-            " WHERE sb.org_id=b.org_id AND sb.item_id=b.item_id AND sb.batch_key=b.id AND sb.qty>0) held"
-            " FROM batches b WHERE b.org_id=? AND b.item_id=? AND b.batch_no=? AND b.expiry_date IS ?"
-            " ORDER BY b.price_variant, b.rowid", (ctx.org_id, item_id, batch_no, expiry))
+            "SELECT id, owner, price_variant, public_price FROM batches"
+            " WHERE org_id=? AND item_id=? AND batch_no=? AND expiry_date IS ?"
+            " ORDER BY price_variant, rowid", (ctx.org_id, item_id, batch_no, expiry))
         for lot in lots:
             if lot["owner"] == "pharmacy" and lot["public_price"] == price:
                 return lot["id"]
-        # Preserve the price of stock still on the shelf. Reuse an empty pharmacy lot if possible.
-        empty = next((lot["id"] for lot in lots if lot["owner"] == "pharmacy" and not lot["held"]), None)
-        if empty:
-            self.db.execute("UPDATE batches SET public_price=? WHERE id=? AND org_id=?", (price, empty, ctx.org_id))
-            return empty
+        # An empty lot can still receive returns at its original official price.
         batch_id = new_id()
         variant = max((lot["price_variant"] for lot in lots), default=-1) + 1
         self.db.execute("INSERT INTO batches (id, org_id, item_id, batch_no, expiry_date, expiry_precision,"
@@ -982,25 +989,26 @@ class Purchasing:
                     Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
                 base_qty = units[l["id"]]                       # bonus is free stock
                 unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
-                if require_price_review:
-                    batch_id = self._receiving_batch(ctx, item["id"], l, l["public_price"])
-                else:
-                    batch_id = inventory.get_or_create_batch(self.db, ctx, item["id"], l["batch_no"],
-                                                             l["expiry_date"], l["expiry_precision"])
-                    if batch_id and l["public_price"] is not None:
-                        self.db.execute("UPDATE batches SET public_price=coalesce(public_price, ?)"
-                                        " WHERE id=? AND org_id=?", (l["public_price"], batch_id, ctx.org_id))
-                if batch_id is None and l["public_price"] is not None:
-                    untracked = self.db.one(
-                        "SELECT 1 FROM stock_balances WHERE org_id=? AND item_id=? AND batch_key='' AND qty>0 LIMIT 1",
-                        (ctx.org_id, item["id"]))
-                    old_untracked = item["untracked_public_price"]
-                    if untracked and require_price_review and old_untracked not in (None, l["public_price"]):
-                        # The new boxes have neither a lot number nor an expiry. Give them their own price group.
-                        batch_id = self._receiving_batch(ctx, item["id"], l, l["public_price"], force_batch=True)
-                    if not untracked:
+                price = l["public_price"]
+                if price is not None and item["public_price"] is not None and price != item["public_price"]:
+                    # Legacy lots without an explicit price can receive returns as well as hold old stock.
+                    self.db.execute("UPDATE batches SET public_price=? WHERE org_id=? AND item_id=?"
+                                    " AND owner='pharmacy' AND public_price IS NULL",
+                                    (item["public_price"], ctx.org_id, item["id"]))
+                    self.db.execute("UPDATE items SET untracked_public_price=? WHERE org_id=? AND id=?"
+                                    " AND untracked_public_price IS NULL AND EXISTS (SELECT 1 FROM stock_balances sb"
+                                    " WHERE sb.org_id=items.org_id AND sb.item_id=items.id AND sb.batch_key='')",
+                                    (item["public_price"], ctx.org_id, item["id"]))
+                batch_id = self._receiving_batch(ctx, item["id"], l, price)
+                if batch_id is None and price is not None:
+                    untracked = self.db.one("SELECT untracked_public_price FROM items WHERE org_id=? AND id=?",
+                                            (ctx.org_id, item["id"]))["untracked_public_price"]
+                    if untracked is not None and untracked != price:
+                        # New boxes without a batch number or expiry still need their own price group.
+                        batch_id = self._receiving_batch(ctx, item["id"], l, price, force_batch=True)
+                    elif untracked is None:
                         self.db.execute("UPDATE items SET untracked_public_price=? WHERE id=? AND org_id=?",
-                                        (l["public_price"], item["id"], ctx.org_id))
+                                        (price, item["id"], ctx.org_id))
                 # the branch is named so ix_moves_item(org_id, branch_id, item_id) answers from the item's own
                 # movements; without it every movement of the pharmacy was read for each line (#253: 4 s a
                 # line on 3.5 M movements, and the approval holds every screen while it runs)
@@ -1059,10 +1067,15 @@ class Purchasing:
                     suppliers.pay_from(self.db, ctx, inv["supplier_id"], pay["amount"], pay["source"],
                                        note=f"دفع فاتورة {inv['invoice_no'] or ''}".strip(), ref=pay["ref"],
                                        ref_id=inv_id)
-            ids = [l["item_id"] for l in lines if l["item_id"]]
-            if ids:                     # arrived: no longer short
-                self.db.execute(f"UPDATE items SET shortage_at=NULL, shortage_by=NULL WHERE org_id=? AND id IN"
-                                f" ({','.join('?' * len(ids))})", (ctx.org_id, *ids))
+            ids = sorted({l["item_id"] for l in lines if l["item_id"]})
+            if ids:
+                slots = ",".join("?" for _ in ids)
+                self.db.execute(f"UPDATE items SET shortage_at=NULL, shortage_by=NULL WHERE org_id=? AND id IN ({slots})",
+                                (ctx.org_id, *ids))
+                # A newly received or repriced lot can change a draft's quoted line prices even if its total stays equal.
+                self.db.execute("UPDATE sales SET version=version+1 WHERE org_id=? AND status='draft'"
+                                f" AND EXISTS (SELECT 1 FROM sale_lines l WHERE l.sale_id=sales.id"
+                                f" AND l.org_id=sales.org_id AND l.item_id IN ({slots}))", (ctx.org_id, *ids))
             label = inv["invoice_no"] or ""
             if cost_ups:
                 notify.emit(self.db, ctx, "cost_increase", "warning",

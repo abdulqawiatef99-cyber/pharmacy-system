@@ -351,6 +351,8 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
     if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
     // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
     if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
+    // An acknowledged partial return can be followed by another of the same quantity.
+    if (sig && r.ok && /^\/api\/sales\/[^/]+\/return$/.test(apiPath)) ONCE_SENT.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
   // one approval per distinct permission the action needs (a late restricted return of someone else's
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
@@ -1518,7 +1520,8 @@ function renderLine(l) {
     <td data-label="الصافي">${fieldInput(l, "unit_net_price", money(l.unit_net_price))}</td>
     <td data-label="ضريبة السطر">${fieldInput(l, "tax_amount", money(l.tax_amount))}
       <select aria-label="معاملة الضريبة" data-taxmode="${esc(l.id)}" ${draft ? "" : "disabled"}>
-        ${l.tax_included == null ? '<option value="">تلقائي (حسب إجمالي السطر)</option>' : ""}
+        ${l.tax_included == null && (CUR.invoice.source_type !== "manual" || l.tax_amount != null)
+          ? '<option value="">تلقائي (حسب إجمالي السطر)</option>' : ""}
         <option value="0">مضافة</option><option value="1" ${l.tax_included ? "selected" : ""}>مشمولة</option>
       </select></td>
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
@@ -1654,7 +1657,12 @@ app.addEventListener("change", async (e) => {
   if (t.dataset.taxmode) {
     await save(`${base}/lines/${t.dataset.taxmode}`, { changes: { tax_included: t.value === "" ? null : +t.value } });
   } else if (t.dataset.field) {
-    await save(`${base}/lines/${t.dataset.line}`, { changes: { [t.dataset.field]: CONVERT[t.dataset.field](t.value) } });
+    const changes = { [t.dataset.field]: CONVERT[t.dataset.field](t.value) };
+    if (t.dataset.field === "tax_amount") {
+      const mode = t.closest("td").querySelector("[data-taxmode]").value;
+      changes.tax_included = mode === "" ? null : +mode;
+    }
+    await save(`${base}/lines/${t.dataset.line}`, { changes });
   } else if (t.dataset.h) {
     const f = t.dataset.h;
     const v = ["declared_total", "extra_discount"].includes(f) ? toPiasters(t.value)

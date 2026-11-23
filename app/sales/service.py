@@ -1580,13 +1580,8 @@ class Sales:
                     # whole shortfall against the chosen channel so we never refund unverified money.
                     short = (s["paid_transfer"] or 0) - verified
                     # Historical card refunds could leave from the wallet regardless of the amount charged to the card.
-                    legacy = sum(old["amount"] for old in self.db.all(
-                        "SELECT total amount FROM sale_returns r WHERE r.org_id=? AND r.sale_id=?"
-                        " AND r.refund_method='card' AND NOT EXISTS (SELECT 1 FROM audit_log a"
-                        " WHERE a.org_id=r.org_id AND a.entity_type='sale' AND a.entity_id=r.sale_id AND a.action='sale.return'"
-                        " AND json_extract(a.after_json,'$.return_id')=r.id"
-                        " AND json_extract(a.after_json,'$.card_only')=1)",
-                        (ctx.org_id, sid)))
+                    from ..finance import money
+                    legacy = money.legacy_wallet_refund_reserve(self.db, ctx, sid)
                     # Cash paid out with an approval can also have used wallet money after exhausting cash.
                     cash_other = max(0, done.get("cash", 0) - (s["paid_cash"] or 0))
                     room = max(0, min(can, channels[channel_id] - previous - short - legacy - cash_other,
@@ -1633,10 +1628,10 @@ class Sales:
                 from ..finance import money
                 money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
                                    meta={"return_id": rid, "method": "card"}, card_only=True)
+            wallet_account = None
             if refund_method == "transfer" and refund:
-                from ..finance import money
-                money.refund_wallet(self.db, ctx, sid, channel_id, refund, return_id=rid,
-                                    note=f"مرتجع فاتورة {s['sale_no']}")
+                wallet_account = money.refund_wallet(self.db, ctx, sid, channel_id, refund, return_id=rid,
+                                                    note=f"مرتجع فاتورة {s['sale_no']}")
             # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
             # refunded to his account or his card, that change is already his credit and stays
             # in cash only (review P2): a card refund never needs the drawer or an open shift; his change stays credit
@@ -1649,7 +1644,7 @@ class Sales:
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds, "rounding": rounding_back or None,
-                                **({"channel_id": channel_id} if refund_method == "transfer" else {}),
+                                **({"channel_id": channel_id, "wallet_account_id": wallet_account} if refund_method == "transfer" else {}),
                                 **({"card_only": True} if refund_method == "card" else {})})
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
                         if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",

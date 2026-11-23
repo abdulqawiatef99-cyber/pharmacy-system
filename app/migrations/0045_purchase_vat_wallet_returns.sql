@@ -46,3 +46,5 @@ ALTER TABLE sale_returns_next RENAME TO sale_returns;
 CREATE INDEX ix_sale_returns_sale ON sale_returns(sale_id);
 CREATE INDEX ix_sale_returns_at ON sale_returns(org_id, created_at);
 CREATE INDEX ix_sale_returns_sale_org_at ON sale_returns(sale_id, org_id, created_at);
+CREATE INDEX ix_sales_drafts_org ON sales(org_id, id) WHERE status='draft';
+CREATE INDEX ix_recall_matches_batch ON recall_matches(org_id, batch_id);

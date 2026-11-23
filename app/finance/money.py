@@ -780,7 +780,7 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
 
 
 def refund_wallet(db: Database, ctx: Context, sale_id: str, channel_id: str | None, amount: int,
-                  *, return_id: str, note: str) -> None:
+                  *, return_id: str, note: str) -> str | None:
     """Debit the wallet account recorded for this sale, even if the route has since changed."""
     source = db.all(
         "SELECT account_id, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
@@ -800,10 +800,38 @@ def refund_wallet(db: Database, ctx: Context, sale_id: str, channel_id: str | No
         accounts.update(legacy)
     if len(accounts) > 1:
         raise Conflict("المحفظة اتسجلت على أكتر من حساب في الفاتورة دي", code="ambiguous_wallet_account")
-    account = next(iter(accounts), None) or route_for(db, ctx.org_id, "transfer", channel_id)
+    account = next(iter(accounts), None)
     if account:
         _post(db, ctx, account, -amount, "refund", ref_type="sale_return", ref_id=sale_id, note=note,
               meta={"return_id": return_id, "method": "transfer", "channel_id": channel_id}, check=False, active=False)
+    return account
+
+
+def legacy_wallet_refund_reserve(db: Database, ctx: Context, sale_id: str) -> int:
+    """Reserve legacy card returns unless a debit proves the payout came from a distinct card account."""
+    legacy = db.all(
+        "SELECT r.id, r.total FROM sale_returns r WHERE r.org_id=? AND r.sale_id=?"
+        " AND r.refund_method='card' AND NOT EXISTS (SELECT 1 FROM audit_log a"
+        " WHERE a.org_id=r.org_id AND a.entity_type='sale' AND a.entity_id=r.sale_id AND a.action='sale.return'"
+        " AND json_extract(a.after_json,'$.return_id')=r.id AND json_extract(a.after_json,'$.card_only')=1)",
+        (ctx.org_id, sale_id))
+    if not legacy:
+        return 0
+    by_method = {"card": set(), "transfer": set()}
+    movements = db.all("SELECT account_id, amount, ref_type, kind, meta FROM money_movements"
+                       " WHERE org_id=? AND ref_id=? AND ref_type IN ('sale','sale_return')",
+                       (ctx.org_id, sale_id))
+    for row in movements:
+        method = json.loads(row["meta"] or "{}").get("method")
+        if row["kind"] == "sale" and method in by_method:
+            by_method[method].add(row["account_id"])
+    card_only = by_method["card"] - by_method["transfer"]
+    proven = {}
+    for row in movements:
+        if row["kind"] == "refund" and row["account_id"] in card_only:
+            rid = json.loads(row["meta"] or "{}").get("return_id")
+            proven[rid] = proven.get(rid, 0) - row["amount"]
+    return sum(max(0, r["total"] - proven.get(r["id"], 0)) for r in legacy)
 
 
 def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: int) -> int:

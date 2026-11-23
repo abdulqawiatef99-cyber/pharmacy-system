@@ -93,6 +93,13 @@ def _base(pub: int | None, line: dict) -> int | None:
     return None if pub is None else pub - 2 * margin_of(line)
 
 
+def _line_net(line: dict, net: int, qty: int, sources: dict) -> int:
+    base, discount = _base(line.get("public_price"), line), line.get("discount_bp")
+    if sources.get("unit_net_price") == "inferred" and base is not None and base >= 0 and discount is not None:
+        return half_up_div(qty * base * (10000 - discount), 10000)
+    return net * qty
+
+
 def derive_line(line: dict) -> dict:
     """Mutates and returns line (DB-shaped dict). Only arithmetic consequences."""
     src, conf = _j(line.get("field_sources")), _j(line.get("field_confidence"))
@@ -114,11 +121,7 @@ def derive_line(line: dict) -> dict:
     net = line.get("unit_net_price")
     if total is None and net is not None and qty:
         added_tax = 0 if line.get("tax_included") == 1 else tax or 0
-        if src.get("unit_net_price") == "inferred" and base is not None and disc is not None:
-            # the net is itself a rounded value: round the line once, from the exact figures
-            put("line_total", half_up_div(qty * base * (10000 - disc), 10000) + added_tax)
-        else:
-            put("line_total", net * qty + added_tax)
+        put("line_total", _line_net(line, net, qty, src) + added_tax)
     line["field_sources"], line["field_confidence"] = src, conf
     return line
 
@@ -156,6 +159,25 @@ def computed_total(invoice: dict, lines: list[dict]) -> int | None:
     if not lines or any(a is None for a in amounts):
         return None
     return sum(amounts) - (invoice.get("extra_discount") or 0) + (invoice.get("extra_tax") or 0)
+
+
+def line_total_mismatch(line: dict) -> dict | None:
+    total, net, qty = (line.get(k) for k in ("line_total", "unit_net_price", "qty"))
+    if total is None or net is None or not qty:
+        return None
+    tax, included = line.get("tax_amount") or 0, line.get("tax_included")
+    if included is None:
+        pre = net * qty
+        expected = pre + tax
+        tol = line_tolerance(expected, qty)
+        mismatch = abs(total - expected) > tol and abs(total - pre) > tol
+    else:
+        sources = _j(line.get("field_sources"))
+        expected = _line_net(line, net, qty, sources) + (0 if included else tax)
+        # A split or merge preserves a validated total and assigns any rounding difference.
+        tol = line_tolerance(expected, qty) if sources.get("line_total") == "allocated" else 0
+        mismatch = abs(total - expected) > tol
+    return {"expected": expected, "actual": total} if mismatch else None
 
 
 def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today: date,
@@ -221,15 +243,10 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
                 if abs(exp - net) > max(2, round(pub * 0.005)):
                     add("warning", "net_price_mismatch", lid, "unit_net_price",
                         expected=exp, actual=net)
+        mismatch = line_total_mismatch(l)
+        if mismatch:
+            add("error", "line_total_mismatch", lid, "line_total", **mismatch)
         total = l.get("line_total")
-        if total is not None and net is not None and qty:
-            pre = net * qty
-            tax = l.get("tax_amount") or 0
-            included = l.get("tax_included")
-            expected = pre if included == 1 else pre + tax
-            tol = line_tolerance(expected, qty)
-            if abs(total - expected) > tol and (included is not None or abs(total - pre) > tol):
-                add("error", "line_total_mismatch", lid, "line_total", expected=expected, actual=total)
         if l.get("tax_included") == 1 and total is not None and (l.get("tax_amount") or 0) > total:
             add("error", "tax_above_total", lid, "tax_amount")
         item = items.get(l.get("item_id") or "")
