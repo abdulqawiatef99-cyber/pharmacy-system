@@ -37,9 +37,9 @@ def preview(db: Database, ctx: Context, item_id: str, new_pack: int) -> dict:
     """What a correction would do, without doing it."""
     ctx.require("items.write")
     ctx.require("inventory.adjust")
-    it = db.one("SELECT id, pack_size, base_unit_name, min_stock, max_stock, is_service FROM items"
+    it = db.one("SELECT id, pack_size, base_unit_name, min_stock, max_stock, is_service, hidden FROM items"
                 " WHERE id=? AND org_id=?", (item_id, ctx.org_id))
-    if not it:
+    if not it or (it["hidden"] and not ctx.can("items.hidden")):
         raise NotFound("الصنف غير موجود")
     if not isinstance(new_pack, int) or isinstance(new_pack, bool) or not 1 <= new_pack <= 10000:
         raise ValidationFailed("عدد الوحدات في العبوة لازم يكون رقم صحيح من 1 لـ 10000")
@@ -62,11 +62,25 @@ def preview(db: Database, ctx: Context, item_id: str, new_pack: int) -> dict:
             "open_credit": open_credit_sales(db, ctx, item_id)}
 
 
-def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason: str) -> dict:
-    reason = (reason or "").strip()[:200]
+def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason: str,
+                 *, expected_pack: int | None = None, base_unit_name: str | None = None) -> dict:
+    reason = reason.strip()[:200] if isinstance(reason, str) else ""
     if len(reason) < 3:
         raise ValidationFailed("اكتب سبب التصحيح")
+    if base_unit_name is not None:
+        if not isinstance(base_unit_name, str) or not 1 <= len(base_unit_name.strip()) <= 30:
+            raise ValidationFailed("اكتب اسم الوحدة الصغيرة (من 1 لـ 30 حرف)")
+        base_unit_name = base_unit_name.strip()
     with db.transaction():
+        if expected_pack is not None:
+            ctx.require("items.write")
+            ctx.require("inventory.adjust")
+            item = db.one("SELECT pack_size, hidden, is_service FROM items WHERE org_id=? AND id=?",
+                          (ctx.org_id, item_id))
+            if not item or (item["hidden"] and not ctx.can("items.hidden")):
+                raise NotFound("الصنف غير موجود")
+            if type(expected_pack) is not int or item["pack_size"] != expected_pack or item["is_service"]:
+                raise Conflict("بيانات العبوة اتغيرت؛ افتح الصنف من جديد", code="stale_pack")
         p = preview(db, ctx, item_id, new_pack)
         if p["drafts"]:
             raise Conflict("الصنف موجود في فاتورة بيع لسه ما اتقفلتش: اقفلها أو احذف السطر الأول", code="pack_in_draft")
@@ -104,10 +118,12 @@ def correct_pack(db: Database, ctx: Context, item_id: str, new_pack: int, reason
             key += row["dedupe_key"][row["dedupe_key"].index("|dup:"):]
         if db.one("SELECT 1 FROM items WHERE org_id=? AND dedupe_key=? AND id<>?", (ctx.org_id, key, item_id)):
             raise Conflict("فيه صنف تاني بنفس الاسم والعبوة الجديدة: ادمجهم الأول أو فرّق الاسم", code="pack_duplicate")
-        db.execute("UPDATE items SET pack_size=?, min_stock=?, max_stock=?, dedupe_key=?, updated_at=? WHERE id=? AND org_id=?",
-                   (new_pack, mn, mx, key, inv._now(), item_id, ctx.org_id))
-        audit.record(db, ctx, ACTION, "item", item_id, {"pack_size": old},
-                     {"pack_size": new_pack, "reason": reason, "lots": len(p["lots"]), "open_credit": p["open_credit"],
+        new_unit = base_unit_name or p["unit"]
+        db.execute("UPDATE items SET pack_size=?, base_unit_name=?, min_stock=?, max_stock=?, dedupe_key=?,"
+                   " updated_at=? WHERE id=? AND org_id=?",
+                   (new_pack, new_unit, mn, mx, key, inv._now(), item_id, ctx.org_id))
+        audit.record(db, ctx, ACTION, "item", item_id, {"pack_size": old, "base_unit_name": p["unit"]},
+                     {"pack_size": new_pack, "base_unit_name": new_unit, "reason": reason, "lots": len(p["lots"]), "open_credit": p["open_credit"],
                       "ledger_seq": seq})
     return {**p, "done": True}
 
