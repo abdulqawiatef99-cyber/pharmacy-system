@@ -1748,7 +1748,7 @@ function openPurchaseLineCard(row) {
   const invoice = CUR.invoice;
   const current = onThisScreen();
   const path = `/api/purchases/${invoice.id}/lines/${line.id}`;
-  const canLink = invoice.status === "draft" && ME.permissions.includes("purchases.edit");
+  const draft = invoice.status === "draft";
   const active = document.activeElement;
   const activeInput = active.dataset.line && active.dataset.field;
   const restore = async () => {
@@ -1770,8 +1770,8 @@ function openPurchaseLineCard(row) {
     purchase: invoice.id,
     query: line.raw_name,
     newName: line.raw_name,
-    onPick: canLink ? (item) => update("", "PATCH", { changes: { item_id: item.id } }) : null,
-    onCreate: canLink && canW() ? (item, force) => update("/new-item", "POST", { item, force }) : null,
+    onPick: draft ? (item) => update("", "PATCH", { changes: { item_id: item.id } }) : null,
+    onCreate: draft ? (item, force) => update("/new-item", "POST", { item, force }) : null,
     onSaved: async (item) => {
       await waitForPurchaseSave(invoice.id);
       if (current()) refreshPurchaseItem(item);

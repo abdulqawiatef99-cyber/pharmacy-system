@@ -190,7 +190,7 @@ const { chromium } = require('playwright');
 SALE = r"""
 const { chromium } = require('playwright');
 (async () => {
-  const [base, user, pw, barcode, second] = process.argv.slice(1);
+  const [base, user, pw, barcode, second, unlinkedInvoice] = process.argv.slice(1);
 """ + LOGIN + r"""
   p.setDefaultTimeout(5000);
   await p.goto(base + '/#/pos');
@@ -220,8 +220,14 @@ const { chromium } = require('playwright');
   await card.waitFor({state:'hidden'});
   await button.click();
   await card.getByText('UX1-BATCH', {exact:true}).waitFor();
-  console.log(JSON.stringify({readOnly, hidesCosts, focus, pages:b.contexts()[0].pages().length,
-                             hash:new URL(p.url()).hash}));
+  const out = {readOnly, hidesCosts, focus, pages:b.contexts()[0].pages().length, hash:new URL(p.url()).hash};
+  await p.goto(base + '/#/purchases/' + unlinkedInvoice);
+  await p.locator('table.lines').getByRole('button', {name:'كارت الصنف', exact:true}).click();
+  await card.getByRole('button', {name:'صنف جديد', exact:true}).click();
+  const rejected = p.waitForResponse(r => r.url().endsWith('/new-item'));
+  await card.getByRole('button', {name:'احفظ', exact:true}).click();
+  out.createStatus = (await rejected).status();
+  console.log(JSON.stringify(out));
   await b.close();
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -283,6 +289,8 @@ class TestInvoiceItemCard(APICase):
         cat.add_barcode(self.db, self.ctx, fixture, second)
         people.add_user(self.db, self.ctx, username="cashier", full_name="Synthetic Cashier", password=PW,
                         role_code="assistant")
-        out = run_node(self, SALE, "cashier", PW, self.barcode, second)
+        draft = self.draft("UX1-UNLINKED")
+        self.add(draft, {"raw_name": "Unlinked Fixture", "qty": 1, "public_price": 4000, "discount_bp": 2500})
+        out = run_node(self, SALE, "cashier", PW, self.barcode, second, draft)
         self.assertEqual(out, {"readOnly": True, "hidesCosts": True, "focus": True,
-                               "pages": 1, "hash": "#/pos"})
+                               "pages": 1, "hash": "#/pos", "createStatus": 403})
