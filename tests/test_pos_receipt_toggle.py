@@ -46,8 +46,8 @@ class TestReceiptRule(unittest.TestCase):
     def test_override_is_per_sale_and_dropped_after_completion(self):
         self.assertIn("rcpt: {}", JS)
         self.assertIn("POS.rcpt[s.id] = e.target.checked", JS)
-        self.assertIn("delete POS.rcpt[SALE.id]", JS)
-        self.assertIn("receipt: receiptWanted(SALE, RCFG, POS.rcpt[SALE.id])", JS)
+        self.assertIn("delete POS.rcpt[sid]", JS)
+        self.assertIn("receipt: receiptWanted(SALE, RCFG, POS.rcpt[sid])", JS)
         self.assertNotIn("open_drawer: cash > 0", JS)          # the screen no longer asks for the drawer
 
 
