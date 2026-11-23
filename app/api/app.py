@@ -9,21 +9,24 @@ only translate HTTP <-> service calls.
 """
 from __future__ import annotations
 
-import re
-
+import asyncio
 import base64
 import functools
 import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
+from collections.abc import Hashable
 from decimal import Decimal
 from pathlib import Path
 
+from anyio import CapacityLimiter, to_thread
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -159,16 +162,25 @@ class SecurityHeaders(BaseHTTPMiddleware):
 class RateLimiter:
     def __init__(self, limit: int, window_s: int, message: str = "محاولات كثيرة، انتظر دقيقة"):
         self.limit, self.window, self.message = limit, window_s, message
-        self.hits: dict[str, deque] = defaultdict(deque)
+        self.hits: dict[Hashable, deque[float]] = defaultdict(deque)
+        self.lock = threading.Lock()
 
-    def check(self, key: str) -> None:
-        now = time.monotonic()
-        q = self.hits[key]
-        while q and now - q[0] > self.window:
-            q.popleft()
-        if len(q) >= self.limit:
+    def check(self, key: Hashable) -> None:
+        if self.record(key):
             raise DomainError(self.message, code="rate_limited")
-        q.append(now)
+
+    def record(self, key: Hashable) -> bool:
+        with self.lock:
+            if key not in self.hits and len(self.hits) >= 4096:
+                del self.hits[next(iter(self.hits))]
+            now = time.monotonic()
+            q = self.hits[key]
+            while q and now - q[0] > self.window:
+                q.popleft()
+            if len(q) >= self.limit:
+                return True
+            q.append(now)
+            return False
 
 
 def create_app(db: Database | None = None, settings: config_mod.Settings | None = None,
@@ -198,7 +210,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
-    login_limiter = RateLimiter(10, 60)
+    password_workers = CapacityLimiter(2)
+    password_failures = RateLimiter(5, 60)
+    pin_limiter = RateLimiter(10, 60)
+    setup_limiter = RateLimiter(10, 60)
     approver_limiter = RateLimiter(20, 60)
     # the current password typed in an open session (#134): 5 tries in 5 minutes per user, so an open
     # session cannot be used to guess the password at full speed
@@ -225,6 +240,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return accounts.effective_access(db, org_id, who)
 
     def ctx_of(req: Request):
+        cached = getattr(req.state, "authorization_context", None)
+        if cached is not None:
+            return cached
         token = None
         auth = req.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
@@ -237,21 +255,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
         if approver and req.url.path == "/api/approvals/check":
             # the PIN is typed once and checked here only; every other request carries the approval token (#137)
-            approver_limiter.check(client_ip(req))
+            approver_limiter.check(ctx.user_id)
             ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
-            req.state.session_token = token
-        elif req.headers.get("x-approval"):
-            ctx = approvals.apply(ctx, token, req.headers["x-approval"][:128], f"{req.method} {req.url.path}",
-                                  lambda who: approver_access(ctx.org_id, who),
-                                  body=getattr(req.state, "approval_body", None))
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
                 break
+        req.state.authorization_context = ctx
         return ctx
 
     def _length_guard(req: Request, limit: int, *, required: bool = False) -> None:
@@ -320,6 +335,34 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return raw
         return raw.replace(b"--" + m.group(1).encode("latin-1"), b"--\x00boundary")
 
+    async def _approval_intent(req: Request) -> approvals.Intent | None:
+        key = req.headers.get("idempotency-key", "").strip()
+        if req.method in ("GET", "HEAD") or not key or len(key) > 100:
+            return None
+        raw = await _read_body(req)
+        media = req.headers.get("content-type", "")
+        media = media.partition(";")[0].strip().lower() if media.lower().startswith("multipart/form-data") else media
+        fingerprint = hashlib.sha256(req.method.encode() + b" " + req.url.path.encode() + _query_part(req)
+                                     + b"\0" + media.encode() + b"\0" + _same_form(req, raw)).hexdigest()
+        return approvals.Intent(key, fingerprint)
+
+    async def _approval_summary(req: Request) -> dict:
+        summary = {"method": req.method, "target": req.url.path}
+        if req.headers.get("content-type", "").partition(";")[0].lower() != "application/json":
+            return summary
+        try:
+            payload = json.loads(await _read_body(req))
+        except (ValueError, UnicodeError):
+            return summary
+        if isinstance(payload, dict):
+            for field in ("amount", "public_price", "qty", "version"):
+                if type(payload.get(field)) is int:
+                    summary[field] = payload[field]
+            lines = payload.get("lines")
+            if isinstance(lines, dict) and lines and all(type(qty) is int for qty in lines.values()):
+                summary["qty"] = sum(lines.values())
+        return summary
+
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
@@ -328,23 +371,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
-        if req.method != "POST" or not key or len(key) > 100 or req.url.path.startswith("/api/auth/"):
+        if ((req.method != "POST" and not getattr(req.state, "reserved_approval", False))
+                or not key or len(key) > 100 or req.url.path.startswith("/api/auth/")):
             return await fn(req)
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
                                + _same_form(req, raw)).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
+        current_permissions = ctx.permissions | ctx.approver_permissions
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its
         # response, finds the reservation and is refused instead of posting a second time.
-        with db.transaction():
-            hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
-            if not hit:
-                idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)   # at most once an hour, not a scan per POST (#324 M2-25)
-                db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
-                           " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
-                           (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(ctx.permissions))))
+        replay_only = getattr(req.state, "approval_replay_only", False)
+
+        def reserve():
+            with db.transaction():
+                hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
+                if not hit:
+                    if replay_only:
+                        raise Forbidden("الموافقة استُخدمت بالفعل", code="approval_used")
+                    idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)
+                    db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
+                               " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
+                               (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(current_permissions))))
+            return hit
+
+        hit = await run_in_threadpool(reserve)
         if hit:
             stored, _, held = hit["request_hash"].partition("|")
             if stored != rhash:
@@ -354,11 +407,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                " قبل إعادتها", code="idempotency_unconfirmed")
             if req.url.path == "/api/cash/close":
                 # rebuilt under the permissions held now, not the report stored at the close (#324 M4)
-                resp = J(CashDrawer(db).close_result(ctx, json.loads(hit["response"])["id"]), status_code=hit["status"])
+                resp = J(await run_in_threadpool(CashDrawer(db).close_result, ctx, json.loads(hit["response"])["id"]),
+                         status_code=hit["status"])
             else:
                 # the stored answer was built under the permissions held then: after one of them was taken away
                 # it is not handed out again (a payroll answer after payroll.manage was revoked, #324 X7)
-                if held and not set(held.split(",")) <= set(ctx.permissions):
+                if held and not set(held.split(",")) <= current_permissions:
                     raise Forbidden("صلاحياتك اتغيّرت بعد العملية دي؛ راجع نتيجتها من شاشتها",
                                     code="permissions_changed")
                 resp = Response(hit["response"], status_code=hit["status"], media_type="application/json")
@@ -372,22 +426,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
         # every write is saved together with its audit row: a rule error raised AFTER one (a 403 while
         # building the answer) must keep the key, or the retry posts a second time (#324 S6, as #331)
-        audit_mark = _audit_mark(ctx)
+        audit_mark = await run_in_threadpool(_audit_mark, ctx)
+        req.state.action_audit_mark = audit_mark
         try:
             resp = await fn(req)
         except DomainError:
-            if not _committed_since(audit_mark, ctx):
-                release()        # refused by a rule before any write: the same key may run again
+            if not await run_in_threadpool(_committed_since, audit_mark, ctx):
+                await run_in_threadpool(release)        # refused by a rule before any write: the same key may run again
             raise
         # Any other exception keeps the reservation: it may have come after a commit, so a retry
         # with this key is refused rather than risk a second posting (a new click uses a new key).
         if 200 <= resp.status_code < 300 and resp.media_type == "application/json":
             # If this write fails, the reservation stays and a retry is refused (never re-run).
-            with db.transaction():
-                db.execute("UPDATE idempotency_keys SET status=?, response=? WHERE org_id=? AND user_id=? AND key=?",
-                           (resp.status_code, resp.body.decode("utf-8"), *ident))
+            def store_response():
+                with db.transaction():
+                    db.execute("UPDATE idempotency_keys SET status=?, response=? WHERE org_id=? AND user_id=? AND key=?",
+                               (resp.status_code, resp.body.decode("utf-8"), *ident))
+
+            await run_in_threadpool(store_response)
         else:
-            release()            # only successful JSON answers are replayed, as before
+            await run_in_threadpool(release)  # only successful JSON answers are replayed
         return resp
 
     def _audit_mark(ctx) -> int:
@@ -405,24 +463,48 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     def handler(fn):
         async def wrapped(req: Request):
+            token = req.headers.get("x-approval", "")[:128]
+            action = f"{req.method} {req.url.path}"
+            before = None
             try:
-                approval = req.headers.get("x-approval", "")[:128]
-                if approval and req.method not in ("GET", "HEAD"):
-                    # an approval is bound to the exact request it is first used on and spent once it succeeds:
-                    # one PIN = one action with one quantity (#324 X5)
-                    req.state.approval_body = hashlib.sha256(await _read_body(req)).hexdigest()
-                resp = await _idempotent(req, fn)
-                if approval and req.method not in ("GET", "HEAD") and 200 <= resp.status_code < 300:
-                    approvals.consume(approval)
-                return resp
+                if token and req.url.path != "/api/approvals/check":
+                    ctx = await run_in_threadpool(ctx_of, req)
+                    intent = await _approval_intent(req)
+                    if req.method not in ("GET", "HEAD") and intent is None:
+                        raise ValidationFailed("العملية تحتاج مفتاح طلب للموافقة", code="approval_intent_required")
+                    if intent is not None:
+                        before = await run_in_threadpool(_audit_mark, ctx)
+                    authorized, replay_only = await run_in_threadpool(
+                        approvals.apply, ctx, req.state.session_token, token, action,
+                        lambda who: approver_access(ctx.org_id, who), intent=intent)
+                    req.state.authorization_context = authorized
+                    req.state.reserved_approval = intent is not None
+                    req.state.approval_replay_only = replay_only
+                    if replay_only:
+                        before = None
+                return await _idempotent(req, fn)
             except DomainError as e:
+                details = e.details
+                ctx = getattr(req.state, "authorization_context", None)
+                permission = details.get("permission") if isinstance(details, dict) else None
+                original_mark = getattr(req.state, "action_audit_mark", before)
+                if (ctx is not None and e.code == "approval_required" and isinstance(permission, str)
+                        and req.method not in ("GET", "HEAD") and approvals.eligible(ctx, permission)
+                        and req.url.path != "/api/approvals/check"):
+                    intent = await _approval_intent(req)
+                    if intent is not None and (original_mark is None or not await run_in_threadpool(_committed_since, original_mark, ctx)):
+                        if before is not None:
+                            await run_in_threadpool(approvals.restore_for_next_permission, token)
+                        challenge = await run_in_threadpool(
+                            approvals.challenge, ctx, req.state.session_token, action, permission, intent)
+                        details = {**details, "summary": await _approval_summary(req), "challenge": challenge}
                 status = 429 if e.code == "rate_limited" else e.status
-                return J({"error": {"code": e.code, "message": e.message, "details": e.details}},
+                return J({"error": {"code": e.code, "message": e.message, "details": details}},
                          status_code=status)
             except Exception:   # never leak internals
                 log.exception("unhandled error on %s %s", req.method, req.url.path)
                 return J({"error": {"code": "internal", "message": "حدث خطأ غير متوقع"}},
-                         status_code=500)
+                         status_code=500, background=getattr(req.state, "checkout_task", None))
         return wrapped
 
     async def off_loop(fn, *args, **kwargs):
@@ -434,18 +516,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return await run_in_threadpool(run)
 
     # ------------------------------------------------------------- auth
+    def _auth_screen(req: Request, *, screen_only: bool = False) -> None:
+        origin = req.headers.get("origin")
+        site = req.headers.get("sec-fetch-site")
+        media = req.headers.get("content-type", "").partition(";")[0].strip().lower()
+        marker = req.headers.get("x-requested-with") == "pharm"
+        if (origin is not None and origin != f"{req.url.scheme}://{req.url.netloc}"
+                or site not in (None, "none", "same-origin")
+                or site == "same-origin" and origin is None
+                or media != "application/json"
+                or (screen_only or origin is not None) and not marker):
+            raise Unauthorized("طلب غير موثّق", code="csrf")
+
     @handler
     async def login(req):
-        # only from the program's own screen or a JSON client: a form on another site (text/plain) cannot sign a
-        # browser in to someone else's account (#324 X25)
-        if req.headers.get("x-requested-with") != "pharm" and \
-                not req.headers.get("content-type", "").lower().startswith("application/json"):
-            raise Unauthorized("طلب غير موثّق", code="csrf")
-        login_limiter.check(client_ip(req))
+        _auth_screen(req)
         b = await body(req)
-        res = accounts.login(db, str(b.get("username", "")), str(b.get("password", "")),
-                             org_id=b.get("org_id"), ip=client_ip(req),
-                             user_agent=req.headers.get("user-agent"))
+        username = str(b.get("username", "")).strip()
+        peer = client_ip(req)
+        try:
+            res = await to_thread.run_sync(functools.partial(
+                accounts.login, db, username, str(b.get("password", "")), org_id=b.get("org_id"),
+                ip=peer, user_agent=req.headers.get("user-agent")), limiter=password_workers)
+        except Unauthorized:
+            if password_failures.record((peer, username)):
+                await asyncio.sleep(1)
+            raise
         ctx = accounts.resolve_session(db, res["token"])
         out = {"me": accounts.me(db, ctx), "expires_at": res["expires_at"]}
         if b.get("token_in_body"):        # mobile/integration clients
@@ -479,10 +575,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         pharmacy exists, and (unless PHARM_ALLOW_REMOTE_SETUP=1) from any machine but this PC."""
         import os as _os
         _own_screen_only(req)
+        _auth_screen(req, screen_only=True)
         if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient") and \
                 _os.environ.get("PHARM_ALLOW_REMOTE_SETUP") != "1":
             raise Forbidden("الإعداد الأول يتم من جهاز الصيدلية نفسه فقط")
-        login_limiter.check(client_ip(req))
+        setup_limiter.check(client_ip(req))
         if not _setup_needed():
             raise Conflict("البرنامج مُعَدّ بالفعل؛ سجّل الدخول", code="already_setup")
         b = await body(req)
@@ -524,26 +621,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..core import updater
         from ..version import __version__
         now = time.time()
-        if upd_cache.get("at", 0) > now - 600:
+        offline = os.environ.get("PHARM_TEST_OFFLINE_UPDATE") == "1"
+        if upd_cache.get("offline") == offline and upd_cache.get("at", 0) > now - 600:
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        token = updater.read_token()
-        # #107: the install's own channel (develop on test PCs); a review installer of a work branch follows the
-        # official release (main) once main contains it (owner 20/11), never an older main
-        chan = updater.follow(info, updater.DEFAULT_REPO, token)
+        token = None if offline else updater.read_token()
+        # Review installs follow main only after their commit reaches it.
+        chan = updater.channel(info) if offline else updater.follow(info, updater.DEFAULT_REPO, token)
         out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, info)}
-        if chan is None:
-            out["candidate"] = info["ref"]        # a review installer main does not contain yet: no channel
-            upd_cache.update(at=now, v=out)
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(None if offline else chan, info)}
+        if offline:
+            upd_cache.update(at=now, v=out, offline=True)
             return out
-        try:
-            out["latest"] = updater.latest_sha(updater.DEFAULT_REPO, chan, token)
-            out["available"] = out["latest"] != cur
-        except updater.UpdateError as e:
-            out["error"] = str(e)
-        upd_cache.update(at=now, v=out)
+        if chan is None:
+            out["candidate"] = info.get("ref")
+        out.update(latest=out["smart"].get("sha"), available=out["smart"].get("available", False))
+        upd_cache.update(at=now, v=out, offline=False)
         return out
 
     upd_root = Path(__file__).resolve().parents[2]
@@ -551,19 +645,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     def _smart_status(chan, info) -> dict:
         """docs/SMART_UPDATE.md: signed bundles (migrations and packages too) once this PC trusts a key."""
         from ..core import smart_update as su, update_sign, updater
+        import release_bootstrap as releases
         out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
                "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
         try:
-            keys = update_sign.trusted_keys(upd_root)
-        except (OSError, update_sign.SignatureError):
+            home = su.home_of(s.data_dir)
+            legacy = releases.installer_root(upd_root)
+            keys = update_sign.trusted_keys(legacy)
+        except (OSError, releases.ReleaseError, update_sign.SignatureError):
             keys = []
-        if not keys or chan is None or su.bootstrap_level(su.home_of(s.data_dir)) < 2:
-            return out                                # old launcher: today's code-only button
+        if not keys or chan is None or su.bootstrap_level(home) < releases.BOOTSTRAP:
+            return out
         token = updater.read_token()
         try:
             m = su.read_manifest(su.GitHubSource(updater.DEFAULT_REPO, chan, token), keys)
-            forward = su.is_forward(m, info, updater.DEFAULT_REPO, token)   # never an older bundle
-        except updater.UpdateError as e:
+            if m["channel"] != chan:
+                raise updater.UpdateError("حزمة التحديث لقناة تانية")
+            forward = su.meets_version_floor(home, m, info, updater.DEFAULT_REPO, token)   # never an older bundle
+        except (releases.ReleaseError, updater.UpdateError) as e:
             out["error"] = str(e)
             return out
         out.update(enabled=True, sha=m["sha"], available=forward, needs_installer=m["python"] != su.python_tag(),
@@ -610,30 +709,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         ctx.require("settings.manage")
         b = await body(req)
-        action = (b or {}).get("action") or "classic"
-        if action != "classic":
-            return J(await _smart_action(ctx, action, b))
-        import subprocess
-        import sys as _sys
-        from ..core import updater
-        chan = updater.follow(updater.installed(s.data_dir), updater.DEFAULT_REPO, updater.read_token())
-        if chan is None:
-            raise ValidationFailed("النسخة دي متثبتة من فرع تجربة مؤقت ومالهاش قناة تحديث؛ ثبّت بالمثبّت", code="no_channel")
-        root = Path(__file__).resolve().parents[2]
-        proc = await run_in_threadpool(lambda: subprocess.run(
-            [_sys.executable, str(root / "manage.py"), "update", "--ref", chan], cwd=os.getcwd(), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=900,
-            env={**os.environ, "PYTHONUTF8": "1"}))
-        ok = proc.returncode == 0
-        with db.transaction():
-            audit.record(db, ctx, "system.update", "system", None,
-                         after={"ok": ok, "channel": chan, "tail": (proc.stdout or "")[-500:]})
-        upd_cache.clear()
-        restart = ok and os.environ.get("PHARM_LAUNCHER") == "1"
-        if restart:          # the launcher starts the new version when we exit with 75
-            threading.Timer(1.5, lambda: os._exit(75)).start()
-        return J({"ok": ok, "restarting": restart,
-                  "output": ((proc.stdout or "") + (proc.stderr or ""))[-3000:]}, status_code=200 if ok else 500)
+        action = b.get("action")
+        if not action or action == "classic":
+            raise ValidationFailed("التحديث يتطلب حزمة إصدار موقّعة", code="signed_update_required")
+        return J(await _smart_action(ctx, action, b))
 
     async def _smart_action(ctx, action: str, b: dict) -> dict:
         """prepare (download, verify, rehearse) / schedule (now | after_close) / cancel; each one audited."""
@@ -738,9 +817,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def stock_alert_api(req):
         """#202: the red banner, refreshed by the screens on their own (login answers do not carry it)."""
         from ..inventory import integrity
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         ctx.require("audit.read")
-        return J({"alert": integrity.banner(db, ctx)})
+        return J({"alert": await run_in_threadpool(integrity.banner, db, ctx)})
 
     @handler
     async def stock_check_report(req):
@@ -800,13 +879,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def pin_login(req):
         _local_only(req)
-        login_limiter.check(client_ip(req))
+        _auth_screen(req, screen_only=True)
         b = await body(req)
         users = {u["id"]: u for u in people.quick_users(db)}
         u = users.get(str(b.get("user_id", "")))
         if not u:
             raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
-        res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", ""))[:6], ip=client_ip(req),
+        pin_limiter.check((client_ip(req), u["id"]))
+        res = people.pin_login(db, u["org_id"], u["id"], str(b.get("pin", "")), ip=client_ip(req),
                                user_agent=req.headers.get("user-agent"))
         ctx = accounts.resolve_session(db, res["token"])
         resp = J({"me": accounts.me(db, ctx), "expires_at": res["expires_at"]})
@@ -846,7 +926,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def item_pack_correct(req):
         from ..catalog import repack
         b = await body(req)
-        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or "",
+                                     expected_pack=b.get("expected_pack"), base_unit_name=b.get("base_unit_name")))
+
+    @handler
+    async def move_pack_review(req):
+        from ..dataimport import migration_review as review
+        return J({"items": await off_loop(review.pack_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_pack_review(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.review_pack, db, ctx_of(req), req.path_params["id"],
+                                         data.get("pack_size"), data.get("reason"), data.get("base_unit_name")))
+
+    @handler
+    async def move_customer_name_review(req):
+        from ..dataimport import migration_review as review
+        return J({"customers": await off_loop(review.customer_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_customer_name(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.apply_customer_name, db, ctx_of(req), req.path_params["id"],
+                                data.get("name"), data.get("current_name")))
 
     @handler
     async def item_card_get(req):
@@ -1099,25 +1204,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             paid, discount = reconcile.split_payment(paid=_int(b.get("amount"), "amount"),
                                                      discount=_int(disc or 0, "discount"))
-        ctx.require("suppliers.pay")
-        src = money.check_source(db, ctx, source or money.OUTSIDE)
-        if src == money.DRAWER:
-            method = "drawer"
-        elif src == money.OUTSIDE:
-            method = method if method in ("cash", "cheque") else "cash"
-        else:
-            kind = money.get_account(db, ctx, src)["kind"] if ctx.can("cash.see_expected") else "other"
-            method = method if method == "cheque" else {"bank": "bank", "wallet": "wallet"}.get(kind, "cash")
         with db.transaction():
-            if src == money.DRAWER:
-                money.drawer_check(db, ctx, paid)        # the drawer never goes below zero (F105)
-            sup.pay(db, ctx, sid, paid, method, b.get("note"), b.get("ref"))
-            lid = db.one("SELECT id FROM supplier_ledger WHERE org_id=? AND supplier_id=? AND kind='payment'"
-                         " ORDER BY rowid DESC LIMIT 1", (ctx.org_id, sid))["id"]
-            if src not in (money.DRAWER, money.OUTSIDE):
-                name = db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))["name"]
-                money.pay_out(db, ctx, src, paid, "supplier_payment", ref_type="supplier_ledger", ref_id=lid,
-                              note=f"دفع للمورد {name}")
+            lid = sup.pay_from(db, ctx, sid, paid, source, method=method, note=b.get("note"), ref=b.get("ref"))
             if discount:
                 reconcile.supplier_discount(db, ctx, sid, discount, payment_id=lid, note=b.get("discount_note"))
         out = sup.account(db, ctx, sid) if ctx.can("suppliers.read") else {"id": sid}
@@ -1176,6 +1264,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                              date_to=qp.get("to") or None, party_id=qp.get("party") or None,
                                              item_id=qp.get("item") or None, ticket=qp.get("ticket") or None,
                                              limit=_int(qp.get("limit") or 200, "limit"))})
+
+    @handler
+    async def estock_period(req):
+        """E-Stock's own totals per day or month (read-only, tagged), with the period's total added from the exact
+        values and rounded once: the history side of a report that crosses the move. Never added into the
+        program's own figures."""
+        from ..dataimport import estock_history as eh
+        qp = req.query_params
+        rows, tot = await off_loop(eh.period_with_total, db, ctx_of(req), qp.get("from") or None, qp.get("to") or None,
+                                   by=qp.get("by") or "month", supplier_id=qp.get("supplier") or None)
+        return J({"source": eh.SOURCE, "rows": rows, "total": tot or {"source": eh.SOURCE}})
 
     @handler
     async def estock_invoice(req):
@@ -1360,8 +1459,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def backup_health_view(req):
-        ctx_of(req).require("settings.manage")
-        return J(backup_health())
+        ctx = await run_in_threadpool(ctx_of, req)
+        ctx.require("settings.manage")
+        return J(await run_in_threadpool(backup_health))
 
     @handler
     async def home_view(req):
@@ -1489,19 +1589,21 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def approval_check(req):
         """The approver typed his PIN: confirm it before the screen retries the action."""
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         if not ctx.approver_id:
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
         perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
         method = str(b.get("method") or "GET").upper()
-        ok = ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT
+        ok = approvals.eligible(ctx, perm) and (
+            ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT)
         out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
         if ok and path.startswith("/api/") and len(path) <= 200 and path != "/api/approvals/check" \
                 and method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
             # #137: lend only this permission, only on the action (method + path) that asked for it, for 90 s
-            out["token"], out["expires_in"] = approvals.issue(
-                ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+            out["token"], out["expires_in"] = await run_in_threadpool(
+                approvals.issue, ctx, req.state.session_token, ctx.approver_id, f"{method} {path}", perm,
+                challenge_token=str(b.get("challenge") or "")[:128],
                 previous=str(b.get("previous") or "")[:128] or None)
         return J(out)
 
@@ -1561,8 +1663,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def notifications_list(req):
-        ctx = ctx_of(req)
-        return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
+        ctx = await run_in_threadpool(ctx_of, req)
+        return J(await off_loop(notify.listing, db, ctx, unread_only=req.query_params.get("unread") == "1",
                                 limit=_qlimit(req, 50, 200)))
 
     @handler
@@ -1623,14 +1725,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- catalog
     @handler
     async def items_list(req):
-        ctx = ctx_of(req)
-        limit = _qlimit(req, 20, 200)
+        ctx = await run_in_threadpool(ctx_of, req)
+        return await off_loop(item_results, ctx, req.query_params, _qlimit(req, 20, 200))
+
+    def item_results(ctx, query, limit):
         # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
-        stock_first = req.query_params.get("stock") in ("first", "only")
-        only_stock = req.query_params.get("stock") == "only"
+        stock_first = query.get("stock") in ("first", "only")
+        only_stock = query.get("stock") == "only"
         # the stock filter looks at up to 500 name matches, not the first 10x (Codex on #400)
-        res = item_search(db, ctx, req.query_params.get("q", ""), 500 if stock_first else limit,
-                          category=req.query_params.get("category") or None)
+        res = item_search(db, ctx, query.get("q", ""), 500 if stock_first else limit,
+                          category=query.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
             c = cats.get(r.get("category_id"))
@@ -1660,20 +1764,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 hidden_no_stock = sum(not has(r) for r in rows)
                 rows = [r for r in rows if has(r)]
         rows = rows[:limit]
+        if query.get("sale"):
+            Sales(db).quote_items(ctx, query["sale"], rows)
         hint = res["hint"]
         if not hint and rows and all(r.get("match") == "spelling" for r in rows):
             hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
-        if req.query_params.get("meta") == "1":
+        if query.get("meta") == "1":
             return J({"items": rows, "hint": hint, "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler
     async def items_create(req):
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         b = await body(req)
-        iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
-                                  force=bool(b.get("force")))
-        return J(catalog.get_item(db, ctx, iid), status_code=201)
+
+        def create():
+            iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
+                                      force=bool(b.get("force")))
+            return J(catalog.get_item(db, ctx, iid), status_code=201)
+
+        return await run_in_threadpool(create)
 
     @handler
     async def item_get(req):
@@ -1685,8 +1795,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def item_update(req):
-        ctx = ctx_of(req)
-        return J(catalog.update_item(db, ctx, req.path_params["id"], await body(req)))
+        ctx = await run_in_threadpool(ctx_of, req)
+        return J(await run_in_threadpool(catalog.update_item, db, ctx, req.path_params["id"], await body(req)))
 
     @handler
     async def suppliers_list(req):
@@ -1806,10 +1916,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                    str(b.get("reason", "")), b.get("line_id"), b.get("version")))
 
     @handler
+    async def purchase_price_default(req):
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            value = purch.set_price_review_default(ctx, (await body(req)).get("default"))
+        else:
+            value = purch.price_review_default(ctx)
+        return J({"default": value})
+
+    @handler
     async def purchase_approve(req):
         ctx = ctx_of(req)
+        if req.method == "GET":
+            return J(purch.price_review(ctx, req.path_params["id"]))
         b = await body(req)
-        return J(purch.approve(ctx, req.path_params["id"], b.get("version")))
+        return J(purch.approve(ctx, req.path_params["id"], b.get("version"), require_price_review=True,
+                               price_decisions=b.get("price_decisions"), price_token=b.get("price_token")))
 
     @handler
     async def purchase_cancel(req):
@@ -2313,12 +2435,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_check(req):
-        ctx = ctx_of(req)
-        return J({"findings": [f.as_dict() for f in Sales(db).safety_check(ctx, req.path_params["id"])]})
+        ctx = await run_in_threadpool(ctx_of, req)
+        findings = await run_in_threadpool(Sales(db).safety_check, ctx, req.path_params["id"])
+        return J({"findings": [f.as_dict() for f in findings]})
 
     @handler
     async def sales_complete(req):
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         b = await body(req)
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         # cash_given: what the customer handed over, only to print the change due (F27); never stored.
@@ -2335,7 +2458,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if 0 < given < cash_part:
             raise ValidationFailed("المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع",
                                    code="cash_given_short", details={"given": given, "cash": cash_part})
-        done = Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
+        done = await run_in_threadpool(Sales(db).complete, ctx, req.path_params["id"],
+                                    paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
@@ -2344,11 +2468,49 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
                                     # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
                                     change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
-        if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
-            kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
-            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
-                                                      given - kept)
+        receipt = b.get("receipt") is True
+        kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
+        if b.get("defer_devices") is True:
+            key = (ctx.org_id, ctx.user_id, done["id"])
+            if not done.get("replayed"):
+                checkout_results[key] = None
+                task = BackgroundTask(finish_checkout_devices, key, ctx, done, receipt, given - kept)
+                # A failure saving the HTTP replay record must still dispatch the committed sale's devices.
+                req.state.checkout_task = task
+                return J({**done, "devices_pending": True}, background=task)
+            if key in checkout_results:
+                return J({**done, "devices_pending": True})
+        elif not done.get("replayed"):
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, receipt, given - kept)
         return J(done)
+
+    # This cache is only for showing device feedback. Posting and replay use the durable sale and request IDs.
+    checkout_results = OrderedDict()
+    checkout_device_slots = CapacityLimiter(4)
+
+    async def finish_checkout_devices(key, ctx, sale, receipt, given):
+        try:
+            job = functools.partial(printing.checkout_devices, db, ctx, sale, receipt, given, drawer_first=True)
+            result = await to_thread.run_sync(job, limiter=checkout_device_slots)
+        except Exception:
+            log.exception("checkout device feedback failed for %s", sale["id"])
+            result = {"receipt": "unknown", "drawer": "unknown", "message": None}
+        checkout_results[key] = result
+        checkout_results.move_to_end(key)
+        if len(checkout_results) > 512:
+            # Keep in-flight entries so a retry can always follow its original job.
+            expired = next((k for k, v in checkout_results.items() if v is not None), None)
+            if expired is not None:
+                checkout_results.pop(expired)
+
+    @handler
+    async def sales_devices(req):
+        ctx = await run_in_threadpool(ctx_of, req)
+        ctx.require("sales.create")
+        key = (ctx.org_id, ctx.user_id, req.path_params["id"])
+        if key not in checkout_results:
+            raise NotFound("نتيجة أجهزة الفاتورة غير متاحة")
+        return J({"devices": checkout_results[key]})
 
     @handler
     async def sales_return(req):
@@ -2360,7 +2522,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
-                                        reason=str(b.get("reason", ""))))
+                                        reason=str(b.get("reason", "")), channel_id=b.get("channel_id")))
 
     @handler
     async def sales_exchange(req):
@@ -2457,7 +2619,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # Database-only operation; no await or external effect inside this transaction.
         status, payload, replayed = idempotency.run(
             db, ctx, key=key, method=req.method, path=req.url.path,
-            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform,
+            replay_only=getattr(req.state, "approval_replay_only", False))
         resp = Response(payload, status_code=status, media_type="application/json")
         if replayed:
             resp.headers["Idempotent-Replay"] = "true"
@@ -2498,7 +2661,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # All awaits are above: the transaction below never spans an async yield.
         status, payload, replayed = idempotency.run(
             db, ctx, key=key, method=req.method, path=req.url.path,
-            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform)
+            request_hash=rhash, ttl_days=IDEMPOTENCY_TTL_DAYS, action=perform,
+            replay_only=getattr(req.state, "approval_replay_only", False))
         # A stored response must not restore visibility removed since the write.
         resp = J(redact_summary(ctx, json.loads(payload)), status_code=status)
         if replayed:
@@ -2739,8 +2903,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0)),
                 ("منها تقريب النقدي (مش مبيعات)", r.get("rounding_total", 0))]
         cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
-        ch_rows = "".join(f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
-                          for c in r["by_channel"])
+        ch_rows = "".join(
+            f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td>"
+            f"<td>{m(c['amount'] - c.get('refunded', 0))}</td></tr>"
+            + (f"<tr><td>مرتجع على نفس المحفظة</td><td>{m(c['refunded'])}</td></tr>" if c.get("refunded") else "")
+            for c in r["by_channel"])
+
         den = r["counted_detail"] or {}
         den_rows = "".join(f"<tr><td>{d / 100:g} × {den[str(d)]}</td><td>{m(d * den[str(d)])}</td></tr>"
                            for d in DENOMINATIONS if den.get(str(d)))
@@ -2782,6 +2950,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
 {f"<tr><td>منها مرتجع على البطاقة</td><td>{m(r['card_refunds'])}</td></tr>" if r['card_refunds'] else ""}
+{f"<tr><td>منها مرتجع للمحفظة</td><td>{m(r['transfer_refunds'])}</td></tr>" if r['transfer_refunds'] else ""}
 {f"<tr><td>منها مرتجع على حساب العميل</td><td>{m(r['credit_refunds'])}</td></tr>" if r['credit_refunds'] else ""}
 {f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
 <table>{cash_rows}<tr class="t"><td>المتوقع في الخزينة</td><td>{m(r['expected_cash'])}</td></tr></table>
@@ -2844,7 +3013,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل"}
+        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -2855,7 +3024,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
+<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}{' · ' + e(r['channel']) if r['channel'] else ''}</td></tr></table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -2884,13 +3053,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
             return e(it.get("name_en") or it["name"])
 
-        def qty(l):
-            it, q = l["item"], l["qty_base"]
-            unit = it["base_unit"] if it["base_unit"] not in (None, "unit") else "وحدة"
-            pack = it.get("pack_unit") if it.get("pack_unit") not in (None, "pack") else "علبة"
-            if it["pack_size"] > 1 and q % it["pack_size"] == 0:
-                return f"{q // it['pack_size']} {e(pack)}"
-            return f"{q} {e(unit)}"
+        from ..printing import escpos as _esc
+
         rows = []
         restricted = False
         for l in sale["lines"]:
@@ -2902,8 +3066,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
                 f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
-            rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
-                        f"<td>{m(l['line_total'])}</td></tr>")
+            for i, (qty, price, gross) in enumerate(_esc.public_price_rows(l)):
+                title = f"{name(l['item'])}{star}<br>" if not i else ""
+                shown = e(qty) + (f" × {m(price)}" if price is not None else "")
+                details = exp + disc if not i else ""
+                rows.append(f"<tr><td>{title}<small>{shown}{details}</small></td><td>{m(gross)}</td></tr>")
         MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
         pays = sale.get("payments") or []
         pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
@@ -2923,6 +3090,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                     f"<tr class='chg'><td>الباقي</td><td>{m(given - cash)}</td></tr>")
         count = (f"<tr><td>عدد الأصناف</td><td>{len(sale['lines'])}</td></tr>"
                  if cfg["show_item_count"] and sale["lines"] else "")
+        bx = sum(p["qty"] for l in sale["lines"] for p in l["official_prices"] if p["pack"])
+        un = sum(p["qty"] for l in sale["lines"] for p in l["official_prices"] if not p["pack"])
+        if sale["lines"]:                    # U2-23: the total quantity
+            count += f"<tr><td>إجمالي الكمية</td><td>{' + '.join(x for x in (f'{bx} علبة' if bx else '', f'{un} وحدة' if un else '') if x)}</td></tr>"
+        cu = sale.get("customer")
+        if cu and sale.get("on_credit") and cu.get("balance_before") is not None:   # U2-23: his balance
+            pay += (f"<tr><td>الرصيد السابق</td><td>{m(cu['balance_before'])}</td></tr>"
+                    f"<tr><td>الرصيد الحالي</td><td>{m(cu['balance'])}</td></tr>")
         hd = []
         if cfg["has_logo"]:
             from ..printing import logo as logo_mod
@@ -2954,22 +3129,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if cfg["show_cashier"] and cashier:
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
-            info.append(f"العميل: {e(sale['customer']['name'])}")
+            cu = sale["customer"]
+            info.append(f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else ""))
+            if sale.get("on_credit") and sale.get("kind") != "delivery":   # U2-23 (a delivery prints its own line)
+                info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
             info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
         policy = ""
         if cfg["show_return_policy"]:
-            n = return_window_days(db, ctx.org_id)       # Arabic number agreement: 7 أيام, 14 يومًا
-            days = {1: "يوم واحد", 2: "يومين"}.get(n) or (f"{n} أيام" if 3 <= n <= 10 else f"{n} يومًا")
-            policy = f"<p class='s'>المرتجع خلال {days} بهذه الفاتورة"
-            policy += " · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها</p>" if restricted else "</p>"
+            # one text for both receipts (B1): Arabic number agreement, 0 days, the ✱ note
+            policy = f"<p class='s'>{e(_esc.policy_text(return_window_days(db, ctx.org_id), restricted))}</p>"
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إيصال {sale['sale_no']}</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}{header}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>{count}
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
-{f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
+<tr><td>الخصم</td><td>{m(sale['discount_total'])}</td></tr>
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
 {f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
 <tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
@@ -3009,7 +3185,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             left = data["code"] if on["code"] else data["value"] if on["digits"] else ""
             bottom = (f'<div class="c"><span>{e(left)}</span><span>{e(data["expiry"]) if on["expiry"] else ""}</span>'
                       f'<b>{e(data["price"]) if on["price"] else ""}</b></div>') if (left or on["expiry"] or on["price"]) else ""
-            cells += [f'<div class="lb">{top}{mark}{name}{bottom}</div>'] * n
+            content = bottom + name if data["internal_barcode"] and on["barcode"] else name + bottom
+            cells += [f'<div class="lb">{top}{mark}{content}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
         with db.transaction():
@@ -3252,7 +3429,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}/merge", line_merge, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
-        Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
+        Route("/api/settings/purchase-price", purchase_price_default, methods=["GET", "PUT"]),
+        Route("/api/purchases/{id}/approve", purchase_approve, methods=["GET", "POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
         Route("/api/imports", import_analyze, methods=["POST"]),
@@ -3303,13 +3481,19 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),
         Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
+        Route("/api/sales/{id}/devices", sales_devices),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
         Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
         Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
+        Route("/api/estock/period", estock_period),
         Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
+        Route("/api/estock/pack-review", move_pack_review),
+        Route("/api/estock/pack-review/{id}", move_apply_pack_review, methods=["POST"]),
+        Route("/api/estock/customer-name-review", move_customer_name_review),
+        Route("/api/estock/customer-name-review/{id}", move_apply_customer_name, methods=["POST"]),
         Route("/api/estock/customers/{id}/items", estock_customer_items),
         Route("/api/estock/items/{id}/history", estock_item_history),
         Route("/api/estock/statement/{kind}/{id}", estock_statement),
@@ -3391,6 +3575,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if auto_backup:
             autob.start()
             daily.start()
+            from ..catalog import matching
+            threading.Thread(target=matching.prewarm, args=(db,), daemon=True, name="catalog-search").start()
             # #202: stock integrity check on every start, in the background so the screens open at once
             from ..inventory import integrity
             threading.Thread(target=integrity.check_all, args=(db, "startup"), daemon=True,

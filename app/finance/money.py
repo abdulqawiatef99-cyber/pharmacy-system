@@ -136,7 +136,7 @@ def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *
     if kind not in KINDS:
         raise ValueError(f"unknown money movement kind {kind}")
     a = _account(db, ctx, account_id, active=active)     # active=False: only the opening of a stopped account
-    if check and amount < 0 and not a["allow_negative"]:
+    if check and amount < 0 and (a["kind"] == "treasury" or not a["allow_negative"]):
         now = balance(db, ctx.org_id, account_id)
         if now + amount < 0:
             raise Conflict(f"رصيد {a['name']} لا يكفي ({now / 100:,.2f} ج)", code="account_negative",
@@ -171,11 +171,11 @@ def drawer_balance(db: Database, ctx: Context) -> dict:
     return {"shift_id": last["id"], "open": False, "balance": left}
 
 
-def drawer_check(db: Database, ctx: Context, amount: int) -> str:
+def drawer_check(db: Database, ctx: Context, amount: int, branch_id: str | None = None) -> str:
     """Refuse a drawer payout that would take the open shift's cash below zero (inside the caller's
     transaction, before the payout row is written by its own service)."""
     from ..sales import cash
-    sid = cash.require_open_shift(db, ctx)
+    sid = cash.require_open_shift(db, ctx, branch_id)
     now = _drawer_expected(db, ctx, sid)
     if now - amount < 0:
         raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
@@ -183,15 +183,9 @@ def drawer_check(db: Database, ctx: Context, amount: int) -> str:
     return sid
 
 
-def _drawer_out(db: Database, ctx: Context, amount: int, ref_id: str | None, note: str) -> str:
+def _drawer_out(db: Database, ctx: Context, amount: int, ref_id: str | None, note: str) -> str | None:
     from ..sales import cash
-    sid = cash.require_open_shift(db, ctx)
-    now = _drawer_expected(db, ctx, sid)
-    if now - amount < 0:
-        raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
-                       details={"balance": now, "amount": amount})
-    cash.record(db, ctx, -amount, "payout", ref_id, note)
-    return sid
+    return cash.record(db, ctx, -amount, "payout", ref_id, note)
 
 
 def source_label(db: Database, ctx: Context, source: str | None) -> str:
@@ -308,6 +302,8 @@ def update_account(db: Database, ctx: Context, account_id: str, data: dict) -> d
             changes["name"] = name
         bal = balance(db, ctx.org_id, account_id)
         if "allow_negative" in data:
+            if a["kind"] == "treasury" and data["allow_negative"]:
+                raise ValidationFailed("الخزنة الرئيسية لا تسمح برصيد سالب", code="physical_cash")
             changes["allow_negative"] = int(bool(data["allow_negative"]))
             if not changes["allow_negative"] and bal < 0:
                 raise Conflict("رصيد الحساب بالسالب؛ سوّه الأول قبل منع السالب", code="account_negative")
@@ -725,7 +721,7 @@ def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amo
     # a refund back to the card / wallet is what really happened at the machine: it is recorded even if it
     # takes the account below zero (never blocks a customer's return); the count then shows the truth
     return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check,
-                 meta={"method": method})
+                 meta={"method": method, "channel_id": channel_id})
 
 
 def _card_refund_account(db: Database, ctx: Context, sale_id: str) -> str | None:
@@ -743,12 +739,16 @@ def _card_refund_account(db: Database, ctx: Context, sale_id: str) -> str | None
 
 
 def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = None, *, ref_type: str,
-                 note: str | None = None, meta: dict | None = None) -> list[str]:
+                 note: str | None = None, meta: dict | None = None, card_only: bool = False) -> list[str]:
     """Take a sale's card / wallet money back (a void: all of it; a card refund: `amount`) from the accounts the
     sale really went to, read from its own movements, never from today's routes (#348 Codex P1). Inside the
     caller's transaction; recorded even below zero or on a stopped account (a return is never blocked)."""
+    card = (" AND (json_extract(meta, '$.method')='card' OR"
+            " (kind='refund' AND json_extract(meta, '$.method') IS NULL))") if card_only else ""
     rows = db.all("SELECT account_id, sum(amount) net FROM money_movements WHERE org_id=? AND ref_id=?"
-                  " AND kind IN ('sale','refund') GROUP BY account_id ORDER BY min(rowid)", (ctx.org_id, sale_id))
+                  " AND kind IN ('sale','refund')" + card + " GROUP BY account_id"
+                  + (" HAVING sum(CASE WHEN kind='sale' THEN amount ELSE 0 END)>0" if card_only else "")
+                  + " ORDER BY min(rowid)", (ctx.org_id, sale_id))
     left, out = amount, []
     for r in rows:
         take = r["net"] if left is None else min(r["net"], left)
@@ -773,6 +773,61 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
             out.append(_post(db, ctx, acc, -left, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
                              meta=meta, check=False, active=False))
     return out
+
+
+def refund_wallet(db: Database, ctx: Context, sale_id: str, channel_id: str | None, amount: int,
+                  *, return_id: str, note: str) -> str | None:
+    """Debit the wallet account recorded for this sale, even if the route has since changed."""
+    source = db.all(
+        "SELECT account_id, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
+        " AND ref_type='sale' AND json_extract(meta, '$.method')='transfer'",
+        (ctx.org_id, sale_id))
+    accounts = set()
+    for row in source:
+        meta = json.loads(row["meta"])
+        if "channel_id" in meta and meta["channel_id"] == channel_id:
+            accounts.add(row["account_id"])
+    legacy = {row["account_id"] for row in source if "channel_id" not in json.loads(row["meta"])}
+    if legacy:
+        channels = db.all("SELECT DISTINCT channel_id FROM sale_payments"
+                          " WHERE org_id=? AND sale_id=? AND method='transfer'", (ctx.org_id, sale_id))
+        if len(channels) > 1:
+            raise Conflict("حساب المحفظة الأصلي مش محدد في الفاتورة القديمة", code="ambiguous_wallet_account")
+        accounts.update(legacy)
+    if len(accounts) > 1:
+        raise Conflict("المحفظة اتسجلت على أكتر من حساب في الفاتورة دي", code="ambiguous_wallet_account")
+    account = next(iter(accounts), None)
+    if account:
+        _post(db, ctx, account, -amount, "refund", ref_type="sale_return", ref_id=sale_id, note=note,
+              meta={"return_id": return_id, "method": "transfer", "channel_id": channel_id}, check=False, active=False)
+    return account
+
+
+def legacy_wallet_refund_reserve(db: Database, ctx: Context, sale_id: str) -> int:
+    """Reserve legacy card returns unless a debit proves the payout came from a distinct card account."""
+    legacy = db.all(
+        "SELECT r.id, r.total FROM sale_returns r WHERE r.org_id=? AND r.sale_id=?"
+        " AND r.refund_method='card' AND NOT EXISTS (SELECT 1 FROM audit_log a"
+        " WHERE a.org_id=r.org_id AND a.entity_type='sale' AND a.entity_id=r.sale_id AND a.action='sale.return'"
+        " AND json_extract(a.after_json,'$.return_id')=r.id AND json_extract(a.after_json,'$.card_only')=1)",
+        (ctx.org_id, sale_id))
+    if not legacy:
+        return 0
+    by_method = {"card": set(), "transfer": set()}
+    movements = db.all("SELECT account_id, amount, ref_type, kind, meta FROM money_movements"
+                       " WHERE org_id=? AND ref_id=? AND ref_type IN ('sale','sale_return')",
+                       (ctx.org_id, sale_id))
+    for row in movements:
+        method = json.loads(row["meta"] or "{}").get("method")
+        if row["kind"] == "sale" and method in by_method:
+            by_method[method].add(row["account_id"])
+    card_only = by_method["card"] - by_method["transfer"]
+    proven = {}
+    for row in movements:
+        if row["kind"] == "refund" and row["account_id"] in card_only:
+            rid = json.loads(row["meta"] or "{}").get("return_id")
+            proven[rid] = proven.get(rid, 0) - row["amount"]
+    return sum(max(0, r["total"] - proven.get(r["id"], 0)) for r in legacy)
 
 
 def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: int) -> int:

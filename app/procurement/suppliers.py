@@ -84,8 +84,34 @@ PAY_METHODS = {"drawer": "نقدًا من الخزينة", "cash": "نقدًا �
                "cheque": "شيك", "wallet": "إنستاباي / محفظة"}
 
 
+def pay_from(db: Database, ctx: Context, sid: str, amount: int, source: str | None, *, method: str = "",
+             note: str | None = None, ref: str | None = None, ref_id: str | None = None) -> str:
+    """A payment out of a money place (the drawer, the treasury, another account, or outside the program for the
+    owner), inside the caller's transaction: the supplier's ledger and the money place move together. Returns the
+    ledger row id. Used by the payments screen and by a purchase invoice paid at approval."""
+    from ..finance import money
+    ctx.require("suppliers.pay")
+    src = money.check_source(db, ctx, source or money.OUTSIDE)
+    if src == money.DRAWER:
+        method = "drawer"
+    elif src == money.OUTSIDE:
+        method = method if method in ("cash", "cheque") else "cash"
+    else:
+        kind = money.get_account(db, ctx, src)["kind"] if ctx.can("cash.see_expected") else "other"
+        method = method if method == "cheque" else {"bank": "bank", "wallet": "wallet"}.get(kind, "cash")
+    with db.transaction():
+        pay(db, ctx, sid, amount, method, note, ref, ref_id=ref_id)
+        lid = db.one("SELECT id FROM supplier_ledger WHERE org_id=? AND supplier_id=? AND kind='payment'"
+                     " ORDER BY rowid DESC LIMIT 1", (ctx.org_id, sid))["id"]
+        if src not in (money.DRAWER, money.OUTSIDE):
+            name = db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (sid, ctx.org_id))["name"]
+            money.pay_out(db, ctx, src, amount, "supplier_payment", ref_type="supplier_ledger", ref_id=lid,
+                          note=f"دفع للمورد {name}")
+    return lid
+
+
 def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: str | None = None,
-        ref: str | None = None) -> dict:
+        ref: str | None = None, *, ref_id: str | None = None) -> dict:
     """A payment to the supplier. 'drawer' takes it out of today's cash drawer (needs an open shift);
     the others are paid from outside the drawer (bank, cheque number in ref, owner's pocket)."""
     ctx.require("suppliers.pay")
@@ -115,7 +141,7 @@ def pay(db: Database, ctx: Context, sid: str, amount: int, method: str, note: st
                 raise ValidationFailed("الدفع أكبر من المستحق: اكتب السبب في الملاحظة", code="reason_required")
         lid = new_id()
         db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by, pay_method, pay_ref)"
-                   " VALUES (?,?,?,?,'payment',?,?,?,?,?)", (lid, ctx.org_id, sid, -amount, None,
+                   " VALUES (?,?,?,?,'payment',?,?,?,?,?)", (lid, ctx.org_id, sid, -amount, ref_id,
                                                             (note or "").strip()[:200] or PAY_METHODS[method],
                                                             ctx.user_id, method, ref))
         if method == "drawer":

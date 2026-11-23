@@ -276,7 +276,7 @@ def _clean_receipt(raw: str) -> tuple[str, list[str]]:
         "label_flip": rs.label_flip_ok, "label_rows": rs.label_rows_ok,
         "label_a4": lambda x: "%dx%d" % rs.a4_grid(x),
         "paper": one_of(80, 58), "names": one_of("en", "ar", "both"), "label_lang": one_of(*LANGS),
-        "label_text_lang": one_of("ar", "en"), "label_dpi": one_of(203, 300), "drawer_timing": one_of(*rs.DRAWER_TIMINGS),
+        "label_barcode_source": rs.label_barcode_source_ok, "label_text_lang": one_of("ar", "en"), "label_dpi": one_of(203, 300), "drawer_timing": one_of(*rs.DRAWER_TIMINGS),
         "time_format": one_of("12", "24"), "copies": one_of(1, 2, 3),
         "label_gap": lambda x: x if is_int(x) and 0 <= x <= 10 else _bad(),
         "auto_receipt_min": lambda x: x if is_int(x) and 0 <= x <= 100_000_000 else _bad(),

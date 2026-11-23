@@ -270,7 +270,7 @@ def _purchases(db: Database, ctx: Context, today: date, sups: dict) -> tuple[dic
     last, per = {}, {}
     for r in db.all(
             "SELECT l.item_id, p.supplier_id, p.id inv, coalesce(p.invoice_date, substr(p.approved_at,1,10)) day, l.qty, l.bonus_qty,"
-            " l.public_price, l.discount_bp, l.unit_net_price, l.raw_name, l.match_status, l.match_method"
+            " l.public_price, l.discount_bp, l.unit_net_price + l.distributor_margin unit_net_price, l.raw_name, l.match_status, l.match_method"
             " FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id WHERE p.org_id=? AND"
             " p.branch_id=? AND p.status='approved' AND l.item_id IS NOT NULL AND l.qty>0 AND p.approved_at>=?"
             " ORDER BY p.approved_at DESC, l.line_no", (ctx.org_id, ctx.branch_id, since)):
