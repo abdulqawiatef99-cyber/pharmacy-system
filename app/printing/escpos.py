@@ -354,6 +354,14 @@ def unit_price(l: dict) -> int | None:
     return (2 * gross + n) // (2 * n) if n else None
 
 
+def public_price_rows(line: dict) -> list[tuple[str, int | None, int]]:
+    """Receipt rows share saved allocation prices across browser and thermal rendering."""
+    _, _, pack, unit = qty_parts(line)
+    return [(f"{row['qty']} {pack if row['pack'] else unit}", row["price"], row["gross"])
+            for row in line.get("official_prices", [])] or [
+                (qty_text(line), unit_price(line), line.get("gross", line["line_total"]))]
+
+
 def policy_text(n: int, restricted: bool) -> str:
     """The return-policy line, the same on the thermal and the browser receipt (B1)."""
     if n <= 0:
@@ -402,8 +410,6 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     for l in sale["lines"]:
         it = l["item"]
         name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
-        out.append(("row", name + (" ✱" if it.get("no_return") else ""), m(l["line_total"])))
-        up = unit_price(l)
         exp = ""
         if cfg.get("show_expiry"):              # as on the browser receipt (B1)
             exps = sorted({(a.get("expiry_date") or "")[:7] for a in l.get("allocations") or [] if a.get("expiry_date")})
@@ -411,9 +417,20 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         # the line's own discount only, as on the browser receipt; the invoice discount is in «خصم» below (review P2)
         disc = (f" · خصم {l['discount_bp'] / 100:g}%" if l.get("discount_bp") else
                 f" · خصم {m(l['discount_amount'])}" if l.get("discount_amount") else "")
-        out.append(("small", qty_text(l) + (f" × {m(up)}" if up is not None else "") + exp + disc, ""))
-        b, u, _, _ = qty_parts(l)
-        boxes, units = boxes + b, units + u
+        prices = public_price_rows(l)
+        out.append(("row", name + (" ✱" if it.get("no_return") else ""), m(prices[0][2]) if len(prices) == 1 else ""))
+        for qty, price, gross in prices:
+            out.append(("small" if len(prices) == 1 else "row",
+                        qty + (f" × {m(price)}" if price is not None else ""),
+                        "" if len(prices) == 1 else m(gross)))
+        if exp or disc:
+            out.append(("small", (exp + disc).removeprefix(" · "), ""))
+        if l.get("official_prices"):
+            boxes += sum(p["qty"] for p in l["official_prices"] if p["pack"])
+            units += sum(p["qty"] for p in l["official_prices"] if not p["pack"])
+        else:
+            b, u, _, _ = qty_parts(l)
+            boxes, units = boxes + b, units + u
     out.append(("rule", "", ""))
     if cfg.get("show_item_count") and sale["lines"]:
         out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
@@ -421,8 +438,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         out.append(("small", "إجمالي الكمية: " + " + ".join(x for x in (f"{boxes} علبة" if boxes else "", f"{units} وحدة" if units else "") if x), ""))
     if sale.get("subtotal") is not None:    # always, as on the browser receipt (B1)
         out.append(("row", "الإجمالي", m(sale["subtotal"])))
-    if sale["discount_total"]:
-        out.append(("row", "خصم", m(sale["discount_total"])))
+    out.append(("row", "الخصم", m(sale["discount_total"])))
     if sale.get("delivery_fee"):
         out.append(("row", "رسوم التوصيل", m(sale["delivery_fee"])))
     if sale.get("rounding"):               # U2-14: its own line, signed

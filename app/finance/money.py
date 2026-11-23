@@ -725,7 +725,7 @@ def receive(db: Database, ctx: Context, method: str, channel_id: str | None, amo
     # a refund back to the card / wallet is what really happened at the machine: it is recorded even if it
     # takes the account below zero (never blocks a customer's return); the count then shows the truth
     return _post(db, ctx, acc, amount, kind, ref_type=ref_type, ref_id=ref_id, note=note, check=check,
-                 meta={"method": method})
+                 meta={"method": method, "channel_id": channel_id})
 
 
 def _card_refund_account(db: Database, ctx: Context, sale_id: str) -> str | None:
@@ -743,12 +743,15 @@ def _card_refund_account(db: Database, ctx: Context, sale_id: str) -> str | None
 
 
 def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = None, *, ref_type: str,
-                 note: str | None = None, meta: dict | None = None) -> list[str]:
+                 note: str | None = None, meta: dict | None = None, card_only: bool = False) -> list[str]:
     """Take a sale's card / wallet money back (a void: all of it; a card refund: `amount`) from the accounts the
     sale really went to, read from its own movements, never from today's routes (#348 Codex P1). Inside the
     caller's transaction; recorded even below zero or on a stopped account (a return is never blocked)."""
+    card = (" AND (json_extract(meta, '$.method')='card' OR"
+            " (kind='refund' AND json_extract(meta, '$.method') IS NULL))") if card_only else ""
     rows = db.all("SELECT account_id, sum(amount) net FROM money_movements WHERE org_id=? AND ref_id=?"
-                  " AND kind IN ('sale','refund') GROUP BY account_id ORDER BY min(rowid)", (ctx.org_id, sale_id))
+                  " AND kind IN ('sale','refund')" + card + " GROUP BY account_id ORDER BY min(rowid)",
+                  (ctx.org_id, sale_id))
     left, out = amount, []
     for r in rows:
         take = r["net"] if left is None else min(r["net"], left)
@@ -773,6 +776,33 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
             out.append(_post(db, ctx, acc, -left, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
                              meta=meta, check=False, active=False))
     return out
+
+
+def refund_wallet(db: Database, ctx: Context, sale_id: str, channel_id: str | None, amount: int,
+                  *, return_id: str, note: str) -> None:
+    """Debit the wallet account recorded for this sale, even if the route has since changed."""
+    source = db.all(
+        "SELECT account_id, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
+        " AND ref_type='sale' AND json_extract(meta, '$.method')='transfer'",
+        (ctx.org_id, sale_id))
+    accounts = set()
+    for row in source:
+        meta = json.loads(row["meta"])
+        if "channel_id" in meta and meta["channel_id"] == channel_id:
+            accounts.add(row["account_id"])
+    legacy = {row["account_id"] for row in source if "channel_id" not in json.loads(row["meta"])}
+    if legacy:
+        channels = db.all("SELECT DISTINCT channel_id FROM sale_payments"
+                          " WHERE org_id=? AND sale_id=? AND method='transfer'", (ctx.org_id, sale_id))
+        if len(channels) > 1:
+            raise Conflict("حساب المحفظة الأصلي مش محدد في الفاتورة القديمة", code="ambiguous_wallet_account")
+        accounts.update(legacy)
+    if len(accounts) > 1:
+        raise Conflict("المحفظة اتسجلت على أكتر من حساب في الفاتورة دي", code="ambiguous_wallet_account")
+    account = next(iter(accounts), None) or route_for(db, ctx.org_id, "transfer", channel_id)
+    if account:
+        _post(db, ctx, account, -amount, "refund", ref_type="sale_return", ref_id=sale_id, note=note,
+              meta={"return_id": return_id, "method": "transfer", "channel_id": channel_id}, check=False, active=False)
 
 
 def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: int) -> int:

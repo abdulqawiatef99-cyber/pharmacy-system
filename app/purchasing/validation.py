@@ -53,6 +53,7 @@ MESSAGES = {
     "same_item_other_expiry": "الصنف موجود في سطر تاني بصلاحية مختلفة (عادي: تشغيلتين)",
     "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
+    "tax_above_total": "الضريبة المشمولة أكبر من إجمالي السطر",
     "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
 }
 
@@ -112,11 +113,12 @@ def derive_line(line: dict) -> dict:
         put("discount_bp", half_up_div((base - net) * 10000, base))
     net = line.get("unit_net_price")
     if total is None and net is not None and qty:
+        added_tax = 0 if line.get("tax_included") == 1 else tax or 0
         if src.get("unit_net_price") == "inferred" and base is not None and disc is not None:
             # the net is itself a rounded value: round the line once, from the exact figures
-            put("line_total", half_up_div(qty * base * (10000 - disc), 10000) + (tax or 0))
+            put("line_total", half_up_div(qty * base * (10000 - disc), 10000) + added_tax)
         else:
-            put("line_total", net * qty + (tax or 0))
+            put("line_total", net * qty + added_tax)
     line["field_sources"], line["field_confidence"] = src, conf
     return line
 
@@ -135,8 +137,11 @@ def line_amount(line: dict) -> int | None:
     """The line as the paper prints it (tax included), without the distributor's margin."""
     net, qty, tax, total = (line.get("unit_net_price"), line.get("qty"),
                             line.get("tax_amount") or 0, line.get("line_total"))
+    included = line.get("tax_included")
     if total is None:
-        return None if net is None or not qty else net * qty + tax
+        return None if net is None or not qty else net * qty + (0 if included == 1 else tax)
+    if included is not None:
+        return total
     if net is not None and qty and tax:
         pre = net * qty
         # printed total excludes tax: it is within tolerance of the pre-tax amount and closer to it than to the
@@ -220,10 +225,13 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         if total is not None and net is not None and qty:
             pre = net * qty
             tax = l.get("tax_amount") or 0
-            tol = line_tolerance(pre + tax, qty)
-            if abs(total - (pre + tax)) > tol and abs(total - pre) > tol:
-                add("error", "line_total_mismatch", lid, "line_total", expected=pre + tax,
-                    actual=total)
+            included = l.get("tax_included")
+            expected = pre if included == 1 else pre + tax
+            tol = line_tolerance(expected, qty)
+            if abs(total - expected) > tol and (included is not None or abs(total - pre) > tol):
+                add("error", "line_total_mismatch", lid, "line_total", expected=expected, actual=total)
+        if l.get("tax_included") == 1 and total is not None and (l.get("tax_amount") or 0) > total:
+            add("error", "tax_above_total", lid, "tax_amount")
         item = items.get(l.get("item_id") or "")
         if item and pub is not None and item.get("public_price") is not None \
                 and item["public_price"] != pub:

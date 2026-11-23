@@ -74,7 +74,7 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
         # the money refunded carries the rounding a return gave back: net sales take line values (review P1)
         "net_sales": s["total"] - (refunded - rets_rounding) - voids["t"],
         "by_method": {"cash": s["cash"] - ret("cash") - voids["cash"], "card": s["card"] - ret("card") - voids["card"],
-                      "transfer": s["transfer"] - voids["transfer"], "credit": s["credit"] - ret("credit") - voids["credit"],
+                      "transfer": s["transfer"] - ret("transfer") - voids["transfer"], "credit": s["credit"] - ret("credit") - voids["credit"],
                       "delivery_cash": s["delivery_cash"] - voids["delivery_cash"]},
         "credit_collected": collected,
         "purchases": pur, "supplier_returns": sret,

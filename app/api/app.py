@@ -1654,6 +1654,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 hidden_no_stock = sum(not has(r) for r in rows)
                 rows = [r for r in rows if has(r)]
         rows = rows[:limit]
+        if req.query_params.get("sale"):
+            Sales(db).quote_items(ctx, req.query_params["sale"], rows)
         hint = res["hint"]
         if not hint and rows and all(r.get("match") == "spelling" for r in rows):
             hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
@@ -1800,10 +1802,22 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                    str(b.get("reason", "")), b.get("line_id"), b.get("version")))
 
     @handler
+    async def purchase_price_default(req):
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            value = purch.set_price_review_default(ctx, (await body(req)).get("default"))
+        else:
+            value = purch.price_review_default(ctx)
+        return J({"default": value})
+
+    @handler
     async def purchase_approve(req):
         ctx = ctx_of(req)
+        if req.method == "GET":
+            return J(purch.price_review(ctx, req.path_params["id"]))
         b = await body(req)
-        return J(purch.approve(ctx, req.path_params["id"], b.get("version")))
+        return J(purch.approve(ctx, req.path_params["id"], b.get("version"), require_price_review=True,
+                               price_decisions=b.get("price_decisions"), price_token=b.get("price_token")))
 
     @handler
     async def purchase_cancel(req):
@@ -2354,7 +2368,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
-                                        reason=str(b.get("reason", ""))))
+                                        reason=str(b.get("reason", "")), channel_id=b.get("channel_id")))
 
     @handler
     async def sales_exchange(req):
@@ -2733,8 +2747,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0)),
                 ("منها تقريب النقدي (مش مبيعات)", r.get("rounding_total", 0))]
         cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
-        ch_rows = "".join(f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td><td>{m(c['amount'])}</td></tr>"
-                          for c in r["by_channel"])
+        ch_rows = "".join(
+            f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td>"
+            f"<td>{m(c['amount'] - c.get('refunded', 0))}</td></tr>"
+            + (f"<tr><td>مرتجع على نفس المحفظة</td><td>{m(c['refunded'])}</td></tr>" if c.get("refunded") else "")
+            for c in r["by_channel"])
+
         den = r["counted_detail"] or {}
         den_rows = "".join(f"<tr><td>{d / 100:g} × {den[str(d)]}</td><td>{m(d * den[str(d)])}</td></tr>"
                            for d in DENOMINATIONS if den.get(str(d)))
@@ -2776,6 +2794,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
 {f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
 {f"<tr><td>منها مرتجع على البطاقة</td><td>{m(r['card_refunds'])}</td></tr>" if r['card_refunds'] else ""}
+{f"<tr><td>منها مرتجع للمحفظة</td><td>{m(r['transfer_refunds'])}</td></tr>" if r['transfer_refunds'] else ""}
 {f"<tr><td>منها مرتجع على حساب العميل</td><td>{m(r['credit_refunds'])}</td></tr>" if r['credit_refunds'] else ""}
 {f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
 <table>{cash_rows}<tr class="t"><td>المتوقع في الخزينة</td><td>{m(r['expected_cash'])}</td></tr></table>
@@ -2838,7 +2857,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل"}
+        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -2849,7 +2868,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}</td></tr></table>
+<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}{' · ' + e(r['channel']) if r['channel'] else ''}</td></tr></table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -2880,9 +2899,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
         from ..printing import escpos as _esc
 
-        def qty(l):                          # U2-24: the sold unit, «1 علبة + 2 شريط», and the price of one
-            up = _esc.unit_price(l)
-            return e(_esc.qty_text(l)) + (f" × {m(up)}" if up is not None else "")
         rows = []
         restricted = False
         for l in sale["lines"]:
@@ -2894,8 +2910,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
                 f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
-            rows.append(f"<tr><td>{name(l['item'])}{star}<br><small>{qty(l)}{exp}{disc}</small></td>"
-                        f"<td>{m(l['line_total'])}</td></tr>")
+            for i, (qty, price, gross) in enumerate(_esc.public_price_rows(l)):
+                title = f"{name(l['item'])}{star}<br>" if not i else ""
+                shown = e(qty) + (f" × {m(price)}" if price is not None else "")
+                details = exp + disc if not i else ""
+                rows.append(f"<tr><td>{title}<small>{shown}{details}</small></td><td>{m(gross)}</td></tr>")
         MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
         pays = sale.get("payments") or []
         pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
@@ -2915,8 +2934,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                     f"<tr class='chg'><td>الباقي</td><td>{m(given - cash)}</td></tr>")
         count = (f"<tr><td>عدد الأصناف</td><td>{len(sale['lines'])}</td></tr>"
                  if cfg["show_item_count"] and sale["lines"] else "")
-        bx = sum(_esc.qty_parts(l)[0] for l in sale["lines"])
-        un = sum(_esc.qty_parts(l)[1] for l in sale["lines"])
+        bx = sum(p["qty"] for l in sale["lines"] for p in l["official_prices"] if p["pack"])
+        un = sum(p["qty"] for l in sale["lines"] for p in l["official_prices"] if not p["pack"])
         if sale["lines"]:                    # U2-23: the total quantity
             count += f"<tr><td>إجمالي الكمية</td><td>{' + '.join(x for x in (f'{bx} علبة' if bx else '', f'{un} وحدة' if un else '') if x)}</td></tr>"
         cu = sale.get("customer")
@@ -2970,7 +2989,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}{header}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>{count}
 <tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
-{f"<tr><td>خصم</td><td>{m(sale['discount_total'])}</td></tr>" if sale['discount_total'] else ""}
+<tr><td>الخصم</td><td>{m(sale['discount_total'])}</td></tr>
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
 {f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
 <tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
@@ -3253,7 +3272,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}/merge", line_merge, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
-        Route("/api/purchases/{id}/approve", purchase_approve, methods=["POST"]),
+        Route("/api/settings/purchase-price", purchase_price_default, methods=["GET", "PUT"]),
+        Route("/api/purchases/{id}/approve", purchase_approve, methods=["GET", "POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
         Route("/api/imports", import_analyze, methods=["POST"]),
