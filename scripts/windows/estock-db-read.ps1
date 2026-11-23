@@ -12,14 +12,15 @@
 #   -RetryFailed reads only the tables the last run listed as not read (estock-db-read-one.bat).
 param([string]$Only = '', [switch]$RetryFailed, [switch]$Guided, [string]$OutputDirectory = '')
 if ($Guided -and (-not $OutputDirectory -or $Only -or $RetryFailed)) {
-    throw 'Guided requires OutputDirectory and a full read.'
+    [Console]::Error.WriteLine('Guided requires OutputDirectory and a full read.')
+    exit 2
 }
 $ErrorActionPreference = 'Stop'
 # CSV dates and numbers in one fixed format (not the PC's Arabic culture: AM/PM marks, decimal comma)
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$out = Join-Path $env:LOCALAPPDATA "PharmacyPlatform\estock-db-read\$stamp"
 if ($Guided) { $out = $OutputDirectory }
+else { $out = Join-Path $env:LOCALAPPDATA "PharmacyPlatform\estock-db-read\$stamp" }
 $tables = Join-Path $out 'tables'
 New-Item -ItemType Directory -Force -Path $tables | Out-Null
 $summary = Join-Path $out 'summary.txt'
@@ -104,7 +105,6 @@ function Find-Estock($c) {
 }
 # How many user databases this connection can really open (a sign-in may connect and still see none).
 function Usable($c) {
-    if ($Guided) { return @(Find-Estock $c).Count }
     $n = 0
     try { $d = Q $c "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE'" } catch { return 0 }
     foreach ($r in $d.Rows) { try { $c.ChangeDatabase($r.name); $n++ } catch { } }
@@ -152,9 +152,28 @@ function Try-Open([string]$cs) {
 
 $conns = @()
 $have = @{}      # instances already connected (by Who)
+$guidedCandidates = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+function Register-Guided($c) {
+    try { $id = Who $c } catch { return 0 }
+    if ($id.Split('\')[0] -ne $env:COMPUTERNAME) { return 0 }
+    $added = 0
+    foreach ($name in (Find-Estock $c)) {
+        $key = "$id/$name"
+        if (-not $guidedCandidates.ContainsKey($key)) {
+            $guidedCandidates.Add($key, [pscustomobject]@{Connection = $c; Database = $name})
+            $added++
+        }
+    }
+    return $added
+}
 foreach ($s in $servers) {
     $c = Try-Open "Server=$s;Integrated Security=True;Connect Timeout=8;Application Name=estock-db-read"
     if (-not $c) { Say "no Windows sign-in to: $s"; continue }
+    if ($Guided) {
+        if ((Register-Guided $c) -gt 0) { $conns += ,@($s, $c) }
+        else { $c.Close() }
+        continue
+    }
     $u = Usable $c
     if ($u -gt 0) { Say "connected (Windows sign-in): $s, $u user database(s) open"; $conns += ,@($s, $c); try { $have[(Who $c)] = 1 } catch { } }
     else { Say "connected (Windows sign-in): $s, but no user database opens with it"; $c.Close() }
@@ -163,7 +182,10 @@ foreach ($s in $servers) {
 # 2. Fallback for every running instance not reached yet (no Windows sign-in, or one that opens no user
 #    database): connection strings in E-Stock's own folder (used here only, never printed).
 $missing = { @($want.Keys | Where-Object { -not $have.ContainsKey($_) }).Count }
-if ($conns.Count -eq 0 -or (& $missing) -gt 0) {
+# Guided discovery also checks the vendor's configurations after a Windows sign-in: the two
+# accounts may see different databases on the same instance (for example a restored copy and live).
+if ($Guided -or ($conns.Count -eq 0 -or (& $missing) -gt 0)) {
+    $checked = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $roots = @('D:\Modern Soft for Programming', 'C:\Program Files (x86)\Modern Soft for Programming', 'C:\Program Files\Modern Soft for Programming')
     foreach ($r in $roots) {
         if (-not (Test-Path $r)) { continue }
@@ -173,16 +195,22 @@ if ($conns.Count -eq 0 -or (& $missing) -gt 0) {
             foreach ($m in [regex]::Matches($text, '(?i)(Data Source|Server)\s*=[^"<>\r\n]+')) {
                 $cs = $m.Value -replace '(?i)Provider\s*=[^;]*;?', ''
                 if ($cs -notmatch '(?i)(Connect|Connection)\s*Timeout') { $cs = $cs.TrimEnd(';') + ';Connect Timeout=8' }
+                if ($Guided -and -not $checked.Add($cs)) { continue }
                 $c = Try-Open $cs
                 if (-not $c) { continue }
+                if ($Guided) {
+                    if ((Register-Guided $c) -gt 0) { $conns += ,@($c.DataSource, $c) }
+                    else { $c.Close() }
+                    continue
+                }
                 $id = $null; try { $id = Who $c } catch { }
                 if ($id -and -not $have.ContainsKey($id) -and (Usable $c) -gt 0) {
                     Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); $have[$id] = 1
                 } else { $c.Close() }
             }
-            if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
+            if (-not $Guided -and $conns.Count -gt 0 -and (& $missing) -eq 0) { break }
         }
-        if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
+        if (-not $Guided -and $conns.Count -gt 0 -and (& $missing) -eq 0) { break }
     }
 }
 foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
@@ -194,11 +222,7 @@ if ($conns.Count -eq 0) {
 
 $selected = $null
 if ($Guided) {
-    $candidates = @(foreach ($pair in $conns) {
-        foreach ($name in (Find-Estock $pair[1])) {
-            [pscustomobject]@{ Connection = $pair[1]; Database = $name }
-        }
-    })
+    $candidates = @($guidedCandidates.Values)
     if ($candidates.Count -ne 1) {
         if ($candidates.Count) { [Console]::WriteLine('ESTOCK: AMBIGUOUS') }
         else { [Console]::WriteLine('ESTOCK: NOT FOUND') }

@@ -304,11 +304,14 @@ SETTLE_CUSTOMERS = 50
 
 
 def _names_and_packs(plan) -> list[str]:
-    from ..catalog.normalize import parse_name
+    from ..catalog.normalize import normalize_text
+    from .estock_db import INTERNAL_MARK
 
     customers = []
     for customer in plan.customers:
         name, alternate = customer["name"], customer.get("alt")
+        if customer.get("internal"):
+            name = name.removesuffix(INTERNAL_MARK)
         if alternate and " ".join(name.split()).casefold() != " ".join(alternate.split()).casefold():
             customers.append(f"  - {customer['code'] or customer['estock_id']} · العربي «{name}» · الإنجليزي «{alternate}»")
     packs = []
@@ -318,9 +321,14 @@ def _names_and_packs(plan) -> list[str]:
         hints = []
         for name in (item["name_ar"], item["name_en"]):
             if name:
-                count = parse_name(name).pack_count
-                if count and count > 1:
-                    hints.append(f"«{name}» ({count})")
+                # Require a count next to a unit. Age and omega variant numbers are part of the name.
+                text = normalize_text(re.sub(r"\d+\s*\+", " ", name).replace("×", " x "))
+                text = re.sub(r"\b(?:omega|اوميجا|اوميغا)\s*[369]\b", "", text)
+                cue = _UNIT_COUNT.search(text)
+                if cue:
+                    count = int(cue[1] or 1) * int(cue[2])
+                    if count > 1:
+                        hints.append(f"«{name}» ({count})")
         if hints:
             packs.append(f"  - {item['code']} · " + " / ".join(hints))
     return [
@@ -330,6 +338,13 @@ def _names_and_packs(plan) -> list[str]:
         "  راجع عدد الوحدات في إي ستوك. الرقم اللي في الاسم للمراجعة.",
         *(packs or ["  مفيش."]),
     ]
+
+
+_UNIT_COUNT = re.compile(
+    r"(?<![\w./])(?:(\d{1,4})\s*x\s*)?(\d{1,4})\s*"
+    r"(?:tablets?|tabs?|capsules?|caps?|strips?|ampoules?|amps?|vials?|sachets?|suppositor(?:y|ies)|"
+    r"قرص|اقراص|اقرص|كبسوله|كبسولات|شريط|شرائط|امبول|امبولات|فيال|لبوس|كيس|اكياس|وحده|وحدات)\b"
+)
 
 
 def write(path: Path, plan, rec: dict, *, rehearsal: bool = False) -> Path:

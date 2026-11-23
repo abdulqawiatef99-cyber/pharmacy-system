@@ -146,6 +146,10 @@ class EstockMove:
                 complete = self._completed_report(home, previous) is not None
                 if complete and replace_id != previous["id"]:
                     return
+                # The source belongs to the machine. An owner in a second organization cannot
+                # use a fresh rehearsal to read the same source under their own tenant.
+                if self.db.one("SELECT count(*) n FROM organizations")["n"] != 1:
+                    raise Conflict("تجربة نقل إي ستوك متاحة على جهاز فيه صيدلية واحدة بس.")
                 why = estock_db.refusal(self.db, ctx, "")
                 if why:
                     raise Conflict(why, code="estock_db_refused")
@@ -219,6 +223,8 @@ class EstockMove:
             with report_path.open("rb+") as report:
                 os.fsync(report.fileno())
             checkpoint("done", reconciled=result["ok"], report_size=report_path.stat().st_size)
+        except estock_db.ExportError:
+            checkpoint("failed", message="قراية الجداول المطلوبة ما كملتش. اتأكد إن إي ستوك شغال واضغط «جرّب تاني».")
         except DomainError as exc:
             checkpoint("failed", message=exc.message)
         except Exception:

@@ -80,7 +80,7 @@ class TestEstockDbRead(unittest.TestCase):
     def test_no_silent_loss_and_no_wrong_pass(self):
         text = PS1.read_text(encoding="utf-8-sig")
         # an instance running but not reached (E-Stock's own, when another instance accepted Windows sign-in)
-        self.assertIn("if ($conns.Count -eq 0 -or (& $missing) -gt 0)", text)
+        self.assertIn("if ($Guided -or ($conns.Count -eq 0 -or (& $missing) -gt 0))", text)
         self.assertIn('$failed.Add($want[$k] + " (could not sign in)")', text)
         # a database not ONLINE and a server whose read stopped are failures, not skips
         self.assertIn('$failed.Add("$srv / " + $db.name + " (" + $db.state_desc + ")")', text)
@@ -111,7 +111,8 @@ class TestEstockDbRead(unittest.TestCase):
         text = PS1.read_text(encoding="utf-8-sig")
         self.assertIn("try { Save } catch { }; exit 3 }", text)          # trap: any unhandled error
         self.assertLess(text.index("trap {"), text.index("Say \"E-Stock database read"))
-        code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+        # Invalid arguments are refused before creating the export folder.
+        code = [l for l in text[text.index("function Save {"):].splitlines() if not l.lstrip().startswith("#")]
         exits = [i for i, l in enumerate(code) if re.search(r"\bexit [0-9]", l)]
         self.assertGreaterEqual(len(exits), 4)
         for i in exits:                                                # every exit has a Save right before it

@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from tests.test_estock_db_import import base_tables, product, write_export
 URL = "/api/estock/move"
 POST = {"X-Requested-With": "pharm", "Idempotency-Key": "synthetic-retry"}
 PW = "Manager-Pass-2026"
+POWERSHELL = shutil.which("powershell.exe" if sys.platform == "win32" else "pwsh")
 
 
 class TestMove(DBTestCase):
@@ -61,7 +63,9 @@ class TestMove(DBTestCase):
         tables = base_tables()
         tables["Products"] += [product(99, "EA99", "Synthetic 24 tablets", "تجربة ٢٤ قرص"),
                                product(98, "EA98", "Synthetic 500 mg tablet"),
-                               product(97, "EA97", "Synthetic 1 capsule")]
+                               product(97, "EA97", "Synthetic 1 capsule"),
+                               product(96, "EA96", "Synthetic Omega 3 capsules"),
+                               product(95, "EA95", "Synthetic Age 50+ Tablets")]
         tables["Customer"][0].update(customer_name_ar="عميل الاختبار", customer_name_en="Synthetic Customer")
         tables["Customer"][1].update(customer_name_en=tables["Customer"][1]["customer_name_ar"])
         progress("reading", 2)
@@ -91,6 +95,8 @@ class TestMove(DBTestCase):
         self.assertIn("EA99", result["report"])
         self.assertNotIn("EA98", result["report"])
         self.assertNotIn("EA97", result["report"])
+        self.assertNotIn("EA96", result["report"])
+        self.assertNotIn("EA95", result["report"])
         self.assertEqual("\n".join(self.db.conn.iterdump()), before)
         reopened = TestClient(create_app(self.db, self.s))
         self.sign_in(reopened, "owner", OWNER_PW)
@@ -111,6 +117,9 @@ class TestMove(DBTestCase):
         self.second_tenant()
         self.sign_in(self.c, "other", "Other-Pass-2026")
         self.assertEqual(self.c.get(URL).json()["phase"], "idle")
+        with mock.patch.object(estock_move, "read_export") as reader:
+            self.assertEqual(self.c.post(URL, headers=POST).status_code, 409)
+            reader.assert_not_called()
         remote = TestClient(create_app(self.db, self.s), client=("192.0.2.10", 5000))
         self.sign_in(remote, "owner", OWNER_PW)
         self.assertEqual(remote.get(URL).status_code, 403)
@@ -189,6 +198,20 @@ class TestMove(DBTestCase):
         self.assertIn("optional_table", result["report"])
         self.assertNotIn("estock-db-import.bat", result["report"])
 
+    def test_missing_required_table_requests_retry_from_the_screen(self):
+        def partial(folder, progress):
+            tables = base_tables()
+            del tables["Products"]
+            write_export(folder, tables)
+            (folder / "summary.txt").write_text(
+                "RESULT: PARTIAL - synthetic\n   PC / stock.dbo.Products\n", encoding="utf-8")
+
+        with mock.patch.object(estock_move, "read_export", side_effect=partial):
+            self.c.post(URL, headers=POST)
+            message = self.wait_for("failed")["message"]
+        self.assertIn("جرّب تاني", message)
+        self.assertNotIn(".bat", message)
+
     def test_reader_uses_hidden_noninteractive_subprocess_and_whitelisted_output(self):
         process = mock.MagicMock()
         process.__enter__.return_value = process
@@ -212,17 +235,66 @@ class TestMove(DBTestCase):
         self.assertEqual(progress.call_args_list, [mock.call("reading", 0), mock.call("reading", 1),
                                                    mock.call("reading", 2)])
 
-    @skipUnless(sys.platform == "win32", "Windows PowerShell 5.1")
-    def test_windows_reader_parses_guided_switches_without_contacting_sql(self):
+    @skipUnless(POWERSHELL, "PowerShell executable unavailable")
+    def test_reader_parses_guided_switches_without_contacting_sql(self):
         # Parameter validation occurs before discovery. This exercises the shipped .ps1 under Windows
         # PowerShell with the same hidden command options and without needing a SQL service or real data.
         script = Path(estock_move.__file__).resolve().parents[2] / "scripts/windows/estock-db-read.ps1"
-        result = subprocess.run([shutil.which("powershell.exe"), "-NoProfile", "-NonInteractive",
+        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive",
                                  "-ExecutionPolicy", "Bypass", "-File", str(script), "-Guided"],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
-                                creationflags=subprocess.CREATE_NO_WINDOW)
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Guided requires OutputDirectory", result.stdout + result.stderr)
+
+    @skipUnless(POWERSHELL, "PowerShell executable unavailable")
+    def test_reader_checks_app_config_even_when_windows_sign_in_finds_a_restored_database(self):
+        """Exercise discovery through the script with synthetic SQL metadata and no network."""
+        source = estock_move.SCRIPT.read_text(encoding="utf-8-sig")
+        source = re.sub(r"Get-Service -ErrorAction SilentlyContinue \| Where-Object \{ .*? \}",
+                        r"@([pscustomobject]@{Name='MSSQLSERVER'; Status='Running'})", source)
+        source = re.sub(r"(?m)^    \$roots = .*", "    $roots = @(Join-Path $env:LOCALAPPDATA 'test-install')", source)
+        first, end = source.index("function Q("), source.index("function Qn(")
+        source = source[:first] + """
+class SyntheticConnection {
+    [string]$DataSource = '(local)'
+    [string]$Database
+    SyntheticConnection([string]$database) { $this.Database = $database }
+    [void] ChangeDatabase([string]$database) {}
+    [void] Close() {}
+}
+function Q($conn, [string]$sql) {
+    if ($sql -like '*FROM sys.databases*') {
+        return @{Rows=@(@{name=$conn.Database; state_desc='ONLINE'})}
+    }
+    if ($sql -like '*FROM INFORMATION_SCHEMA.TABLES*') {
+        return @{Rows=@('Products','Customer','Vendor','Product_Amount' | ForEach-Object { @{nm=$_} })}
+    }
+    throw 'Discovery selected a database and reached the export phase.'
+}
+""" + source[end:]
+        first, end = source.index("function Who("), source.index("# One text form")
+        source = source[:first] + 'function Who($c) { return $env:COMPUTERNAME }\n' + source[end:]
+        first, end = source.index("function Try-Open("), source.index("$conns = @()")
+        source = source[:first] + """
+function Try-Open([string]$cs) {
+    if ($cs -like '*Initial Catalog=Live*') { return [SyntheticConnection]::new('Live') }
+    return [SyntheticConnection]::new('Restored')
+}
+""" + source[end:]
+        script = self.tmp / "synthetic-reader.ps1"
+        script.write_text(source, encoding="utf-8-sig")
+        install = self.tmp / "test-install"
+        install.mkdir()
+        (install / "data.config").write_text("Server=(local);Initial Catalog=Live;Integrated Security=True")
+        result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                 "-File", str(script), "-Guided", "-OutputDirectory", str(self.tmp / "export-test")],
+                                env={**os.environ, "LOCALAPPDATA": str(self.tmp), "COMPUTERNAME": "SYNTHETIC"},
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ESTOCK: AMBIGUOUS", result.stdout)
+        self.assertNotIn("ESTOCK: FOUND", result.stdout)
 
 
 SCREEN = r"""
