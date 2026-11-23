@@ -1,4 +1,4 @@
-"""Expected failures from QA-1, using synthetic stock and the real browser screens."""
+"""Regressions from QA-1, using synthetic stock and the real browser screens."""
 import unittest
 from datetime import timedelta
 from decimal import Decimal
@@ -31,7 +31,17 @@ const { chromium } = require('playwright');
     await p.waitForSelector('dialog[open], #pinApproved');
     const htmlDialog = await p.locator('dialog[open]').allTextContents();
     const text = [...dialogs, ...htmlDialog].join(' ');
-    out = { asked: /المخزون الحالي|الرصيد الحالي|التشغيلات القديمة|إعادة تسعير/.test(text) };
+    out = { asked: text.includes('السعر اتغير من 100.00 لـ 120.00: تغيّر سعر الرصيد الحالي (10 علبة) للسعر الجديد؟'),
+      options: await p.locator('dialog[open] select option').evaluateAll(xs => xs.map(x => x.value)),
+      chosen: await p.locator('dialog[open] select').evaluateAll(xs => xs.map(x => x.value)) };
+  } else if (probe === 'purchase-search') {
+    await p.waitForSelector('#puBox tbody tr');
+    await p.fill('#puQ', 'QA-HIGHER');
+    out = { count: await p.locator('#puBox tbody tr').count(), total: await p.locator('#puBox > p').innerText() };
+  } else if (probe === 'official') {
+    out = { detail: await p.locator('#app table').first().innerText(),
+      totals: await p.locator('#app .totals').first().innerText(),
+      receipt: await (await p.request.get(base + '/receipt/' + route.split('/').pop())).text() };
   } else if (probe === 'vat') {
     await p.waitForSelector('#qaQ');
     const fields = await p.locator('#app input, #app select').evaluateAll(fields =>
@@ -73,10 +83,11 @@ const { chromium } = require('playwright');
     const result = p.locator('#posRes .res').first();
     await result.locator('[data-kind=pack]').waitFor();
     const advertised = await result.locator('.price').innerText();
+    const prices = await result.innerText();
     await result.locator('[data-kind=pack]').click();
     await p.waitForSelector('#posCart tbody [data-minus]');
     const due = await p.locator('#posSide .due b').innerText();
-    out = { advertised, due };
+    out = { advertised, due, prices, line: await p.locator('#posCart tbody tr').first().innerText() };
   }
   console.log(JSON.stringify(out));
   await b.close();
@@ -113,19 +124,64 @@ class QA20261123(APICase):
         self.assertTrue(p.get(self.ctx, sid)["can_approve"])
         return sid
 
-    @unittest.expectedFailure
     def test_QA_001_purchase_prompts_about_repricing_stock(self):
         sid = self.purchase_draft()
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/purchases/{sid}", "price")
         self.assertTrue(out["asked"], "QA-001: expected a decision about the existing batches")
+        self.assertEqual(out["options"], ["keep", "all", "per_batch"])
+        self.assertEqual(out["chosen"], ["keep"])
 
-    @unittest.expectedFailure
     def test_QA_002_sale_result_exposes_the_price_it_will_charge(self):
+        self.add_new_stock()
         out = run_node(self, SCRIPT, "owner", OWNER_PW, "#/pos", "pos")
         self.assertEqual(out["advertised"].split()[0], out["due"].strip(),
                          "QA-002: quote the allocatable batch price")
+        self.assertIn("120.00", out["prices"])
+        self.assertIn("80.00", out["line"])
 
-    @unittest.expectedFailure
+    def add_new_stock(self):
+        with self.db.transaction():
+            later = (self.today + timedelta(days=800)).isoformat()
+            batch = inventory.get_or_create_batch(self.db, self.ctx, self.item, "QA-later", later)
+            self.db.execute("UPDATE batches SET public_price=? WHERE id=?", (12000, batch))
+            inventory.post_movement(self.db, self.ctx, item_id=self.item, batch_id=batch,
+                                    qty_delta=4, movement_type="opening", unit_cost=Decimal("20"))
+
+    def test_QA_006_011_official_prices_and_discount_on_both_receipts(self):
+        from app.printing.escpos import receipt_lines
+
+        self.add_new_stock()
+        sales = Sales(self.db)
+        sid = sales.create(self.ctx)
+        sale = sales.add_line(self.ctx, sid, self.item, packs=11)
+        sale = sales.set_invoice_discount(self.ctx, sid, version=sale["version"], bp=1000)
+        sales.complete(self.ctx, sid, payments=[{"method": "cash", "amount": sale["total"]}], version=sale["version"])
+        sale = sales.get(self.ctx, sid)
+        out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/sales/{sid}", "official")
+        thermal = str(receipt_lines("QA", sale, ""))
+        for screen in (out["detail"], out["receipt"], thermal):
+            self.assertIn("80.00", screen)
+            self.assertIn("120.00", screen)
+        for screen in (out["totals"], out["receipt"], thermal):
+            self.assertLess(screen.index("الإجمالي"), screen.index("الخصم"))
+            self.assertLess(screen.index("الخصم"), screen.index("المطلوب"))
+            self.assertIn("920.00", screen)
+            self.assertIn("92.00", screen)
+            self.assertIn("828.00", screen)
+        self.assertEqual(sale["lines"][0]["invoice_share"], 9200)
+
+    def test_QA_013_purchase_search_filters_the_approved_total(self):
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        purchasing.approve(self.ctx, sid, None)
+        other = self.purchase_draft()
+        purchasing.update_header(self.ctx, other, {"invoice_no": "QA-OTHER"}, None)
+        purchasing.approve(self.ctx, other, None)
+        out = run_node(self, SCRIPT, "owner", OWNER_PW, "#/purchases", "purchase-search")
+        self.assertEqual(out["count"], 1)
+        self.assertIn("1 فاتورة", out["total"])
+        self.assertIn("192.00", out["total"])
+
     def test_QA_003_manual_purchase_has_a_vat_field(self):
         sid = self.purchase_draft()
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/purchases/{sid}", "vat")
@@ -138,7 +194,6 @@ class QA20261123(APICase):
         sales.complete(self.ctx, sid, payments=[{**payment, "amount": sale["total"]}], version=sale["version"])
         return sid
 
-    @unittest.expectedFailure
     def test_QA_004_guest_wallet_sale_offers_refund_to_original_method(self):
         self.http_login()
         channels = self.c.get("/api/payment-channels").json()["channels"]
@@ -147,7 +202,6 @@ class QA20261123(APICase):
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/sales/{sid}", "wallet")
         self.assertTrue(out["wallet"], "QA-004: a transfer-paid sale needs a same-method refund choice")
 
-    @unittest.expectedFailure
     def test_QA_005_latest_invoice_filter_owns_the_totals(self):
         self.http_login()
         channels = self.c.get("/api/payment-channels").json()["channels"]
