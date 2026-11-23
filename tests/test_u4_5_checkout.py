@@ -263,6 +263,11 @@ const { chromium } = require('playwright');
 (async () => {
   const [base, user, pw, other, current] = process.argv.slice(1);
 """ + LOGIN + r"""
+  // This fixture represents a cashier who already completed first-run guidance.
+  await p.evaluate(async () => {
+    const me = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${me.organization.id}:${me.user.id}`, '{"all":1}');
+  });
   await p.goto(base + '/#/pos');
   await p.waitForSelector(`[data-tab="${current}"].on`);
   let release;
