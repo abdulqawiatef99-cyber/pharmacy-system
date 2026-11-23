@@ -100,8 +100,6 @@ def pay_from(db: Database, ctx: Context, sid: str, amount: int, source: str | No
         kind = money.get_account(db, ctx, src)["kind"] if ctx.can("cash.see_expected") else "other"
         method = method if method == "cheque" else {"bank": "bank", "wallet": "wallet"}.get(kind, "cash")
     with db.transaction():
-        if src == money.DRAWER:
-            money.drawer_check(db, ctx, amount)        # the drawer never goes below zero (F105)
         pay(db, ctx, sid, amount, method, note, ref, ref_id=ref_id)
         lid = db.one("SELECT id FROM supplier_ledger WHERE org_id=? AND supplier_id=? AND kind='payment'"
                      " ORDER BY rowid DESC LIMIT 1", (ctx.org_id, sid))["id"]

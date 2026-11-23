@@ -90,27 +90,30 @@ class TestVerifyPush(unittest.TestCase):
 
 
 class TestGuardWiring(unittest.TestCase):
-    def test_installer_publishes_only_after_the_gate(self):
+    def test_production_updates_do_not_build_or_replace_the_last_installer(self):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
-        self.assertIn("run: .github/scripts/verify_push.sh", wf)
-        self.assertIn("needs: gate", wf)
-        self.assertIn("needs.gate.result == 'success' || needs.gate.result == 'skipped'", wf)
-        self.assertIn("if: github.event_name == 'push'", wf)              # manual review builds skip the gate
+        events = wf.split("on:\n", 1)[1].split("permissions:", 1)[0]
+        self.assertEqual(events.strip(), "workflow_dispatch:")
+        self.assertNotIn("gh release create installer-latest", wf)
+        bundle = (ROOT / ".github" / "workflows" / "update-bundle.yml").read_text(encoding="utf-8")
+        self.assertIn("run: .github/scripts/verify_push.sh", bundle)
+        self.assertIn("dist/update/*", bundle)
 
-    def test_installer_artifact_is_short_lived_and_never_blocks_the_release(self):
+    def test_installer_artifact_is_short_lived_and_never_blocks_review_delivery(self):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
         upload = wf.split("- uses: actions/upload-artifact@v4", 1)[1].split("- name:", 1)[0]
-        self.assertIn("retention-days: 14", upload)                       # #122: quota filled at 90 days
-        self.assertIn("continue-on-error: true", upload)                     # #122: a full quota blocks no delivery
-        self.assertLess(wf.index("actions/upload-artifact@v4"), wf.index('Publish as release "installer-latest"'))
+        self.assertIn("retention-days: 14", upload)
+        self.assertIn("continue-on-error: true", upload)
+        self.assertLess(wf.index("actions/upload-artifact@v4"), wf.index("Publish review build"))
 
     def test_program_files_have_the_line_ends_github_serves(self):
         """#18 B13: the runner's git writes CRLF (core.autocrlf); the in-app update downloads LF from GitHub."""
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
         archives = [line.strip() for line in wf.splitlines() if " archive " in line and line.strip().startswith("git")]
-        self.assertEqual(len(archives), 2)                                   # the program and the update candidate
-        for line in archives:
-            self.assertIn("-c core.autocrlf=false", line)
+        self.assertEqual(len(archives), 1)                                   # installer archive
+        self.assertIn("-c core.autocrlf=false -c core.eol=lf", archives[0])
+        bundle = (ROOT / "scripts" / "release" / "build_bundle.py").read_text(encoding="utf-8")
+        self.assertIn('"git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive"', bundle)
 
     def test_manual_review_build_is_delivered_as_a_prerelease(self):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")

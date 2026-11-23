@@ -5,16 +5,16 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..db import Database, new_id
-from . import audit, security
+from . import audit, notify, security
 from .errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
 from dataclasses import replace
 
-from .permissions import APPROVER_ROLES, DEFAULT_ROLES, PERMISSIONS, ROLE_ORDER, ROLES_VERSION, Context
+from .permissions import APPROVER_ROLES, DEFAULT_ROLES, PERMISSIONS, ROLE_ORDER, ROLES_VERSION, PIN_LOGIN_ROLES, PIN_SESSION_PERMISSIONS, Context
 
 SESSION_TTL = timedelta(hours=12)
 SESSION_IDLE = timedelta(hours=2)
 MAX_FAILED_LOGINS = 5
-LOCKOUT = timedelta(minutes=15)
+FAILED_LOGIN_WINDOW = timedelta(minutes=15)
 
 DEFAULT_FEATURES = ("catalog", "purchasing", "inventory", "sales", "counting", "procurement",
                     "recalls", "safety", "dataimport")
@@ -102,33 +102,21 @@ def add_user(db: Database, ctx: Context, *, username: str, full_name: str, passw
 # --------------------------------------------------------------------------
 def login(db: Database, username: str, password: str, *, org_id: str | None = None,
           ip: str | None = None, user_agent: str | None = None) -> dict:
-    """Returns {'token', 'expires_at', 'org_id'}. Uniform error message for
-    unknown user / wrong password; temporary lockout after repeated failures."""
+    """Authenticate before applying any failed-attempt policy."""
     generic = Unauthorized("اسم المستخدم أو كلمة المرور غير صحيحة", code="invalid_credentials")
     user = db.one("SELECT * FROM users WHERE username=?", (username.strip(),))
     if user is None:
         security.dummy_verify(password)
         raise generic
-    now = utcnow()
-    if user["locked_until"] and parse_iso(user["locked_until"]) > now:
-        raise Unauthorized("الحساب مقفول مؤقتًا بسبب محاولات خاطئة متكررة، حاول بعد قليل",
-                           code="locked")
-    if not security.verify_password(password, user["password_hash"]):
-        with db.transaction():
-            failed = user["failed_logins"] + 1
-            locked = iso(now + LOCKOUT) if failed >= MAX_FAILED_LOGINS else None
-            db.execute("UPDATE users SET failed_logins=?, locked_until=? WHERE id=?",
-                       (0 if locked else failed, locked, user["id"]))
-            audit.record(db, None, "auth.login_failed", "user", user["id"],
-                         after={"ip": ip, "locked": bool(locked)}, user_id=user["id"])
-        raise generic
-    if not user["is_active"]:
-        raise generic
-
     memberships = db.all(
         "SELECT m.org_id FROM memberships m JOIN organizations o ON o.id=m.org_id"
         " WHERE m.user_id=? AND m.is_active=1 AND o.status='active'", (user["id"],))
     orgs = [m["org_id"] for m in memberships]
+    if not security.verify_password(password, user["password_hash"]):
+        _failed_password(db, user, orgs, ip)
+        raise generic
+    if not user["is_active"]:
+        raise generic
     if not orgs:
         raise Forbidden("المستخدم غير مرتبط بأي صيدلية فعالة")
     if org_id is None:
@@ -143,20 +131,44 @@ def login(db: Database, username: str, password: str, *, org_id: str | None = No
         if security.needs_rehash(user["password_hash"]):
             updates["password_hash"] = security.hash_password(password)
         sets = ", ".join(f"{k}=?" for k in updates)
-        db.execute(f"UPDATE users SET {sets} WHERE id=?", (*updates.values(), user["id"]))
+        changed = db.execute(f"UPDATE users SET {sets} WHERE id=? AND password_hash=? AND is_active=1",
+                             (*updates.values(), user["id"], user["password_hash"]))
+        if not changed.rowcount or not db.one(
+                "SELECT 1 FROM memberships m JOIN organizations o ON o.id=m.org_id"
+                " WHERE m.user_id=? AND m.org_id=? AND m.is_active=1 AND o.status='active'",
+                (user["id"], org_id)):
+            raise generic
         return _new_session(db, user["id"], org_id, ip, user_agent, "auth.login")
 
 
+def _failed_password(db: Database, user, orgs: list[str], ip: str | None) -> None:
+    cutoff = iso(utcnow() - FAILED_LOGIN_WINDOW)
+    with db.transaction():
+        if not orgs:
+            audit.record(db, None, "auth.login_failed", "user", user["id"], after={"ip": ip})
+        for org_id in orgs:
+            ctx = Context(user_id=None, org_id=org_id, branch_id=None, ip=ip)
+            audit.record(db, ctx, "auth.login_failed", "user", user["id"])
+            recent = db.all("SELECT 1 FROM audit_log WHERE org_id=? AND entity_type='user' AND entity_id=?"
+                            " AND action='auth.login_failed' AND at>=? AND ip IS ? LIMIT ?",
+                            (org_id, user["id"], cutoff, ip, MAX_FAILED_LOGINS))
+            if len(recent) == MAX_FAILED_LOGINS and not db.one(
+                    "SELECT 1 FROM notifications WHERE org_id=? AND created_at>=?"
+                    " AND kind='failed_sign_in' AND entity_id=?", (org_id, cutoff, user["id"])):
+                notify.emit(db, ctx, "failed_sign_in", "warning", "محاولات دخول خاطئة متكررة",
+                            user["username"], "user", user["id"])
+
+
 def _new_session(db: Database, user_id: str, org_id: str, ip: str | None, user_agent: str | None,
-                 action: str) -> dict:
+                 action: str, *, auth_method: str = "password") -> dict:
     """Call inside a transaction."""
     now = utcnow()
     token = security.new_token()
     expires = now + SESSION_TTL
     db.execute("INSERT INTO sessions (id, token_hash, user_id, org_id, created_at, expires_at,"
-               " last_seen_at, ip, user_agent) VALUES (?,?,?,?,?,?,?,?,?)",
+               " last_seen_at, ip, user_agent, auth_method) VALUES (?,?,?,?,?,?,?,?,?,?)",
                (new_id(), security.token_hash(token), user_id, org_id, iso(now),
-                iso(expires), iso(now), ip, (user_agent or "")[:200]))
+                iso(expires), iso(now), ip, (user_agent or "")[:200], auth_method))
     audit.record(db, None, action, "user", user_id, after={"ip": ip}, org_id=org_id, user_id=user_id)
     return {"token": token, "expires_at": iso(expires), "org_id": org_id}
 
@@ -177,6 +189,11 @@ def resolve_session(db: Database, token: str, ip: str | None = None) -> Context:
             or not row["user_active"] or not row["m_active"] or row["org_status"] != "active"):
         raise Unauthorized("انتهت الجلسة، سجّل الدخول مرة أخرى", code="session_expired")
     access = effective_access(db, row["org_id"], row["user_id"])
+    if row["auth_method"] == "pin":
+        if access["role_code"] not in PIN_LOGIN_ROLES:
+            raise Unauthorized("سجّل الدخول بكلمة المرور", code="session_expired")
+        access["permissions"] &= PIN_SESSION_PERMISSIONS
+        access["max_discount_bp"] = 0
     branch_id = row["branch_id"]
     if branch_id is None:
         b = db.one("SELECT id FROM branches WHERE org_id=? AND is_active=1 ORDER BY created_at LIMIT 1",
@@ -188,7 +205,7 @@ def resolve_session(db: Database, token: str, ip: str | None = None) -> Context:
             db.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (iso(now), row["id"]))
     return Context(user_id=row["user_id"], org_id=row["org_id"], branch_id=branch_id,
                    permissions=access["permissions"], ip=ip, role_code=access["role_code"],
-                   max_discount_bp=access["max_discount_bp"])
+                   max_discount_bp=access["max_discount_bp"], auth_method=row["auth_method"])
 
 
 def logout(db: Database, token: str) -> None:

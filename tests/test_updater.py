@@ -73,116 +73,100 @@ if __name__ == "__main__":
     unittest.main()
 
 
-from unittest import mock as _mock
-from tests.test_api import APICase, H as _H
+from app.core import smart_update, update_sign
+import release_bootstrap as releases
+from tests.test_api import APICase, H
 
 
-@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateAPI(APICase):
-    def test_owner_sees_status_and_can_run_update(self):
+    def test_owner_sees_signed_status_failure_and_can_prepare_an_update(self):
         self.http_login()
-        with _mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": "/nonexistent/t.txt"}):
-            os_env = __import__("os").environ
-            os_env.pop("PHARM_GITHUB_TOKEN", None)
-            import urllib.error
-            gone = urllib.error.HTTPError("u", 404, "x", {}, None)   # repository private again
-            with _mock.patch("urllib.request.urlopen", side_effect=gone):
-                st = self.c.get("/api/system/update").json()
-        self.assertIn("بدون مفتاح", st["error"])                    # clear message, no crash
-        done = _mock.Mock(returncode=0, stdout="التحديث خلص بنجاح", stderr="")
-        with _mock.patch("subprocess.run", return_value=done) as run:
-            r = self.c.post("/api/system/update", headers=_H, json={})
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertFalse(r.json()["restarting"])                    # not under the launcher
-        self.assertIn("update", run.call_args[0][0])
-        n = self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update'")[0]
-        self.assertEqual(n, 1)
+        with mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(smart_update, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(smart_update, "read_manifest", side_effect=updater.UpdateError("No signed release")):
+            st = self.c.get("/api/system/update").json()
+        self.assertEqual(st["smart"]["error"], "No signed release")
+        self.assertFalse(st["available"])
+        done = mock.Mock(returncode=0, stdout="SMART-PREPARE", stderr="")
+        with mock.patch("subprocess.run", return_value=done) as run:
+            result = self.c.post("/api/system/update", headers=H, json={"action": "prepare"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertTrue(result.json()["ok"])
+        self.assertEqual(run.call_args.args[0][-2:], ["update", "--prepare"])
+        self.assertEqual(self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update.prepare'")[0], 1)
 
 
-@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateWithoutKey(APICase):
-    def test_a_pc_without_a_key_file_still_sees_updates(self):
-        """Heikal PC: no %USERPROFILE%\\.pharmacy\\github_token.txt; the public repository is read anonymously."""
-        from tests.test_updater_edges import _Resp
-        seen = []
-
-        def fake(req, timeout):
-            seen.append(req.get_header("Authorization"))
-            return _Resp(b"e" * 40)
+    def test_a_pc_without_a_key_file_still_sees_signed_updates(self):
         self.http_login()
-        with _mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": "/nonexistent/t.txt"}) as env, \
-                _mock.patch("urllib.request.urlopen", side_effect=fake):
+        with mock.patch.dict("os.environ", {"PHARM_UPDATE_TOKEN_FILE": str(self.tmp / "missing.txt")}) as env, \
+                mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(smart_update, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(smart_update, "read_manifest", return_value={
+                    "sha": "e" * 40, "commit_time": 20, "channel": "main",
+                    "python": smart_update.python_tag(), "migrations": [], "notes": [],
+                }) as manifest:
             env.pop("PHARM_GITHUB_TOKEN", None)
             st = self.c.get("/api/system/update").json()
-        self.assertNotIn("error", st)
-        self.assertEqual((st["latest"], st["available"], seen), ("e" * 40, True, [None]))
+        self.assertIsNone(manifest.call_args.args[0].token)
+        self.assertEqual((st["latest"], st["available"]), ("e" * 40, True))
 
 
-@_mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateChannel(APICase):
-    """#107: the settings button follows the install's own channel; develop test installs can update."""
+    """The signed manifest is read from the channel selected by the installer."""
 
     def status(self, info, latest="b" * 40):
-        from app.core import updater
-        with _mock.patch.object(updater, "installed", return_value=info), \
-                _mock.patch.object(updater, "read_token", return_value="t"), \
-                _mock.patch.object(updater, "latest_sha", return_value=latest) as ls:
-            st = self.c.get("/api/system/update").json()
-        return st, ls
+        def signed(source, _keys):
+            return {"sha": latest, "commit_time": 20, "channel": source.channel,
+                    "python": smart_update.python_tag(), "migrations": [], "notes": []}
 
-    def run_update(self, info):
-        from app.core import updater
-        done = _mock.Mock(returncode=0, stdout="ok", stderr="")
-        with _mock.patch.object(updater, "installed", return_value=info), \
-                _mock.patch("subprocess.run", return_value=done) as run:
-            r = self.c.post("/api/system/update", headers=_H, json={})
-        return r, run
+        with mock.patch.object(updater, "installed", return_value={"commit_time": 10, **info}), \
+                mock.patch.object(updater, "read_token", return_value="t"), \
+                mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(smart_update, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(smart_update, "read_manifest", side_effect=signed) as manifest:
+            status = self.c.get("/api/system/update").json()
+        return status, manifest
 
     def test_channel_rules(self):
-        from app.core import updater
         self.assertEqual(updater.channel({}), "main")
         self.assertEqual(updater.channel({"ref": "main"}), "main")
         self.assertEqual(updater.channel({"ref": "develop", "source": "installer"}), "develop")
-        self.assertIsNone(updater.channel({"ref": "claude/96-auto-updates"}))
+        self.assertIsNone(updater.channel({"ref": "review/work"}))
 
     def test_develop_installer_checks_develop_and_sees_an_update(self):
         self.http_login()
-        st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "develop"})
-        self.assertEqual(ls.call_args[0][1], "develop")
+        st, manifest = self.status({"sha": "a" * 40, "source": "installer", "ref": "develop"})
+        self.assertEqual(manifest.call_args.args[0].channel, "develop")
         self.assertEqual((st["channel"], st["available"], st["latest"]), ("develop", True, "b" * 40))
         self.assertNotIn("candidate", st)
 
     def test_main_and_unknown_installs_still_use_main(self):
         import itertools
+
         self.http_login()
-        clock = itertools.count(10_000, 1000)          # past the 10-minute status cache on every call
+        clock = itertools.count(10_000, 1000)
         for info in ({"sha": "a" * 40, "source": "installer", "ref": "main"}, {"sha": "a" * 40}, {}):
-            with _mock.patch("app.api.app.time.time", side_effect=lambda: next(clock)):
-                st, ls = self.status(info, latest="a" * 40)
-            self.assertEqual(ls.call_args[0][1], "main", info)
+            with mock.patch("app.api.app.time.time", side_effect=lambda: next(clock)):
+                st, manifest = self.status(info, latest="a" * 40)
+            self.assertEqual(manifest.call_args.args[0].channel, "main", info)
             self.assertEqual((st["channel"], st["available"]), ("main", info.get("sha") != "a" * 40), info)
 
-    def test_button_passes_the_channel(self):
+    def test_button_uses_signed_prepare(self):
         self.http_login()
-        r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "develop"})
-        self.assertEqual(r.status_code, 200, r.text)
-        cmd = run.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "develop"])
-        row = self.db.one("SELECT after_json FROM audit_log WHERE action='system.update'")
-        self.assertIn('"channel": "develop"', row["after_json"])
-        r, run = self.run_update({"sha": "a" * 40})
-        cmd = run.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
+        done = mock.Mock(returncode=0, stdout="ok", stderr="")
+        with mock.patch("subprocess.run", return_value=done) as run:
+            result = self.c.post("/api/system/update", headers=H, json={"action": "prepare"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(run.call_args.args[0][-2:], ["update", "--prepare"])
 
     def test_work_branch_install_has_no_channel(self):
-        """Until the official release (main) contains a review installer's commit, it follows nothing."""
-        from app.core import updater
         self.http_login()
-        with _mock.patch.object(updater, "contains", return_value=False) as has:
-            st, ls = self.status({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
-            r, run = self.run_update({"sha": "a" * 40, "source": "installer", "ref": "claude/x"})
-        self.assertEqual(has.call_args_list[0][0][1:3], ("a" * 40, "main"))
-        self.assertFalse(ls.called)
-        self.assertEqual((st["channel"], st["candidate"], st["available"]), (None, "claude/x", False))
-        self.assertEqual(r.status_code, 422)
-        self.assertFalse(run.called)
+        with mock.patch.object(updater, "contains", return_value=False) as has:
+            st, manifest = self.status({"sha": "a" * 40, "source": "installer", "ref": "review/work"})
+        self.assertEqual(has.call_args.args[1:3], ("a" * 40, "main"))
+        manifest.assert_not_called()
+        self.assertEqual((st["channel"], st["candidate"], st["available"]), (None, "review/work", False))

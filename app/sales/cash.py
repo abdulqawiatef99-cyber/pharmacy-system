@@ -40,7 +40,11 @@ def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | Non
     """Call inside the business transaction. amount 0 is a no-op."""
     if amount == 0:
         return None
-    shift = require_open_shift(db, ctx, branch_id)
+    if kind == "payout" and amount < 0:
+        from ..finance import money
+        shift = money.drawer_check(db, ctx, -amount, branch_id)
+    else:
+        shift = require_open_shift(db, ctx, branch_id)
     db.execute("INSERT INTO cash_movements (id, org_id, shift_id, amount, kind, ref_id, note, created_by)"
                " VALUES (?,?,?,?,?,?,?,?)", (new_id(), ctx.org_id, shift, amount, kind, ref_id, note, ctx.user_id))
     return shift
@@ -184,7 +188,7 @@ class CashDrawer:
     def movement(self, ctx: Context, amount: int, kind: str, note: str) -> None:
         """Payout (مصروف من الدرج) or deposit by an authorized user, with a reason."""
         ctx.require("cash.manage")
-        if kind not in ("payout", "deposit") or not isinstance(amount, int) or amount <= 0:
+        if kind not in ("payout", "deposit") or type(amount) is not int or amount <= 0:
             raise ValidationFailed("بيانات الحركة غير صحيحة")
         if len((note or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب الحركة")

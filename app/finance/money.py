@@ -136,7 +136,7 @@ def _post(db: Database, ctx: Context, account_id: str, amount: int, kind: str, *
     if kind not in KINDS:
         raise ValueError(f"unknown money movement kind {kind}")
     a = _account(db, ctx, account_id, active=active)     # active=False: only the opening of a stopped account
-    if check and amount < 0 and not a["allow_negative"]:
+    if check and amount < 0 and (a["kind"] == "treasury" or not a["allow_negative"]):
         now = balance(db, ctx.org_id, account_id)
         if now + amount < 0:
             raise Conflict(f"رصيد {a['name']} لا يكفي ({now / 100:,.2f} ج)", code="account_negative",
@@ -171,11 +171,11 @@ def drawer_balance(db: Database, ctx: Context) -> dict:
     return {"shift_id": last["id"], "open": False, "balance": left}
 
 
-def drawer_check(db: Database, ctx: Context, amount: int) -> str:
+def drawer_check(db: Database, ctx: Context, amount: int, branch_id: str | None = None) -> str:
     """Refuse a drawer payout that would take the open shift's cash below zero (inside the caller's
     transaction, before the payout row is written by its own service)."""
     from ..sales import cash
-    sid = cash.require_open_shift(db, ctx)
+    sid = cash.require_open_shift(db, ctx, branch_id)
     now = _drawer_expected(db, ctx, sid)
     if now - amount < 0:
         raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
@@ -183,15 +183,9 @@ def drawer_check(db: Database, ctx: Context, amount: int) -> str:
     return sid
 
 
-def _drawer_out(db: Database, ctx: Context, amount: int, ref_id: str | None, note: str) -> str:
+def _drawer_out(db: Database, ctx: Context, amount: int, ref_id: str | None, note: str) -> str | None:
     from ..sales import cash
-    sid = cash.require_open_shift(db, ctx)
-    now = _drawer_expected(db, ctx, sid)
-    if now - amount < 0:
-        raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
-                       details={"balance": now, "amount": amount})
-    cash.record(db, ctx, -amount, "payout", ref_id, note)
-    return sid
+    return cash.record(db, ctx, -amount, "payout", ref_id, note)
 
 
 def source_label(db: Database, ctx: Context, source: str | None) -> str:
@@ -308,6 +302,8 @@ def update_account(db: Database, ctx: Context, account_id: str, data: dict) -> d
             changes["name"] = name
         bal = balance(db, ctx.org_id, account_id)
         if "allow_negative" in data:
+            if a["kind"] == "treasury" and data["allow_negative"]:
+                raise ValidationFailed("الخزنة الرئيسية لا تسمح برصيد سالب", code="physical_cash")
             changes["allow_negative"] = int(bool(data["allow_negative"]))
             if not changes["allow_negative"] and bal < 0:
                 raise Conflict("رصيد الحساب بالسالب؛ سوّه الأول قبل منع السالب", code="account_negative")

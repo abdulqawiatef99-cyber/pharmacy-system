@@ -5,11 +5,14 @@
 |---|---|---|
 | Password storage | scrypt, random salt, params in hash, rehash on login when params change | `test_core.TestPasswords` |
 | Password policy | ≥10 chars, not trivially repetitive | `test_weak_password_rejected` |
-| Brute force | 5 failures → 15 min lockout; per-IP login rate limit (10/min) | `test_lockout_after_repeated_failures` |
+| Failed password attempts | Bound concurrent verification. Record failures by account and peer, delay repeated errors, and alert owner and managers after five failures in 15 minutes. A valid password can still authenticate. | `test_failed_password_policy_has_no_account_wide_lockout` |
 | User enumeration | same message + equalized hashing time for unknown users | `test_wrong_password_same_message_as_unknown_user` |
 | Sessions | random 256-bit token, SHA-256 stored, 12h absolute + 2h idle expiry, revoke on logout / password change / org suspension | `TestAuth` |
 | Cookie | HttpOnly, SameSite=Strict, Secure when `PHARM_COOKIE_SECURE=1` | `test_login_sets_httponly_cookie_and_headers` |
 | CSRF | cookie-auth writes need `X-Requested-With: pharm`, logout included (#140) | `test_csrf_header_required_for_cookie_writes` |
+| PIN sign-in | Same browser origin and JSON checks as password sign-in. Assistants and pharmacists get cashier permissions only. A PIN change revokes PIN sessions. | `test_pin_sign_in_applies_browser_origin_admission`, `test_pin_session_stays_bounded_and_pin_change_revokes_it` |
+| Write approvals | The supervisor sees the server's operation summary. The grant is bound to the exact write and reserved before execution. An authorized retry may replay a recorded result. | `test_approval_checks_the_intent_before_the_action_starts`, `test_approved_response_replays_only_to_a_currently_authorized_request` |
+| Release updates | Signed manifests cover code and packages. The installed launcher rechecks both before execution. Production installer publication requires the pinned Authenticode signer. | `test_prepared_release_signature_is_checked_before_activation`, `test_installed_launcher_checks_publisher_proof_and_exact_release_files` |
 | Owner sign-in | the owner's own password/PIN change needs his current password (users screen too); nobody else, not even with an owner approval, sets the owner's PIN (#131) | `test_sec_owner_credentials.py` |
 | Authorization | permission checks inside services; roles per org | `test_permission_enforced_in_service`, `test_assistant_cannot_approve` |
 | Tenant isolation | every query filtered by `ctx.org_id`; cross-tenant tests at service and HTTP level | `test_tenant_isolation` (×3), `test_cross_tenant_via_api` |
@@ -59,17 +62,6 @@
 Each item needs a bigger change than is safe before the launch. The trade-offs are written down so the
 choice can be made later without repeating the analysis.
 
-### Approver PIN kept in the browser (#137)
-- **Now:** after an approval the screen keeps `{approver, pin}` for 90 s and sends it on every request; the
-  server accepts the approver's permissions on any route.
-- **Design:** `POST /api/approvals` takes the PIN once with the permission and the action (method + path,
-  optionally the record id) and returns a random token (sha256 stored, 60 s, single use) bound to
-  (org, approver, actor session, permission, action). `ctx_of` accepts `X-Approval` only on that action and
-  burns it in the same transaction as the change. The screen never keeps the PIN.
-- **Trade-offs:** a repeated action (several voids in a row) needs the PIN each time, or a short
-  "approve the next N of this action" token; one new table (a migration, so it ships through the installer);
-  every screen that asks for approval changes to say which action it approves.
-
 ### Backup encryption and PIN hashes (#138)
 - **Now:** a backup is the whole database in clear (customers, staff password and PIN hashes); a 4–6 digit
   PIN hash falls to an offline attacker in minutes to hours.
@@ -95,16 +87,7 @@ choice can be made later without repeating the analysis.
 - **Trade-offs:** a DHCP address change hides the program from phones until the owner picks again (a fixed
   address on the router avoids it); the firewall rule needs admin once at install; certificate setup on each
   phone is a manual step. Until then: keep LAN mode off, or on only on a Wi-Fi with a password customers do
-  not have. Anyone on the LAN can still lock an account for 15 min with 5 wrong passwords; counting failures per
-  (user, IP) and keeping the PC itself exempt would stop that.
-
-### Signed updates (#140 item 5, with #96)
-- **Now:** the updater trusts TLS and the GitHub account; the read-only token sits in the user's profile.
-- **Design:** CI signs a release manifest (zip sha256, ref, version, protocol) with an Ed25519 key kept as a
-  repository secret; the public key ships in the installer; the updater refuses an unsigned or mismatched
-  release before staging. Key rotation through a new installer.
-- **Trade-offs:** whoever holds the signing key can still ship; losing the key means a new installer for every
-  PC; adds a small dependency (or a pure-Python Ed25519 verifier) that ships only through the installer.
+  not have.
 
 ### نسيان كلمة سر المالك (#151)
 مفيش أي طريقة من الشبكة ولا كلمة سر افتراضية. الاسترجاع من جهاز الصيدلية نفسه بس (اللي قدامه الجهاز وفولدر البيانات):

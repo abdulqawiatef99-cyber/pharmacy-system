@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from .errors import ValidationFailed
+from .errors import Forbidden, ValidationFailed
 from .permissions import Context
 from ..db import Database
 
@@ -39,7 +39,7 @@ def prune(db: Database, ttl_days: int = TTL_DAYS, *, force: bool = False) -> int
 
 def run(db: Database, ctx: Context, *, key: str, method: str, path: str,
         request_hash: str, ttl_days: int,
-        action: Callable[[], tuple[int, str]]) -> tuple[int, str, bool]:
+        action: Callable[[], tuple[int, str]], replay_only: bool = False) -> tuple[int, str, bool]:
     """Return (status, JSON text, replayed); commit action + cache as one unit.
 
     BEGIN IMMEDIATE serializes the lookup and write across connections/processes,
@@ -57,6 +57,8 @@ def run(db: Database, ctx: Context, *, key: str, method: str, path: str,
                     raise ValidationFailed("نفس مفتاح الطلب استُخدم لطلب مختلف",
                                            code="idempotency_mismatch")
                 return hit["status"], hit["response"], True
+        if replay_only:
+            raise Forbidden("الموافقة استُخدمت بالفعل", code="approval_used")
         status, response = action()
         if use_key:
             prune(db, ttl_days)
