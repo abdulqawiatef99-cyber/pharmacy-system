@@ -2909,9 +2909,9 @@ async function renderReceiptCfg(c) {
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
-    <fieldset class="lblp"><legend>معاينة الإيصال</legend>
+    <fieldset class="lblp lbprev"><legend>معاينة الإيصال</legend>
       <p id="rcPreviewMessage" class="muted" role="status"></p>
-      <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية" style="max-width:100%;height:auto">
+      <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
     </fieldset>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;

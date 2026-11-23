@@ -68,7 +68,7 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
                 " WHERE s.org_id=? AND s.id=?", (ctx.org_id, sale_id))
             if staff:
                 seller = staff["seller"] or ""
-                cashier = staff["cashier"] or seller
+                cashier = staff["cashier"] or ""
         from . import logo
         from ..sales.service import return_window_days
         png = logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None

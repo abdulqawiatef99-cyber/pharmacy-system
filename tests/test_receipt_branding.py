@@ -116,7 +116,8 @@ class TestDirectReceipt(DBTestCase):
             import numpy as np
         except ImportError:
             self.skipTest("OpenCV not installed (optional cross-check)")
-        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(printed))[0], "https://wa.me/201000000000")
+        qr_footer = printed.crop((0, printed.height - 240, printed.width, printed.height))
+        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(qr_footer))[0], "https://wa.me/201000000000")
 
     def test_broken_logo_never_stops_the_receipt(self):
         rs.save(self.db, self.ctx, {"qr_text": "https://wa.me/201000000000"})

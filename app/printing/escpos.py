@@ -98,6 +98,9 @@ def render_receipt(lines: list[ReceiptRow], width: int = DOTS_80MM, font_path: s
     def wrap(value, room, n, bold, direction):
         """Use word breaks first, then split a word that is wider than the cell."""
         for paragraph in value.splitlines():
+            if paragraph and fits(paragraph, room, n, bold, direction):
+                yield paragraph
+                continue
             line = ""
             for word in paragraph.split():
                 candidate = f"{line} {word}" if line else word
@@ -171,6 +174,8 @@ def render_receipt(lines: list[ReceiptRow], width: int = DOTS_80MM, font_path: s
                 images.append(((width - code.width) // 2, y, code))
                 y += code.height + gap
         else:
+            if kind == "detail" and right.startswith("خصم "):
+                right = f"خصم \u2066{right.removeprefix('خصم ')}\u2069"
             n = {"title": size + 12, "total": size + 10, "small": size - 2,
                  "center": size - 2, "detail": size - 3}.get(kind, size)
             bold = kind in ("title", "total")
@@ -559,8 +564,11 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     for p in pays:
         label = method_names.get(p["method"], p["method"])
         channel = f" · {p['channel']}" if p.get("channel") else ""
-        prefix = "" if p["method"] == "credit" else "مدفوع "
-        out.append(("row", prefix + label + channel, amount(p["amount"])))
+        if p["method"] == "cash" and is_delivery and delivery.get("status") not in ("delivered", "settled"):
+            label = "كاش عند الاستلام"
+        elif p["method"] != "credit":
+            label = "مدفوع " + label
+        out.append(("row", label + channel, amount(p["amount"])))
     cash = sale.get("paid_cash") or 0
     if cfg.get("show_change", True) and cash and given > cash:
         out.extend([("row", "المدفوع من العميل", amount(given)), ("total", "الباقي", amount(given - cash))])
