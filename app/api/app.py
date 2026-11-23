@@ -859,7 +859,32 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def item_pack_correct(req):
         from ..catalog import repack
         b = await body(req)
-        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or "",
+                                     expected_pack=b.get("expected_pack"), base_unit_name=b.get("base_unit_name")))
+
+    @handler
+    async def move_pack_review(req):
+        from ..dataimport import migration_review as review
+        return J({"items": await off_loop(review.pack_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_pack_review(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.review_pack, db, ctx_of(req), req.path_params["id"],
+                                         data.get("pack_size"), data.get("reason"), data.get("base_unit_name")))
+
+    @handler
+    async def move_customer_name_review(req):
+        from ..dataimport import migration_review as review
+        return J({"customers": await off_loop(review.customer_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_customer_name(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.apply_customer_name, db, ctx_of(req), req.path_params["id"],
+                                data.get("name"), data.get("current_name")))
 
     @handler
     async def item_card_get(req):
@@ -3070,7 +3095,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             left = data["code"] if on["code"] else data["value"] if on["digits"] else ""
             bottom = (f'<div class="c"><span>{e(left)}</span><span>{e(data["expiry"]) if on["expiry"] else ""}</span>'
                       f'<b>{e(data["price"]) if on["price"] else ""}</b></div>') if (left or on["expiry"] or on["price"]) else ""
-            cells += [f'<div class="lb">{top}{mark}{name}{bottom}</div>'] * n
+            content = bottom + name if data["internal_barcode"] and on["barcode"] else name + bottom
+            cells += [f'<div class="lb">{top}{mark}{content}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
         with db.transaction():
@@ -3373,6 +3399,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/estock/invoices", estock_invoices),
         Route("/api/estock/period", estock_period),
         Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
+        Route("/api/estock/pack-review", move_pack_review),
+        Route("/api/estock/pack-review/{id}", move_apply_pack_review, methods=["POST"]),
+        Route("/api/estock/customer-name-review", move_customer_name_review),
+        Route("/api/estock/customer-name-review/{id}", move_apply_customer_name, methods=["POST"]),
         Route("/api/estock/customers/{id}/items", estock_customer_items),
         Route("/api/estock/items/{id}/history", estock_item_history),
         Route("/api/estock/statement/{kind}/{id}", estock_statement),

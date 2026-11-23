@@ -195,8 +195,8 @@ const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.n
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
   ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
-async function findItems(q, limit = 8, stock = "") {
-  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}`);
+async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
+  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}`, { settleAfterNavigation });
   return r;
 }
 const hintHtml = (h) => (!h ? "" : h.kind === "layout"
@@ -297,7 +297,8 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
   /^\/api\/supplier-returns$/,
   // U4-2: an order recorded as sent: an unanswered «اتبعتت» pressed again replays, never a second order (Codex P2 on #433)
-  /^\/api\/procurement\/orders$/];
+  /^\/api\/procurement\/orders$/,
+  /^\/api\/items\/[^/]+\/pack-fix$/, /^\/api\/estock\/(pack-review|customer-name-review)\/[^/]+$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -310,8 +311,16 @@ function onceKey(method, apiPath, bodyText) {
   return key;
 }
 onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
-async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
+let navigation = 0;
+const routeHash = () => location.hash || "#/home";
+function onThisScreen() {
+  const id = navigation, hash = routeHash();
+  return () => id === navigation && hash === routeHash();
+}
+
+async function api(path, { method = "GET", body, form, settleAfterNavigation = false, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
+  const current = method === "GET" && !settleAfterNavigation ? onThisScreen() : () => true;
   let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm", ...approvalHeaders(`${method} ${apiPath}`) }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -328,8 +337,11 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
   try {
     for (let attempt = 0; ; attempt++) {
+      // Leave the abandoned view suspended, including its catch/final render paths.
+      if (!current()) return new Promise(() => {});
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
+        if (!current()) return new Promise(() => {});
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
         if (attempt >= 2) {
           if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
@@ -339,7 +351,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       }
     }
     data = await r.json().catch(() => ({}));
-    if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
+    if (!current() || (range && RANGE_SEQ[range.id] !== range.seq)) return new Promise(() => {});   // a newer period was chosen
     // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
     if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
   } finally { API.busy--; API.last = Date.now(); }
@@ -347,12 +359,12 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   // invoice needs four), each added to the same token; a permission asked twice means it was not granted
   const perm = data?.error?.details?.permission;
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)) {
-    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
+    if (await askApproval(data.error.details, data.error.message, method, apiPath)) return api(path, { method, body, form, settleAfterNavigation, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
   if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;
     // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
-    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
+    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, settleAfterNavigation, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
   }
   if (!r.ok) {
     if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
@@ -423,6 +435,8 @@ const routes = [
   [/^#\/hikma-claim$/, viewHikmaClaim],
   [/^#\/dispensing-notes$/, viewDispensingNotes],
   [/^#\/item-health$/, viewItemHealth],
+  [/^#\/pack-review$/, viewPackReview],
+  [/^#\/customer-name-review$/, viewCustomerNameReview],
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
@@ -444,7 +458,8 @@ const routes = [
 ];
 
 async function route() {
-  const hash = location.hash || "#/home";
+  navigation++;
+  const hash = routeHash(), current = onThisScreen();
   if (!ME && hash !== "#/setup") {
     try { if ((await api("/api/setup")).needed) { location.hash = "#/setup"; return; } } catch { /* offline: fall through */ }
   }
@@ -485,7 +500,11 @@ async function route() {
   $("#navMore")?.classList.toggle("active", !!$("#navMore .menu a.active"));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
-    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } setTimeout(tourAuto, 400); return; }
+    if (m) {
+      try { await fn(...m.slice(1)); } catch (e) { if (current()) toast(e.message, true); }
+      if (current()) setTimeout(() => { if (current()) tourAuto(); }, 400);
+      return;
+    }
   }
   location.hash = "#/home";
 }
@@ -535,10 +554,14 @@ const SCREENS = {
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
   customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
+  "pack-review": ["مراجعة العبوات بعد النقل", "items.write"],
+  "customer-name-review": ["مراجعة أسماء العملاء بعد النقل", "customers.manage"],
   reconcile: ["مطابقة الأرصدة", "cash.see_expected"], "opening-fix": ["تصحيح الأرصدة بعد النقل", "balances.correct"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
+  "pack-review": ["راجع العبوات المنقولة اللي اسمها فيه عدد والبرنامج مسجلها علبة واحدة.", ["راجع العلبة نفسها، واكتب عدد الوحدات اللي بتتباع وسبب اختيارك."]],
+  "customer-name-review": ["راجع أسماء نفس الحساب في إي ستوك وتاريخ البيع.", ["اختار الاسم اللي هيظهر في البرنامج واضغط اعتمد الاسم."]],
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
   pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
   sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
@@ -1370,9 +1393,9 @@ function purchaseLabels(cur) {
 function quickAddHtml() {
   return `<section class="panel" id="qa"><h2>إضافة صنف للفاتورة</h2>
     <div class="row">
-      <label class="f grow">الصنف (اسم أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب أو امسح الباركود"></label>
+      <label class="f grow">الصنف (اسم أو كود أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب الكود أو امسح الباركود"></label>
       <label class="f">كمية (علبة)<input id="qaQty" type="number" min="1" step="1" class="narrow"></label>
-      <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
+      <label class="f" id="qaBonusField" hidden>بونص<input id="qaBonus" disabled type="number" min="0" step="1" value="0" class="narrow"></label>
       <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
       <label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" type="number" min="0" step="0.01" class="narrow"></label>
@@ -1398,32 +1421,45 @@ function bindQuickAdd() {
     if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
     $("#qaQty").focus();
   };
-  let t, res = [];
+  let timer, seq = 0, res = [];
+  const current = onThisScreen();
+  const search = async (v, select) => {
+    const request = ++seq;
+    if (v.length < 2 || !current() || !q.isConnected) return;
+    const found = await findItems(v);
+    if (request !== seq || !q.isConnected || v !== q.value.trim()) return;
+    res = found.items;
+    if (found.hint?.kind === "gs1") {
+      if (!res.length) { $("#qaRes").innerHTML = '<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. سجّله من بطاقة الصنف.</p>'; return; }
+      pick(res[0]);
+      if (found.hint.expiry) { const [y, m] = found.hint.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
+      if (found.hint.batch) $("#qaBatch").value = found.hint.batch;
+      $("#qaPicked").textContent += found.hint.expiry ? " · قُرئت الصلاحية والتشغيلة من الكود" : "";
+      return;
+    }
+    if (res.length === 1 && (/^\d{6,}$/.test(v) || (/^\d{3,5}$/.test(v) && res[0].code === v))) {
+      pick(res[0]); return;
+    }
+    if (select && res.length && !/^\d+$/.test(v)) { pick(res[0]); return; }
+    $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
+      <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || '<p class="muted">لا توجد نتائج</p>');
+    $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
+  };
+  const runSearch = (select) => search(q.value.trim(), select).catch((err) => { if (current()) toast(err.message, true); });
   q.addEventListener("input", () => {
-    QA_ITEM = null; clearTimeout(t);
-    t = setTimeout(async () => {
-      const v = q.value.trim(); if (v.length < 2) { $("#qaRes").innerHTML = ""; return; }
-      const found = await findItems(v); res = found.items;
-      if (found.hint?.kind === "gs1") {             // 2D code on the pack: item + expiry + batch in one scan
-        if (!res.length) { $("#qaRes").innerHTML = `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. سجّله من بطاقة الصنف.</p>`; return; }
-        pick(res[0]);
-        if (found.hint.expiry) { const [y, m] = found.hint.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
-        if (found.hint.batch) $("#qaBatch").value = found.hint.batch;
-        $("#qaPicked").textContent += found.hint.expiry ? ` · قُرئت الصلاحية والتشغيلة من الكود` : "";
-        return;
-      }
-      if (res.length === 1 && /^\d{6,}$/.test(v)) { pick(res[0]); return; }
-      $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
-        <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">لا توجد نتائج</p>`);
-      $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
-    }, 250);
+    QA_ITEM = null; seq++; clearTimeout(timer);
+    $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
+    timer = setTimeout(() => runSearch(false), 250);
   });
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
+  q.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || QA_ITEM) return;
+    e.preventDefault(); clearTimeout(timer); runSearch(true);
+  });
   const add = async () => {
     if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
     const qty = typedWhole($("#qaQty").value);
     if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
+    const line = { item_id: QA_ITEM.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
     if ($("#qaMargin").value.trim() !== "") line.distributor_margin = exactPiasters($("#qaMargin").value) ?? $("#qaMargin").value;
@@ -1439,15 +1475,17 @@ function bindQuickAdd() {
   // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
   // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
   const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaMargin", "#qaExp", "#qaBatch"];
-  order.forEach((sel, i) => {
+  order.forEach((sel) => {
     const el = $(sel);
     el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
     el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); if (i === order.length - 1 || e.ctrlKey) add(); else $(order[i + 1]).focus(); return; }
+      const fields = order.map((key) => $(key)).filter((field) => !field.disabled);
+      const i = fields.indexOf(el);
+      if (e.key === "Enter") { e.preventDefault(); if (i === fields.length - 1 || e.ctrlKey) add(); else fields[i + 1].focus(); return; }
       const back = e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft"), fwd = e.key === (document.dir === "rtl" ? "ArrowLeft" : "ArrowRight");
       if ((back || fwd) && (el.type === "number" || el.selectionStart === (back ? 0 : el.value.length))) {
         const j = i + (fwd ? 1 : -1);
-        if (j >= 0 && j < order.length) { e.preventDefault(); $(order[j]).focus(); }
+        if (j >= 0 && j < fields.length) { e.preventDefault(); fields[j].focus(); }
       }
     });
   });
@@ -1512,10 +1550,16 @@ const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
 async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
   const list = await api("/api/suppliers");
+  if (!sel.isConnected) return;
   sel.innerHTML = `<option value="">— اختر —</option>` + list.map((s) =>
     `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}${SUP_TYPE[s.supplier_type] ? ` (${SUP_TYPE[s.supplier_type]})` : ""}</option>`).join("");
   sel.disabled = !draft;
-  const cur = list.find((x) => x.id === selected), box = $("#supType");
+  const cur = list.find((x) => x.id === selected), box = $("#supType"), bonus = $("#qaBonus");
+  if (bonus) {
+    bonus.disabled = cur?.supplier_type === "warehouse";
+    $("#qaBonusField").hidden = bonus.disabled;
+    if (bonus.disabled) bonus.value = "0";
+  }
   if (!box) return;
   if (!cur) { box.innerHTML = `<span class="muted">اختر المورد</span>`; return; }
   const canEdit = ME.permissions.includes("suppliers.write");
@@ -1591,12 +1635,16 @@ app.addEventListener("keydown", (e) => {
 });
 
 async function save(path, body, method = "PATCH") {
+  const current = onThisScreen();
   PG_SAVING++;
   try {
-    CUR = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
+    const updated = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
+    if (!current()) return;
+    CUR = updated;
     renderInvoice();
     pgFocus();
   } catch (e) {
+    if (!current()) return;
     toast(e.message, true);
     PG_FOCUS = null;                       // a failed save keeps no pending move (review P2)
     if (e.code === "stale_version") await viewInvoice(CUR.invoice.id);
@@ -1700,6 +1748,10 @@ async function loadCats(force = false) {
   return CATS;
 }
 const canW = () => ME.permissions.includes("items.write");
+const canFixPack = () => canW() && ME.permissions.includes("inventory.adjust");
+const PACK_QUESTION = "العلبة فيها كام شريط؟";
+const PACK_REVIEW_TITLE = "مراجعة العبوات بعد النقل";
+const NAME_REVIEW_TITLE = "مراجعة أسماء العملاء بعد النقل";
 
 const FORMS = [["tab", "أقراص"], ["cap", "كبسول"], ["eff", "فوار"], ["chew", "أقراص مضغ"], ["lozenge", "استحلاب"], ["syrup", "شراب"],
   ["susp", "معلق"], ["solution", "محلول"], ["drops", "نقط"], ["eyedrops", "قطرة عين"], ["amp", "أمبول / حقن"], ["vial", "فيال"],
@@ -1763,6 +1815,7 @@ async function viewItems() {
   <section class="panel">
     <div class="row between"><h1>الأصناف</h1>
       <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/dispensing-notes">ملاحظات الصرف</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
+      ${ME.role === "owner" ? `<a class="btn secondary" href="#/pack-review">${PACK_REVIEW_TITLE}</a>` : ""}
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
@@ -1862,6 +1915,7 @@ async function viewItem(id) {
       <div class="totals"><div>العبوة<b>${esc(c.pack_unit_name === "pack" ? "علبة" : c.pack_unit_name)}</b></div>
         <div>تُباع بـ<b>${esc(unitName(c))}</b></div><div>العبوة تحتوي على<b>${c.pack_size} ${esc(unitName(c))}</b></div>
         <div>الحد الأقصى<b>${c.max_stock ? esc(packs(c.max_stock, c)) : "—"}</b></div></div>
+      ${c.pack_size === 1 && !c.is_service && canFixPack() ? `<button type="button" class="btn secondary" id="cardPackFix">${PACK_QUESTION}</button>` : ""}
       <h2 class="mt">الباركود والكود الدولي</h2>
       <ul class="plain">${c.barcodes.map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}</li>`).join("") || `<li class="muted">لا يوجد باركود</li>`}</ul>
       <h2 class="mt">البيع آخر 12 شهر</h2>
@@ -1902,6 +1956,13 @@ async function viewItem(id) {
       catch (err) { toast(err.message, true); }
     });
   }
+  $("#cardPackFix")?.addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    if (await withBusy(button, () => packFix(id, null, true)) && button.isConnected) {
+      await viewItem(id);
+      estockPanel("item", id);
+    }
+  });
   if ($("#mvRep")) {
     let mv = null;
     const q = (n) => `${n < 0 ? "−" : ""}${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
@@ -1956,7 +2017,7 @@ async function viewItemEdit(id) {
       <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
       <label class="f">عدد الوحدات في العبوة <input name="pack_size" type="number" min="1" step="1" value="${it.pack_size}" ${id && it.stock_qty ? "disabled" : ""}>
         ${id && it.stock_qty ? `<span class="muted">مقفلة لأن للصنف رصيدًا</span>` : ""}
-        ${id && ME.permissions.includes("inventory.adjust") && ME.permissions.includes("items.write") ? `<button type="button" class="btn small secondary" id="packFixBtn">تصحيح عدد الوحدات (الرصيد يتحوّل معاه)</button>` : ""}</label>
+        ${id && !it.is_service && canFixPack() ? `<button type="button" class="btn small secondary" id="packFixBtn">${it.pack_size === 1 ? PACK_QUESTION : "تصحيح عدد الوحدات (الرصيد يتحوّل معاه)"}</button>` : ""}</label>
       <label class="f">حد الطلب (بالعبوة) <input name="min_packs" type="number" min="0" step="1" value="${it.min_stock ? Math.round(it.min_stock / it.pack_size) : ""}"></label>
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
@@ -1997,7 +2058,10 @@ async function viewItemEdit(id) {
     try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: b.dataset.rm, remove: true } }); viewItemEdit(id); }
     catch (err) { toast(err.message, true); }
   }));
-  $("#packFixBtn")?.addEventListener("click", () => packFix(id).then((ok) => { if (ok) viewItemEdit(id); }));
+  $("#packFixBtn")?.addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    if (await withBusy(button, () => packFix(id, null, it.pack_size === 1)) && button.isConnected) viewItemEdit(id);
+  });
   $("#itemForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
@@ -2693,6 +2757,9 @@ async function renderReceiptCfg(c) {
       ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة. الحل: أعد التثبيت بآخر نسخة من المثبّت.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
+      <label class="f">الباركود على الملصق <select name="label_barcode_source">
+        <option value="internal" ${c.label_barcode_source === "internal" ? "selected" : ""}>كود الصنف</option>
+        <option value="international" ${c.label_barcode_source === "international" ? "selected" : ""}>الكود الدولي</option></select></label>
       <label class="f">المقاس <select name="label_preset">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}<option value="custom" ${["38x25", "50x30", "58x40"].includes(c.label_size) ? "" : "selected"}>مقاس آخر (اكتبه)</option></select></label>
       <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.1" value="${esc(c.label_size.split("x")[0])}"></label>
         <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.1" value="${esc(c.label_size.split("x")[1])}"></label></div>
@@ -2751,15 +2818,23 @@ async function renderReceiptCfg(c) {
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
   let prevT = null, prevUrl = null;
+  const previewCurrent = onThisScreen();
   const preview = () => { clearTimeout(prevT); prevT = setTimeout(async () => {
+    if (!previewCurrent() || !lf.isConnected) return;
     try {
       const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
-        body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
+        body: JSON.stringify({ label_barcode_source: lf.label_barcode_source.value, label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
           label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim(), label_rows: +lf.label_rows.value, label_gap: +lf.label_gap.value || 0, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() }) });
-      if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
+      if (!r.ok) {
+        const error = (await r.json()).error?.message || "تعذرت المعاينة";
+        if (previewCurrent() && lf.isConnected) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + error; }
+        return;
+      }
+      const png = await r.blob();
+      if (!previewCurrent() || !lf.isConnected) return;
       const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
       if (prevUrl) URL.revokeObjectURL(prevUrl);
-      prevUrl = URL.createObjectURL(await r.blob());
+      prevUrl = URL.createObjectURL(png);
       $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
       const fromWin = r.headers.get("X-Label-Source") === "windows" ? ` على مقاس ويندوز ${(r.headers.get("X-Label-Size") || "").replace("x", " × ")} مم` : "";
       $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: حُذف ${dropped.map((k) => ({ phone: "الهاتف", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
@@ -2771,7 +2846,7 @@ async function renderReceiptCfg(c) {
   lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview); lf.label_rows.addEventListener("change", preview); lf.label_gap.addEventListener("change", preview); lf.label_text_lang.addEventListener("change", preview); lf.label_pharmacy_en.addEventListener("change", preview);
   showCustom(); preview();
   lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
-  ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
+  ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi", "label_barcode_source"].forEach((k) => lf[k].addEventListener("change", preview));
   lf.querySelectorAll("[data-lf]").forEach((x) => x.addEventListener("change", preview));
   $("#rcForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -2781,7 +2856,7 @@ async function renderReceiptCfg(c) {
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
       header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
-      footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
+      footer: f.footer.value, names: f.names.value, label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
       label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim(), show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
       show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
       qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
@@ -2797,7 +2872,7 @@ async function renderReceiptCfg(c) {
   });
   $("#lbTest").addEventListener("click", async () => {
     try {
-      const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
+      const r = await api("/api/print/label-test", { method: "POST", body: { label_barcode_source: lf.label_barcode_source.value, label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
         label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked, label_rows: +lf.label_rows.value, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() } });
       toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — إذا خرجت سليمة فاضغط «احفظ»`);
@@ -2892,7 +2967,11 @@ function renderBackup(b) {
 }
 async function checkUpdateBadge() {
   if (!ME?.permissions?.includes("settings.manage")) { $("#navSystem")?.setAttribute("hidden", ""); return; }
-  try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
+  const user = ME.user.id;
+  try {
+    const st = await api("/api/system/update", { settleAfterNavigation: true });
+    if (ME?.user.id === user) $("#updBadge").hidden = !st.available;
+  } catch { /* offline */ }
 }
 
 // An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
@@ -3532,13 +3611,20 @@ async function viewDispensingNotes() {
 // ------------------------------------------------------------------ item data health (U3-1)
 // Correcting a wrong pack size of an item with stock: the server converts every lot (boxes stay boxes) and refuses
 // an open box, a draft sale or an open count. Nothing changes until the person confirms with a reason.
-async function packFix(id, suggest) {
-  const v = typedWhole(prompt("عدد الوحدات الصحيح في العلبة:", suggest ? String(suggest) : "") || "");
+async function packFix(id, suggest, strips = false) {
+  const current = onThisScreen();
+  const v = typedWhole(prompt(strips ? PACK_QUESTION : "عدد الوحدات الصحيح في العلبة:", suggest ? String(suggest) : "") || "");
   if (!(Number(v) > 0)) return false;
   try {
     const p = await api(`/api/items/${id}/pack-fix?pack=${encodeURIComponent(v)}`);
-    const lines = [`العبوة هتتغير من ${p.old_pack} لـ ${p.new_pack} ${p.unit}.`,
-      ...p.lots.map((l) => `رصيد ${l.qty} ← ${l.new_qty} ${p.unit} (نفس عدد العلب)`)];
+    if (strips && p.drafts) {
+      toast("شيل الصنف من الفاتورة المفتوحة، وبعدها صحّح العبوة من نتيجة البحث أو بطاقة الصنف وأضفه تاني.", true);
+      return false;
+    }
+    const unit = strips ? (prompt("اسم الوحدة اللي بتتباع من العلبة", p.unit === "unit" ? "شريط" : p.unit) || "").trim() : p.unit;
+    if (!unit) return false;
+    const lines = [`العبوة هتتغير من ${p.old_pack} لـ ${p.new_pack} ${unit}.`,
+      ...p.lots.map((l) => `رصيد ${l.qty} ← ${l.new_qty} ${unit} (نفس عدد العلب)`)];
     if (p.not_whole.length) lines.push("⚠ فيه علبة مفتوحة مش هتتحول لوحدات كاملة: اعمل جرد للصنف الأول.");
     if (p.drafts) lines.push(`⚠ الصنف في ${p.drafts} فاتورة بيع مفتوحة: اقفلها الأول.`);
     if (p.counting) lines.push("⚠ الصنف في جرد مفتوح: اعتمده أو الغيه الأول.");
@@ -3547,10 +3633,84 @@ async function packFix(id, suggest) {
     if (!confirm(lines.join("\n"))) return false;
     const reason = (prompt("سبب التصحيح (إجباري):", "العبوة متسجلة غلط") || "").trim();
     if (reason.length < 3) { toast("اكتب السبب", true); return false; }
-    await api(`/api/items/${id}/pack-fix`, { method: "POST", body: { pack_size: Number(v), reason } });
-    toast("اتصححت العبوة والرصيد اتحوّل");
-    return true;
-  } catch (er) { toast(er.message, true); return false; }
+    const body = { pack_size: Number(v), reason, expected_pack: p.old_pack };
+    if (strips) { body.expected_pack = 1; body.base_unit_name = unit; }
+    await api(`/api/items/${id}/pack-fix`, { method: "POST", body });
+    if (current()) toast("اتصححت العبوة والرصيد اتحوّل");
+    return current();
+  } catch (er) { if (current()) toast(er.message, true); return false; }
+}
+
+async function viewPackReview() {
+  if (ME.role !== "owner") { app.textContent = "المراجعة دي للمالك فقط"; return; }
+  const { items } = await api("/api/estock/pack-review");
+  const current = onThisScreen();
+  app.innerHTML = `<section class="panel"><a href="#/items">← الأصناف</a><h1>${PACK_REVIEW_TITLE}</h1>
+    <p class="muted">القائمة مرتبة بقيمة الرصيد بسعر التكلفة. العدد في الاسم يساعدك تلاقي الصنف. راجع العلبة نفسها قبل اعتماد الوحدة اللي بتتباع.</p>
+    <div id="packReviewRows">${items.map((it) => `<form class="row" data-item="${esc(it.id)}">
+      <div class="grow"><a href="#/items/${esc(it.id)}">${itemHtml(it)}</a> <bdi>${esc(it.code || "")}</bdi>
+        <div class="muted">العدد في الاسم: ${it.printed_count} · الرصيد: ${it.stock_qty} · قيمة الرصيد: ${it.stock_value == null ? "التكلفة غير متاحة" : `${money(it.stock_value)} ج`}</div></div>
+      <label class="f">عدد الوحدات المباعة في العلبة<input name="size" type="number" min="1" max="10000" step="1" placeholder="1 للعلبة الكاملة" required></label>
+      <label class="f">اسم الوحدة الصغيرة<input name="unit" maxlength="30" placeholder="شريط / أمبول / كيس"
+        value="${esc(it.base_unit_name === "unit" ? "" : it.base_unit_name)}"></label>
+      <label class="f">السبب<input name="reason" minlength="3" maxlength="200" required></label>
+      <button class="btn small">اعتمد العبوة</button><span class="t-err small" role="status"></span>
+    </form>`).join("")}</div><p id="packReviewEmpty" ${items.length ? "hidden" : ""}>مفيش عبوات محتاجة مراجعة.</p>
+    <p class="muted">لو العدد اتغيّر، الرصيد بيتحوّل مع الحفاظ على عدد العلب. مرتجعات الفواتير والتشغيلات القديمة بتحتاج تسوية أو جرد.</p></section>`;
+  for (const form of $("#packReviewRows").querySelectorAll("form")) {
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const [button, status] = [form.querySelector("button"), form.querySelector("[role=status]")];
+      withBusy(button, async () => {
+        const id = form.dataset.item, size = Number(form.elements.size.value);
+        const reason = form.elements.reason.value.trim(), unit = form.elements.unit.value.trim();
+        status.textContent = "";
+        if (size > 1 && !unit) { status.textContent = "اكتب اسم الوحدة الصغيرة"; return; }
+        try {
+          await api(`/api/estock/pack-review/${id}`, { method: "POST",
+            body: { reason, pack_size: size, base_unit_name: unit || null } });
+          if (!current() || !form.isConnected) return;
+          form.remove();
+          $("#packReviewEmpty").hidden = !!$("#packReviewRows").children.length;
+          toast("تم اعتماد العبوة");
+        } catch (err) { if (current()) status.textContent = err.message; }
+      });
+    });
+  }
+}
+
+async function viewCustomerNameReview() {
+  if (ME.role !== "owner") { app.textContent = "المراجعة دي للمالك فقط"; return; }
+  const { customers } = await api("/api/estock/customer-name-review");
+  const current = onThisScreen();
+  app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><h1>${NAME_REVIEW_TITLE}</h1>
+    <div id="nameReviewRows">${customers.map((row) => `<form class="row">
+      <div class="grow"><a href="#/customers/${esc(row.customer_id)}">${esc(row.current_name)}</a> <bdi>${esc(row.estock_code || "")}</bdi>
+        ${row.name_ar ? `<div>إي ستوك (عربي): <bdi>${esc(row.name_ar)}</bdi></div>` : ""}
+        ${row.name_en ? `<div>إي ستوك (إنجليزي): <bdi>${esc(row.name_en)}</bdi></div>` : ""}
+        ${row.history.length ? `<div>في فواتير البيع: ${row.history.map((n) => `<bdi>${esc(n)}</bdi>`).join(" · ")}</div>` : ""}</div>
+      <label class="f grow">الاسم المعتمد<select name="picked" required>
+        <option value="">اختر الاسم</option>${row.options.map((name) =>
+          `<option value="${esc(name)}">${esc(name)}${name === row.current_name ? " (الاسم الحالي)" : ""}</option>`).join("")}</select></label>
+      <button class="btn small">اعتمد الاسم</button><span class="t-err small" role="status"></span>
+    </form>`).join("")}</div><p id="nameReviewEmpty" ${customers.length ? "hidden" : ""}>مفيش أسماء محتاجة مراجعة في الأرشيف المتاح.</p></section>`;
+  [...$("#nameReviewRows").querySelectorAll("form")].forEach((form, i) => {
+    const row = customers[i];
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const button = form.querySelector("button");
+      withBusy(button, async () => {
+        try {
+          await api(`/api/estock/customer-name-review/${row.customer_id}`, { method: "POST",
+            body: { name: form.elements.picked.value, current_name: row.current_name } });
+          if (!current() || !form.isConnected) return;
+          form.remove();
+          $("#nameReviewEmpty").hidden = !!$("#nameReviewRows").children.length;
+          toast("تم اعتماد اسم العميل");
+        } catch (err) { if (current()) form.querySelector("[role=status]").textContent = err.message; }
+      });
+    });
+  });
 }
 
 const IH_KEYS = { pack_vs_name: "العبوة مش زي الاسم", unit_price_split: "سعر الوحدة × العدد ≠ سعر العلبة", no_public_price: "مفيش سعر جمهور",
@@ -4003,14 +4163,16 @@ async function viewPos(afterCheckout = false) {
   const search = async (unit, live = false, given = null) => {
     const v = given ?? q.value.trim(); if (!v) return;
     const mine = live ? ++liveSeq : null, saleId = SALE.id;
-    const isScan = /^\d{6,}$/.test(v) || /^01\d{14}/.test(v);
+    const isScan = /^\d{3,}$/.test(v) || /^01\d{14}/.test(v);
+    const short = /^\d{3,5}$/.test(v), current = onThisScreen();
     // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
-    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only");
-    if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;
+    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only", true);
+    if (!current() || SALE?.id !== saleId || (live && mine !== liveSeq)) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) {
+    const exactShort = !short || res[0]?.code === v || res[0]?.code === `E${v}`;
+    if (!live && res.length === 1 && sellable(res[0]) && exactShort && (scanned || !found.hint)) {
       return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
@@ -4021,12 +4183,17 @@ async function viewPos(afterCheckout = false) {
         ${r.stock_qty ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>
         ${r.pack_size > 1 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}`
         : `<span class="badge b-err">✕ نفد</span>`}
+        ${r.pack_size === 1 && !r.is_service && canFixPack() ? `<button class="btn small secondary" data-search-pack="${i}">${PACK_QUESTION}</button>` : ""}
         ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
       + (found.hidden_no_stock ? `<p class="muted small">${found.hidden_no_stock} صنف رصيده صفر مش ظاهر — <a href="#" id="posShowZero">اعرضهم</a></p>` : "")
       || `<p class="muted">لا توجد نتائج</p>`;
     $("#posShowZero")?.addEventListener("click", (e) => { e.preventDefault(); $("#posAll").checked = true; $("#posAll").dispatchEvent(new Event("change")); });
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
+    $("#posRes").querySelectorAll("[data-search-pack]").forEach((button) => button.addEventListener("click", async () => {
+      const item = res[+button.dataset.searchPack];
+      if (await withBusy(button, () => packFix(item.id, null, true)) && q.isConnected) await search(false, true);
+    }));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
     if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
     if (!live && (isScan || scanned)) return false;       // an unresolved scan needs the cashier's attention
@@ -4045,11 +4212,11 @@ async function viewPos(afterCheckout = false) {
     e.preventDefault();
     clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
-    if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
+    if (first && !/^\d{3,5}$/.test(q.value.trim()) && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
     const v = q.value.trim();
-    if (/^\d{6,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
+    if (/^\d{3,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
       q.value = ""; delete q.dataset.searched;
       trackPosAdd(search(e.shiftKey, false, v));
       return;
@@ -4301,7 +4468,9 @@ function renderCart(findings = null) {
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
           ${l.item.pack_size > 1 && !l.item.is_service ? `<select class="small" data-unit="${esc(l.id)}" aria-label="الوحدة" title="غيّر الوحدة">
             <option value="pack" ${l.qty_base % l.item.pack_size === 0 ? "selected" : ""}>${esc(l.item.pack_unit && l.item.pack_unit !== "pack" ? l.item.pack_unit : "علبة")}</option>
-            <option value="unit" ${l.qty_base % l.item.pack_size ? "selected" : ""}>${esc(unitName({ base_unit_name: l.item.base_unit }))}</option></select>` : ""}</td>
+            <option value="unit" ${l.qty_base % l.item.pack_size ? "selected" : ""}>${esc(unitName({ base_unit_name: l.item.base_unit }))}</option></select>` : ""}
+          ${l.item.pack_size === 1 && !l.item.is_service && canFixPack()
+            ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
         <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
@@ -4312,6 +4481,8 @@ function renderCart(findings = null) {
     </table></div><div id="posSafety"></div>`;
   posMark();
   const line = (id) => s.lines.find((l) => l.id === id);
+  $("#posCart").querySelectorAll("[data-cart-pack]").forEach((button) => button.addEventListener("click", () =>
+    withBusy(button, () => packFix(line(button.dataset.cartPack).item_id, null, true))));
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
   // U2-13: the same count in the other unit (1 box -> 1 strip, 2 strips -> 2 boxes); the server re-checks the stock
   $("#posCart").querySelectorAll("[data-unit]").forEach((sel) => sel.addEventListener("change", () => {
@@ -5884,7 +6055,7 @@ async function viewShortages() {
 const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية", discount: "خصم مطالبة" };
 async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
-  app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
+  app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${ME.role === "owner" ? `<a class="btn secondary" href="#/customer-name-review">${NAME_REVIEW_TITLE}</a>` : ""}${reportTools("cust")}</div>
     <div class="row"><input id="cuQ" class="grow" placeholder="الاسم أو الموبايل أو الكود" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <label class="f small">الترتيب <select id="cuSort"><option value="code">بالكود</option><option value="name">بالاسم</option><option value="balance">بالرصيد (الأكبر أولًا)</option></select></label>
