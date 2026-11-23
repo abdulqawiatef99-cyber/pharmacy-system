@@ -694,6 +694,7 @@ class Sales:
                 return after - base if after is not None else None
 
             item.update(next_pack_price=quote(size), next_unit_price=quote(1), available_qty=available,
+                        stock_qty=sum(prices.values()),
                         price_stock=[{"price": price, "qty": qty} for price, qty in prices.items()])
 
     def get(self, ctx: Context, sid: str) -> dict:

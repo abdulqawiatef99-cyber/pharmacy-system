@@ -195,7 +195,8 @@ const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.n
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
   ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
-async function findItems(q, limit = 8, stock = "", sale = null) {
+async function findItems(q, limit = 8, stock = "") {
+  const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
   const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}${sale ? `&sale=${encodeURIComponent(sale)}` : ""}`);
   return r;
 }
@@ -4124,13 +4125,12 @@ async function viewPos() {
     const mine = live ? ++liveSeq : null, saleId = SALE.id;
     const isScan = /^\d{6,}$/.test(v) || /^01\d{14}/.test(v);
     // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
-    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only", saleId);
+    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only");
     if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
-    const sellable = (r, strips = false) => r.is_service || r.available_qty >= (strips ? 1 : r.pack_size);
-    res = res.map((r) => ({ ...r, stock_qty: r.price_stock?.reduce((n, p) => n + p.qty, 0) ?? r.stock_qty }));
-    if (!live && res.length === 1 && sellable(res[0], unit) && (scanned || !found.hint)) {
+    const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
+    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) {
       return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
@@ -4140,9 +4140,9 @@ async function viewPos() {
         <div><b class="price">${money(r.next_pack_price ?? r.next_unit_price) || "—"} ج</b>
           ${r.pack_size > 1 && r.next_unit_price != null && r.next_pack_price != null ? `<div class="muted small">${money(r.next_unit_price)} ج / ${esc(unitName(r))}</div>` : ""}
           ${r.price_stock?.length > 1 ? `<div class="muted small">${r.price_stock.map((p) => `${money(p.price) || "بدون سعر"} ج · ${esc(fmtStock(p.qty, r))}`).join(" / ")}</div>` : ""}</div>
-        ${sellable(r) ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>` : ""}
-        ${r.pack_size > 1 && !r.is_service && sellable(r, true) ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}
-        ${!sellable(r, true) ? `<span class="badge b-err">✕ نفد</span>` : ""}
+        ${r.is_service || r.available_qty >= r.pack_size ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>` : ""}
+        ${r.pack_size > 1 && !r.is_service && r.available_qty > 0 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}
+        ${!r.is_service && !r.available_qty ? `<span class="badge b-err">✕ نفد</span>` : ""}
         ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
       + (found.hidden_no_stock ? `<p class="muted small">${found.hidden_no_stock} صنف رصيده صفر مش ظاهر — <a href="#" id="posShowZero">اعرضهم</a></p>` : "")
       || `<p class="muted">لا توجد نتائج</p>`;
