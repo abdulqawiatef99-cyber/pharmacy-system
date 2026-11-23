@@ -170,6 +170,24 @@ class QA20261123(APICase):
         self.assertEqual(after["approved_by"], self.ctx.user_id)
         self.assertEqual(after["stock_price_decisions"][0]["mode"], "keep")
 
+    def test_depleted_lot_keeps_its_price_when_the_old_boxes_return(self):
+        sales = Sales(self.db)
+        sold_id = sales.create(self.ctx)
+        sold = sales.add_line(self.ctx, sold_id, self.item, packs=10)
+        sold = sales.complete(self.ctx, sold_id, paid_cash=sold["total"], version=sold["version"])
+        purchasing = Purchasing(self.db, self.s)
+        sid = self.purchase_draft()
+        line = purchasing.get(self.ctx, sid)["lines"][0]
+        purchasing.update_line(self.ctx, sid, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        review = purchasing.price_review(self.ctx, sid)
+        self.assertEqual(review["changes"], [])
+        purchasing.approve(self.ctx, sid, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={})
+        sales.return_items(self.ctx, sold_id, {sold["lines"][0]["id"]: 2},
+                           refund_method="cash", reason="QA old-price return")
+        next_sale = sales.add_line(self.ctx, sales.create(self.ctx), self.item, packs=1)
+        self.assertEqual(next_sale["total"], 8000)
+
     def test_receiving_a_new_price_never_releases_a_recalled_lot(self):
         from app.recalls.service import Recalls
 
@@ -322,6 +340,20 @@ class QA20261123(APICase):
             self.assertEqual(self.db.one("SELECT amount FROM supplier_ledger WHERE org_id=? AND ref_id=?",
                                          (self.ctx.org_id, sid))[0], expected)
 
+    def test_typed_total_cannot_omit_one_piastre_of_explicit_additive_vat(self):
+        purchasing = Purchasing(self.db, self.s)
+        sid = purchasing.create_manual(self.ctx, supplier_id=self.supplier)
+        purchasing.update_header(self.ctx, sid, {"invoice_no": "QA-VAT-EXACT", "declared_total": 10001}, None)
+        draft = purchasing.add_line(self.ctx, sid, {
+            "item_id": self.item, "qty": 1, "unit_net_price": 10000, "line_total": 10000,
+            "tax_amount": 1, "tax_included": 0, "batch_no": "QA-VAT-EXACT", "expiry_date": self.expiry,
+        }, None)
+        self.assertFalse(draft["can_approve"])
+        with self.assertRaises(Conflict):
+            purchasing.approve(self.ctx, sid, None)
+        corrected = purchasing.update_line(self.ctx, sid, draft["lines"][0]["id"], {"line_total": 10001}, None)
+        self.assertTrue(corrected["can_approve"])
+
     def finish_sale(self, payment):
         sales = Sales(self.db)
         sid = sales.create(self.ctx)
@@ -363,6 +395,22 @@ class QA20261123(APICase):
         self.assertEqual(summary["transfer_refunds"], 4000)
         wallet = next(ch for ch in summary["by_channel"] if ch["method"] == "transfer")
         self.assertEqual((wallet["amount"], wallet["refunded"]), (8000, 4000))
+
+    def test_an_unrouted_wallet_refund_never_debits_a_later_route(self):
+        self.http_login()
+        channel = next(c["id"] for c in self.c.get("/api/payment-channels").json()["channels"] if c["kind"] == "transfer")
+        money.set_route(self.db, self.ctx, "transfer", channel, None)
+        sid = self.finish_sale({"method": "transfer", "channel_id": channel})
+        proof = attachments.attach(self.db, self.tmp, self.ctx, sid, b"%PDF synthetic unrouted transfer proof")
+        attachments.review(self.db, self.ctx, proof["attachments"][0]["id"], True)
+        routed_later = money.create_account(self.db, self.ctx, "QA wallet routed later", "wallet")["id"]
+        money.set_route(self.db, self.ctx, "transfer", channel, routed_later)
+        sales = Sales(self.db)
+        line = sales.get(self.ctx, sid)["lines"][0]["id"]
+        sales.return_items(self.ctx, sid, {line: 1}, refund_method="transfer", reason="QA original channel")
+        self.assertIsNone(self.db.one("SELECT id FROM money_movements WHERE org_id=? AND ref_id=?",
+                                      (self.ctx.org_id, sid)))
+        self.assertEqual(sales.get(self.ctx, sid)["returns"][0]["channel_id"], channel)
 
     def test_QA_005_latest_invoice_filter_owns_the_totals(self):
         self.http_login()
