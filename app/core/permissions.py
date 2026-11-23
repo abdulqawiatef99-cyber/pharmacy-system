@@ -105,6 +105,11 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
 }
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
+PIN_LOGIN_ROLES = ("assistant", "pharmacist")
+PIN_SESSION_PERMISSIONS = frozenset({
+    "items.read", "inventory.read", "safety.read", "sales.read", "sales.create", "sales.return", "cash.close",
+})
+PASSWORD_SESSION_PERMISSIONS = frozenset({"settings.manage", "users.manage", "users.permissions", "payroll.manage"})
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
 ROLES_VERSION = "2026-11-22b"
 
@@ -123,6 +128,7 @@ class Context:
     approver_id: str | None = None
     approver_permissions: frozenset[str] = field(default_factory=frozenset)
     approver_discount_bp: int = 0
+    auth_method: str = "password"
 
     @property
     def is_owner(self) -> bool:
