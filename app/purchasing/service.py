@@ -781,7 +781,9 @@ class Purchasing:
             line = next((l for l in lines if l["id"] == line_id), None)
             if not line:
                 raise NotFound("السطر غير موجود")
-            data = {"name_en": line["raw_name"], "public_price": line["public_price"], **item}
+            data = {"name_en": line["raw_name"], **item}
+            if ctx.allowed("items.price"):
+                data.setdefault("public_price", line["public_price"])
             barcodes = [line["raw_barcode"]] if line["raw_barcode"] else []
             item_id = catalog.create_item(self.db, ctx, data, barcodes=barcodes, force=force,
                                           source="purchase_invoice")
@@ -847,8 +849,12 @@ class Purchasing:
                                code="negative_total", details={"lines_amount": gross, "total": net_total})
             pay = self._pay_now(ctx, inv, net_total)      # checked before anything is written
             moved = 0
-            packs_of = {l["id"]: self.db.one("SELECT pack_size FROM items WHERE id=? AND org_id=?",
-                                             (l["item_id"], ctx.org_id))["pack_size"] for l in lines}
+            may_price = ctx.allowed("items.price")
+            items = {item_id: self.db.one("SELECT pack_size, public_price FROM items WHERE id=? AND org_id=?",
+                                          (item_id, ctx.org_id)) for item_id in {l["item_id"] for l in lines}}
+            if any(l["public_price"] is not None and items[l["item_id"]]["public_price"] is None for l in lines):
+                ctx.require("items.price")
+            packs_of = {l["id"]: items[l["item_id"]]["pack_size"] for l in lines}
             units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * packs_of[l["id"]] for l in lines}
             all_units = sum(units.values())
             for l, amount in zip(lines, amounts):
@@ -863,9 +869,11 @@ class Purchasing:
                 unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
                 batch_id = inventory.get_or_create_batch(self.db, ctx, item["id"], l["batch_no"],
                                                          l["expiry_date"], l["expiry_precision"])
-                if batch_id and l["public_price"] is not None:
-                    self.db.execute("UPDATE batches SET public_price=coalesce(public_price, ?)"
-                                    " WHERE id=?", (l["public_price"], batch_id))
+                receipt_price = l["public_price"] if may_price else None
+                if batch_id and receipt_price is not None:
+                    self.db.execute("UPDATE batches SET public_price=?"
+                                    " WHERE id=? AND org_id=? AND public_price IS NULL",
+                                    (receipt_price, batch_id, ctx.org_id))
                 # the branch is named so ix_moves_item(org_id, branch_id, item_id) answers from the item's own
                 # movements; without it every movement of the pharmacy was read for each line (#253: 4 s a
                 # line on 3.5 M movements, and the approval holds every screen while it runs)
@@ -884,11 +892,14 @@ class Purchasing:
                                         ref_id=inv_id, ref_line_id=l["id"],
                                         branch_id=inv["branch_id"])
                 moved += base_qty
-                if l["public_price"] is not None and l["public_price"] != item["public_price"]:
-                    self.db.execute("UPDATE items SET public_price=?, updated_at=? WHERE id=?",
-                                    (l["public_price"], accounts.iso(accounts.utcnow()), item["id"]))
+                if may_price and l["public_price"] is not None and l["public_price"] != item["public_price"]:
+                    self.db.execute("UPDATE items SET public_price=?, updated_at=? WHERE id=? AND org_id=?",
+                                    (l["public_price"], accounts.iso(accounts.utcnow()), item["id"], ctx.org_id))
                     catalog.record_price(self.db, ctx, item["id"], l["public_price"],
                                          item["public_price"], "purchase_invoice", inv_id)
+                    audit.record(self.db, ctx, "purchase.catalog_price", "item", item["id"],
+                                 before={"public_price": item["public_price"]},
+                                 after={"public_price": l["public_price"], "invoice_id": inv_id})
                     price_changes.append(f"{item['name_en'] or item['name_ar']}: "
                                          f"{(item['public_price'] or 0) / 100:,.2f} ← {l['public_price'] / 100:,.2f}")
                 # learn from human confirmations only

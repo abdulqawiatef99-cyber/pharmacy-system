@@ -14,13 +14,23 @@ FUT = (date.today() + timedelta(days=700)).strftime("%m/%Y")
 H = {"X-Requested-With": "pharm"}
 
 
-def approval_headers(client, approver_id, pin, permission, path, method="GET"):
-    """What the approval box does (#137): the PIN goes to /api/approvals/check once, the action (method +
-    path) then carries the token it returns. Returns the headers for the action (no approval if refused)."""
-    r = client.post("/api/approvals/check", json={"permission": permission, "path": path, "method": method},
+def approval_headers(client, approver_id, pin, permission, path, method="GET", *,
+                     payload=None, key=None, previous=None):
+    """Ask the actual action for its challenge, then get the supervisor's approval."""
+    headers = dict(H)
+    challenge = None
+    if method != "GET":
+        from uuid import uuid4
+        headers["Idempotency-Key"] = key or uuid4().hex
+        refused = client.request(method, path, json=payload, headers=headers)
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["error"]["details"]["permission"] == permission, refused.text
+        challenge = refused.json()["error"]["details"]["challenge"]
+    r = client.post("/api/approvals/check", json={"permission": permission, "path": path.split("?")[0],
+                    "method": method, "challenge": challenge, "previous": previous},
                     headers={**H, "X-Approver": approver_id, "X-Approver-Pin": pin})
     token = r.json().get("token") if r.status_code == 200 else None
-    return {**H, "X-Approval": token} if token else dict(H)
+    return {**headers, "X-Approval": token} if token else headers
 
 
 class APICase(DBTestCase):

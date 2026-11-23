@@ -95,10 +95,16 @@ class TestAdoptInstaller(unittest.TestCase):
 @mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateBadge(APICase):
     def status(self, info, latest):
+        from app.core import smart_update, update_sign
+
         self.http_login()
-        with mock.patch.object(updater, "installed", return_value=info), \
+        signed = {"sha": latest, "channel": info["ref"], "commit_time": 20, "python": smart_update.python_tag(),
+                  "migrations": [], "notes": []}
+        with mock.patch.object(updater, "installed", return_value={**info, "commit_time": 10}), \
                 mock.patch.object(updater, "read_token", return_value="t"), \
-                mock.patch.object(updater, "latest_sha", return_value=latest):
+                mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(smart_update, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(smart_update, "read_manifest", return_value=signed):
             return self.c.get("/api/system/update").json()
 
     def test_main_build_is_not_an_update_of_itself(self):

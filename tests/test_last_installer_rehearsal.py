@@ -132,7 +132,7 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         for f in self.bundle.iterdir():
             f.unlink()
         with patch("tests.test_smart_update.SHA_NEW", "c" * 40):            # a later commit of the channel
-            self.build(deps_files={"rehearsalpkg/__init__.py": "VALUE = 7\n"})   # CI ships the set every time
+            self.build(deps_files={"rehearsalpkg/__init__.py": "VALUE = 7\n"}, commit_time=3000)
         raw = json.loads((self.bundle / su.MANIFEST).read_bytes())
         self.assertNotEqual(raw["sha"], SHA_NEW)
         p2 = su.prepare(self.s, su.FolderSource(self.bundle), legacy=self.legacy)

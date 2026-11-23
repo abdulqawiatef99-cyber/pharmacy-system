@@ -122,6 +122,8 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
     including Arabic/English spelling) unless force=True."""
     ctx.require("items.write")
     d = _clean_item(data)
+    if d.get("public_price") is not None:
+        ctx.require("items.price")
     name = d.get("name_en") or d.get("name_ar")
     if not name:
         raise ValidationFailed("اسم الصنف مطلوب (عربي أو إنجليزي)")
@@ -192,8 +194,13 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
         # silently would mis-state quantities and unit prices
         raise Conflict("لا يمكن تغيير عدد الوحدات في العبوة لصنف له حركات مخزون؛ صحح الرصيد بالجرد أولًا"
                        " أو أنشئ صنفًا جديدًا", code="pack_size_locked")
-    if "public_price" in d and d["public_price"] != before.get("public_price"):
-        ctx.require("items.price")
+    if "public_price" in d:
+        if d["public_price"] == before.get("public_price"):
+            del d["public_price"]
+        else:
+            ctx.require("items.price")
+    if not d:
+        return before
     if "hidden" in d and bool(d["hidden"]) != bool(before.get("hidden")):
         ctx.require("items.hidden")          # hiding or showing an item is the hidden-items right (#324 X12)
     if d.get("is_service") and not before.get("is_service") and db.one(

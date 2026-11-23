@@ -81,7 +81,7 @@ class SmartUpdateBase(unittest.TestCase):
     def add_migration(self, sql="CREATE TABLE smart_update_probe (id INTEGER PRIMARY KEY);\n"):
         (self.new / "app" / "migrations" / "0999_smart_update_probe.sql").write_text(sql, encoding="utf-8")
 
-    def build(self, *, deps_files=None, tamper_code=False, key=None, channel="main"):
+    def build(self, *, deps_files=None, tamper_code=False, key=None, channel="main", commit_time=2000, startup_proof=False):
         code = self.bundle / "code.zip"
         zip_tree(self.new, code)
         req = (self.new / "requirements.txt").read_bytes()
@@ -92,11 +92,15 @@ class SmartUpdateBase(unittest.TestCase):
             with zipfile.ZipFile(deps_zip, "w") as z:
                 for name, body in deps_files.items():
                     z.writestr(name, body)
-        raw = su.make_manifest(channel=channel, sha=SHA_NEW, commit_time=2000, version="0.5.0",
+        raw = su.make_manifest(channel=channel, sha=SHA_NEW, commit_time=commit_time, version="0.5.0",
                                python=su.python_tag(), platform=su.platform_tag(), code_zip=code,
                                deps_zip=deps_zip, deps=ident,
                                migrations=[p.stem for p in (self.new / "app" / "migrations").glob("*.sql")])
         m = json.loads(raw)
+        if startup_proof:
+            su.add_startup_proof(code, m, self.priv)
+            m["code"].update(size=code.stat().st_size, sha256=releases.file_sha256(code))
+            raw = json.dumps(m).encode("utf-8")
         os.replace(code, self.bundle / m["code"]["name"])
         if deps_zip:
             os.replace(deps_zip, self.bundle / m["deps"]["name"])
@@ -207,12 +211,44 @@ class TestPrepare(SmartUpdateBase):
     def test_every_smart_batch_needs_the_new_launcher(self):
         (self.home / "bootstrap.json").unlink()                                     # old installed launcher
         self.build()                                                                # code only, too
-        with self.assertRaisesRegex(UpdateError, "المثبّت"):
+        with self.assertRaisesRegex(UpdateError, "المشغّل"):
             self.prepare()
         self.assertFalse((self.home / "downloads").exists())
 
 
 class TestApply(SmartUpdateBase):
+    def test_prepared_release_signature_is_checked_before_activation(self):
+        self.build()
+        prepared = self.prepare()
+        proof = self.home / "proofs" / f"{prepared['release']}.json"
+        releases.atomic_json(proof, {"manifest": "{}", "signature": "invalid"})
+        with self.assertRaises(UpdateError):
+            su.select_code_only(self.s, self.legacy, self.backups)
+        self.assertFalse(releases.read_state(self.home).get("active"))
+
+    def test_installed_launcher_checks_publisher_proof_and_exact_release_files(self):
+        self.build()
+        p = self.prepare()
+        su.select_code_only(self.s, self.legacy, self.backups)
+        candidate = releases.verified_program(self.legacy, self.home)
+        self.assertEqual(candidate.name, p["release"])
+        (candidate / "extra.txt").write_text("Synthetic unexpected file", encoding="utf-8")
+        with self.assertRaises(releases.ReleaseError):
+            releases.verified_program(self.legacy, self.home)
+
+    def test_startup_proof_is_required_when_the_old_updater_did_not_save_a_manifest(self):
+        self.build(startup_proof=True)
+        p = self.prepare()
+        su.select_code_only(self.s, self.legacy, self.backups)
+        (self.home / "proofs" / f"{p['release']}.json").unlink()
+        candidate = releases.verified_program(self.legacy, self.home)
+        proof = candidate / su.STARTUP_PROOF
+        value = json.loads(proof.read_text(encoding="utf-8"))
+        value["signature"] = "invalid"
+        proof.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaises(releases.ReleaseError):
+            releases.verified_program(self.legacy, self.home)
+
     def test_apply_migrates_a_copy_then_stage0_swaps_it_in_and_can_undo(self):
         self.add_migration()
         self.build()
@@ -484,7 +520,7 @@ class TestBundleBuilder(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             with patch.dict(os.environ, {"UPDATE_SIGNING_KEY": ""}):
-                self.assertEqual(build_bundle.main(["--channel", "main", "--out", str(out)]), 0)
+                self.assertEqual(build_bundle.main(["--channel", "main", "--out", str(out)]), 1)
             self.assertFalse(out.exists())                                         # no key: nothing published
             site = Path(tmp) / "site"
             (site / "pkg").mkdir(parents=True)

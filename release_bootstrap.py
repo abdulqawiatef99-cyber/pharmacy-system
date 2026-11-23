@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 PROTOCOL = 1        # format of active-release.json and release_protocol.json (installed launchers read it)
-BOOTSTRAP = 2       # stage-0 capability: journal-driven database swap + undo (docs/SMART_UPDATE.md)
+BOOTSTRAP = 2       # installed launcher protocol for journal-driven database swap and recovery
 
 
 class ReleaseError(RuntimeError):
@@ -139,6 +139,49 @@ def current_root(legacy: Path, home: Path) -> Path:
     return path
 
 
+def installer_root(running: Path) -> Path:
+    if not (running / ".release-source.json").is_file():
+        return running
+    root = os.environ.get("PHARM_INSTALL_ROOT")
+    if not root and os.environ.get("PHARM_LAUNCHER") == "1":
+        # The deployed launcher exports its exact program root in PYTHONPATH.
+        root = os.environ.get("PYTHONPATH")
+    if not root or not Path(root).is_absolute():
+        raise ReleaseError("Start the update from the installed program directory")
+    return Path(root)
+
+
+def verify_running_release(program: Path) -> None:
+    launched = os.environ.get("PHARM_LAUNCHER") == "1" or "PHARM_INSTALL_ROOT" in os.environ
+    if not launched or os.environ.get("PHARM_RELEASE_CANDIDATE") == "1" or not (program / ".release-source.json").is_file():
+        return
+    home = code_home(data_dir())
+    selected = verified_program(installer_root(program), home)
+    if selected.resolve() != program.resolve():
+        raise ReleaseError("The running program is not the publisher-verified selection")
+    # Bootstrap 2 confirms the startup in another process. Record its accepted
+    # version on the next invocation of this already-verified program.
+    state = read_state(home)
+    entry = state.get("active")
+    if entry and not state.get("pending") and entry["id"] == program.name:
+        with locked(home):
+            if read_state(home) == state:
+                _raise_version_floor(home, entry)
+
+
+def verified_program(legacy: Path, home: Path) -> Path:
+    """Verify a selected bundle using the installer's own keys and code."""
+    entry = read_state(home).get("active")
+    if not entry:
+        return legacy
+    from app.core import smart_update
+
+    try:
+        return smart_update.verify_selected_release(home, legacy, entry)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ReleaseError("Selected update failed publisher verification") from exc
+
+
 def _text(p: Path) -> bytes:
     """File bytes with Windows line ends as Unix ones. The installer's program files came from `git archive`
     on a Windows runner (CRLF) while GitHub's update archive has LF: byte for byte every update looked like a
@@ -184,11 +227,37 @@ def activate(legacy: Path, home: Path, release_id: str, metadata: dict,
                      "active": {**metadata, "id": release_id}, "previous": active, "pending": True})
 
 
+def version_floor(home: Path, channel: str) -> dict:
+    path = Path(home) / "version-floor.json"
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get(channel, {})
+        if not isinstance(value, dict) or value and (not re.fullmatch(r"[0-9a-f]{40}", value["sha"])
+                      or type(value["commit_time"]) is not int or value["commit_time"] <= 0):
+            raise ValueError("invalid release version floor")
+        return value
+    except (OSError, AttributeError, KeyError, ValueError, TypeError) as exc:
+        raise ReleaseError("Release version floor could not be verified") from exc
+
+
+def _raise_version_floor(home: Path, entry: dict) -> None:
+    channel, commit_time = entry.get("ref"), entry.get("commit_time")
+    if entry.get("smart") and channel in ("main", "develop") and type(commit_time) is int:
+        floor = version_floor(home, channel)
+        if commit_time > floor.get("commit_time", 0):
+            other = "develop" if channel == "main" else "main"
+            atomic_json(home / "version-floor.json",
+                        {other: version_floor(home, other), channel: {"sha": entry["sha"],
+                                                                      "commit_time": commit_time}})
+
+
 def confirm(home: Path, expected_id: str) -> None:
     with locked(home):
         state = read_state(home)
         if (state.get("active") or {}).get("id") != expected_id:
             raise ReleaseError("Release changed before health confirmation")
+        _raise_version_floor(home, state["active"])
         state["pending"] = False
         atomic_json(home / "active-release.json", state)
 
@@ -263,8 +332,18 @@ def run_selected(root: Path) -> None:
             and read_state(home).get("pending")
             and os.environ.get("PHARM_LAUNCHER") != "1"):
         raise ReleaseError("Pending release requires launcher health supervision; use launcher or update --rollback")
-    selected = current_root(root, home)
+    installed = (root / "build_info.json").is_file()
+    if installed:
+        os.environ["PHARM_INSTALL_ROOT"] = str(root)
+        selected = verified_program(root, home)
+    else:
+        selected = current_root(root, home)
     if selected.resolve() != root.resolve():
+        if installed:
+            # The verifier imported modules from the installation. Start the selected
+            # program in a fresh interpreter so its imports come from its own tree.
+            import subprocess
+            raise SystemExit(subprocess.call([sys.executable, str(selected / "manage.py"), *sys.argv[1:]]))
         sys.path.insert(0, str(selected))
         runpy.run_path(str(selected / "manage.py"), run_name="__main__")
         raise SystemExit(0)
