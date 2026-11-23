@@ -84,6 +84,7 @@ const NUM = "(\\d[\\d.,]*)";
 const I18N_FULL_TEXT = [
   [/السعر اتغير من ([\d.,]+) لـ ([\d.,]+): تغيّر سعر الرصيد الحالي \(([^)]*)\) للسعر الجديد؟/g,
     "The price changed from $1 to $2. Reprice the current stock ($3)?"],
+  [/سعر الجمهور اتغير من ([\d.,]+) لـ ([\d.,]+)/g, "The public price changed from $1 to $2"],
   [/مبيعات ([\d.,]+) · مرتجع ([\d.,]+)/g, "Sales $1 · Refunds $2"],
 ];
 const I18N_PATTERNS = [
