@@ -144,6 +144,7 @@ const { chromium } = require('playwright');
   await card.getByText('2000007190023', {exact:true}).waitFor();
   await p.keyboard.press('Escape');
   await card.waitFor({state:'hidden'});
+  await p.waitForFunction(() => document.activeElement?.dataset.field === 'public_price');
   await p.keyboard.press('F3');
   await card.getByText(barcode, {exact:true}).waitFor();
   await check(card.getByText('2000007190023', {exact:true}).count().then(n => n === 0), 'cancelled barcode edit');

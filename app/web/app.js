@@ -2290,21 +2290,27 @@ function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCrea
     try { await action(); } catch (err) { if (d.open) showError(err); }
     finally { busy = false; }
   };
+  const dismiss = async () => {
+    if (!d.open) return;
+    d.close();
+    lifecycle.abort();
+    d.remove();
+    if (!current()) return;
+    const target = restore ? await restore() : focused;
+    if (current() && !$("dialog[open]") &&
+        [document.body, focused, target].includes(document.activeElement)) target?.focus({ preventScroll: true });
+  };
   const finish = async (callback, ...args) => {
     if (!current() || !d.open) return;
     await callback?.(...args);
-    if (d.open) d.close();
+    await dismiss();
   };
-  close.addEventListener("click", () => { if (!busy) d.close(); });
-  d.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
-  d.addEventListener("close", async () => {
-    lifecycle.abort();
-    d.remove();
-    const target = restore ? await restore() : focused;
-    if (current() && !d.open && !$("dialog[open]") &&
-        [document.body, focused, target].includes(document.activeElement)) target?.focus({ preventScroll: true });
-  }, { once: true });
-  window.addEventListener("hashchange", () => { if (!current()) d.close(); }, { signal: lifecycle.signal });
+  close.addEventListener("click", () => { if (!busy) dismiss(); });
+  d.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    if (!busy) dismiss();
+  });
+  window.addEventListener("hashchange", () => { if (!current()) dismiss(); }, { signal: lifecycle.signal });
 
   const path = (itemId) => `/api/items/${encodeURIComponent(itemId)}/card?recent_purchases=1${purchase ? `&purchase=${encodeURIComponent(purchase)}` : ""}`;
   const show = async (itemId) => {
