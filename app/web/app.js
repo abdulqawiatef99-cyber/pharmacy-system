@@ -4167,7 +4167,8 @@ async function viewPos(afterCheckout = false) {
     const short = /^\d{3,5}$/.test(v), current = onThisScreen();
     // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
     const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only", true);
-    if (!current() || SALE?.id !== saleId || (live && mine !== liveSeq)) return;
+    if (!current()) return;
+    if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
