@@ -396,6 +396,41 @@ class QA20261123(APICase):
         wallet = next(ch for ch in summary["by_channel"] if ch["method"] == "transfer")
         self.assertEqual((wallet["amount"], wallet["refunded"]), (8000, 4000))
 
+    def test_legacy_refund_from_a_distinct_card_account_leaves_wallet_room(self):
+        from unittest.mock import patch
+        from app.core import audit
+
+        self.http_login()
+        channels = {c["kind"]: c["id"] for c in self.c.get("/api/payment-channels").json()["channels"]}
+        card = money.create_account(self.db, self.ctx, "QA card account", "bank")["id"]
+        wallet = money.create_account(self.db, self.ctx, "QA original wallet", "wallet")["id"]
+        money.set_route(self.db, self.ctx, "card", channels["card"], card)
+        money.set_route(self.db, self.ctx, "transfer", channels["transfer"], wallet)
+        sales = Sales(self.db)
+        sid = sales.create(self.ctx)
+        sale = sales.add_line(self.ctx, sid, self.item, packs=1)
+        sale = sales.complete(self.ctx, sid, version=sale["version"], payments=[
+            {"method": "card", "channel_id": channels["card"], "amount": 4000},
+            {"method": "transfer", "channel_id": channels["transfer"], "amount": 4000},
+        ])
+        proof = attachments.attach(self.db, self.tmp, self.ctx, sid, b"%PDF synthetic split transfer proof")
+        attachments.review(self.db, self.ctx, proof["attachments"][0]["id"], True)
+        line = sale["lines"][0]["id"]
+        record = audit.record
+
+        def legacy_audit(*args, **kwargs):
+            if args[2] == "sale.return":
+                kwargs["after"].pop("card_only", None)
+            return record(*args, **kwargs)
+
+        with patch.object(audit, "record", side_effect=legacy_audit):
+            sales.return_items(self.ctx, sid, {line: 1}, refund_method="card", reason="QA legacy card return")
+        result = sales.return_items(self.ctx, sid, {line: 1}, refund_method="transfer", reason="QA wallet return")
+        self.assertEqual(result["refund"], 4000)
+        balances = self.db.all("SELECT account_id, sum(amount) net FROM money_movements WHERE org_id=? AND ref_id=?"
+                               " GROUP BY account_id", (self.ctx.org_id, sid))
+        self.assertEqual({r["account_id"]: r["net"] for r in balances}, {card: 0, wallet: 0})
+
     def test_an_unrouted_wallet_refund_never_debits_a_later_route(self):
         self.http_login()
         channel = next(c["id"] for c in self.c.get("/api/payment-channels").json()["channels"] if c["kind"] == "transfer")
