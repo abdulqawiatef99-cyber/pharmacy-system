@@ -214,6 +214,31 @@ class QA20261123(APICase):
             "SELECT public_price FROM batches WHERE org_id=? AND item_id=?", (self.ctx.org_id, self.item))}
         self.assertNotIn(12000, prices)
 
+    def test_receipt_without_price_authority_joins_the_lot_at_the_current_price(self):
+        from app.core.permissions import DEFAULT_ROLES
+
+        purchasing = Purchasing(self.db, self.s)
+        first = self.purchase_draft()
+        line = purchasing.get(self.ctx, first)["lines"][0]
+        purchasing.update_line(self.ctx, first, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        review = purchasing.price_review(self.ctx, first)
+        purchasing.approve(self.ctx, first, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={self.item: {"mode": "keep"}})
+        second = self.purchase_draft("QA-AGAIN")
+        line = purchasing.get(self.ctx, second)["lines"][0]
+        purchasing.update_line(self.ctx, second, line["id"], {"batch_no": "QA-old", "expiry_date": self.expiry}, None)
+        assistant = replace(self.ctx, role_code="assistant", permissions=frozenset(DEFAULT_ROLES["assistant"][1]))
+        approver = replace(assistant, approver_id=self.ctx.user_id,
+                           approver_permissions=frozenset({"purchases.approve"}))
+        review = purchasing.price_review(approver, second)
+        purchasing.approve(approver, second, review["version"], require_price_review=True,
+                           price_token=review["token"], price_decisions={})
+        lots = self.db.all("SELECT b.public_price, coalesce(sum(sb.qty), 0) qty FROM batches b"
+                           " LEFT JOIN stock_balances sb ON sb.org_id=b.org_id AND sb.batch_key=b.id"
+                           " WHERE b.org_id=? AND b.item_id=? AND b.batch_no='QA-OLD'"
+                           " GROUP BY b.id ORDER BY b.price_variant", (self.ctx.org_id, self.item))
+        self.assertEqual([(r["public_price"], r["qty"]) for r in lots], [(8000, 20), (12000, 8)])
+
     def test_depleted_lot_keeps_its_price_when_the_old_boxes_return(self):
         sales = Sales(self.db)
         sold_id = sales.create(self.ctx)

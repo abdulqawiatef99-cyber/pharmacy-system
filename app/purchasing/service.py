@@ -997,7 +997,13 @@ class Purchasing:
                     Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
                 base_qty = units[l["id"]]                       # bonus is free stock
                 unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
-                price = l["public_price"] if may_price else None   # #448: price authority
+                price = l["public_price"] if may_price else None     # #448: no authority, stated price ignored
+                if not may_price and item["public_price"] is not None and self.db.one(
+                        "SELECT 1 FROM batches WHERE org_id=? AND item_id=? AND batch_no=? AND expiry_date IS ?"
+                        " AND public_price IS NOT NULL LIMIT 1",
+                        (ctx.org_id, item["id"], (l["batch_no"] or "").strip().upper(), l["expiry_date"])):
+                    # the batch already has priced lots: the boxes join the one at today's price, never an older one
+                    price = item["public_price"]
                 if price is not None and item["public_price"] is not None and price != item["public_price"]:
                     # Legacy lots without an explicit price can receive returns as well as hold old stock.
                     self.db.execute("UPDATE batches SET public_price=? WHERE org_id=? AND item_id=?"
