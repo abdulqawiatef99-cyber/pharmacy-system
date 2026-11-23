@@ -17,7 +17,7 @@ from .service import _period, local_buckets
 MAX_ROWS = 5000
 SOURCES = {"manual": "يدوي", "purchase_invoice": "فاتورة شراء", "import": "استيراد"}
 UNIT_FIELDS = {"pack_size": "عدد الوحدات في العبوة", "pack_unit_name": "اسم العبوة", "base_unit_name": "اسم الوحدة"}
-METHODS = {"cash": "نقدي", "card": "بطاقة", "credit": "على الحساب"}
+METHODS = {"cash": "نقدي", "card": "بطاقة", "credit": "على الحساب", "transfer": "المحفظة الأصلية"}
 
 
 def _out(d1: date, d2: date, rows: list, **kw) -> dict:
