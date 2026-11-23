@@ -65,6 +65,11 @@ const { chromium } = require('playwright');
 (async () => {
   const [base, user, pw, inv] = process.argv.slice(1);
 """ + LOGIN + r"""
+  // A cashier who already completed first-run guidance: the tour would take the focus mid-typing.
+  await p.evaluate(async () => {
+    const { organization, user } = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${organization.id}:${user.id}`, JSON.stringify({ all: 1 }));
+  });
   await p.goto(base + '/#/purchases/' + inv);
   await p.waitForSelector('#qaQ');
   await p.fill('#qaQ', 'Panadol');
