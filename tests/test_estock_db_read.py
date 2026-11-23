@@ -146,7 +146,7 @@ class TestEstockDbRead(unittest.TestCase):
     def test_only_and_retry_failed(self):
         text = PS1.read_text(encoding="utf-8-sig")
         code = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
-        self.assertEqual(code[0].lstrip("\ufeff"), "param([string]$Only = '', [switch]$RetryFailed)")   # first statement
+        self.assertTrue(code[0].lstrip("\ufeff").startswith("param([string]$Only = '', [switch]$RetryFailed,"))   # first statement
         self.assertIn("if (-not (Wanted $dbn $t.sc $t.nm)) { continue }", text)
         self.assertIn('($onlyList -contains "$db.$sc.$nm") -or ($onlyList -contains "$sc.$nm") -or ($onlyList -contains $nm)', text)
         # the retry reads exactly what a run writes under RESULT: PARTIAL

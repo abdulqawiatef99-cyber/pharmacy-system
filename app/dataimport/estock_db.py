@@ -2317,7 +2317,7 @@ ESTOCK_SETTINGS = (       # (E-Stock's setting, what the program has, recommende
 
 
 # ---------------------------------------------------------------- reports
-def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
+def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict, *, rehearsal: bool = False) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {"data_quality": out_dir / "data-quality.csv", "reconciliation": out_dir / "reconciliation.txt",
              "json": out_dir / "report.json", "openings": out_dir / "openings-to-confirm.xlsx",
@@ -2410,7 +2410,7 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
         lines += [f"  [{m['what']}] {m['code']} {m['name']}: {m['detail']} ({m['value']} ج)" for m in rec["mismatches"]]
     paths["reconciliation"].write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     from . import estock_owner_report
-    estock_owner_report.write(paths["owner"], plan, rec)       # the page the owner reads (manager 19/11)
+    estock_owner_report.write(paths["owner"], plan, rec, rehearsal=rehearsal)
     paths["json"].write_text(json.dumps({"reconciliation": rec, "stock_source": {k: v for k, v in plan.stock_source.items()},
                                          "checks": plan.checks, "rules": plan.rules, "extra": extra,
                                          "data_quality_rows": len(plan.dq)}, ensure_ascii=False, indent=1, default=str),
@@ -2421,7 +2421,8 @@ def write_reports(out_dir: Path, plan: Plan, rec: dict, extra: dict) -> dict:
 # ---------------------------------------------------------------- one run
 def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_path: Path, write_archive: bool,
         confirm_file: Path | None = None, packs_file: Path | None = None, stock_source: str | None = None,
-        stores: list[str] | None = None, database: str | None = None, round_piastres: bool = True) -> dict:
+        stores: list[str] | None = None, database: str | None = None, round_piastres: bool = True,
+        scratch_dir: Path | None = None, rehearsal: bool = False) -> dict:
     """Plan, apply into `db` (the copy on a dry run), build the archive, reconcile, write the reports.
     `write_archive` False = the archive is built in a temp file only to count it (dry run)."""
     import tempfile
@@ -2464,7 +2465,8 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
         for x in rec["mismatches"]:
             x["value"] = egp(x["value"])
         extra["applied"] = "لا: فيه مشاكل محتاجة قرار"
-        return {"ok": False, "applied": False, "reports": write_reports(out_dir, plan, rec, extra), "reconciliation": rec,
+        return {"ok": False, "applied": False,
+                "reports": write_reports(out_dir, plan, rec, extra, rehearsal=rehearsal), "reconciliation": rec,
                 "plan": plan}
     sha = lambda f: hashlib.sha256(Path(f).read_bytes()).hexdigest() if f else ""
     res = apply_plan(db, ctx, plan, ex, packs_sha=sha(packs_file), confirm_sha=confirm.get("sha", ""))
@@ -2475,11 +2477,11 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
         counts = estock_archive.build(ex, archive_path, maps, org_id=ctx.org_id)
         extra["archive"] = str(archive_path)
     else:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=scratch_dir) as tmp:
             counts = estock_archive.build(ex, Path(tmp) / estock_archive.NAME, maps, keep=False, org_id=ctx.org_id)
         extra["archive"] = "(تجربة: اتبنى واتعد ومش محفوظ)"
     if res["resumed"]:
         extra["resumed_steps"] = ", ".join(res["resumed"])
     rec = reconcile(db, ctx, plan, res["runs"], ex, counts)
-    return {"ok": rec["ok"], "applied": True, "reports": write_reports(out_dir, plan, rec, extra),
+    return {"ok": rec["ok"], "applied": True, "reports": write_reports(out_dir, plan, rec, extra, rehearsal=rehearsal),
             "reconciliation": rec, "plan": plan, "runs": res["runs"]}

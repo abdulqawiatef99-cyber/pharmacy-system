@@ -426,6 +426,7 @@ const routes = [
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
+  [/^#\/estock-move$/, viewEstockMove],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
@@ -566,6 +567,7 @@ const HELP = {
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
+  "estock-move": ["جرّب نقل إي ستوك على نسخة من قاعدة البرنامج الجديدة وراجع تقرير المطابقة.", ["افتح الشاشة من الكمبيوتر اللي عليه إي ستوك. لو الجهاز فصل، ارجع للشاشة واضغط «كمّل التجربة»."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
   procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
@@ -2511,6 +2513,70 @@ async function renderDeviceRestore() {
     } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
   });
 }
+async function viewEstockMove() {
+  if (!isOwnerMe()) {
+    app.innerHTML = `<section class="panel"><h1>نقل من إي ستوك</h1><p>الشاشة دي للمالك بس.</p></section>`;
+    return;
+  }
+  app.innerHTML = `<section class="panel" id="estockMove">
+    <h1>نقل من إي ستوك</h1>
+    <p>ابدأ من الكمبيوتر اللي عليه إي ستوك. البرنامج هيقرا البيانات ويجرّب النقل على نسخة، وبعدها يعرض تقرير المطابقة.</p>
+    <p class="muted">يفضّل توقف التسجيل في إي ستوك وقت القراية عشان التقرير يعكس البيانات في نفس الوقت.</p>
+    <p id="estockMoveStatus" role="status"></p>
+    <progress aria-label="تقدّم تجربة النقل" hidden></progress>
+    <div class="row"><button class="btn" type="button" hidden></button><a class="btn secondary" href="#/system">ارجع للبرنامج</a></div>
+    <pre id="estockMoveReport" dir="rtl" hidden></pre>
+  </section>`;
+  const panel = $("#estockMove"), button = panel.querySelector("button"), bar = panel.querySelector("progress");
+  const status = $("#estockMoveStatus"), report = $("#estockMoveReport");
+  const path = "/api/estock/move";
+  const isCurrent = () => panel.isConnected && location.hash === "#/estock-move";
+  let state;
+
+  async function refresh() {
+    if (!isCurrent()) return;
+    try {
+      const next = await api(path);
+      if (!isCurrent()) return;
+      state = next;
+      const labels = {
+        idle: "جاهز للبحث عن إي ستوك.",
+        finding: "بندور على قاعدة إي ستوك على الجهاز…",
+        reading: `لقينا قاعدة إي ستوك. بنقرا البيانات… الجداول اللي اتقرت: ${next.tables}`,
+        rehearsing: "القراية خلصت. بنجرّب النقل على نسخة وبنجهّز تقرير المطابقة…",
+        interrupted: "التجربة وقفت. اضغط «كمّل التجربة» عشان تتابع.",
+        failed: next.message,
+        done: next.reconciled ? "التجربة خلصت والمطابقة نجحت. راجع التقرير." : "التجربة خلصت. راجع الملاحظات والفروق في التقرير.",
+      };
+      const actions = { idle: "ابدأ تجربة النقل", failed: "جرّب تاني", interrupted: "كمّل التجربة", done: "اعمل تجربة جديدة" };
+      const working = ["finding", "reading", "rehearsing"].includes(next.phase);
+      const message = next.supported ? labels[next.phase] : "تجربة نقل إي ستوك متاحة على ويندوز ١٠ و١١.";
+      if (status.textContent !== message) status.textContent = message;
+      bar.hidden = !working;
+      button.hidden = !next.supported || working;
+      button.textContent = actions[next.phase] || "";
+      report.hidden = next.phase !== "done";
+      report.textContent = next.report || "";
+      if (working) setTimeout(refresh, 1000);
+    } catch (err) {
+      if (!isCurrent()) return;
+      status.textContent = err.message;
+      // A running job can outlive a brief disconnect or browser reload.
+      if (!err.code) setTimeout(refresh, 2000);
+      else { bar.hidden = true; button.hidden = true; report.hidden = true; report.textContent = ""; }
+    }
+  }
+  button.addEventListener("click", () => withBusy(button, async () => {
+    try {
+      await api(path, { method: "POST", body: state.phase === "done" ? { replace_id: state.id } : {} });
+      await refresh();
+    } catch (err) {
+      if (isCurrent()) toast(err.message, true);
+    }
+  }));
+  await refresh();
+}
+
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
@@ -2519,7 +2585,9 @@ async function viewSystem() {
     <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
-    <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
+    <section class="panel"><h1>البرنامج</h1>
+      ${isOwnerMe() ? `<p><a class="btn secondary" href="#/estock-move">نقل من إي ستوك</a></p>` : ""}
+      <div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));

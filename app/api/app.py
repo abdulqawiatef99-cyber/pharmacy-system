@@ -43,6 +43,7 @@ from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
+from ..dataimport.estock_move import EstockMove
 from ..dataimport.service import DataImport, export_catalog, template_xlsx
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
@@ -197,6 +198,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
+    estock_move = EstockMove(db, s.data_dir)
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
@@ -326,7 +328,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
         # This database-only route commits its action and replay record together.
-        if req.method == "POST" and (req.url.path == "/api/cash/movements" or
+        if req.method == "POST" and (req.url.path in ("/api/cash/movements", "/api/estock/move") or
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
@@ -1155,6 +1157,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note"), amount=amount))
 
     # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
+    def estock_move_context(req):
+        ctx = ctx_of(req)
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise Forbidden("افتح تجربة نقل إي ستوك من الكمبيوتر اللي عليه إي ستوك.", code="local_only")
+        return ctx
+
+    @handler
+    async def estock_move_status(req):
+        return J(await run_in_threadpool(estock_move.status, estock_move_context(req)))
+
+    @handler
+    async def estock_move_start(req):
+        ctx = estock_move_context(req)
+        replace_id = (await body(req)).get("replace_id")
+        await run_in_threadpool(estock_move.start, ctx, replace_id=replace_id)
+        return J({}, status_code=202)
+
     @handler
     async def estock_available(req):
         from ..dataimport import estock_history as eh
@@ -3369,6 +3388,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
         Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/estock/move", estock_move_status),
+        Route("/api/estock/move", estock_move_start, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
         Route("/api/estock/period", estock_period),
