@@ -1,9 +1,13 @@
 """Structured and raster coverage for the thermal receipt, using synthetic sales."""
+import base64
+import io
 import unittest
 
-from PIL import ImageChops
+from PIL import Image, ImageChops
 
-from app.printing import barcode, escpos
+from app.printing import barcode, escpos, settings
+from app.core.errors import ValidationFailed
+from tests.helpers import DBTestCase
 
 
 def sample_sale(name="Sample Relief 24 tablets"):
@@ -133,3 +137,24 @@ class ReceiptRasterTests(unittest.TestCase):
             self.assertGreaterEqual(module, 2)
             self.assertEqual(bars, "".join(bit * module for bit in bits))
             self.assertGreaterEqual(row.index("1"), 10 * module)
+
+class ReceiptSettingsTests(DBTestCase):
+    def test_templates_persist_and_invalid_values_are_rejected(self):
+        self.assertEqual(settings.get(self.db, self.ctx.org_id)["template"], "detailed")
+        self.assertEqual(settings.save(self.db, self.ctx, {"template": "large"})["template"], "large")
+        with self.assertRaises(ValidationFailed):
+            settings.save(self.db, self.ctx, {"template": "invalid"})
+
+    @unittest.skipUnless(escpos.shaping_available(), "The thermal raster requires libraqm")
+    def test_preview_uses_unsaved_width_and_template_without_persisting(self):
+        before = settings.get(self.db, self.ctx.org_id)
+        audits = self.db.one("SELECT count(*) FROM audit_log")[0]
+        previews = []
+        for template in ("compact", "large"):
+            result = settings.save(self.db, self.ctx, {"preview": True, "paper": 58, "template": template})
+            with Image.open(io.BytesIO(base64.b64decode(result["png"]))) as png:
+                self.assertEqual((png.width, png.mode), (384, "1"))
+                previews.append(png.height)
+        self.assertLess(*previews)
+        self.assertEqual(settings.get(self.db, self.ctx.org_id), before)
+        self.assertEqual(self.db.one("SELECT count(*) FROM audit_log")[0], audits)

@@ -1,9 +1,12 @@
 """Server-side printing for the pharmacy node (printer attached to the PC)."""
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import os
 import time
+from datetime import datetime
 
 from PIL import Image
 
@@ -53,13 +56,24 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
         raise PrintFailed("لم تُختر طابعة الإيصال (البرنامج ← طابعة الإيصال والدرج)", code="no_printer")
     rendered = False
     try:
-        width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
-        who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
+        seller = cashier = ""
+        if cfg["show_cashier"]:
+            staff = db.one(
+                "SELECT seller.full_name seller, cashier.full_name cashier FROM sales s"
+                " LEFT JOIN users seller ON seller.id=s.created_by"
+                " LEFT JOIN users cashier ON cashier.id=("
+                "   SELECT a.user_id FROM audit_log a WHERE a.org_id=s.org_id"
+                "     AND a.entity_type='sale' AND a.entity_id=s.id AND a.action='sale.complete'"
+                "   ORDER BY a.at DESC, a.id DESC LIMIT 1)"
+                " WHERE s.org_id=? AND s.id=?", (ctx.org_id, sale_id))
+            if staff:
+                seller = staff["seller"] or ""
+                cashier = staff["cashier"] or seller
+        from . import logo
         from ..sales.service import return_window_days
-        body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
-                                                          given=given, return_days=return_window_days(db, ctx.org_id)),
-                                     width=width)
-        img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
+        png = logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None
+        img = receipt_image(org, sale, when, cfg, logo_png=png, seller=seller, cashier=cashier,
+                            given=given, return_days=return_window_days(db, ctx.org_id))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
     except escpos.PrinterError as e:
@@ -79,25 +93,63 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     return {"ok": True}
 
 
-def _header(db: Database, ctx: Context, cfg: dict, width: int):
-    """Logo + QR (F27). A broken logo or QR text must never stop the receipt: log it and print without."""
-    from . import logo, qrlinks
-    try:
-        return escpos.receipt_header(width, logo.get_png(db, ctx.org_id) if cfg["has_logo"] else None, cfg["qr_text"],
-                                     qrlinks.caption(cfg["qr_text"], cfg["qr_caption"]))
-    except Exception:  # noqa: BLE001
-        log.exception("receipt header (logo/QR) skipped")
-        return None
-
-
-def _footer(cfg: dict, width: int):
-    """The optional second QR code under the receipt (F27); same rule: never stops the receipt."""
+def receipt_image(org: str, sale: dict, when: str, cfg: dict, *, logo_png: bytes | None = None,
+                  seller: str = "", cashier: str = "", given: int = 0,
+                  return_days: int | None = None) -> Image.Image:
+    """Compose the bitmap used for both printing and settings preview."""
     from . import qrlinks
+
+    width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
     try:
-        return escpos.receipt_footer_qr(width, cfg["qr2_text"], qrlinks.caption(cfg["qr2_text"], cfg["qr2_caption"]))
-    except Exception:  # noqa: BLE001
-        log.exception("receipt footer QR skipped")
-        return None
+        header = escpos.receipt_header(width, logo_png)
+    except (OSError, ValueError):
+        log.warning("Could not read the receipt logo")
+        header = None
+    codes = []
+    for prefix in ("qr", "qr2"):
+        text = cfg[f"{prefix}_text"]
+        if not text:
+            continue
+        try:
+            codes.append(escpos.receipt_footer_qr(width, text, qrlinks.caption(text, cfg[f"{prefix}_caption"])))
+        except (OSError, ValueError):
+            log.warning("Could not render receipt QR code")
+    lines = escpos.receipt_lines(org, sale, when, cfg, seller=seller, cashier=cashier,
+                                 given=given, return_days=return_days)
+    return escpos.render_receipt(lines, width, template=cfg["template"], header=header, footer_codes=tuple(codes))
+
+
+def receipt_preview(db: Database, ctx: Context, cfg: dict, logo_png: bytes | None) -> str:
+    """Preview the draft settings with a synthetic sale and no device or database writes."""
+    from . import settings as rs
+    from ..sales.service import return_window_days
+
+    ctx.require("settings.manage")
+    org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
+    sample = {
+        "sale_no": 12048, "kind": "store", "subtotal": 6250, "discount_total": 700,
+        "total": 5550, "paid_cash": 5550,
+        "customer": {"name": "عميل تجريبي", "estock_code": 35, "phone": "01000000000"},
+        "lines": [
+            {"item": {"name": "Sample Relief 24 Tablets", "name_ar": "أقراص تجريبية",
+                      "name_en": "Sample Relief 24 Tablets", "pack_size": 4, "base_unit": "شريط"},
+             "qty_base": 4, "line_total": 4300, "discount_bp": 1000, "discount": 700, "invoice_share": 200,
+             "official_prices": [{"pack": True, "qty": 1, "price": 5000, "gross": 5000}]},
+            {"item": {"name": "Sample Vitamin C 500 mg", "name_ar": "فيتامين سي تجريبي",
+                      "name_en": "Sample Vitamin C 500 mg", "pack_size": 4, "base_unit": "شريط"},
+             "qty_base": 1, "line_total": 1250,
+             "official_prices": [{"pack": False, "qty": 1, "price": 1250, "gross": 1250}]},
+        ],
+    }
+    when = rs.fmt_when(datetime(2026, 11, 23, 14, 5), cfg["time_format"])
+    try:
+        image = receipt_image(org, sample, when, cfg, logo_png=logo_png, seller="بائع تجريبي",
+                              cashier="أمين صندوق تجريبي", given=6000, return_days=return_window_days(db, ctx.org_id))
+    except escpos.PrinterError as exc:
+        raise ValidationFailed(str(exc)) from exc
+    buf = io.BytesIO()
+    image.point(lambda p: 255 if p > escpos.THRESHOLD else 0, mode="1").save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:

@@ -58,61 +58,143 @@ def shaping_available() -> bool:
     return bool(features.check("raqm"))
 
 
-def render_receipt(lines: list[tuple[str, str, str]], width: int = DOTS_80MM,
-                   font_path: str | None = None) -> Image.Image:
-    """lines: (kind, right_text, left_text). kind: title | text | row | total | rule | small.
-    Right text is the Arabic label (RTL), left text the amount (LTR)."""
+ReceiptRow = tuple[str, str, str | tuple[str, ...]]
+RECEIPT_TEMPLATES = ("detailed", "compact", "large")
+
+
+def render_receipt(lines: list[ReceiptRow], width: int = DOTS_80MM, font_path: str | None = None,
+                   *, template: str = "detailed", header: Image.Image | None = None,
+                   footer_codes: tuple[Image.Image, ...] = ()) -> Image.Image:
+    """Lay out receipt rows in printer dots. Pillow/raqm shapes and reorders each cell."""
+    from functools import cache
+
+    from .barcode import code128_modules
+    from .labels import bold_font
+
     if not shaping_available():
         raise PrinterError("مكتبة تشكيل الحروف العربية (raqm) غير متاحة؛ الإيصال العربي سيظهر مقطعًا")
     fp = font_path or find_font()
-    fonts = {"title": ImageFont.truetype(fp, 34), "text": ImageFont.truetype(fp, 24),
-             "row": ImageFont.truetype(fp, 24), "total": ImageFont.truetype(fp, 30),
-             "small": ImageFont.truetype(fp, 20)}
-    pad, y = 8, 6
-    # a small row with no amount (expiry, discount, the return policy) wraps by words instead of being cut with «…»:
-    # the ✱ rule at the end of the policy was lost on thermal paper (Codex P2 on #423)
-    meas, wrapped = ImageDraw.Draw(Image.new("L", (1, 1), 255)), []
-    for kind, right, left in lines:
-        if kind != "small" or left or not right or \
-                meas.textlength(right, font=fonts["small"], direction="rtl") <= width - 2 * pad:
-            wrapped.append((kind, right, left))
-            continue
-        cur = ""
-        for word in right.split(" "):
-            nxt = f"{cur} {word}".strip()
-            if cur and meas.textlength(nxt, font=fonts["small"], direction="rtl") > width - 2 * pad:
-                wrapped.append(("small", cur, ""))
-                cur = word
-            else:
-                cur = nxt
-        if cur:
-            wrapped.append(("small", cur, ""))
-    lines = wrapped
-    height = sum({"title": 48, "total": 44, "rule": 14, "small": 28}.get(k, 34) for k, _, _ in lines) + 40
-    img = Image.new("L", (width, height), 255)
-    d = ImageDraw.Draw(img)
+    bold_path = bold_font(fp)
+    size = 24 if width >= DOTS_80MM else 20
+    size += {"compact": -3, "large": 4}.get(template, 0)
+    pad, gap = 8, (5 if template == "compact" else 8)
+    span = width - 2 * pad
+    y = (header.height if header else 0) + 6
+    # Each drawing command uses absolute bounds. The image is allocated after wrapping.
+    texts, rules, images = [], [], [(0, 0, header)] if header else []
+
+    @cache
+    def font(n, bold):
+        return ImageFont.truetype(bold_path if bold else fp, n)
+
+    @cache
+    def bounds(value, n, bold, direction):
+        return font(n, bold).getbbox(value, anchor="lt", direction=direction)
+
+    def fits(value, room, n, bold, direction):
+        x0, _, x1, _ = bounds(value, n, bold, direction)
+        return x1 - x0 <= room
+
+    def wrap(value, room, n, bold, direction):
+        """Use word breaks first, then split a word that is wider than the cell."""
+        for paragraph in value.splitlines():
+            line = ""
+            for word in paragraph.split():
+                candidate = f"{line} {word}" if line else word
+                if fits(candidate, room, n, bold, direction):
+                    line = candidate
+                    continue
+                if line:
+                    yield line
+                while not fits(word, room, n, bold, direction):
+                    lo, hi = 1, len(word)
+                    while lo + 1 < hi:
+                        mid = (lo + hi) // 2
+                        if fits(word[:mid], room, n, bold, direction):
+                            lo = mid
+                        else:
+                            hi = mid
+                    yield word[:lo]
+                    word = word[lo:]
+                line = word
+            if line:
+                yield line
+
+    def cell(value, left, right, n, *, bold=False, direction="rtl", align="right", single=False):
+        if not value:
+            return 0
+        if single:
+            while n > 8 and not fits(value, right - left, n, bold, direction):
+                n -= 1
+        row_y = y
+        for part in wrap(value, right - left, n, bold, direction):
+            x0, y0, x1, y1 = bounds(part, n, bold, direction)
+            start = right - x1 if align == "right" else (left + right - x0 - x1) // 2
+            texts.append((start, row_y - y0, part, font(n, bold), direction))
+            row_y += max(n + 3, y1 - y0 + 3)
+        return row_y - y
+
+    # Cell edges in RTL order. Numeric cells share right edges with their headings.
+    edges = [width - pad - span * k // 100 for k in (0, 7, 43, 63, 81, 100)]
     for kind, right, left in lines:
         if kind == "rule":
-            for x in range(pad, width - pad, 10):
-                d.line([(x, y + 6), (x + 5, y + 6)], fill=0, width=2)
-            y += 14
-            continue
-        f = fonts[kind]
-        if kind == "title":
-            w = d.textlength(right, font=f, direction="rtl")
-            d.text(((width - w) / 2, y), right, font=f, fill=0, direction="rtl")
-            y += 48
-            continue
-        if right:
-            room = width - 2 * pad - (d.textlength(left, font=f) + 16 if left else 0)
-            while right and d.textlength(right, font=f, direction="rtl") > room:
-                right = right[:-2] + "…"          # long item names never overrun the amount
-            w = d.textlength(right, font=f, direction="rtl")
-            d.text((width - pad - w, y), right, font=f, fill=0, direction="rtl")
-        if left:
-            d.text((pad, y), left, font=f, fill=0, direction="ltr")
-        y += {"total": 44, "small": 28}.get(kind, 34)
-    return img.crop((0, 0, width, min(height, y + 10)))
+            rules.append((pad, y + 2, width - pad - 1, y + 2))
+            y += gap
+        elif kind in ("columns", "item"):
+            values = (left[0], right, *left[1:])
+            heading = kind == "columns"
+            n = size - 2
+            h = max(cell(value, edges[i + 1] + 3, edges[i] - 3, n,
+                         bold=heading, direction="ltr" if not heading and i in (0, 3, 4) else "rtl",
+                         single=heading or i in (0, 3, 4))
+                    for i, value in enumerate(values))
+            y += h + gap
+            if heading:
+                rules.append((pad, y - 3, width - pad - 1, y - 3))
+        elif kind == "barcode":
+            try:
+                bits = code128_modules(right)
+            except ValueError:
+                continue                     # old invoice identifiers may not be printable ASCII
+            module = min(4, span // (len(bits) + 20))
+            if not module:
+                continue
+            start = (width - len(bits) * module) // 2
+            for i, bit in enumerate(bits):
+                if bit == "1":
+                    x = start + i * module
+                    rules.append((x, y + 4, x + module - 1, y + 49))
+            y += 55
+            y += cell(right, pad, width - pad, size - 3, direction="ltr", align="center") + gap
+        elif kind == "footer_codes":
+            for code in footer_codes:
+                images.append(((width - code.width) // 2, y, code))
+                y += code.height + gap
+        else:
+            n = {"title": size + 12, "total": size + 10, "small": size - 2,
+                 "center": size - 2, "detail": size - 3}.get(kind, size)
+            bold = kind in ("title", "total")
+            center = kind in ("title", "center")
+            if left:
+                # The date and invoice number occupy the same row, even at 58 mm.
+                middle = pad + (span // 2 if kind == "small" else span * 42 // 100)
+                h1 = cell(right, middle + 4, width - pad, n, bold=bold, single=kind == "small")
+                h2 = cell(left, pad, middle - 4, n, bold=bold,
+                          direction="ltr", single=True)
+                y += max(h1, h2) + gap
+            else:
+                end = edges[1] - 3 if kind == "detail" else width - pad
+                y += cell(right, pad, end, n, bold=bold, align="center" if center else "right") + gap
+
+    img = Image.new("L", (width, y + 6), 255)
+    draw = ImageDraw.Draw(img)
+    for x, top, part in images:
+        img.paste(part, (x, top))
+    for box in rules:
+        draw.rectangle(box, fill=0)
+    for x, top, value, face, direction in texts:
+        draw.text((x, top), value, font=face, direction=direction, anchor="lt", fill=0)
+    return img
 
 
 def qr_block(width: int, text: str, caption: str = "", font_path: str | None = None,
@@ -372,96 +454,132 @@ def policy_text(n: int, restricted: bool) -> str:
     return text + (" · الأصناف التي عليها ✱ لا تُقبل إعادتها ولا استبدالها" if restricted else "")
 
 
-def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, cashier: str = "",
-                  given: int = 0, return_days: int | None = None) -> list[tuple[str, str, str]]:
-    """given: what the customer handed over in cash (piastres), printed with the change due when it is
-    more than the cash part of the sale (F27). Shown only on the receipt printed at checkout; it is
-    not stored, so a later reprint has no change line.
-    U2-23 / U2-24: the sold unit and its price, each line's discount, the customer (and for credit or delivery his
-    phone and address), each payment method, the customer's balance on a credit sale, the total quantity and the
-    return policy line."""
+def _receipt_amount(piasters: int) -> str:
+    pounds, remainder = divmod(abs(piasters), 100)
+    return f"{'-' if piasters < 0 else ''}{pounds}.{remainder:02d}"
+
+
+def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None, *, seller: str = "",
+                  cashier: str = "", given: int = 0, return_days: int | None = None) -> list[ReceiptRow]:
+    """Build the thermal receipt from the saved sale and its public-price allocations."""
     cfg = cfg or {}
-    m = lambda p: f"{p / 100:.2f}"  # noqa: E731
-    out = [("small", cfg["header"], "")] if cfg.get("header") else []
-    out.append(("title", cfg.get("title") or org_name, ""))
-    for ln in cfg.get("lines") or []:
-        if ln:
-            out.append(("small", ln, ""))
+    amount = _receipt_amount
+    out = [("title", cfg.get("title") or org_name, "")]
+    out.extend(("center", ln, "") for ln in cfg.get("lines") or () if ln)
+    if cfg.get("header"):
+        out.append(("center", cfg["header"], ""))
     for key, label in (("tax_no", "رقم التسجيل الضريبي"), ("cr_no", "السجل التجاري")):
         if cfg.get(key):
             out.append(("small", f"{label}: {cfg[key]}", ""))
-    out.append(("small", f"فاتورة رقم {sale['sale_no']}", when))
-    if cashier and cfg.get("show_cashier", True):
-        out.append(("small", f"البائع: {cashier}", ""))
-    c, d = sale.get("customer"), sale.get("delivery") or {}
-    if c and cfg.get("show_customer", True):
-        out.append(("small", f"العميل: {c.get('name', '')}" + (f" (كود {c['estock_code']})" if c.get("estock_code") is not None else ""), ""))
-        if sale.get("on_credit") or sale.get("kind") == "delivery":
-            phone = d.get("phone") or c.get("phone")
-            addr = d.get("address") or c.get("address1")
-            if phone:
-                out.append(("small", f"موبايل: {phone}", ""))
-            if addr:
-                out.append(("small", f"العنوان: {addr}", ""))
-    elif sale.get("kind") == "delivery" and (d.get("address") or d.get("phone")):
-        out.append(("small", "توصيل: " + " ".join(x for x in (d.get("address"), d.get("phone")) if x), ""))
-    out.append(("rule", "", ""))
-    boxes = units = 0
-    for l in sale["lines"]:
-        it = l["item"]
-        name = "—" if it.get("hide_on_receipt") else (it.get("name_ar") if cfg.get("names") == "ar" else it.get("name_en")) or it["name"]
-        exp = ""
-        if cfg.get("show_expiry"):              # as on the browser receipt (B1)
-            exps = sorted({(a.get("expiry_date") or "")[:7] for a in l.get("allocations") or [] if a.get("expiry_date")})
-            exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-        # the line's own discount only, as on the browser receipt; the invoice discount is in «خصم» below (review P2)
-        disc = (f" · خصم {l['discount_bp'] / 100:g}%" if l.get("discount_bp") else
-                f" · خصم {m(l['discount_amount'])}" if l.get("discount_amount") else "")
-        prices = public_price_rows(l)
-        out.append(("row", name + (" ✱" if it.get("no_return") else ""), m(prices[0][2]) if len(prices) == 1 else ""))
-        for qty, price, gross in prices:
-            out.append(("small" if len(prices) == 1 else "row",
-                        qty + (f" × {m(price)}" if price is not None else ""),
-                        "" if len(prices) == 1 else m(gross)))
-        if exp or disc:
-            out.append(("small", (exp + disc).removeprefix(" · "), ""))
-        if l.get("official_prices"):
-            boxes += sum(p["qty"] for p in l["official_prices"] if p["pack"])
-            units += sum(p["qty"] for p in l["official_prices"] if not p["pack"])
+    out.extend([("rule", "", ""), ("small", f"فاتورة رقم {sale['sale_no']}", when)])
+    if cfg.get("show_cashier", True):
+        if seller:
+            out.append(("small", f"البائع: {seller}", ""))
+        if cashier:
+            out.append(("small", f"الكاشير: {cashier}", ""))
+
+    customer, delivery = sale.get("customer") or {}, sale.get("delivery") or {}
+    is_delivery = sale.get("kind") == "delivery"
+    is_credit = bool(sale.get("on_credit"))
+    if (customer and cfg.get("show_customer", True)) or is_delivery or is_credit:
+        if customer.get("name"):
+            code = customer.get("estock_code")
+            suffix = f" (كود {code})" if code is not None else ""
+            out.append(("small", f"العميل: {customer['name']}{suffix}", ""))
+        phone = delivery.get("phone") or customer.get("phone")
+        address = delivery.get("address") or customer.get("address1")
+        if phone:
+            out.append(("small", f"موبايل: {phone}", ""))
+        if address and (is_delivery or is_credit):
+            out.append(("small", f"العنوان: {address}", ""))
+
+    method_names = {"cash": "كاش", "card": "فيزا", "transfer": "محفظة", "credit": "آجل"}
+    pays = sale.get("payments") or [
+        {"method": method, "amount": sale[key]}
+        for key, method in (("paid_cash", "cash"), ("paid_card", "card"),
+                            ("paid_transfer", "transfer"), ("on_credit", "credit"))
+        if sale.get(key)
+    ]
+    methods = list(dict.fromkeys(method_names.get(p["method"], p["method"]) for p in pays))
+    payment_type = "توصيل" if is_delivery else " / ".join(methods)
+    if payment_type:
+        out.append(("small", f"الدفع: {payment_type}", ""))
+    out.extend([("rule", "", ""), ("columns", "الصنف", ("م", "الكمية", "السعر", "الإجمالي"))])
+
+    lines = sale["lines"]
+    number = pieces = 0
+    for line in lines:
+        item = line["item"]
+        if item.get("hide_on_receipt"):
+            name = "—"
+        elif cfg.get("names") == "both":
+            name = " / ".join(dict.fromkeys(n for n in (item.get("name_en"), item.get("name_ar")) if n))
         else:
-            b, u, _, _ = qty_parts(l)
-            boxes, units = boxes + b, units + u
+            name = item.get("name_ar" if cfg.get("names") == "ar" else "name_en")
+        name = (name or item["name"]) + (" ✱" if item.get("no_return") else "")
+        prices = public_price_rows(line)
+        for qty, price, gross in prices:
+            number += 1
+            out.append(("item", name, (str(number), qty, amount(price) if price is not None else "—", amount(gross))))
+        saved_prices = line.get("official_prices")
+        if saved_prices:
+            pieces += sum(p["qty"] for p in saved_prices)
+        else:
+            boxes, loose, _, _ = qty_parts(line)
+            pieces += boxes + loose
+        if cfg.get("show_expiry"):
+            dates = sorted({a["expiry_date"][:7] for a in line.get("allocations") or () if a.get("expiry_date")})
+            if dates:
+                out.append(("detail", f"الصلاحية: {' / '.join(dates)}", ""))
+        bp = line.get("discount_bp") or 0
+        line_discount = (line["discount"] - (line.get("invoice_share") or 0)
+                         if line.get("discount") is not None else line.get("discount_amount") or 0)
+        if line_discount > 0 and cfg.get("template") != "compact":
+            percent = f" {amount(bp).rstrip('0').rstrip('.')}%" if bp else ""
+            out.append(("detail", f"خصم{percent} −{amount(line_discount)}", ""))
+
     out.append(("rule", "", ""))
-    if cfg.get("show_item_count") and sale["lines"]:
-        out.append(("small", f"عدد الأصناف: {len(sale['lines'])}", ""))
-    if sale["lines"]:
-        out.append(("small", "إجمالي الكمية: " + " + ".join(x for x in (f"{boxes} علبة" if boxes else "", f"{units} وحدة" if units else "") if x), ""))
-    if sale.get("subtotal") is not None:    # always, as on the browser receipt (B1)
-        out.append(("row", "الإجمالي", m(sale["subtotal"])))
-    out.append(("row", "الخصم", m(sale["discount_total"])))
+    if lines and cfg.get("show_item_count", True):
+        kinds = {line.get("item_id") or i for i, line in enumerate(lines)}
+        out.append(("small", f"عدد الأصناف: {len(kinds)}", ""))
+    if lines:
+        out.append(("small", f"عدد القطع: {pieces}", ""))
+    if sale.get("subtotal") is not None:
+        out.append(("row", "الإجمالي قبل الخصم", amount(sale["subtotal"])))
+    invoice_discount = sum(line.get("invoice_share") or 0 for line in lines)
+    total_discount = sale["discount_total"]
+    out.extend([("row", "خصم الأصناف", amount(total_discount - invoice_discount)),
+                ("row", "خصم الفاتورة", amount(invoice_discount))])
     if sale.get("delivery_fee"):
-        out.append(("row", "رسوم التوصيل", m(sale["delivery_fee"])))
-    if sale.get("rounding"):               # U2-14: its own line, signed
-        out.append(("row", "التقريب", ("+" if sale["rounding"] > 0 else "-") + m(abs(sale["rounding"]))))
-    out.append(("total", "المطلوب", m(sale["total"] + (sale.get("rounding") or 0))))   # U2-14: cash rounding on top
-    MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
-    pays = sale.get("payments") or []
-    if pays:
-        for p in pays:
-            out.append(("row", MET.get(p["method"], p["method"]) + (f" — {p['channel']}" if p.get("channel") else ""), m(p["amount"])))
-    else:
-        for key, label in (("paid_cash", "نقدي"), ("paid_card", "بطاقة"), ("paid_transfer", "تحويل"), ("on_credit", "آجل")):
-            if sale.get(key):
-                out.append(("row", label, m(sale[key])))
+        out.append(("row", "رسوم التوصيل", amount(sale["delivery_fee"])))
+    rounding = sale.get("rounding") or 0
+    if rounding:
+        out.append(("row", "التقريب", ("+" if rounding > 0 else "") + amount(rounding)))
+    out.extend([("rule", "", ""), ("total", "المطلوب", amount(sale["total"] + rounding)), ("rule", "", "")])
+    for p in pays:
+        label = method_names.get(p["method"], p["method"])
+        channel = f" · {p['channel']}" if p.get("channel") else ""
+        prefix = "" if p["method"] == "credit" else "مدفوع "
+        out.append(("row", prefix + label + channel, amount(p["amount"])))
     cash = sale.get("paid_cash") or 0
     if cfg.get("show_change", True) and cash and given > cash:
-        out += [("row", "المدفوع من العميل", m(given)), ("total", "الباقي", m(given - cash))]
-    if c and sale.get("on_credit") and c.get("balance_before") is not None:
-        # only while his account has not moved since this invoice (Sales.get decides), so a reprint is never wrong
-        out += [("row", "الرصيد السابق", m(c["balance_before"])), ("row", "الرصيد الحالي", m(c["balance"]))]
-    out.append(("small", cfg.get("footer") or "شكرًا لزيارتكم", ""))
+        out.extend([("row", "المدفوع من العميل", amount(given)), ("total", "الباقي", amount(given - cash))])
+    if total_discount > 0:
+        out.append(("center", f"وفّرت: {amount(total_discount)} ج", ""))
+    if is_credit:
+        out.append(("center", "هذه الفاتورة على الحساب", ""))
+        # Sales.get provides the invoice balances only while the account is unchanged.
+        if customer.get("balance_before") is not None and customer.get("balance") is not None:
+            out.extend([("row", "الرصيد السابق", amount(customer["balance_before"])),
+                        ("row", "الرصيد الحالي", amount(customer["balance"]))])
+
+    out.append(("rule", "", ""))
     if return_days is not None and cfg.get("show_return_policy", True):
-        # one row per sentence: the thermal renderer cuts a long row, so the ✱ rule is never lost (Codex P2 on #423)
-        for part in policy_text(return_days, any(l["item"].get("no_return") for l in sale["lines"])).split(" · "):
-            out.append(("small", part, ""))
+        restricted = any(line["item"].get("no_return") for line in lines)
+        out.extend(("small", part, "") for part in policy_text(return_days, restricted).split(" · "))
+    footer = (cfg.get("footer") or "").removeprefix("شكرًا لزيارتكم — ")
+    if footer and footer != "شكرًا لزيارتكم":
+        out.append(("center", footer, ""))
+    out.extend([("barcode", str(sale["sale_no"]), ""), ("footer_codes", "", ""),
+                ("center", "شكرًا لزيارتكم", "")])
     return out
