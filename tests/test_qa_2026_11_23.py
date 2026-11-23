@@ -53,6 +53,16 @@ const { chromium } = require('playwright');
       fields.map(f => [f.getAttribute('aria-label'), f.dataset.field,
         ...Array.from(f.labels || [], l => l.textContent)].join(' ')));
     out = { fields, vat: fields.some(t => /ضريبة|VAT|tax_amount/i.test(t)) };
+    if (out.vat) {
+      const edit = p.locator('[data-field=tax_amount]').first();
+      const saved = p.waitForResponse(r => r.url().includes('/lines/') && r.request().method() === 'PATCH');
+      await edit.fill('0.01');
+      await edit.press('Tab');
+      const data = await (await saved).json();
+      out.savedVat = data.lines[0].tax_amount;
+      out.savedMode = data.lines[0].tax_included;
+      out.total = data.invoice.computed_total;
+    }
   } else if (probe === 'invoice-filter') {
     await p.waitForSelector('#iTable');
     let releaseOld;
@@ -387,6 +397,7 @@ class QA20261123(APICase):
         sid = self.purchase_draft()
         out = run_node(self, SCRIPT, "owner", OWNER_PW, f"#/purchases/{sid}", "vat")
         self.assertTrue(out["vat"], "QA-003: the owner needs to enter the paper's line VAT")
+        self.assertEqual((out["savedVat"], out["savedMode"], out["total"]), (1, 0, 19201))
 
     def test_manual_vat_modes_use_exact_payable_and_preserve_line_tax(self):
         purchasing = Purchasing(self.db, self.s)
