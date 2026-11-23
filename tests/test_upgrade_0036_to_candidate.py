@@ -9,9 +9,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from app.core import accounts, audit
+from app.core import accounts, audit, security
+from app.core.permissions import Context
 from app.dataimport import estock_archive, estock_db, estock_synthetic
-from app.db import MIGRATIONS_DIR, Database
+from app.db import MIGRATIONS_DIR, Database, new_id
 from app.inventory import service as inventory
 from app.sales.cash import CashDrawer
 from app.sales.service import Sales
@@ -30,9 +31,17 @@ class TestUpgradeFrom0036(DBTestCase):
                 shutil.copy2(f, self.old / f.name)
         self.db = Database(self.tmp / "pharmacy.db")
         self.db.migrate(self.old)
-        accounts.create_organization(self.db, name="صيدلية تجريبية", owner_username="owner", owner_full_name="Owner",
-                                     owner_password=OWNER_PW)
-        self.ctx = self.login("owner", OWNER_PW)
+        org = accounts.create_organization(self.db, name="صيدلية تجريبية", owner_username="owner",
+                                           owner_full_name="Owner", owner_password=OWNER_PW)
+        org_id, user_id = org["org_id"], org["owner_user_id"]
+        access = accounts.effective_access(self.db, org_id, user_id)
+        self.ctx = Context(user_id=user_id, org_id=org_id, branch_id=org["branch_id"], **access)
+        self.legacy_token = security.new_token()
+        now = accounts.iso(accounts.utcnow())
+        with self.db.transaction():
+            self.db.execute("INSERT INTO sessions (id, token_hash, user_id, org_id, created_at, expires_at, last_seen_at)"
+                            " VALUES (?,?,?,?,?,?,?)", (new_id(), security.token_hash(self.legacy_token), user_id,
+                                                        org_id, now, "2099-01-01T00:00:00.000000Z", now))
 
     def _populate(self):
         folder = estock_synthetic.write(self.tmp / "estock" / "20261119-153400", scale=0.01)
@@ -66,6 +75,10 @@ class TestUpgradeFrom0036(DBTestCase):
         self.assertTrue(applied, "the candidate brings migrations after 0036")
         self.assertTrue(all(v[:4] > UPTO for v in applied), applied)
         self.assertEqual(self.db.unknown_migrations(), [])
+        old = self.db.one("SELECT revoked_at FROM sessions WHERE token_hash=?",
+                          (security.token_hash(self.legacy_token),))
+        self.assertIsNotNone(old["revoked_at"])
+        self.assertEqual(self.login("owner", OWNER_PW).auth_method, "password")
         self.assertEqual(self._snapshot(), before)
 
     def test_after_the_upgrade_the_new_parts_work_on_the_old_data(self):

@@ -108,9 +108,10 @@ class TestGuardWiring(unittest.TestCase):
         """#18 B13: the runner's git writes CRLF (core.autocrlf); the in-app update downloads LF from GitHub."""
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
         archives = [line.strip() for line in wf.splitlines() if " archive " in line and line.strip().startswith("git")]
-        self.assertEqual(len(archives), 2)                                   # the program and the update candidate
-        for line in archives:
-            self.assertIn("-c core.autocrlf=false", line)
+        self.assertEqual(len(archives), 1)                                   # installer archive
+        self.assertIn("-c core.autocrlf=false -c core.eol=lf", archives[0])
+        bundle = (ROOT / "scripts" / "release" / "build_bundle.py").read_text(encoding="utf-8")
+        self.assertIn('"git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive"', bundle)
 
     def test_manual_review_build_is_delivered_as_a_prerelease(self):
         wf = (ROOT / ".github" / "workflows" / "windows-installer.yml").read_text(encoding="utf-8")
