@@ -66,6 +66,7 @@ class TestFollowTheOfficialRelease(unittest.TestCase):
         self.assertEqual(get.call_count, 2)                    # not there yet: asked again at the next check
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestReviewInstallOnTheApi(APICase):
     def test_status_follows_main_once_the_official_release_has_it(self):
         self.http_login()

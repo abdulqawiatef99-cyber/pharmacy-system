@@ -19,13 +19,14 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Hashable
 from decimal import Decimal
 from pathlib import Path
 
 from anyio import CapacityLimiter, to_thread
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -371,7 +372,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if ((req.method != "POST" and not getattr(req.state, "reserved_approval", False))
                 or not key or len(key) > 100 or req.url.path.startswith("/api/auth/")):
             return await fn(req)
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
                                + _same_form(req, raw)).hexdigest()
@@ -380,15 +381,21 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # Reserve the key (status 0) before running, in one write transaction: a retry that
         # arrives while the first attempt runs, or after it committed but could not store its
         # response, finds the reservation and is refused instead of posting a second time.
-        with db.transaction():
-            hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
-            if not hit:
-                if getattr(req.state, "approval_replay_only", False):
-                    raise Forbidden("الموافقة استُخدمت بالفعل", code="approval_used")
-                idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)   # at most once an hour, not a scan per POST (#324 M2-25)
-                db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
-                           " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
-                           (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(current_permissions))))
+        replay_only = getattr(req.state, "approval_replay_only", False)
+
+        def reserve():
+            with db.transaction():
+                hit = db.one("SELECT * FROM idempotency_keys WHERE org_id=? AND user_id=? AND key=?", ident)
+                if not hit:
+                    if replay_only:
+                        raise Forbidden("الموافقة استُخدمت بالفعل", code="approval_used")
+                    idempotency.prune(db, IDEMPOTENCY_TTL_DAYS)
+                    db.execute("INSERT INTO idempotency_keys (org_id, user_id, key, method, path,"
+                               " request_hash, status, response) VALUES (?,?,?,?,?,?,0,'')",
+                               (*ident, req.method, req.url.path, rhash + "|" + ",".join(sorted(current_permissions))))
+            return hit
+
+        hit = await run_in_threadpool(reserve)
         if hit:
             stored, _, held = hit["request_hash"].partition("|")
             if stored != rhash:
@@ -398,7 +405,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                " قبل إعادتها", code="idempotency_unconfirmed")
             if req.url.path == "/api/cash/close":
                 # rebuilt under the permissions held now, not the report stored at the close (#324 M4)
-                resp = J(CashDrawer(db).close_result(ctx, json.loads(hit["response"])["id"]), status_code=hit["status"])
+                resp = J(await run_in_threadpool(CashDrawer(db).close_result, ctx, json.loads(hit["response"])["id"]),
+                         status_code=hit["status"])
             else:
                 # the stored answer was built under the permissions held then: after one of them was taken away
                 # it is not handed out again (a payroll answer after payroll.manage was revoked, #324 X7)
@@ -416,23 +424,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
         # every write is saved together with its audit row: a rule error raised AFTER one (a 403 while
         # building the answer) must keep the key, or the retry posts a second time (#324 S6, as #331)
-        audit_mark = _audit_mark(ctx)
+        audit_mark = await run_in_threadpool(_audit_mark, ctx)
         req.state.action_audit_mark = audit_mark
         try:
             resp = await fn(req)
         except DomainError:
-            if not _committed_since(audit_mark, ctx):
-                release()        # refused by a rule before any write: the same key may run again
+            if not await run_in_threadpool(_committed_since, audit_mark, ctx):
+                await run_in_threadpool(release)        # refused by a rule before any write: the same key may run again
             raise
         # Any other exception keeps the reservation: it may have come after a commit, so a retry
         # with this key is refused rather than risk a second posting (a new click uses a new key).
         if 200 <= resp.status_code < 300 and resp.media_type == "application/json":
             # If this write fails, the reservation stays and a retry is refused (never re-run).
-            with db.transaction():
-                db.execute("UPDATE idempotency_keys SET status=?, response=? WHERE org_id=? AND user_id=? AND key=?",
-                           (resp.status_code, resp.body.decode("utf-8"), *ident))
+            def store_response():
+                with db.transaction():
+                    db.execute("UPDATE idempotency_keys SET status=?, response=? WHERE org_id=? AND user_id=? AND key=?",
+                               (resp.status_code, resp.body.decode("utf-8"), *ident))
+
+            await run_in_threadpool(store_response)
         else:
-            release()            # only successful JSON answers are replayed, as before
+            await run_in_threadpool(release)  # only successful JSON answers are replayed
         return resp
 
     def _audit_mark(ctx) -> int:
@@ -455,15 +466,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             before = None
             try:
                 if token and req.url.path != "/api/approvals/check":
-                    ctx = ctx_of(req)
+                    ctx = await run_in_threadpool(ctx_of, req)
                     intent = await _approval_intent(req)
                     if req.method not in ("GET", "HEAD") and intent is None:
                         raise ValidationFailed("العملية تحتاج مفتاح طلب للموافقة", code="approval_intent_required")
                     if intent is not None:
-                        before = _audit_mark(ctx)
-                    authorized, replay_only = approvals.apply(
-                        ctx, req.state.session_token, token, action, lambda who: approver_access(ctx.org_id, who),
-                        intent=intent)
+                        before = await run_in_threadpool(_audit_mark, ctx)
+                    authorized, replay_only = await run_in_threadpool(
+                        approvals.apply, ctx, req.state.session_token, token, action,
+                        lambda who: approver_access(ctx.org_id, who), intent=intent)
                     req.state.authorization_context = authorized
                     req.state.reserved_approval = intent is not None
                     req.state.approval_replay_only = replay_only
@@ -479,7 +490,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                         and req.method not in ("GET", "HEAD") and approvals.eligible(ctx, permission)
                         and req.url.path != "/api/approvals/check"):
                     intent = await _approval_intent(req)
-                    if intent is not None and (original_mark is None or not _committed_since(original_mark, ctx)):
+                    if intent is not None and (original_mark is None or not await run_in_threadpool(_committed_since, original_mark, ctx)):
                         if before is not None:
                             approvals.restore_for_next_permission(token)
                         details = {**details, "summary": await _approval_summary(req), "challenge": approvals.challenge(
@@ -490,7 +501,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             except Exception:   # never leak internals
                 log.exception("unhandled error on %s %s", req.method, req.url.path)
                 return J({"error": {"code": "internal", "message": "حدث خطأ غير متوقع"}},
-                         status_code=500)
+                         status_code=500, background=getattr(req.state, "checkout_task", None))
         return wrapped
 
     async def off_loop(fn, *args, **kwargs):
@@ -607,20 +618,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..core import updater
         from ..version import __version__
         now = time.time()
-        if upd_cache.get("at", 0) > now - 600:
+        offline = os.environ.get("PHARM_TEST_OFFLINE_UPDATE") == "1"
+        if upd_cache.get("offline") == offline and upd_cache.get("at", 0) > now - 600:
             return upd_cache["v"]
         info = updater.installed(s.data_dir)
         cur = info.get("sha")
-        token = updater.read_token()
-        # #107: the install's own channel (develop on test PCs); a review installer of a work branch follows the
-        # official release (main) once main contains it (owner 20/11), never an older main
-        chan = updater.follow(info, updater.DEFAULT_REPO, token)
+        token = None if offline else updater.read_token()
+        # Review installs follow main only after their commit reaches it.
+        chan = updater.channel(info) if offline else updater.follow(info, updater.DEFAULT_REPO, token)
         out = {"version": __version__, "installed": cur, "latest": None, "available": False, "channel": chan,
-               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(chan, info)}
+               "restarts_itself": os.environ.get("PHARM_LAUNCHER") == "1", "smart": _smart_status(None if offline else chan, info)}
+        if offline:
+            upd_cache.update(at=now, v=out, offline=True)
+            return out
         if chan is None:
             out["candidate"] = info.get("ref")
         out.update(latest=out["smart"].get("sha"), available=out["smart"].get("available", False))
-        upd_cache.update(at=now, v=out)
+        upd_cache.update(at=now, v=out, offline=False)
         return out
 
     upd_root = Path(__file__).resolve().parents[2]
@@ -800,9 +814,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def stock_alert_api(req):
         """#202: the red banner, refreshed by the screens on their own (login answers do not carry it)."""
         from ..inventory import integrity
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         ctx.require("audit.read")
-        return J({"alert": integrity.banner(db, ctx)})
+        return J({"alert": await run_in_threadpool(integrity.banner, db, ctx)})
 
     @handler
     async def stock_check_report(req):
@@ -1417,8 +1431,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def backup_health_view(req):
-        ctx_of(req).require("settings.manage")
-        return J(backup_health())
+        ctx = await run_in_threadpool(ctx_of, req)
+        ctx.require("settings.manage")
+        return J(await run_in_threadpool(backup_health))
 
     @handler
     async def home_view(req):
@@ -1620,8 +1635,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def notifications_list(req):
-        ctx = ctx_of(req)
-        return J(notify.listing(db, ctx, unread_only=req.query_params.get("unread") == "1",
+        ctx = await run_in_threadpool(ctx_of, req)
+        return J(await off_loop(notify.listing, db, ctx, unread_only=req.query_params.get("unread") == "1",
                                 limit=_qlimit(req, 50, 200)))
 
     @handler
@@ -1682,14 +1697,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # ------------------------------------------------------------- catalog
     @handler
     async def items_list(req):
-        ctx = ctx_of(req)
-        limit = _qlimit(req, 20, 200)
+        ctx = await run_in_threadpool(ctx_of, req)
+        return await off_loop(item_results, ctx, req.query_params, _qlimit(req, 20, 200))
+
+    def item_results(ctx, query, limit):
         # the sale screen (update 1, owner): items with stock first, and those with none left out unless asked
-        stock_first = req.query_params.get("stock") in ("first", "only")
-        only_stock = req.query_params.get("stock") == "only"
+        stock_first = query.get("stock") in ("first", "only")
+        only_stock = query.get("stock") == "only"
         # the stock filter looks at up to 500 name matches, not the first 10x (Codex on #400)
-        res = item_search(db, ctx, req.query_params.get("q", ""), 500 if stock_first else limit,
-                          category=req.query_params.get("category") or None)
+        res = item_search(db, ctx, query.get("q", ""), 500 if stock_first else limit,
+                          category=query.get("category") or None)
         cats = {c["id"]: c for c in db.all("SELECT id, name, mark, no_return FROM categories WHERE org_id=?", (ctx.org_id,))}
         for r in res["items"]:
             c = cats.get(r.get("category_id"))
@@ -1722,17 +1739,21 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         hint = res["hint"]
         if not hint and rows and all(r.get("match") == "spelling" for r in rows):
             hint = {"kind": "spelling"}          # only spelling guesses left: Enter never adds one alone (Codex #400)
-        if req.query_params.get("meta") == "1":
+        if query.get("meta") == "1":
             return J({"items": rows, "hint": hint, "hidden_no_stock": hidden_no_stock})
         return J(rows)
 
     @handler
     async def items_create(req):
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         b = await body(req)
-        iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
-                                  force=bool(b.get("force")))
-        return J(catalog.get_item(db, ctx, iid), status_code=201)
+
+        def create():
+            iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
+                                      force=bool(b.get("force")))
+            return J(catalog.get_item(db, ctx, iid), status_code=201)
+
+        return await run_in_threadpool(create)
 
     @handler
     async def item_get(req):
@@ -1744,8 +1765,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def item_update(req):
-        ctx = ctx_of(req)
-        return J(catalog.update_item(db, ctx, req.path_params["id"], await body(req)))
+        ctx = await run_in_threadpool(ctx_of, req)
+        return J(await run_in_threadpool(catalog.update_item, db, ctx, req.path_params["id"], await body(req)))
 
     @handler
     async def suppliers_list(req):
@@ -2372,12 +2393,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_check(req):
-        ctx = ctx_of(req)
-        return J({"findings": [f.as_dict() for f in Sales(db).safety_check(ctx, req.path_params["id"])]})
+        ctx = await run_in_threadpool(ctx_of, req)
+        findings = await run_in_threadpool(Sales(db).safety_check, ctx, req.path_params["id"])
+        return J({"findings": [f.as_dict() for f in findings]})
 
     @handler
     async def sales_complete(req):
-        ctx = ctx_of(req)
+        ctx = await run_in_threadpool(ctx_of, req)
         b = await body(req)
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         # cash_given: what the customer handed over, only to print the change due (F27); never stored.
@@ -2394,7 +2416,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if 0 < given < cash_part:
             raise ValidationFailed("المبلغ الذي دفعه العميل أقل من المطلوب نقدًا. صحّح المبلغ أو قسّم الدفع",
                                    code="cash_given_short", details={"given": given, "cash": cash_part})
-        done = Sales(db).complete(ctx, req.path_params["id"], paid_cash=_int(b.get("paid_cash"), "cash"),
+        done = await run_in_threadpool(Sales(db).complete, ctx, req.path_params["id"],
+                                    paid_cash=_int(b.get("paid_cash"), "cash"),
                                     paid_card=_int(b.get("paid_card"), "card"),
                                     on_credit=_int(b.get("on_credit"), "credit"),
                                     safety_decisions=decisions, version=b.get("version"),
@@ -2403,11 +2426,49 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
                                     # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
                                     change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
-        if not done.get("replayed"):        # the receipt and the drawer pulse happen once per sale (#81)
-            kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
-            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, b.get("receipt") is True,
-                                                      given - kept)
+        receipt = b.get("receipt") is True
+        kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
+        if b.get("defer_devices") is True:
+            key = (ctx.org_id, ctx.user_id, done["id"])
+            if not done.get("replayed"):
+                checkout_results[key] = None
+                task = BackgroundTask(finish_checkout_devices, key, ctx, done, receipt, given - kept)
+                # A failure saving the HTTP replay record must still dispatch the committed sale's devices.
+                req.state.checkout_task = task
+                return J({**done, "devices_pending": True}, background=task)
+            if key in checkout_results:
+                return J({**done, "devices_pending": True})
+        elif not done.get("replayed"):
+            done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, done, receipt, given - kept)
         return J(done)
+
+    # This cache is only for showing device feedback. Posting and replay use the durable sale and request IDs.
+    checkout_results = OrderedDict()
+    checkout_device_slots = CapacityLimiter(4)
+
+    async def finish_checkout_devices(key, ctx, sale, receipt, given):
+        try:
+            job = functools.partial(printing.checkout_devices, db, ctx, sale, receipt, given, drawer_first=True)
+            result = await to_thread.run_sync(job, limiter=checkout_device_slots)
+        except Exception:
+            log.exception("checkout device feedback failed for %s", sale["id"])
+            result = {"receipt": "unknown", "drawer": "unknown", "message": None}
+        checkout_results[key] = result
+        checkout_results.move_to_end(key)
+        if len(checkout_results) > 512:
+            # Keep in-flight entries so a retry can always follow its original job.
+            expired = next((k for k, v in checkout_results.items() if v is not None), None)
+            if expired is not None:
+                checkout_results.pop(expired)
+
+    @handler
+    async def sales_devices(req):
+        ctx = await run_in_threadpool(ctx_of, req)
+        ctx.require("sales.create")
+        key = (ctx.org_id, ctx.user_id, req.path_params["id"])
+        if key not in checkout_results:
+            raise NotFound("نتيجة أجهزة الفاتورة غير متاحة")
+        return J({"devices": checkout_results[key]})
 
     @handler
     async def sales_return(req):
@@ -3371,6 +3432,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/lines/{line_id}", sales_remove_line, methods=["DELETE"]),
         Route("/api/sales/{id}/check", sales_check, methods=["POST"]),
         Route("/api/sales/{id}/complete", sales_complete, methods=["POST"]),
+        Route("/api/sales/{id}/devices", sales_devices),
         Route("/api/sales/{id}/return", sales_return, methods=["POST"]),
         Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
         Route("/api/returns/find", returns_find),
@@ -3460,6 +3522,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if auto_backup:
             autob.start()
             daily.start()
+            from ..catalog import matching
+            threading.Thread(target=matching.prewarm, args=(db,), daemon=True, name="catalog-search").start()
             # #202: stock integrity check on every start, in the background so the screens open at once
             from ..inventory import integrity
             threading.Thread(target=integrity.check_all, args=(db, "startup"), daemon=True,

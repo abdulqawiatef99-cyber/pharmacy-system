@@ -1,6 +1,8 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"حفظ البيع تم، لكن نتيجة أمر الطباعة أو فتح الدرج غير متاحة": "Sale saved. The receipt or drawer status is unavailable.",
+"نتيجة أجهزة الفاتورة غير متاحة": "This invoice's device status is unavailable.",
 "مرتجعات بتاريخها في الفترة": "Returns dated in the period",
 "مبيعات الفترة قبل المرتجع، البرنامج + إي ستوك: 0 ج": "Period sales before returns, program + E-Stock: 0 EGP",
 "⚠ 0 فاتورة إي ستوك إجماليها مش مقروء: محسوبة في العدد ومش في المبلغ": "⚠ 0 E-Stock invoices have an unreadable total: counted in the number, not in the amount",

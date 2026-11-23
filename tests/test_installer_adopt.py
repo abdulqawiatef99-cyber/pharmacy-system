@@ -92,6 +92,7 @@ class TestAdoptInstaller(unittest.TestCase):
         self.assertEqual(updater.installed(app_home / "data")["sha"], SHA)
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateBadge(APICase):
     def status(self, info, latest):
         from app.core import smart_update, update_sign

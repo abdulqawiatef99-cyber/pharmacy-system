@@ -14,6 +14,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 from ..db import Database
 from .normalize import FORM_GROUP, ParsedName, normalize_barcode, normalize_text, parse_name
@@ -87,6 +88,23 @@ _parsed: dict[str, dict[str, tuple[tuple, "_IndexedItem | None"]]] = {}
 _cache_lock = threading.Lock()
 
 
+def _parse_item(row, primary: ParsedName | None = None) -> _IndexedItem | None:
+    label = row["name_en"] or row["name_ar"]
+    if not label:
+        return None
+    parsed = [primary or parse_name(label)]
+    if row["name_en"] and row["name_ar"]:
+        parsed.append(parse_name(row["name_ar"]))
+    return _IndexedItem(
+        item_id=row["id"], label=label, parsed=parsed,
+        strength=row["strength_norm"] or next((p.strength for p in parsed if p.strength), None),
+        form=row["dosage_form"] or next((p.form for p in parsed if p.form), None),
+        content=next((p.content for p in parsed if p.content), None),
+        pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
+        modifiers=frozenset().union(*(p.modifiers for p in parsed)),
+    )
+
+
 def _version(db: Database, org_id: str) -> str:
     r = db.one("SELECT count(*) c, max(updated_at) u FROM items WHERE org_id=? AND status='active'",
                (org_id,))
@@ -111,15 +129,7 @@ def _index(db: Database, org_id: str) -> _OrgIndex:
         if old is not None and old[0] == key:
             it = old[1]
         else:
-            parsed = [parse_name(n) for n in (r["name_en"], r["name_ar"]) if n]
-            it = _IndexedItem(
-                item_id=r["id"], label=r["name_en"] or r["name_ar"], parsed=parsed,
-                strength=r["strength_norm"] or next((p.strength for p in parsed if p.strength), None),
-                form=r["dosage_form"] or next((p.form for p in parsed if p.form), None),
-                content=next((p.content for p in parsed if p.content), None),
-                pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
-                modifiers=frozenset().union(*(p.modifiers for p in parsed)),
-            ) if parsed else None
+            it = _parse_item(r)
         seen[r["id"]] = (key, it)
         if it is not None:
             items.append(it)
@@ -154,8 +164,13 @@ def forget(org_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+@lru_cache(maxsize=16384)
 def _ratio(a: str, b: str) -> float:
     if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if set(a).isdisjoint(b):
         return 0.0
     return SequenceMatcher(None, a, b).ratio()
 
@@ -218,6 +233,33 @@ def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5) -
         idx.memo[key] = hit
     # copies: a caller may change what it gets without changing the remembered answer
     return [Candidate(c.item_id, c.label, c.score, list(c.reasons)) for c in hit]
+
+
+def lookalike_candidates(db: Database, org_id: str, label: str, exclude: set[str],
+                         limit: int = 6) -> list[Candidate]:
+    """A sale warning requires an identical parsed core and a different attribute."""
+    query = parse_name(label)
+    if not query.core:
+        return []
+    # Parsing can join dotted release modifiers (e.g. X.R. becomes xr) and F.C.
+    # All other core tokens occur literally in the normalized name before parsing.
+    anchors = sorted(set(query.core_tokens) - {"sr", "xr", "er", "mr", "cr", "fc"})
+    where = " AND ".join("instr(coalesce(name_norm,''), ?) > 0" for _ in anchors)
+    rows = db.all("SELECT id, name_en, name_ar, strength_norm, dosage_form FROM items"
+                  " WHERE org_id=? AND status='active'" + (" AND " + where if where else ""),
+                  (org_id, *anchors))
+    candidates = []
+    for row in rows:
+        if row["id"] in exclude:
+            continue
+        primary = parse_name(row["name_en"] or row["name_ar"] or "")
+        if primary.core != query.core:
+            continue
+        item = _parse_item(row, primary)
+        candidate = score_item(query, item)
+        if candidate.score >= SUGGEST_MIN * 0.6 and any(r.endswith("_mismatch") for r in candidate.reasons):
+            candidates.append(candidate)
+    return sorted(candidates, key=lambda c: (-c.score, c.item_id))[:limit]
 
 
 def _label_score(db: Database, org_id: str, item_id: str, raw_name: str) -> float:

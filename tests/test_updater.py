@@ -78,6 +78,7 @@ import release_bootstrap as releases
 from tests.test_api import APICase, H
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateAPI(APICase):
     def test_owner_sees_signed_status_failure_and_can_prepare_an_update(self):
         self.http_login()
@@ -96,6 +97,7 @@ class TestUpdateAPI(APICase):
         self.assertEqual(self.db.one("SELECT count(*) FROM audit_log WHERE action='system.update.prepare'")[0], 1)
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateWithoutKey(APICase):
     def test_a_pc_without_a_key_file_still_sees_signed_updates(self):
         self.http_login()
@@ -112,6 +114,7 @@ class TestUpdateWithoutKey(APICase):
         self.assertEqual((st["latest"], st["available"]), ("e" * 40, True))
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestUpdateChannel(APICase):
     """The signed manifest is read from the channel selected by the installer."""
 

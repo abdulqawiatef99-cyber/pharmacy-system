@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..catalog import matching
-from ..catalog.normalize import normalize_text, parse_name
+from ..catalog.normalize import normalize_text
 from ..core import accounts, audit
 from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.permissions import Context
@@ -348,15 +348,12 @@ class SafetyEngine:
         # is a normal sale (update 1); old split_policy rows in the database are not read.
 
         # look-alike neighbours (heuristic, informational)
+        basket = set(item_ids)
         for i in dict.fromkeys(item_ids):
-            for c in matching.fuzzy_candidates(self.db, ctx.org_id, labels[i], 6):
-                if c.item_id != i and c.item_id not in item_ids and c.reasons and \
-                        any(r.endswith("_mismatch") for r in c.reasons):
-                    base_p = parse_name(labels[i])
-                    if base_p.core and base_p.core == parse_name(c.label).core:
-                        findings.append(Finding("lookalike", "info",
-                                                f"تأكد من الصنف: يوجد صنف مشابه بالاسم ({c.label}) بتركيز أو شكل مختلف",
-                                                [i, c.item_id], basis="heuristic", requires="none"))
+            for c in matching.lookalike_candidates(self.db, ctx.org_id, labels[i], basket):
+                findings.append(Finding("lookalike", "info",
+                                        f"تأكد من الصنف: يوجد صنف مشابه بالاسم ({c.label}) بتركيز أو شكل مختلف",
+                                        [i, c.item_id], basis="heuristic", requires="none"))
 
         findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 1 if f.severity == "insufficient" else 0),
                       reverse=True)
