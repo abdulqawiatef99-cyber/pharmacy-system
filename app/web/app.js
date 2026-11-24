@@ -84,6 +84,7 @@ const NUM = "(\\d[\\d.,]*)";
 const I18N_FULL_TEXT = [
   [/السعر اتغير من ([\d.,]+) لـ ([\d.,]+): تغيّر سعر الرصيد الحالي \(([^)]*)\) للسعر الجديد؟/g,
     "The price changed from $1 to $2. Reprice the current stock ($3)?"],
+  [/سعر الجمهور اتغير من ([\d.,]+) لـ ([\d.,]+)/g, "The public price changed from $1 to $2"],
   [/مبيعات ([\d.,]+) · مرتجع ([\d.,]+)/g, "Sales $1 · Refunds $2"],
 ];
 const I18N_PATTERNS = [
@@ -1272,7 +1273,7 @@ const FIELD_AR = { raw_name: "اسم الصنف", raw_code: "الكود", raw_ba
   expiry_date: "الصلاحية", distributor_margin: "هامش الموزع" };
 const SRC_LABEL = { read: "مقروء", inferred: "محسوب", ai: "قراءة آلية", user: "أدخله المستخدم", db: "من قاعدة البيانات" };
 
-function fieldInput(line, field, value, { type = "number", step = "0.01" } = {}) {
+function fieldInput(line, field, value, { type = "number", step = "0.01", describedBy } = {}) {
   const src = line.field_sources[field];
   const conf = line.field_confidence[field];
   const low = src !== "user" && conf !== undefined && conf < 0.8;
@@ -1281,7 +1282,7 @@ function fieldInput(line, field, value, { type = "number", step = "0.01" } = {})
   const dis = CUR.invoice.status !== "draft" ? "disabled" : "";
   return `<input class="${cls}" data-line="${esc(line.id)}" data-field="${field}" type="${type}"
     ${type === "number" ? `step="${step}" min="0"` : ""} value="${esc(value)}" title="${esc(title)}"
-    aria-label="${esc(field)}" ${dis}>
+    aria-label="${esc(field)}" ${describedBy ? `aria-describedby="${esc(describedBy)}"` : ""} ${dis}>
     ${low && !dis ? `<button class="btn small secondary" data-confirm="${esc(line.id)}" data-cfield="${field}">تأكيد</button>` : ""}`;
 }
 
@@ -1290,13 +1291,38 @@ function itemLabel(it) {
   return [it.name_en || it.name_ar, it.strength, it.dosage_form].filter(Boolean).join(" · ");
 }
 
+function purchasePriceWarning(current, value) {
+  const typed = toPiasters(value);
+  return current == null || !Number.isSafeInteger(typed) || typed < 0 || typed === current
+    ? "" : `سعر الجمهور اتغير من ${money(current)} لـ ${money(typed)}`;
+}
+
+function showPurchasePriceWarning(output, current, value) {
+  const message = purchasePriceWarning(current, value);
+  output.hidden = !message;
+  output.textContent = message;
+}
+
+const purchaseCardKey = () => {
+  const key = posKey("item_card");
+  return /^F\d+$/.test(key) ? key : "F2";  // Ctrl+Enter already adds a purchase line
+};
+const invoicePack = (it) => `${it.pack_unit_name === "pack" ? "علبة" : it.pack_unit_name} · ${it.pack_size} ${unitName(it)}`;
+const purchaseItemInfo = (it) => it ? [it.code, invoicePack(it)].filter(Boolean).join(" · ") : "";
+function invoiceCardButton(attribute, value, key) {
+  return `<button type="button" class="btn small secondary" ${attribute}="${esc(value)}"
+    aria-keyshortcuts="${esc(key)}" title="كارت الصنف (${esc(key)})">كارت الصنف</button>`;
+}
+
 function lineIssues(lineId) { return CUR.issues.filter((i) => i.line_id === lineId); }
 
-function renderInvoice() {
+function renderInvoice(keepPicker = true) {
   const { invoice: inv, lines, issues } = CUR;
   const draft = inv.status === "draft";
+  const picker = $("#qa");
+  const keep = draft && keepPicker && picker?.dataset.invoice === inv.id;
   const errs = issues.filter((i) => i.level === "error" && !i.acknowledged);
-  const warns = issues.filter((i) => i.level === "warning" || i.level === "info");
+  const warns = issues.filter((i) => (i.level === "warning" || i.level === "info") && (!draft || i.code !== "public_price_changed"));
   const lineNo = Object.fromEntries(lines.map((l) => [l.id, l.line_no]));
   const fileUrl = inv.source_file_id ? `/api/files/${encodeURIComponent(inv.source_file_id)}` : null;
   let doc = `<p class="muted">لا يوجد ملف مرفق (إدخال يدوي)</p>`;
@@ -1363,7 +1389,7 @@ function renderInvoice() {
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
-  ${draft ? quickAddHtml() : ""}
+  ${draft ? (keep ? `<div id="qaSlot"></div>` : quickAddHtml()) : ""}
   <div class="${fileUrl ? "review" : ""}">
     ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
     <section class="panel">
@@ -1378,7 +1404,9 @@ function renderInvoice() {
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
   fillPaySources(inv);
-  if (draft) bindQuickAdd();
+  if (keep) $("#qaSlot").replaceWith(picker);
+  else if (draft) bindQuickAdd();
+  if (keep) picker.dispatchEvent(new Event("invoice-lines-changed"));
   purchaseTabs(inv.id);
 }
 
@@ -1428,12 +1456,14 @@ function purchaseLabels(cur) {
 
 // fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
 function quickAddHtml() {
-  return `<section class="panel" id="qa"><h2>إضافة صنف للفاتورة</h2>
+  return `<section class="panel" id="qa" data-invoice="${esc(CUR.invoice.id)}"><h2>إضافة صنف للفاتورة</h2>
     <div class="row">
       <label class="f grow">الصنف (اسم أو كود أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب الكود أو امسح الباركود"></label>
+      ${invoiceCardButton("data-qa-card", "picked", purchaseCardKey())}
       <label class="f">كمية (علبة)<input id="qaQty" type="number" min="1" step="1" class="narrow"></label>
       <label class="f" id="qaBonusField" hidden>بونص<input id="qaBonus" disabled type="number" min="0" step="1" value="0" class="narrow"></label>
-      <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow" aria-describedby="qaPriceWarning">
+        <small class="badge b-warn" id="qaPriceWarning" role="status" hidden></small></label>
       <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
       <label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" type="number" min="0" step="0.01" class="narrow"></label>
       <label class="f">ضريبة السطر<input id="qaTax" type="number" min="0" step="0.01" class="narrow"></label>
@@ -1445,22 +1475,42 @@ function quickAddHtml() {
     <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
 }
 
-let QA_ITEM = null;
 function bindQuickAdd() {
   const q = $("#qaQ");
   if (!q) return;
-  const pick = (it) => {
-    QA_ITEM = it;
-    $("#qaRes").innerHTML = "";
-    q.value = itemText(it);
+  const picker = $("#qa"), price = $("#qaPrice");
+  let item = null;
+  const warnPrice = () => showPurchasePriceWarning($("#qaPriceWarning", picker), item?.public_price, price.value);
+  const showPicked = (it) => {
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
     // U2-3: said at once, not after saving: the item is already on the invoice
     const twins = (CUR?.lines || []).filter((l) => l.item_id === it.id);
     if (twins.length) $("#qaPicked").textContent += ` · ⚠ الصنف ده موجود في ${twins.map((l) => `سطر ${l.line_no}${l.expiry_date ? ` (صلاحية ${l.expiry_date.slice(5, 7)}/${l.expiry_date.slice(0, 4)}${l.batch_no ? `، تشغيلة ${l.batch_no}` : "، من غير تشغيلة"})` : ""}`).join("، ")}: لو نفس الصلاحية والتشغيلة زوّد الكمية هناك`;
-    if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
+    warnPrice();
+  };
+  const pick = (it) => {
+    item = it;
+    $("#qaRes").innerHTML = "";
+    q.value = itemText(it);
+    price.value = money(it.public_price);
+    showPicked(it);
     $("#qaQty").focus();
   };
+  picker.addEventListener("invoice-lines-changed", () => { if (item) showPicked(item); });
+  picker.addEventListener("invoice-item-saved", ({ detail }) => {
+    res = res.map((r) => r.id === detail.id ? { ...r, ...detail } : r);
+    res.forEach((r, i) => {
+      const button = $(`[data-qa="${i}"]`, picker);
+      if (r.id === detail.id && button) button.innerHTML = resultLabel(r);
+    });
+    if (item?.id !== detail.id) return;
+    item = { ...item, ...detail };
+    q.value = itemText(item);
+    showPicked(item);
+  });
+  price.addEventListener("input", warnPrice);
   let timer, seq = 0, res = [], resultsFor = "";
+  const resultLabel = (r) => `${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span>`;
   const current = onThisScreen();
   const search = async (v, select) => {
     const request = ++seq;
@@ -1481,28 +1531,45 @@ function bindQuickAdd() {
       pick(res[0]); return;
     }
     if (select && res.length && !/^\d+$/.test(v)) { pick(res[0]); return; }
-    $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
-      <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || '<p class="muted">لا توجد نتائج</p>');
+    $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<span class="row nowrap"><button type="button"
+      class="btn small secondary" data-qa="${i}">${resultLabel(r)}</button>${invoiceCardButton("data-qa-card", i, purchaseCardKey())}</span>`).join("") || '<p class="muted">لا توجد نتائج</p>');
     $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
   };
   const runSearch = (select) => search(q.value.trim(), select).catch((err) => { if (current()) toast(err.message, true); });
   q.addEventListener("input", () => {
-    QA_ITEM = null; resultsFor = ""; seq++; clearTimeout(timer);
+    item = null; resultsFor = ""; seq++; clearTimeout(timer); warnPrice();
     $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
     timer = setTimeout(() => runSearch(false), 250);
   });
   q.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || QA_ITEM) return;
+    if (e.key !== "Enter" || item) return;
     e.preventDefault(); clearTimeout(timer);
     const v = q.value.trim();
     if (resultsFor === v && res.length && !/^\d+$/.test(v)) pick(res[0]);
     else runSearch(true);
   });
+  const openCard = (trigger) => {
+    clearTimeout(timer); seq++;
+    const candidate = trigger.dataset.qaCard === "picked" ? item : res[+trigger.dataset.qaCard];
+    showInvoiceItemCard(candidate?.id, {
+      purchase: picker.dataset.invoice, query: q.value.trim(), onPick: pick, onSaved: refreshPurchaseItem,
+    });
+  };
+  picker.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-qa-card]");
+    if (button) openCard(button);
+  });
+  picker.addEventListener("keydown", (e) => {
+    if (!purchaseCardShortcut(e)) return;
+    e.preventDefault();
+    const result = e.target.closest("[data-qa]")?.dataset.qa;
+    openCard(e.target.closest("[data-qa-card]") || $(`[data-qa-card="${result ?? "picked"}"]`, picker));
+  });
   const add = async () => {
-    if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    if (!item) { toast("اختر الصنف أولًا", true); q.focus(); return; }
     const qty = typedWhole($("#qaQty").value);
     if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
+    const line = { item_id: item.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
     if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
     if ($("#qaMargin").value.trim() !== "") line.distributor_margin = exactPiasters($("#qaMargin").value) ?? $("#qaMargin").value;
@@ -1513,8 +1580,7 @@ function bindQuickAdd() {
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
     if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
     const keepDisc = $("#qaDisc").value;
-    QA_ITEM = null;
-    await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST");
+    await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST", false);
     if ($("#qaDisc")) $("#qaDisc").value = keepDisc;     // same supplier discount usually repeats
     $("#qaQ")?.focus();
   };
@@ -1543,28 +1609,32 @@ function bindQuickAdd() {
 }
 
 function renderLine(l) {
-  const iss = lineIssues(l.id);
-  const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   const draft = CUR.invoice.status === "draft";
+  const iss = lineIssues(l.id).filter((i) => !draft || i.code !== "public_price_changed");
+  const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   let match;
   if (l.item_id && l.match_status !== "suggested") {
-    match = `<div>${esc(itemLabel(l.item))} <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>`;
+    match = `<div><span data-line-item>${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
+      <div class="muted small" data-line-item-info>${esc(purchaseItemInfo(l.item))}</div>`;
   } else {
     const c = l.candidates || [];
     match = `<div class="cands">${c.length ? `<select data-pick="${esc(l.id)}" ${draft ? "" : "disabled"}>
       <option value="">— اختر الصنف الصحيح —</option>
       ${c.map((x) => `<option value="${esc(x.item_id)}" ${x.item_id === l.item_id ? "selected" : ""}>${esc(x.label)} (${Math.round(x.score * 100)}%)</option>`).join("")}
     </select>` : `<span class="badge b-err">غير موجود</span>`}
-    ${draft ? `<span><button class="btn small secondary" data-search="${esc(l.id)}">بحث</button>
-      <button class="btn small secondary" data-newitem="${esc(l.id)}">صنف جديد</button></span>` : ""}</div>`;
+    </div>`;
   }
-  return `<tr class="${hasErr ? "has-err" : ""}">
+  const warning = draft ? purchasePriceWarning(l.item?.public_price, money(l.public_price)) : "";
+  const warningId = draft ? `puPriceWarning-${l.id}` : undefined;
+  return `<tr data-purchase-line="${esc(l.id)}" class="${hasErr ? "has-err" : ""}">
     <td>${l.line_no}</td>
     <td class="name"><div class="raw">${esc(l.raw_name)}</div>${match}
+      ${invoiceCardButton("data-purchase-card", l.id, purchaseCardKey())}
       ${iss.length ? `<div class="muted">${iss.map((i) => (i.level === "error" ? "⛔ " : "⚠️ ") + esc(i.message)).join("<br>")}</div>` : ""}</td>
     <td data-label="كمية">${fieldInput(l, "qty", l.qty ?? "", { step: "1" })}</td>
     <td data-label="بونص">${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
-    <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price))}</td>
+    <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price), { describedBy: warningId })}
+      ${draft ? `<small class="badge b-warn" id="${esc(warningId)}" data-price-warning role="status" ${warning ? "" : "hidden"}>${esc(warning)}</small>` : ""}</td>
     <td data-label="خصم %">${fieldInput(l, "discount_bp", pct(l.discount_bp))}</td>
     <td data-label="هامش الموزع">${fieldInput(l, "distributor_margin", money(l.distributor_margin || 0))}</td>
     <td data-label="الصافي">${fieldInput(l, "unit_net_price", money(l.unit_net_price))}</td>
@@ -1654,6 +1724,71 @@ function pgFocus() {
   PG_FOCUS = null;
   if (el && !el.disabled) { el.focus(); try { el.select(); } catch { /* not selectable */ } }
 }
+function purchaseCardShortcut(e) {
+  return !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key === purchaseCardKey();
+}
+
+function refreshPurchaseItem(item) {
+  for (const line of CUR.lines) {
+    if (line.item_id !== item.id) continue;
+    line.item = item;
+    const row = $(`[data-purchase-line="${CSS.escape(line.id)}"]`, app);
+    if (!row) continue;
+    const label = $("[data-line-item]", row);
+    if (label) label.textContent = itemLabel(item);
+    const info = $("[data-line-item-info]", row);
+    if (info) info.textContent = purchaseItemInfo(item);
+    const warning = $("[data-price-warning]", row);
+    if (warning) showPurchasePriceWarning(warning, item.public_price, $('[data-field="public_price"]', row).value);
+  }
+  $("#qa")?.dispatchEvent(new CustomEvent("invoice-item-saved", { detail: item }));
+}
+
+function openPurchaseLineCard(row) {
+  const line = CUR.lines.find((l) => l.id === row.dataset.purchaseLine);
+  const invoice = CUR.invoice;
+  const current = onThisScreen();
+  const path = `/api/purchases/${invoice.id}/lines/${line.id}`;
+  const draft = invoice.status === "draft";
+  const active = document.activeElement;
+  const activeInput = active.dataset.line && active.dataset.field;
+  const restore = async () => {
+    await waitForPurchaseSave(invoice.id);
+    if (!current()) return;
+    return active.isConnected ? active : activeInput
+      ? $(`[data-line="${CSS.escape(active.dataset.line)}"][data-field="${activeInput}"]`, app)
+      : $(`[data-purchase-card="${CSS.escape(line.id)}"]`, app);
+  };
+  const update = async (suffix, method, body) => {
+    await waitForPurchaseSave(invoice.id);
+    if (!current()) return;
+    const updated = await api(path + suffix, { method, body: { ...body, version: CUR.invoice.version } });
+    if (!current()) return;
+    CUR = updated;
+    renderInvoice();
+  };
+  showInvoiceItemCard(line.match_status === "suggested" ? null : line.item_id, {
+    purchase: invoice.id,
+    query: line.raw_name,
+    newName: line.raw_name,
+    onPick: draft ? (item) => update("", "PATCH", { changes: { item_id: item.id } }) : null,
+    onCreate: draft ? (item, force) => update("/new-item", "POST", { item, force }) : null,
+    onSaved: async (item) => {
+      await waitForPurchaseSave(invoice.id);
+      if (current()) refreshPurchaseItem(item);
+    },
+    restore,
+  });
+}
+
+app.addEventListener("input", (e) => {
+  const input = e.target;
+  if (input.dataset.field !== "public_price" || !CUR) return;
+  const warning = $("[data-price-warning]", input.parentElement);
+  const line = CUR.lines.find((l) => l.id === input.dataset.line);
+  if (warning) showPurchasePriceWarning(warning, line?.item?.public_price, input.value);
+});
+
 function pgTarget(el, key) {
   const rows = [...new Set([...app.querySelectorAll("input[data-line][data-field]")].map((x) => x.dataset.line))];
   const r = rows.indexOf(el.dataset.line), c = PG_FIELDS.indexOf(el.dataset.field);
@@ -1674,6 +1809,12 @@ app.addEventListener("focusin", (e) => {       // U2-2 in the grid too: typing r
 });
 app.addEventListener("keydown", (e) => {
   const el = e.target;
+  const row = el.closest?.("[data-purchase-line]");
+  if (row && purchaseCardShortcut(e)) {
+    e.preventDefault();
+    openPurchaseLineCard(row);
+    return;
+  }
   if (!CUR || !(el instanceof HTMLInputElement) || !el.dataset.field || !el.dataset.line) return;
   if (!["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
   const side = e.key === "ArrowLeft" || e.key === "ArrowRight";
@@ -1688,14 +1829,25 @@ app.addEventListener("keydown", (e) => {
   else pgFocus();
 });
 
-async function save(path, body, method = "PATCH") {
+const purchaseSaves = new Map();
+function waitForPurchaseSave(invoiceId) {
+  return Promise.allSettled([...purchaseSaves].filter(([, id]) => id === invoiceId).map(([job]) => job));
+}
+function save(path, body, method = "PATCH", keepPicker = true) {
+  const job = savePurchase(path, body, method, keepPicker);
+  purchaseSaves.set(job, CUR.invoice.id);
+  job.then(() => purchaseSaves.delete(job), () => purchaseSaves.delete(job));
+  return job;
+}
+
+async function savePurchase(path, body, method, keepPicker) {
   const current = onThisScreen();
   PG_SAVING++;
   try {
     const updated = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
-    if (!current()) return;
+    if (!current() || updated.invoice.version < CUR.invoice.version) return;
     CUR = updated;
-    renderInvoice();
+    renderInvoice(keepPicker);
     pgFocus();
   } catch (e) {
     if (!current()) return;
@@ -1706,7 +1858,9 @@ async function save(path, body, method = "PATCH") {
 }
 
 async function viewInvoice(id) {
-  CUR = await api(`/api/purchases/${encodeURIComponent(id)}`);
+  const updated = await api(`/api/purchases/${encodeURIComponent(id)}`);
+  if (CUR?.invoice.id === id && updated.invoice.version < CUR.invoice.version) return;
+  CUR = updated;
   renderInvoice();
 }
 
@@ -1772,11 +1926,18 @@ function choosePurchasePrices(review) {
   });
 }
 
+app.addEventListener("mousedown", (e) => {
+  if (e.button === 0 && e.target.closest("[data-purchase-card], [data-qa-card]") &&
+      document.activeElement.matches("#qa input, table.lines input")) e.preventDefault();
+});
+
 app.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t || !CUR) return;
   const base = `/api/purchases/${CUR.invoice.id}`;
-  if (t.id === "approve") {
+  if (t.dataset.purchaseCard) {
+    openPurchaseLineCard(t.closest("[data-purchase-line]"));
+  } else if (t.id === "approve") {
     const pay = CUR.invoice.pay || {}, payNow = pay.source === "credit" ? 0 : pay.amount ?? CUR.invoice.computed_total ?? 0;
     if (!confirm(["اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.",
       payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج: ${$("#paySrc")?.selectedOptions[0]?.textContent || ""}` + (payNow < (CUR.invoice.computed_total || 0) ? "، والباقي على حسابه." : ".")
@@ -1829,33 +1990,6 @@ app.addEventListener("click", async (e) => {
   } else if (t.dataset.ack) {
     const reason = prompt("اكتب سبب قبول الفرق (يُسجَّل باسمك):");
     if (reason) await save(`${base}/acknowledge`, { code: t.dataset.ack, line_id: t.dataset.ackline || null, reason }, "POST");
-  } else if (t.dataset.search) {
-    const q = prompt("ابحث عن الصنف (اسم أو باركود):");
-    if (!q) return;
-    const res = await api(`/api/items?q=${encodeURIComponent(q)}`);
-    if (!res.length) return toast("لا توجد نتائج", true);
-    const pick = prompt(res.slice(0, 9).map((r, i) => `${i + 1}) ${r.name_en || r.name_ar}`).join("\n") + "\n\nاكتب رقم الصنف:");
-    const it = res[parseInt(pick, 10) - 1];
-    if (it) await save(`${base}/lines/${t.dataset.search}`, { changes: { item_id: it.id } });
-  } else if (t.dataset.newitem) {
-    const line = CUR.lines.find((l) => l.id === t.dataset.newitem);
-    const name = prompt("اسم الصنف الجديد:", line.raw_name);
-    if (!name) return;
-    const pack = parseInt(prompt("عدد الشرائط/الوحدات في العلبة:", "1"), 10) || 1;
-    try {
-      CUR = await api(`${base}/lines/${line.id}/new-item`, { method: "POST",
-        body: { item: { name_en: name, pack_size: pack }, version: CUR.invoice.version } });
-      renderInvoice();
-    } catch (err) {
-      if (err.code === "possible_duplicate") {
-        const d = err.details.duplicates.map((x) => x.label).join("، ");
-        if (confirm(`يوجد صنف مشابه: ${d}\nهل أنت متأكد أنه صنف مختلف؟`)) {
-          CUR = await api(`${base}/lines/${line.id}/new-item`, { method: "POST",
-            body: { item: { name_en: name, pack_size: pack }, force: true, version: CUR.invoice.version } });
-          renderInvoice();
-        }
-      } else toast(err.message, true);
-    }
   }
 });
 
@@ -2113,14 +2247,165 @@ async function viewItem(id) {
   });
 }
 
+function invoiceCardDetails(c) {
+  const cost = c.avg_cost_pack;
+  return `<h3 class="ltr-name">${esc(itemText(c))}</h3>
+    ${c.name_en && c.name_ar ? `<p>${esc(PREFS.names === "ar" ? c.name_en : c.name_ar)}</p>` : ""}
+    <dl class="invoice-card-fields">
+      <div><dt>الكود الداخلي</dt><dd><bdi>${esc(c.code || "—")}</bdi></dd></div>
+      <div><dt>الباركود</dt><dd>${c.barcodes.map((b) => `<bdi dir="ltr">${esc(b.code)}</bdi>`).join("<br>") || "—"}</dd></div>
+      <div><dt>العبوة</dt><dd>${esc(invoicePack(c))}</dd></div>
+      <div><dt>سعر الجمهور (ج)</dt><dd>${money(c.public_price) || "—"}</dd></div>
+      ${c.recent_purchases ? `<div><dt>متوسط التكلفة</dt><dd>${money(cost) || "—"}</dd></div>` : ""}
+    </dl>
+    ${c.batches ? `<h3>التشغيلات والصلاحية</h3><div class="tablewrap"><table>
+      <thead><tr><th>التشغيلة</th><th>الصلاحية</th><th>الرصيد</th><th>سعر الجمهور (ج)</th></tr></thead>
+      <tbody>${c.batches.map((b) => `<tr><td>${esc(b.batch_no || (b.batch_id ? "—" : "من غير تشغيلة"))}</td><td>${esc(b.expiry_date || "—")}</td>
+        <td>${esc(fmtStock(b.qty, c))}</td><td>${money((b.batch_id ? b.public_price : c.untracked_public_price) ?? c.public_price) || "—"}</td></tr>`).join("") ||
+        '<tr><td colspan="4" class="muted">لا يوجد رصيد</td></tr>'}</tbody></table></div>` : ""}
+    ${c.recent_purchases ? `<h3>آخر المشتريات</h3><div class="tablewrap"><table>
+      <thead><tr><th>المورد</th><th>التاريخ</th><th>الكمية (علبة)</th><th>سعر الشراء (ج)</th></tr></thead>
+      <tbody>${c.recent_purchases.map((p) => `<tr><td>${esc(p.supplier || "—")}</td><td>${esc(p.invoice_date || "—")}</td>
+        <td>${p.qty}</td><td>${money(p.unit_net_price) || "—"}</td></tr>`).join("") ||
+        '<tr><td colspan="4" class="muted">لا يوجد شراء مسجل بعد</td></tr>'}</tbody></table></div>` : ""}`;
+}
+
+function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCreate, onSaved, restore } = {}) {
+  if ($("dialog[open]")) return;
+  const focused = document.activeElement, current = onThisScreen();
+  const d = document.createElement("dialog");
+  d.className = "invoice-item-card";
+  d.setAttribute("aria-labelledby", "invoiceCardTitle");
+  d.innerHTML = `<div class="row between"><h2 id="invoiceCardTitle">كارت الصنف</h2>
+    <button type="button" class="btn small secondary" data-card-close autofocus>قفل</button></div>
+    <p class="err" role="alert" hidden></p><div data-card-body></div>`;
+  const box = $("[data-card-body]", d), close = $("[data-card-close]", d), error = $("[role=alert]", d);
+  const lifecycle = new AbortController();
+  let busy = false;
+  const showError = (err) => { error.textContent = err.message; error.hidden = false; };
+  const run = async (action) => {
+    if (busy || !d.open) return;
+    busy = true;
+    error.hidden = true;
+    try { await action(); } catch (err) { if (d.open) showError(err); }
+    finally { busy = false; }
+  };
+  const dismiss = async () => {
+    if (!d.open) return;
+    d.close();
+    lifecycle.abort();
+    d.remove();
+    if (!current()) return;
+    const target = restore ? await restore() : focused;
+    if (current() && !$("dialog[open]") &&
+        [document.body, focused, target].includes(document.activeElement)) target?.focus({ preventScroll: true });
+  };
+  const finish = async (callback, ...args) => {
+    if (!current() || !d.open) return;
+    await callback?.(...args);
+    await dismiss();
+  };
+  close.addEventListener("click", () => { if (!busy) dismiss(); });
+  d.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    if (!busy) dismiss();
+  });
+  window.addEventListener("hashchange", () => { if (!current()) dismiss(); }, { signal: lifecycle.signal });
+
+  const path = (itemId) => `/api/items/${encodeURIComponent(itemId)}/card?recent_purchases=1${purchase ? `&purchase=${encodeURIComponent(purchase)}` : ""}`;
+  const show = async (itemId) => {
+    box.innerHTML = '<p role="status">بنعرض كارت الصنف…</p>';
+    const item = await api(path(itemId));
+    if (!d.open) return;
+    box.innerHTML = invoiceCardDetails(item) + (canW() ? '<button type="button" class="btn mt" data-card-edit>تعديل</button>' : "");
+    $("[data-card-edit]", box)?.addEventListener("click", () => run(async () => {
+      const cats = await loadCats(true);
+      if (!d.open) return;
+      renderItemEdit(box, itemId, item, cats, { run, onSave: (saved) => finish(onSaved, saved) });
+      $("[name=name_en]", box).focus();
+    }));
+  };
+  const newItem = () => {
+    box.innerHTML = `<form><h3>صنف جديد</h3>
+      <label class="f">اسم الصنف<input name="name_en" required value="${esc(newName || "")}"></label>
+      <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
+      <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
+    const form = $("form", box);
+    form.name_en.focus();
+    $("[data-card-back]", box).addEventListener("click", () => { if (!busy) searchForm(); });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      run(async () => {
+        const item = { name_en: form.name_en.value.trim(), pack_size: form.pack_size.valueAsNumber };
+        try { await finish(onCreate, item, false); }
+        catch (err) {
+          if (err.code !== "possible_duplicate") throw err;
+          const labels = (err.details?.duplicates || []).map((entry) => entry.label).join("، ");
+          if (confirm(`يوجد صنف مشابه: ${labels}\nهل أنت متأكد أنه صنف مختلف؟`)) await finish(onCreate, item, true);
+        }
+      });
+    });
+  };
+  const searchForm = () => {
+    box.innerHTML = `<form><label class="f">دَوّر على الصنف بالاسم أو الكود أو الباركود
+      <input type="search" autocomplete="off" value="${esc(query)}"></label>
+      <div class="row"><button class="btn secondary">بحث</button>
+      ${onCreate ? '<button type="button" class="btn secondary" data-card-new>صنف جديد</button>' : ""}</div></form>
+      <div data-card-results></div>`;
+    const input = $("input", box), results = $("[data-card-results]", box);
+    let request = 0, timer;
+    const search = async () => {
+      clearTimeout(timer);
+      const n = ++request, value = input.value.trim();
+      if (value.length < 2) return;
+      try {
+        const { items } = await findItems(value);
+        if (!d.open || !input.isConnected || n !== request) return;
+        results.innerHTML = items.map((item, i) => `<div class="row between"><span>${itemHtml(item)}</span>
+          <button type="button" class="btn small secondary" data-card-result="${i}">${onPick ? (newName === undefined ? "اختار الصنف" : "ربط الصنف") : "كارت الصنف"}</button></div>`).join("") ||
+          '<p class="muted">مفيش أصناف مطابقة</p>';
+        results.querySelectorAll("[data-card-result]").forEach((button) => button.addEventListener("click", () => {
+          const item = items[+button.dataset.cardResult];
+          run(() => onPick ? finish(onPick, item) : show(item.id));
+        }));
+      } catch (err) { if (d.open && input.isConnected && n === request) showError(err); }
+    };
+    input.addEventListener("input", () => {
+      query = input.value;
+      request++;
+      results.replaceChildren();
+      error.hidden = true;
+      clearTimeout(timer);
+      timer = setTimeout(search, 200);
+    });
+    $("form", box).addEventListener("submit", (e) => { e.preventDefault(); search(); });
+    $("[data-card-new]", box)?.addEventListener("click", () => { if (!busy) newItem(); });
+    input.focus();
+    search();
+  };
+
+  document.body.append(d);
+  d.showModal();
+  if (id) show(id).catch((err) => { if (d.open) showError(err); });
+  else searchForm();
+}
+
 async function viewItemEdit(id) {
   if (!canW()) { location.hash = id ? `#/items/${id}` : "#/items"; return; }
   const it = id ? await api(`/api/items/${id}/card`) : { pack_size: 1, base_unit_name: "unit", pack_unit_name: "pack", barcodes: [] };
-  const cats = (await loadCats(true)).filter((c) => c.is_active || c.id === it.category_id);
+  const cats = await loadCats(true);
+  renderItemEdit(app, id, it, cats);
+}
+
+function renderItemEdit(root, id, it, categories, modal = null) {
+  const cats = categories.filter((c) => c.is_active || c.id === it.category_id);
+  const $ = (s) => root.querySelector(s);
   const canPrice = ME.permissions.includes("items.price") || !id;
   const unitVal = (v, def) => (v === "unit" ? "" : v === "pack" ? "" : v) || def;
-  app.innerHTML = `<form class="panel" id="itemForm"><div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
-      <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>
+  root.innerHTML = `<form class="panel" id="itemForm">${modal
+    ? '<h3>تعديل الصنف</h3>'
+    : `<div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
+      <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>`}
     <div class="formgrid">
       <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
       <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
@@ -2134,10 +2419,10 @@ async function viewItemEdit(id) {
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">تحديث السعر للمالك والمدير فقط</span>`}</label>
       <label class="f">اسم العبوة <input name="pack_unit_name" value="${esc(unitVal(it.pack_unit_name, "علبة"))}"></label>
-      <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
+      <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, modal ? "وحدة" : "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
       <label class="f">عدد الوحدات في العبوة <input name="pack_size" type="number" min="1" step="1" value="${it.pack_size}" ${id && it.stock_qty ? "disabled" : ""}>
         ${id && it.stock_qty ? `<span class="muted">مقفلة لأن للصنف رصيدًا</span>` : ""}
-        ${id && !it.is_service && canFixPack() ? `<button type="button" class="btn small secondary" id="packFixBtn">${it.pack_size === 1 ? PACK_QUESTION : "تصحيح عدد الوحدات (الرصيد يتحوّل معاه)"}</button>` : ""}</label>
+        ${!modal && id && !it.is_service && canFixPack() ? `<button type="button" class="btn small secondary" id="packFixBtn">${it.pack_size === 1 ? PACK_QUESTION : "تصحيح عدد الوحدات (الرصيد يتحوّل معاه)"}</button>` : ""}</label>
       <label class="f">حد الطلب (بالعبوة) <input name="min_packs" type="number" min="0" step="1" value="${it.min_stock ? Math.round(it.min_stock / it.pack_size) : ""}"></label>
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
@@ -2158,7 +2443,10 @@ async function viewItemEdit(id) {
       ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">إزالة</button>` : ""}</li>`).join("")}</ul>
     <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
     <div class="row mt"><button class="btn">احفظ</button></div></form>`;
-  const newCodes = [];
+  const newCodes = new Set(), removedCodes = new Set();
+  const perform = modal ? modal.run : async (action) => {
+    try { await action(); } catch (err) { toast(err.message, true); }
+  };
   const readCode = (raw) => {     // a 2D code -> its GTIN (as the EAN-13 printed on most packs when it starts with 0)
     const m = raw.trim().replace(/^\](d2|Q3|C1)/, "").match(/^(?:\(01\)|01)(\d{14})/) || raw.match(/\/01\/(\d{8,14})/);
     if (!m) return raw.trim();
@@ -2166,25 +2454,42 @@ async function viewItemEdit(id) {
     return g.startsWith("0") ? g.slice(1) : g;
   };
   $("#bcNew").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#bcAdd").click(); } });
-  $("#bcAdd").addEventListener("click", async () => {
-    const code = readCode($("#bcNew").value); if (!code) return;
-    if (id) {
-      try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: code } }); viewItemEdit(id); }
-      catch (err) { toast(err.message, true); }
-    } else { newCodes.push(code); $("#bcList").insertAdjacentHTML("beforeend", `<li><bdi dir="ltr">${esc(code)}</bdi></li>`); $("#bcNew").value = ""; }
+  const appendCode = (code) => $("#bcList").insertAdjacentHTML("beforeend", `<li><bdi dir="ltr">${esc(code)}</bdi>
+    ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(code)}">إزالة</button>` : ""}</li>`);
+  $("#bcAdd").addEventListener("click", () => {
+    const input = $("#bcNew"), code = readCode(input.value);
+    if (!code) return;
+    if (id && !modal) perform(async () => {
+      await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: code } });
+      return viewItemEdit(id);
+    });
+    else {
+      if (!$(`[data-rm="${CSS.escape(code)}"]`) && !newCodes.has(code)) {
+        if (!removedCodes.delete(code)) newCodes.add(code);
+        appendCode(code);
+      }
+      input.value = "";
+    }
   });
-  document.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirmInline(b)) return;
-    try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: b.dataset.rm, remove: true } }); viewItemEdit(id); }
-    catch (err) { toast(err.message, true); }
-  }));
+  $("#bcList").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-rm]");
+    if (!button) return;
+    const barcode = button.dataset.rm;
+    if (modal) {
+      if (!newCodes.delete(barcode)) removedCodes.add(barcode);
+      button.closest("li").remove();
+    } else if (confirmInline(button)) perform(async () => {
+      await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode, remove: true } });
+      await viewItemEdit(id);
+    });
+  });
   $("#packFixBtn")?.addEventListener("click", async (e) => {
     const button = e.currentTarget;
     if (await withBusy(button, () => packFix(id, null, it.pack_size === 1)) && button.isConnected) viewItemEdit(id);
   });
-  $("#itemForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const f = e.target, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
+  const form = $("#itemForm");
+  const readFields = () => {
+    const f = form, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
     const pack = +(v("pack_size") ?? it.pack_size) || 1;
     const data = { name_en: v("name_en") || null, name_ar: v("name_ar") || null, manufacturer: v("manufacturer") || null,
       active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
@@ -2196,26 +2501,63 @@ async function viewItemEdit(id) {
     if (data.is_service && !id && ["شريط", "وحدة"].includes(data.base_unit_name)) { data.base_unit_name = "مرة"; data.pack_unit_name = "خدمة"; }
     if (v("pack_size") !== undefined) data.pack_size = pack;
     if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
+    return data;
+  };
+  const original = readFields();
+  let category = it.category_id || null;
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const data = readFields();
+    if (modal) {
+      for (const key of Object.keys(data)) if (data[key] === original[key]) delete data[key];
+    }
     if (id && data.public_price === it.public_price) delete data.public_price;
     if (id && data.pack_size === it.pack_size) delete data.pack_size;
     if (id && (data.strength || "") === (it.strength || it.strength_norm || "")) delete data.strength;     // untouched: don't rewrite
     if (id && (data.dosage_form || "") === (it.dosage_form || "")) delete data.dosage_form;
-    try {
-      let iid = id;
-      if (id) await api(`/api/items/${id}`, { method: "PATCH", body: data });
-      else {
-        try { iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes } })).id; }
+    perform(async () => {
+      let iid = id, saved = it;
+      if (id && (!modal || Object.keys(data).length)) {
+        saved = await api(`/api/items/${id}`, { method: "PATCH", body: data });
+        if (modal) {
+          Object.assign(original, data);
+          const { barcodes, ...fields } = saved;
+          Object.assign(it, fields);
+          saved = it;
+        }
+      } else if (!id) {
+        try { iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: [...newCodes] } })).id; }
         catch (err) {
           if (err.code !== "possible_duplicate") throw err;
           const d = (err.details?.duplicates || []).map((x) => x.name || x.name_en).join("، ");
           if (!confirm(`يوجد صنف مشابه: ${d}\nهل أنت متأكد أنه صنف مختلف؟`)) return;
-          iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes, force: true } })).id;
+          iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: [...newCodes], force: true } })).id;
         }
       }
-      const cat = f.category_id.value || null;
-      if (cat !== (it.category_id || null)) await api(`/api/items/${iid}/category`, { method: "POST", body: { category_id: cat } });
-      toast("تم الحفظ"); location.hash = `#/items/${iid}`;
-    } catch (err) { toast(err.message, true); }
+      const cat = form.category_id.value || null;
+      if (cat !== category) {
+        await api(`/api/items/${iid}/category`, { method: "POST", body: { category_id: cat } });
+        category = cat;
+      }
+      if (modal) {
+        const changeBarcode = (barcode, remove) => api(`/api/items/${iid}/barcode`, {
+          method: "POST", body: { barcode, remove },
+        });
+        for (const barcode of newCodes) {
+          await changeBarcode(barcode, false);
+          newCodes.delete(barcode);
+        }
+        for (const barcode of removedCodes) {
+          await changeBarcode(barcode, true);
+          removedCodes.delete(barcode);
+        }
+      }
+      toast("تم الحفظ");
+      if (modal) {
+        Object.assign(it, saved, { category_id: category });
+        await modal.onSave(it);
+      } else location.hash = `#/items/${iid}`;
+    });
   });
 }
 
@@ -4447,6 +4789,20 @@ function posLine() {
   const id = rows[POS_SEL]?.querySelector("[data-rm]")?.dataset.rm;
   return SALE.lines.find((l) => l.id === id) || (POS_SEL < 0 ? SALE.lines[SALE.lines.length - 1] : null);
 }
+function posInvoiceCard(line) {
+  const sid = SALE.id, active = document.activeElement;
+  const attr = ["data-pos-card", "data-disc", "data-dunit", "data-unit", "data-plus", "data-minus", "data-rm"]
+    .find((name) => active.hasAttribute(name));
+  showInvoiceItemCard(line.item_id, {
+    restore: async () => {
+      await POS.saving;
+      await Promise.allSettled(pendingPosAdds(sid));
+      if (SALE?.id !== sid) return;
+      if (active.isConnected) return active;
+      return (attr && $(`#posCart [${attr}="${CSS.escape(active.getAttribute(attr))}"]`)) || $("#posQ");
+    },
+  });
+}
 async function posBranchStock(l) {
   const r = await api(`/api/items/${l.item_id || l.item.id}/branch-stock`);
   const d = document.createElement("dialog");
@@ -4462,11 +4818,15 @@ document.addEventListener("keydown", async (e) => {
   const act = posAction(k);
   if (POS.completing) { if (act) e.preventDefault(); return; }
   if (act === "search") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
-  if (act === "branch_stock" || act === "item_card" || act === "qty") {
+  if (act === "item_card") {
+    const id = e.target.closest?.("#posCart tr")?.querySelector("[data-rm]")?.dataset.rm;
+    const line = SALE?.lines.find((l) => l.id === id) || posLine();
+    return go(() => line ? posInvoiceCard(line) : toast("مفيش صنف في الفاتورة", true));
+  }
+  if (act === "branch_stock" || act === "qty") {
     const l = posLine();
     if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
     if (act === "branch_stock") return go(() => posBranchStock(l));
-    if (act === "item_card") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
     return go(() => {
       const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
       const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
@@ -4603,6 +4963,7 @@ function renderCart(findings = null) {
         <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
           ${l.item.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${l.item.hide_on_receipt ? `<span class="badge" title="لن يظهر اسمه في الإيصال">🙈</span>` : ""}${l.item.rx_required ? `<span class="badge b-err" title="يُصرف بوصفة طبية فقط">📋 وصفة طبية</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="يُساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية غير متاحة"}</span>` : ""}
+          ${invoiceCardButton("data-pos-card", l.id, posKey("item_card"))}
           ${l.item.stock != null ? `<div class="muted small">الرصيد: ${esc(fmtStock(l.item.stock, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit }))}</div>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
@@ -4621,6 +4982,8 @@ function renderCart(findings = null) {
     </table></div><div id="posSafety"></div>`;
   posMark();
   const line = (id) => s.lines.find((l) => l.id === id);
+  $("#posCart").querySelectorAll("[data-pos-card]").forEach((button) => button.addEventListener("click", () =>
+    posInvoiceCard(line(button.dataset.posCard))));
   $("#posCart").querySelectorAll("[data-cart-pack]").forEach((button) => button.addEventListener("click", () =>
     withBusy(button, () => packFix(line(button.dataset.cartPack).item_id, null, true))));
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
