@@ -955,7 +955,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def item_card_get(req):
-        return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
+        ctx = ctx_of(req)
+        if invoice_id := req.query_params.get("purchase"):
+            ctx = purch.receiving_context(ctx, invoice_id)
+        return J(item_card.card(db, ctx, req.path_params["id"],
+                                recent_purchases=req.query_params.get("recent_purchases") == "1"))
 
     @handler
     async def sections_suggest(req):

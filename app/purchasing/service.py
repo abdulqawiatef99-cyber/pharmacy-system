@@ -248,6 +248,15 @@ class Purchasing:
                         (comp, h, inv_id))
 
     # ------------------------------------------------------------ read
+    def receiving_context(self, ctx: Context, inv_id: str) -> Context:
+        """Use the branch that receives the invoice's stock for contextual reads."""
+        from dataclasses import replace
+        ctx.require("purchases.read")
+        r = self.db.one("SELECT branch_id FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id))
+        if not r:
+            raise NotFound("الفاتورة غير موجودة")
+        return replace(ctx, branch_id=r["branch_id"])
+
     def _load(self, ctx: Context, inv_id: str) -> tuple[dict, list[dict]]:
         r = self.db.one("SELECT * FROM purchase_invoices WHERE id=? AND org_id=?",
                         (inv_id, ctx.org_id))
@@ -377,8 +386,9 @@ class Purchasing:
             l["field_sources"] = json.loads(l["field_sources"])
             l["field_confidence"] = json.loads(l["field_confidence"])
             if l["item_id"]:
-                it = self.db.one("SELECT name_en, name_ar, strength, dosage_form, pack_size,"
-                                 " public_price FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
+                it = self.db.one("SELECT name_en, name_ar, strength, dosage_form, pack_size, code,"
+                                 " pack_unit_name, base_unit_name, public_price FROM items WHERE id=? AND org_id=?",
+                                 (l["item_id"], ctx.org_id))
                 l["item"] = dict(it) if it else None
             if with_candidates and l["match_status"] in ("suggested", "unmatched"):
                 cands = matching.fuzzy_candidates(self.db, ctx.org_id, l["raw_name"], 5)
