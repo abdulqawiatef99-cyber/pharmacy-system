@@ -87,6 +87,8 @@ def _db(s: config.Settings, create: bool = False) -> Database:
                  "حدد مكان البيانات: set PHARM_DATA_DIR=%LOCALAPPDATA%\\PharmacyPlatform\\data ثم أعد الأمر. "
                  "(no database here; nothing was created)")
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    from app.core import backup as _backup
+    _backup.finish_interrupted_restore(Path(s.db_path))     # a restore cut by a power loss: one whole set
     existed = s.db_path.exists()
     db = Database(s.db_path)
     from app.db import MigrationError

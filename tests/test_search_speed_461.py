@@ -96,8 +96,11 @@ class TestShortlistKeepsTheAnswers(DBTestCase):
         with mock.patch.object(matching, "fuzzy_candidates", wraps=matching.fuzzy_candidates) as asked:
             r = search.search(self.db, self.ctx, "Zedmakr Lien", 500)
         self.assertEqual(r["hint"], {"kind": "fuzzy"})
-        self.assertEqual(asked.call_args.args[-1], search.FUZZY_MAX)
+        self.assertEqual((asked.call_args.args[-1], asked.call_args.kwargs), (search.FUZZY_MAX, {"compare": search.FUZZY_MAX}))
         self.assertTrue(0 < len(r["items"]) <= search.FUZZY_MAX)
+        # every guess that was compared reaches the caller's stock filter, not only the first few (Codex on #483)
+        self.assertGreater(len(r["items"]), 100)
+        self.assertEqual(len(search.search(self.db, self.ctx, "Zedmakr Lien", 20)["items"]), 20)
         self.assertTrue(all(i["org_id"] == self.ctx.org_id for i in r["items"]))
 
 
@@ -133,22 +136,21 @@ class TestIndexFollowsOneItem(DBTestCase):
         matching.forget(self.ctx.org_id)
         self.assertEqual(followed, shape(matching._index(self.db, self.ctx.org_id)))
 
-    def test_a_stopped_or_deleted_item_leaves_the_index(self):
+    def test_a_stopped_item_or_one_that_is_gone_drops_the_index(self):
         with self.db.transaction():
             self.db.execute("UPDATE items SET status='inactive' WHERE id=? AND org_id=?", (self.ids[4], self.ctx.org_id))
-        matching.item_changed(self.db, self.ctx.org_id, self.ids[4])
-        matching.item_changed(self.db, self.ctx.org_id, "no-such-item")
+        matching.item_changed(self.db, self.ctx.org_id, self.ids[4], matching._cache[self.ctx.org_id][0])
+        self.assertNotIn(self.ctx.org_id, matching._cache)
         idx = matching._index(self.db, self.ctx.org_id)
         self.assertNotIn(self.ids[4], idx.items)
         self.assertNotIn(self.ids[4], matching._parsed[self.ctx.org_id])
-        self.assertFalse(any(self.ids[4] in ids for table in (idx.by_key, idx.by_gram, idx.by_size, idx.by_attr) for ids in table.values()))
-        matching.forget(self.ctx.org_id)
-        self.assertEqual(shape(idx), shape(matching._index(self.db, self.ctx.org_id)))
+        matching.item_changed(self.db, self.ctx.org_id, "no-such-item", matching._cache[self.ctx.org_id][0])
+        self.assertNotIn(self.ctx.org_id, matching._cache)
 
     def test_another_pharmacys_item_never_enters_this_index(self):
         _, other = self.second_tenant()
         theirs = cat.create_item(self.db, other, {"name_en": "Brandix0 50mg 20 tab", "public_price": 1000}, force=True)
-        matching.item_changed(self.db, self.ctx.org_id, theirs)              # asked with the wrong pharmacy
+        matching.item_changed(self.db, self.ctx.org_id, theirs, matching._cache[self.ctx.org_id][0])   # wrong pharmacy
         self.assertNotIn(theirs, matching._index(self.db, self.ctx.org_id).items)
         self.assertEqual(self.first("Brandix0 50mg 20 tab"), self.ids[0])
 

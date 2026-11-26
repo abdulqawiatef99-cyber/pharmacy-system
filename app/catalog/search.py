@@ -25,7 +25,7 @@ _EN_AR = {
 }
 _AR_EN = {v: k for k, v in _EN_AR.items() if len(v) == 1}
 _AR_EN.update({"ﻻ": "b", "ﻷ": "b", "ﻹ": "b", "ﻵ": "b", "أ": "h", "إ": "h", "آ": "h"})
-FUZZY_MAX = 40
+FUZZY_MAX = 160
 _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
@@ -202,15 +202,16 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
                 break
     if not found and "%" not in q and not category:
         from . import matching
-        # guesses: the closest FUZZY_MAX are enough even when the sale screen asks for 500 rows to sort by
-        # stock, and they are read in one query (500 single reads cost more than the search itself, #461)
+        # guesses: the sale screen asks for 500 rows to sort and filter by stock. Every guess that was compared
+        # is handed over for that (FUZZY_MAX at most, so an in-stock guess is not cut before its balance is
+        # read, Codex on #483), and they are read in one query (500 single reads cost more than the search)
         most = min(limit, FUZZY_MAX)
-        cands = matching.fuzzy_candidates(db, ctx.org_id, q, most)
+        cands = matching.fuzzy_candidates(db, ctx.org_id, q, most, compare=FUZZY_MAX)
         hint = {"kind": "fuzzy"}
         if not cands or cands[0].score < FUZZY_SURE:
             # a misspelt name typed on the wrong layout: the guess of the mapped query wins when it is closer
             for alt in alts:
-                other = matching.fuzzy_candidates(db, ctx.org_id, alt, most)
+                other = matching.fuzzy_candidates(db, ctx.org_id, alt, most, compare=FUZZY_MAX)
                 if other and (not cands or other[0].score > cands[0].score):
                     cands, hint = other, {"kind": "layout", "query": alt, "guess": True}
         ids = [c.item_id for c in cands]

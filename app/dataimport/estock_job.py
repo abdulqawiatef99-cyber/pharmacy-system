@@ -88,7 +88,8 @@ def run(db: Database, ctx: Context, *, catalog_file: Path, stock_file: Path, pac
         rep["catalog"] = {**json.loads(done["report"]).get("applied", {}), "kept_duplicates": kept,
                           "already_applied": True}
     else:
-        run_id = di.analyze(ctx, data, catalog_file.name, kind="items", source_system="estock")
+        run_id = di.analyze(ctx, data, catalog_file.name, kind="items", source_system="estock",
+                            packs_set_later=True)       # step 2 below sets the packs from the reviewed file
         reviews = db.all("SELECT id, data FROM import_rows WHERE run_id=? AND action='review'", (run_id,))
         if reviews and not keep_duplicates:
             raise ValidationFailed(f"{len(reviews)} صنفًا بالاسم نفسه تحتاج إلى قرار؛ راجعها من الشاشة")
