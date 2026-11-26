@@ -199,11 +199,15 @@ document.addEventListener("mouseup", (e) => {   // the click that focused it wou
   zeroPick = null;
 });
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
-const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+// UX-26 (owner 26/11): English letters in capitals on screen; what is stored is not rewritten
+function upperEn(t) {
+  return String(t ?? "").replace(/[a-z]+/g, (w) => w.toUpperCase());
+}
+const itemText = (it) => upperEn((PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "");
 // UX-26 (owner 26/11): each name in its own direction, so an English name reads left to right in Arabic screens
 const bidi = (t) => `<bdi>${esc(t)}</bdi>`;
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
-  ? `${bidi(it.name_en)}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
+  ? `${bidi(upperEn(it.name_en))}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
 async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
   const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
@@ -2344,7 +2348,7 @@ async function viewItems() {
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
-      <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
+      <input id="q" lang="en" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
       <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">بدون قسم</option>
         ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label></div>
   </section>
@@ -2598,7 +2602,7 @@ function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCrea
   };
   const newItem = () => {
     box.innerHTML = `<form><h3>صنف جديد</h3>
-      <label class="f">اسم الصنف<input name="name_en" required value="${esc(newName || "")}"></label>
+      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(newName || "")}"></label>
       <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
     const form = $("form", box);
@@ -2678,14 +2682,14 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     : `<div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
       <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>`}
     <div class="formgrid">
-      <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
-      <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
+      <label class="f">الاسم بالإنجليزي <input name="name_en" lang="en" data-upper dir="ltr" value="${esc(it.name_en || "")}"></label>
+      <label class="f">الاسم بالعربي <input name="name_ar" lang="ar" value="${esc(it.name_ar || "")}"></label>
       <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
       <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}" placeholder="Amoxicillin + Clavulanic acid">
         <span class="muted">بالإنجليزية كما على العلبة، ومنها يُعثر على المثيل.</span></label>
       <label class="f">التركيز <input name="strength" dir="ltr" value="${esc(it.strength || it.strength_norm || "")}" placeholder="500 mg"></label>
       <label class="f">الشكل <select name="dosage_form"><option value="">—</option>${(it.dosage_form && !FORMS.some((x) => x[0] === it.dosage_form) ? [[it.dosage_form, it.dosage_form], ...FORMS] : FORMS).map(([c, t]) => `<option value="${esc(c)}" ${c === it.dosage_form ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
-      <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
+      <label class="f">الكود الداخلي <input name="code" lang="en" dir="ltr" value="${esc(it.code || "")}"></label>
       <label class="f">القسم <select name="category_id"><option value="">— بدون قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">تحديث السعر للمالك والمدير فقط</span>`}</label>
@@ -2712,7 +2716,7 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     <p class="muted">امسح هنا الباركود أو الكود المربع الموجود على العلبة. يُحفظ الكود المربع بالكود الدولي الذي بداخله.</p>
     <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
       ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">إزالة</button>` : ""}</li>`).join("")}</ul>
-    <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
+    <div class="row"><input id="bcNew" lang="en" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
     <div class="row mt"><button class="btn">احفظ</button></div></form>`;
   const newCodes = new Set(), removedCodes = new Set();
   const perform = modal ? modal.run : async (action) => {
@@ -3993,7 +3997,7 @@ async function viewSalesAdvanced() {
     const box = document.createElement("div");
     if (mode === "full") {
       box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "بدون عميل")} — ${esc(r.seller || "")}</h3>
-        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(upperEn(x.name_en || x.name_ar))}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
@@ -4135,7 +4139,7 @@ async function viewExchange() {
   const drawDraft = () => {
     // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
     findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
-    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
       try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
@@ -4147,7 +4151,7 @@ async function viewExchange() {
     $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
       ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
-      ${sale.lines.map((l) => `<tr><td>${bidi(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+      ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
@@ -4255,7 +4259,7 @@ async function viewSale(id) {
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الجمهور</th><th>قبل الخصم</th><th>الخصم</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
-    ${s.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td>
+    ${s.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td>
       <td>${l.official_prices.map((p) => salePriceQty(p, l.item)).join("<br>") || esc(fq(l.qty_base, l))}</td>
       <td class="num">${l.official_prices.map((p) => money(p.price)).join("<br>")}</td>
       <td class="num">${l.official_prices.map((p) => money(p.gross)).join("<br>")}</td>
@@ -4270,10 +4274,10 @@ async function viewSale(id) {
       ${wallets.length ? `<label id="rWalletChoice" class="f" hidden>المحفظة الأصلية<select id="rWallet">
         ${wallets.map(([id, name]) => `<option value="${esc(id || "")}">${esc(name || "تحويل من غير قناة مسجلة")}</option>`).join("")}
       </select><small class="muted">الرد في حدود التحويل المؤكد وصوله</small></label>` : ""}
-      <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
+      <label class="f grow">سبب المرتجع<input id="rReason" lang="ar" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
-      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
+      <input id="vReason" lang="ar"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
       <small class="muted void-why">يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.</small></div>` : ""}
   </section>`;
   // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
@@ -5004,7 +5008,7 @@ async function viewPos(afterCheckout = false) {
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
-        <input id="posQ" class="big" autocomplete="off" autofocus></label>
+        <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
       <section class="panel" id="posCart"></section>
@@ -5707,10 +5711,10 @@ function newCustomerDialog() {
   const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
   const d = document.createElement("dialog"); d.id = "custNewDlg";
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
-    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">اسم العميل <input name="name" lang="ar" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
     <label class="f">الموبايل (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
     <label class="f">رقم تاني (اختياري) <input name="phone2" inputmode="tel" maxlength="20" autocomplete="off"></label>
-    <label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
+    <label class="f">العنوان (اختياري) <input name="address1" lang="ar" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
     <p class="badge b-err" data-err hidden></p>
     <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -6692,7 +6696,7 @@ const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتو
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
-    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
+    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" lang="ar" placeholder="اسم المورد" required>
       <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
@@ -7074,10 +7078,10 @@ async function viewCustomers(filter = "") {
     <table class="mt"><thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
-  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" lang="ar" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
     <label class="f">الهاتف <input name="phone" inputmode="tel"></label><label class="f">هاتف 2 <input name="phone2" inputmode="tel"></label>
-    <label class="f">العنوان <input name="address1"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+    <label class="f">العنوان <input name="address1" lang="ar"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
     <button class="btn">أضف</button></form>` : ""}`;
   const today = isoDay(new Date());
   let cur = { list: [], f: "" };
@@ -8121,6 +8125,42 @@ async function viewUser(id) {
   $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
   $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
 }
+
+// UX-26 (owner 26/11): the keyboard follows the field. A field marked lang="ar" asks the PC for the Arabic layout,
+// lang="en" (barcode, English name, codes, item search) for the English one. Fire-and-forget and debounced: it never
+// waits, never shows an error, and turns itself off when the PC cannot switch (404 / not supported).
+function keyboardSwitcher(send, delay = 120) {
+  let timer = null, last = null, off = false;
+  return (lang) => {
+    if (off || (lang !== "ar" && lang !== "en")) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (lang === last) return;
+      last = lang;
+      Promise.resolve().then(() => send("/api/system/keyboard-layout", {
+        method: "POST", credentials: "same-origin",
+        headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
+        body: JSON.stringify({ lang }),
+      })).then((r) => { if (r && ((r.status >= 400 && r.status < 500) || r.status === 501)) off = true; else if (!r?.ok) last = null; })
+        .catch(() => { last = null; });
+    }, delay);
+  };
+}
+const KB_SWITCH = keyboardSwitcher((url, opts) => fetch(url, opts));
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (el?.matches?.("input:not([type=checkbox]):not([type=radio]):not([type=number]), textarea")) KB_SWITCH(el.getAttribute("lang"));
+});
+// English-name fields write capitals as they are typed (data-upper); the cursor stays where it was
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el?.matches?.("input[data-upper]") || e.isComposing) return;
+  const up = upperEn(el.value);
+  if (up === el.value) return;
+  const a = el.selectionStart, b = el.selectionEnd;
+  el.value = up;
+  try { el.setSelectionRange(a, b); } catch { /* not a text field */ }
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 route();
