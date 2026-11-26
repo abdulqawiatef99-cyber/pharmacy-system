@@ -14,6 +14,7 @@ EXPIRY = (date.today() + timedelta(days=700)).isoformat()
 SETTINGS = "/api/settings/purchase-entry"
 ORDER = ["qty", "expiry", "discount", "bonus", "batch", "public_price", "tax_margin"]
 BARCODE = "9876500012345"
+NEXT_BARCODE = "9876500012346"
 
 
 class TestPurchaseEntry(APICase):
@@ -94,11 +95,20 @@ class TestPurchaseEntry(APICase):
         state = self.c.get(f"/api/purchases/{invoice}").json()
         self.assertEqual(state["lines"][0]["stock_qty"], 7)
 
+    def test_last_cost_checks_the_cost_after_invoice_discount(self):
+        opening = self.purch.add_line(self.ctx, self.inv, self.line(), None)
+        self.purch.approve(self.ctx, self.inv, opening["invoice"]["version"])
+        invoice = self.purch.create_manual(self.ctx, supplier_id=self.company)
+        self.purch.add_line(self.ctx, invoice, self.line(), None)
+        state = self.purch.update_header(self.ctx, invoice, {"extra_discount": 5700}, None)
+        self.assertIn("unusual_last_cost", {i["code"] for i in state["issues"]})
+        self.assertFalse(state["can_approve"])
+
 
 BROWSER = r"""
 const { chromium } = require('playwright');
 (async () => {
-  const [base, user, pw, company, warehouse, barcode] = process.argv.slice(1);
+  const [base, user, pw, company, warehouse, barcode, nextBarcode] = process.argv.slice(1);
 """ + LOGIN + r"""
   p.on('dialog', d => d.dismiss());
   await p.evaluate(async () => {
@@ -135,7 +145,32 @@ const { chromium } = require('playwright');
   await p.waitForFunction(() => document.activeElement.id === 'qaQ');
   const autocomplete = await p.locator('#qaQty, #qaBonus, #qaPrice, #qaDisc, #qaNet, #qaBatch, [data-h="invoice_no"], table.lines input').evaluateAll(xs => xs.every(x => x.autocomplete === 'off'));
   const stock = await completed.locator('[data-label="الرصيد"]').innerText();
-  const help = await p.getByRole('button', {name: 'اشرح الشاشة دي'}).count();
+  const help = await p.getByRole('button', {name: /اشرح الشاشة دي/}).count();
+  const scan = async code => {
+    await p.keyboard.press('F12');
+    await p.keyboard.type(code);
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(() => document.activeElement.id === 'qaQty');
+  };
+  await scan(barcode);
+  await batch.fill('OLD-LOT');
+  await p.fill('#qaExp', '12/2032');
+  await p.fill('#qaNet', '10');
+  await p.fill('#qaBonus', '3');
+  await p.fill('#qaMargin', '5');
+  await p.fill('#qaTax', '1');
+  await scan(nextBarcode);
+  const freshLine = [];
+  for (const field of ['qaBatch', 'qaExp', 'qaNet', 'qaBonus', 'qaMargin', 'qaTax']) {
+    freshLine.push(await p.inputValue('#' + field));
+  }
+  await p.fill('#qaDisc', '25');
+  await p.focus('#qaNet');
+  await p.keyboard.type('9e');
+  await p.waitForFunction(() => document.querySelector('#qaNet').validity.badInput);
+  await p.click('#qaAdd');
+  const badPriceRejected = await p.waitForFunction(() => document.querySelector('#toast').textContent.includes('سعر الصيدلي'),
+    null, { timeout: 3000 }).then(() => true, () => false);
   await p.goto(base + '/#/purchases');
   await p.locator('summary').filter({hasText: 'إعدادات إدخال الشراء'}).click();
   await p.locator('[data-order-field="expiry"] [data-move="-1"]').click();
@@ -154,7 +189,7 @@ const { chromium } = require('playwright');
   await p.waitForFunction(() => document.activeElement.id === 'qaExp');
   const routed = await header.inputValue();
   console.log(JSON.stringify({standard, custom, preserved, qty, enter, autocomplete, stock, help, bonusHidden, routed,
-                              savedQtyMin: setting.qty_min}));
+                              savedQtyMin: setting.qty_min, freshLine, badPriceRejected}));
   await b.close();
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -167,13 +202,15 @@ class TestPurchaseEntryBrowser(APICase):
         warehouse = catalog.create_supplier(self.db, self.ctx, name="Synthetic Warehouse", supplier_type="warehouse")
         item = catalog.create_item(self.db, self.ctx, {"name_en": "Synthetic Scanner Item", "public_price": 4000},
                                    barcodes=[BARCODE])
+        catalog.create_item(self.db, self.ctx, {"name_en": "Synthetic Second Scanner Item", "public_price": 5000},
+                            barcodes=[NEXT_BARCODE])
         with self.db.transaction():
             inventory.post_movement(self.db, self.ctx, item_id=item, qty_delta=9, movement_type="opening",
                                     unit_cost=Decimal("10"))
         purch = Purchasing(self.db, self.s)
         first = purch.create_manual(self.ctx, supplier_id=company)
         second = purch.create_manual(self.ctx, supplier_id=warehouse)
-        out = run_node(self, BROWSER, "owner", OWNER_PW, first, second, BARCODE)
+        out = run_node(self, BROWSER, "owner", OWNER_PW, first, second, BARCODE, NEXT_BARCODE)
         self.assertEqual(out["standard"], ORDER)
         self.assertEqual(out["custom"], ["expiry", "qty", "discount", "batch", "public_price", "tax_margin"])
         self.assertEqual(out["preserved"], "SYN-BATCH")
@@ -186,6 +223,8 @@ class TestPurchaseEntryBrowser(APICase):
         self.assertTrue(out["bonusHidden"])
         self.assertEqual(out["routed"], "")
         self.assertEqual(out["savedQtyMin"], 25)
+        self.assertEqual(out["freshLine"], ["", "", "", "0", "", ""])
+        self.assertTrue(out["badPriceRejected"])
 
 
 BENCHMARK = r"""
