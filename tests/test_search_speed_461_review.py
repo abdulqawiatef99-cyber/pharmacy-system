@@ -84,6 +84,29 @@ class TestNameInTheOtherScript(ReviewCase):
                 self.assertEqual((got[0].item_id, got[0].score), (ids[0], self.full("Vitamin Zorbex" + tail_en)[0].score))
 
 
+class TestNumbersInTheName(ReviewCase):
+    """Codex P1 on #483: the shortlist ranked without score_item's name-number rule, so 200 names with another
+    number (B1000..B1199) pushed out the one close alternative (Vitamins B12) and the line was matched alone."""
+
+    def test_wrong_numbers_do_not_crowd_out_the_close_alternative(self):
+        ids = add_items(self.db, self.ctx.org_id, [("Vitamin B12", ""), ("Vitamins B12", "")]
+                        + [(f"Vitamin B{n}", "") for n in range(1000, 1200)])
+        self.assertEqual(self.full_status("Vitamin B12"), "suggested")
+        r = matching.match_line(self.db, self.ctx.org_id, raw_name="Vitamin B12")
+        self.assertEqual((r.status, r.warnings, r.item_id), ("suggested", ["ambiguous"], ids[0]))
+        self.assertEqual([c.score for c in r.candidates[:2]], [c.score for c in self.full("Vitamin B12")[:2]])
+
+    def test_the_same_with_a_number_of_its_own_word_and_in_arabic(self):
+        ids = add_items(self.db, self.ctx.org_id, [("Omega 3 Plus", ""), ("Omegas 3 Plus", ""), ("", "اوميجا 3 بلس")]
+                        + [(f"Omega {n} Plus", "") for n in range(100, 400)])
+        for line in ("Omega 3 Plus", "اوميجا 3 بلس"):
+            want = self.full(line)
+            got = matching.fuzzy_candidates(self.db, self.ctx.org_id, line, 5)
+            self.assertEqual([c.score for c in got[:3]], [c.score for c in want[:3]], line)
+            self.assertEqual(matching.match_line(self.db, self.ctx.org_id, raw_name=line).status, self.full_status(line))
+        self.assertIn(ids[0], [c.item_id for c in matching.fuzzy_candidates(self.db, self.ctx.org_id, "Omega 3 Plus", 5)])
+
+
 class TestOtherScriptInALargeCatalog(ReviewCase):
     """Second review: at 12,000 items every skeleton letter group is common, so a name in the other script was
     cut before it was ranked. 60 planted pairs: an English item spelt one vowel short and an Arabic-only item

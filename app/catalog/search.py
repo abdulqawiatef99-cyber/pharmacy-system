@@ -25,7 +25,7 @@ _EN_AR = {
 }
 _AR_EN = {v: k for k, v in _EN_AR.items() if len(v) == 1}
 _AR_EN.update({"ﻻ": "b", "ﻷ": "b", "ﻹ": "b", "ﻵ": "b", "أ": "h", "إ": "h", "آ": "h"})
-FUZZY_MAX = 40
+FUZZY_MAX = 160
 _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
@@ -173,9 +173,11 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
                 hint = {"kind": "layout", "query": alt}
     if not found and "%" not in q and not category:
         from . import matching
-        # guesses: the closest FUZZY_MAX are enough even when the sale screen asks for 500 rows to sort by
-        # stock, and they are read in one query (500 single reads cost more than the search itself, #461)
-        ids = [c.item_id for c in matching.fuzzy_candidates(db, ctx.org_id, q, min(limit, FUZZY_MAX))]
+        # guesses: the sale screen asks for 500 rows to sort and filter by stock. Every guess that was compared
+        # is handed over for that (FUZZY_MAX at most, so an in-stock guess is not cut before its balance is
+        # read, Codex on #483), and they are read in one query (500 single reads cost more than the search)
+        ids = [c.item_id for c in matching.fuzzy_candidates(db, ctx.org_id, q, min(limit, FUZZY_MAX),
+                                                            compare=FUZZY_MAX)]
         rows = {r["id"]: dict(r) for r in db.all(
             f"SELECT * FROM items WHERE org_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.org_id, *ids))} if ids else {}
         for i in ids:

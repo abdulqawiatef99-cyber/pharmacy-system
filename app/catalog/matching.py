@@ -57,6 +57,7 @@ class _IndexedItem:
     pack_count: int | None
     modifiers: frozenset
     grams: tuple = ()          # per parsed name: (word groups, skeleton groups) of `_grams`, for the shortlist
+    numbers: tuple = ()        # per parsed name: the numbers that belong to the name (`_numbers`)
 
 
 def _grams(p: ParsedName) -> tuple[frozenset, frozenset]:
@@ -72,6 +73,11 @@ def _grams(p: ParsedName) -> tuple[frozenset, frozenset]:
         w = f"#{sk}#"
         skel.update("~" + w[i:i + 2] for i in range(len(w) - 1))
     return frozenset(words), frozenset(skel)
+
+
+def _numbers(p: ParsedName) -> frozenset:
+    """Numbers that belong to the name (B12, Omega 3): score_item requires them to agree exactly."""
+    return frozenset(re.sub(r"\D", "", t) for t in p.core_tokens if re.search(r"\d", t))
 
 
 def _all_grams(it) -> set[str]:
@@ -174,7 +180,7 @@ def _parse_item(row, primary: ParsedName | None = None) -> _IndexedItem | None:
         content=next((p.content for p in parsed if p.content), None),
         pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
         modifiers=frozenset().union(*(p.modifiers for p in parsed)),
-        grams=tuple(_grams(p) for p in parsed),
+        grams=tuple(_grams(p) for p in parsed), numbers=tuple(_numbers(p) for p in parsed),
     )
 
 
@@ -439,6 +445,7 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
         return found
     nw, ns = len(qw), len(qs)
     qform = FORM_GROUP.get(q.form or "", q.form)
+    qn = _numbers(q)
 
     def rank(it: _IndexedItem) -> float:
         # like name_similarity: the closer of the spelling and (at 0.95) the consonant skeleton, so a name in
@@ -459,18 +466,23 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
                              (q.content, it.content, 0.6), (q.pack_count, it.pack_count, 0.6)):
             if qv != iv:
                 best *= miss if qv and iv else 0.94
+        if (qn or any(it.numbers)) and qn not in it.numbers:
+            best *= 0.35                       # B12 against B1000: two hundred of those must not push B12's twin out
         return best if q.modifiers == it.modifiers else best * 0.7
     return heapq.nlargest(keep, found, key=rank)
 
 
-def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5) -> list[Candidate]:
+def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5, *,
+                     compare: int | None = None) -> list[Candidate]:
+    """The closest `limit` items. `compare`: how many shortlisted candidates are compared in full (default
+    three for every one asked, 120 to 400); the sale screen asks for more answers than that ratio gives."""
     idx = _index(db, org_id)
-    key = (raw_name, limit)
+    key = (raw_name, limit, compare)
     hit = idx.memo.get(key)
     if hit is None:
         memo, changes = idx.memo, idx.changes
         q = parse_name(raw_name)
-        keep = min(max(SHORTLIST_MIN, 3 * limit), SHORTLIST_MAX)
+        keep = max(limit, compare) if compare else min(max(SHORTLIST_MIN, 3 * limit), SHORTLIST_MAX)
         scored = [score_item(q, it) for it in _shortlist(idx, q, idx.candidates(q), keep)]
         scored.sort(key=lambda c: c.score, reverse=True)
         hit = [c for c in scored if c.score >= SUGGEST_MIN * 0.6][:limit]
