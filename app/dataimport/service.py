@@ -884,6 +884,7 @@ class DataImport:
             done["updated" if action == "update" else "linked"] += 1
         else:
             return
+        audit.record(self.db, ctx, "item.imported", "item", item_id, after={"run_id": run_id})
         if d.get("barcode"):
             try:
                 catalog.add_barcode(self.db, ctx, item_id, d["barcode"])

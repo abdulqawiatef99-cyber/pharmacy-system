@@ -4,7 +4,7 @@ name: Update bundle
 # code, the PC's complete package set (win_amd64, the same pip command as the installer) and a signed
 # manifest. Publishes the pre-release "update-<channel>" only; never builds an installer, never touches
 # installer-latest. Without the repository secret UPDATE_SIGNING_KEY it publishes nothing (fail closed),
-# and the PCs keep the code-only path. Linux runner only (cheapest minutes, ~2 min a merge).
+# and PCs wait for a signed bundle. Linux runner only (cheapest minutes, ~2 min a merge).
 # Dry run: a PR labelled "ci" that touches the signing path, or a manual run on a work branch, goes through
 # the same steps and publishes nothing, so a missing or wrong key shows before the merge (second review, #386).
 
@@ -79,13 +79,9 @@ jobs:
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
-          if [ -z "$UPDATE_SIGNING_KEY" ] && [ "$PUBLISH" != "true" ]; then
-            # a dry run exists to check the key: a missing key is a red check, never a quiet green one
-            echo "::error::UPDATE_SIGNING_KEY is not available to this run: it must be a repository secret (Settings > Secrets and variables > Actions > Repository secrets), named exactly UPDATE_SIGNING_KEY."
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::UPDATE_SIGNING_KEY is unavailable; no update bundle will be published."
             exit 1
-          elif [ -z "$UPDATE_SIGNING_KEY" ]; then
-            echo "::notice::UPDATE_SIGNING_KEY is not set: no smart-update bundle (code-only button path stays)."
-            echo "ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi

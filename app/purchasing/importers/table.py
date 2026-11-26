@@ -27,7 +27,7 @@ HEADERS: dict[str, list[str]] = {
     "public_price": ["سعر الجمهور", "سعر البيع", "ج", "سعر الجمهور للعبوه", "public price",
                      "pub price", "retail price", "consumer price", "selling price", "price",
                      "السعر", "سعر"],
-    "discount_pct": ["خصم", "الخصم", "نسبه الخصم", "خصم %", "disc", "disc %", "discount",
+    "discount_pct": ["خصم 1", "خصم", "الخصم", "نسبه الخصم", "خصم %", "disc", "disc %", "discount",
                      "discount %", "dis %", "%"],
     "unit_net_price": ["سعر الصيدلي", "صافي السعر", "سعر الوحده", "الصافي", "سعر الشراء",
                        "net price", "unit price", "pharmacy price", "net", "cost"],
@@ -44,12 +44,25 @@ _TOTAL_WORDS = ("الاجمالي", "اجمالي", "total", "grand total", "ا�
                 "net total", "الصافي", "المطلوب")
 
 
+_PUBLIC_TOTAL_HEADERS = {normalize_text(s) for s in (
+    "اجمالي جمهور", "اجمالي الجمهور", "اجمالي سعر الجمهور",
+    "الاجمالي جمهور", "الاجمالي الجمهور", "الاجمالي سعر الجمهور",
+)}
+_COUNT_FOOTERS = ("عدد الاصناف", "عدد البنود", "item count")
+_ITEM_VALUES = ("qty", "bonus_qty", "public_price", "unit_net_price", "line_total")
+_EMPTY_ITEM_VALUES = {"", "-", "—", "–"}
+
+
+def _starts_with_label(text: str, labels: tuple[str, ...]) -> bool:
+    return any(text == label or text.startswith(label + " ") for label in labels)
+
+
 def _cell_text(v: Any) -> str:
     return normalize_text(str(v)) if v is not None else ""
 
 
 def _header_field(text: str) -> str | None:
-    if not text:
+    if not text or text in _PUBLIC_TOTAL_HEADERS:
         return None
     if text in _SYN:
         return _SYN[text]
@@ -127,6 +140,7 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
         _scan_meta([str(c) for r in rows[:30] for c in r if c is not None] + (extra_text or []), inv)
         return inv
     hi, cmap = found
+    public_total_columns = {i for i, cell in enumerate(rows[hi]) if _cell_text(cell) in _PUBLIC_TOTAL_HEADERS}
     # metadata usually sits above the table
     meta_cells = [str(c) for r in rows[:hi] for c in r if c not in (None, "")]
     # 'label' cell followed by value cell on the same row: join neighbours
@@ -141,29 +155,35 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
         vals = {f: (r[j] if j < len(r) else None) for j, f in cmap.items()}
         name = str(vals.get("raw_name") or "").strip()
         texts = [_cell_text(c) for c in r if c not in (None, "")]
-        if not any(texts):
+        label = normalize_text(name)
+        no_name = not label or label in ("none", "nan")
+        if _starts_with_label(label, _COUNT_FOOTERS):
             continue
-        if not name or name.lower() in ("none", "nan"):
-            # totals row: label in some cell + number
-            if any(any(w == t or t.startswith(w) for w in _TOTAL_WORDS) for t in texts):
-                nums = [parse_decimal(c) for c in r if parse_decimal(c) is not None]
-                if nums and inv.declared_total is None:
-                    inv.declared_total = nums[-1]
+        if _starts_with_label(label, _TOTAL_WORDS) or (
+            no_name and any(_starts_with_label(text, _TOTAL_WORDS) for text in texts)
+        ):
+            if inv.declared_total is None:
+                declared = parse_decimal(vals.get("line_total"))
+                if declared is None:
+                    nums = [value for i, cell in enumerate(r) if i not in public_total_columns
+                            if (value := parse_decimal(cell)) is not None]
+                    if nums:
+                        declared = nums[-1]
+                if declared is not None:
+                    inv.declared_total = declared
                     inv.header_sources["declared_total"] = "read"
                     inv.header_confidence["declared_total"] = 0.9
             continue
-        if any(normalize_text(name).startswith(w) for w in _TOTAL_WORDS):
-            nums = [parse_decimal(c) for c in r if parse_decimal(c) is not None]
-            if nums and inv.declared_total is None:
-                inv.declared_total = nums[-1]
-                inv.header_sources["declared_total"] = "read"
-                inv.header_confidence["declared_total"] = 0.9
+        if no_name or re.fullmatch(r"[+-]?\d+(?:[.,٫]\d+)?", name):
+            continue
+        if not any(vals.get(field) is not None and str(vals[field]).strip() not in _EMPTY_ITEM_VALUES
+                   for field in _ITEM_VALUES):
             continue
         raw_lines.append(vals)
 
     # a value written with "%" is a percent as it stands ("0.5%" is half a percent): a column holding one is
     # never read as fractions (it became 50%, #324 S21)
-    signed = any("%" in str(v.get("discount_pct") or "") for v in raw_lines)
+    signed = any(_has_percent_sign(v.get("discount_pct")) for v in raw_lines)
     values = [parse_percent(v.get("discount_pct")) if not _is_fraction_text(v.get("discount_pct"))
               else parse_decimal(v.get("discount_pct")) for v in raw_lines]
     discounts, converted = (values, False) if signed else normalize_percent_column(values)
@@ -212,9 +232,13 @@ def grid_to_invoice(rows: list[list[Any]], method: str = "structured",
     return inv
 
 
+def _has_percent_sign(v) -> bool:
+    return "%" in str(v) or "٪" in str(v)
+
+
 def _is_fraction_text(v) -> bool:
     d = parse_decimal(v)
-    return d is not None and d <= 1 and "%" not in str(v)
+    return d is not None and d <= 1 and not _has_percent_sign(v)
 
 
 def _text(v) -> str | None:

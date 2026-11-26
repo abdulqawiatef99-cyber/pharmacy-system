@@ -411,10 +411,12 @@ def shortages(db: Database, ctx: Context, *, date_from: str | None = None, date_
              "class": r["class"]} for r in rows]
 
 
-def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month") -> list[dict]:
+def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month",
+                  supplier_id: str | None = None, _total: dict | None = None) -> list[dict]:
     """E-Stock's totals per day or month: sales (net bill), sale returns, purchases (purchases only with
-    purchases.read). E-Stock's own figures, apart from the program's reports."""
-    ctx.require("sales.totals")
+    purchases.read). E-Stock's own figures, apart from the program's reports. `supplier_id` (a program supplier)
+    keeps only that supplier's purchases (no sales): the purchases list filtered by supplier (U4 history step 2)."""
+    ctx.require("sales.totals" if not supplier_id else "purchases.read")
     if by not in ("day", "month"):
         raise ValidationFailed("التجميع لازم يكون day أو month")
     n = 10 if by == "day" else 7
@@ -424,18 +426,46 @@ def period_report(db: Database, ctx: Context, date_from: str, date_to: str, *, b
         for key, head, tot, perm in (("sales", "Sales_header", "total_bill_net", "sales.totals"),
                                      ("returns", "Back_sales_header", "total_bill_net", "sales.totals"),
                                      ("purchases", "Purchase_header", "total_bill", "purchases.read")):
-            if not a.has(head) or not ctx.can(perm):
+            if not a.has(head) or not ctx.can(perm) or (supplier_id and key != "purchases"):
                 continue
             where, params = ["1=1"], []
             _period(where, params, a.col(head, "insert_date"), date_from, date_to)
+            if supplier_id:
+                ids = _program_to_estock(a, "suppliers", supplier_id)
+                if not ids:
+                    continue                        # a supplier E-Stock never had: no rows, never every supplier
+                where.append(f'{a.col(head, "vendor_id")} IN ({",".join("?" * len(ids))})')
+                params += ids
             for r in a.rows(f'SELECT substr({a.col(head, "insert_date")}, 1, {n}) p, {a.col(head, tot)} v'
                             f' FROM "e_{head}" WHERE {" AND ".join(where)}', tuple(params)):
                 d = out.setdefault(r["p"], {"source": SOURCE, "period": r["p"]})
                 d[key + "_count"] = d.get(key + "_count", 0) + 1
-                d[key] = d.get(key, Decimal(0)) + (_dec(r["v"]) or 0)        # exact; rounded once below
+                v = _dec(r["v"])
+                if v is None:                       # shown as is: counted apart, never a silent zero (U4 review)
+                    d[key + "_unreadable"] = d.get(key + "_unreadable", 0) + 1
+                d[key] = d.get(key, Decimal(0)) + (v or 0)                    # exact; rounded once below
     rows = [out[k] for k in sorted(out)]
+    if _total is not None:                    # the period total from the exact values, rounded once (Codex P1 on #436)
+        _total["source"] = SOURCE
+        for d in rows:
+            for k in ("sales", "returns", "purchases"):
+                if k in d:
+                    _total[k] = _total.get(k, Decimal(0)) + d[k]
+                    for x in ("_count", "_unreadable"):
+                        _total[k + x] = _total.get(k + x, 0) + d.get(k + x, 0)
+        for k in ("sales", "returns", "purchases"):
+            if k in _total:
+                _total[k] = str(_total[k].quantize(Decimal("0.01"), ROUND_HALF_UP))
     for d in rows:
         for k in ("sales", "returns", "purchases"):
             if k in d:
                 d[k] = str(d[k].quantize(Decimal("0.01"), ROUND_HALF_UP))
     return rows
+
+
+def period_with_total(db: Database, ctx: Context, date_from: str, date_to: str, *, by: str = "month",
+                      supplier_id: str | None = None) -> tuple[list, dict]:
+    """period_report's rows plus the whole period's totals, added from the exact values and rounded once."""
+    total: dict = {}
+    rows = period_report(db, ctx, date_from, date_to, by=by, supplier_id=supplier_id, _total=total)
+    return rows, total

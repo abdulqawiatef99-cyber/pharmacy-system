@@ -88,13 +88,31 @@ class TestPin(People):
         with self.assertRaises(Forbidden):                    # someone else's PIN: owner only
             people.set_pin(self.db, self.asst, self.ids["manager"], "5791")
 
-    def test_lockout_after_five_wrong(self):
+    def test_incorrect_approval_pins_do_not_lock_the_approver(self):
         for _ in range(5):
             with self.assertRaises(Unauthorized):
                 people.verify_pin(self.db, self.ids["manager"], "0000", org_id=self.ctx.org_id)
-        with self.assertRaises(Unauthorized) as e:
-            people.verify_pin(self.db, self.ids["manager"], "2468", org_id=self.ctx.org_id)
-        self.assertEqual(e.exception.code, "pin_locked")
+        self.assertEqual(people.verify_pin(self.db, self.ids["manager"], "2468",
+                                           org_id=self.ctx.org_id)["id"], self.ids["manager"])
+
+    def test_privileged_role_requires_password_for_session(self):
+        with self.assertRaises(Unauthorized):
+            people.pin_login(self.db, self.ctx.org_id, self.ids["manager"], "2468")
+        self.assertNotIn(self.ids["manager"], {user["id"] for user in people.quick_users(self.db)})
+
+    def test_pin_session_stays_bounded_and_pin_change_revokes_it(self):
+        who = self.ids["pharmacist"]
+        people.set_exception(self.db, self.ctx, who, "items.price", "grant")
+        token = people.pin_login(self.db, self.ctx.org_id, who, "1357")["token"]
+        quick = accounts.resolve_session(self.db, token)
+        self.assertTrue(quick.can("sales.create"))
+        self.assertFalse(quick.can("items.price"))
+        self.assertFalse(quick.can("purchases.approve"))
+        password = accounts.login(self.db, "pharmacist", PW)["token"]
+        people.set_pin(self.db, self.ph, who, "5791")
+        with self.assertRaises(Unauthorized):
+            accounts.resolve_session(self.db, token)
+        self.assertTrue(accounts.resolve_session(self.db, password).can("items.price"))
 
     def test_pin_login_and_approvers(self):
         tok = people.pin_login(self.db, self.ctx.org_id, self.ids["pharmacist"], "1357")["token"]
@@ -127,22 +145,15 @@ class TestDiscount(People):
         n = notify.listing(self.db, self.mgr)["items"][0]
         self.assertEqual((n["kind"], n["actor"]), ("discount", "Assistant"))
 
-    def test_below_cost_owner_confirms_others_cannot(self):
-        # cost 15/unit, price 20/unit: 30% discount = 14 < 15
+    def test_below_cost_refused_for_everyone(self):
+        # cost 15/unit, price 20/unit: 30% discount = 14 < 15. Update 3 (owner: «امنعه أساساً»): the owner too
         people.set_role_discount(self.db, self.ctx, "manager", 5000)
         m = self.login("manager", PW)
-        sid = self.s.create(m)
-        with self.assertRaises(Forbidden) as e:          # U2-33: refused when typed, not only at payment
-            self.s.add_line(m, sid, self.pan, units=2, discount_bp=3000)
-        self.assertEqual(e.exception.details["permission"], "sales.below_cost")
-        sid = self.s.create(self.ctx)
-        d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=3000)
-        with self.assertRaises(Conflict) as e:
-            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={})
-        self.assertEqual(e.exception.code, "below_cost_confirm")
-        self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions={}, confirm_below_cost=True)
-        kinds = [n["kind"] for n in notify.listing(self.db, self.ctx)["items"]]
-        self.assertIn("below_cost", kinds)
+        for who in (m, self.ctx):
+            sid = self.s.create(who)
+            with self.assertRaises(ValidationFailed) as e:          # refused when typed
+                self.s.add_line(who, sid, self.pan, units=2, discount_bp=3000)
+            self.assertEqual(e.exception.code, "below_cost")
 
 
 class TestReturns(People):
@@ -223,7 +234,7 @@ class TestPeopleAPI(APICase):
         from starlette.testclient import TestClient
         a = TestClient(self.app)
         users = a.get("/api/auth/quick-users").json()["users"]
-        self.assertEqual({u["full_name"] for u in users}, {"Owner", "أحمد"})
+        self.assertEqual({u["full_name"] for u in users}, {"أحمد"})
         r = a.post("/api/auth/pin", json={"user_id": uid, "pin": "8642"}, headers=H)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(a.get("/api/users").status_code, 403)

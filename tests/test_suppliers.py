@@ -29,10 +29,12 @@ class TestSuppliers(Base):
         return self.p.approve(self.ctx, inv, d["invoice"]["version"])
 
     def test_type_balance_payment_cancel(self):
+        # bought on the account first: a warehouse invoice is paid cash from the drawer by default since the
+        # purchase payment method (owner 22/11), and this test is about the payments screen
+        inv = self.buy()
         sup.update(self.db, self.ctx, self.sid, {"supplier_type": "warehouse"})
         with self.assertRaises(ValidationFailed):
             sup.update(self.db, self.ctx, self.sid, {"supplier_type": "x"})
-        inv = self.buy()
         self.assertEqual(sup.balance(self.db, self.ctx.org_id, self.sid), 15000)          # 5 x 40 x 75%
         self.cd.open(self.ctx, 20000)
         acc = sup.pay(self.db, self.ctx, self.sid, 5000, "drawer", "دفعة")

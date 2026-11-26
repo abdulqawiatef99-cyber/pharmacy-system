@@ -48,10 +48,11 @@ const { chromium } = require('playwright');
 class Wiring(__import__("unittest").TestCase):
     def test_complete_waits_for_a_delivery_field_being_typed_in(self):
         js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
-        start = js.index("async function complete(findings) {")
-        head = js[start:start + 400]
-        self.assertIn("document.activeElement?.dataset?.dl", head)
-        self.assertIn("await POS.saving;", head)
+        start = js.index("async function complete(findings = null) {")
+        submit = js.index("async function finishSale(findings, sid) {", start)
+        self.assertIn("active?.dataset?.dl", js[start:submit])
+        self.assertLess(js.index("active.blur()", start), js.index("app.inert = true", start))
+        self.assertIn("await POS.saving;", js[submit:submit + 250])
 
 
 @needs_browser

@@ -1946,6 +1946,9 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
     ctx.require("customers.manage")
     if plan.blocking:
         raise ValidationFailed(f"فيه {len(plan.blocking)} مشكلة محتاجة قرار قبل النقل (data-quality)", code="blocking")
+    if any(item.get("public_price") is not None for item in plan.items) or any(
+            batch.get("batch_price") is not None for batch in plan.stock):
+        ctx.require("items.price")
     esha = ex.source_sha()
     why = refusal(db, ctx, esha)
     if why:

@@ -74,13 +74,33 @@ class TestAuth(DBTestCase):
             accounts.login(self.db, "nobody", "wrong-password-1")
         self.assertEqual(a.exception.message, b.exception.message)
 
-    def test_lockout_after_repeated_failures(self):
+    def test_failed_password_policy_has_no_account_wide_lockout(self):
         for _ in range(accounts.MAX_FAILED_LOGINS):
+            with self.assertRaises(Unauthorized) as refused:
+                accounts.login(self.db, "owner", "wrong-password-1", ip="127.0.0.1")
+            self.assertEqual(refused.exception.code, "invalid_credentials")
+        result = accounts.login(self.db, "owner", OWNER_PW, ip="127.0.0.1")
+        self.assertEqual(accounts.resolve_session(self.db, result["token"]).user_id, self.ctx.user_id)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM audit_log WHERE org_id=?"
+                                     " AND action='auth.login_failed'", (self.ctx.org_id,))["n"],
+                         accounts.MAX_FAILED_LOGINS)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM notifications WHERE org_id=?"
+                                     " AND kind='failed_sign_in'", (self.ctx.org_id,))["n"], 1)
+
+    def test_password_changed_during_verification_cannot_mint_a_session(self):
+        verify = security.verify_password
+        replacement = security.hash_password("Replacement-Pass-2026")
+
+        def changed_during_verification(password, stored):
+            result = verify(password, stored)
+            with self.db.transaction():
+                self.db.execute("UPDATE users SET password_hash=? WHERE id=?", (replacement, self.ctx.user_id))
+            return result
+
+        with mock.patch.object(security, "verify_password", side_effect=changed_during_verification):
             with self.assertRaises(Unauthorized):
-                accounts.login(self.db, "owner", "wrong-password-1")
-        with self.assertRaises(Unauthorized) as e:
-            accounts.login(self.db, "owner", OWNER_PW)  # even the right password
-        self.assertEqual(e.exception.code, "locked")
+                accounts.login(self.db, "owner", OWNER_PW)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM sessions WHERE user_id=?", (self.ctx.user_id,))["n"], 1)
 
     def test_logout_revokes(self):
         tok = accounts.login(self.db, "owner", OWNER_PW)["token"]
