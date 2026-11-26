@@ -6,7 +6,8 @@ REM   2) take a backup of the current data and verify it (also copied to D:\Phar
 REM   3) RENAME (never delete) %LOCALAPPDATA%\PharmacyPlatform\data to data-trial-DATE-TIME;
 REM      the program code chosen by the update button (data\code-releases) and the small settings files are
 REM      copied into the new empty data folder (installed_version, network, backup_settings: the backup
-REM      folder and schedule chosen by the owner), so the same program version keeps running;
+REM      folder and schedule chosen by the owner), so the same program version keeps running; the printing and
+REM      device settings (from the database) go along in device_settings_carry.json, applied by the setup screen (U4-0);
 REM   4) start the program again: it shows the first-run setup screen.
 REM Every step is logged PASS/FAIL to %USERPROFILE%\Documents\launch-night\fresh-start.txt.
 REM The first FAIL stops the script; nothing after it runs. A FAIL before step 3 leaves the data folder untouched;
@@ -63,11 +64,12 @@ call :log PASS "program and data found"
 echo.
 echo This keeps today's data in a folder named %TRIAL% and starts the program EMPTY.
 echo E-Stock is not touched.
-REM refused once the database has a sale after the E-Stock import (the live data after launch); otherwise the
-REM pharmacy name must be typed, not just YES. Python asks: set /p cannot read Arabic typing (#324 R2)
+REM the pharmacy name must be typed, not just YES (#324 R2); once the database has sales after the E-Stock import
+REM (the live data after launch) Python lists them (dates, totals; also in Notepad) and goes on only on YES
+REM (update 1, owner 21/11). Python asks: set /p cannot read Arabic typing
 set "PHARM_DATA_DIR=%DATA%"
 "%PY%" "%MANAGE%" fresh-start-check
-if errorlevel 1 (set "MSG=refused or the pharmacy name was not typed: nothing was changed" & goto fail)
+if errorlevel 1 (set "MSG=not confirmed (the pharmacy name, or YES for the sales listed): nothing was changed" & goto fail)
 set "PHARM_DATA_DIR="
 call :log PASS "confirmed by the user (pharmacy name typed, no sale after an import)"
 
@@ -107,6 +109,13 @@ call :log PASS "no drive D: on this PC, backup kept in %BKDIR% only"
 REM which program code is selected now (the same must be selected after the rename)
 "%PY%" -I -c "import sys,pathlib as p; sys.path.insert(0, sys.argv[1]); import release_bootstrap as r; print(r.current_root(p.Path(sys.argv[1]), p.Path(sys.argv[2])).name)" "%INST%\program" "%DATA%\code-releases" > "%TEMP%\pharm-code-before.txt" 2>> "%LOG%"
 if errorlevel 1 (set "MSG=could not read which program version is selected" & goto fail)
+REM U4-0: the printing, label, drawer, card machine and screen settings live in the database; keep them in a small
+REM file that the first-run setup of the new data applies (no sales, stock, customers, users or passwords).
+REM Not a FAIL: without it the owner brings them back from Settings (restore device settings from an older copy).
+set "CARRY=%HOMEDIR%\device-settings-%STAMP%.json"
+"%PY%" "%MANAGE%" export-device-settings --out "%CARRY%" >> "%LOG%" 2>&1
+if errorlevel 1 (call :log WARN "device settings NOT kept - restore them from Settings" & set "CARRY=")
+if defined CARRY call :log PASS "device and printing settings kept: %CARRY%"
 set "PHARM_DATA_DIR="
 
 REM 3) rename the data folder (never delete)
@@ -129,6 +138,8 @@ if errorlevel 1 (set "MSG=the copied program version did not pass its check" & g
 fc "%TEMP%\pharm-code-before.txt" "%TEMP%\pharm-code-after.txt" >nul
 if errorlevel 1 (set "MSG=a different program version would start" & goto fail)
 call :log PASS "same program version kept in the new data folder"
+if defined CARRY copy /y "%CARRY%" "%DATA%\device_settings_carry.json" >nul
+if defined CARRY if errorlevel 1 call :log WARN "device settings file not copied - restore them from Settings"
 
 REM 4) start the program on the empty data: it must answer and show the first-run setup screen
 start "" /d "%INST%\program" "%PYW%" "%INST%\program\launcher.py"

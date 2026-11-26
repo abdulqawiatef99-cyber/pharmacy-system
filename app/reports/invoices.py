@@ -12,7 +12,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import line_gross_as_sold, outstanding_value, returns_history
+from ..sales.service import line_fixed, line_gross_as_sold, official_prices, outstanding_value, returns_history
 
 TYPES = ("cash", "card", "transfer", "credit", "delivery", "contract", "returned", "discounted", "voided", "draft")
 MAX_ROWS = 3000
@@ -52,8 +52,9 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
     line_ids: list[str] = []
     for k in range(0, len(sale_ids), _CHUNK):
         part = sale_ids[k:k + _CHUNK]
-        for l in db.all("SELECT l.sale_id, l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_source, l.line_total, i.name_en,"
-                        " i.name_ar, i.pack_size, i.base_unit_name, i.hidden FROM sale_lines l JOIN items i ON i.id=l.item_id"
+        for l in db.all("SELECT l.sale_id, l.id, l.item_id, l.qty_base, l.discount_bp, l.discount_amount, l.invoice_share,"
+                        " l.discount_source, l.line_total, i.name_en,"
+                        " i.name_ar, i.pack_size, i.pack_unit_name, i.base_unit_name, i.hidden FROM sale_lines l JOIN items i ON i.id=l.item_id"
                         f" WHERE l.sale_id IN ({','.join('?' * len(part))}) ORDER BY l.sale_id, l.line_no", tuple(part)):
             lines_of.setdefault(l["sale_id"], []).append(l)
             line_ids.append(l["id"])
@@ -135,26 +136,32 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
         lines = []
         for l in lines_of.get(r["id"], []):
             allocs = allocs_of.get(l["id"], [])
-            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"])
+            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"], line_fixed(l))
             net = l["line_total"] if l["line_total"] is not None else gross
             disc = gross - net
             if l["discount_source"] == "contract":
-                r["customer_discount"] += disc
+                share = min(disc, l["invoice_share"] or 0)          # the invoice discount: the person's, not the contract's
+                r["customer_discount"] += disc - share
+                r["item_discount"] += share
             else:
                 r["item_discount"] += disc
             returned = sum(a["returned_qty"] for a in allocs)
             if show_cost and r["status"] == "completed":
                 kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
                 value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
-                                          history.get(r["id"], []))
+                                          history.get(r["id"], []), fixed=line_fixed(l))
                 if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
                     r["unknown_cost"] = True
                 value_sum += value
                 cost_sum += sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
             if with_lines:
+                prices = official_prices(allocs)
+                if sum(p["gross"] for p in prices) != gross:
+                    prices = official_prices(allocs, per_batch=True)
                 lines.append({"item_id": l["item_id"], "name_en": l["name_en"], "name_ar": l["name_ar"], "pack_size": l["pack_size"],
-                              "base_unit_name": l["base_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,
-                              "discount_bp": l["discount_bp"], "net": net, "contract": l["discount_source"] == "contract",
+                              "base_unit_name": l["base_unit_name"], "pack_unit_name": l["pack_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,
+                              "discount_bp": l["discount_bp"], "invoice_share": l["invoice_share"] or 0,
+                              "official_prices": prices, "net": net, "contract": l["discount_source"] == "contract",
                               "hidden": bool(l["hidden"]) and not hidden_ok})
         if show_cost:
             # exact costs are added up and rounded once, per invoice here and for the period below: rounding

@@ -11,6 +11,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inv
 from ..inventory.adjust import avg_cost
+from ..purchasing.validation import effective_amount
 
 REASONS = {"expired": "منتهي الصلاحية", "near_expiry": "قارب على الانتهاء", "damaged": "تالف / مكسور",
            "wrong_item": "صنف خاطئ / غير مطلوب", "overstock": "زيادة / راكد", "recall": "سحب من هيئة الدواء", "other": "سبب آخر"}
@@ -161,8 +162,10 @@ def get(db: Database, ctx: Context, rid: str) -> dict:
         " ORDER BY i.name_en, l.rowid", (rid,))]
     if not (ctx.can("suppliers.pay") or ctx.can("costs.read")):
         out.pop("total", None)
+        out.pop("tax_total", None)
         for x in out["lines"]:
             x.pop("unit_value", None)
+            x.pop("tax_value", None)
     return out
 
 
@@ -188,3 +191,222 @@ def listing(db: Database, ctx: Context, date_from: str, date_to: str, supplier_i
             x.pop("total", None)
     return {"from": d1.isoformat(), "to": d2.isoformat(), "rows": rows,
             "total": sum(x.get("total", 0) for x in rows) if show else None}
+
+
+# -------------------------------------------------------------------------- part 3 item 6b: return from the invoice
+def _invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str | None = None, invoice_id: str | None = None):
+    q = ("SELECT * FROM purchase_invoices WHERE org_id=? AND supplier_id=? AND status='approved' AND "
+         + ("id=?" if invoice_id else "invoice_no=?") + " ORDER BY approved_at DESC LIMIT 1")
+    r = db.one(q, (ctx.org_id, supplier_id, invoice_id or str(invoice_no or "").strip()))
+    if not r:
+        raise NotFound("مفيش فاتورة شراء معتمدة بالرقم ده للمورد ده")
+    return r
+
+
+def _invoice_lines(db: Database, ctx: Context, inv_id: str) -> list[dict]:
+    """Each line of an approved invoice with what is still returnable of it. Two rules from the Codex reviews of
+    part 3 (#396, #397): the line's amount is what approval charged for it, the invoice-level discount and tax
+    spread over the lines by amount (`_spread`: floor shares, the leftover to the largest remainders, so the
+    lines add up to the supplier's charge); and a return made earlier by item and lot that took this receipt's units counts as
+    returned from this line (paid units first), so the same units are never returned twice."""
+    from ..purchasing.service import lot_receipts
+    head = db.one("SELECT extra_discount, extra_tax FROM purchase_invoices WHERE id=? AND org_id=?", (inv_id, ctx.org_id))
+    rows = [dict(l) for l in db.all(
+        "SELECT l.*, i.name_en, i.name_ar, i.pack_size FROM purchase_invoice_lines l JOIN items i ON i.id=l.item_id"
+        " WHERE l.invoice_id=? AND l.org_id=? ORDER BY l.line_no", (inv_id, ctx.org_id))]
+    amounts = [effective_amount(l) or 0 for l in rows]
+    shares = _spread((head["extra_tax"] or 0) - (head["extra_discount"] or 0), amounts)
+    out = []
+    for l, amount, share in zip(rows, amounts, shares):
+        mv = db.one("SELECT id, batch_id, branch_id FROM stock_movements WHERE org_id=? AND ref_type='purchase_invoice'"
+                    " AND ref_id=? AND ref_line_id=? AND movement_type='purchase' ORDER BY rowid LIMIT 1",
+                    (ctx.org_id, inv_id, l["id"]))
+        back = {r["is_bonus"]: r["q"] for r in db.all(
+            "SELECT r.is_bonus, coalesce(sum(r.qty_base),0) q FROM supplier_return_lines r JOIN supplier_returns h"
+            " ON h.id=r.return_id AND h.org_id=? WHERE r.purchase_line_id=? GROUP BY r.is_bonus", (ctx.org_id, l["id"]))}
+        ps = l["pack_size"] or 1
+        paid_units, bonus_units = (l["qty"] or 0) * ps, (l["bonus_qty"] or 0) * ps
+        paid_back, bonus_back, left = back.get(0, 0), back.get(1, 0), paid_units + bonus_units
+        if mv:
+            me = next((p for p in lot_receipts(db, ctx, mv["branch_id"], l["item_id"], mv["batch_id"]) if p["id"] == mv["id"]), None)
+            if me:
+                by_lot = sum(t[0] for t in me["took"] if not t[2])        # earlier returns by item and lot
+                take = min(by_lot, paid_units - paid_back)
+                paid_back, bonus_back = paid_back + take, bonus_back + (by_lot - take)
+                left = me["left"]
+        out.append({"id": l["id"], "line_no": l["line_no"], "item_id": l["item_id"], "name": l["name_en"] or l["name_ar"],
+                    "pack_size": ps, "batch_id": mv["batch_id"] if mv else None, "batch_no": l["batch_no"],
+                    "expiry_date": l["expiry_date"], "paid_units": paid_units, "bonus_units": bonus_units,
+                    "paid_returned": paid_back, "bonus_returned": min(bonus_back, bonus_units), "receipt_left": left,
+                    "qty_packs": l["qty"] or 0, "unit_net_price": None if l["unit_net_price"] is None
+                    else l["unit_net_price"] + (l["distributor_margin"] or 0),     # the pack's cost (B3)
+                    "tax_amount": l["tax_amount"] or 0,
+                    "amount": amount + share, "invoice_adjustment": share,
+                    "line_total": l["line_total"], "on_hand": inv.batch_qty(db, ctx.org_id, mv["branch_id"], l["item_id"],
+                                                                            mv["batch_id"]) if mv else 0})
+    return out
+
+
+def from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_no: str) -> dict:
+    """The approved purchase invoice of this supplier with this number, with each line's paid and bonus units,
+    what was already returned of each, the net price and the tax: the start of a return from the invoice."""
+    ctx.require("purchases.approve")
+    inv_row = _invoice(db, ctx, supplier_id, invoice_no=invoice_no)
+    lines = _invoice_lines(db, ctx, inv_row["id"])
+    show = ctx.can("suppliers.pay") or ctx.can("costs.read")
+    if not show:
+        for l in lines:
+            for k in ("unit_net_price", "tax_amount", "line_total", "amount", "invoice_adjustment"):
+                l.pop(k, None)
+    return {"invoice_id": inv_row["id"], "invoice_no": inv_row["invoice_no"], "invoice_date": inv_row["invoice_date"],
+            "lines": lines}
+
+
+def _spread(adj: int, amounts: list[int]) -> list[int]:
+    """The invoice-level tax (+) or discount (-) over the lines by amount, integers that add up to adj exactly:
+    each line its floor share, the leftover piasters one by one to the largest remainders, and a discount never
+    takes a line below zero while another line can carry it (Codex P1 round 6: [1000 x4, 1] with a 2-piaster
+    discount gave the last line -1)."""
+    n, whole = len(amounts), sum(max(0, a) for a in amounts)
+    if not n or not adj:
+        return [0] * n
+    if whole <= 0:
+        return [adj] + [0] * (n - 1)
+    size, sign = abs(adj), (1 if adj > 0 else -1)
+    base = [size * max(0, a) // whole for a in amounts]
+    rest = size - sum(base)
+    order = sorted(range(n), key=lambda i: (-(size * max(0, amounts[i]) % whole), i))
+    while rest:
+        moved = False
+        for i in order:
+            if rest and (sign > 0 or amounts[i] - base[i] - 1 >= 0):
+                base[i] += 1
+                rest -= 1
+                moved = True
+        if not moved:                      # a discount bigger than the lines: the rest on the first line
+            base[0] += rest
+            rest = 0
+    return [sign * b for b in base]
+
+
+def _share(amount: int, part: int, whole: int) -> int:
+    """part/whole of a whole-piaster amount, half up, integers only."""
+    return (amount * part * 2 + whole) // (2 * whole) if whole else 0
+
+
+def line_value(l: dict, paid_units: int) -> tuple[int, int]:
+    """(net, tax) credited for `paid_units` of an invoice line: the net invoice price of those units (owner
+    #310: the box at the invoice's net price) and their share of the line's tax. Returning everything still
+    left of a line credits exactly what is left of it, never a piaster more or less."""
+    # what approval charged the supplier for this line (validation.effective_amount, tax included, plus its share
+    # of the invoice discount/tax), never a total rebuilt from a rounded unit price (Codex P1 on #396). The tax is
+    # never more than that amount: an invoice discount can leave less than the line's tax (Codex P1, round 5)
+    charged = max(0, l["amount"] or 0)
+    tax = min(l["tax_amount"] or 0, charged)
+    total_net = charged - tax
+    done = l["paid_returned"]
+    if done + paid_units >= l["paid_units"]:      # the rest of the line: what is left, exactly
+        return (total_net - _share(total_net, done, l["paid_units"]), tax - _share(tax, done, l["paid_units"]))
+    return (_share(total_net, done + paid_units, l["paid_units"]) - _share(total_net, done, l["paid_units"]),
+            _share(tax, done + paid_units, l["paid_units"]) - _share(tax, done, l["paid_units"]))
+
+
+def create_from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_id: str, lines: list[dict], *,
+                        credit_note_no: str | None = None, note: str | None = None,
+                        partial_bonus_reason: str | None = None) -> dict:
+    """A return to the supplier from one approved purchase invoice. lines: [{purchase_line_id, paid_units,
+    bonus_units, reason}]. Paid units are credited at the line's net price plus their share of its tax; bonus
+    units go back on their own line at 0. Default settlement: on the supplier's account. A line that came with
+    bonus units is returned whole (paid + bonus, owner #310) unless the person may return part of it
+    (`purchases.return_bonus_part`) and writes why."""
+    ctx.require("purchases.approve")
+    sup = db.one("SELECT id, name FROM suppliers WHERE id=? AND org_id=?", (supplier_id, ctx.org_id))
+    if not sup:
+        raise NotFound("المورد غير موجود")
+    if not isinstance(lines, list) or not lines or len(lines) > MAX_LINES:
+        raise ValidationFailed("أضف الأصناف المرتجعة")
+    cn = (str(credit_note_no).strip()[:40] or None) if credit_note_no else None
+    why = (partial_bonus_reason or "").strip()[:200]
+    with db.transaction():
+        inv_row = _invoice(db, ctx, supplier_id, invoice_id=invoice_id)
+        if inv_row["branch_id"] != ctx.branch_id:      # its units are that branch's stock (independent review)
+            raise Conflict("الفاتورة دي اتسلمت في فرع تاني؛ المرتجع منها بيتعمل من نفس الفرع", code="other_branch")
+        by_id = {l["id"]: l for l in _invoice_lines(db, ctx, inv_row["id"])}
+        plan, partial = [], []
+        ids = [str(ln.get("purchase_line_id") or "") for ln in lines if isinstance(ln, dict)]
+        if len(ids) != len(lines) or len(set(ids)) != len(ids):      # one entry per line (Codex P1 on #396)
+            raise ValidationFailed("كل سطر من الفاتورة مرة واحدة بس", code="duplicate_line")
+        for ln in lines:
+            l = by_id.get(str(ln.get("purchase_line_id") or ""))
+            if not l:
+                raise NotFound("السطر مش من الفاتورة دي")
+            pu, bu, reason = ln.get("paid_units", 0), ln.get("bonus_units", 0), ln.get("reason")
+            for v in (pu, bu):
+                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                    raise ValidationFailed("الكمية غير صحيحة")
+            if not pu and not bu:
+                continue
+            if reason not in REASONS:
+                raise ValidationFailed("اختر سبب المرتجع لكل صنف")
+            if (pu > l["paid_units"] - l["paid_returned"] or bu > l["bonus_units"] - l["bonus_returned"]
+                    or pu + bu > l["receipt_left"]):
+                raise Conflict(f"«{l['name']}»: الكمية أكبر من اللي فاضل من السطر ده", code="return_exceeds")
+            if l["bonus_units"] and (pu != l["paid_units"] - l["paid_returned"] or bu != l["bonus_units"] - l["bonus_returned"]):
+                partial.append(l["name"])
+            if inv.batch_qty(db, ctx.org_id, ctx.branch_id, l["item_id"], l["batch_id"]) < pu + bu:
+                raise Conflict(f"«{l['name']}»: الرصيد الموجود من التشغيلة دي أقل من الكمية", code="insufficient_stock")
+            plan.append((l, pu, bu, reason))
+        if not plan:
+            raise ValidationFailed("اكتب كمية المرتجع", code="empty_return")
+        if partial:
+            ctx.require("purchases.return_bonus_part")
+            if len(why) < 3:
+                raise ValidationFailed("السطر ده عليه بونص: بيترجع كله (المدفوع والبونص) — أو اكتب سبب المرتجع الجزئي",
+                                       code="bonus_line_whole", details={"items": partial})
+        db.execute("INSERT INTO branch_counters (org_id, branch_id, kind, next_no) VALUES (?,?,'supplier_return',1)"
+                   " ON CONFLICT(org_id, branch_id, kind) DO NOTHING", (ctx.org_id, ctx.branch_id))
+        no = db.one("SELECT next_no FROM branch_counters WHERE org_id=? AND branch_id=? AND kind='supplier_return'",
+                    (ctx.org_id, ctx.branch_id))["next_no"]
+        db.execute("UPDATE branch_counters SET next_no=next_no+1 WHERE org_id=? AND branch_id=? AND kind='supplier_return'",
+                   (ctx.org_id, ctx.branch_id))
+        rid = new_id()
+        rows, total, tax_total = [], 0, 0
+        for l, pu, bu, reason in plan:
+            if pu:
+                net, tax = line_value(l, pu)
+                for q, v in _pieces(pu, net):
+                    rows.append((l, q, v, 0, reason, 0))
+                if tax:
+                    rows[-1] = (*rows[-1][:5], tax)          # the line's tax on its last paid row
+                total += net + tax
+                tax_total += tax
+            if bu:
+                rows.append((l, bu, 0, 1, reason, 0))
+        db.execute("INSERT INTO supplier_returns (id, org_id, branch_id, supplier_id, return_no, total, note, created_by,"
+                   " purchase_invoice_id, credit_note_no, tax_total) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   (rid, ctx.org_id, ctx.branch_id, supplier_id, no, total,
+                    ((note or "").strip() + (f" — مرتجع جزئي من سطر عليه بونص: {why}" if partial else "")).strip(" —")[:300] or None,
+                    ctx.user_id, inv_row["id"], cn, tax_total))
+        for l, q, v, bonus, reason, tax in rows:
+            lid = new_id()
+            db.execute("INSERT INTO supplier_return_lines (id, return_id, item_id, batch_id, qty_base, unit_value, reason,"
+                       " purchase_line_id, is_bonus, tax_value) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (lid, rid, l["item_id"], l["batch_id"], q, v, reason, l["id"], bonus, tax))
+            inv.post_movement(db, ctx, item_id=l["item_id"], qty_delta=-q, batch_id=l["batch_id"],
+                              movement_type="supplier_return", unit_cost=avg_cost(db, ctx.org_id, ctx.branch_id, l["item_id"]),
+                              ref_type="supplier_return", ref_id=rid, ref_line_id=lid,
+                              note=f"مرتجع للمورد {sup['name']} من فاتورة {inv_row['invoice_no'] or ''}".strip(), reason=reason)
+        if total:
+            db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note, created_by)"
+                       " VALUES (?,?,?,?,'return',?,?,?)", (new_id(), ctx.org_id, supplier_id, -total, rid,
+                                                          f"مرتجع رقم {no}" + (f" — إشعار {cn}" if cn else ""), ctx.user_id))
+        audit.record(db, ctx, "supplier.return", "supplier_return", rid,
+                     after={"supplier": supplier_id, "no": no, "total": total, "tax": tax_total, "lines": len(rows),
+                            "invoice": inv_row["id"], "credit_note": cn, "partial_bonus": why if partial else None})
+        notify.emit(db, ctx, "supplier_return", "warning" if partial else "info",
+                    f"مرتجع رقم {no} إلى {sup['name']} — {total / 100:,.2f} ج",
+                    f"من فاتورة {inv_row['invoice_no'] or ''}" + (f" · مرتجع جزئي من سطر عليه بونص: {why}" if partial else ""),
+                    "supplier_return", rid)
+    if not ctx.can("purchases.read"):
+        return {"ok": True, "id": rid, "return_no": no}
+    return get(db, ctx, rid)

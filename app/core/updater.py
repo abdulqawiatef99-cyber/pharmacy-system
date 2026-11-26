@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -93,6 +94,8 @@ def download(repo: str, sha: str, token: str | None) -> bytes:
 
 
 CHANNELS = ("main", "develop")      # #107: main = the pharmacy; develop = test installs
+OFFICIAL = "main"                   # the official release: the pharmacy PC's channel (owner 20/11)
+_contains_seen: set = set()
 
 
 def channel(info: dict) -> str | None:
@@ -100,6 +103,38 @@ def channel(info: dict) -> str | None:
     unknown. None for any other branch (a review installer of a work branch): no update offered."""
     ref = info.get("ref") or "main"
     return ref if ref in CHANNELS else None
+
+
+def contains(repo: str, sha: str, head: str, token: str | None) -> bool:
+    """True when `head` (a branch or a commit) already contains commit `sha` (GitHub compare: ahead or
+    identical). An update only ever moves forward: an older commit of a branch is never an update."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or "") or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._/-]{0,199}",
+                                                                       head or ""):
+        return False
+    if (repo, sha, head) in _contains_seen:      # branches only move forward (no force push): stays true
+        return True
+    raw = _get(f"{API}/repos/{repo}/compare/{sha}...{head}?per_page=1", token, "application/vnd.github+json")
+    try:
+        status = json.loads(raw).get("status")
+    except (ValueError, AttributeError) as e:
+        raise UpdateError("رد غير متوقع من GitHub") from e
+    if status in ("ahead", "identical"):
+        _contains_seen.add((repo, sha, head))
+        return True
+    return False
+
+
+def follow(info: dict, repo: str, token: str | None) -> str | None:
+    """The channel this install takes updates from: its own (main or develop, #107). A review installer of a
+    work branch (the launch candidate on the pharmacy PC) follows the official release, main, once main
+    contains its commit (owner 20/11), never an older main; until then None (no update offered)."""
+    chan = channel(info)
+    if chan is not None:
+        return chan
+    try:
+        return OFFICIAL if contains(repo, info.get("sha") or "", OFFICIAL, token) else None
+    except UpdateError:              # offline or rate-limited: no channel this time, asked again on the next check
+        return None
 
 
 def installed(data_dir: Path) -> dict:

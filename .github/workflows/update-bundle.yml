@@ -1,0 +1,124 @@
+name: Update bundle
+
+# Smart update (docs/SMART_UPDATE.md §2): a signed bundle per channel for the in-app «تحديث» button:
+# code, the PC's complete package set (win_amd64, the same pip command as the installer) and a signed
+# manifest. Publishes the pre-release "update-<channel>" only; never builds an installer, never touches
+# installer-latest. Without the repository secret UPDATE_SIGNING_KEY it publishes nothing (fail closed),
+# and PCs wait for a signed bundle. Linux runner only (cheapest minutes, ~2 min a merge).
+# Dry run: a PR labelled "ci" that touches the signing path, or a manual run on a work branch, goes through
+# the same steps and publishes nothing, so a missing or wrong key shows before the merge (second review, #386).
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - .github/workflows/update-bundle.yml
+      - scripts/release/**
+      - release_keys/**
+      - app/core/update_sign.py
+      - app/core/smart_update.py
+      - requirements.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# as in ci.yml: only an event that will run joins the shared group, so an unrelated label never cancels a run
+concurrency:
+  group: >-
+    ${{ (github.event_name != 'pull_request' ||
+         (contains(github.event.pull_request.labels.*.name, 'ci') &&
+          (github.event.action != 'labeled' || github.event.label.name == 'ci')))
+        && format('update-bundle-{0}', github.ref) || format('update-bundle-skip-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Verify the push (merged PR with a green "CI / linux")
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          FORCED: ${{ github.event.forced }}
+        run: .github/scripts/verify_push.sh
+
+  bundle:
+    needs: gate
+    if: >-
+      ${{ !cancelled() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') &&
+          (github.event_name != 'pull_request' ||
+           (contains(github.event.pull_request.labels.*.name, 'ci') &&
+            (github.event.action != 'labeled' || github.event.label.name == 'ci'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      # published only from a channel branch (a push after the gate, or a manual run there); else a dry run
+      PUBLISH: ${{ github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'develop') }}
+      CHANNEL: ${{ github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'develop') && github.ref_name || 'develop' }}
+    steps:
+      # the secret is given only to the two steps that read it, never to checkout or pip
+      - name: Signing key present?
+        id: key
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::UPDATE_SIGNING_KEY is unavailable; no update bundle will be published."
+            exit 1
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.ok == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        if: steps.key.outputs.ok == 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Package set for the PC (win_amd64, binary wheels only, no install scripts run)
+        if: steps.key.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          # requirements.txt is the complete pinned set; its markers are for Windows, which this runner is not
+          sed -E 's/;[[:space:]]*sys_platform[[:space:]]*==[[:space:]]*"win32"//' requirements.txt > req-win.txt
+          python -m pip install --no-deps --only-binary=:all: --platform win_amd64 --python-version 3.13 \
+            --implementation cp --target site -r req-win.txt --no-compile
+          python -m pip install "$(grep -E '^cryptography==' requirements.txt)"
+
+      - name: Build and sign (verified against release_keys/*.pub, the way the PC reads it)
+        if: steps.key.outputs.ok == 'true'
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: python scripts/release/build_bundle.py --channel "$CHANNEL" --out dist/update --site-packages site
+
+      - name: Publish pre-release update-${{ github.ref_name }}
+        if: steps.key.outputs.ok == 'true' && env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="update-${{ github.ref_name }}"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" dist/update/* --prerelease --title "تحديث البرنامج (${{ github.ref_name }})" \
+            --notes "حزمة تحديث موقّعة من ${{ github.sha }} للزرار «تحديث». مش مثبّت." --target "${{ github.sha }}"

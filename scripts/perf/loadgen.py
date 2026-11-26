@@ -322,8 +322,7 @@ class Generator:
                                   "expiry_date": exp.isoformat()}, ver)
             it["stock"] += packs * it["pack"]
             self.stats["purchase_lines"] += 1
-        ver = self.db.one("SELECT version FROM purchase_invoices WHERE id=?", (inv,))["version"]
-        p.approve(ctx, inv, ver)
+        approve_with_reasons(p, ctx, inv)
 
     def restock(self, day: date, initial: bool = False):
         by_sup: dict[str, list] = {}
@@ -552,5 +551,18 @@ def main(argv=None):
     return info
 
 
+GUARD_CODES = ("short_expiry", "slow_before_expiry")     # update 2 (U2-22): approved only with a written reason
+
+
+def approve_with_reasons(p, ctx, inv):
+    """Synthetic history: the owner's written reason for the near-expiry guards, then approval (U2-22)."""
+    d = p.get(ctx, inv, with_candidates=False)
+    for i in d["issues"]:
+        if i["code"] in GUARD_CODES and not i["acknowledged"]:
+            d = p.acknowledge(ctx, inv, i["code"], "بيانات تجربة: كمية متفق عليها", i["line_id"], d["invoice"]["version"])
+    return p.approve(ctx, inv, d["invoice"]["version"])
+
+
 if __name__ == "__main__":
     main()
+

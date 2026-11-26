@@ -246,6 +246,6 @@ class TestShiftReportPage(CheckoutCase):
         self.complete(self.draft(), [{"method": "cash", "amount": 3000}])
         shift = self.db.one("SELECT id FROM cash_shifts WHERE status='open'")["id"]
         page = self.c.get(f"/shift-report/{shift}", headers=H).text
-        self.assertIn("أوامر فتح الدرج مع البيع النقدي</td><td>1", page)
-        self.assertIn("أوامر فتح الدرج يدويًا</td><td>1", page)
+        self.assertIn("فتح الدرج مع البيع النقدي</td><td>1", page)
+        self.assertIn("فتح الدرج من غير بيع</td><td>1", page)
         self.assertIn("أخرى : فكة لعميل", page)

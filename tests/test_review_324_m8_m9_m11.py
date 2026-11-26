@@ -47,6 +47,8 @@ class TestM11NothingToPay(Base):
     def test_a_sale_worth_nothing_completes_with_no_payment_line(self):
         self.cd.open(self.ctx, 0)
         sid = self.s.create(self.ctx)
+        with self.db.transaction():   # U2-33: nobody sells under cost; this test is about a zero total, so the cost is unknown
+            self.db.execute("DELETE FROM item_costs WHERE item_id=?", (self.pan,))
         self.s.add_line(self.ctx, sid, self.pan, units=1, discount_bp=10000)  # 100% discount
         f = self.s.safety_check(self.ctx, sid)
         r = self.s.complete(self.ctx, sid, payments=[], safety_decisions={i: "ok" for i in range(len(f))},

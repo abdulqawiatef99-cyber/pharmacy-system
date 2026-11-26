@@ -32,13 +32,17 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
     (r"table not read", "جدول ماتقراش من إي ستوك",
      "شغّل estock-db-import.bat تاني (بيعيد قراية الجدول ده لوحده). لو فضل، اقفل إي ستوك واعمل القراية من الأول"),
     (r"--packs", "عدد الوحدات في العلبة مش واضح في إي ستوك",
-     "قول كام وحدة في العلبة للصنف ده (بيتكتب في ملف القرار packs.json)"),
+     "قول كام وحدة في العلبة للصنف ده؛ بيتكتب في launch-night\\packs.json كده: {\"packs\": {\"<الكود>\": <عدد الوحدات>}}"),
     (r"stock_source", "مش واضح أنهي جدول رصيد هو الشغال",
      "قارن إجمالي المخزون بتقرير إي ستوك وقول أنهي جدول هو الصح"),
     (r"مش موجود في جدول الأصناف", "رصيد على صنف ممسوح من إي ستوك",
      "قول الرصيد ده يتنقل على صنف جديد ولا يتساب في الأرشيف"),
     (r"مش رقم", "قيمة مكتوبة غلط في إي ستوك", "صحّح القيمة دي في إي ستوك واعمل القراية تاني"),
-    (r"اتقرا مرتين", "القراية اتعملت وإي ستوك شغال", "اقفل إي ستوك خالص واعمل القراية تاني"),
+    (r"رقم التشغيلة موجود .* ببيانات مختلفة \(مكرر\)", "رقم التشغيلة موجود مرتين في إي ستوك نفسه ببيانات مختلفة (مكرر)",
+     "قول أنهي سطر الصح؛ بيتكتب في launch-night\\packs.json كده: {\"duplicates\": {\"<رقم التشغيلة>\": 1 أو 2}}"
+     " (والسطر التاني بيتساب في الأرشيف)"),
+    (r"(أكتر من مرة|مرتين) في إي ستوك نفسه", "الرقم موجود أكتر من مرة في إي ستوك نفسه (مكرر)",
+     "قولّي أنهي واحد الصح قبل النقل"),
     (r"حد آجل أكبر", "حد آجل أكبر من اللي البرنامج يشيله", "قول حد الآجل الحقيقي للعميل ده"),
     (r"كسر قرش", "رصيد فيه كسر قرش", "قول الرصيد الحقيقي بالقرش، أو سيب التقريب نص لفوق (الافتراضي)"),
     (r"confirmed balance", "رصيد اتغيّر في إي ستوك بعد ما أكدته", "أكّد الرصيد تاني على التقرير الجديد"),
@@ -49,10 +53,19 @@ ASKS: list[tuple] = [   # (pattern, what, ask[, what the program did])
      "ما اتعملتش مسودة؛ مكتوبة هنا وفي الأرشيف بس"),
     (r"سطر بيع كبير", "سطر بيع بقيمة كبيرة", "اتأكد إن الرقم ده صح في إي ستوك (غالبًا غلطة إدخال)",
      "السطر محفوظ في الأرشيف زي ما هو (تاريخ بس، مابيأثرش على المخزون ولا الأرصدة)"),
-    (r"^class$", "نوع فواتير شراء (class)", "قول الرقم ده معناه إيه: كاش ولا آجل ولا تحت التصريف",
+    (r"^class$", "نوع فواتير شراء (class)",
+     ("قول الرقم ده معناه إيه، في نفس ملف القرار launch-night\\packs.json:"
+     " {\"classes\": {\"<الرقم>\": \"كاش\" أو \"آجل\" أو \"تحت التصريف\"}} — "
+     "كاش = اتدفعت وقتها: الفواتير تاريخ في الأرشيف بس ومفيش رصيد ولا مخزون بيتغيّر؛ "
+     "آجل = على حساب المورد: رصيد المورد اللي بيتنقل هو رصيده في إي ستوك (فيه الفواتير دي)؛ "
+     "تحت التصريف = بضاعة المورد عندك لحد ما تتباع: البرنامج لسه مابيفرّقهاش عن بضاعتك، فرصيدها بيتنقل في مخزونك"
+     " ورصيد المورد زي إي ستوك، واتعلّمت كده في التقرير"),
      "الفواتير محفوظة في الأرشيف زي ما هي؛ ولا واحدة اتحسبت بضاعة تحت التصريف ولا دين جديد"),
     (r"مالوش حساب في البرنامج", "خزنة من غير حساب في البرنامج وعليها رصيد", "قول الرصيد ده يروح أنهي حساب",
      "ما اتعملهاش حساب (قرارك)؛ رصيدها مكتوب هنا وتاريخها في الأرشيف"),
+    (r"^impossible values$", "سطور بقيم مستحيلة في إي ستوك",
+     "القراية النهائية تبقى وإي ستوك مقفول خالص؛ لو السطور دي فضلت بعدها، ابعت أرقام الفواتير دي من شاشة إي ستوك",
+     "اتحفظت لوحدها في الأرشيف ومش داخلة في أي حساب ولا مرتجع ولا تقرير ولا مطابقة فلوس"),
     (r"درج الشيفت", "مش واضح أنهي درج هو درج الشيفت", "قول أنهي درج هو درج الشيفت",
      "ما اتنقلش لسه: الرصيد مستني خدمة الحسابات (F105)، ومكتوب هنا بمصدره"),
 ]
@@ -86,9 +99,42 @@ def _ask(d: dict) -> tuple[str, str, str | None]:
     return _plain(d.get("action", "")).split(":")[0], "راجع السطر ده وقول القرار", None
 
 
-def _who(d: dict) -> str:
+def _names(plan) -> dict:
+    """E-Stock's names as the owner sees them: items by product id and by code, parties by kind and id."""
+    items, codes, parties = {}, {}, {}
+    for it in getattr(plan, "items", []):
+        en, ar = it.get("name_en") or "", it.get("name_ar") or ""
+        nm = f"«{en}» / «{ar}»" if en and ar and en != ar else (f"«{en or ar}»" if en or ar else "")
+        items[str(it.get("product_id"))] = (it.get("code") or "", nm)
+        if it.get("code"):
+            codes[str(it["code"])] = (it["code"], nm)
+    for d in list(getattr(plan, "suppliers", [])) + list(getattr(plan, "customers", [])):
+        parties[(d.get("kind"), str(d.get("estock_id")))] = (d.get("code") or "", f"«{d['name']}»" if d.get("name") else "")
+    return {"items": items, "codes": codes, "parties": parties}
+
+
+ITEM_TABLES = {"Products", "Product_Amount", "Branches_Product_Amount", "stock"}
+
+
+def _who(d: dict, names: dict | None = None) -> str:
     kind = TABLE_AR.get(d.get("table", ""), d.get("table", ""))
+    names = names or {}
+    t, eid, code = d.get("table", ""), str(d.get("estock_id") or ""), str(d.get("code") or "")
+    hit = None
+    if t == "Products":
+        hit = names.get("items", {}).get(eid) or names.get("codes", {}).get(code)
+    elif t in ITEM_TABLES and d.get("field") != "product_id":      # a missing product's id is not a code (#384)
+        hit = names.get("codes", {}).get(code)
+    elif t == "Customer":
+        hit = names.get("parties", {}).get(("customer", eid))
+    elif t == "Vendor":
+        hit = names.get("parties", {}).get(("supplier", eid))
+    if hit and hit[1]:
+        # the name and code as E-Stock shows them, then E-Stock's own number (manager 20/11 00:25)
+        return f"{kind} {hit[1]} (كود {hit[0] or code or '-'}، رقمه في إي ستوك {eid or '-'})"
     out = kind
+    if d.get("field") == "impossible values" and kind != d.get("table"):
+        out += f" ({d['table']})"                  # the E-Stock table to look at
     if d.get("estock_id"):
         out += f" رقم {d['estock_id']}"
     if d.get("code") and d.get("code") != d.get("estock_id"):
@@ -118,8 +164,8 @@ def _balances_line(plan) -> dict | None:
     return {"what": f"أرصدة {sup} مورد و{cus} عميل" + (" اتنقلت زي ما هي في إي ستوك" if not fixed else " اتنقلت"),
             "estock": f"إجمالي الأرصدة في إي ستوك {_money(src)} ج (الأكبر الأول في openings-to-confirm.xlsx)",
             "done": done,
-            "ask": "أكّد الرصيد الحقيقي لكل مورد وعميل من البرنامج بعد النقل (أو في openings-to-confirm.xlsx قبله)؛"
-                   " الفرق بيتسجل تسوية افتتاحية مش دفع",
+            "ask": "أكّد الرصيد الحقيقي لكل مورد وعميل: بعد النقل من شاشة «تصحيح الأرصدة بعد النقل» في البرنامج"
+                   " (من «الخزنة والحسابات»)، أو في openings-to-confirm.xlsx قبله؛ الفرق بيتسجل تسوية افتتاحية مش دفع",
             "value": src}
 
 
@@ -134,10 +180,26 @@ def _money_pending(plan) -> list[dict]:
             bal = Decimal(str(d.get("balance") or 0))
         except InvalidOperation:
             continue
-        if bal and d.get("action") in PENDING_ACTIONS:
+        if bal and d.get("action") in PENDING_ACTIONS and not d.get("reference_only"):
             out.append({"name": d.get("name") or d.get("estock_id"), "balance": bal,
                         "shift": d.get("action") == "first_shift_opening"})
     return out
+
+
+def _money_moved_line(pending: list[dict], money: dict) -> dict:
+    """The candidate schema: the account places became accounts with their openings (estock_db money step)."""
+    accts = [d for d in pending if not d["shift"]]
+    shift = [d for d in pending if d["shift"]]
+    tot = sum(abs(d["balance"]) for d in accts)
+    parts = "، ".join(f"«{d['name']}» {_money(d['balance'])} ج" for d in sorted(accts, key=lambda d: -abs(d["balance"])))
+    done = (f"اتنقلت حسابات في البرنامج ({money['accounts']} حساب) برصيدها الافتتاحي من إي ستوك، واتطابقت"
+            + ("" if not money.get("mismatches") else f" إلا {money['mismatches']} (القسم ٢)"))
+    if shift:
+        done += "؛ " + "، ".join(f"«{d['name']}» {_money(d['balance'])} ج" for d in shift) + \
+            " درج الشيفت: مش حساب، يبقى نقدية أول شيفت لما تفتح الشيفت"
+    return {"what": "حسابات الفلوس من إي ستوك (الخزنة والبنك والمحافظ)", "estock": f"{parts} — القيمة {_money(tot)} ج",
+            "done": done, "ask": "اعدّ الخزنة وراجع كل محفظة وحساب بنك؛ أي فرق يتسجل بالجرد من شاشة الحسابات",
+            "value": tot}
 
 
 def _money_line(pending: list[dict]) -> dict | None:
@@ -198,6 +260,10 @@ def _margin(plan, rec: dict) -> list[str]:
         rows = sum(v["csv"] for v in hist.values())
         out.append(f"  التاريخ: {len(hist)} جدول ({rows:,} سطر) اتحفظ في الأرشيف — اتطابق {same} من {len(hist)}"
                    f" ({_pct(same, len(hist))})")
+    qn = rec.get("history_quarantined") or {}
+    if qn:
+        out.append("  سطور اتعزلت (قيم مستحيلة، مش داخلة في أي حساب): "
+                   + "، ".join(f"{t} {n} سطر" for t, n in sorted(qn.items())))
     rnd = plan.checks.get("rounding") or {}
     if rnd:
         n = sum(v["values"] for v in rnd.values())
@@ -222,11 +288,29 @@ def _group_key(d: dict) -> str:
     return f"{label}: {head}"
 
 
+DOUBT_MAX = 200
+
+
+def _owes(d: dict) -> str:
+    """The sign in words: + for a supplier = we owe him, + for a customer = he owes us (part 3 item 3)."""
+    ours = (Decimal(d["estock_balance"]) > 0) == (d["kind"] == "supplier")
+    return "علينا له" if ours else "لينا عنده"
+
+
+def _arabic(line: str) -> str:
+    """The owner's report has no English program words: E-Stock's own number reads «رقم إي ستوك»."""
+    return line.replace("(E-Stock ", "(رقم إي ستوك ").replace("E-Stock", "إي ستوك")
+SETTLE_CUSTOMERS = 50
+
+
 def write(path: Path, plan, rec: dict) -> Path:
+    names = _names(plan)
     owner = [d for d in plan.dq if _for_owner(d)]
     rest = [d for d in plan.dq if not _for_owner(d)]
     blocked = bool(plan.blocking)
-    pending = _money_pending(plan)
+    moved_money = rec.get("money")                 # the candidate schema posted the accounts (estock_db money step)
+    places = _money_pending(plan)
+    pending = [] if moved_money else places
     if blocked:
         result = f"النتيجة: النقل وقف — فيه {len(plan.blocking)} حاجة لازم تقررها الأول، ومفيش أي حاجة اتكتبت"
     elif rec.get("ok") and pending:
@@ -241,14 +325,14 @@ def write(path: Path, plan, rec: dict) -> Path:
     for d in owner:
         what, ask, done = _ask(d)
         v = _value(d)
-        entries.append({"what": f"{_who(d)} — {what}",
+        entries.append({"what": f"{_who(d, names)} — {what}",
                         "estock": (f"{FIELD_AR[d['field']]} " if d.get("field") in FIELD_AR else "") + f"{d['estock_value']}"
                                   + (f" — القيمة {_money(v)} ج" if v else "")
                                   + (f" ({_plain(d['action']).split(':')[0]})" if done else ""),
                         "done": "وقف النقل لحد قرارك (مفيش حاجة اتكتبت)" if d["severity"] == "block"
                                 else (done or _plain(d["action"])),
                         "ask": ask, "value": v, "stops": d["severity"] == "block"})
-    ml = _money_line(pending)
+    ml = _money_moved_line(places, moved_money) if moved_money else _money_line(pending)
     if ml:
         entries.append(ml)
     bl = _balances_line(plan)
@@ -263,6 +347,10 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines += [f"  {n}) {e['what']}", f"     في إي ستوك: {e['estock']}", f"     البرنامج عمل: {e['done']}",
                   f"     المطلوب منك: {e['ask']}"]
     lines += ["", "٢. المطابقة (قد إيه اتطابق وقد إيه لأ):"] + _margin(plan, rec)
+    if moved_money:
+        lines.append(f"  الخزنة والمحافظ: {moved_money['accounts']} حساب اتنقل بإجمالي {_money(moved_money['program_total'])} ج"
+                     f" — اتطابق {moved_money['accounts'] - moved_money['mismatches']} من {moved_money['accounts']}"
+                     f" ({_pct(moved_money['accounts'] - moved_money['mismatches'], moved_money['accounts'])})")
     if pending:
         lines.append(f"  الخزنة والمحافظ: {len(pending)} حساب بإجمالي {_money(sum(abs(d['balance']) for d in pending))} ج"
                      " لسه ما اتنقلتش (خدمة الحسابات F105)؛ مش داخلين في المطابقة لحد ما يتنقلوا")
@@ -277,5 +365,33 @@ def write(path: Path, plan, rec: dict) -> Path:
         lines.append(f"  - {key}: {len(ds)} سطر ({kinds})" + (f"، قيمتهم {_money(tot)} ج" if tot else ""))
     if not rest:
         lines.append("  مفيش.")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    owed = sorted((d for d in plan.suppliers + plan.customers if d.get("estock_balance")),
+                  key=lambda d: -abs(d["estock_balance"]))
+    if owed:
+        sup = [d for d in owed if d["kind"] == "supplier"]
+        cus = [d for d in owed if d["kind"] == "customer"]
+        lines += ["", "  أرصدة للتسوية (الأكبر الأول؛ الكل في openings-to-confirm.xlsx بآخر فاتورة وآخر دفعة؛"
+                      " التصحيح بعد النقل من شاشة «تصحيح الأرصدة بعد النقل»):"]
+        for d in sup + cus[:SETTLE_CUSTOMERS]:
+            lines.append(f"    - {'مورد' if d['kind'] == 'supplier' else 'عميل'} «{d['name']}» (كود {d['code'] or '-'}):"
+                         f" رصيد {_money(abs(Decimal(d['estock_balance'])) / 100)} ج ({_owes(d)}) — آخر فاتورة {d.get('last_invoice') or 'مفيش'}،"
+                         f" آخر دفعة {d.get('last_payment') or 'مفيش'}")
+        if len(cus) > SETTLE_CUSTOMERS:
+            lines.append(f"    والباقي ({len(cus) - SETTLE_CUSTOMERS} عميل) في openings-to-confirm.xlsx")
+    refs = [d for d in (plan.checks.get("money_info") or {}).get("cash_depots", []) if d.get("reference_only")]
+    if refs:
+        lines += ["", "  أرقام مرجع بس (مش فلوس اتنقلت):"]
+        lines += [f"    - «{d['name']}» في إي ستوك {_money(d.get('balance') or 0)} ج: قرار المالك إنها مش فلوس حقيقية؛"
+                  " حسابها بيبدأ بصفر ودرج أول شيفت = اللي تعدّه ليلة النقل" for d in refs]
+    doubt = [d for d in plan.dq if d["table"] == "Products" and d["severity"] in ("review", "block")
+             and not _for_owner(d)]
+    if doubt:
+        lines += ["", f"  أصناف مشكوك فيها ({len(doubt)} سطر؛ اتنقلت زي ما هي في إي ستوك، الكل في data-quality.csv):"]
+        for d in sorted(doubt, key=lambda d: (-_value(d), d["code"]))[:DOUBT_MAX]:
+            v = _value(d)
+            lines.append(f"    - {_who(d, names)}: {FIELD_AR.get(d['field'], d['field'])} {d['estock_value']}"
+                         + (f" — القيمة {_money(v)} ج" if v else "") + f" — {_plain(d['action'])}")
+        if len(doubt) > DOUBT_MAX:
+            lines.append(f"    والباقي ({len(doubt) - DOUBT_MAX}) في data-quality.csv")
+    path.write_text("\n".join(_arabic(x) for x in lines) + "\n", encoding="utf-8-sig")
     return path

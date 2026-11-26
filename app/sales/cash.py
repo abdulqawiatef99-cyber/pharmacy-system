@@ -40,7 +40,11 @@ def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | Non
     """Call inside the business transaction. amount 0 is a no-op."""
     if amount == 0:
         return None
-    shift = require_open_shift(db, ctx, branch_id)
+    if kind == "payout" and amount < 0:
+        from ..finance import money
+        shift = money.drawer_check(db, ctx, -amount, branch_id)
+    else:
+        shift = require_open_shift(db, ctx, branch_id)
     db.execute("INSERT INTO cash_movements (id, org_id, shift_id, amount, kind, ref_id, note, created_by)"
                " VALUES (?,?,?,?,?,?,?,?)", (new_id(), ctx.org_id, shift, amount, kind, ref_id, note, ctx.user_id))
     return shift
@@ -56,23 +60,64 @@ def _sales_of(s) -> tuple[str, tuple]:
     return "x.shift_id=? AND x.status='completed'", (s["id"],)
 
 
+def _channels_of(db: Database, shift, where: str, args: tuple) -> list[dict]:
+    channels = [dict(r) for r in db.all(
+        "SELECT p.method, p.channel_id, coalesce(c.name,'') channel, sum(p.amount) amount FROM sale_payments p"
+        " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id AND c.org_id=p.org_id"
+        f" WHERE {where} AND p.org_id=x.org_id AND p.method IN ('card','transfer') GROUP BY 1,2,3", args)]
+    by_id = {(r["method"], r.pop("channel_id")): r for r in channels}
+    for r in db.all(
+        "SELECT r.channel_id, coalesce(c.name,'') channel, sum(r.total) amount"
+        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
+        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
+        " WHERE r.org_id=? AND x.branch_id=? AND r.refund_method='transfer'"
+        " AND r.created_at>=? AND (? IS NULL OR r.created_at<=?) GROUP BY 1,2",
+        (shift["org_id"], shift["branch_id"], shift["opened_at"], shift["closed_at"], shift["closed_at"])):
+        key = ("transfer", r["channel_id"])
+        row = by_id.get(key)
+        if row is None:
+            row = {"method": "transfer", "channel": r["channel"], "amount": 0}
+            channels.append(row)
+        row["refunded"] = r["amount"]
+    return channels
+
+
+def _voided_elsewhere(db: Database, s) -> int:
+    """U2-14 (Codex P2 on #415): the cash rounding of sales of an earlier shift voided in this one. Their cash left
+    this drawer here, so their rounding leaves this shift's figure too; the earlier shift keeps its report."""
+    # once per sale (Codex P2 on #424): a void can move cash twice (its own cash and a kept change given back)
+    # from the shift's few void movements to their sales by id (CROSS JOIN keeps that order; no sales scan)
+    return db.one("SELECT coalesce(sum(x.rounding),0) r FROM (SELECT DISTINCT m.ref_id sid FROM cash_movements m"
+                  " WHERE m.shift_id=? AND m.org_id=? AND m.kind='void') v CROSS JOIN sales x ON x.id=v.sid"
+                  " WHERE x.org_id=? AND (x.shift_id IS NULL OR x.shift_id<>?)",
+                  (s["id"], s["org_id"], s["org_id"], s["id"]))["r"]
+
+
 def _returns_of(db: Database, s) -> dict:
     """Returns made while the shift was open, by refund method (final review P2-1). Cash refunds are found
     through their drawer movement in this shift, so the report always reconciles with the drawer. Card and
     credit refunds (and a cash refund of 0, which moves no cash) by the shift's open-close window: return
     times are written by the same clock and format as the shift's (Codex P2 on #323)."""
-    by = {m: {"count": 0, "total": 0} for m in ("cash", "card", "credit")}
-    c = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r JOIN cash_movements m"
-               " ON m.ref_id=r.id AND m.kind='refund' WHERE m.shift_id=? AND m.org_id=?", (s["id"], s["org_id"]))
-    by["cash"] = {"count": c["n"], "total": c["t"]}
-    for r in db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r"
+    by = {m: {"count": 0, "total": 0, "rounding": 0} for m in ("cash", "card", "credit", "transfer")}
+    c = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd FROM sale_returns r"
+               " JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' WHERE m.shift_id=? AND m.org_id=?",
+               (s["id"], s["org_id"]))
+    by["cash"] = {"count": c["n"], "total": c["t"], "rounding": c["rd"]}
+    for r in db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
+                    " FROM sale_returns r"
                     " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
                     " AND (? IS NULL OR r.created_at<=?) AND x.org_id=? AND x.branch_id=?"
-                    " AND (r.refund_method IN ('card','credit') OR r.total=0) GROUP BY 1",
+                    " AND (r.refund_method IN ('card','credit','transfer') OR r.total=0) GROUP BY 1",
                     (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"])):
         cur = by[r["m"]]
-        by[r["m"]] = {"count": cur["count"] + r["n"], "total": cur["total"] + r["t"]}
+        by[r["m"]] = {"count": cur["count"] + r["n"], "total": cur["total"] + r["t"], "rounding": cur["rounding"] + r["rd"]}
     return by
+
+
+def handover_pin_on(db: Database, org_id: str) -> bool:
+    """Owner setting: the person who receives the shift's cash confirms with his PIN (default on)."""
+    r = db.one("SELECT value FROM org_settings WHERE org_id=? AND key='shift_handover_pin'", (org_id,))
+    return not r or r["value"] not in ("0", "false", "off")
 
 
 # Egyptian notes and coins, in piasters
@@ -102,7 +147,7 @@ def redact_summary(ctx: Context, summary: dict) -> dict:
         return summary
     out = dict(summary)
     for key in ("expected_cash", "cash_by_kind", "difference", "card_total", "credit_total", "transfer_total",
-                "by_channel", "card_refunds", "credit_refunds"):
+                "by_channel", "card_refunds", "credit_refunds", "transfer_refunds", "rounding_total"):
         out.pop(key, None)
     out["blind"] = True
     return out
@@ -137,12 +182,9 @@ class CashDrawer:
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
         where, args = _sales_of(s)
-        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t,"
+        card = self.db.one("SELECT coalesce(sum(paid_card),0) c, coalesce(sum(paid_transfer),0) t, coalesce(sum(rounding),0) rd,"
                            f" coalesce(sum(on_credit),0) cr, count(*) n FROM sales x WHERE {where}", args)
-        by_channel = [dict(r) for r in self.db.all(
-            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
-            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
+        by_channel = _channels_of(self.db, s, where, args)
         rets = _returns_of(self.db, s)
         # from the deliveries still with a courier (few), not from every sale of the branch (#113)
         with_courier = self.db.one("SELECT coalesce(sum(d.cash_due),0) c FROM sale_deliveries d CROSS JOIN sales s"
@@ -151,8 +193,11 @@ class CashDrawer:
         expected = s["opening_cash"] + sum(by_kind.values())
         out = {**dict(s), "cash_by_kind": by_kind, "expected_cash": expected if s["status"] == "open"
                else s["expected_cash"], "card_total": card["c"], "transfer_total": card["t"], "credit_total": card["cr"],
+               # U2-14: the shift's cash rounding, less what its returns gave back (review P2)
+               "rounding_total": card["rd"] - sum(r.pop("rounding") for r in rets.values()) - _voided_elsewhere(self.db, s),
                "sales_count": card["n"], "by_channel": by_channel, "with_courier": with_courier,
-               "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"]}
+               "card_refunds": rets["card"]["total"], "credit_refunds": rets["credit"]["total"],
+               "transfer_refunds": rets["transfer"]["total"]}
         return redact_summary(ctx, out)
 
     def _expected(self, shift_id: str) -> int:
@@ -163,7 +208,7 @@ class CashDrawer:
     def movement(self, ctx: Context, amount: int, kind: str, note: str) -> None:
         """Payout (مصروف من الدرج) or deposit by an authorized user, with a reason."""
         ctx.require("cash.manage")
-        if kind not in ("payout", "deposit") or not isinstance(amount, int) or amount <= 0:
+        if kind not in ("payout", "deposit") or type(amount) is not int or amount <= 0:
             raise ValidationFailed("بيانات الحركة غير صحيحة")
         if len((note or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب الحركة")
@@ -172,16 +217,34 @@ class CashDrawer:
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
     def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
-              denominations: dict | None = None, shift_id: str | None = None) -> dict:
-        """shift_id: the shift the count screen showed. A count made for a shift another till has closed
-        since never closes the next one (#324 M2-06)."""
+              denominations: dict | None = None, shift_id: str | None = None, *, float_left: int | None = None,
+              to_account: str | None = None, handover: bool | None = None) -> dict:
+        """Close the open shift. Like E-Stock's «تقفيل درج الكاشير»: the counted cash minus the float left for
+        the next shift (default: this shift's opening cash) moves to a money account (default the main
+        treasury) in the same transaction (F105). When the money is handed to another person, he confirms
+        with his own PIN (the approval on this request); the closer keeps it only if he may manage cash.
+        shift_id: the shift the count screen showed. A count made for a shift another till has closed since
+        never closes the next one (#324 M2-06)."""
         ctx.require("cash.close")
         detail = None
         if denominations is not None:
             counted_cash, detail = count_total(denominations)
         if not isinstance(counted_cash, int) or counted_cash < 0:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
+        from ..finance import money
         with self.db.transaction():
+            sid0 = require_open_shift(self.db, ctx)
+            s0 = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=?", (sid0, ctx.org_id))
+            if float_left is None and handover is None and not ctx.can("cash.manage"):
+                left = counted_cash          # nobody received it: everything stays in the drawer for the next shift
+            else:
+                left = min(s0["opening_cash"], counted_cash) if float_left is None else float_left
+            if not isinstance(left, int) or isinstance(left, bool) or left < 0:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج غير صحيحة")
+            if left > counted_cash:
+                raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large",
+                                       details={"counted": counted_cash, "float_left": left})
+            receiver = self._receiver(ctx, counted_cash - left, handover)
             sid = require_open_shift(self.db, ctx)
             if shift_id is not None and shift_id != sid:
                 raise Conflict("أُغلق هذا الشيفت وفُتح شيفت جديد بعده. حدّث الشاشة وعُدّ الخزينة من جديد",
@@ -197,6 +260,9 @@ class CashDrawer:
                              json.dumps(detail) if detail else None, sid))
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
                          after={"expected": expected, "counted": counted_cash, "difference": diff})
+            money.shift_close_transfer(self.db, ctx, sid, left, to_account=to_account, received_by=receiver)
+            from . import shift_tools
+            shift_tools.record_split(self.db, ctx, sid, detail, left)      # which notes stayed (U2-28 report)
             if diff:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
@@ -207,6 +273,25 @@ class CashDrawer:
         autobackup.trigger("shift_close")
         return self.close_result(ctx, sid)
 
+    def _receiver(self, ctx: Context, moved: int, handover: bool | None) -> str:
+        """Who takes the cash moved out at close. The closer keeps it only with cash.manage; anyone else hands
+        it over, and the receiver types his own PIN (owner setting 'shift_handover_pin', on by default). A
+        cashier who closes with no float and no hand-over leaves all the cash in the drawer (nothing moves)."""
+        if moved <= 0:
+            return ctx.user_id
+        if handover is None:
+            handover = not ctx.can("cash.manage")      # a float given by a cashier means the cash is handed over
+        if not handover:
+            if not ctx.can("cash.manage"):
+                raise ValidationFailed("سلّم النقدية لمدير أو للمالك", code="handover_required")
+            return ctx.user_id
+        if not handover_pin_on(self.db, ctx.org_id):
+            return ctx.approver_id or ctx.user_id
+        if not ctx.approver_id or ctx.approver_id == ctx.user_id or "cash.manage" not in ctx.approver_permissions:
+            raise Forbidden("اللي هيستلم النقدية يكتب الرقم السري بتاعه", code="approval_required",
+                            details={"permission": "cash.manage", "label": "استلام نقدية الشيفت"})
+        return ctx.approver_id
+
     def close_result(self, ctx: Context, shift_id: str) -> dict:
         """What the closer is shown after the close, by his permissions now: the full report with
         sales.read, else only his count against the drawer. Never a refusal after the close committed
@@ -215,11 +300,11 @@ class CashDrawer:
         ctx.require("cash.close")
         if ctx.can("sales.read"):
             return self.report(ctx, shift_id)
-        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by FROM cash_shifts"
+        s = self.db.one("SELECT id, status, expected_cash, counted_cash, difference, closed_by, float_left FROM cash_shifts"
                         " WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
         if not s or s["status"] != "closed" or s["closed_by"] != ctx.user_id:
             raise NotFound("الشيفت غير موجود")
-        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference")}
+        return {k: s[k] for k in ("id", "status", "expected_cash", "counted_cash", "difference", "float_left")}
 
     def report(self, ctx: Context, shift_id: str) -> dict:
         """Closing report. The person who closed sees the result (shortage / surplus) only after
@@ -237,7 +322,7 @@ class CashDrawer:
         where, args = _sales_of(s)
         sales = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_card),0) card,"
                             " coalesce(sum(paid_transfer),0) transfer, coalesce(sum(on_credit),0) credit,"
-                            f" coalesce(sum(discount_total),0) discount FROM sales x WHERE {where}", args)
+                            f" coalesce(sum(discount_total),0) discount, coalesce(sum(rounding),0) rounding FROM sales x WHERE {where}", args)
         # voided while this shift was open (a void after the close belongs to the shift open at that time)
         voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL"
                              " AND (? IS NULL OR voided_at<?)", (shift_id, s["closed_at"], s["closed_at"]))["n"]
@@ -255,10 +340,7 @@ class CashDrawer:
                               (ctx.org_id, s["branch_id"], day0, s["closed_at"] or "9999-12-31", shift_id,
                                s["opened_at"], s["closed_at"], s["closed_at"]))["n"]
         rets = _returns_of(self.db, s)
-        by_channel = [dict(r) for r in self.db.all(
-            "SELECT p.method, coalesce(c.name, '') channel, sum(p.amount) amount FROM sale_payments p"
-            " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id"
-            f" WHERE {where} AND p.method IN ('card','transfer') GROUP BY 1,2", args)]
+        by_channel = _channels_of(self.db, s, where, args)
         names = {u["id"]: u["full_name"] for u in self.db.all(
             "SELECT id, full_name FROM users WHERE id IN (?,?)", (s["opened_by"], s["closed_by"] or ""))}
         # drawer-open commands (#81): manual ones with their reason, apart from the automatic checkout pulses.
@@ -275,13 +357,18 @@ class CashDrawer:
         expected = s["expected_cash"] if s["status"] == "closed" else self._expected(shift_id)
         full.update(cash_by_kind=k, sales_count=sales["n"], sales_total=sales["total"], card_total=sales["card"],
                     transfer_total=sales["transfer"], credit_total=sales["credit"], discount_total=sales["discount"],
+                    rounding_total=sales["rounding"] - sum(r.pop("rounding") for r in rets.values())
+                    - _voided_elsewhere(self.db, s),
                     voided_count=voided, returns_count=sum(r["count"] for r in rets.values()),
                     returns_total=sum(r["total"] for r in rets.values()), returns_by_method=rets,
-                    card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"], by_channel=by_channel,
+                    card_refunds=rets["card"]["total"], credit_refunds=rets["credit"]["total"],
+                    transfer_refunds=rets["transfer"]["total"], by_channel=by_channel,
                     expected_cash=expected, opened_by_name=names.get(s["opened_by"]),
                     closed_by_name=names.get(s["closed_by"]),
                     counted_detail=json.loads(s["counted_detail"]) if s["counted_detail"] else None,
                     drawer_manual=manual, drawer_manual_count=len(manual), drawer_auto_count=auto)
+        from . import shift_tools
+        full.update(shift_tools.report_extras(self.db, ctx, dict(s)))
         return full
 
     def recent(self, ctx: Context, limit: int = 30) -> list[dict]:

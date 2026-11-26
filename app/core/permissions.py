@@ -29,32 +29,37 @@ PERMISSIONS: dict[str, str] = {
     "suppliers.read": "عرض الموردين",
     "suppliers.write": "إضافة وتعديل الموردين",
     "suppliers.pay": "تسجيل دفع للموردين",
+    "suppliers.pay_advance": "دفع للمورد أكتر من المستحق عليه (دفعة مقدمة بسبب مكتوب)",
     "purchases.read": "عرض فواتير الشراء",
     "purchases.create": "إدخال فواتير الشراء",
     "purchases.edit": "مراجعة وتعديل فواتير الشراء",
     "purchases.approve": "اعتماد فواتير الشراء وإضافتها للمخزون",
     "purchases.cancel": "إلغاء فاتورة شراء معتمدة",
+    "purchases.return_bonus_part": "مرتجع جزئي لسطر شراء عليه بونص (بسبب مكتوب)",
     "inventory.read": "عرض المخزون",
     "inventory.adjust": "تسويات المخزون",
     "inventory.count": "تسجيل الجرد",
     "costs.read": "عرض التكلفة والربح",
     "users.manage": "المستخدمون والصلاحيات",
+    "users.permissions": "فتح وقفل صلاحيات الموظفين (غير المالك والمدير، وفي حدود صلاحياته)",
     "settings.manage": "الإعدادات والنسخ الاحتياطي والتحديث",
     "payroll.manage": "الحضور والرواتب والسلف",
     "audit.read": "عرض سجل العمليات",
     "sales.read": "فتح فواتير البيع",
     "sales.create": "البيع (البائع)",
     "sales.totals": "عرض إجمالي المبيعات وفواتير كل الموظفين",
-    "sales.below_cost": "بيع تحت سعر التكلفة",
+    "sales.below_cost": "خصم يوصّل الصنف لسعر التكلفة بالظبط (بسبب مكتوب؛ تحت التكلفة ممنوع لأي حد)",
     "sales.void": "إلغاء فاتورة بيع",
     "sales.return": "مرتجع فاتورة باعها بنفسه",
     "sales.return_others": "مرتجع فاتورة باعها شخص آخر",
     "sales.return_late": "مرتجع بعد مدة المرتجع",
     "sales.return_restricted": "مرتجع أصناف لا ترتجع (ثلاجة واستعمال شخصي)",
+    "sales.refund_other_method": "رد مرتجع نقدي لفاتورة اتدفعت ببطاقة أو تحويل (بسبب مكتوب)",
     "customers.manage": "إدارة العملاء والآجل",
     "contracts.manage": "التعاقدات وخصوماتها",
     "cash.close": "إغلاق الشيفت (عدّ الخزينة)",
     "cash.see_expected": "معرفة المتوقع في الخزينة",
+    "balances.correct": "تصحيح أرصدة الموردين والعملاء بعد النقل (بسبب مكتوب)",
     "cash.manage": "الصرف والإيداع من الخزينة وفتحها",
     "expenses.record": "تسجيل مصروف (ينتظر الموافقة)",
     "expenses.approve": "اعتماد المصروفات",
@@ -69,16 +74,16 @@ PERMISSIONS: dict[str, str] = {
 # Permission groups, in the order the users screen shows them.
 GROUPS: list[tuple[str, list[str]]] = [
     ("البيع", ["sales.create", "sales.read", "sales.below_cost", "sales.void", "customers.manage", "contracts.manage"]),
-    ("المرتجع", ["sales.return", "sales.return_others", "sales.return_late", "sales.return_restricted"]),
+    ("المرتجع", ["sales.return", "sales.return_others", "sales.return_late", "sales.return_restricted", "sales.refund_other_method"]),
     ("ما يراه", ["sales.totals", "costs.read", "cash.see_expected", "notifications.read", "audit.read"]),
     ("الشراء والأصناف", ["purchases.create", "purchases.read", "purchases.edit", "purchases.approve",
-                         "purchases.cancel", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
-                         "items.groups", "suppliers.read", "suppliers.write", "suppliers.pay"]),
+                         "purchases.cancel", "purchases.return_bonus_part", "items.read", "items.write", "items.price", "items.import", "items.no_return", "items.hidden",
+                         "items.groups", "suppliers.read", "suppliers.write", "suppliers.pay", "suppliers.pay_advance"]),
     ("المخزون", ["inventory.read", "inventory.count", "inventory.adjust"]),
-    ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve"]),
+    ("النقدية", ["cash.close", "cash.manage", "expenses.record", "expenses.approve", "balances.correct"]),
     ("السلامة الدوائية", ["safety.read", "safety.override", "safety.override_critical",
                           "safety.manage", "safety.approve"]),
-    ("الإدارة", ["users.manage", "settings.manage", "payroll.manage"]),
+    ("الإدارة", ["users.manage", "users.permissions", "settings.manage", "payroll.manage"]),
 ]
 assert sorted(p for _, ps in GROUPS for p in ps) == sorted(PERMISSIONS), "every permission in one group"
 
@@ -90,17 +95,23 @@ _EMPLOYEE = ["items.read", "suppliers.read", "purchases.read", "purchases.create
 DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
     "owner": ("المالك", list(PERMISSIONS), 10000),
     "manager": ("مدير", _EMPLOYEE + [
-        "items.write", "items.price", "items.hidden", "suppliers.write", "suppliers.pay", "purchases.approve", "inventory.adjust",
+        "items.write", "items.price", "items.hidden", "suppliers.write", "suppliers.pay", "suppliers.pay_advance", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
-        "audit.read", "safety.override", "expenses.approve"], 0),
+        "audit.read", "safety.override", "expenses.approve", "balances.correct", "users.permissions",
+        "sales.refund_other_method", "sales.below_cost"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
         "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
     "assistant": ("مساعد", list(_EMPLOYEE), 0),
 }
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
+PIN_LOGIN_ROLES = ("assistant", "pharmacist")
+PIN_SESSION_PERMISSIONS = frozenset({
+    "items.read", "inventory.read", "safety.read", "sales.read", "sales.create", "sales.return", "cash.close",
+})
+PASSWORD_SESSION_PERMISSIONS = frozenset({"settings.manage", "users.manage", "users.permissions", "payroll.manage"})
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-10-25f"
+ROLES_VERSION = "2026-11-22b"
 
 
 @dataclass(frozen=True)
@@ -117,6 +128,7 @@ class Context:
     approver_id: str | None = None
     approver_permissions: frozenset[str] = field(default_factory=frozenset)
     approver_discount_bp: int = 0
+    auth_method: str = "password"
 
     @property
     def is_owner(self) -> bool:

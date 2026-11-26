@@ -6,6 +6,7 @@ name: CI
 #   full suite passed locally); later pushes to a labelled PR run again. Unlabelled pushes run nothing.
 # - docs-only changes run the linux job without the test steps (the branch guard still sees "linux" green).
 # - Windows runs on PRs into main, on demand, and on pushes to develop that touch Windows-relevant files.
+#   For a PR into develop that needs both runners, put <!-- run-windows-ci --> in its body before adding ci.
 
 on:
   pull_request:
@@ -61,21 +62,26 @@ jobs:
   linux:
     needs: changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # the suite takes 11-13 minutes on the runner (22/11: 12m50s): 15 cut a green run; 25 leaves room (U4-5)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0  # signed-update transition tests exercise the deployed release by revision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: No data files or secrets in the repository
         run: python scripts/check_secrets.py $(git ls-files)
-      - name: Release channel source (writes the old-format backup for test_legacy_restore)
+      # The release BEFORE 0.4 (main until 21/11), which writes the old-format backup (test_legacy_restore) and the
+      # per-batch 99.99 sales (test_legacy_split_refund). Pinned: since v0.4.0 is on main, main no longer writes
+      # them, and every PR went red (update 1).
+      - name: Old release source (writes the old-format backup and sales for the legacy tests)
         if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: 25328e3c7851d68e3154eaf5315d1962051220e2
           path: _release
           persist-credentials: false
       - name: Install
@@ -99,13 +105,16 @@ jobs:
     needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' || github.base_ref == 'main' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- run-windows-ci -->')) ||
       (github.event_name == 'push' && needs.changes.outputs.windows == 'true')
     runs-on: windows-2025
-    timeout-minutes: 20
+    # the validator stops the tests at 30 minutes (scripts/validate_local_release.py); the rest needs a few more
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0  # signed-update transition tests exercise the deployed release by revision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

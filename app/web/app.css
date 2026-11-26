@@ -149,6 +149,12 @@ input.narrow { width: 80px; }
 dialog { border: 1px solid var(--line); border-radius: 14px; padding: 20px; max-width: 420px; width: calc(100% - 32px);
   background: var(--panel); color: var(--ink); }
 dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.invoice-item-card { max-width: 760px; max-height: calc(100dvh - 32px); }
+.invoice-item-card h3 { margin-top: 12px; }
+.invoice-card-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.invoice-card-fields dt { color: var(--muted); }
+.invoice-card-fields dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+[data-price-warning] { margin-top: 4px; line-height: 1.35; }
 .approve label.f { margin-top: 10px; } .approve select, .approve input { width: 100%; }
 .notes { list-style: none; padding: 0; margin: 0; }
 .notes li { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: start; }
@@ -424,3 +430,12 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .tour-bub[data-side="none"] .tour-arrow { display: none; }
 .tourbtn { margin-inline-start: 8px; vertical-align: middle; }
 @media print { .tour-bub, .tour-ring, .tourbtn { display: none !important; } }
+
+/* money accounts (F105) */
+.err { color: var(--err, #b42318); }
+.panel.sub { box-shadow: none; border: 1px solid var(--line, #ddd); margin-top: .5rem; }
+
+/* part 3 C: the cart line chosen with the arrow keys */
+.cart tbody tr.sel { outline: 2px solid var(--brand, #0a7); outline-offset: -2px; }
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]::after { content: " " attr(data-dir); }

@@ -9,7 +9,7 @@
   python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py import-estock-db --dir EXPORT [--confirm openings.xlsx] --username owner [--apply]
-  python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
+  python manage.py update --prepare [--from-bundle DIR]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
   python manage.py reset-owner-password [--username owner]   (forgotten owner password; on this PC only)
 """
@@ -19,14 +19,59 @@ import argparse
 import getpass
 import os
 import sys
+
 from datetime import datetime
 from pathlib import Path
 
 # Embedded Windows Python ignores PYTHONPATH; choose code before importing app.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_program_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(_program_root))
+if (_program_root / ".release-source.json").is_file():
+    sys.dont_write_bytecode = True
 if __name__ == "__main__":
-    from release_bootstrap import run_selected
-    run_selected(Path(__file__).resolve().parent)
+    import release_bootstrap as _bootstrap
+
+    _bootstrap_root = Path(_bootstrap.__file__).resolve().parent
+    if _bootstrap_root != _program_root and (_program_root / ".release-source.json").is_file():
+        # The deployed bootstrap delegates with runpy and keeps its module in
+        # memory. Restart the selected CLI with its own verifier and the real
+        # installed trust root before it opens packages or data.
+        import subprocess
+
+        _env = {**os.environ, "PHARM_INSTALL_ROOT": str(_bootstrap_root)}
+        raise SystemExit(subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], env=_env))
+    _bootstrap.run_selected(_program_root)
+    _bootstrap.verify_running_release(_program_root)
+
+
+def _use_packages() -> None:
+    """Smart update (docs/SMART_UPDATE.md): a release that brought its own package set (verified when it was
+    staged) puts it before the installed one. No pip on the pharmacy PC."""
+    import site
+    here = Path(__file__).resolve().parent
+    folder = os.environ.get("PHARM_DEPS_DIR")
+    if not folder:
+        try:
+            import release_bootstrap as rb
+            home = rb.code_home(rb.data_dir())
+            active = rb.read_state(home).get("active") or {}
+            if active.get("id") == here.name and active.get("deps"):
+                folder = str(home / "deps" / active["deps"])
+        except Exception:                       # no state / old bootstrap: the installed packages
+            return
+    if not folder:
+        return
+    if not (Path(folder) / ".deps-files.json").is_file():
+        sys.exit(f"package set missing: {folder}")
+    before = list(sys.path)
+    site.addsitedir(folder)
+    added = [x for x in sys.path if x not in before]
+    for x in added:
+        sys.path.remove(x)
+    sys.path[1:1] = added
+
+
+_use_packages()
 
 from app import config
 from app.core import accounts
@@ -141,7 +186,11 @@ def cmd_serve(a, s):
         from app.core import tools_folder
         tools_folder.refresh(Path(__file__).resolve().parent, s.data_dir.parent)
     from app.core.accesslog import uvicorn_log_config
-    uvicorn.run(create_app(_db(s, create=True), s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
+    db = _db(s, create=True)
+    import threading
+    from app.catalog import matching          # update 1: the fuzzy index is built at start, not on a keystroke
+    threading.Thread(target=matching.prewarm, args=(db,), daemon=True, name="fuzzy-prewarm").start()
+    uvicorn.run(create_app(db, s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
                 server_header=False, log_config=uvicorn_log_config())
 
 
@@ -294,18 +343,52 @@ def _estock_import_refused(db, ctx, catalog_file: Path) -> str | None:
     return None
 
 
-def fresh_start_refusal(db, answer: str | None) -> str | None:
+def _owner_password(username: str) -> str:
+    """The password: from estock-db-import.bat's single prompt (PHARM_OWNER_PASSWORD_HEX: UTF-8 as hex, so any
+    character survives cmd's for /f; set for this run only, never on the command line), else asked here. The prompt
+    is English: an old cmd window shows Arabic as ???."""
+    hx = os.environ.get("PHARM_OWNER_PASSWORD_HEX")
+    if hx:
+        try:
+            return bytes.fromhex(hx).decode("utf-8")
+        except ValueError:
+            sys.exit("FAIL: the password from estock-db-import.bat could not be read; run it again")
+    return getpass.getpass(f"Password for {username} (typing is hidden): ")
+
+
+def cmd_ask_password(a, s):
+    """estock-db-import.bat asks the password ONCE (update 1): the prompt goes to the console itself (getpass),
+    so it is seen even when the output is captured, and an empty answer asks again. Prints it for the .bat."""
+    for _ in range(5):
+        pw = getpass.getpass(f"Password for {a.username} (typing is hidden): ")
+        if pw:
+            print(pw.encode("utf-8").hex())      # hex: a leading ";" or an Arabic letter survive cmd's for /f
+            return
+        print("Nothing typed; type the password and press Enter.", file=sys.stderr)
+    sys.exit(1)
+
+
+def sales_after_import(db) -> list[dict]:
+    """The sales made after an applied opening-stock import (the Excel one or the E-Stock database move): what
+    a fresh start would archive. Oldest first."""
+    return [dict(r) for r in db.all(
+        "SELECT DISTINCT s.id, s.sale_no, coalesce(s.completed_at, s.created_at) at, s.total, s.status FROM sales s"
+        " JOIN import_runs r ON r.org_id=s.org_id WHERE r.kind='opening_stock' AND r.status='applied'"
+        " AND s.status IN ('completed','voided')"
+        " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at) ORDER BY at")]
+
+
+def fresh_start_refusal(db, answer: str | None, sales_confirmed: bool = False) -> str | None:
     """launch-fresh-start.bat archives the whole database. After launch that is the live data, and the
-    runbook used to send the operator back to it whenever the import refused (#324 R2). Refused once any
-    sale was made after an applied opening-stock import; otherwise the pharmacy's name must be typed
-    (not just YES). Spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter."""
+    runbook used to send the operator back to it whenever the import refused (#324 R2). The pharmacy's name
+    must be typed (not just YES); spelling forms (ة/ه, أ/ا, ى/ي), case and spaces do not matter. Once sales were
+    made after an applied opening-stock import, the owner must also see them and type YES (update 1, owner 21/11:
+    a list with dates and totals instead of a flat refusal): until then it is refused."""
     from app.catalog.normalize import normalize_text
-    sold = db.one("SELECT count(*) n FROM sales s JOIN import_runs r ON r.org_id=s.org_id"
-                  " WHERE r.kind='opening_stock' AND r.status='applied' AND s.status IN ('completed','voided')"
-                  " AND julianday(coalesce(s.completed_at, s.created_at)) > julianday(r.applied_at)")["n"]
-    if sold:
+    sold = len(sales_after_import(db))
+    if sold and not sales_confirmed:
         return (f"البرنامج اتشغل فعلًا: فيه {sold} فاتورة بيع بعد استيراد الأرصدة من E-Stock. "
-                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت. كلمني قبل أي خطوة")
+                "البداية من الصفر هنا تشيل البيانات الحقيقية؛ مفيش أي حاجة اتغيرت إلا لو كتبت YES بعد ما تشوفها")
     key = lambda v: normalize_text(v or "").replace(" ", "")
     names = [r["name"] for r in db.all("SELECT name FROM organizations")]
     if not answer or key(answer) not in {key(n) for n in names}:
@@ -313,24 +396,61 @@ def fresh_start_refusal(db, answer: str | None) -> str | None:
     return None
 
 
+def cmd_export_device_settings(a, s):
+    """U4-0: launch-fresh-start.bat writes the printing / device / screen settings to a small file before it
+    renames the data folder; the first-run setup of the new empty data applies it (no business data, no users)."""
+    from app.core import device_settings
+    out = Path(a.out)
+    info = device_settings.carry_out(_db(s), out)
+    print(f"device settings written: {out} ({', '.join(info['keys']) or 'none'}; {info['channels']} payment channels)")
+
+
 def cmd_fresh_start_check(a, s):
     """Asked by launch-fresh-start.bat before it stops anything. Python reads the answer (cmd's set /p
     cannot read Arabic typing reliably). Exit 0 = go on, 1 = refused (reason printed)."""
     db = _db(s)
     names = [r["name"] for r in db.all("SELECT name FROM organizations")]
-    print("الصيدلية في البرنامج:", "، ".join(names))
+    sold = sales_after_import(db)
+    # update 1: an old cmd window shows Arabic as ???: the Arabic (the name, the sales) also goes to a text file
+    # opened in Notepad, and the console lines are English
+    lines = ["الصيدلية في البرنامج: " + "، ".join(names), ""]
+    if sold:
+        lines.append(f"فواتير بيع بعد استيراد الأرصدة ({len(sold)}، إجمالي {sum(r['total'] or 0 for r in sold) / 100:,.2f} ج):")
+        lines += [f"  رقم {r['sale_no'] or '-'}  {(r['at'] or '')[:16].replace('T', ' ')}  {(r['total'] or 0) / 100:,.2f} ج"
+                  + ("  (ملغاة)" if r["status"] == "voided" else "") for r in sold]
+        lines += ["", "البداية من الصفر هتحفظ الفواتير دي في فولدر data-trial (مش هتتمسح)، والبرنامج يبدأ فاضي."]
+    note = s.data_dir.parent / "fresh-start-check.txt"
+    try:
+        note.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+        if os.name == "nt" and not os.environ.get("PHARM_E2E_PHARMACY"):
+            os.startfile(str(note))                                   # noqa: S606 (Notepad, the owner's own file)
+    except OSError:
+        pass
+    print("Pharmacy in the program (the name is in Notepad too):", ", ".join(names))
+    if sold:
+        print(f"Sales after the E-Stock import: {len(sold)}, total {sum(r['total'] or 0 for r in sold) / 100:,.2f} EGP")
+        for r in sold[:50]:
+            print(f"  no. {r['sale_no'] or '-'}  {(r['at'] or '')[:16].replace('T', ' ')}  {(r['total'] or 0) / 100:,.2f}"
+                  + ("  (voided)" if r["status"] == "voided" else ""))
     answer = os.environ.get("PHARM_E2E_PHARMACY")   # automated check on synthetic data only (CI)
     if answer is None:
-        why = fresh_start_refusal(db, "-")
-        if why and "اسم الصيدلية" not in why:   # refused whatever is typed: do not ask
-            sys.exit("FAIL: " + why)
         try:
-            answer = input("اكتب اسم الصيدلية زي ما هو مكتوب فوق علشان تكمل: ")
+            answer = input("Type the pharmacy name exactly as shown (Notepad), then Enter: ")
         except EOFError:
             answer = ""
-    why = fresh_start_refusal(db, answer)
+    why = fresh_start_refusal(db, answer, sales_confirmed=True)        # the name first
     if why:
         sys.exit("FAIL: " + why)
+    if sold:
+        yes = os.environ.get("PHARM_E2E_SALES_YES")
+        while yes is None or not yes.strip():                         # a stray Enter is not an answer: ask again
+            try:
+                yes = input(f"These {len(sold)} sales will be kept in the trial folder and the program starts EMPTY."
+                            " Type YES to go on, NO to stop: ")
+            except EOFError:
+                yes = "NO"
+        if yes.strip().upper() != "YES":
+            sys.exit("FAIL: " + fresh_start_refusal(db, answer))
     print("OK")
 
 
@@ -342,7 +462,7 @@ def cmd_import_estock(a, s):
     from app.core import backup
     from app.dataimport import estock_job
     db = _db(s)
-    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    pw = a.password or _owner_password(a.username)
     tok = accounts.login(db, a.username, pw)["token"]
     files = {k: Path(getattr(a, k)) for k in ("catalog", "stock")}
     packs = Path(a.packs) if a.packs else None
@@ -418,7 +538,7 @@ def cmd_import_estock_db(a, s):
     if not a.username:
         sys.exit("FAIL: --username is required")
     db = _db(s)
-    pw = a.password or getpass.getpass(f"كلمة مرور {a.username}: ")
+    pw = a.password or _owner_password(a.username)
     tok = accounts.login(db, a.username, pw)["token"]
     for f in [a.dir, *([a.confirm] if a.confirm else []), *([a.packs] if a.packs else [])]:
         if not Path(f).exists():
@@ -519,71 +639,79 @@ def _estock_db_print(a, res):
 
 
 def cmd_update(a, s):
-    """Stage immutable code and atomically select it; never migrate the live DB here."""
+    """Offer only publisher-signed updates and verified recovery."""
     import subprocess
-    import tempfile
     import zipfile
-    from app.core import backup, updater
+    from app.core import smart_update as su, update_sign, updater
     import release_bootstrap as releases
     root = Path(__file__).resolve().parent
     home = releases.code_home(s.data_dir)
     try:
+        if a.from_zip:
+            raise updater.UpdateError("A signed release bundle is required; use --prepare --from-bundle DIR")
         if a.rollback:
             if a.from_zip or a.check:
                 raise updater.UpdateError("--rollback cannot be combined with --from-zip or --check")
+            state = releases.read_state(home)
+            journal = releases.read_journal(home)
+            if (state.get("active") or {}).get("needs_db") and journal.get("release") == state["active"]["id"]:
+                raise updater.UpdateError(
+                    "النسخة دي غيّرت قاعدة البيانات؛ الرجوع للكود القديم وحده مش آمن. استرجع النسخة الاحتياطية "
+                    f"اللي اتعملت قبل التحديث: {journal.get('backup', '')}")
+            if previous := state.get("previous"):
+                su.verify_selected_release(home, releases.installer_root(root), previous)
             releases.rollback(home)
             print("Previous code selected. Restart the program; no database restore was performed.")
             return
-        state = releases.read_state(home)
-        expected_active = (state.get("active") or {}).get("id")
-        if a.from_zip:
-            data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
-        else:
-            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
-                a.ref = updater.channel(updater.installed(s.data_dir)) or "main"
-            token = updater.read_token()
-            sha = updater.latest_sha(a.repo, a.ref, token)
-            cur = updater.installed(s.data_dir).get("sha")
-            if cur == sha and not a.force:
-                print("البرنامج محدّث بالفعل:", sha[:7])
-                return
-            print(f"فيه تحديث: {(cur or 'غير معروف')[:7]} -> {sha[:7]}")
-            if a.check:
-                return
-            data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
-        staged = updater.apply_zip(data, root, code_home=home)
-        candidate = Path(staged["release"])
-        releases.check_compatible(releases.current_root(root, home), candidate)
-        # A candidate check must not open/migrate the real pharmacy database.
-        with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
-            isolated = Path(tmp)
-            env = {**os.environ, "PHARM_RELEASE_CANDIDATE": "1", "PHARM_DATA_DIR": str(isolated),
-                   "PHARM_DB_PATH": str(isolated / "test.db"), "PHARM_UPLOAD_DIR": str(isolated / "uploads"),
-                   "PHARM_BACKUP_DIR": str(isolated / "backups"), "PHARM_PRINTER": "none",
-                   "PYTHONUTF8": "1"}
-            check = subprocess.run([sys.executable, str(candidate / "manage.py"), "selftest", "--quick"],
-                                   cwd=candidate, env=env, timeout=120)
-            if check.returncode:
-                raise updater.UpdateError("Candidate selftest failed; the selected code is unchanged")
-        if s.db_path.exists():
-            db = Database(s.db_path)  # read/snapshot only; do NOT call _db or migrate
-            try:
-                out = backup.create(db, s.upload_dir, _backups(a.backup_dir, s))
-                if backup.verify_archive(out)["problems"]:
-                    raise updater.UpdateError("Backup verification failed; the selected code is unchanged")
-            finally:
-                db.close()
-            print("نسخة احتياطية للبيانات:", out)
-        # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
-        ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
-        releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat()},
-                          expected_active=expected_active)
-        print(f"Prepared {staged['files']} files; restart to check the selected release.")
-        print("Previous code is retained. No pip install or database migration was run.")
-    except (updater.UpdateError, releases.ReleaseError, OSError, zipfile.BadZipFile,
-            subprocess.TimeoutExpired) as exc:
+        return _smart_update(a, s, root)
+    except (updater.UpdateError, update_sign.SignatureError, releases.ReleaseError, OSError,
+            zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
         sys.exit(f"التحديث فشل: {exc}")
+
+
+def _smart_update(a, s, root: Path):
+    """Stage-1 steps of the smart update (docs/SMART_UPDATE.md); every failure keeps code and data as they are."""
+    import json
+    import release_bootstrap as releases
+    from app.core import smart_update as su, update_sign, updater
+    if a.candidate_check:                       # runs inside the NEW code, on a COPY of the database
+        report = su.candidate_check(s, _db)
+        print("CANDIDATE-CHECK " + json.dumps(report, ensure_ascii=False))
+        sys.exit(0 if report["ok"] else 1)
+    if a.self_check:
+        update_sign.self_check(root)
+        su.deps_id(b"x", su.python_tag(), su.platform_tag())
+        print("SELF-CHECK OK")
+        return
+    legacy = releases.installer_root(root)
+    backups = _backups(a.backup_dir, s)
+    if not (a.select_prepared or a.apply_prepared):
+        info = updater.installed(s.data_dir)
+        token = None if a.from_bundle else updater.read_token()
+        chan = (updater.channel(info) or "main") if a.from_bundle else updater.follow(info, a.repo, token)
+        if chan is None:
+            raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ لم يتغير شيء")
+        if a.ref and a.ref != chan:
+            raise updater.UpdateError("التحديث يتبع قناة النسخة المثبّتة فقط")
+        source = (su.FolderSource(Path(a.from_bundle)) if a.from_bundle
+                  else su.GitHubSource(a.repo, chan, token))
+        if a.check:
+            m = su.read_manifest(source, update_sign.trusted_keys(legacy))
+            if m["channel"] != (chan or updater.channel(info) or "main"):
+                raise updater.UpdateError("حزمة التحديث لقناة تانية")
+            available = su.meets_version_floor(su.home_of(s.data_dir), m, info, getattr(source, "repo", None), token)
+            print("Signed update available:" if available else "No newer signed update:", m["sha"])
+            return
+        out = su.prepare(s, source, legacy=legacy)
+        print("SMART-PREPARE " + json.dumps(out, ensure_ascii=False))
+        return
+    if a.select_prepared:
+        out = su.select_code_only(s, legacy, backups)
+        print(f"Selected {out['sha'][:7]}; restart to check it.")
+        return
+    out = su.apply_prepared(s, legacy, a.apply_prepared, backups)
+    print("SMART-APPLY " + json.dumps({k: out.get(k) for k in ("release", "sha", "migrated", "backup")},
+                                      ensure_ascii=False))
 
 
 def cmd_reset_owner_password(a, s):
@@ -697,14 +825,24 @@ def main(argv=None):
                     help="trial on a new empty database (the program still holds trial data); never applies")
     ed.add_argument("--backup-dir", default=None)
     sub.add_parser("fresh-start-check", help="launch-fresh-start.bat: refuse after launch, else ask the pharmacy name")
+    xd = sub.add_parser("export-device-settings", help="launch-fresh-start.bat: keep printing/device settings")
+    xd.add_argument("--out", required=True)
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
-    up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
+    up.add_argument("--from-zip", help="retired; use --prepare --from-bundle DIR")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")
     up.add_argument("--backup-dir", default=None)
+    up.add_argument("--prepare", action="store_true", help="smart update: download, verify and rehearse (no change)")
+    up.add_argument("--from-bundle", help="smart update from a folder (flash drive): same signature checks")
+    up.add_argument("--select-prepared", action="store_true", help="smart update without database change")
+    up.add_argument("--apply-prepared", metavar="RELEASE_ID", help="(run by the launcher, program stopped)")
+    up.add_argument("--candidate-check", metavar="DB_COPY", help="(inside a candidate) migrate and check a copy")
+    up.add_argument("--self-check", action="store_true", help="(inside a candidate) the updater's own check")
+    ap = sub.add_parser("ask-password", help="for estock-db-import.bat: ask a password once (prints it)")
+    ap.add_argument("--username", required=True)
     rp = sub.add_parser("reset-owner-password", help="forgotten owner password: set a new one on this PC (#151)")
     rp.add_argument("--username", help="needed only when there is more than one owner")
     a = p.parse_args(argv)
@@ -712,8 +850,8 @@ def main(argv=None):
     {"init": cmd_init, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify,
      "preflight": cmd_preflight,
      "feature": cmd_feature, "restore": cmd_restore, "selftest": cmd_selftest,
-     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check,
-     "reset-owner-password": cmd_reset_owner_password}[a.cmd](a, s)
+     "import-estock": cmd_import_estock, "import-estock-db": cmd_import_estock_db, "update": cmd_update, "fresh-start-check": cmd_fresh_start_check, "export-device-settings": cmd_export_device_settings,
+     "reset-owner-password": cmd_reset_owner_password, "ask-password": cmd_ask_password}[a.cmd](a, s)
 
 
 if __name__ == "__main__":

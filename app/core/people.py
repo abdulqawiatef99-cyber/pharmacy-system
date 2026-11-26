@@ -4,16 +4,13 @@ PC and for approving an action on someone else's screen."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 from ..db import Database, new_id
 from . import accounts, audit, security
 from .errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
 from .numbers import whole_number
-from .permissions import (APPROVER_ROLES, DEFAULT_ROLES, GROUPS, PERMISSIONS, ROLE_ORDER, Context)
+from .permissions import (APPROVER_ROLES, DEFAULT_ROLES, GROUPS, PERMISSIONS, PIN_LOGIN_ROLES, ROLE_ORDER, Context)
 
-MAX_PIN_FAILS = 5
-PIN_LOCKOUT = timedelta(minutes=15)
 WEAK_PINS = {"1234", "12345", "123456", "4321", "54321", "654321", "1212", "2580", "0852"}
 
 
@@ -44,54 +41,50 @@ def set_pin(db: Database, ctx: Context, user_id: str, pin: str) -> None:
     with db.transaction():
         db.execute("UPDATE users SET pin_hash=?, pin_failed=0, pin_locked_until=NULL WHERE id=?",
                    (security.hash_password(pin), user_id))
+        db.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND auth_method='pin' AND revoked_at IS NULL",
+                   (accounts.iso(accounts.utcnow()), user_id))
         audit.record(db, ctx, "user.pin_set", "user", user_id)
 
 
 def verify_pin(db: Database, user_id: str, pin: str, *, org_id: str) -> dict:
-    """Raises on a wrong PIN; 5 wrong tries lock the PIN for 15 minutes."""
+    """Verify the staff PIN without changing its availability to other callers."""
     u = db.one("SELECT u.* FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
                " WHERE u.id=? AND u.is_active=1 AND m.is_active=1", (org_id, user_id))
     generic = Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
     if u is None or not u["pin_hash"]:
         security.dummy_verify(str(pin))
         raise generic
-    now = accounts.utcnow()
-    if u["pin_locked_until"] and accounts.parse_iso(u["pin_locked_until"]) > now:
-        raise Unauthorized("أُوقف الرقم السري مؤقتًا بسبب محاولات خاطئة، انتظر ربع ساعة", code="pin_locked")
     if not security.verify_password(str(pin), u["pin_hash"]):
         with db.transaction():
-            failed = u["pin_failed"] + 1
-            locked = accounts.iso(now + PIN_LOCKOUT) if failed >= MAX_PIN_FAILS else None
-            db.execute("UPDATE users SET pin_failed=?, pin_locked_until=? WHERE id=?",
-                       (0 if locked else failed, locked, user_id))
-            audit.record(db, None, "auth.pin_failed", "user", user_id, after={"locked": bool(locked)},
-                         org_id=org_id, user_id=user_id)
+            audit.record(db, None, "auth.pin_failed", "user", user_id, org_id=org_id)
         raise generic
-    if u["pin_failed"]:
-        with db.transaction():
-            db.execute("UPDATE users SET pin_failed=0 WHERE id=?", (user_id,))
     return dict(u)
 
 
 def pin_login(db: Database, org_id: str, user_id: str, pin: str, *, ip: str | None = None,
               user_agent: str | None = None) -> dict:
-    verify_pin(db, user_id, pin, org_id=org_id)
-    org = db.one("SELECT status FROM organizations WHERE id=?", (org_id,))
-    if not org or org["status"] != "active":
-        raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
+    user = verify_pin(db, user_id, pin, org_id=org_id)
     with db.transaction():
-        return accounts._new_session(db, user_id, org_id, ip, user_agent, "auth.pin_login")
+        eligible = db.one(
+            "SELECT 1 FROM users u JOIN memberships m ON m.user_id=u.id JOIN roles r ON r.id=m.role_id"
+            " JOIN organizations o ON o.id=m.org_id WHERE o.id=? AND u.id=? AND u.pin_hash=?"
+            " AND o.status='active' AND u.is_active=1 AND m.is_active=1 AND r.code IN (?,?)",
+            (org_id, user_id, user["pin_hash"], *PIN_LOGIN_ROLES))
+        if not eligible:
+            raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
+        return accounts._new_session(db, user_id, org_id, ip, user_agent, "auth.pin_login", auth_method="pin")
 
 
 def quick_users(db: Database) -> list[dict]:
-    """Names shown on the quick-login screen of the pharmacy PC (single pharmacy only)."""
+    """Quick sign-in accounts on a single-pharmacy installation."""
     orgs = db.all("SELECT id FROM organizations WHERE status='active'")
     if len(orgs) != 1:
         return []
     return [dict(r) for r in db.all(
-        "SELECT u.id, u.full_name, ? org_id FROM users u JOIN memberships m ON m.user_id=u.id"
+        "SELECT u.id, u.full_name, m.org_id FROM users u JOIN memberships m ON m.user_id=u.id"
+        " JOIN roles r ON r.id=m.role_id"
         " WHERE m.org_id=? AND m.is_active=1 AND u.is_active=1 AND u.pin_hash IS NOT NULL"
-        " ORDER BY u.full_name", (orgs[0]["id"], orgs[0]["id"]))]
+        " AND r.code IN (?,?) ORDER BY u.full_name", (orgs[0]["id"], *PIN_LOGIN_ROLES))]
 
 
 def approvers(db: Database, ctx: Context) -> list[dict]:
@@ -105,8 +98,14 @@ def approvers(db: Database, ctx: Context) -> list[dict]:
 
 
 # -------------------------------------------------------------------------- owner: users screen
+def _see_people(ctx: Context) -> None:
+    """The users screen: the owner (users.manage), or someone who switches staff permissions (part 3, A)."""
+    if not (ctx.allowed("users.manage") or ctx.allowed("users.permissions")):
+        ctx.require("users.manage")           # the approval box asks for the owner's right, as before
+
+
 def roles(db: Database, ctx: Context) -> list[dict]:
-    ctx.require("users.manage")
+    _see_people(ctx)
     rows = {r["code"]: dict(r) for r in db.all(
         "SELECT code, name, permissions, max_discount_bp FROM roles WHERE org_id=?", (ctx.org_id,))}
     out = []
@@ -119,7 +118,7 @@ def roles(db: Database, ctx: Context) -> list[dict]:
 
 
 def list_users(db: Database, ctx: Context) -> list[dict]:
-    ctx.require("users.manage")
+    _see_people(ctx)
     out = []
     for m in db.all("SELECT m.user_id id, u.username, u.full_name, u.is_active AND m.is_active active,"
                     " r.code role, r.name role_name, m.perm_grants, m.perm_denies, m.max_discount_bp,"
@@ -136,7 +135,7 @@ def list_users(db: Database, ctx: Context) -> list[dict]:
 
 def access_matrix(db: Database, ctx: Context, user_id: str) -> dict:
     """Every permission with: role default, this person's value, and whether it is an exception."""
-    ctx.require("users.manage")
+    _see_people(ctx)
     m = _member(db, ctx, user_id)
     role_perms = {r["code"]: set(r["permissions"]) for r in roles(db, ctx)}
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
@@ -163,19 +162,35 @@ def _guard_owner(m: dict) -> None:
 
 
 def set_exception(db: Database, ctx: Context, user_id: str, perm: str, mode: str) -> dict:
-    """mode: 'grant' (open for this person), 'deny' (close for this person), 'default'."""
-    ctx.require("users.manage")
+    """mode: 'grant' (open for this person), 'deny' (close for this person), 'default'.
+    Every permission can be switched per person; the role is only the starting template (owner, part 3 A).
+    The owner (users.manage) switches anything for anyone but himself. Someone with users.permissions (the
+    manager by default) switches a staff member's permissions, not his own, not the owner's or another
+    manager's, never the two people rights, and opens only what he holds himself."""
     if perm not in PERMISSIONS or mode not in ("grant", "deny", "default"):
         raise ValidationFailed("بيانات غير صحيحة")
     if perm == "users.manage" and mode == "grant":
         raise Forbidden("إدارة المستخدمين للمالك فقط", code="owner_only")
     m = _member(db, ctx, user_id)
     _guard_owner(m)
+    if not ctx.allowed("users.manage"):
+        ctx.require("users.permissions")
+        if user_id == ctx.user_id:
+            raise Forbidden("مينفعش تغيّر صلاحياتك بنفسك", code="self_permissions")
+        if m["role_code"] in APPROVER_ROLES:
+            raise Forbidden("صلاحيات المدير يغيّرها المالك بس", code="owner_only")
+        if perm in ("users.manage", "users.permissions"):
+            raise Forbidden("الصلاحية دي يغيّرها المالك بس", code="owner_only")
+        role_has_it = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                                     (m["role_id"], ctx.org_id))["permissions"]))
+        opens = mode == "grant" or (mode == "default" and role_has_it)     # 'default' can lift a deny (Codex P1 on #396)
+        if opens and not ctx.can(perm):
+            raise Forbidden("مينفعش تفتح صلاحية إنت نفسك معندكش", code="beyond_own")
     grants, denies = set(json.loads(m["perm_grants"])), set(json.loads(m["perm_denies"]))
     grants.discard(perm)
     denies.discard(perm)
-    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=?",
-                                             (m["role_id"],))["permissions"]))
+    role_has = perm in set(json.loads(db.one("SELECT permissions FROM roles WHERE id=? AND org_id=?",
+                                             (m["role_id"], ctx.org_id))["permissions"]))
     if mode == "grant" and not role_has:
         grants.add(perm)
     elif mode == "deny" and role_has:
@@ -297,9 +312,11 @@ def add_user(db: Database, ctx: Context, *, username: str, full_name: str, passw
 
 
 # -------------------------------------------------------------------------- screen preferences
-PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both", "help": "on"}
+PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both", "help": "on",
+                 "logout_confirm": "on"}
 _PREF_CHOICES = {"theme": ("light", "dark", "contrast"), "font": ("s", "m", "l", "xl"),
-                 "lang": ("ar", "en"), "names": ("both", "en", "ar"), "help": ("on", "off")}
+                 "lang": ("ar", "en"), "names": ("both", "en", "ar"), "help": ("on", "off"),
+                 "logout_confirm": ("on", "off")}
 
 
 def _luminance(hex6: str) -> float:

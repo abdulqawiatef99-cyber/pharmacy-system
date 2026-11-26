@@ -55,8 +55,10 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     try:
         width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
         who = db.one("SELECT full_name FROM users WHERE id=?", (sale["created_by"],)) if cfg["show_cashier"] else None
+        from ..sales.service import return_window_days
         body = escpos.render_receipt(escpos.receipt_lines(org, sale, when, cfg, cashier=(who["full_name"] if who else "") or "",
-                                                          given=given), width=width)
+                                                          given=given, return_days=return_window_days(db, ctx.org_id)),
+                                     width=width)
         img = escpos.stack(_header(db, ctx, cfg, width), body, _footer(cfg, width))
         rendered = True
         escpos.send(dest, escpos.receipt_job(img, open_drawer, cfg["drawer_timing"], cfg["copies"]))
@@ -109,7 +111,8 @@ def _kick(db: Database, ctx: Context, dest: str, sale_id: str) -> bool:
     return True
 
 
-def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, given: int = 0) -> dict:
+def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, given: int = 0, *,
+                     drawer_first: bool = False) -> dict:
     """After a sale is committed (#81), once: the call site skips replays of the same request_id.
     The drawer opens on any cash part of a store sale, with or without a receipt; a delivery sale prints
     one receipt and never opens the drawer. A failure here never touches the saved sale.
@@ -126,17 +129,20 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, give
         out["receipt"] = "browser" if want_receipt else "none"
         out["drawer"] = "unsupported" if want_drawer else "none"
         return out
+    pulse_with_receipt = want_drawer and want_receipt and not drawer_first
     try:
+        if want_drawer and not pulse_with_receipt:
+            out["drawer"] = "sent" if _kick(db, ctx, dest, sale["id"]) else "failed"
         if want_receipt:
             try:
-                print_receipt(db, ctx, sale["id"], open_drawer=want_drawer, target=dest, given=given)
-                out["receipt"], out["drawer"] = "sent", "sent" if want_drawer else "none"
+                print_receipt(db, ctx, sale["id"], open_drawer=pulse_with_receipt, target=dest, given=given)
+                out["receipt"] = "sent"
+                if pulse_with_receipt:
+                    out["drawer"] = "sent"
             except PrintFailed as e:
                 out["receipt"], out["message"] = "failed", e.message
-                if want_drawer:
+                if pulse_with_receipt:
                     out["drawer"] = "sent" if (e.details or {}).get("drawer_opened") else "failed"
-        elif want_drawer:
-            out["drawer"] = "sent" if _kick(db, ctx, dest, sale["id"]) else "failed"
     except Exception as e:  # noqa: BLE001 — the sale is saved; report the device problem, never fail the sale
         log.exception("checkout devices failed for sale %s", sale.get("id"))
         out["message"] = str(e)
@@ -217,7 +223,10 @@ def label_data(db: Database, ctx: Context, it, cfg: dict) -> dict:
                  (ctx.org_id, ctx.branch_id, it["id"]))["e"]
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
     name = (it["name_ar"] or it["name_en"]) if cfg.get("label_text_lang", "en") == "ar" else (it["name_en"] or it["name_ar"])
-    return {"name": name or "", "value": str(lb.label_value(dict(it), codes)), "code": it["code"] or "",
+    source = cfg["label_barcode_source"]
+    value = lb.label_value(dict(it), codes, source)
+    return {"name": name or "", "value": value, "code": it["code"] or "",
+            "internal_barcode": source == "internal" and value == it["code"],
             "price": rs.label_price(it["public_price"], cfg) if it["public_price"] is not None else "",
             "expiry": f"{exp[5:7]}/{exp[2:4]}" if exp else "", "pharmacy": pharmacy, "phone": phone}
 
@@ -243,6 +252,8 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
     cfg["label_dpi"] = (data or {}).get("label_dpi") if (data or {}).get("label_dpi") in lb.DPIS else saved["label_dpi"]
     cfg["label_lang"] = cfg["label_lang"] if cfg["label_lang"] in lb.LANGS else saved["label_lang"]
     cfg["label_pharmacy"], cfg["label_phone"] = str(cfg["label_pharmacy"] or "")[:40], str(cfg["label_phone"] or "")[:40]
+    if data and "label_barcode_source" in data:
+        cfg["label_barcode_source"] = rs.label_barcode_source_ok(data["label_barcode_source"])
     if data and "label_size" in data:
         cfg["label_size"] = rs.label_size_ok(data["label_size"])
     if data and isinstance(data.get("label_fields"), dict):
@@ -270,7 +281,9 @@ def label_preview(db: Database, ctx: Context, data: dict | None = None) -> tuple
             h_one = (pg.h_mm - float(cfg.get("label_gap") or 0) * (rows - 1)) / rows
             w, h, cfg["label_dpi"], source = pg.w_mm, h_one, pg.dpi_x, "windows"
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
+    internal = cfg["label_barcode_source"] == "internal"
+    sample = {"name": "Sample Item 24 Tab", "value": "8130" if internal else "6221025012340",
+              "internal_barcode": internal, "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     try:
         img, dropped = lb.render_label(sample, w, h, cfg["label_dpi"], cfg["label_fields"])
@@ -420,6 +433,8 @@ def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
     if cfg["label_lang"] not in lb.DIRECT:
         raise ValidationFailed("اختر نوع طابعة الملصقات (تعريف ويندوز أو TSPL أو ZPL) لتجربة الطباعة المباشرة",
                                code="labels_in_browser")
+    if "label_barcode_source" in data:
+        cfg["label_barcode_source"] = rs.label_barcode_source_ok(data["label_barcode_source"])
     if "label_size" in data:
         cfg["label_size"] = rs.label_size_ok(data["label_size"])
     if "label_target" in data:
@@ -467,7 +482,9 @@ def print_label_test(db: Database, ctx: Context, data: dict | None = None) -> di
         raise ValidationFailed("طرق الإرسال البديلة لطابعات TSPL فقط", code="variant_tspl_only")
     w, h = label_size(cfg)
     pharmacy, phone = rs.label_identity(db, ctx.org_id, cfg)
-    sample = {"name": "Panadol Extra 24 Tab", "value": "6221025012340", "code": "8130", "price": rs.label_price(4000, cfg),
+    internal = cfg["label_barcode_source"] == "internal"
+    sample = {"name": "Sample Item 24 Tab", "value": "8130" if internal else "6221025012340",
+              "internal_barcode": internal, "code": "8130", "price": rs.label_price(4000, cfg),
               "expiry": "10/27", "pharmacy": pharmacy, "phone": phone}
     shift = lb.shift_dots(cfg["label_shift"], cfg["label_dpi"])
     count = lb.TEST_LABELS

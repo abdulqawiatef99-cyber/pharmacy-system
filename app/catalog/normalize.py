@@ -117,6 +117,23 @@ def normalize_text(s: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+_SKEL_DROP = str.maketrans("", "", "اوي")
+
+
+def spelling_key(s: str | None) -> str:
+    """Arabic spelling key for search (update 1, launch day): normalize_text, then the long vowels ا و ي dropped,
+    so بكتول = بيكتول and جالهوم = جلهوم; ى/ي, ة/ه, أ/إ/ا are already one. SQL: SPELLING_SQL on a normalized column."""
+    return " ".join(w for w in (w.translate(_SKEL_DROP) for w in normalize_text(s).split()) if w)
+
+
+def spelling_sql(col: str) -> str:
+    """`spelling_key` of an already-normalized column, in SQLite (native replace, fast on every row)."""
+    expr = col
+    for ch in "اأإآٱوؤيىئ":                 # works on raw text too (customer names): the variants drop with them
+        expr = f"replace({expr},'{ch}','')"
+    return f"lower(replace({expr},'ة','ه'))"
+
+
 def _fmt_num(x: float) -> str:
     return str(int(x)) if x == int(x) else ("%.4f" % x).rstrip("0").rstrip(".")
 

@@ -65,6 +65,9 @@ def open_for(path: Path, org_id: str) -> sqlite3.Connection:
     return open_ro(path)
 
 
+FORMAT = "3"            # 2: rows with impossible values are kept apart in q_<table> (#380); 3: an exact second copy of a history row too (#385)
+
+
 def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True, org_id: str | None = None) -> dict[str, int]:
     """Writes the archive at `path` (or checks the one there). Returns rows per table as stored."""
     sha = ex.source_sha()
@@ -73,10 +76,22 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
         if old != sha:
             raise RuntimeError(f"فيه أرشيف إي ستوك من تصدير تاني: {path}. مفيش أي حاجة اتكتبت")
         with closing(open_ro(path)) as con:
-            return {r[0]: r[1] for r in con.execute("SELECT name, rows FROM tables")}
+            r = con.execute("SELECT value FROM meta WHERE key='format'").fetchone()
+            if r and r[0] == FORMAT:
+                return {r[0]: r[1] for r in con.execute("SELECT name, rows FROM tables")}
+        # the same export, archived by an older version without the quarantine (Codex on #380): rebuilt from
+        # the export (it holds nothing else), never reused with impossible rows in its e_ tables. The old file
+        # stays until the new one is built and checked; os.replace below swaps them in one step
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)       # Windows: os.replace cannot overwrite a read-only file
+    old_kept = path.exists()
     tmp = path.with_name(path.name + ".part")
     tmp.unlink(missing_ok=True)
-    con = sqlite3.connect(tmp)
+    try:
+        con = sqlite3.connect(tmp)
+    except Exception:
+        if old_kept:
+            os.chmod(path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)    # the old archive, as it was
+        raise
     counts: dict[str, int] = {}
     try:
         con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -94,16 +109,24 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
                     c += "_"
                 cols.append(c)
             tn = "e_" + t["name"]
+            # rows with impossible values (Export.quarantined): kept apart in q_<table> with why, never in e_
+            bad = ex.quarantined(t["name"]) if hasattr(ex, "quarantined") else {}
             con.execute(f"CREATE TABLE {_q(tn)} (" + ", ".join(f"{_q(c)} TEXT" for c in cols or ["col"]) + ")")
             if cols:
                 ph = ",".join("?" * len(cols))
                 width = len(cols)
+                cell = lambda r: [v if v != "" else None for v in (r + [""] * width)[:width]]   # noqa: E731
                 con.executemany(f"INSERT INTO {_q(tn)} VALUES ({ph})",
-                                ([v if v != "" else None for v in (r + [""] * width)[:width]] for r in rows))
+                                (cell(r) for n, r in enumerate(rows) if n not in bad))
                 for c in cols:
                     if c.lower() in INDEX_COLS:
                         con.execute(f"CREATE INDEX {_q('ix_' + tn + '_' + c)} ON {_q(tn)}({_q(c)})")
-            n = con.execute(f"SELECT count(*) FROM {_q(tn)}").fetchone()[0]
+                if bad:
+                    qn = "q_" + t["name"]
+                    con.execute(f"CREATE TABLE {_q(qn)} (_reason TEXT, " + ", ".join(f"{_q(c)} TEXT" for c in cols) + ")")
+                    con.executemany(f"INSERT INTO {_q(qn)} VALUES (?,{ph})",
+                                    ([bad[n], *cell(r)] for n, r in enumerate(rows) if n in bad))
+            n = con.execute(f"SELECT count(*) FROM {_q(tn)}").fetchone()[0] + len(bad)
             counts[t["name"]] = n
             con.execute("INSERT INTO tables VALUES (?,?,?,?)", (t["name"], t["schema"], n, t["rows"]))
         for kind, m in maps.items():
@@ -123,10 +146,16 @@ def build(ex, path: Path, maps: dict[str, dict[str, str]], *, keep: bool = True,
             ("org_id", org_id or ""),
             ("left_out_columns", ", ".join(secret_columns(ex))),
             ("source_sha", sha), ("instance", ex.instance), ("database", ex.database),
-            ("built_at", datetime.now().isoformat(timespec="seconds")), ("format", "1")])
+            ("built_at", datetime.now().isoformat(timespec="seconds")), ("format", FORMAT)])
         con.commit()
         if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("archive integrity check failed")
+    except Exception:
+        con.close()
+        tmp.unlink(missing_ok=True)
+        if old_kept:
+            os.chmod(path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)    # the old archive stays, as it was
+        raise
     finally:
         con.close()
     if not keep:

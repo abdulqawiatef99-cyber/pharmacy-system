@@ -130,3 +130,40 @@ class TestM2_22FingerprintHasTheQuery(APICase):
         b = self.c.post("/api/staff?month=2026-11", json=body, headers=h)
         self.assertEqual(a.status_code, 200, a.text)
         self.assertEqual((b.status_code, b.json()["error"]["code"]), (422, "idempotency_mismatch"))
+
+
+class TestCodexReview348f(FinBase):
+    """#348 Codex (installer gate): P1 a rejected schedule payment from a money account keeps its month taken (the
+    money already left the account, as with the drawer); P2 a salary paid 'from outside the accounts' by a
+    manager waits for the owner instead of being marked paid with a pending expense."""
+
+    def test_a_rejected_account_payment_keeps_the_month_paid(self):
+        from app.finance import money
+        t = money.treasury_id(self.db, self.ctx)
+        money.owner_movement(self.db, self.ctx, t, 300000, "owner_deposit", "إيداع تجربة")
+        s = schedules.save(self.db, self.ctx, {"name": "إيجار", "category_id": self.cat, "amount": 100000,
+                                               "day_of_month": 1, "paid_from": t})
+        p = s["next"]["period"]
+        e = schedules.pay(self.db, self.m, s["id"], period=p)            # over the manager's limit: pending
+        self.assertEqual(e["status"], "pending")
+        fin.decide(self.db, self.ctx, e["id"], False, "الورق ناقص")
+        again = next(x for x in schedules.listing(self.db, self.ctx) if x["id"] == s["id"])
+        self.assertNotEqual((again["next"] or {}).get("period"), p)
+        with self.assertRaises(Exception):
+            schedules.pay(self.db, self.ctx, s["id"], period=p)
+        self.assertEqual(money.balance(self.db, self.ctx.org_id, t), 200000)   # paid once, not twice
+
+    def test_a_manager_cannot_pay_a_salary_from_outside(self):
+        uid = people.add_user(self.db, self.ctx, username="asst2", full_name="سعيد", password=PW, role_code="assistant")
+        people.set_exception(self.db, self.ctx, self.db.one("SELECT id FROM users WHERE username='mgr'")["id"],
+                             "payroll.manage", "grant")
+        m = self.login("mgr", PW)
+        pay.set_pay(self.db, self.ctx, uid, 52000, 26)
+        pay.fix_attendance(self.db, self.ctx, uid, f"{self.month}-01", "10:00", "18:00", "تسجيل")
+        pay.approve(self.db, m, uid, self.month)
+        with self.assertRaises(Forbidden) as e:
+            pay.pay(self.db, m, uid, self.month, "outside")
+        self.assertEqual(e.exception.code, "approval_required")
+        self.assertEqual(self.db.one("SELECT status FROM payroll WHERE user_id=?", (uid,))["status"], "approved")
+        pay.pay(self.db, self.ctx, uid, self.month, "outside")             # the owner may
+        self.assertEqual(self.db.one("SELECT status FROM payroll WHERE user_id=?", (uid,))["status"], "paid")

@@ -85,9 +85,10 @@ class TestM2_03CashReceivedBelowTheCashPart(ApiBase):
 
     def test_the_screen_stops_before_sending(self):
         at = JS.index("const gv = toPiasters($(\"#payGiven\")?.value)")
-        block = JS[at:at + 900]
-        self.assertIn("cashPart", block)
-        self.assertLess(block.index("given < cashPart"), block.index("btn.disabled = true"))
+        send = JS.index('await api(`/api/sales/${sid}/complete`', at)
+        short = JS.index("given < cashPart", at)
+        self.assertLess(short, send)
+        self.assertIn("return;", JS[short:send])
 
 
 class TestM2_06OldCountScreen(ApiBase):
@@ -111,7 +112,7 @@ class TestM2_06OldCountScreen(ApiBase):
 
     def test_the_screen_sends_the_shift_it_shows(self):
         at = JS.index('await api("/api/cash/close"')
-        self.assertIn("shift_id: sh.id", JS[at:at + 200])
+        self.assertIn("shift_id: sh.id", JS[at - 400:at + 200])          # in the request body, built just before
 
 
 class TestM2_07OffsettingPriceChanges(Base):

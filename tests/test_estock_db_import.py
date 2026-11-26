@@ -28,7 +28,7 @@ OLD = "2025-01-01T10:00:00.000"
 
 def product(pid, code, en, ar="", **kw):
     r = {"product_id": str(pid), "product_code": code, "product_name_en": en, "product_name_ar": ar,
-         "product_scientific_name": "", "company_id": "1", "product_drug": "1", "deleted": "0", "active": "1",
+         "product_scientific_name": "", "company_id": "1", "product_drug": "1", "deleted": "1", "active": "1",
          "sell_price": "30.0000", "buy_price": "20.0000", "product_disc1": "0", "product_disc2": "0",
          "product_unit1": "1", "product_unit2": "", "product_unit3": "", "product_unit1_2": "", "product_unit1_3": "",
          "unit2_sell_price": "", "unit3_sell_price": "", "unit2_sell_price_clause": "", "unit3_sell_price_clause": "",
@@ -57,7 +57,7 @@ def base_tables():
         product(2, "101", "Testofen Syrup", buy_price="-5.0000", sell_price="25.5000"),
         product(3, "102", "Testaclav 1g Tab", product_unit2="2", product_unit3="3", product_unit1_2="2",
                 product_unit1_3="14", product_disc1="-6076", unit2_sell_price_clause="-3.0000", sell_price="140.0000"),
-        product(4, "", "", "مرهم تجربة", deleted="1", product_int_code="6220000000017", sell_price="0.0000"),
+        product(4, "", "", "مرهم تجربة", active="0", product_int_code="6220000000017", sell_price="0.0000"),
         product(6, "100", "Testamol Copy Tab"),
     ]
     t["Product_Amount"] = [
@@ -95,17 +95,17 @@ def base_tables():
     t["Customer"] = [
         {"customer_id": "1", "customer_code": "C1", "customer_name_ar": "أحمد تجربة", "customer_name_en": "Ahmed",
          "mobile": "01012345678", "tel": "0223456789", "address": "شارع التجربة", "customer_current_money": "120.0000",
-         "customer_max_money": "9999999999999.0000", "deleted": "0", "active": "1"},
+         "customer_max_money": "9999999999999.0000", "deleted": "1", "active": "1"},
         {"customer_id": "2", "customer_code": "C2", "customer_name_ar": "منى تجربة", "mobile": "01012345678",
-         "tel": "12", "customer_current_money": "-15.5000", "customer_max_money": "500.0000", "deleted": "0", "active": "1"},
+         "tel": "12", "customer_current_money": "-15.5000", "customer_max_money": "500.0000", "deleted": "1", "active": "1"},
         {"customer_id": "3", "customer_code": "C3", "customer_name_ar": "", "customer_current_money": "0.0000",
          "customer_max_money": "0", "deleted": "1", "active": "0"}]
     t["Vendor"] = [
         {"vendor_id": "1", "vendor_code": "V1", "vendor_name_ar": "مورد تجربة", "mobile": "01111111111",
          "vendor_current_money": "500.0000", "emp_tel": "مندوب حسن", "emp_tel_details": "01222222222",
-         "deleted": "0", "active": "1"},
+         "deleted": "1", "active": "1"},
         {"vendor_id": "2", "vendor_code": "V2", "vendor_name_ar": "مورد تجربه", "vendor_current_money": "-20.0000",
-         "deleted": "0", "active": "1"}]
+         "deleted": "1", "active": "1"}]
     return t
 
 
@@ -150,8 +150,79 @@ class Base(DBTestCase):
         return self.db.one("SELECT * FROM items WHERE code=?", (code,))
 
     def units(self, code):
-        return self.db.one("SELECT coalesce(sum(qty_delta),0) q FROM stock_movements WHERE item_id=?",
-                           (self.item(code)["id"],))["q"]
+        """The pharmacy's own units of the item (with 0039 a hospital-owned batch is not the pharmacy's)."""
+        own = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if any(
+            r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)")) else ""
+        return self.db.one("SELECT coalesce(sum(m.qty_delta),0) q FROM stock_movements m LEFT JOIN batches b ON"
+                           f" b.id=m.batch_id WHERE m.item_id=?{own}", (self.item(code)["id"],))["q"]
+
+
+class TestProductActiveFlags(Base):
+    """Launch day 21/11: E-Stock Products.deleted is '1' on 30,269 of 30,508 live items, so it does not mean
+    deleted. Rule: inactive = active is '0' OR deleted is '0' (live counts (1,1)=30269, (0,1)=225, (0,0)=14)."""
+
+    def test_rule_on_every_combination(self):
+        from app.dataimport.estock_db import product_inactive
+        cases = {("1", "1"): False, ("0", "1"): True, ("0", "0"): True, ("1", "0"): True,
+                 ("1", ""): False, ("", "1"): False, ("", ""): False}
+        for (active, deleted), want in cases.items():
+            self.assertIs(product_inactive({"active": active, "deleted": deleted}), want, (active, deleted))
+
+    def test_live_pattern_moves_active_and_reconciles_active_counts(self):
+        tb = base_tables()
+        tb["Products"].append(product(7, "107", "Testlive Tab", active="1", deleted="1"))
+        tb["Products"].append(product(8, "108", "Teststopped Tab", active="0", deleted="1"))
+        tb["Products"].append(product(9, "109", "Testgone Tab", active="0", deleted="0"))
+        res = self.run_import(tables=tb)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual([self.item(c)["status"] for c in ("100", "107", "108", "109", "E4")],
+                         ["active", "active", "inactive", "inactive", "inactive"])
+        rec = res["reconciliation"]["items"]
+        self.assertEqual(rec["estock_active"], rec["program_active"])
+        self.assertEqual(rec["program_active"],
+                         self.db.one("SELECT count(*) n FROM items WHERE status='active'")["n"])
+
+    def test_parties_never_take_a_state_from_estock_flags(self):
+        # owner 21/11 20:59: «ماحذفتش ولا بيانات عميل»: the old rule hid a party whenever `active` was empty, NULL or
+        # missing (flag() reads those as False) or `deleted` was '1' (normal on live rows)
+        tb = base_tables()
+        odd = [("", ""), (None, None), ("0", "0"), ("1", "0"), ("True", "False"), ("False", "True"), ("1", "1")]
+        for n, (active, deleted) in enumerate(odd, start=10):
+            row = {"customer_id": str(n), "customer_code": str(330 + n), "customer_name_ar": f"عميل علم {n}",
+                   "customer_current_money": "0", "customer_max_money": "0", "active": active, "deleted": deleted}
+            tb["Customer"].append({k: v for k, v in row.items() if v is not None})          # None = the column missing
+            tb["Vendor"].append({k: v for k, v in {"vendor_id": str(n), "vendor_code": f"V{n}", "vendor_name_ar": f"مورد علم {n}",
+                                 "vendor_current_money": "0", "active": active, "deleted": deleted}.items() if v is not None})
+        tb["Customer"].append({"customer_id": "335", "customer_code": "335", "customer_name_ar": "دكتور محمد الشربيني",
+                               "customer_current_money": "0", "customer_max_money": "0"})   # no flag columns at all
+        res = self.run_import(tables=tb)
+        self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
+        self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM customers")}, {1})
+        self.assertEqual({r["is_active"] for r in self.db.all("SELECT is_active FROM suppliers")}, {1})
+        self.assertFalse(self.db.one("SELECT 1 FROM customers WHERE notes LIKE '%محذوف%'"))
+        from app.sales import customers as cu
+        self.assertEqual(cu.listing(self.db, self.ctx, "335")[0]["name"], "دكتور محمد الشربيني")
+        import json as _j
+        raw = [_j.loads(r["raw"]) for r in self.db.all("SELECT ir.raw FROM import_rows ir JOIN import_runs r ON r.id=ir.run_id"
+                                                        " WHERE r.kind='customers' AND r.options LIKE '%\"step\": \"customers\"%'")]
+        self.assertIn({"active": "0", "deleted": "0"}, [x["estock_flags"] for x in raw])  # kept for a later look
+
+    def test_product_flags_on_odd_values(self):
+        from app.dataimport.estock_db import product_inactive
+        cases = {(None, None): False, ("", ""): False, ("True", "True"): False, ("False", "True"): True,
+                 ("True", "False"): True, (" 1 ", " 1 "): False, ("0", None): True}
+        for (active, deleted), want in cases.items():
+            self.assertIs(product_inactive({k: v for k, v in (("active", active), ("deleted", deleted)) if v is not None}),
+                          want, (active, deleted))
+
+    def test_an_active_count_difference_is_a_mismatch(self):
+        res = self.run_import()
+        self.assertTrue(res["ok"])
+        # an item switched off behind the move's back: the totals still agree, the active counts do not
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET status='inactive' WHERE code='100'")
+        out = estock_db.reconcile(self.db, self.ctx, res["plan"], res["runs"], estock_db.Export(self._last), None)
+        self.assertIn("الأصناف الشغالة", " ".join(m["detail"] for m in out["mismatches"]))
 
 
 class TestFullMove(Base):
@@ -194,7 +265,9 @@ class TestFullMove(Base):
         self.assertIn("01012345678", c["منى تجربة"]["notes"])
         # E-Stock's 9,999,999,999,999 = no limit there: kept as-is, never 0 (0 = no credit at all here)
         self.assertEqual((c["أحمد تجربة"]["credit_limit"], c["منى تجربة"]["credit_limit"]), (999999999999900, 50000))
-        self.assertEqual(c["عميل C3"]["is_active"], 0)
+        # owner 21/11 20:59: E-Stock has no stopped or deleted customer: never hidden, never tagged
+        self.assertEqual(c["عميل C3"]["is_active"], 1)
+        self.assertNotIn("محذوف", c["عميل C3"]["notes"] or "")
         bal = {r["customer_id"]: (r["amount"], r["kind"]) for r in self.db.all("SELECT * FROM customer_ledger")}
         self.assertEqual(bal, {c["أحمد تجربة"]["id"]: (12000, "adjustment"), c["منى تجربة"]["id"]: (-1550, "adjustment")})
         s = {r["name"]: r for r in self.db.all("SELECT * FROM suppliers")}
@@ -242,7 +315,7 @@ class TestFullMove(Base):
         finally:
             con.close()
         h = res["reconciliation"]["history"]
-        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2})
+        self.assertEqual(h["Sales_header"], {"manifest": 2, "csv": 2, "archive": 2, "quarantined": 0})
         self.assertEqual(h["Gedo_customers"]["archive"], 1)
 
     def test_same_export_again_resumes_and_writes_nothing_twice(self):
@@ -523,6 +596,8 @@ class TestBat(unittest.TestCase):
         L = self.lines
         for l in L[:L.index(":fail")]:
             if l == 'if "%RC%"=="4" goto rehearsal':      # not a failure: the database holds trial data (#362)
+                continue
+            if re.fullmatch(r'if (not )?defined \w+ goto (haveowner|havepw|haveyes)', l):   # update 1: re-asks
                 continue
             if l.lower().startswith("if ") and "goto" in l:
                 self.assertRegex(l, r'set "MSG=.+" & goto fail\)$')
@@ -895,7 +970,9 @@ class TestManagerSchemaReview(Base):
 
     def test_a_row_read_twice_blocks(self):
         t = base_tables()
-        t["Product_Amount"].append(dict(t["Product_Amount"][0]))           # pa_id 1 twice
+        # manager 20/11 15:15: an exact copy counts once (tests/test_estock_duplicates.py); two different rows
+        # with one stock number still stop the move
+        t["Product_Amount"].append(dict(t["Product_Amount"][0], amount="3"))     # pa_id 1 twice, other cells
         res = self.run_import(tables=t)
         self.assertIn(("Product_Amount", "pa_id"), {(b["table"], b["field"]) for b in res["plan"].blocking})
         self.assertFalse(self.db.one("SELECT 1 FROM items"))
@@ -906,7 +983,7 @@ class TestManagerSchemaReview(Base):
         t["Sales_header"][0]["gf_id"] = "7"
         res = self.run_import(tables=t)
         got = {(d["field"], d["severity"]) for d in res["plan"].dq}
-        self.assertIn(("insert_date", "review"), got)
+        self.assertIn(("insert_date", "info"), got)          # manager 20/11 15:15: what it is, for information
         self.assertIn(("gf_id", "review"), got)
 
     def test_branch_mirror_rows_of_the_other_pharmacy_are_left_out(self):
@@ -1028,10 +1105,15 @@ class TestOwnerReportLines(Base):
         res = self.run_import(tables=t)
         self.assertTrue(res["ok"], res["reconciliation"]["mismatches"])
         rows = {(d["table"], d["field"]): d for d in res["plan"].dq if d["action"].startswith("OWNER")}
-        self.assertEqual(rows[("Customer", "customer_id")]["estock_id"], "77")
-        self.assertEqual(rows[("Vendor", "vendor_id")]["estock_id"], "9")
+        every = {(d["table"], d["field"]): d for d in res["plan"].dq}
+        # manager 20/11 00:25: history-only lines (unknown ids in old invoices, a large sale line) are for review,
+        # not the owner's decisions; they change no money and no stock
+        self.assertEqual(every[("Customer", "customer_id")]["estock_id"], "77")
+        self.assertEqual(every[("Vendor", "vendor_id")]["estock_id"], "9")
+        self.assertNotIn(("Customer", "customer_id"), rows)
         self.assertEqual(rows[("Purchase_header", "purchase")]["value_egp"], "404.15")   # vendor 9 unknown: a line
-        self.assertIn("سطر عكسه", rows[("sales lines", "line value")]["action"])
+        self.assertIn("سطر عكسه", every[("sales lines", "line value")]["action"])
+        self.assertNotIn(("sales lines", "line value"), rows)
         # owner 19/11: a parked purchase becomes a draft purchase (no stock, no balance)
         d = self.db.one("SELECT * FROM purchase_invoices WHERE invoice_no='PK-1'")
         self.assertEqual((d["status"], d["declared_total"], d["invoice_date"]), ("draft", 40415, "2026-07-11"))
@@ -1062,7 +1144,9 @@ class TestCashDepots(Base):
         self.assertEqual([(x["estock_id"], x["name"], x["class"], x["balance"]) for x in d],
                          [("1", "الخزنة الرئيسية", "1", "12500.25"), ("2", "إنستاباي", "3", "830.00"),
                           ("3", "فودافون كاش", "3", "-15.00")])
-        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 3)
+        # owner 20/11 00:50: the treasury's E-Stock figure is a reference (info), the two wallets are reviewed
+        self.assertEqual(sum(1 for x in res["plan"].dq if x["table"] == "Cash_depots" and x["severity"] == "review"), 2)
+        self.assertTrue(d[0]["reference_only"])
         self.assertIn("إنستاباي", Path(res["reports"]["reconciliation"]).read_text(encoding="utf-8-sig"))
         self.assertFalse(self.db.one("SELECT 1 FROM cash_movements"))
 
@@ -1173,7 +1257,8 @@ class TestScreenTour2245(Base):
                                   "total_after_back": "250.0000"}]
         res = self.run_import(tables=t)
         pc = res["plan"].checks["purchase_classes"]
-        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2})
+        self.assertEqual(pc["3"], {"invoices": 2, "total_bill": "1000.00", "after_returns": "950.00", "vendors": 2,
+                                   "meaning": "consignment"})                     # owner 20/11 00:50
         self.assertIn("تحت التصريف", [d for d in res["plan"].dq if d["field"] == "class" and d["estock_value"] == "3"][0]["action"])
 
     def test_junk_master_names_are_listed_and_not_used(self):

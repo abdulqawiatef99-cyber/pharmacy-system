@@ -15,6 +15,11 @@ DefaultDirName={localappdata}\Programs\PharmacyPlatform
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+; Windows 10 or newer, 64-bit only: the embedded Python is amd64 (windows-installer.yml).
+; x64compatible = x64 Windows, and Windows 11 on Arm through x64 emulation (Inno Setup 6.3+).
+MinVersion=10.0
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=PharmacySetup
 Compression=lzma2/max

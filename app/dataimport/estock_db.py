@@ -59,6 +59,53 @@ HISTORY_TABLES = ("Sales_header", "Branches_sales_details", "Back_sales_header",
                   "Purchase_header", "Purchase_details", "Branches_purchase_details", "Gedo_customers",
                   "Gedo_Vendors", "Shortcoming", "Cash_disk_close")
 DEFAULT_STORE = "الصيدلية"
+# History rows with values no pharmacy can have (a read taken while E-Stock writes, 19/11 15:34): quarantined
+# in the archive (q_<table>), never planned, summed, returned or reported as money.
+# (Shortcoming is not checked: E-Stock keeps barcodes in its product_id, listed for the owner as they are)
+SANITY_TABLES = tuple(t for t in HISTORY_TABLES if t != "Shortcoming") + ("Sales_details", "Gedo_Financial")
+ID_MAX = Decimal(2) ** 53                      # beyond this an id is not a counter any more
+# history tables whose rows have an id: an exact second copy of a row is set apart (q_<table>) with this reason, so
+# every reader of the archive sees the row once (Codex on #385); E-Stock's own copy is kept there as it was
+HISTORY_KEYS = {"sales_details": ("sales_id", "details_id"), "sales_header": ("sales_id",),
+                "gedo_financial": ("gf_id",), "gedo_customers": ("gc_id",), "gedo_vendors": ("gv_id",)}
+COPY_REASON = "نسخة مكررة بالظبط من سطر تاني بنفس الرقم"
+# one id with different rows: none of them is known to be the right one, so all are set apart (kept for review),
+# out of every report, claim and return (Codex on #385)
+CONFLICT_REASON = "رقم مكرر ببيانات مختلفة"
+QTY_MAX = Decimal(1_000_000)                   # units or packs on one line
+MONEY_MAX = Decimal(1_000_000_000)             # pounds on one line or one invoice
+_MONEY_WORDS = ("price", "money", "total", "disc", "cash", "net", "value", "for_me", "for_him", "balance")
+
+
+def _has_rule(col: str) -> bool:
+    c = col.strip().lower()
+    return (c.endswith("_date") or c == "date" or c == "id" or c.endswith("_id") or c in ("amount", "back_amount",
+            "sale_unit_change") or c.endswith("_amount") or any(w in c for w in _MONEY_WORDS))
+
+
+def implausible(col: str, raw: str) -> str | None:
+    """Why this cell is impossible, or None. Only clear impossibilities: a value that merely looks odd is
+    left to the planner's own checks."""
+    v = (raw or "").strip()
+    if not v:
+        return None
+    c = col.strip().lower()
+    if c.endswith("_date") or c == "date":
+        year = v[:4]
+        if not year.isdigit():
+            return None
+        lo, hi = (1899, 2200) if c.startswith("exp") else (1900, 2100)
+        return None if lo <= int(year) <= hi else f"{c}={v[:10]}"
+    d = dec(v)
+    if d is None:
+        return None
+    if c == "id" or c.endswith("_id"):
+        return None if (d == d.to_integral_value() and -1 <= d <= ID_MAX) else f"{c}={v}"
+    if c in ("amount", "back_amount", "sale_unit_change") or c.endswith("_amount"):
+        return None if abs(d) <= QTY_MAX else f"{c}={v}"
+    if any(w in c for w in _MONEY_WORDS):
+        return None if abs(d) <= MONEY_MAX else f"{c}={v}"
+    return None
 
 
 class ExportError(ValidationFailed):
@@ -221,6 +268,7 @@ class Export:
         if unfinished:
             self.missing.append(unfinished)
         self._cache: dict[str, list[dict]] = {}
+        self._quarantine: dict[str, dict[int, str]] = {}
         self._raw: dict[str, tuple[list[str], list[list[str]]]] = {}
 
     def has(self, name: str) -> bool:
@@ -244,8 +292,64 @@ class Export:
                 self._raw[key] = (head, [[keep(v, v) if len(v) < 24 else v for v in r] for r in rd])
         return self._raw[key]
 
+    def quarantined(self, name: str) -> dict[int, str]:
+        """{row index: why} for the rows of a history table with impossible values (see implausible())."""
+        key = name.lower()
+        if key not in self._quarantine:
+            out: dict[int, str] = {}
+            if key in self.tables and key in {t.lower() for t in SANITY_TABLES}:
+                head, data = self.raw(name)
+                cols = [(i, h) for i, h in enumerate(head) if _has_rule(h)]     # once per table, not per cell
+                for n, r in enumerate(data):
+                    why = [w for w in (implausible(h, r[i]) for i, h in cols if i < len(r)) if w]
+                    if why:
+                        out[n] = "؛ ".join(why)
+                low = [h.strip().lower() for h in head]
+                kc = HISTORY_KEYS.get(key)
+                if kc and all(c in low for c in kc):
+                    at = [low.index(c) for c in kc]
+                    seen: dict[tuple, list] = {}
+                    for n, r in enumerate(data):
+                        if n in out:
+                            continue
+                        k = tuple(ident(r[i]) if i < len(r) else "" for i in at)
+                        if all(k):
+                            seen.setdefault(k, []).append(n)
+                    for ns in seen.values():
+                        if len(ns) < 2:
+                            continue
+                        distinct = {tuple(data[n]) for n in ns}
+                        if len(distinct) > 1:
+                            for n in ns:
+                                out[n] = CONFLICT_REASON
+                        else:
+                            for n in ns[1:]:
+                                out[n] = COPY_REASON
+            self._quarantine[key] = out
+        return self._quarantine[key]
+
+    def quarantined_ids(self, name: str, col: str) -> tuple[set[str], bool]:
+        """The ids in `col` of a table's quarantined rows, and whether any of them is unreadable."""
+        q = self.quarantined(name)
+        if not q:
+            return set(), False
+        head, data = self.raw(name)
+        low = [h.strip().lower() for h in head]
+        if col not in low:
+            return set(), True
+        i = low.index(col)
+        ids, unknown = set(), False
+        for n in q:
+            v = data[n][i] if i < len(data[n]) else ""
+            if implausible(col, v) or not v.strip():
+                unknown = True
+            else:
+                ids.add(ident(v))
+        return ids, unknown
+
     def rows(self, name: str) -> list[dict]:
-        """Rows as dicts with lower-case column names (E-Stock mixes PV_id / pv_id)."""
+        """Rows as dicts with lower-case column names (E-Stock mixes PV_id / pv_id); a history row with
+        impossible values is left out (it stays in the archive's quarantine table)."""
         key = name.lower()
         if key not in self._cache:
             if key not in self.tables:
@@ -255,7 +359,8 @@ class Export:
                 index: dict[str, int] = {}
                 for i, h in enumerate(head):
                     index[h.strip().lower()] = i               # a repeated name: the last one, as dict(zip()) did
-                self._cache[key] = [Row(index, r) for r in data]
+                q = self.quarantined(name)
+                self._cache[key] = [Row(index, r) for n, r in enumerate(data) if n not in q]
         return self._cache[key]
 
     def sha(self, *names: str) -> str:
@@ -310,6 +415,23 @@ def flag(v) -> bool | None:
     return True if s in _TRUE else False if s in _FALSE else None
 
 
+def party_flags(r: dict) -> dict:
+    """E-Stock's raw active / deleted values of a Customer or Vendor row, kept in the import row only. The owner
+    (21/11 20:59): E-Stock has no stopped, cancelled or deleted customer or supplier, and none was ever deleted. The
+    old rule made a party inactive whenever `active` was empty, NULL or missing (flag() reads those as False) or
+    `deleted` was '1' (normal on live rows), so live customers were hidden. A party never takes a state from them."""
+    return {"active": r.get("active"), "deleted": r.get("deleted")}
+
+
+def product_inactive(r: dict) -> bool:
+    """Products: on the pharmacy's live E-Stock (launch day 21/11) `deleted` is '1' on 30,269 of the 30,508 rows
+    with active='1', so deleted='1' does NOT mean deleted. (active, deleted) counts: (1,1)=30269, (0,1)=225,
+    (0,0)=14. Rule (manager 21/11): inactive = active is '0' OR deleted is '0'; anything else stays active."""
+    def no(v) -> bool:                           # an empty cell is unknown, not '0'
+        return str(v or "").strip() != "" and flag(v) is False
+    return no(r.get("active")) or no(r.get("deleted"))
+
+
 def ident(v) -> str:
     """E-Stock ids are decimal(18,0): '123' and '123.0' are the same id."""
     s = str(v or "").strip()
@@ -348,9 +470,72 @@ class Plan:
         return [d for d in self.dq if d["severity"] == "block"]
 
 
+CLASS_MEANINGS = {"cash": "كاش", "credit": "آجل", "consignment": "تحت التصريف"}
+CLASS_WORDS = {"cash": "cash", "كاش": "cash", "نقدي": "cash", "credit": "credit", "آجل": "credit", "اجل": "credit",
+               "consignment": "consignment", "تحت التصريف": "consignment"}
+# what the program does with each answer (manager 20/11 00:25: plain words, before the owner chooses)
+CLASS_EFFECT = {
+    "cash": "كاش = اتدفعت وقتها: الفواتير تاريخ في الأرشيف بس، ومفيش رصيد مورد ولا مخزون بيتغيّر.",
+    "credit": "آجل = على حساب المورد: رصيد المورد اللي بيتنقل هو رصيده في إي ستوك (فيه الفواتير دي)، والفواتير تاريخ في الأرشيف.",
+    "consignment": ("تحت التصريف = بضاعة المورد عندك لحد ما تتباع: البرنامج لسه مابيفرّقهاش عن بضاعتك، فرصيدها بيتنقل في"
+                    " مخزونك زي إي ستوك ورصيد المورد زي إي ستوك؛ واتعلّمت كده في التقرير."),
+}
+
+
+# owner 20/11 00:50: E-Stock's purchase screen offers كاش / آجل / تحت التصريف in that order (2,941 / 55 / 1 fit)
+OWNER_CLASSES = {"1": "cash", "2": "credit", "3": "consignment"}
+
+
+def decision_json(path: Path | None) -> Path | None:
+    """The decision file holding the class answers: packs.json itself, or the packs.json next to a chosen
+    packs.xlsx (the bat passes the workbook when both exist; Codex #384)."""
+    if not path:
+        return None
+    path = Path(path)
+    j = path if path.suffix.lower() == ".json" else path.with_suffix(".json")
+    return j if j.exists() else None
+
+
+def read_classes(path: Path | None) -> dict[str, str]:
+    """The owner's answers for Purchase_header.class, in the same decision file as the packs:
+    packs.json = {"packs": {"<code>": n}, "classes": {"1": "كاش", "2": "آجل", "3": "تحت التصريف"}}."""
+    path = decision_json(path)
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out = {}
+    for k, v in (raw.get("classes") or {}).items() if isinstance(raw, dict) else ():
+        meaning = CLASS_WORDS.get(str(v or "").strip().lower()) or CLASS_WORDS.get(str(v or "").strip())
+        if not meaning:
+            raise ValidationFailed(f"معنى غير معروف لنوع فواتير الشراء {k}: {v} (كاش أو آجل أو تحت التصريف)")
+        out[str(k).strip()] = meaning
+    return out
+
+
+def read_duplicates(path: Path | None) -> dict[str, int]:
+    """The owner's choice for a stock number E-Stock holds twice with different cells (manager 20/11 15:15),
+    in the same decision file: packs.json = {"duplicates": {"<pa_id>": 1 | 2}} (the row, as numbered in the report)."""
+    path = decision_json(path)
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out = {}
+    for k, v in (raw.get("duplicates") or {}).items() if isinstance(raw, dict) else ():
+        try:
+            n = int(str(v).strip())
+        except ValueError:
+            n = 0
+        if n < 1:
+            raise ValidationFailed(f"اختيار مش مفهوم للتشغيلة المكررة {k}: {v} (رقم السطر: 1 أو 2)")
+        out[ident(k)] = n
+    return out
+
+
 def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source: str | None = None,
-               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True) -> Plan:
+               stores: list[str] | None = None, confirm: dict | None = None, round_piastres: bool = True,
+               classes: dict[str, str] | None = None, duplicates: dict[str, int] | None = None) -> Plan:
     p = Plan(confirm_rows=(confirm or {}).get("rows", {}), rules={"stores": stores or [DEFAULT_STORE], "stock_source": stock_source, "round_piastres": round_piastres,
+                    "classes": dict(classes or {}), "duplicates": dict(duplicates or {}),
                     "packs_overrides": len(packs or {}), "confirm_rows": len((confirm or {}).get("rows", {}))})
     for t in ("Products", "Customer", "Vendor"):
         if not ex.has(t):
@@ -361,9 +546,12 @@ def build_plan(ex: Export, *, packs: dict[str, int] | None = None, stock_source:
                 block=True)
     _plan_items(ex, p, packs or {})
     _plan_stock(ex, p, stock_source, stores or [DEFAULT_STORE])
+    _settle_cancelled_items(p)
     _plan_parties(ex, p, confirm or {})
+    _plan_last_activity(ex, p)
     _plan_history_checks(ex, p)
     _plan_money_info(ex, p)
+    _plan_quarantine(ex, p)
     _plan_snapshot(ex, p)
     return p
 
@@ -407,8 +595,7 @@ def _plan_items(ex: Export, p: Plan, packs: dict[str, int]) -> None:
             p.issue("Products", pid, code, "product_drug", r.get("product_drug"), "دواء/غير دواء: غير معروف",
                     kind="info")
         it["is_drug"] = None if drug is None else int(drug)
-        deleted, active = flag(r.get("deleted")), flag(r.get("active"))
-        it["inactive"] = bool(deleted) or active is False
+        it["inactive"] = product_inactive(r)
         price = dec(r.get("sell_price"))
         if price is None or price <= 0:
             p.issue("Products", pid, code, "sell_price", r.get("sell_price") or "(فاضي)",
@@ -504,6 +691,72 @@ def _pack_of(r: dict, p: Plan, pid: str, code: str) -> tuple[int, bool]:
     return (f3 if f3 and f3 > 1 else f2 if f2 and f2 > 1 else 1), False
 
 
+def _settle_cancelled_items(p: Plan) -> None:
+    """Owner 20/11 00:50: an item cancelled in E-Stock whose units are unclear moves stopped as E-Stock has it,
+    listed as doubtful, when it has no stock (nothing to count, nothing priced). With stock it still stops."""
+    stocked = {r["product_id"] for r in p.stock}
+    stock_codes = {d["code"] for d in p.dq if d["table"] in ("Product_Amount", "Branches_Product_Amount", "stock")}
+    for it in p.items:
+        if not (it.get("inactive") and it.get("pack_unknown") and not it.get("pack_decided")):
+            continue
+        if it["product_id"] in stocked or it["code"] in stock_codes:
+            continue
+        for d in p.dq:
+            if d["table"] == "Products" and d["estock_id"] == it["product_id"] and d["severity"] == "block" \
+                    and d["field"].startswith("product_unit1_"):
+                d["severity"] = "review"
+                d["action"] = (f"صنف ملغي في إي ستوك ومفيش عليه رصيد، وعدد وحداته مش واضح: اتنقل متوقف زي ما هو"
+                               f" بعبوة {it['pack_size']} (صنف مشكوك فيه؛ لو رجّعته اكتب عدد الوحدات في packs.json)")
+                d["doubtful"] = True
+        it["pack_unknown"] = False
+
+
+def _variants(rows: list, cols: tuple[str, ...]) -> dict[tuple, list]:
+    """Rows sharing a key, exact copies counted once, in file order: {key: [distinct rows]} for keys with a copy
+    or a variant. An empty key part (no id) is not a key."""
+    seen: dict[tuple, list] = {}
+    copies: dict[tuple, int] = defaultdict(int)
+    for r in rows:
+        k = tuple(ident(r.get(c)) for c in cols)
+        if not all(k):
+            continue
+        got = seen.setdefault(k, [])
+        if any(tuple(x._v) == tuple(r._v) for x in got):
+            copies[k] += 1
+        else:
+            got.append(r)
+    return {k: v for k, v in seen.items() if len(v) > 1 or copies[k]}, copies
+
+
+def _owner_duplicate_choice(rows: list, p: Plan) -> list:
+    """A stock number E-Stock holds with different cells: the row the owner chose (packs.json duplicates). A choice
+    this read does not fit (the number is once now, or there is no such row) stops the move: no row is left out
+    on an old answer (Codex on #385). Exact copies were already counted once (_stock_groups)."""
+    pick = p.rules.get("duplicates") or {}
+    if not pick:
+        return rows
+    count: dict[str, int] = defaultdict(int)
+    for r in rows:
+        count[ident(r.get("pa_id"))] += 1
+    use = {}
+    for k, n in sorted(pick.items()):
+        if count.get(k, 0) < 2 or n > count[k]:
+            p.issue("Product_Amount", k, "", "duplicates", f"{k}: السطر {n} (في القراية دي {count.get(k, 0)} سطر)",
+                    "اختيار التشغيلة المكررة في packs.json مش مطابق للقراية دي: امسحه أو صحّحه", block=True)
+        else:
+            use[k] = n
+    seen: dict[str, int] = defaultdict(int)
+    out = []
+    for r in rows:
+        k = ident(r.get("pa_id"))
+        if k in use:
+            seen[k] += 1
+            if seen[k] != use[k]:
+                continue
+        out.append(r)
+    return out
+
+
 def _store_ids(ex: Export, stores: list[str]) -> tuple[set[str], list[dict]]:
     allst = [{"id": ident(r.get("store_id")), "name": (r.get("store_name_ar") or r.get("store_name_en") or "").strip()}
              for r in ex.rows("Stores")]
@@ -547,16 +800,23 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
     items = {it["product_id"]: it for it in p.items}
     by_item: dict[str, list[dict]] = defaultdict(list)
     others: dict[str, list] = defaultdict(lambda: [0, Decimal(0)])
-    for r in chosen["rows"]:
+    chosen_rows = _owner_duplicate_choice(chosen["rows"], p)
+    for r in chosen_rows:
         if ident(r.get("store_id")) not in store_ids:
             o = others[ident(r.get("store_id"))]
             o[0] += 1
             o[1] += (dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)
-            p.hospital.append({"store_id": ident(r.get("store_id")), "pa_id": ident(r.get("pa_id")),
-                               "product_id": ident(r.get("product_id")), "amount": r.get("amount"),
-                               "expiry": iso_day(r.get("exp_date")), "buy_price": r.get("buy_price"),
-                               "sell_price": r.get("sell_price"),
-                               "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0))})
+            h = {"store_id": ident(r.get("store_id")), "pa_id": ident(r.get("pa_id")),
+                 "product_id": ident(r.get("product_id")), "amount": r.get("amount"),
+                 "expiry": iso_day(r.get("exp_date")), "buy_price": r.get("buy_price"),
+                 "sell_price": r.get("sell_price"),
+                 "value": egp((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)),
+                 "batch_no": (f"{ident(r.get('store_id'))}-{ident(r.get('counter_id'))}"
+                              if ident(r.get("counter_id")) else f"{ident(r.get('store_id'))}-{ident(r.get('pa_id'))}"),
+                 "raw": {"vendor_id": ident(r.get("vendor_id")) or None, "tax_price": r.get("tax_price") or None,
+                         "counter_id": ident(r.get("counter_id")) or None}}
+            _plan_hospital_row(p, items.get(h["product_id"]), h, chosen["table"])
+            p.hospital.append(h)
             continue
         by_item[ident(r.get("product_id"))].append(r)
     names = {s["id"]: s["name"] for s in allst}
@@ -685,6 +945,26 @@ def _plan_stock(ex: Export, p: Plan, source: str | None, stores: list[str]) -> N
     _unit_evidence(ex, p)
 
 
+def _plan_hospital_row(p: Plan, it: dict | None, h: dict, table: str) -> None:
+    """A row of the hospital's own store: whole base units at a cost per base unit, as the pharmacy's rows; one
+    that cannot be (an unknown item, a fraction, nothing or less) stays listed in hospital-stock.csv only."""
+    h["units"] = h["unit_cost"] = None
+    amt, bp = dec(h["amount"]), dec(h["buy_price"])
+    if not it or amt is None or amt <= 0:
+        return
+    pack = it["pack_size"]
+    exact = amt * pack
+    whole = exact.to_integral_value(ROUND_HALF_UP)
+    tol = max(Decimal("0.0006") * pack, DRIFT) if pack > 1 else Decimal("0.0006")
+    if whole <= 0 or abs(exact - whole) > tol:
+        p.issue(table, h["pa_id"], it["code"], "amount", h["amount"],
+                f"كمية في مخزن المستشفى مش عدد صحيح من الوحدات (العبوة {pack}): اتسابت في hospital-stock.csv بس",
+                kind="review")
+        return
+    h["units"] = int(whole)
+    h["unit_cost"] = (bp / pack).quantize(COST_Q, ROUND_HALF_UP) if bp is not None and bp >= 0 else None
+
+
 def local_branch(ex: Export) -> str | None:
     """This pharmacy's branch in E-Stock (co_inf.branch_id). The Branches_* tables also hold the other
     pharmacy's rows, with ids that overlap the local ones (manager 22:15)."""
@@ -697,31 +977,104 @@ def local_branch(ex: Export) -> str | None:
 
 def sales_lines(ex: Export) -> list[dict]:
     """The local sales lines: Sales_details when it was read, else the Branches_ mirror of this branch only."""
-    if ex.has("Sales_details") and ex.rows("Sales_details"):
+    if ex.has("Sales_details") and ex.raw("Sales_details")[1]:    # read, even if quarantine set every line apart
         return ex.rows("Sales_details")
     b = local_branch(ex)
     return [r for r in ex.rows("Branches_sales_details") if b is None or ident(r.get("branch_id")) == b]
 
 
-def _plan_snapshot(ex: Export, p: Plan) -> None:
-    """A read taken while E-Stock sells is not one moment (19:15 read: Sales_header to 19:40, the money
-    journal to 19:13; one stock row read twice would double a batch). Duplicate keys stop the move; tables
-    that end at different times are listed; the real move reads with E-Stock closed (manager 22:15)."""
-    for table, key in (("Product_Amount", "pa_id"), ("Sales_header", "sales_id"), ("Gedo_Financial", "gf_id"),
-                       ("Gedo_customers", "gc_id"), ("Gedo_Vendors", "gv_id"), ("Products", "product_id"),
-                       ("Customer", "customer_id"), ("Vendor", "vendor_id"), ("Sales_details", "details_id")):
-        rows = ex.rows(table)
-        if not rows or key not in rows[0]:
+RETURN_GUARDED = {"sales_header", "sales_details", "branches_sales_details", "back_sales_header", "back_sales_details"}
+
+
+def _plan_quarantine(ex: Export, p: Plan) -> None:
+    for t in SANITY_TABLES:
+        if not ex.has(t):
             continue
-        seen, dup = set(), []
-        for r in rows:
-            k = ident(r.get(key))
-            if k in seen:
-                dup.append(k)
-            seen.add(k)
-        if dup:
-            p.issue(table, ", ".join(dup[:10]), "", key, f"{len(dup)} مكرر",
-                    "نفس السطر اتقرا مرتين (القراية كانت وإي ستوك شغال): اقفل إي ستوك واقرا تاني", block=True)
+        name = ex.tables[t.lower()]["name"]
+        q = ex.quarantined(t)
+        copies = sum(1 for v in q.values() if v == COPY_REASON)
+        clash = sum(1 for v in q.values() if v == CONFLICT_REASON)
+        bad = {n: v for n, v in q.items() if v not in (COPY_REASON, CONFLICT_REASON)}
+        if clash:
+            p.issue(name, "", "", "same id, other cells", f"{clash} سطر",
+                    "رقم موجود أكتر من مرة في تاريخ إي ستوك ببيانات مختلفة (مكرر): السطور اتحفظت لوحدها في الأرشيف"
+                    f" (q_{name}) ومش داخلة في أي تقرير ولا مطالبة"
+                    + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
+                    kind="review")
+        if copies:
+            p.issue(name, "", "", "exact copy", f"{copies} سطر",
+                    "سطر موجود مرتين في تاريخ إي ستوك نفسه بنفس الرقم ونفس البيانات بالظبط: اتحسب مرة واحدة"
+                    f" (النسخة التانية محفوظة لوحدها في الأرشيف q_{name})", kind="info")
+        if bad:
+            sample = "؛ ".join(sorted({w.split("=")[0] + "=" + w.split("=", 1)[1][:20] for v in bad.values()
+                                       for w in v.split("؛ ") if "=" in w})[:5])
+            p.issue(name, "", "", "impossible values", f"{len(bad)} سطر؛ مثلًا {sample}",
+                    "OWNER: سطور بقيم مستحيلة في إي ستوك نفسه (أرقام بايظة في الجدول): اتحفظت لوحدها في الأرشيف"
+                    f" (q_{name}) ومش داخلة في أي حساب ولا مرتجع ولا تقرير"
+                    + ("؛ والمرتجع على الفواتير دي موقوف لحد ما تراجعها" if t.lower() in RETURN_GUARDED else ""),
+                    kind="review")
+
+
+SNAPSHOT_KEYS = (("Product_Amount", ("pa_id",)), ("Products", ("product_id",)), ("Customer", ("customer_id",)),
+                 ("Vendor", ("vendor_id",)), ("Sales_header", ("sales_id",)), ("Gedo_Financial", ("gf_id",)),
+                 ("Gedo_customers", ("gc_id",)), ("Gedo_Vendors", ("gv_id",)),
+                 # Sales_details numbers its lines inside each invoice (1, 2, 3 ...): the line is invoice + number
+                 ("Sales_details", ("sales_id", "details_id")))
+MASTER_TABLES = {"products", "customer", "vendor"}
+
+
+def _stock_row_words(r) -> str:
+    return (f"كمية {r.get('amount')}، صلاحية {iso_day(r.get('exp_date')) or '-'}، تكلفة {dec(r.get('buy_price'))},"
+            f" مخزن {ident(r.get('store_id'))}").replace(",", "،", 1)
+
+
+def _plan_snapshot(ex: Export, p: Plan) -> None:
+    """One key, more than one row (manager 20/11 15:15: E-Stock was closed, so these are inside E-Stock): an
+    exact copy counts once and is listed; different rows with one stock number stop the move with both rows
+    shown and the owner chooses one in packs.json; a master id with different rows stops; history rows with
+    one id are kept as E-Stock has them and listed."""
+    items = {it["product_id"]: it for it in p.items}
+    pick = p.rules.get("duplicates") or {}
+    for table, cols in SNAPSHOT_KEYS:
+        rows = ex.rows(table)
+        if not rows or any(c not in rows[0] for c in cols):
+            continue
+        fld = "+".join(cols)
+        groups, copies = _variants(rows, cols)
+        same = [k for k in groups if len(groups[k]) == 1]
+        if same and table.lower() in MASTER_TABLES:     # a second copy would make a second item or party: stop
+            p.issue(table, ", ".join("/".join(k) for k in same[:10]), "", fld, f"{len(same)} رقم مكرر",
+                    "الرقم ده موجود مرتين في إي ستوك نفسه (مكرر): محتاج مراجعة قبل النقل", block=True)
+        elif same:
+            p.issue(table, ", ".join("/".join(k) for k in same[:10]), "", fld,
+                    f"{sum(copies[k] for k in same)} نسخة زيادة",
+                    "سطر موجود مرتين في إي ستوك نفسه بنفس الرقم ونفس البيانات بالظبط: اتحسب مرة واحدة"
+                    " (الأرشيف فيه السطور زي إي ستوك)", kind="info")
+        diff = [k for k in groups if len(groups[k]) > 1]
+        if not diff:
+            continue
+        if table == "Product_Amount":
+            for k in diff:
+                vs = groups[k]
+                it = items.get(ident(vs[0].get("product_id")), {})
+                worth = max(abs((dec(r.get("amount")) or 0) * (dec(r.get("buy_price")) or 0)) for r in vs)
+                shown = "؛ ".join(f"السطر {n}: {_stock_row_words(r)}" for n, r in enumerate(vs, start=1))
+                if k[0] in pick and pick[k[0]] <= len(vs):
+                    p.issue(table, k[0], it.get("code", ""), fld, shown,
+                            f"رقم التشغيلة موجود {len(vs)} مرة في إي ستوك ببيانات مختلفة: اتاخد السطر {pick[k[0]]} من قرارك",
+                            value_egp=worth, kind="fixed")
+                else:
+                    p.issue(table, k[0], it.get("code", ""), fld, shown,
+                            f"رقم التشغيلة موجود {len(vs)} مرة في إي ستوك نفسه ببيانات مختلفة (مكرر)",
+                            value_egp=worth, block=True)
+        elif table.lower() in MASTER_TABLES:
+            p.issue(table, ", ".join("/".join(k) for k in diff[:10]), "", fld, f"{len(diff)} رقم مكرر",
+                    "الرقم ده موجود أكتر من مرة في إي ستوك نفسه ببيانات مختلفة (مكرر): محتاج مراجعة قبل النقل",
+                    block=True)
+        else:
+            p.issue(table, ", ".join("/".join(k) for k in diff[:10]), "", fld, f"{len(diff)} رقم مكرر",
+                    "رقم موجود أكتر من مرة في تاريخ إي ستوك ببيانات مختلفة (مكرر): السطور اتحفظت في الأرشيف زي ما هي",
+                    kind="review")
     ends = {}
     for table in ("Sales_header", "Sales_details", "Branches_sales_details", "Gedo_Financial", "Gedo_customers",
                   "Gedo_Vendors", "Purchase_header"):
@@ -731,8 +1084,8 @@ def _plan_snapshot(ex: Export, p: Plan) -> None:
     p.checks["snapshot_ends"] = ends
     if len(set(ends.values())) > 1:
         p.issue("export", "", "", "insert_date", "، ".join(f"{t} {v}" for t, v in sorted(ends.items())),
-                "الجداول بتخلص في أوقات مختلفة (القراية كانت وإي ستوك شغال): النقل الحقيقي يتقرا وإي ستوك مقفول",
-                kind="review")
+                "آخر حركة متسجلة في كل جدول (للعلم): كل جدول بيخلص عند آخر حاجة اتسجلت فيه (آخر بيع، آخر دفعة،"
+                " آخر شراء)، فطبيعي يختلفوا", kind="info")
     gf_head = [dec(r.get("gf_id")) for r in ex.rows("Sales_header") if dec(r.get("gf_id"))]
     gf_led = [dec(r.get("gf_id")) for r in ex.rows("Gedo_Financial") if dec(r.get("gf_id"))]
     if gf_head and gf_led and max(gf_head) > max(gf_led):
@@ -774,7 +1127,12 @@ def _stock_groups(ex: Export) -> dict[str, dict]:
     for t in STOCK_TABLES:
         if not ex.has(t):
             continue
+        copies = set()
         for r in ex.rows(t):
+            same = (ident(r.get("branch_id")), ident(r.get("pa_id")), tuple(r._v))
+            if same[1] and same in copies:            # the same row twice inside E-Stock: counted once (15:15)
+                continue
+            copies.add(same)
             key = f"{ex.tables[t.lower()]['name']}:{ident(r.get('branch_id'))}"
             g = groups.setdefault(key, {"key": key, "table": ex.tables[t.lower()]["name"],
                                         "branch_id": ident(r.get("branch_id")), "rows": [], "touch": {},
@@ -910,7 +1268,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
                                   estock_limit=(r.get("customer_max_money") or "").strip(),
                                   phones=phones, notes="؛ ".join(notes),
                                   address=(r.get("address") or "").strip() or None,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=False, flags=party_flags(r)))     # never from E-Stock's flags (owner 21/11)
     names: dict[str, str] = {}
     for r in sorted(ex.rows("Vendor"), key=lambda r: (dec(r.get("vendor_id")) or 0)):
         vid = ident(r.get("vendor_id"))
@@ -937,7 +1295,7 @@ def _plan_parties(ex: Export, p: Plan, confirm: dict) -> None:
         c = crows.get(("supplier", vid), {})
         p.suppliers.append(_party(p, "supplier", vid, code, name, vbal, c,
                                   phone=" / ".join(phones + bad) or None, contacts=contacts,
-                                  inactive=bool(flag(r.get("deleted"))) or flag(r.get("active")) is False))
+                                  inactive=False, flags=party_flags(r)))
     _balance_sign_check(ex, p)
 
 
@@ -1056,6 +1414,31 @@ def _balance_sign_check(ex: Export, p: Plan) -> None:
     p.checks["balance_sign"] = out
 
 
+def _plan_last_activity(ex: Export, p: Plan) -> None:
+    """For the owner's settlement of old accounts: each party's last invoice (purchase for a supplier, sale for a
+    customer) and last payment (a statement line with a minus: E-Stock keeps a payment as - in one column)."""
+    def latest(rows, idcol, datecols, keep=lambda r: True):
+        out: dict[str, str] = {}
+        for r in rows:
+            if not keep(r):
+                continue
+            k = ident(r.get(idcol))
+            d = next((iso_day(r.get(c)) for c in datecols if iso_day(r.get(c))), None)
+            if k and d and d > out.get(k, ""):
+                out[k] = d
+        return out
+
+    def paid(pfx):
+        return lambda r: any((dec(r.get(f"{pfx}_{c}")) or 0) < 0 for c in ("for_him", "for_me"))
+    inv = {"supplier": latest(ex.rows("Purchase_header"), "vendor_id", ("bill_date", "insert_date")),
+           "customer": latest(ex.rows("Sales_header"), "customer_id", ("insert_date",))}
+    pay = {"supplier": latest(ex.rows("Gedo_Vendors"), "vendor_id", ("insert_date",), paid("gv")),
+           "customer": latest(ex.rows("Gedo_customers"), "customer_id", ("insert_date",), paid("gc"))}
+    for d in p.suppliers + p.customers:
+        d["last_invoice"] = inv[d["kind"]].get(d["estock_id"])
+        d["last_payment"] = pay[d["kind"]].get(d["estock_id"])
+
+
 def _plan_history_checks(ex: Export, p: Plan) -> None:
     items = {it["product_id"] for it in p.items}
     for r in ex.rows("Shortcoming"):
@@ -1082,12 +1465,18 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if missing:
             p.issue(master, ", ".join(sorted(missing, key=lambda x: dec(x) or 0)), "", key,
                     f"{len(missing)} رقم، {sum(missing.values())} سطر",
-                    f"OWNER: التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
+                    f"التاريخ فيه {kind} مش موجود في قايمة إي ستوك: السطور اتحفظت في الأرشيف زي ما هي",
                     kind="review")
     # a purchase invoice with no lines (left parked in E-Stock): a draft purchase in the program (owner 19/11)
     with_lines = {ident(r.get("purchase_id")) for r in ex.rows("Purchase_details")}
+    # a quarantined line still says the invoice had lines (Codex on #380): never a new draft from unknown contents;
+    # a quarantined line whose invoice id is unreadable could be any invoice: then no draft at all
+    q_ids, q_unknown = ex.quarantined_ids("Purchase_details", "purchase_id")
+    with_lines |= q_ids
     sup_ids = {d["estock_id"] for d in p.suppliers}
     for r in ex.rows("Purchase_header"):
+        if q_unknown:
+            break
         if ident(r.get("purchase_id")) not in with_lines:
             v = dec(r.get("total_bill")) or 0
             day = iso_day(r.get("bill_date")) or iso_day(r.get("insert_date"))
@@ -1138,7 +1527,7 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         if abs(v) >= 10000:
             rev = by_value.get(-v)
             p.issue("sales lines", sid, pid, "line value", egp(v),
-                    "OWNER: سطر بيع كبير" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
+                    "سطر بيع كبير (تاريخ في الأرشيف بس)" + (f" وليه سطر عكسه (فاتورة {rev[0][0]})" if rev else ""), value_egp=v,
                     kind="review")
     # purchases paid cash / on account / on consignment (تحت التصريف): how Purchase_header.class splits them.
     # Which value is consignment is E-Stock's code: every value is listed with its invoices and value, and
@@ -1154,10 +1543,18 @@ def _plan_history_checks(ex: Export, p: Plan) -> None:
         x[3].add(ident(r.get("vendor_id")))
     p.checks["purchase_classes"] = {c: {"invoices": n, "total_bill": egp(t), "after_returns": egp(a), "vendors": len(v)}
                                     for c, (n, t, a, v) in sorted(classes.items())}
+    answered = {**OWNER_CLASSES, **(p.rules.get("classes") or {})}
     for c, (n, t, a, v) in sorted(classes.items()):
-        p.issue("Purchase_header", "", "", "class", c,
-                f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
-                " التصريف؟ بضاعة تحت التصريف مابتتحسبش ملكنا ولا دين عادي من غير قرار", value_egp=a, kind="review")
+        meaning = answered.get(c)
+        if meaning:
+            p.checks["purchase_classes"][c]["meaning"] = meaning
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"{n} فاتورة شراء بقيمة {egp(t)} من {len(v)} مورد: قرار المالك «{CLASS_MEANINGS[meaning]}» ← "
+                    + CLASS_EFFECT[meaning], value_egp=a, kind="fixed")
+        else:
+            p.issue("Purchase_header", "", "", "class", c,
+                    f"OWNER: {n} فاتورة شراء بقيمة {egp(t)} (بعد المرتجع {egp(a)}) من {len(v)} مورد: كاش ولا آجل ولا تحت"
+                    " التصريف؟", value_egp=a, kind="review")
     # master rows whose name has no letter (units "6", "15", "16"; the money place "0000"): kept as they are
     for table, idc, cols in (("Product_units", "unit_id", ("unit_name_ar", "unit_name_en")),
                              ("Product_groups", "group_id", ("group_name_ar", "group_name_en")),
@@ -1325,14 +1722,15 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
             d = {"source": "Cash_depots", "estock_id": ident(r.get(idc)), "name": name, "role": role,
                  "class": (r.get(classc) or "").strip() if classc else "",
                  "balance": egp(bal) if bal is not None else None, "balance_column": balc,
-                 "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal}
+                 "exact_piastres": bal is not None and exact_piasters(bal) is not None, "_bal": bal,
+                 "_raw": r.get(balc) if balc else None}
             if role == "drawer":
                 d["last_close"] = closes.get(d["estock_id"]) or None
             depots.append(d)
         # owner 19/11: what each depot becomes (F105 / #342 posts it; nothing here posts money)
         used = [d for d in depots if d["role"] == "drawer" and d.get("last_close")]
         for d in depots:
-            bal, name = d.pop("_bal"), d["name"]
+            bal, name, raw_bal = d.pop("_bal"), d["name"], d.pop("_raw", None)
             if d["role"] == "junk":
                 d["action"] = "no_account"          # «0000»: almost nothing; its history stays in the archive
                 if bal:
@@ -1353,6 +1751,19 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
                 p.issue("Cash_depots", d["estock_id"], name, "last_close", ", ".join(x["estock_id"] for x in used) or "-",
                         "OWNER: مش واضح أنهي درج هو درج الشيفت (اتقفل فيه شيفتات)", value_egp=bal, kind="review")
             d["action"] = "account_stopped" if "موقوف" in name else "account"
+            if d["role"] == "treasury":
+                d["reference_only"] = True      # owner 20/11 00:50: not real cash; the account starts at zero
+                d["piasters"] = 0               # the account is made, no opening is posted
+                p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
+                        f"«{name}» (خزنة): رصيدها في إي ستوك {d['balance']} ج مرجع بس — قرار المالك: مش فلوس حقيقية"
+                        " (مدفوعات الموردين والمخازن اتسجلت منها، والإيداعات والإيجار والمرتبات ما اتسجلتش)؛"
+                        " حسابها في البرنامج بيبدأ بصفر، ودرج أول شيفت = اللي المالك يعدّه ليلة النقل",
+                        kind="info")
+                continue
+            # what the account opens with: a fraction of a piaster is rounded half up and listed (owner 19/11),
+            # or stops the move with --no-round-piastres; never rounded silently (Codex on #381)
+            d["piasters"] = _balance_piastres(p, "Cash_depots", d["estock_id"], name, balc or "balance",
+                                              raw_bal, bal) if bal is not None else None    # unknown: never a zero
             p.issue("Cash_depots", d["estock_id"], name, balc or "balance", d["balance"] or "?",
                     f"«{name}» ({_ROLE_AR[d['role']]}): حساب لوحده برصيده وتاريخه"
                     + ("، متوقف" if d["action"] == "account_stopped" else "") + " بخدمة F105 (لسه ما اتنقلش)",
@@ -1374,7 +1785,7 @@ def _plan_money_info(ex: Export, p: Plan) -> None:
 
 # ---------------------------------------------------------------- the owner's confirmation sheet
 SHEET_HEAD = ["النوع", "رقم إي ستوك", "كود إي ستوك", "الاسم", "رصيد إي ستوك", "الرصيد المؤكد",
-              "حد الآجل في إي ستوك", "حد الآجل المؤكد"]
+              "حد الآجل في إي ستوك", "حد الآجل المؤكد", "آخر فاتورة", "آخر دفعة"]
 _KIND_AR = {"supplier": "مورد", "customer": "عميل"}
 
 
@@ -1389,8 +1800,9 @@ def write_openings(plan: Plan, path: Path) -> None:
     rows.sort(key=lambda d: (-d["estock_balance"], d["kind"], d["name"]))
     for d in rows:
         ws.append([_KIND_AR[d["kind"]], d["estock_id"], d["code"], d["name"], d["estock_balance"] / 100, None,
-                   d.get("estock_limit") if d["kind"] == "customer" else None, None])
-    for col, w in zip("ABCDEFGH", (8, 12, 12, 36, 16, 16, 18, 18)):
+                   d.get("estock_limit") if d["kind"] == "customer" else None, None,
+                   d.get("last_invoice"), d.get("last_payment")])
+    for col, w in zip("ABCDEFGHIJ", (8, 12, 12, 36, 16, 16, 18, 18, 14, 14)):
         ws.column_dimensions[col].width = w
     from ..core.xlsx_safe import as_text
     as_text(wb)
@@ -1437,6 +1849,26 @@ def read_confirm(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------- applying
+# Codex on #381: inventory adjustments, counts and the average cost do not tell the hospital's batches from the
+# pharmacy's yet, so for launch the hospital's own store stays out of operational stock (listed in full in
+# hospital-stock.csv, as before). 0039 and the sale guard are in place; switch on when those paths filter by owner.
+HOSPITAL_BATCHES = False
+
+
+def _has_money(db: Database) -> bool:
+    """The candidate schema (0038, money accounts) and its service: E-Stock's money places become accounts."""
+    try:
+        from ..finance import money  # noqa: F401
+    except ImportError:
+        return False
+    return bool(db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='money_accounts'"))
+
+
+def _has_batch_owner(db: Database) -> bool:
+    """0039: batches carry who owns them, so the hospital's own stock can move as hospital-owned batches."""
+    return any(r["name"] == "owner" for r in db.all("PRAGMA table_info(batches)"))
+
+
 def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
     """Only into a new database (launch night), or the same export again (resume after a failure)."""
     if db.one("SELECT 1 FROM sales WHERE org_id=? LIMIT 1", (ctx.org_id,)):
@@ -1458,6 +1890,9 @@ def refusal(db: Database, ctx: Context, export_sha: str) -> str | None:
         if db.one(f"SELECT 1 FROM {table} WHERE org_id=?{mine} LIMIT 1",
                   (ctx.org_id, ctx.org_id) if mine else (ctx.org_id,)):
             return f"قاعدة البيانات فيها حركات فلوس ({table}): النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
+    if _has_money(db) and db.one("SELECT 1 FROM money_movements WHERE org_id=? AND NOT (kind='opening' AND"
+                                 " coalesce(ref_id,'') LIKE 'Cash_depots:%') LIMIT 1", (ctx.org_id,)):
+        return "قاعدة البيانات فيها حركات في حسابات الفلوس مش من النقل ده: النقل من إي ستوك يكون على قاعدة جديدة بس. مفيش أي حاجة اتكتبت"
     for table in ("items", "customers", "suppliers"):
         if db.one(f"SELECT 1 FROM {table} t WHERE t.org_id=? AND t.id NOT IN (SELECT target_id FROM import_rows"
                   f" WHERE target_id IS NOT NULL AND run_id IN {ours}) LIMIT 1", (ctx.org_id, ctx.org_id)):
@@ -1511,6 +1946,9 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
     ctx.require("customers.manage")
     if plan.blocking:
         raise ValidationFailed(f"فيه {len(plan.blocking)} مشكلة محتاجة قرار قبل النقل (data-quality)", code="blocking")
+    if any(item.get("public_price") is not None for item in plan.items) or any(
+            batch.get("batch_price") is not None for batch in plan.stock):
+        ctx.require("items.price")
     esha = ex.source_sha()
     why = refusal(db, ctx, esha)
     if why:
@@ -1554,8 +1992,6 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
             for d in (plan.suppliers if kind == "supplier" else plan.customers):
                 if kind == "supplier":
                     pid = catalog.create_supplier(db, ctx, name=d["name"], phone=d.get("phone"))
-                    if d["inactive"]:
-                        db.execute("UPDATE suppliers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO supplier_ledger (id, org_id, supplier_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'opening', ?, 'رصيد افتتاحي من إي ستوك', ?)",
@@ -1566,14 +2002,13 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
                     pid = Sales(db).create_customer(ctx, name=d["name"], phone=ph[0], phone2=ph[1], phone3=ph[2],
                                                     credit_limit=d["limit"], notes=d["notes"], name_alt=d["alt"],
                                                     address1=d["address"])
-                    if d["inactive"]:
-                        db.execute("UPDATE customers SET is_active=0 WHERE id=? AND org_id=?", (pid, ctx.org_id))
                     if d["estock_balance"]:
                         db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
                                    " created_by) VALUES (?,?,?,?, 'adjustment', ?, 'رصيد افتتاحي من إي ستوك', ?)",
                                    (new_id(), ctx.org_id, pid, d["estock_balance"], run_id, ctx.user_id))
                 total += d["estock_balance"]
-                rows.append(({"estock_id": d["estock_id"], "code": d["code"]}, pid))
+                # owner 21/11: a party is never hidden for E-Stock's flags; their raw values stay in the import row
+                rows.append(({"estock_id": d["estock_id"], "code": d["code"], "estock_flags": d.get("flags") or {}}, pid))
             return rows, {"parties": len(rows), "balance_total": total}
         return fn
     runs["suppliers"], r = _step(db, ctx, "suppliers", "suppliers", H("suppliers", ex.sha("Vendor")), esha, label,
@@ -1648,6 +2083,56 @@ def apply_plan(db: Database, ctx: Context, plan: Plan, ex: Export, *, packs_sha:
         except Exception:   # alerting must never undo an applied import
             import logging
             logging.getLogger("pharm.recalls").exception("recall matching failed")
+
+    # 4b) the hospital's own store (owner 19/11): hospital-owned batches, never the pharmacy's stock (0039)
+    hosp = [h for h in plan.hospital if h.get("units")]
+    if hosp and HOSPITAL_BATCHES and _has_batch_owner(db):
+        def do_hospital(run_id):
+            rows, units = [], 0
+            for h in hosp:
+                iid = item_map[h["product_id"]]
+                bid = inventory.get_or_create_batch(db, ctx, iid, h["batch_no"], h["expiry"],
+                                                    "day" if h["expiry"] else None)
+                db.execute("UPDATE batches SET owner='hospital' WHERE id=? AND org_id=?", (bid, ctx.org_id))
+                inventory.post_movement(db, ctx, item_id=iid, qty_delta=h["units"], movement_type="opening",
+                                        batch_id=bid, unit_cost=h["unit_cost"], ref_type="import_run", ref_id=run_id,
+                                        ref_line_id=h["pa_id"], note="رصيد افتتاحي من إي ستوك: ملك المستشفى")
+                units += h["units"]
+                rows.append(({"pa_id": h["pa_id"], "product_id": h["product_id"], "store_id": h["store_id"],
+                              "owner": "hospital", **h.get("raw", {})}, iid))
+            return rows, {"hospital_rows": len(rows), "units": units}
+        runs["hospital"], r = _step(db, ctx, "opening_stock", "hospital_stock",
+                                    H("hospital", ex.sha(src.split(":")[0]), items_sha), esha, label, do_hospital)
+        resumed += ["hospital"] if r else []
+
+    # 4c) E-Stock's money places (owner 19/11, F105): each account place becomes an account with its opening
+    depots = [d for d in (plan.checks.get("money_info") or {}).get("cash_depots", [])
+              if d.get("action") in ("account", "account_stopped")]
+    if depots and _has_money(db):
+        from ..finance import money
+
+        def do_money(run_id):
+            rows, total, treasury = [], 0, False
+            for d in depots:
+                role = d.get("role")
+                kind = {"treasury": "treasury", "bank": "bank", "wallet": "wallet"}.get(role, "other")
+                if kind == "treasury":
+                    kind, treasury = ("other", True) if treasury else ("treasury", True)   # one main treasury
+                aid = money.ensure_account(db, ctx, kind=kind, name=d["name"], source_ref=f"estock:{d['estock_id']}",
+                                           is_active=d["action"] != "account_stopped")
+                if d.get("reference_only"):               # the treasury: E-Stock's figure is a reference only
+                    rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": 0,
+                                  "reference_only": True}, aid))
+                    continue
+                if d.get("piasters") is None:            # run() blocks this before anything is written
+                    raise ValidationFailed(f"رصيد «{d['name']}» مش مقروء", code="blocking")
+                money.post_opening(db, ctx, f"estock:{d['estock_id']}", d["piasters"], source="estock",
+                                   source_ref=f"Cash_depots:{d['estock_id']}", note=f"«{d['name']}» في إي ستوك")
+                total += d["piasters"]
+                rows.append(({"estock_id": d["estock_id"], "name": d["name"], "piasters": d["piasters"]}, aid))
+            return rows, {"accounts": len(rows), "opening_total": total}
+        runs["money"], r = _step(db, ctx, "customers", "money", H("money", ex.sha("Cash_depots")), esha, label, do_money)
+        resumed += ["money"] if r else []
 
     # 5) the owner's confirmed balances: difference = opening adjustment
     adj = [d for d in plan.suppliers + plan.customers if d["adjustment"] or (d["kind"] == "customer" and confirm_sha)]
@@ -1739,7 +2224,14 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
     n_items = db.one("SELECT count(*) n FROM items WHERE org_id=?", (ctx.org_id,))["n"]
     if n_items != len(plan.items) or len(item_map) != len(plan.items):
         mm.append({"what": "items", "code": "", "name": "", "detail": f"الأصناف {n_items}، إي ستوك {len(plan.items)}", "value": Decimal(0)})
-    out["items"] = {"estock": len(plan.items), "program": n_items}
+    # active counts too (launch day 21/11: a wrong deleted/active reading made almost every item inactive while
+    # the total still matched)
+    n_active = db.one("SELECT count(*) n FROM items WHERE org_id=? AND status='active'", (ctx.org_id,))["n"]
+    e_active = sum(not it["inactive"] for it in plan.items)
+    if n_active != e_active:
+        mm.append({"what": "items", "code": "", "name": "",
+                   "detail": f"الأصناف الشغالة {n_active}، إي ستوك {e_active}", "value": Decimal(0)})
+    out["items"] = {"estock": len(plan.items), "program": n_items, "estock_active": e_active, "program_active": n_active}
     for kind, table, ltable, col, parties in (("suppliers", "suppliers", "supplier_ledger", "supplier_id", plan.suppliers),
                                              ("customers", "customers", "customer_ledger", "customer_id", plan.customers)):
         n = db.one(f"SELECT count(*) n FROM {table} WHERE org_id=?", (ctx.org_id,))["n"]
@@ -1765,15 +2257,43 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
                      "confirmed_balance_total": egp(Decimal(sum(d["balance"] for d in parties)) / 100),
                      "opening_adjustment_total": egp(Decimal(sum(d["adjustment"] for d in parties)) / 100),
                      "program_balance_total": egp(Decimal(sum(bal.values())) / 100)}
+    if runs.get("money"):
+        bad = 0
+        for raw, aid in ((json.loads(r["raw"]), r["target_id"]) for r in
+                         db.all("SELECT raw, target_id FROM import_rows WHERE run_id=?", (runs["money"],))):
+            got = db.one("SELECT coalesce(sum(amount),0) b FROM money_movements WHERE org_id=? AND account_id=?",
+                         (ctx.org_id, aid))["b"]
+            if got != raw["piasters"]:
+                bad += 1
+                mm.append({"what": "money", "code": raw["estock_id"], "name": raw["name"],
+                           "detail": f"الحساب في البرنامج {egp(Decimal(got) / 100)}، إي ستوك {egp(Decimal(raw['piasters']) / 100)}",
+                           "value": abs(Decimal(got - raw["piasters"]) / 100)})
+        n = db.one("SELECT count(*) n FROM import_rows WHERE run_id=?", (runs["money"],))["n"]
+        tot = db.one("SELECT coalesce(sum(m.amount),0) b FROM money_movements m JOIN import_rows i ON i.target_id="
+                     "m.account_id AND i.run_id=? WHERE m.org_id=?", (runs["money"], ctx.org_id))["b"]
+        out["money"] = {"accounts": n, "mismatches": bad, "program_total": egp(Decimal(tot) / 100)}
+    if runs.get("hospital"):
+        want = {h["pa_id"]: h for h in plan.hospital if h.get("units")}
+        got = {r["ref_line_id"]: r["q"] for r in db.all(
+            "SELECT ref_line_id, sum(qty_delta) q FROM stock_movements WHERE org_id=? AND ref_type='import_run'"
+            " AND ref_id=? GROUP BY ref_line_id", (ctx.org_id, runs["hospital"]))}
+        bad = [k for k, h in want.items() if got.get(k) != h["units"]] + [k for k in got if k not in want]
+        for k in bad:
+            mm.append({"what": "hospital", "code": k, "name": "", "value": Decimal(0),
+                       "detail": f"مخزن المستشفى: البرنامج {got.get(k)}، المفروض {want[k]['units'] if k in want else 0}"})
+        out["hospital"] = {"rows": len(want), "units": sum(h["units"] for h in want.values()), "mismatches": len(bad),
+                           "cost": egp(sum(h["units"] * (h["unit_cost"] or 0) for h in want.values()))}
     counts = {}
     for t in ex.tables.values():
         _, rows = ex.raw(t["name"])
-        c = {"manifest": t["rows"], "csv": len(rows), "archive": (archive_counts or {}).get(t["name"])}
+        c = {"manifest": t["rows"], "csv": len(rows), "archive": (archive_counts or {}).get(t["name"]),
+             "quarantined": len(ex.quarantined(t["name"]))}
         counts[t["name"]] = c
         if (t["rows"] is not None and c["csv"] != t["rows"]) or (archive_counts is not None and c["archive"] != c["csv"]):
             mm.append({"what": "history", "code": t["name"], "name": "", "value": Decimal(0),
                        "detail": f"عدد الصفوف: التصدير {t['rows']}، الملف {c['csv']}، الأرشيف {c['archive']}"})
     out["history"] = {k: counts[ex.tables[k.lower()]["name"]] for k in HISTORY_TABLES if ex.has(k)}
+    out["history_quarantined"] = {n: c["quarantined"] for n, c in counts.items() if c["quarantined"]}
     out["tables"] = len(counts)
     for b in plan.blocking:
         mm.append({"what": "data-quality", "code": b["code"], "name": b["field"], "detail": b["action"],
@@ -1788,7 +2308,7 @@ def reconcile(db: Database, ctx: Context, plan: Plan, runs: dict, ex: Export, ar
 # E-Stock settings seen on its screens (manager's tour 18/11 22:45) and what the program has for each:
 # listed in the report, never applied by the move (returns and printing are the owner's rules).
 ESTOCK_SETTINGS = (       # (E-Stock's setting, what the program has, recommended value) - none applied
-    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 7 زي إي ستوك"),
+    ("مرتجع البيع خلال 7 أيام", "فيه إعداد (return_window_days، الافتراضي 14)", "المقترح: 14 (قرار المالك 21/11)"),
     ("منع بيع المنتهي", "البرنامج أصلًا مابيبيعش تشغيلة منتهية", "المقترح: زي ما هو"),
     ("تنبيه لو فيه صلاحية أقرب", "مفيش إعداد: البرنامج بيبيع الأقرب صلاحية الأول لوحده", "المقترح: مش محتاج"),
     ("شريط الصلاحية 6 شهور", "إعداد تشغيل (PHARM_SHORT_EXPIRY_DAYS=180)", "المقترح: 180 يوم زي ما هو"),
@@ -1912,12 +2432,27 @@ def run(db: Database, ctx: Context, *, export_dir: Path, out_dir: Path, archive_
     from .estock_job import read_packs
     ex = Export(export_dir, database)
     packs = read_packs(Path(packs_file)) if packs_file else {}
+    side = decision_json(Path(packs_file)) if packs_file else None
+    if side and side != Path(packs_file):            # packs.xlsx chosen: packs.json next to it counts as well
+        for code, n in read_packs(side).items():
+            if packs.get(code, n) != n:
+                raise ValidationFailed(f"عدد الوحدات للكود {code} مختلف بين packs.xlsx ({packs[code]}) و packs.json ({n})")
+            packs[code] = n
+    classes = read_classes(Path(packs_file)) if packs_file else {}
+    duplicates = read_duplicates(Path(packs_file)) if packs_file else {}
     confirm = read_confirm(Path(confirm_file)) if confirm_file else {}
     plan = build_plan(ex, packs=packs, stock_source=stock_source, stores=stores, confirm=confirm,
-                      round_piastres=round_piastres)
+                      round_piastres=round_piastres, classes=classes, duplicates=duplicates)
     why = refusal(db, ctx, ex.source_sha())
     if why:
         raise Conflict(why, code="estock_db_refused")
+    if _has_money(db):        # the money step will post these openings: an unknown balance is never a zero opening
+        for d in (plan.checks.get("money_info") or {}).get("cash_depots", []):
+            if d.get("action") in ("account", "account_stopped") and d.get("piasters") is None:
+                plan.issue("Cash_depots", d["estock_id"], d["name"], d.get("balance_column") or "balance",
+                           d.get("balance") or "(مش مقروء)",
+                           "رصيد مكان الفلوس ده مش مقروء من إي ستوك: الرصيد الافتتاحي لحسابه محتاج قرار قبل النقل",
+                           block=True)
     if write_archive and archive_path.exists() and (estock_archive.source_sha(archive_path) != ex.source_sha()
                                                     or estock_archive.owner_org(archive_path) != ctx.org_id):
         raise Conflict(f"فيه أرشيف إي ستوك من تصدير تاني: {archive_path}. مفيش أي حاجة اتكتبت", code="estock_db_refused")
