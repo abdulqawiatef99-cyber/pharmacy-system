@@ -118,3 +118,31 @@ class TestTheSourceNameIsNoWayAround(DBTestCase):
         di = DataImport(self.db)
         run = di.analyze(self.ctx, sheet(ROWS), "items.xlsx", source_system="estock", packs_set_later=True)
         self.assertEqual({r["action"] for r in di.get(self.ctx, run)["rows"]}, {"create"})
+
+
+class TestCodexFindings(DBTestCase):
+    def test_the_form_in_its_own_column_is_asked_too(self):
+        di = DataImport(self.db)
+        rows = [["كود الصنف", "اسم الصنف", "الشكل", "سعر الجمهور", "عدد الوحدات"],
+                [401, "OtherSynthetic 400mg 20", "tab", 40, None],
+                [402, "LiquidSynthetic 120", "syrup", 25, None]]
+        run = di.analyze(self.ctx, sheet(rows), "forms.xlsx")
+        got = {r["data"]["code"]: r for r in di.get(self.ctx, run)["rows"]}
+        self.assertEqual(got["401"]["action"], "review")
+        issue = [i for i in got["401"]["issues"] if i["code"] == "unknown_pack_layout"][0]
+        self.assertEqual(issue["count"], 20)
+        self.assertEqual(got["402"]["action"], "create")
+
+    def test_the_confirmed_pack_may_equal_an_existing_items_and_still_be_kept_apart(self):
+        di = DataImport(self.db)
+        run = di.analyze(self.ctx, sheet(ROWS), "items.xlsx")
+        first = {r["data"]["code"]: r for r in di.get(self.ctx, run)["rows"]}
+        di.decide(self.ctx, run, first["201"]["id"], "pack:2")
+        di.apply(self.ctx, run)
+        run = di.analyze(self.ctx, sheet([HEAD, [301, "Synthofen 400mg 20 tab", 40, None]]), "second.xlsx")
+        row = di.get(self.ctx, run)["rows"][0]
+        self.assertEqual(row["action"], "review")
+        di.decide(self.ctx, run, row["id"], "pack:2")        # the person keeps it as its own item, same layout
+        di.apply(self.ctx, run)                               # used to fail with duplicate_item and roll back
+        packs = [r["pack_size"] for r in self.db.all("SELECT pack_size FROM items WHERE code IN ('201','301')")]
+        self.assertEqual(packs, [2, 2])

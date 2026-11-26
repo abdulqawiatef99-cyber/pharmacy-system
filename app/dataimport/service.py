@@ -781,6 +781,13 @@ class DataImport:
                     dup = action == "create" and bool(r["decision"]) and any(
                         i["code"] in ("duplicate_item_in_file", "same_item_exists", "duplicate_code_in_file")
                         for i in json.loads(r["issues"]))
+                    if action == "create" and (r["decision"] or "").startswith("pack:") and not dup:
+                        # the confirmed layout can make this the same item as an existing one (the analysis
+                        # compared with pack 1): the person chose a separate item, so it is kept apart
+                        key = dedupe_key(d.get("_name") or "", d.get("strength"), d.get("dosage_form"),
+                                         d["pack_size"], d.get("manufacturer"))
+                        dup = bool(self.db.one("SELECT 1 FROM items WHERE org_id=? AND dedupe_key=?",
+                                               (ctx.org_id, key)))
                     self._apply_item(ctx, d, action, target, run_id, done,
                                      keep_duplicate=d.get("code") or r["row_no"] if dup else None)
                 elif run["kind"] in ("suppliers", "customers"):
@@ -962,6 +969,8 @@ def _unknown_layout(d: dict) -> dict | None:
         return None
     from ..reports.item_health import _COUNTED_FORMS, strip_suggestions
     p = parse_name(d["_name"])
+    if not p.form and d.get("dosage_form"):         # the form in its own column: read the name with it
+        p = parse_name(f"{d['_name']} {d['dosage_form']}")
     if not p.pack_count or p.pack_count < 2 or p.form not in _COUNTED_FORMS:
         return None
     return {"code": "unknown_pack_layout", "count": p.pack_count, "suggest": strip_suggestions(p.pack_count)}
