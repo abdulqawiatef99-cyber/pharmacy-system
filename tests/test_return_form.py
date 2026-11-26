@@ -72,7 +72,7 @@ class TestRefundOptions(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertEqual(out[0], [["cash", True, False], ["credit", False, True]])           # cash disabled
         self.assertEqual(out[1], [["cash", False, True], ["credit", False, False]])          # both open
-        self.assertEqual(out[2], "نقدًا من الخزينة (حتى 30.00 ج)")                          # the cap is shown
+        self.assertEqual(out[2], "نقدًا من الدرج (حتى 30.00 ج)")                          # the cap is shown
         self.assertEqual(out[3], [["cash", False, False], ["card", False, True]])           # card back to card
         self.assertEqual(out[4], [["cash", False, True]])                                   # no card option
         self.assertEqual(out[5], [["cash", True, False], ["credit", False, True]])          # courier's cash

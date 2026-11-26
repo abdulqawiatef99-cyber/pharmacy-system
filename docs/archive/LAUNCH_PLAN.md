@@ -1,3 +1,5 @@
+> Archived 26/11/2026: obsolete. The launch happened on 21/11 (v0.4.0); roles and rules are in `docs/OWNER_RULES.md`.
+
 # LAUNCH PLAN: who does what until the first release
 
 Owner decision, 2026-10-30. Every agent (Claude, Codex, ChatGPT, any other) reads this file right after

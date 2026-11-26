@@ -39,3 +39,7 @@ table.den th:nth-child(2), table.den td:nth-child(2) { width: 12mm; text-align: 
 table.den th:last-child { width: 23mm; text-align: left; }
 body.w58 table.den th:nth-child(2), body.w58 table.den td:nth-child(2) { width: 9mm; }
 body.w58 table.den th:last-child { width: 17mm; }
+
+/* UX-26 (owner 26/11): the customer's name, phone and address bold and larger */
+b.cu { font-size: 14px; }
+body.w58 b.cu { font-size: 12px; }

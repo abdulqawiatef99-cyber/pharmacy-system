@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -66,6 +67,62 @@ class Counting:
             audit.record(self.db, ctx, "count.create", "count_session", sid,
                          after={"scope": scope, "filter": flt})
         return sid
+
+    def daily_pick(self, ctx: Context, n: int = 10) -> list[dict]:
+        """U3-5 «جرد يومي صغير»: about `n` items to count today without stopping sales, a mix of the most valuable
+        on the shelf, the fastest sellers of the last 30 days, and items that had a count difference in the last
+        90 days; anything counted in the last 14 days is skipped. Only items with stock."""
+        ctx.require("inventory.count")
+        from datetime import timedelta
+        from ..core.accounts import iso, utcnow
+        org, br = ctx.org_id, ctx.branch_id
+        now = utcnow()
+        d14, d30, d90 = (iso(now - timedelta(days=k)) for k in (14, 30, 90))
+        recent = {r["item_id"] for r in self.db.all(
+            "SELECT DISTINCT e.item_id FROM count_entries e JOIN count_sessions c ON c.id=e.session_id"
+            " WHERE c.org_id=? AND c.branch_id=? AND c.status<>'cancelled' AND e.counted_at>=?", (org, br, d14))}
+        base = ("SELECT i.id, coalesce(i.name_en, i.name_ar) label, i.location, sum(sb.qty) q, c.avg_cost FROM items i"
+                " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+                " LEFT JOIN item_costs c ON c.item_id=i.id AND c.org_id=i.org_id AND c.branch_id=sb.branch_id"
+                " WHERE i.org_id=? AND i.status='active' AND coalesce(i.is_service,0)=0"
+                + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0") +    # Codex P1 on #418: as search
+                " GROUP BY i.id HAVING sum(sb.qty)>0")
+        stock = {r["id"]: dict(r) for r in self.db.all(base, (br, org))}       # one query, Decimal in Python
+        for i in recent:                       # skipped before the lists are cut (Codex P2 on #418)
+            stock.pop(i, None)
+        value = sorted(stock, key=lambda i: -(Decimal(stock[i]["avg_cost"] or "0") * stock[i]["q"]))
+        fast = [r["item_id"] for r in self.db.all(
+            "SELECT item_id, -sum(qty_delta) s FROM stock_movements WHERE org_id=? AND branch_id=? AND movement_type='sale'"
+            " AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 2000", (org, br, d30))]
+        diff = [r["item_id"] for r in self.db.all(
+            "SELECT item_id, sum(abs(qty_delta)) s FROM stock_movements WHERE org_id=? AND branch_id=?"
+            " AND ref_type='count_session' AND created_at>=? GROUP BY item_id ORDER BY s DESC LIMIT 2000", (org, br, d90))]
+        picked, why = [], {}
+        lists = [("diff", diff), ("value", value), ("fast", fast)]
+        while len(picked) < n and any(l for _, l in lists):
+            for tag, l in lists:
+                while l:
+                    i = l.pop(0)
+                    if i in stock and i not in recent and i not in why:
+                        picked.append(i)
+                        why[i] = tag
+                        break
+                if len(picked) >= n:
+                    break
+        label = {"diff": "كان فيه فرق في جرد قريب", "value": "قيمته عالية", "fast": "بيتباع كتير"}
+        return [{"item_id": i, "label": stock[i]["label"], "location": stock[i]["location"], "why": label[why[i]]} for i in picked]
+
+    def create_daily(self, ctx: Context, n: int = 10) -> str:
+        """Opens today's mini-count of the picked items (blind); sales go on, the expected qty follows them."""
+        from ..sales.service import local_today
+        if self.db.one("SELECT 1 FROM count_sessions WHERE org_id=? AND branch_id=? AND status='open' AND title=?",
+                       (ctx.org_id, ctx.branch_id, f"جرد يومي صغير {local_today().isoformat()}")):
+            raise Conflict("جرد النهارده الصغير مفتوح بالفعل: كمّله من القايمة", code="daily_open")
+        picks = self.daily_pick(ctx, n)
+        if not picks:
+            raise ValidationFailed("مفيش أصناف تتجرد النهارده (كل اللي عليه رصيد اتجرد في آخر أسبوعين)")
+        return self.create(ctx, title=f"جرد يومي صغير {local_today().isoformat()}", scope="items",
+                           item_ids=[p["item_id"] for p in picks], blind=True)
 
     def _session(self, ctx: Context, sid: str, *, open_only: bool = False) -> dict:
         s = self.db.one("SELECT * FROM count_sessions WHERE id=? AND org_id=?", (sid, ctx.org_id))
@@ -174,6 +231,12 @@ class Counting:
 
     def variances(self, ctx: Context, sid: str) -> dict:
         ctx.require("inventory.adjust")
+        with self.db.read_snapshot():
+            return self._variances(ctx, sid)
+
+    def _variances(self, ctx: Context, sid: str) -> dict:
+        from ..sales.service import local_today
+
         s = self._session(ctx, sid)
         entries = [dict(e) for e in self.db.all(
             "SELECT * FROM count_entries WHERE session_id=? AND superseded_by IS NULL", (sid,))]
@@ -208,8 +271,21 @@ class Counting:
                             (ctx.org_id, s["branch_id"], item_id))
             r["value"] = str((Decimal(c["avg_cost"]) * r["difference"]).quantize(Decimal("0.01"), ROUND_HALF_UP)) \
                 if c and ctx.can("costs.read") else None
-            r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
-                                     (item_id,))["n"]
+            # U3-5: the order of the report is by value (cost of the difference), high -> low, whoever reads it;
+            # the figure itself is shown only with costs.read
+            # items with a cost rank by money; an item without one comes after them, by units (review P2)
+            r["_order"] = (1, abs(Decimal(c["avg_cost"]) * r["difference"])) if c and c["avg_cost"] and Decimal(c["avg_cost"]) \
+                else (0, Decimal(abs(r["difference"])))
+            r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=? AND org_id=?",
+                                     (item_id, ctx.org_id))["n"]
+            if not bk and r["difference"] > 0 and self.db.one(
+                    "SELECT 1 FROM batches b WHERE b.org_id=? AND b.item_id=?"
+                    " AND (b.expiry_date<? OR EXISTS (SELECT 1 FROM recall_matches m"
+                    " WHERE m.org_id=b.org_id AND m.batch_id=b.id AND m.status IN ('confirmed','handled')))"
+                    " LIMIT 1", (ctx.org_id, item_id, local_today().isoformat())):
+                r["problem"] = "surplus_requires_batch"
+                r["problem_message"] = (f"«{r['label']}»: فيه تشغيلة منتهية أو مسحوبة؛"
+                                        " ألغِ الجرد ده وأعد العدّ بالتشغيلة الفعلية قبل الاعتماد")
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
             if r["last_seq"] > r["seq"] and self._moved_between(ctx, s["branch_id"], item_id, bk or None,
@@ -225,17 +301,26 @@ class Counting:
             r.pop("last_seq")
             out.append(r)
         counted_items = {r["item_id"] for r in out}
-        uncounted = []
-        # one grouped query (not one per item): 20,000 items stay quick on a weak PC
-        for it in self.db.all("SELECT i.id, i.name_en, i.name_ar, i.location, sum(sb.qty) q FROM items i"
-                              " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
-                              " WHERE i.org_id=? AND i.status='active' GROUP BY i.id HAVING sum(sb.qty) <> 0",
-                              (s["branch_id"], ctx.org_id)):
+        uncounted, reviewed_stock = [], []
+        # Use each item's last branch movement as well as its quantity. A transfer between lots can
+        # change which units would be zeroed even when the total is unchanged.
+        for it in self.db.all("SELECT i.id, i.name_en, i.name_ar, i.location, sum(sb.qty) q,"
+                              " (SELECT max(m.rowid) FROM stock_movements m WHERE m.org_id=i.org_id"
+                              " AND m.branch_id=sb.branch_id AND m.item_id=i.id) last_movement"
+                              " FROM items i JOIN stock_balances sb"
+                              " ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+                              " WHERE i.org_id=? AND i.status='active' GROUP BY i.id HAVING sum(sb.qty) <> 0"
+                              " ORDER BY i.id", (s["branch_id"], ctx.org_id)):
             if it["id"] in counted_items or not self._in_scope(s, dict(it)):
                 continue
             uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"], "system_qty": it["q"]})
-        out.sort(key=lambda r: abs(r["difference"]), reverse=True)
+            reviewed_stock.append((it["id"], it["q"], it["last_movement"]))
+        confirmation = hashlib.sha256(json.dumps([sid, reviewed_stock]).encode("ascii")).hexdigest()
+        out.sort(key=lambda r: (*r["_order"], abs(r["difference"])), reverse=True)
+        for r in out:
+            r.pop("_order", None)
         return {"session": s, "lines": out, "uncounted_with_stock": uncounted,
+                "uncounted_confirmation": confirmation,
                 "summary": {"counted_lines": len(out),
                             "shortage_units": -sum(r["difference"] for r in out if r["difference"] < 0),
                             "excess_units": sum(r["difference"] for r in out if r["difference"] > 0),
@@ -244,11 +329,10 @@ class Counting:
     def approve(self, ctx: Context, sid: str, *, zero_uncounted: bool = False,
                 reason: str | None = None, reasons: dict | None = None,
                 shortage_reason: str = "lost", zero_reason: str = "lost",
-                uncounted_item_ids: list[str] | None = None) -> dict:
+                uncounted_item_ids: list[str] | None = None, uncounted_confirmation: str | None = None) -> dict:
         """reasons: {"item_id|batch_key": reason code} for single lines; others take
         shortage_reason (less than the system) or "found" (more than the system).
-        zero_uncounted zeroes exactly the uncounted items the approver was shown (uncounted_item_ids):
-        an item received after the preview is refused, never zeroed unseen (#324 S15)."""
+        zero_uncounted requires the list and stock revision from the approver's preview."""
         from . import adjust
         ctx.require("inventory.adjust")
         if zero_uncounted is not True and zero_uncounted is not False:
@@ -266,13 +350,17 @@ class Counting:
             v = self.variances(ctx, sid)
             bad = [r for r in v["lines"] if r.get("problem")]
             if bad:
-                stale = [r["problem_message"] for r in bad if r["problem"] == "adjusted_since_count"]
+                messages = [r["problem_message"] for r in bad if r.get("problem_message")]
                 msg = "توجد أصناف تحتاج إلى مراجعة قبل الاعتماد"
-                if stale:
-                    msg = "لا يمكن اعتماد الجرد: " + stale[0] + (
-                        f" (و{len(stale) - 1} صنف آخر بالحالة نفسها)" if len(stale) > 1 else "")
+                if messages:
+                    msg = "لا يمكن اعتماد الجرد: " + messages[0]
                 raise Conflict(msg, code="count_problems",
                                details={"lines": bad})
+            if zero_uncounted and (
+                    uncounted_confirmation != v["uncounted_confirmation"]
+                    or {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}):
+                raise Conflict("رصيد الأصناف اللي لم تُجرد اتغيّر أو التقرير قديم؛ اعرض الفروق تاني قبل التصفير",
+                               code="uncounted_changed")
             posted = 0
             for r in v["lines"]:
                 diff = r["difference"]
@@ -283,9 +371,6 @@ class Counting:
                 self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid, why)
                 posted += 1
             if zero_uncounted:
-                if {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}:
-                    raise Conflict("الأصناف اللي لم تُجرد اتغيّرت بعد ما عرضت التقرير (صنف اتورد أو اتباع)؛"
-                                   " اعرض الفروق تاني قبل التصفير", code="uncounted_changed")
                 for u in v["uncounted_with_stock"]:
                     self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid, zero_reason)
                     posted += 1

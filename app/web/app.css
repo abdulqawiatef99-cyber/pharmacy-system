@@ -149,6 +149,12 @@ input.narrow { width: 80px; }
 dialog { border: 1px solid var(--line); border-radius: 14px; padding: 20px; max-width: 420px; width: calc(100% - 32px);
   background: var(--panel); color: var(--ink); }
 dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.invoice-item-card { max-width: 760px; max-height: calc(100dvh - 32px); }
+.invoice-item-card h3 { margin-top: 12px; }
+.invoice-card-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.invoice-card-fields dt { color: var(--muted); }
+.invoice-card-fields dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+[data-price-warning] { margin-top: 4px; line-height: 1.35; }
 .approve label.f { margin-top: 10px; } .approve select, .approve input { width: 100%; }
 .notes { list-style: none; padding: 0; margin: 0; }
 .notes li { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: start; }
@@ -362,6 +368,11 @@ ul.cols li { break-inside: avoid; }
 /* quick-sale buttons and the similar/alternative panel */
 .qsale h2 { margin: 0; }
 .qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+/* U4-17: the quick sale is one sideways row under the invoice; shrunk to its title once the invoice has an item */
+.qgrid.qrow { display: flex; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 4px; scroll-snap-type: x proximity; }
+.qgrid.qrow .qbtn { flex: 0 0 150px; min-height: 52px; scroll-snap-align: start; }
+.qsale.shrunk { padding-top: 6px; padding-bottom: 6px; }
+.qsale.shrunk h2 { font-size: 1rem; }
 .qbtn { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-height: 64px; padding: 8px 8px 8px 22px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; text-align: start; font: inherit; }
 .qbtn:hover:not(:disabled) { border-color: var(--ink); }
@@ -433,3 +444,6 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .cart tbody tr.sel { outline: 2px solid var(--brand, #0a7); outline-offset: -2px; }
 th[data-sort] { cursor: pointer; user-select: none; }
 th[data-sort]::after { content: " " attr(data-dir); }
+
+#estockMove progress { inline-size: min(100%, 28rem); margin-block-end: .75rem; }
+#estockMoveReport { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }

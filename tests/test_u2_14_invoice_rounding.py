@@ -219,8 +219,9 @@ class TestReceiptShowsIt(Rounded):
         from app.printing.escpos import receipt_lines
         sid, _ = self.sale()
         self.pay(sid, paid_cash=1900)
-        lines = receipt_lines("x", self.s.get(self.ctx, sid), "now")
+        lines = receipt_lines("x", self.s.get(self.ctx, sid), "now", {"show_rounding": True})   # UX-26: opt-in
         self.assertIn(("row", "التقريب", "+0.10"), lines)
+        self.assertNotIn("التقريب", [l[1] for l in receipt_lines("x", self.s.get(self.ctx, sid), "now")])
         self.assertIn(("total", "المطلوب", "19.00"), lines)
 
 

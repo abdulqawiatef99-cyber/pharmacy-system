@@ -192,13 +192,15 @@ class TestS28CancelApprovedPurchase(_Base):
         self.assertEqual(self.qty(self.it), 0)
         self.assertEqual(self.owed(self.a), 0)
 
-    def test_a_free_invoice_with_a_credited_return_still_comes_to_zero(self):
-        """Codex P2 on #347: nothing was posted for the invoice, but a return of its units was credited at an
-        agreed value; the cancel must take that credit back or the supplier is left owing 3.60."""
-        iid, v = self.buy(self.a, self.it, 10, 0)
+    def test_a_free_invoice_with_a_legacy_credit_still_comes_to_zero(self):
+        """An already posted return at a manual value must still be reversed on cancellation."""
+        from unittest.mock import patch
+
+        iid, v = self.buy(self.a, self.it, 10, 100, total=0, extra_discount=1000)
         self.assertEqual(self.owed(self.a), 0)
-        returns.create(self.db, self.ctx, self.a, [{"item_id": self.it, "batch_id": self.lot(self.it), "qty_base": 4,
-                                                    "reason": "expired", "unit_value": 90}])
+        with patch.object(returns, "_lot_return_rows", return_value=[(4, 90, 0, None, 0)]):
+            returns.create(self.db, self.ctx, self.a, [{"item_id": self.it, "batch_id": self.lot(self.it), "qty_base": 4,
+                                                        "reason": "expired", "unit_value": 90}])
         self.assertEqual(self.owed(self.a), -360)
         self.p.cancel(self.ctx, iid, "إلغاء تجربة", v)
         self.assertEqual(self.qty(self.it), 0)

@@ -10,10 +10,10 @@ from ..core.permissions import Context
 from ..db import Database
 from . import logo, qr, qrlinks
 
-DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا لزيارتكم — ألف سلامة",
+DEFAULTS = {"paper": 80, "template": "detailed", "title": "", "lines": ["", ""], "footer": "شكرًا لزيارتكم — ألف سلامة",
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
             "show_return_policy": True, "label_size": "38x25",
-            "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
+            "label_lang": "browser", "label_barcode_source": "internal", "label_target": "", "label_dpi": 203, "label_gap": 2,
             "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
             "label_variant": "current",   # #100: how the TSPL job is built (labels.VARIANTS); saved after a device test
             "label_flip": False,          # #100: driver labels turned 180° (a driver set to print upside down)
@@ -30,7 +30,10 @@ DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا �
             # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
             "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24",
             # #100 (owner, 12/11): the label's words in English (default) or Arabic; the English pharmacy name
-            "label_text_lang": "en", "label_pharmacy_en": ""}
+            "label_text_lang": "en", "label_pharmacy_en": "",
+            # UX-26 (owner 26/11): discount lines can be hidden (the lines then show net amounts); the rounding line
+            # is hidden unless asked for (the total printed is the final amount)
+            "show_item_discount": True, "show_invoice_discount": True, "show_rounding": False}
 _KEEP = object()
 LABEL_SIZES = ("38x25", "50x30", "58x40")
 DRAWER_TIMINGS = ("before", "with", "after")
@@ -51,10 +54,20 @@ def get(db: Database, org_id: str) -> dict:
     except ValueError:
         stored = {}
     out = {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
+    from .escpos import RECEIPT_TEMPLATES
+    if out["template"] not in RECEIPT_TEMPLATES:
+        out["template"] = DEFAULTS["template"]
     from .labels import DEFAULT_FIELDS
     out["label_fields"] = {**DEFAULT_FIELDS, **{k: bool(v) for k, v in (out["label_fields"] or {}).items() if k in DEFAULT_FIELDS}}
     out["has_logo"] = bool(db.one("SELECT 1 FROM org_settings WHERE org_id=? AND key=?", (org_id, logo.KEY)))
     return out
+
+
+def label_barcode_source_ok(value) -> str:
+    from .labels import BARCODE_SOURCES
+    if value not in BARCODE_SOURCES:
+        raise ValidationFailed("اختر كود الصنف أو الكود الدولي للملصقات")
+    return value
 
 
 def label_size_ok(size) -> str:
@@ -143,10 +156,17 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if data["paper"] not in (80, 58):
             raise ValidationFailed("مقاس الورق 80 أو 58 مم")
         new["paper"] = data["paper"]
+    if "template" in data:
+        from .escpos import RECEIPT_TEMPLATES
+        if data["template"] not in RECEIPT_TEMPLATES:
+            raise ValidationFailed("قالب الإيصال غير صحيح")
+        new["template"] = data["template"]
     if "names" in data:
         if data["names"] not in ("en", "ar", "both"):
             raise ValidationFailed("اختيار غير صحيح")
         new["names"] = data["names"]
+    if "label_barcode_source" in data:
+        new["label_barcode_source"] = label_barcode_source_ok(data["label_barcode_source"])
     if "label_size" in data:
         new["label_size"] = label_size_ok(data["label_size"])       # a preset or the owner's own W x H (#84)
     if "label_fields" in data:
@@ -234,9 +254,13 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
     if "logo" in data:              # data URL from the settings page; "" / null removes the logo
         png = logo.clean(data["logo"]) if data["logo"] else None
     for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash",
-              "show_item_count", "show_change"):
+              "show_item_count", "show_change", "show_item_discount", "show_invoice_discount", "show_rounding"):
         if k in data:
             new[k] = bool(data[k])
+    if data.get("preview") is True:
+        from .service import receipt_preview
+        preview_logo = logo.get_png(db, ctx.org_id) if png is _KEEP else png
+        return {"png": receipt_preview(db, ctx, new, preview_logo)}
     with db.transaction():
         if png is not _KEEP:
             audit.record(db, ctx, "settings.receipt_logo", "organization", ctx.org_id,

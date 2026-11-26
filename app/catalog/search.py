@@ -139,8 +139,12 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
                    f" WHERE b.org_id=? AND b.barcode IN ({','.join('?' * len(keys))})", (ctx.org_id, *keys))
         if r:
             return {"items": [dict(r)], "hint": None}
+    codes = _exact_code(db, ctx.org_id, q)
+    if re.fullmatch(r"[0-9]{3,5}", q) and codes and codes[0]["code"] == q:
+        # Printed short codes are exact identifiers, even if another item's name contains the digits.
+        return {"items": [codes[0]], "hint": None}
     found: dict[str, dict] = {}
-    for r in _exact_code(db, ctx.org_id, q):
+    for r in codes:
         found.setdefault(r["id"], r)
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)

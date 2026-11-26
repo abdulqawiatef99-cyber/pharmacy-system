@@ -5,6 +5,7 @@ again into stock, drawer, treasury, balances, reports or claims. Synthetic data 
 The proof: every table of the program's database is hashed, and the program's own reports are read, before and
 after every history view is opened; both must be identical."""
 import hashlib
+import json
 from datetime import date, timedelta
 
 from tests.helpers import OWNER_PW, needs_browser
@@ -53,6 +54,10 @@ class EverywhereBase(ApiBase):
             r = self.c.get(url, headers={"X-Requested-With": "pharm"})
             self.assertEqual(r.status_code, 200, (url, r.text[:200]))
             out[url] = r.text
+            if "/reports/invoices" in url:                               # `as_of` is the clock of the answer
+                body = r.json()
+                body.pop("as_of")
+                out[url] = json.dumps(body, sort_keys=True, ensure_ascii=False)
         return out
 
     def every_history_view(self):
@@ -186,7 +191,9 @@ class TestReviewFixes(EverywhereBase):
         self.assertIn("unreadable", body)
         at = js.index("estockSalesBelow($(\"#iBox\")")
         call = js[at - 600:at + 300]
-        self.assertIn("R.truncated", call)                    # a capped program total is never added up
+        # since #461 the program total is the whole period's whatever page is listed; only an item filter
+        # (E-Stock has no such total) leaves it out of the sum
+        self.assertIn("A.item ? null : T.total", call)
         self.assertIn("00:00", call)                          # part of a day: E-Stock counts whole days only
 
 

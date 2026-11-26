@@ -43,7 +43,9 @@ from ..core.numbers import whole_number
 from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
+from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
+from ..dataimport.estock_move import EstockMove
 from ..dataimport.service import DataImport, export_catalog, template_xlsx
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
@@ -73,7 +75,7 @@ def _static_v(name: str) -> str:
 
 
 # Shell assets referenced by index.html; each gets its content hash in the URL (#85).
-SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
+SHELL_ASSETS = ("app.css", "app.js", "scan.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
 def _web_build() -> str:
@@ -188,6 +190,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     s = settings or config_mod.load()
     if db is None:
         s.data_dir.mkdir(parents=True, exist_ok=True)
+        from ..core import backup as _backup
+        _backup.finish_interrupted_restore(Path(s.db_path))   # a restore cut by a power loss: one whole set
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)
@@ -207,6 +211,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
+    estock_move = EstockMove(db, s.data_dir)
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
@@ -367,7 +372,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
         # This database-only route commits its action and replay record together.
-        if req.method == "POST" and (req.url.path == "/api/cash/movements" or
+        if req.method == "POST" and (req.url.path in ("/api/cash/movements", "/api/estock/move") or
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
@@ -840,6 +845,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler
+    async def staff_ui_api(req):
+        from ..core import staff_ui
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(staff_ui.save(db, ctx, await body(req)))
+        if req.query_params.get("all"):
+            ctx.require("users.manage")
+            return J(staff_ui.get(db, ctx.org_id))
+        return J(staff_ui.mine(db, ctx))
+
+    @handler
     async def rounding_api(req):
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
@@ -926,11 +942,40 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def item_pack_correct(req):
         from ..catalog import repack
         b = await body(req)
-        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or ""))
+        return J(repack.correct_pack(db, ctx_of(req), req.path_params["id"], b.get("pack_size"), b.get("reason") or "",
+                                     expected_pack=b.get("expected_pack"), base_unit_name=b.get("base_unit_name")))
+
+    @handler
+    async def move_pack_review(req):
+        from ..dataimport import migration_review as review
+        return J({"items": await off_loop(review.pack_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_pack_review(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.review_pack, db, ctx_of(req), req.path_params["id"],
+                                         data.get("pack_size"), data.get("reason"), data.get("base_unit_name")))
+
+    @handler
+    async def move_customer_name_review(req):
+        from ..dataimport import migration_review as review
+        return J({"customers": await off_loop(review.customer_rows, db, ctx_of(req))})
+
+    @handler
+    async def move_apply_customer_name(req):
+        from ..dataimport import migration_review as review
+        data = await body(req)
+        return J(await run_in_threadpool(review.apply_customer_name, db, ctx_of(req), req.path_params["id"],
+                                data.get("name"), data.get("current_name")))
 
     @handler
     async def item_card_get(req):
-        return J(item_card.card(db, ctx_of(req), req.path_params["id"]))
+        ctx = ctx_of(req)
+        if invoice_id := req.query_params.get("purchase"):
+            ctx = purch.receiving_context(ctx, invoice_id)
+        return J(item_card.card(db, ctx, req.path_params["id"],
+                                recent_purchases=req.query_params.get("recent_purchases") == "1"))
 
     @handler
     async def sections_suggest(req):
@@ -1010,9 +1055,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
+        offset = qp.get("offset") or "0"
+        if not (offset.isascii() and offset.isdigit()) or len(offset) > 9:
+            raise ValidationFailed("رقم الصفحة غير صحيح")
         return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
-                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
+                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1",
+                                 offset=int(offset), totals=qp.get("totals") != "0",
+                                 after=qp.get("after") or None, until=qp.get("until") or None))
 
     @handler
     async def owner_report(req):
@@ -1071,7 +1121,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
                                                  b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
                                                  note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
-        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
+        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note"),
+                                explicit_unit_values=True))
 
     @handler
     async def supplier_return_page(req):
@@ -1222,6 +1273,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note"), amount=amount))
 
     # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
+    def estock_move_context(req):
+        ctx = ctx_of(req)
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise Forbidden("افتح تجربة نقل إي ستوك من الكمبيوتر اللي عليه إي ستوك.", code="local_only")
+        return ctx
+
+    @handler
+    async def estock_move_status(req):
+        return J(await run_in_threadpool(estock_move.status, estock_move_context(req)))
+
+    @handler
+    async def estock_move_start(req):
+        ctx = estock_move_context(req)
+        replace_id = (await body(req)).get("replace_id")
+        await run_in_threadpool(estock_move.start, ctx, replace_id=replace_id)
+        return J({}, status_code=202)
+
     @handler
     async def estock_available(req):
         from ..dataimport import estock_history as eh
@@ -1831,6 +1899,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(purch.get(ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def purchase_scan(req):
+        return J(purch.scan_item(ctx_of(req), req.path_params["id"], req.query_params.get("barcode", "")))
+
+    @handler
     async def purchase_header(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -1841,7 +1913,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def line_add(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version")))
+        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version"),
+                                picked=b.get("picked") is True))
 
     @handler
     async def line_update(req):
@@ -1898,6 +1971,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             value = purch.price_review_default(ctx)
         return J({"default": value})
+
+    @handler
+    async def purchase_entry_settings(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        if req.method == "PUT":
+            return J(entry_settings.save(db, ctx, await body(req)))
+        return J(entry_settings.get(db, ctx.org_id))
 
     @handler
     async def purchase_approve(req):
@@ -2030,6 +2111,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_items(req):
+        """The items an items-scope count covers, by name (Codex P2 on #418: the daily count's picks stay visible)."""
+        ctx = ctx_of(req)
+        ctx.require("inventory.count")
+        s = db.one("SELECT scope, scope_filter FROM count_sessions WHERE id=? AND org_id=?", (req.path_params["id"], ctx.org_id))
+        if not s:
+            raise NotFound("الجرد غير موجود")
+        ids = (json.loads(s["scope_filter"] or "{}").get("item_ids") or []) if s["scope"] == "items" else []
+        names = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            hide = "" if ctx.can("items.hidden") else " AND coalesce(hidden,0)=0"     # Codex P1 on #418
+            names += [dict(r) for r in db.all(f"SELECT id, coalesce(name_en, name_ar) name, location FROM items"
+                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))}){hide}", (ctx.org_id, *part))]
+        return J({"items": names if len(ids) <= 50 else []})
+
+    @handler
     async def safety_rule_create(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2102,9 +2200,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_daily_pick(req):
+        return J({"items": counting.daily_pick(ctx_of(req), 10)})
+
+    @handler
     async def counts_create(req):
         ctx = ctx_of(req)
         b = await body(req)
+        if b.get("daily"):                  # U3-5: today's mini-count, picked by the program
+            sid = counting.create_daily(ctx, 10)
+            return J({"id": sid}, status_code=201)
         scope, ids = b.get("scope", "full"), b.get("item_ids")
         if scope == "category":            # count one section: its items, stored as an items-scope count
             cid = str(b.get("category_id") or "")
@@ -2133,7 +2238,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def counts_variances(req):
-        return J(counting.variances(ctx_of(req), req.path_params["id"]))
+        report = counting.variances(ctx_of(req), req.path_params["id"])
+        # The count screen echoes these IDs from the report it is displaying. Carry the
+        # stock revision in the first reference so existing tabs submit their own preview.
+        if report["uncounted_with_stock"]:
+            first = report["uncounted_with_stock"][0]
+            first["stock_item_id"] = first["item_id"]
+            first["item_id"] = f'{first["stock_item_id"]}:{report["uncounted_confirmation"]}'
+        return J(report)
 
     @handler
     async def counts_approve(req):
@@ -2143,10 +2255,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         zero = b.get("zero_uncounted", False)
         if not isinstance(zero, bool):       # the string "false" was truthy and zeroed every uncounted item (#324 X20)
             raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
+        ids = b.get("uncounted_item_ids")
+        confirmation = b.get("uncounted_confirmation")
+        if zero and isinstance(ids, list) and ids and isinstance(ids[0], str):
+            item_id, separator, revision = ids[0].partition(":")
+            if separator:
+                ids = [item_id, *ids[1:]]
+                if confirmation is None:
+                    confirmation = revision
         return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=zero,
                                   reason=b.get("reason"), reasons=reasons,
                                   shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost",
-                                  uncounted_item_ids=b.get("uncounted_item_ids")))
+                                  uncounted_item_ids=ids, uncounted_confirmation=confirmation))
 
     @handler
     async def counts_cancel(req):
@@ -2782,6 +2902,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def customer_usual(req):
+        from ..sales import customers as cu
+        return J({"items": await off_loop(cu.usual_items, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
     async def hikma_claim_api(req):
         from ..reports import hikma_claim as hk
         ctx, q = ctx_of(req), req.query_params
@@ -2811,6 +2936,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         # only this pharmacy's requests (Codex P1 on #407); requests before sign-in carry no pharmacy and are not shown
         mine = [{k: v for k, v in x.items() if k != "org_id"} for x in SLOW_LOG if x.get("org_id") == ctx.org_id]
         return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
+
+    @handler
+    async def shift_owner_summary(req):
+        from ..reports.owner_summary import shift_summary
+        return J(shift_summary(db, ctx_of(req), req.path_params["id"]))
 
     @handler
     async def cash_report(req):
@@ -2908,7 +3038,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def return_receipt(req):
         """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
-        from ..printing import settings as rs
+        from ..printing import escpos as _esc, settings as rs
         ctx = ctx_of(req)
         x = Sales(db).return_receipt(ctx, req.path_params["id"])
         r, sale = x["return"], x["sale"]
@@ -2923,13 +3053,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"
         rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -2964,25 +3094,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
             if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):
-                return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it['name_en']))}</bdi><br><small><bdi>{e(it['name_ar'])}</bdi></small>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"   # UX-26: an English name reads left to right
 
         from ..printing import escpos as _esc
 
         rows = []
         restricted = False
-        for l in sale["lines"]:
+        view = _esc.discount_view(sale, cfg)            # UX-26: hidden discount kinds folded into the lines
+        for l, prices, item_off in view["lines"]:
             restricted |= bool(l["item"].get("no_return"))
             exp = ""
             if cfg["show_expiry"]:
                 exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
                 exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
+            disc = "" if not item_off else f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
                 f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
-            for i, (qty, price, gross) in enumerate(_esc.public_price_rows(l)):
+            for i, (qty, price, gross) in enumerate(prices):
                 title = f"{name(l['item'])}{star}<br>" if not i else ""
                 shown = e(qty) + (f" × {m(price)}" if price is not None else "")
                 details = exp + disc if not i else ""
@@ -3046,11 +3177,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
             cu = sale["customer"]
-            info.append(f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else ""))
+            # UX-26 (owner 26/11): the customer's name, phone and address bold and larger
+            info.append('<b class="cu">' + f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else "") + "</b>")
             if sale.get("on_credit") and sale.get("kind") != "delivery":   # U2-23 (a delivery prints its own line)
-                info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
+                info += [f'<b class="cu">{lbl}: {e(cu[k])}</b>' for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
-            info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
+            info.append('<b class="cu">توصيل: ' + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)) + "</b>")
         policy = ""
         if cfg["show_return_policy"]:
             # one text for both receipts (B1): Arabic number agreement, 0 days, the ✱ note
@@ -3060,10 +3192,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}{header}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>{count}
-<tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
-<tr><td>الخصم</td><td>{m(sale['discount_total'])}</td></tr>
+<tr><td>الإجمالي</td><td>{m(view['subtotal'])}</td></tr>
+{f"<tr><td>الخصم</td><td>{m(view['shown'])}</td></tr>" if view['item'] is not None or view['invoice'] is not None else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
-{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
+{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') and cfg['show_rounding'] else ""}
 <tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
@@ -3101,7 +3233,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             left = data["code"] if on["code"] else data["value"] if on["digits"] else ""
             bottom = (f'<div class="c"><span>{e(left)}</span><span>{e(data["expiry"]) if on["expiry"] else ""}</span>'
                       f'<b>{e(data["price"]) if on["price"] else ""}</b></div>') if (left or on["expiry"] or on["price"]) else ""
-            cells += [f'<div class="lb">{top}{mark}{name}{bottom}</div>'] * n
+            content = bottom + name if data["internal_barcode"] and on["barcode"] else name + bottom
+            cells += [f'<div class="lb">{top}{mark}{content}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
         with db.transaction():
@@ -3265,6 +3398,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/staff-ui", staff_ui_api, methods=["GET", "PUT"]),
         Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
         Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
@@ -3336,6 +3470,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases", purchases_manual, methods=["POST"]),
         Route("/api/purchases/import", purchases_import, methods=["POST"]),
         Route("/api/purchases/{id}", purchase_get),
+        Route("/api/purchases/{id}/scan", purchase_scan),
         Route("/api/purchases/{id}", purchase_header, methods=["PATCH"]),
         Route("/api/purchases/{id}/lines", line_add, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}", line_update, methods=["PATCH"]),
@@ -3345,6 +3480,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/settings/purchase-price", purchase_price_default, methods=["GET", "PUT"]),
+        Route("/api/settings/purchase-entry", purchase_entry_settings, methods=["GET", "PUT"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["GET", "POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
@@ -3401,10 +3537,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
         Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/estock/move", estock_move_status),
+        Route("/api/estock/move", estock_move_start, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
         Route("/api/estock/period", estock_period),
         Route("/api/estock/invoices/{kind}/{id}", estock_invoice),
+        Route("/api/estock/pack-review", move_pack_review),
+        Route("/api/estock/pack-review/{id}", move_apply_pack_review, methods=["POST"]),
+        Route("/api/estock/customer-name-review", move_customer_name_review),
+        Route("/api/estock/customer-name-review/{id}", move_apply_customer_name, methods=["POST"]),
         Route("/api/estock/customers/{id}/items", estock_customer_items),
         Route("/api/estock/items/{id}/history", estock_item_history),
         Route("/api/estock/statement/{kind}/{id}", estock_statement),
@@ -3417,6 +3559,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
+        Route("/api/customers/{id}/usual", customer_usual),
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),
@@ -3445,6 +3588,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reports/hikma-claim", hikma_claim_api),
         Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/owner-summary", shift_owner_summary),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
         Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
@@ -3465,9 +3609,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
+        Route("/api/counts/daily-pick", counts_daily_pick),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
         Route("/api/counts/{id}/variances", counts_variances),
+        Route("/api/counts/{id}/items", counts_items),
         Route("/api/counts/{id}/approve", counts_approve, methods=["POST"]),
         Route("/api/counts/{id}/cancel", counts_cancel, methods=["POST"]),
         Route("/api/recalls/extract", recall_extract, methods=["POST"]),

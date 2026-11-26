@@ -2,6 +2,18 @@
 
 > الملفات الحقيقية **مش في المستودع** (في `/home/claude/estock_data` في بيئة الجلسة بس). اللي هنا شكل التقارير والنتائج.
 
+## تجربة النقل من جوه البرنامج لصيدلية جديدة
+
+على الكمبيوتر اللي عليه إي ستوك وويندوز ١٠ أو ١١، ادخل بحساب المالك وافتح «البرنامج» ← «نقل من إي ستوك» ← «ابدأ تجربة النقل». التجربة لصيدلية واحدة بقاعدة برنامج جديدة.
+الشاشة بتدور على قاعدة إي ستوك المحلية وبتعرض عدد الجداول اللي اتقرت. لو فيه أكتر من قاعدة مطابقة، القراية بتقف لحد ما تتحدد القاعدة الشغالة مع الدعم.
+يفضّل توقف التسجيل في إي ستوك وقت القراية عشان الفواتير والأرصدة اللي في التقرير توافق نفس الفترة.
+
+التجربة بتشتغل على نسخة من قاعدة البرنامج الجديدة. التقرير بيعرض المطابقة، والجداول الناقصة إن وجدت، وأسماء العملاء المختلفة بين العربي والإنجليزي، والأصناف اللي اسمها بيدل على أكتر من وحدة وعبوتها مسجلة بوحدة واحدة.
+لو الجهاز فصل، ارجع لنفس الشاشة واضغط «كمّل التجربة». البرنامج بيكمّل من القراية المحفوظة لو سليمة، أو يبدأ القراية من جديد لو وقفت قبل ما تخلص.
+بعد تصحيح البيانات في إي ستوك، اضغط «اعمل تجربة جديدة» للحصول على تقرير محدّث.
+
+القراية والتقارير بتفضل في مجلد بيانات البرنامج تحت `estock-move` على الجهاز. الشاشة تنتهي عند التقرير، والتجربة بتنزل مع «تحديث».
+
 ## التقارير وشكلها (Excel - Data Only)
 | التقرير | الشكل | اللي بيتعمل |
 |---|---|---|
@@ -125,3 +137,9 @@ python manage.py import-estock --catalog "قائمة الأصناف.xlsx" --stoc
 
 
 - **زراير سطح المكتب لخطوات النقل (الجزء 3، البند 5):** كل تشغيل للبرنامج بيحط على سطح المكتب «إي ستوك ١ - النسخ الاحتياطية» و«إي ستوك ٢ - القراية» و«إي ستوك ٣ - النقل للبرنامج»؛ كل زرار بيفتح النسخة اللي في فولدر «أدوات الصيدلية» (`app/core/tools_folder.py` `MOVE_BUTTONS`).
+
+## Owner review after the move
+
+- In **الأصناف → مراجعة العبوات بعد النقل**, start with the imported items with the highest on-hand cost value. The number printed in a name such as `20TAB` is a clue to check the physical pack. Enter the count of units you actually sell, their name and the reason. Enter 1 to confirm a whole-box item. A correction uses the stock ledger to keep the same number of boxes and records the reason. Remove the item from open sale drafts and finish any open count before correcting its pack. The item card and the sale search expose the same correction.
+- In **العملاء → مراجعة أسماء العملاء بعد النقل**, compare the current name, available Arabic and English names, and any customer-name snapshots stored on old sales. Pick the name for the active account. The archive stays read-only. The program links evidence by the archived customer ID, so sales with no mapped customer and ticket names are excluded.
+- In **إعدادات الملصقات**, choose **كود الصنف** to print the short internal code and its digits below the bars. Choose **الكود الدولي** for the previous barcode preference. Items without a short internal code use the existing barcode fallback. Search by scanning or typing the digits in a sale or purchase.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -37,13 +38,45 @@ def needs_browser(cls):
     return unittest.skipIf(why is not None, f"{why} (runs in CI)")(cls)
 
 
+_TEMPLATE: dict = {}
+
+
+def _migrated_template() -> Path:
+    """An empty, fully migrated database file, built once per test process and copied for each test.
+
+    Running every migration for every test was most of a test's set-up (about 70 ms of 75 on Linux, far more
+    on a Windows disk: on 19/11 the 1,905 tests no longer fitted the Windows job's time limit). The file holds
+    the schema and what the migrations themselves insert, nothing else: each test still creates its own
+    pharmacy and owner, so ids and dates are fresh per test exactly as before."""
+    if "path" not in _TEMPLATE:
+        folder = Path(tempfile.mkdtemp(prefix="pharm-test-template-"))
+        atexit.register(shutil.rmtree, folder, ignore_errors=True)
+        db = Database(folder / "template.db")
+        db.migrate()
+        db.close()                                   # the last connection: the WAL is folded into the one file
+        _TEMPLATE["path"] = folder / "template.db"
+    return _TEMPLATE["path"]
+
+
+def fresh_database(path: Path) -> Database:
+    """A fully migrated database at `path` (which must not exist yet), from the template."""
+    template = _migrated_template()
+    shutil.copyfile(template, path)
+    for ext in ("-wal", "-shm"):                     # normally absent after the close above
+        side = template.with_name(template.name + ext)
+        if side.exists():
+            shutil.copyfile(side, path.with_name(path.name + ext))
+    db = Database(path)
+    db.migrate()                                     # nothing to apply; kept so a test sees what the program does
+    return db
+
+
 class DBTestCase(unittest.TestCase):
     """Fresh, fully migrated SQLite file per test + one pharmacy tenant."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="pharm-test-"))
-        self.db = Database(self.tmp / "test.db")
-        self.db.migrate()
+        self.db = fresh_database(self.tmp / "test.db")
         self.org = accounts.create_organization(
             self.db, name="صيدلية الاختبار", owner_username="owner",
             owner_full_name="Owner", owner_password=OWNER_PW)

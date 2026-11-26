@@ -35,6 +35,8 @@ class TestNearExpiryGuard(PurchaseBase):
     def test_more_than_will_sell_needs_a_reason(self):
         exp = (date.today() + timedelta(days=300)).isoformat()      # 210 days before "near": ~210 strips
         inv_id = self.draft(qty=300, expiry=exp)                        # 300 boxes of 1
+        line = self.p.get(self.ctx, inv_id)["lines"][0]
+        self.p.update_line(self.ctx, inv_id, line["id"], {"public_price": 1000, "unit_net_price": 800}, None)
         d, issues = self.codes(inv_id)
         i = issues["slow_before_expiry"]
         self.assertIn("هتبيع حوالي", i["message"])
@@ -65,6 +67,11 @@ const { chromium } = require('playwright');
 (async () => {
   const [base, user, pw, inv] = process.argv.slice(1);
 """ + LOGIN + r"""
+  // A cashier who already completed first-run guidance: the tour would take the focus mid-typing.
+  await p.evaluate(async () => {
+    const { organization, user } = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${organization.id}:${user.id}`, JSON.stringify({ all: 1 }));
+  });
   await p.goto(base + '/#/purchases/' + inv);
   await p.waitForSelector('#qaQ');
   await p.fill('#qaQ', 'Panadol');
@@ -73,11 +80,21 @@ const { chromium } = require('playwright');
   const out = { f1: await p.evaluate(() => document.activeElement.id) };
   await p.keyboard.type('3'); await p.keyboard.press('Enter');
   out.f2 = await p.evaluate(() => document.activeElement.id);
-  await p.focus('#qaExp'); await p.keyboard.type('112028');
+  await p.keyboard.type('112028');
+  await p.waitForFunction(() => document.querySelector('#qaExpSee').textContent.includes('11/2028'));
   out.see = await p.textContent('#qaExpSee');
   await p.keyboard.press('Enter');
   out.f3 = await p.evaluate(() => document.activeElement.id);
-  await p.keyboard.type('B9'); await p.keyboard.press('Enter');  // the last box adds the line
+  for (const field of ['qaNet', 'qaBonus', 'qaBatch']) {
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(id => document.activeElement.id === id, field);
+  }
+  await p.keyboard.type('B9'); await p.keyboard.press('Enter');
+  for (const field of ['qaMargin', 'qaTax', 'qaTaxMode']) {
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(id => document.activeElement.id === id, field);
+  }
+  await p.keyboard.press('Enter');  // the last box adds the line
   await p.waitForSelector('table.lines tbody tr');
   await p.waitForFunction(() => document.activeElement && document.activeElement.id === 'qaQ');
   out.rows = await p.$$eval('table.lines tbody tr', (r) => r.length);
@@ -96,7 +113,7 @@ class TestQuickAddKeyboard(APICase):
         p = Purchasing(self.db, replace(config.load(), upload_dir=self.tmp / "u"))
         inv_id = p.create_manual(self.ctx)
         out = run_node(self, SCRIPT, "owner", OWNER_PW, inv_id)
-        self.assertEqual((out["f1"], out["f2"], out["f3"]), ("qaQty", "qaBonus", "qaBatch"))
+        self.assertEqual((out["f1"], out["f2"], out["f3"]), ("qaQty", "qaExp", "qaDisc"))
         self.assertIn("11/2028", out["see"])
         self.assertEqual(out["rows"], 1)
 

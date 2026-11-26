@@ -84,7 +84,9 @@ const NUM = "(\\d[\\d.,]*)";
 const I18N_FULL_TEXT = [
   [/السعر اتغير من ([\d.,]+) لـ ([\d.,]+): تغيّر سعر الرصيد الحالي \(([^)]*)\) للسعر الجديد؟/g,
     "The price changed from $1 to $2. Reprice the current stock ($3)?"],
+  [/سعر الجمهور اتغير من ([\d.,]+) لـ ([\d.,]+)/g, "The public price changed from $1 to $2"],
   [/مبيعات ([\d.,]+) · مرتجع ([\d.,]+)/g, "Sales $1 · Refunds $2"],
+  [/الفواتير ([\d.,]+) إلى ([\d.,]+) من ([\d.,]+)/g, "Invoices $1 to $2 of $3"],
 ];
 const I18N_PATTERNS = [
   [new RegExp(`${NUM}\\s*فواتير|${NUM}\\s*فاتورة`, "g"), (m, a, b) => `${a || b} invoices`],
@@ -198,13 +200,19 @@ document.addEventListener("mouseup", (e) => {   // the click that focused it wou
   zeroPick = null;
 });
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
-const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+// UX-26 (owner 26/11): English letters in capitals on screen; what is stored is not rewritten
+function upperEn(t) {
+  return String(t ?? "").replace(/[a-z]+/g, (w) => w.toUpperCase());
+}
+const itemText = (it) => upperEn((PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "");
+// UX-26 (owner 26/11): each name in its own direction, so an English name reads left to right in Arabic screens
+const bidi = (t) => `<bdi>${esc(t)}</bdi>`;
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
-  ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
+  ? `${bidi(upperEn(it.name_en))}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
-async function findItems(q, limit = 8, stock = "") {
+async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
   const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
-  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}${sale ? `&sale=${encodeURIComponent(sale)}` : ""}`);
+  const r = await api(`/api/items?q=${encodeURIComponent(q)}&limit=${limit}&meta=1${stock ? `&stock=${stock}` : ""}${sale ? `&sale=${encodeURIComponent(sale)}` : ""}`, { settleAfterNavigation });
   return r;
 }
 const hintHtml = (h) => (!h ? "" : h.kind === "layout"
@@ -313,7 +321,8 @@ const ONCE_PATHS = [/^\/api\/customers\/[^/]+\/payments$/, /^\/api\/expenses$/, 
   // a return to a supplier (by item or from its invoice): an unanswered save sent again replays (Codex P1 on #396)
   /^\/api\/supplier-returns$/,
   // U4-2: an order recorded as sent: an unanswered «اتبعتت» pressed again replays, never a second order (Codex P2 on #433)
-  /^\/api\/procurement\/orders$/];
+  /^\/api\/procurement\/orders$/,
+  /^\/api\/items\/[^/]+\/pack-fix$/, /^\/api\/estock\/(pack-review|customer-name-review)\/[^/]+$/];
 function onceKey(method, apiPath, bodyText) {
   if (!onceKey.applies(method, apiPath, bodyText)) return null;
   const now = Date.now(), sig = `${method} ${apiPath} ${bodyText}`;
@@ -326,8 +335,16 @@ function onceKey(method, apiPath, bodyText) {
   return key;
 }
 onceKey.applies = (method, apiPath, bodyText) => method === "POST" && bodyText !== undefined && ONCE_PATHS.some((re) => re.test(apiPath));
-async function api(path, { method = "GET", body, form, _approvals = 0, _key = null, _asked = [] } = {}) {
+let navigation = 0;
+const routeHash = () => location.hash || "#/home";
+function onThisScreen() {
+  const id = navigation, hash = routeHash();
+  return () => id === navigation && hash === routeHash();
+}
+
+async function api(path, { method = "GET", body, form, settleAfterNavigation = false, _approvals = 0, _key = null, _asked = [] } = {}) {
   const apiPath = path.split("?")[0], range = method === "GET" ? RANGE_CALL : null;
+  const current = method === "GET" && !settleAfterNavigation ? onThisScreen() : () => true;
   let sig = null;
   const opts = { method, headers: { "X-Requested-With": "pharm" }, credentials: "same-origin" };
   if (form) opts.body = form;
@@ -344,8 +361,11 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   API.busy++;                                     // a screen with a request in flight is never reloaded by itself (#153)
   try {
     for (let attempt = 0; ; attempt++) {
+      // Leave the abandoned view suspended, including its catch/final render paths.
+      if (!current()) return new Promise(() => {});
       try { r = await fetch(path, opts); break; }
       catch (netErr) {
+        if (!current()) return new Promise(() => {});
         if (method === "GET" && attempt >= 1) throw new Error("لا يوجد اتصال بالخادم");
         if (attempt >= 2) {
           if (sig && opts.headers["Idempotency-Key"]) UNSURE.set(sig, opts.headers["Idempotency-Key"]);
@@ -355,7 +375,7 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
       }
     }
     data = await r.json().catch(() => ({}));
-    if (range && RANGE_SEQ[range.id] !== range.seq) return new Promise(() => {});   // a newer period was chosen
+    if (!current() || (range && RANGE_SEQ[range.id] !== range.seq)) return new Promise(() => {});   // a newer period was chosen
     // an answer came: the outcome is known, unless the server itself says the first attempt is unconfirmed
     if (sig && data?.error?.code !== "idempotency_unconfirmed") UNSURE.delete(sig);
     // An acknowledged partial return can be followed by another of the same quantity.
@@ -366,12 +386,12 @@ async function api(path, { method = "GET", body, form, _approvals = 0, _key = nu
   const perm = data?.error?.details?.permission;
   if (!r.ok && r.status === 403 && data?.error?.code === "approval_required" && _approvals < API_MAX_APPROVALS && !_asked.includes(perm)
       && (method === "GET" || data.error.details?.challenge)) {
-    if (await askApproval(data.error.details, data.error.message, method, apiPath, opts.headers["Idempotency-Key"])) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
+    if (await askApproval(data.error.details, data.error.message, method, apiPath, opts.headers["Idempotency-Key"])) return api(path, { method, body, form, settleAfterNavigation, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [..._asked, perm] });
   }
   if (!r.ok && opts.headers["X-Approval"] && ["approval_expired", "approval_mismatch", "approval_used", "approver_invalid"].includes(data?.error?.code)) {
     APPROVAL = null;
     // same Idempotency-Key: if the first attempt did post, the server replays it instead of posting again
-    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
+    if (_approvals < API_MAX_APPROVALS) return api(path, { method, body, form, settleAfterNavigation, _approvals: _approvals + 1, _key: opts.headers["Idempotency-Key"], _asked: [] });
   }
   if (!r.ok) {
     if (r.status === 401 && !path.startsWith("/api/auth")) { ME = null; location.hash = "#/login"; }
@@ -399,6 +419,61 @@ function printInFrame(url) {
   f.src = url;
   document.body.appendChild(f);
 }
+
+// ------------------------------------------------------------------ dhikr ticker and work hours (U3-7)
+// The ticker is a passive strip at the very bottom (pointer-events: none, never over a button, hidden in print);
+// the work-hours reminder is one toast WARN_MIN minutes before the end of the person's hours. Neither stops work.
+let STAFF_UI = null, STAFF_TIMERS = [], STAFF_LOADING = null;
+function staffUiStop() {                 // on sign-out and before every reload of the settings (review P1)
+  STAFF_TIMERS.forEach(clearInterval); STAFF_TIMERS = [];
+  document.getElementById("dhikrBar")?.remove();
+  document.body.style.paddingBottom = "";
+}
+// minutes left until a shift end «HH:MM» seen from `now` (the end after midnight when it is still ahead)
+function shiftEndLeft(now, endHHMM) {
+  const [eh, em] = endHHMM.split(":").map(Number), end = new Date(now);
+  end.setHours(eh, em, 0, 0);
+  if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
+  return (end - now) / 60000;
+}
+async function staffUi(force = false) {
+  const uid = ME?.user?.id;
+  if (!uid || (!force && STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  STAFF_LOADING = uid;
+  let cfg;
+  // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui", { settleAfterNavigation: true })) }; } catch { STAFF_LOADING = null; return; }
+  STAFF_LOADING = null;
+  if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
+  staffUiStop();
+  STAFF_UI = cfg;
+  // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
+  STAFF_TIMERS.push(setInterval(() => { staffUi(true); }, 600000));
+  if (cfg.dhikr.length) {
+    const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.cssText = "position:fixed;inset-inline:0;bottom:0;height:1.4em;line-height:1.4em;font-size:.8em;opacity:.75;"
+      + "pointer-events:none;overflow:hidden;white-space:nowrap;text-align:center;z-index:1;background:var(--panel,transparent)";
+    let i = 0;
+    const show = () => { bar.textContent = cfg.dhikr[i++ % cfg.dhikr.length]; };
+    show(); STAFF_TIMERS.push(setInterval(show, 20000));
+    document.body.append(bar);
+    document.body.style.paddingBottom = "1.6em";
+  }
+  const h = cfg.hours;
+  if (h?.end) {
+    const tick = () => {
+      const now = new Date(), left = shiftEndLeft(now, h.end), key = `endWarn:${uid}:${h.end}:${new Date(now.getTime() + left * 60000).toDateString()}`;
+      if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
+        sessionStorageSet(key, "1");
+        toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
+      }
+    };
+    tick(); STAFF_TIMERS.push(setInterval(tick, 60000));
+  }
+}
+function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* blocked storage: warn again later */ } }
 
 // ------------------------------------------------------------------ routing
 const routes = [
@@ -442,9 +517,12 @@ const routes = [
   [/^#\/hikma-claim$/, viewHikmaClaim],
   [/^#\/dispensing-notes$/, viewDispensingNotes],
   [/^#\/item-health$/, viewItemHealth],
+  [/^#\/pack-review$/, viewPackReview],
+  [/^#\/customer-name-review$/, viewCustomerNameReview],
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
+  [/^#\/estock-move$/, viewEstockMove],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
@@ -463,7 +541,8 @@ const routes = [
 ];
 
 async function route() {
-  const hash = location.hash || "#/home";
+  navigation++;
+  const hash = routeHash(), current = onThisScreen();
   if (!ME && hash !== "#/setup") {
     try { if ((await api("/api/setup")).needed) { location.hash = "#/setup"; return; } } catch { /* offline: fall through */ }
   }
@@ -474,6 +553,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
+    staffUi();
     $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
@@ -504,7 +584,11 @@ async function route() {
   $("#navMore")?.classList.toggle("active", !!$("#navMore .menu a.active"));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
-    if (m) { try { await fn(...m.slice(1)); } catch (e) { toast(e.message, true); } setTimeout(tourAuto, 400); return; }
+    if (m) {
+      try { await fn(...m.slice(1)); } catch (e) { if (current()) toast(e.message, true); }
+      if (current()) setTimeout(() => { if (current()) tourAuto(); }, 400);
+      return;
+    }
   }
   location.hash = "#/home";
 }
@@ -554,13 +638,17 @@ const SCREENS = {
   staff: ["الحضور والرواتب", "payroll.manage"], system: ["البرنامج والنسخ الاحتياطي", null], me: ["المظهر واللغة ورقمي السري", null],
   feedback: ["الشكاوى والمقترحات", null], groups: ["المجموعات العلاجية", "items.read"], notifications: ["الإشعارات", "notifications.read"],
   customize: ["تخصيص الواجهة", "settings.manage"], money: ["الخزنة والحسابات", "cash.see_expected"],
+  "pack-review": ["مراجعة العبوات بعد النقل", "items.write"],
+  "customer-name-review": ["مراجعة أسماء العملاء بعد النقل", "customers.manage"],
   reconcile: ["مطابقة الأرصدة", "cash.see_expected"], "opening-fix": ["تصحيح الأرصدة بعد النقل", "balances.correct"], estock: ["تاريخ إي ستوك", "sales.read"],
 };
 const canScreen = (k) => !!SCREENS[k] && (!SCREENS[k][1] || ME.permissions.includes(SCREENS[k][1]));
 const HELP = {
+  "pack-review": ["راجع العبوات المنقولة اللي اسمها فيه عدد والبرنامج مسجلها علبة واحدة.", ["راجع العلبة نفسها، واكتب عدد الوحدات اللي بتتباع وسبب اختيارك."]],
+  "customer-name-review": ["راجع أسماء نفس الحساب في إي ستوك وتاريخ البيع.", ["اختار الاسم اللي هيظهر في البرنامج واضغط اعتمد الاسم."]],
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
-  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
-  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "أسرع بيع: امسح الأصناف، ثم Enter على البحث الفاضي يوديك لخانة «العميل دفع»، وEnter تاني يتمم البيع بالمبلغ بالظبط (أو اكتب المبلغ اللي دفعه الأول). المسح من أي خانة في الشاشة بيضيف الصنف ومبيكتبش في الخانة.", "البيع السريع صف واحد تحت الفاتورة: بيصغر بعد أول صنف، وزرار «افتح ▾» يفتحه.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها.", "«إلغاء الفاتورة» يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
   "items/1": ["بطاقة الصنف: الرصيد والتشغيلات والأسعار والحركة والمثيل والبديل.", ["التسوية تحتاج إلى سبب، وتظهر في تقرير خسائر المخزون.", "المثيل يظهر عند كتابة المادة الفعالة والتركيز والشكل في تعديل الصنف."]],
@@ -585,6 +673,7 @@ const HELP = {
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
+  "estock-move": ["جرّب نقل إي ستوك على نسخة من قاعدة البرنامج الجديدة وراجع تقرير المطابقة.", ["افتح الشاشة من الكمبيوتر اللي عليه إي ستوك. لو الجهاز فصل، ارجع للشاشة واضغط «كمّل التجربة»."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
   procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
@@ -668,12 +757,12 @@ const TOUR = {
     ["#logout", "خروج", "لما تسيب الجهاز اعمل خروج، عشان محدش يشتغل باسمك."],
   ],
   pos: [
-    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة."],
+    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة، وEnter على البحث الفاضي يوديك للدفع."],
     ["#posRes [data-add]|#posQ", "علبة ولا شريط؟", "تحت البحث بيظهر زرار «علبة» وزرار الوحدة (شريط أو قرص). Shift+Enter يضيف وحدة بدل العلبة."],
     ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
     ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
     ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
-    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو Enter في خانة «العميل دفع» أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
     ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
     ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
   ],
@@ -957,6 +1046,7 @@ $("#logout").addEventListener("click", async () => {
     try { if (ME?.permissions?.includes("sales.read") && await api("/api/cash/current")) warn.push("الشيفت لسه مفتوح: اقفله لو هتمشي."); } catch { /* no open shift */ }
     if (!confirm(["تخرج من البرنامج؟", ...warn].join("\n"))) return;
   }
+  staffUiStop(); STAFF_UI = null;
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
 });
@@ -1110,10 +1200,70 @@ const cairoWhen = (iso) => {
 let PU_SORT = { k: null, desc: true };               // the purchase list's column sort (this tab only)
 const STATUS = { draft: ["مسودة", "b-warn"], approved: ["معتمدة", "b-ok"], cancelled: ["ملغاة", "b-err"] };
 
+const PURCHASE_ENTRY_FIELDS = {
+  qty: "الكمية", expiry: "الصلاحية", discount: "الخصم / سعر الصيدلي", bonus: "البونص",
+  batch: "التشغيلة", public_price: "سعر الجمهور", tax_margin: "هامش الموزع / الضريبة",
+};
+const PURCHASE_ENTRY_LIMITS = {
+  qty_multiple: ["مضاعف الكمية المعتادة", 100],
+  qty_min: ["أقل كمية للمراجعة (علبة)", 1000000],
+  public_delta_pct: ["فرق السعر عن سعر الجمهور %", 1000],
+  last_cost_delta_pct: ["فرق السعر عن آخر تكلفة %", 1000],
+};
+
+function purchaseEntrySettingsHtml(setting) {
+  return `<details class="panel"><summary>إعدادات إدخال الشراء</summary>
+    <form id="puEntrySettings">
+      <p>الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.</p>
+      <ol id="puEntryOrder">${setting.field_order.map((field) => `<li data-order-field="${field}">
+        <span id="puEntryField-${field}">${PURCHASE_ENTRY_FIELDS[field]}</span>
+        <button type="button" class="btn small secondary" data-move="-1" aria-label="قدّم" aria-describedby="puEntryField-${field}">↑</button>
+        <button type="button" class="btn small secondary" data-move="1" aria-label="أخّر" aria-describedby="puEntryField-${field}">↓</button>
+      </li>`).join("")}</ol>
+      <div class="row">${Object.entries(PURCHASE_ENTRY_LIMITS).map(([key, [label, max]]) => `<label class="f">${label}
+        <input name="${key}" type="number" min="1" max="${max}" step="1" required autocomplete="off" value="${esc(setting[key])}">
+        </label>`).join("")}
+        <button class="btn" type="submit">حفظ إعدادات الشراء</button></div>
+    </form></details>`;
+}
+
+function bindPurchaseEntrySettings() {
+  const form = $("#puEntrySettings");
+  const list = $("#puEntryOrder", form);
+  const updateButtons = () => {
+    for (const row of list.children) {
+      $('[data-move="-1"]', row).disabled = !row.previousElementSibling;
+      $('[data-move="1"]', row).disabled = !row.nextElementSibling;
+    }
+  };
+  updateButtons();
+  list.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-move]");
+    if (!button) return;
+    const row = button.closest("li");
+    if (button.dataset.move === "-1") row.previousElementSibling?.before(row);
+    else row.nextElementSibling?.after(row);
+    updateButtons();
+    (button.disabled ? $('button:not(:disabled)', row) : button)?.focus();
+  });
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    withBusy($('button[type="submit"]', form), async () => {
+      const changes = { field_order: Array.from(list.children, row => row.dataset.orderField) };
+      for (const key of Object.keys(PURCHASE_ENTRY_LIMITS)) changes[key] = form.elements[key].valueAsNumber;
+      try {
+        await api("/api/settings/purchase-entry", { method: "PUT", body: changes });
+        toast("تم حفظ إعدادات الشراء");
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
 async function viewPurchases() {
   const canSetPriceDefault = ME.permissions.includes("settings.manage");
-  const [list, suppliers, priceSetting] = await Promise.all([api("/api/purchases"), api("/api/suppliers"),
-    canSetPriceDefault ? api("/api/settings/purchase-price") : null]);
+  const [list, suppliers, priceSetting, entrySetting] = await Promise.all([api("/api/purchases"), api("/api/suppliers"),
+    canSetPriceDefault ? api("/api/settings/purchase-price") : null,
+    canSetPriceDefault ? api("/api/settings/purchase-entry") : null]);
   app.innerHTML = `
   <section class="panel">
     <h1>إدخال فاتورة شراء</h1>
@@ -1135,13 +1285,14 @@ async function viewPurchases() {
     <form id="manForm" class="row">
       <label class="f">المورد<select name="supplier_id" required><option value="">— اختر —</option>
         ${suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>
-      <label class="f">رقم فاتورة المورد<input name="invoice_no" required></label>
+      <label class="f">رقم فاتورة المورد<input name="invoice_no" autocomplete="off" required></label>
       <label class="f">تاريخ فاتورة المورد<input name="invoice_date" type="date" value="${localDay()}"></label>
       <button class="btn" type="submit">ابدأ الفاتورة</button>
     </form>
     <p class="muted">${suppliers.length ? "المورد غير موجود في القائمة؟" : "لا يوجد موردون مسجلون بعد."} اكتب اسمه:
       <input id="newSup" placeholder="اسم المورد"> <button class="btn small secondary" id="addSup" type="button">إضافة مورد</button></p>
   </section>
+  ${entrySetting ? purchaseEntrySettingsHtml(entrySetting) : ""}
   <section class="panel" id="puRep">
     <div class="row between"><h2>الفواتير</h2>${reportTools("pur")}</div>
     <div class="row noprint">${rangeBar("puRange")}
@@ -1160,6 +1311,7 @@ async function viewPurchases() {
     } catch (err) { select.value = savedPriceDefault; toast(err.message, true); }
     finally { select.disabled = false; }
   });
+  if (entrySetting) bindPurchaseEntrySettings();
   let rows = list, sub = "";
   const puSorted = (xs) => {
     const k = PU_SORT.k; if (!k) return xs;
@@ -1249,7 +1401,7 @@ const FIELD_AR = { raw_name: "اسم الصنف", raw_code: "الكود", raw_ba
   expiry_date: "الصلاحية", distributor_margin: "هامش الموزع" };
 const SRC_LABEL = { read: "مقروء", inferred: "محسوب", ai: "قراءة آلية", user: "أدخله المستخدم", db: "من قاعدة البيانات" };
 
-function fieldInput(line, field, value, { type = "number", step = "0.01" } = {}) {
+function fieldInput(line, field, value, { type = "number", step = "0.01", describedBy } = {}) {
   const src = line.field_sources[field];
   const conf = line.field_confidence[field];
   const low = src !== "user" && conf !== undefined && conf < 0.8;
@@ -1258,7 +1410,7 @@ function fieldInput(line, field, value, { type = "number", step = "0.01" } = {})
   const dis = CUR.invoice.status !== "draft" ? "disabled" : "";
   return `<input class="${cls}" data-line="${esc(line.id)}" data-field="${field}" type="${type}"
     ${type === "number" ? `step="${step}" min="0"` : ""} value="${esc(value)}" title="${esc(title)}"
-    aria-label="${esc(field)}" ${dis}>
+    autocomplete="off" aria-label="${esc(FIELD_AR[field] || field)}" ${describedBy ? `aria-describedby="${esc(describedBy)}"` : ""} ${dis}>
     ${low && !dis ? `<button class="btn small secondary" data-confirm="${esc(line.id)}" data-cfield="${field}">تأكيد</button>` : ""}`;
 }
 
@@ -1267,13 +1419,39 @@ function itemLabel(it) {
   return [it.name_en || it.name_ar, it.strength, it.dosage_form].filter(Boolean).join(" · ");
 }
 
+function purchasePriceWarning(current, value) {
+  const typed = toPiasters(value);
+  return current == null || !Number.isSafeInteger(typed) || typed < 0 || typed === current
+    ? "" : `سعر الجمهور اتغير من ${money(current)} لـ ${money(typed)}`;
+}
+
+function showPurchasePriceWarning(output, current, value) {
+  const message = purchasePriceWarning(current, value);
+  output.hidden = !message;
+  output.textContent = message;
+}
+
+const purchaseCardKey = () => {
+  const key = posKey("item_card");
+  return /^F\d+$/.test(key) ? key : "F2";  // Ctrl+Enter already adds a purchase line
+};
+const invoicePack = (it) => `${it.pack_unit_name === "pack" ? "علبة" : it.pack_unit_name} · ${it.pack_size} ${unitName(it)}`;
+const purchaseItemInfo = (it) => it ? [it.code, invoicePack(it)].filter(Boolean).join(" · ") : "";
+function invoiceCardButton(attribute, value, key) {
+  return `<button type="button" class="btn small secondary" ${attribute}="${esc(value)}"
+    aria-keyshortcuts="${esc(key)}" title="كارت الصنف (${esc(key)})">كارت الصنف</button>`;
+}
+
 function lineIssues(lineId) { return CUR.issues.filter((i) => i.line_id === lineId); }
 
-function renderInvoice() {
+function renderInvoice(keepPicker = true) {
   const { invoice: inv, lines, issues } = CUR;
   const draft = inv.status === "draft";
+  const picker = $("#qa");
+  const keep = draft && keepPicker && picker?.dataset.invoice === inv.id
+    && picker.dataset.order === CUR.entry_order.join(",");
   const errs = issues.filter((i) => i.level === "error" && !i.acknowledged);
-  const warns = issues.filter((i) => i.level === "warning" || i.level === "info");
+  const warns = issues.filter((i) => (i.level === "warning" || i.level === "info") && (!draft || i.code !== "public_price_changed"));
   const lineNo = Object.fromEntries(lines.map((l) => [l.id, l.line_no]));
   const fileUrl = inv.source_file_id ? `/api/files/${encodeURIComponent(inv.source_file_id)}` : null;
   let doc = `<p class="muted">لا يوجد ملف مرفق (إدخال يدوي)</p>`;
@@ -1295,17 +1473,19 @@ function renderInvoice() {
       <label class="f">المورد <select data-h="supplier_id" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
       <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
-      <label class="f">رقم فاتورة المورد <input data-h="invoice_no" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
-      <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
+      <label class="f">رقم فاتورة المورد <input data-h="invoice_no" autocomplete="off" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
+      <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" autocomplete="off" dir="ltr"
+        placeholder="YYYY-MM-DD" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
+      ${draft ? '<input type="date" id="puDatePicker" hidden><button class="btn small secondary" type="button" id="puDateOpen">التقويم</button>' : ""}
       <label class="f">تاريخ الإدخال على السيستم <input id="pinEntered" value="${esc(cairoWhen(inv.created_at))}" readonly disabled></label>
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
-      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
+      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" autocomplete="off" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
         <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
         ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
-      <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
+      <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" autocomplete="off" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
       <label class="f">طريقة الدفع <select data-h="pay_source" id="paySrc" ${draft ? "" : "disabled"}></select>
         <small class="muted">${inv.pay?.default ? "الافتراضي حسب نوع المورد" : ""}</small></label>
-      ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
+      ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" autocomplete="off" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
         <label class="f">مرجع الدفع (رقم التحويل)<input data-h="pay_ref" autocomplete="off" value="${esc(inv.pay_ref || "")}" ${draft ? "" : "disabled"}></label>` : ""}
     </div>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
@@ -1321,13 +1501,13 @@ function renderInvoice() {
     </div>
     <h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة يجب حلها قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
     <ul class="issues">
-      ${errs.map((i) => `<li class="err">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
+      ${errs.map((i) => `<li class="${i.code.startsWith("unusual_") ? "warn" : "err"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
         ${i.details?.difference != null ? ` (الفرق ${money(i.details.difference)} ج)` : ""}
         ${i.details?.expected != null ? ` (المتوقع ${money(i.details.expected)})` : ""}
         ${i.code === "low_confidence" && draft ? ` [${esc(FIELD_AR[i.field] || i.field)}] <button class="btn small secondary" data-confirm="${esc(i.line_id)}" data-cfield="${esc(i.field)}">القيمة صحيحة</button>` : ""}
         ${i.code === "unreadable" ? ` [${esc(FIELD_AR[i.field] || i.field)}]` : ""}
-        ${["total_mismatch", "line_total_mismatch", "net_price_mismatch", "short_expiry", "slow_before_expiry"].includes(i.code) && draft && ME.permissions.includes("purchases.approve")
-          ? `<button class="btn small secondary" data-ack="${esc(i.code)}" data-ackline="${esc(i.line_id || "")}">قبول الفرق مع ذكر السبب</button>` : ""}</li>`).join("")}
+        ${(["total_mismatch", "line_total_mismatch", "net_price_mismatch", "short_expiry", "slow_before_expiry"].includes(i.code) || i.code.startsWith("unusual_")) && draft && ME.permissions.includes("purchases.approve")
+          ? `<button class="btn small secondary" data-ack="${esc(i.code)}" data-ackline="${esc(i.line_id || "")}">${i.code.startsWith("unusual_") ? "تأكيد القيمة مع ذكر السبب" : "قبول الفرق مع ذكر السبب"}</button>` : ""}</li>`).join("")}
       ${warns.map((i) => `<li class="${i.level === "info" ? "muted" : "warn"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}${i.details?.other_line ? ` (سطر ${lineNo[i.details.other_line]})` : ""}
         ${i.details?.mergeable && draft ? `<button class="btn small secondary" data-merge="${esc(i.details.other_line)}" data-mergewith="${esc(i.line_id)}">دمج السطرين</button>` : ""}
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
@@ -1340,14 +1520,14 @@ function renderInvoice() {
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
   </section>
-  ${draft ? quickAddHtml() : ""}
+  ${draft ? (keep ? `<div id="qaSlot"></div>` : quickAddHtml()) : ""}
   <div class="${fileUrl ? "review" : ""}">
     ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
     <section class="panel">
       <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج إلى مراجعة</span>
         <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
       <div class="tablewrap"><table class="lines">
-        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
+        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>الرصيد</th><th data-purchase-bonus ${inv.supplier_type === "warehouse" ? "hidden" : ""}>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
           <th title="هامش ثابت للعلبة زي «4+4» في ورقة الموزع: بيتشال مرتين من سعر الجمهور قبل الخصم ويتزوّد مرة بعده">هامش الموزع</th><th>الصافي</th><th>ضريبة السطر</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
         <tbody>${lines.map(renderLine).join("")}</tbody>
       </table></div>
@@ -1355,7 +1535,21 @@ function renderInvoice() {
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
   fillPaySources(inv);
-  if (draft) bindQuickAdd();
+  const invoiceDate = $('[data-h="invoice_date"]'), calendar = $("#puDatePicker");
+  if (calendar) {
+    $("#puDateOpen").addEventListener("click", () => {
+      calendar.value = invoiceDate.value;
+      calendar.showPicker();
+    });
+    calendar.addEventListener("change", () => {
+      invoiceDate.value = calendar.value;
+      invoiceDate.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  if (keep) $("#qaSlot").replaceWith(picker);
+  else if (draft) bindQuickAdd();
+  updatePurchaseBonus(inv.supplier_type);
+  if (keep) picker.dispatchEvent(new Event("invoice-lines-changed"));
   purchaseTabs(inv.id);
 }
 
@@ -1403,68 +1597,169 @@ function purchaseLabels(cur) {
   d.showModal();
 }
 
-// fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
+// The picker displays the same order that Enter and Tab use.
 function quickAddHtml() {
-  return `<section class="panel" id="qa"><h2>إضافة صنف للفاتورة</h2>
+  const warehouse = CUR.invoice.supplier_type === "warehouse";
+  const fields = {
+    qty: `<label class="f">كمية (علبة)<input id="qaQty" autocomplete="off" type="number" min="1" step="1" value="1" class="narrow"></label>`,
+    expiry: `<label class="f">الصلاحية (شهر/سنة)<input id="qaExp" autocomplete="off" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>`,
+    discount: `<label class="f">خصم %<input id="qaDisc" autocomplete="off" type="number" min="0" max="100" step="0.01" class="narrow"></label>
+      <label class="f">سعر الصيدلي<input id="qaNet" autocomplete="off" type="number" min="0.01" step="0.01" class="narrow"></label>`,
+    bonus: `<label class="f" id="qaBonusField" ${warehouse ? "hidden" : ""}>بونص<input id="qaBonus" ${warehouse ? "disabled" : ""} autocomplete="off" type="number" min="0" step="1" value="0" class="narrow"></label>`,
+    batch: `<label class="f">التشغيلة<input id="qaBatch" autocomplete="off" class="narrow"></label>`,
+    public_price: `<label class="f">سعر الجمهور<input id="qaPrice" autocomplete="off" type="number" min="0.01" step="0.01" class="narrow" aria-describedby="qaPriceWarning">
+      <small class="badge b-warn" id="qaPriceWarning" role="status" hidden></small></label>`,
+    tax_margin: `<label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" autocomplete="off" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">ضريبة السطر<input id="qaTax" autocomplete="off" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">معاملة الضريبة<select id="qaTaxMode"><option value="0">مضافة على الصافي</option><option value="1">مشمولة في الصافي</option></select></label>`,
+  };
+  const order = CUR.entry_order;
+  return `<section class="panel" id="qa" data-invoice="${esc(CUR.invoice.id)}" data-order="${esc(order.join(","))}"><h2>إضافة صنف للفاتورة</h2>
     <div class="row">
-      <label class="f grow">الصنف (اسم أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب أو امسح الباركود"></label>
-      <label class="f">كمية (علبة)<input id="qaQty" type="number" min="1" step="1" class="narrow"></label>
-      <label class="f">بونص<input id="qaBonus" type="number" min="0" step="1" value="0" class="narrow"></label>
-      <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow"></label>
-      <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
-      <label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" type="number" min="0" step="0.01" class="narrow"></label>
-      <label class="f">ضريبة السطر<input id="qaTax" type="number" min="0" step="0.01" class="narrow"></label>
-      <label class="f">معاملة الضريبة<select id="qaTaxMode"><option value="0">مضافة على الصافي</option><option value="1">مشمولة في الصافي</option></select></label>
-      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>
-      <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
+      <label class="f grow">الصنف (اسم أو كود أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب الكود أو امسح الباركود"></label>
+      ${invoiceCardButton("data-qa-card", "picked", purchaseCardKey())}
+      ${order.map(key => `<div class="row" data-entry-field="${key}" ${key === "bonus" && warehouse ? "hidden" : ""}>${fields[key]}</div>`).join("")}
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
     <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
 }
 
-let QA_ITEM = null;
 function bindQuickAdd() {
   const q = $("#qaQ");
   if (!q) return;
-  const pick = (it) => {
-    QA_ITEM = it;
-    $("#qaRes").innerHTML = "";
-    q.value = itemText(it);
+  const picker = $("#qa"), price = $("#qaPrice");
+  let item = null, entryItemId;
+  const warnPrice = () => showPurchasePriceWarning($("#qaPriceWarning", picker), item?.public_price, price.value);
+  const showPicked = (it) => {
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
     // U2-3: said at once, not after saving: the item is already on the invoice
     const twins = (CUR?.lines || []).filter((l) => l.item_id === it.id);
     if (twins.length) $("#qaPicked").textContent += ` · ⚠ الصنف ده موجود في ${twins.map((l) => `سطر ${l.line_no}${l.expiry_date ? ` (صلاحية ${l.expiry_date.slice(5, 7)}/${l.expiry_date.slice(0, 4)}${l.batch_no ? `، تشغيلة ${l.batch_no}` : "، من غير تشغيلة"})` : ""}`).join("، ")}: لو نفس الصلاحية والتشغيلة زوّد الكمية هناك`;
-    if (it.public_price != null) $("#qaPrice").value = (it.public_price / 100).toFixed(2);
-    $("#qaQty").focus();
+    warnPrice();
   };
-  let t, res = [];
-  q.addEventListener("input", () => {
-    QA_ITEM = null; clearTimeout(t);
-    t = setTimeout(async () => {
-      const v = q.value.trim(); if (v.length < 2) { $("#qaRes").innerHTML = ""; return; }
-      const found = await findItems(v); res = found.items;
-      if (found.hint?.kind === "gs1") {             // 2D code on the pack: item + expiry + batch in one scan
-        if (!res.length) { $("#qaRes").innerHTML = `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. سجّله من بطاقة الصنف.</p>`; return; }
-        pick(res[0]);
-        if (found.hint.expiry) { const [y, m] = found.hint.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
-        if (found.hint.batch) $("#qaBatch").value = found.hint.batch;
-        $("#qaPicked").textContent += found.hint.expiry ? ` · قُرئت الصلاحية والتشغيلة من الكود` : "";
+  const pick = (it) => {
+    if (entryItemId && entryItemId !== it.id) {
+      for (const [id, value] of Object.entries({
+        qaQty: "1", qaExp: "", qaNet: "", qaBonus: "0", qaBatch: "", qaMargin: "", qaTax: "", qaTaxMode: "0",
+      })) $(`#${id}`, picker).value = value;
+      $("#qaExpSee", picker).textContent = "";
+    }
+    entryItemId = it.id;
+    item = it;
+    $("#qaRes").innerHTML = "";
+    q.value = itemText(it);
+    price.value = money(it.public_price);
+    showPicked(it);
+    entryFields()[0]?.focus();
+  };
+  const entryFields = () => [...picker.querySelectorAll("[data-entry-field] :is(input, select):enabled")];
+  picker.addEventListener("invoice-lines-changed", () => { if (item) showPicked(item); });
+  picker.addEventListener("invoice-item-saved", ({ detail }) => {
+    res = res.map((r) => r.id === detail.id ? { ...r, ...detail } : r);
+    res.forEach((r, i) => {
+      const button = $(`[data-qa="${i}"]`, picker);
+      if (r.id === detail.id && button) button.innerHTML = resultLabel(r);
+    });
+    if (item?.id !== detail.id) return;
+    item = { ...item, ...detail };
+    q.value = itemText(item);
+    showPicked(item);
+  });
+  price.addEventListener("input", warnPrice);
+  let timer, seq = 0, res = [], resultsFor = "";
+  const resultLabel = (r) => `${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span>`;
+  const current = onThisScreen();
+  const search = async (v, select, scan) => {
+    const request = ++seq;
+    if (!v || (!scan && v.length < 2) || !current() || !q.isConnected) return;
+    const found = scan ? await api(`/api/purchases/${picker.dataset.invoice}/scan?barcode=${encodeURIComponent(v)}`)
+      : await findItems(v);
+    if (request !== seq || !q.isConnected || v !== q.value.trim()) return;
+    res = found.items;
+    resultsFor = scan ? "" : v;
+    const code = found.hint?.kind === "gs1" ? found.hint : null;
+    const pickResult = (it) => {
+      pick(it);
+      if (code?.expiry) {
+        $("#qaExp").value = code.expiry;
+        $("#qaExpSee").textContent = "الصلاحية من الباركود";
+      }
+      if (code?.batch) $("#qaBatch").value = code.batch;
+    };
+    if (scan || code) {
+      if (res.length === 1) { pickResult(res[0]); return; }
+      if (!res.length) {
+        $("#qaRes").innerHTML = '<p class="badge b-warn">الباركود مش مسجل على أي صنف. سجّله من كارت الصنف.</p>';
         return;
       }
-      if (res.length === 1 && /^\d{6,}$/.test(v)) { pick(res[0]); return; }
-      $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<button type="button" class="btn small secondary" data-qa="${i}">${itemHtml(r)}
-        <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span></button>`).join("") || `<p class="muted">لا توجد نتائج</p>`);
-      $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
-    }, 250);
+    } else if (res.length === 1 && (/^\d{6,}$/.test(v) || (/^\d{3,5}$/.test(v) && res[0].code === v))) {
+      pick(res[0]);
+      return;
+    } else if (select && res.length && !/^\d+$/.test(v)) {
+      pick(res[0]);
+      return;
+    }
+    $("#qaRes").innerHTML = (code ? "" : hintHtml(found.hint)) + (res.map((r, i) => `<span class="row nowrap"><button type="button"
+      class="btn small secondary" data-qa="${i}">${resultLabel(r)}</button>${invoiceCardButton("data-qa-card", i, purchaseCardKey())}</span>`).join("") || '<p class="muted">لا توجد نتائج</p>');
+    $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pickResult(res[+b.dataset.qa])));
+  };
+  const runSearch = (select, scan = false) => search(q.value.trim(), select, scan)
+    .catch((err) => { if (current()) toast(err.message, true); });
+  const resetResults = () => {
+    item = null; resultsFor = ""; seq++; clearTimeout(timer); warnPrice();
+    $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
+  };
+  q.addEventListener("input", () => {
+    resetResults();
+    timer = setTimeout(() => runSearch(false), 250);
   });
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && res.length && !QA_ITEM) { e.preventDefault(); pick(res[0]); } });
+  picker.addEventListener("purchase-scan", ({ detail }) => {
+    q.focus();
+    q.value = detail;
+    $("#qaQty").value = "1";
+    resetResults();
+    runSearch(true, true);
+  });
+  q.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (item) { entryFields()[0]?.focus(); return; }
+    clearTimeout(timer);
+    const v = q.value.trim();
+    if (resultsFor === v && res.length && !/^\d+$/.test(v)) pick(res[0]);
+    else runSearch(true);
+  });
+  const openCard = (trigger) => {
+    clearTimeout(timer); seq++;
+    const candidate = trigger.dataset.qaCard === "picked" ? item : res[+trigger.dataset.qaCard];
+    showInvoiceItemCard(candidate?.id, {
+      purchase: picker.dataset.invoice, query: q.value.trim(), onPick: pick, onSaved: refreshPurchaseItem,
+    });
+  };
+  picker.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-qa-card]");
+    if (button) openCard(button);
+  });
+  picker.addEventListener("keydown", (e) => {
+    if (!purchaseCardShortcut(e)) return;
+    e.preventDefault();
+    const result = e.target.closest("[data-qa]")?.dataset.qa;
+    openCard(e.target.closest("[data-qa-card]") || $(`[data-qa-card="${result ?? "picked"}"]`, picker));
+  });
   const add = async () => {
-    if (!QA_ITEM) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    if (!item) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    const bad = entryFields().find(field => field.validity.badInput);
+    if (bad) {
+      toast(`اكتب رقم صحيح في خانة ${bad.labels[0].firstChild.textContent.trim()}`, true);
+      bad.focus();
+      return;
+    }
     const qty = typedWhole($("#qaQty").value);
     if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
-    const line = { item_id: QA_ITEM.id, qty, bonus_qty: typedWhole($("#qaBonus").value) ?? 0 };
-    if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
-    if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
+    const line = { item_id: item.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
+    if ($("#qaPrice").value !== "") line.public_price = CONVERT.public_price($("#qaPrice").value);
+    if ($("#qaNet").value !== "") line.unit_net_price = CONVERT.unit_net_price($("#qaNet").value);
+    else if ($("#qaDisc").value !== "") line.discount_bp = CONVERT.discount_bp($("#qaDisc").value);
     if ($("#qaMargin").value.trim() !== "") line.distributor_margin = exactPiasters($("#qaMargin").value) ?? $("#qaMargin").value;
     if ($("#qaTax").value !== "" || $("#qaTaxMode").value === "1") {
       line.tax_amount = CONVERT.tax_amount($("#qaTax").value);
@@ -1473,24 +1768,29 @@ function bindQuickAdd() {
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
     if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
     const keepDisc = $("#qaDisc").value;
-    QA_ITEM = null;
-    await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST");
-    if ($("#qaDisc")) $("#qaDisc").value = keepDisc;     // same supplier discount usually repeats
-    $("#qaQ")?.focus();
+    const button = $("#qaAdd", picker);
+    await withBusy(button, async () => {
+      await waitForPurchaseSave(picker.dataset.invoice);
+      if (!current() || !picker.isConnected) return;
+      if (await save(`/api/purchases/${CUR.invoice.id}/lines`, { line, picked: true }, "POST", false)) {
+        $("#qaDisc").value = keepDisc;  // same supplier discount usually repeats
+        $("#qaQ").focus();
+      }
+    });
   };
   $("#qaAdd").addEventListener("click", add);
   // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
   // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
-  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaMargin", "#qaTax", "#qaTaxMode", "#qaExp", "#qaBatch"];
-  order.forEach((sel, i) => {
-    const el = $(sel);
+  picker.querySelectorAll("[data-entry-field] :is(input, select)").forEach((el) => {
     el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
     el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); if (i === order.length - 1 || e.ctrlKey) add(); else $(order[i + 1]).focus(); return; }
+      const fields = entryFields();
+      const i = fields.indexOf(el);
+      if (e.key === "Enter") { e.preventDefault(); if (i === fields.length - 1 || e.ctrlKey) add(); else fields[i + 1].focus(); return; }
       const back = e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft"), fwd = e.key === (document.dir === "rtl" ? "ArrowLeft" : "ArrowRight");
       if ((back || fwd) && (el.type === "number" || el.selectionStart === (back ? 0 : el.value.length))) {
         const j = i + (fwd ? 1 : -1);
-        if (j >= 0 && j < order.length) { e.preventDefault(); $(order[j]).focus(); }
+        if (j >= 0 && j < fields.length) { e.preventDefault(); fields[j].focus(); }
       }
     });
   });
@@ -1500,29 +1800,96 @@ function bindQuickAdd() {
   });
 }
 
+// Buffer a keyboard-wedge burst before it can edit the focused control.
+// The pharmacy scanner's F12 prefix is definitive. Unprefixed scanners send a fast burst followed by Enter.
+const PURCHASE_SCAN_GAP = 55;
+let purchaseKeys, purchaseKeyTimer;
+function flushPurchaseKeys() {
+  clearTimeout(purchaseKeyTimer);
+  const keys = purchaseKeys;
+  purchaseKeys = null;
+  if (keys && !keys.prefixed && keys.text && keys.target === document.activeElement &&
+      keys.target.matches("input, textarea, [contenteditable=true]")) {
+    // Use the browser's edit so selection, input events and undo also work for numeric inputs.
+    document.execCommand("insertText", false, keys.text);
+  }
+}
+
+document.addEventListener("pointerdown", flushPurchaseKeys, true);
+document.addEventListener("focusout", flushPurchaseKeys, true);
+document.addEventListener("keydown", (e) => {
+  const picker = $("#qa");
+  if (!picker || !routeHash().startsWith("#/purchases/")) return;
+  const capture = () => { e.preventDefault(); e.stopPropagation(); };
+  if (e.key === "F12") {
+    flushPurchaseKeys();
+    purchaseKeys = { target: e.target, prefixed: true, text: "" };
+    purchaseKeyTimer = setTimeout(flushPurchaseKeys, 1000);
+    capture();
+    return;
+  }
+  if (e.key === "Shift") return;
+  const separator = e.ctrlKey && e.key === "]" && purchaseKeys;
+  if (e.isComposing || e.repeat || e.altKey || e.metaKey || (e.ctrlKey && !separator)) {
+    flushPurchaseKeys();
+    return;
+  }
+  if (e.key === "Enter" && purchaseKeys &&
+      (purchaseKeys.prefixed || /^\p{Nd}{8,}$/u.test(purchaseKeys.text) ||
+        /^(?:\](?:d2|Q3|C1)|\(01\)|01\d{14}|https?:\/\/[^/]+\/.*01\/\d{8,14})/i.test(purchaseKeys.text))) {
+    const barcode = purchaseKeys.text;
+    purchaseKeys = null;
+    clearTimeout(purchaseKeyTimer);
+    capture();
+    if (barcode) {
+      const send = () => picker.dispatchEvent(new CustomEvent("purchase-scan", { detail: barcode }));
+      const dialog = $("dialog[open]");
+      if (dialog) dialog.addEventListener("close", () => { if (picker.isConnected) send(); }, { once: true });
+      else send();
+    }
+    return;
+  }
+  if (e.key.length !== 1 || e.key === " ") {
+    flushPurchaseKeys();
+    return;
+  }
+  // Start buffering on a digit or a GS1 introducer. Other text and keyboard shortcuts stay native.
+  if (!purchaseKeys && !/^[\p{Nd}(\]hH]$/u.test(e.key)) return;
+  purchaseKeys ||= { target: e.target, prefixed: false, text: "" };
+  purchaseKeys.text += separator ? "\x1d" : e.key;
+  capture();
+  clearTimeout(purchaseKeyTimer);
+  purchaseKeyTimer = setTimeout(flushPurchaseKeys, purchaseKeys.prefixed ? 1000 : PURCHASE_SCAN_GAP);
+}, true);
+
 function renderLine(l) {
-  const iss = lineIssues(l.id);
-  const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   const draft = CUR.invoice.status === "draft";
+  const iss = lineIssues(l.id).filter((i) => !draft || i.code !== "public_price_changed");
+  const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   let match;
   if (l.item_id && l.match_status !== "suggested") {
-    match = `<div>${esc(itemLabel(l.item))} <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>`;
+    match = `<div><span data-line-item dir="auto">${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
+      <div class="muted small" data-line-item-info>${esc(purchaseItemInfo(l.item))}</div>`;
   } else {
     const c = l.candidates || [];
     match = `<div class="cands">${c.length ? `<select data-pick="${esc(l.id)}" ${draft ? "" : "disabled"}>
       <option value="">— اختر الصنف الصحيح —</option>
       ${c.map((x) => `<option value="${esc(x.item_id)}" ${x.item_id === l.item_id ? "selected" : ""}>${esc(x.label)} (${Math.round(x.score * 100)}%)</option>`).join("")}
     </select>` : `<span class="badge b-err">غير موجود</span>`}
-    ${draft ? `<span><button class="btn small secondary" data-search="${esc(l.id)}">بحث</button>
-      <button class="btn small secondary" data-newitem="${esc(l.id)}">صنف جديد</button></span>` : ""}</div>`;
+    </div>`;
   }
-  return `<tr class="${hasErr ? "has-err" : ""}">
+  const warning = draft ? purchasePriceWarning(l.item?.public_price, money(l.public_price)) : "";
+  const warningId = draft ? `puPriceWarning-${l.id}` : undefined;
+  return `<tr data-purchase-line="${esc(l.id)}" class="${hasErr ? "has-err" : ""}">
     <td>${l.line_no}</td>
     <td class="name"><div class="raw">${esc(l.raw_name)}</div>${match}
+      ${invoiceCardButton("data-purchase-card", l.id, purchaseCardKey())}
       ${iss.length ? `<div class="muted">${iss.map((i) => (i.level === "error" ? "⛔ " : "⚠️ ") + esc(i.message)).join("<br>")}</div>` : ""}</td>
     <td data-label="كمية">${fieldInput(l, "qty", l.qty ?? "", { step: "1" })}</td>
-    <td data-label="بونص">${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
-    <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price))}</td>
+    <td data-label="الرصيد">${l.item && l.stock_qty != null ? esc(fmtStock(l.stock_qty, l.item)) : "—"}</td>
+    <td data-label="بونص" data-purchase-bonus ${CUR.invoice.supplier_type === "warehouse" ? "hidden" : ""}>${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
+    <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price), { describedBy: warningId })}
+      ${draft ? `<small class="badge b-warn" id="${esc(warningId)}" data-price-warning role="status" ${warning ? "" : "hidden"}>${esc(warning)}</small>` : ""}</td>
     <td data-label="خصم %">${fieldInput(l, "discount_bp", pct(l.discount_bp))}</td>
     <td data-label="هامش الموزع">${fieldInput(l, "distributor_margin", money(l.distributor_margin || 0))}</td>
     <td data-label="الصافي">${fieldInput(l, "unit_net_price", money(l.unit_net_price))}</td>
@@ -1534,7 +1901,8 @@ function renderLine(l) {
       </select></td>
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
-    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_date ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : "", { type: "text" })}</td>
+    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_precision === "month" && l.expiry_date
+      ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : l.expiry_date || "", { type: "text" })}</td>
     <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>
       ${l.item_id && l.qty > 1 ? `<button class="btn small secondary" data-split="${esc(l.id)}" title="جزء من الكمية بصلاحية تانية">+ صلاحية</button>` : ""}` : ""}</td>
   </tr>`;
@@ -1558,13 +1926,27 @@ async function fillPaySources(inv) {
 }
 
 const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
+function updatePurchaseBonus(type) {
+  const hidden = type === "warehouse";
+  const bonus = $("#qaBonus");
+  if (bonus) {
+    bonus.disabled = hidden;
+    $("#qaBonusField").hidden = hidden;
+    bonus.closest("[data-entry-field]").hidden = hidden;
+    if (hidden) bonus.value = "0";
+  }
+  for (const cell of app.querySelectorAll("[data-purchase-bonus]")) cell.hidden = hidden;
+}
+
 async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
   const list = await api("/api/suppliers");
+  if (!sel.isConnected) return;
   sel.innerHTML = `<option value="">— اختر —</option>` + list.map((s) =>
     `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}${SUP_TYPE[s.supplier_type] ? ` (${SUP_TYPE[s.supplier_type]})` : ""}</option>`).join("");
   sel.disabled = !draft;
   const cur = list.find((x) => x.id === selected), box = $("#supType");
+  updatePurchaseBonus(cur?.supplier_type);
   if (!box) return;
   if (!cur) { box.innerHTML = `<span class="muted">اختر المورد</span>`; return; }
   const canEdit = ME.permissions.includes("suppliers.write");
@@ -1586,12 +1968,17 @@ async function purchaseTabs(curId) {
   });
 }
 
+function purchaseDecimal(value) {
+  const text = value.trim().replace(/^(-?)\./, (_, sign) => `${sign}0.`);
+  return text === "" ? null : exactPiasters(text) ?? { invalid: value };
+}
+
 const CONVERT = {
-  public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters,
-  tax_amount: (v) => (String(v).trim() === "" ? null : exactPiasters(v) ?? String(v)),
+  public_price: purchaseDecimal, unit_net_price: purchaseDecimal, line_total: purchaseDecimal,
+  tax_amount: purchaseDecimal,
   // exact piasters, never a float round: 4.005 goes to the server as typed and is refused there (review P2)
   distributor_margin: (v) => (String(v).trim() === "" ? 0 : exactPiasters(v) ?? String(v)),
-  discount_bp: toBp, qty: (v) => typedWhole(v),
+  discount_bp: purchaseDecimal, qty: (v) => typedWhole(v),
   bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
@@ -1606,19 +1993,86 @@ function pgFocus() {
   PG_FOCUS = null;
   if (el && !el.disabled) { el.focus(); try { el.select(); } catch { /* not selectable */ } }
 }
+function purchaseCardShortcut(e) {
+  return !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key === purchaseCardKey();
+}
+
+function refreshPurchaseItem(item) {
+  for (const line of CUR.lines) {
+    if (line.item_id !== item.id) continue;
+    line.item = item;
+    const row = $(`[data-purchase-line="${CSS.escape(line.id)}"]`, app);
+    if (!row) continue;
+    const label = $("[data-line-item]", row);
+    if (label) label.textContent = itemLabel(item);
+    const info = $("[data-line-item-info]", row);
+    if (info) info.textContent = purchaseItemInfo(item);
+    const warning = $("[data-price-warning]", row);
+    if (warning) showPurchasePriceWarning(warning, item.public_price, $('[data-field="public_price"]', row).value);
+  }
+  $("#qa")?.dispatchEvent(new CustomEvent("invoice-item-saved", { detail: item }));
+}
+
+function openPurchaseLineCard(row) {
+  const line = CUR.lines.find((l) => l.id === row.dataset.purchaseLine);
+  const invoice = CUR.invoice;
+  const current = onThisScreen();
+  const path = `/api/purchases/${invoice.id}/lines/${line.id}`;
+  const draft = invoice.status === "draft";
+  const active = document.activeElement;
+  const activeInput = active.dataset.line && active.dataset.field;
+  const restore = async () => {
+    await waitForPurchaseSave(invoice.id);
+    if (!current()) return;
+    return active.isConnected ? active : activeInput
+      ? $(`[data-line="${CSS.escape(active.dataset.line)}"][data-field="${activeInput}"]`, app)
+      : $(`[data-purchase-card="${CSS.escape(line.id)}"]`, app);
+  };
+  const update = async (suffix, method, body) => {
+    await waitForPurchaseSave(invoice.id);
+    if (!current()) return;
+    const updated = await api(path + suffix, { method, body: { ...body, version: CUR.invoice.version } });
+    if (!current()) return;
+    CUR = updated;
+    renderInvoice();
+  };
+  showInvoiceItemCard(line.match_status === "suggested" ? null : line.item_id, {
+    purchase: invoice.id,
+    query: line.raw_name,
+    newName: line.raw_name,
+    onPick: draft ? (item) => update("", "PATCH", { changes: { item_id: item.id } }) : null,
+    onCreate: draft ? (item, force) => update("/new-item", "POST", { item, force }) : null,
+    onSaved: async (item) => {
+      await waitForPurchaseSave(invoice.id);
+      if (current()) refreshPurchaseItem(item);
+    },
+    restore,
+  });
+}
+
+app.addEventListener("input", (e) => {
+  const input = e.target;
+  if (input.dataset.field !== "public_price" || !CUR) return;
+  const warning = $("[data-price-warning]", input.parentElement);
+  const line = CUR.lines.find((l) => l.id === input.dataset.line);
+  if (warning) showPurchasePriceWarning(warning, line?.item?.public_price, input.value);
+});
+
 function pgTarget(el, key) {
   const rows = [...new Set([...app.querySelectorAll("input[data-line][data-field]")].map((x) => x.dataset.line))];
-  const r = rows.indexOf(el.dataset.line), c = PG_FIELDS.indexOf(el.dataset.field);
+  const fields = app.querySelector("[data-purchase-bonus]")?.hidden
+    ? PG_FIELDS.filter(field => field !== "bonus_qty") : PG_FIELDS;
+  const r = rows.indexOf(el.dataset.line), c = fields.indexOf(el.dataset.field);
   if (r < 0 || c < 0) return null;
   const rtl = document.dir === "rtl";
   let [nr, nc] = [r, c];
-  if (key === "Enter") { nc = c + 1; if (nc >= PG_FIELDS.length) { nc = 0; nr = r + 1; } }
+  if (key === "Enter") { nc = c + 1; if (nc >= fields.length) { nc = 0; nr = r + 1; } }
   else if (key === "ArrowDown") nr = r + 1;
   else if (key === "ArrowUp") nr = r - 1;
   else if (key === (rtl ? "ArrowLeft" : "ArrowRight")) nc = c + 1;
   else if (key === (rtl ? "ArrowRight" : "ArrowLeft")) nc = c - 1;
-  if (nr < 0 || nr >= rows.length || nc < 0 || nc >= PG_FIELDS.length) return null;
-  return { line: rows[nr], field: PG_FIELDS[nc] };
+  if (nr < 0 || nr >= rows.length || nc < 0 || nc >= fields.length) return null;
+  return { line: rows[nr], field: fields[nc] };
 }
 app.addEventListener("focusin", (e) => {       // U2-2 in the grid too: typing replaces the box
   const el = e.target;
@@ -1626,6 +2080,12 @@ app.addEventListener("focusin", (e) => {       // U2-2 in the grid too: typing r
 });
 app.addEventListener("keydown", (e) => {
   const el = e.target;
+  const row = el.closest?.("[data-purchase-line]");
+  if (row && purchaseCardShortcut(e)) {
+    e.preventDefault();
+    openPurchaseLineCard(row);
+    return;
+  }
   if (!CUR || !(el instanceof HTMLInputElement) || !el.dataset.field || !el.dataset.line) return;
   if (!["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
   const side = e.key === "ArrowLeft" || e.key === "ArrowRight";
@@ -1640,13 +2100,29 @@ app.addEventListener("keydown", (e) => {
   else pgFocus();
 });
 
-async function save(path, body, method = "PATCH") {
+const purchaseSaves = new Map();
+function waitForPurchaseSave(invoiceId) {
+  return Promise.allSettled([...purchaseSaves].filter(([, id]) => id === invoiceId).map(([job]) => job));
+}
+function save(path, body, method = "PATCH", keepPicker = true) {
+  const job = savePurchase(path, body, method, keepPicker);
+  purchaseSaves.set(job, CUR.invoice.id);
+  job.then(() => purchaseSaves.delete(job), () => purchaseSaves.delete(job));
+  return job;
+}
+
+async function savePurchase(path, body, method, keepPicker) {
+  const current = onThisScreen();
   PG_SAVING++;
   try {
-    CUR = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
-    renderInvoice();
+    const updated = await api(path, { method, body: { ...body, version: CUR.invoice.version } });
+    if (!current() || updated.invoice.version < CUR.invoice.version) return;
+    CUR = updated;
+    renderInvoice(keepPicker);
     pgFocus();
+    return true;
   } catch (e) {
+    if (!current()) return;
     toast(e.message, true);
     PG_FOCUS = null;                       // a failed save keeps no pending move (review P2)
     if (e.code === "stale_version") await viewInvoice(CUR.invoice.id);
@@ -1654,13 +2130,19 @@ async function save(path, body, method = "PATCH") {
 }
 
 async function viewInvoice(id) {
-  CUR = await api(`/api/purchases/${encodeURIComponent(id)}`);
+  const updated = await api(`/api/purchases/${encodeURIComponent(id)}`);
+  if (CUR?.invoice.id === id && updated.invoice.version < CUR.invoice.version) return;
+  CUR = updated;
   renderInvoice();
 }
 
 app.addEventListener("change", async (e) => {
   const t = e.target;
   if (!CUR) return;
+  if ((t.dataset.field || t.dataset.h) && t.validity?.badInput) {
+    toast("اكتب قيمة رقمية صحيحة", true);
+    return;
+  }
   const base = `/api/purchases/${CUR.invoice.id}`;
   if (t.dataset.taxmode) {
     await save(`${base}/lines/${t.dataset.taxmode}`, { changes: { tax_included: t.value === "" ? null : +t.value } });
@@ -1673,7 +2155,7 @@ app.addEventListener("change", async (e) => {
     await save(`${base}/lines/${t.dataset.line}`, { changes });
   } else if (t.dataset.h) {
     const f = t.dataset.h;
-    const v = ["declared_total", "extra_discount"].includes(f) ? toPiasters(t.value)
+    const v = ["declared_total", "extra_discount"].includes(f) ? purchaseDecimal(t.value)
       : f === "pay_amount" ? (t.value.trim() === "" ? null : exactPiasters(t.value) ?? t.value) : (t.value || null);
     await save(base, { changes: { [f]: v } });
   } else if (t.dataset.pick && t.value) {
@@ -1720,11 +2202,18 @@ function choosePurchasePrices(review) {
   });
 }
 
+app.addEventListener("mousedown", (e) => {
+  if (e.button === 0 && e.target.closest("[data-purchase-card], [data-qa-card]") &&
+      document.activeElement.matches("#qa input, table.lines input")) e.preventDefault();
+});
+
 app.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t || !CUR) return;
   const base = `/api/purchases/${CUR.invoice.id}`;
-  if (t.id === "approve") {
+  if (t.dataset.purchaseCard) {
+    openPurchaseLineCard(t.closest("[data-purchase-line]"));
+  } else if (t.id === "approve") {
     const pay = CUR.invoice.pay || {}, payNow = pay.source === "credit" ? 0 : pay.amount ?? CUR.invoice.computed_total ?? 0;
     if (!confirm(["اعتماد الفاتورة؟ سيتم إضافة الكميات للمخزون وتحديث التكلفة.",
       payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج: ${$("#paySrc")?.selectedOptions[0]?.textContent || ""}` + (payNow < (CUR.invoice.computed_total || 0) ? "، والباقي على حسابه." : ".")
@@ -1750,7 +2239,7 @@ app.addEventListener("click", async (e) => {
     } catch (err) {
       if (!t.isConnected) return;
       toast(err.message, true);
-      if (err.code === "stale_version") await viewInvoice(invoice.id);
+      if (["stale_version", "has_blocking_issues"].includes(err.code)) await viewInvoice(invoice.id);
     } finally { t.disabled = false; }
   } else if (t.id === "invLabels") {
     purchaseLabels(CUR);
@@ -1777,33 +2266,6 @@ app.addEventListener("click", async (e) => {
   } else if (t.dataset.ack) {
     const reason = prompt("اكتب سبب قبول الفرق (يُسجَّل باسمك):");
     if (reason) await save(`${base}/acknowledge`, { code: t.dataset.ack, line_id: t.dataset.ackline || null, reason }, "POST");
-  } else if (t.dataset.search) {
-    const q = prompt("ابحث عن الصنف (اسم أو باركود):");
-    if (!q) return;
-    const res = await api(`/api/items?q=${encodeURIComponent(q)}`);
-    if (!res.length) return toast("لا توجد نتائج", true);
-    const pick = prompt(res.slice(0, 9).map((r, i) => `${i + 1}) ${r.name_en || r.name_ar}`).join("\n") + "\n\nاكتب رقم الصنف:");
-    const it = res[parseInt(pick, 10) - 1];
-    if (it) await save(`${base}/lines/${t.dataset.search}`, { changes: { item_id: it.id } });
-  } else if (t.dataset.newitem) {
-    const line = CUR.lines.find((l) => l.id === t.dataset.newitem);
-    const name = prompt("اسم الصنف الجديد:", line.raw_name);
-    if (!name) return;
-    const pack = parseInt(prompt("عدد الشرائط/الوحدات في العلبة:", "1"), 10) || 1;
-    try {
-      CUR = await api(`${base}/lines/${line.id}/new-item`, { method: "POST",
-        body: { item: { name_en: name, pack_size: pack }, version: CUR.invoice.version } });
-      renderInvoice();
-    } catch (err) {
-      if (err.code === "possible_duplicate") {
-        const d = err.details.duplicates.map((x) => x.label).join("، ");
-        if (confirm(`يوجد صنف مشابه: ${d}\nهل أنت متأكد أنه صنف مختلف؟`)) {
-          CUR = await api(`${base}/lines/${line.id}/new-item`, { method: "POST",
-            body: { item: { name_en: name, pack_size: pack }, force: true, version: CUR.invoice.version } });
-          renderInvoice();
-        }
-      } else toast(err.message, true);
-    }
   }
 });
 
@@ -1816,6 +2278,10 @@ async function loadCats(force = false) {
   return CATS;
 }
 const canW = () => ME.permissions.includes("items.write");
+const canFixPack = () => canW() && ME.permissions.includes("inventory.adjust");
+const PACK_QUESTION = "العلبة فيها كام شريط؟";
+const PACK_REVIEW_TITLE = "مراجعة العبوات بعد النقل";
+const NAME_REVIEW_TITLE = "مراجعة أسماء العملاء بعد النقل";
 
 const FORMS = [["tab", "أقراص"], ["cap", "كبسول"], ["eff", "فوار"], ["chew", "أقراص مضغ"], ["lozenge", "استحلاب"], ["syrup", "شراب"],
   ["susp", "معلق"], ["solution", "محلول"], ["drops", "نقط"], ["eyedrops", "قطرة عين"], ["amp", "أمبول / حقن"], ["vial", "فيال"],
@@ -1842,7 +2308,7 @@ async function altPanel(itemId, box, onAdd = null) {
   };
   const all = [...r.similar, ...r.other_strength, ...r.alternatives];
   const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
-  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${esc(r.item.name_en || r.item.name_ar)}</h2>
+  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${bidi(upperEn(r.item.name_en || r.item.name_ar))}</h2>
       <button class="btn small secondary" data-aclose>✕ إغلاق</button></div>
     ${r.missing.includes("ingredient") ? `<p class="badge b-warn">⚠ المادة الفعالة غير مكتوبة في بطاقة هذا الصنف، لذلك لا يمكن العثور على المثيل. ${canW() ? `<a href="#/items/${esc(r.item.id)}/edit">أضِفها</a>` : "اطلب من المدير إضافتها."}</p>` : ""}
     ${r.missing.includes("strength") ? `<p class="badge b-warn">⚠ التركيز غير مكتوب، لذلك يُقارَن المثيل دون تركيز.</p>` : ""}
@@ -1879,10 +2345,11 @@ async function viewItems() {
   <section class="panel">
     <div class="row between"><h1>الأصناف</h1>
       <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/dispensing-notes">ملاحظات الصرف</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
+      ${ME.role === "owner" ? `<a class="btn secondary" href="#/pack-review">${PACK_REVIEW_TITLE}</a>` : ""}
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
-      <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
+      <input id="q" lang="en" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
       <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">بدون قسم</option>
         ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label></div>
   </section>
@@ -1978,6 +2445,7 @@ async function viewItem(id) {
       <div class="totals"><div>العبوة<b>${esc(c.pack_unit_name === "pack" ? "علبة" : c.pack_unit_name)}</b></div>
         <div>تُباع بـ<b>${esc(unitName(c))}</b></div><div>العبوة تحتوي على<b>${c.pack_size} ${esc(unitName(c))}</b></div>
         <div>الحد الأقصى<b>${c.max_stock ? esc(packs(c.max_stock, c)) : "—"}</b></div></div>
+      ${c.pack_size === 1 && !c.is_service && canFixPack() ? `<button type="button" class="btn secondary" id="cardPackFix">${PACK_QUESTION}</button>` : ""}
       <h2 class="mt">الباركود والكود الدولي</h2>
       <ul class="plain">${c.barcodes.map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}</li>`).join("") || `<li class="muted">لا يوجد باركود</li>`}</ul>
       <h2 class="mt">البيع آخر 12 شهر</h2>
@@ -2018,6 +2486,13 @@ async function viewItem(id) {
       catch (err) { toast(err.message, true); }
     });
   }
+  $("#cardPackFix")?.addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    if (await withBusy(button, () => packFix(id, null, true)) && button.isConnected) {
+      await viewItem(id);
+      estockPanel("item", id);
+    }
+  });
   if ($("#mvRep")) {
     let mv = null;
     const q = (n) => `${n < 0 ? "−" : ""}${fmtStock(Math.abs(n), { pack_size: c.pack_size, base_unit_name: c.base_unit_name }) || 0}`;
@@ -2048,31 +2523,182 @@ async function viewItem(id) {
   });
 }
 
+function invoiceCardDetails(c) {
+  const cost = c.avg_cost_pack;
+  return `<h3 class="ltr-name">${esc(itemText(c))}</h3>
+    ${c.name_en && c.name_ar ? `<p>${esc(PREFS.names === "ar" ? c.name_en : c.name_ar)}</p>` : ""}
+    <dl class="invoice-card-fields">
+      <div><dt>الكود الداخلي</dt><dd><bdi>${esc(c.code || "—")}</bdi></dd></div>
+      <div><dt>الباركود</dt><dd>${c.barcodes.map((b) => `<bdi dir="ltr">${esc(b.code)}</bdi>`).join("<br>") || "—"}</dd></div>
+      <div><dt>العبوة</dt><dd>${esc(invoicePack(c))}</dd></div>
+      <div><dt>سعر الجمهور (ج)</dt><dd>${money(c.public_price) || "—"}</dd></div>
+      ${c.recent_purchases ? `<div><dt>متوسط التكلفة</dt><dd>${money(cost) || "—"}</dd></div>` : ""}
+    </dl>
+    ${c.batches ? `<h3>التشغيلات والصلاحية</h3><div class="tablewrap"><table>
+      <thead><tr><th>التشغيلة</th><th>الصلاحية</th><th>الرصيد</th><th>سعر الجمهور (ج)</th></tr></thead>
+      <tbody>${c.batches.map((b) => `<tr><td>${esc(b.batch_no || (b.batch_id ? "—" : "من غير تشغيلة"))}</td><td>${esc(b.expiry_date || "—")}</td>
+        <td>${esc(fmtStock(b.qty, c))}</td><td>${money((b.batch_id ? b.public_price : c.untracked_public_price) ?? c.public_price) || "—"}</td></tr>`).join("") ||
+        '<tr><td colspan="4" class="muted">لا يوجد رصيد</td></tr>'}</tbody></table></div>` : ""}
+    ${c.recent_purchases ? `<h3>آخر المشتريات</h3><div class="tablewrap"><table>
+      <thead><tr><th>المورد</th><th>التاريخ</th><th>الكمية (علبة)</th><th>سعر الشراء (ج)</th></tr></thead>
+      <tbody>${c.recent_purchases.map((p) => `<tr><td>${esc(p.supplier || "—")}</td><td>${esc(p.invoice_date || "—")}</td>
+        <td>${p.qty}</td><td>${money(p.unit_net_price) || "—"}</td></tr>`).join("") ||
+        '<tr><td colspan="4" class="muted">لا يوجد شراء مسجل بعد</td></tr>'}</tbody></table></div>` : ""}`;
+}
+
+function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCreate, onSaved, restore } = {}) {
+  if ($("dialog[open]")) return;
+  const focused = document.activeElement, current = onThisScreen();
+  const d = document.createElement("dialog");
+  d.className = "invoice-item-card";
+  d.setAttribute("aria-labelledby", "invoiceCardTitle");
+  d.innerHTML = `<div class="row between"><h2 id="invoiceCardTitle">كارت الصنف</h2>
+    <button type="button" class="btn small secondary" data-card-close autofocus>قفل</button></div>
+    <p class="err" role="alert" hidden></p><div data-card-body></div>`;
+  const box = $("[data-card-body]", d), close = $("[data-card-close]", d), error = $("[role=alert]", d);
+  const lifecycle = new AbortController();
+  let busy = false;
+  const showError = (err) => { error.textContent = err.message; error.hidden = false; };
+  const run = async (action) => {
+    if (busy || !d.open) return;
+    busy = true;
+    error.hidden = true;
+    try { await action(); } catch (err) { if (d.open) showError(err); }
+    finally { busy = false; }
+  };
+  const dismiss = async () => {
+    if (!d.open) return;
+    d.close();
+    lifecycle.abort();
+    d.remove();
+    if (!current()) return;
+    const target = restore ? await restore() : focused;
+    if (current() && !$("dialog[open]") &&
+        [document.body, focused, target].includes(document.activeElement)) target?.focus({ preventScroll: true });
+  };
+  const finish = async (callback, ...args) => {
+    if (!current() || !d.open) return;
+    await callback?.(...args);
+    await dismiss();
+  };
+  close.addEventListener("click", () => { if (!busy) dismiss(); });
+  d.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    if (!busy) dismiss();
+  });
+  window.addEventListener("hashchange", () => { if (!current()) dismiss(); }, { signal: lifecycle.signal });
+
+  const path = (itemId) => `/api/items/${encodeURIComponent(itemId)}/card?recent_purchases=1${purchase ? `&purchase=${encodeURIComponent(purchase)}` : ""}`;
+  const show = async (itemId) => {
+    box.innerHTML = '<p role="status">بنعرض كارت الصنف…</p>';
+    const item = await api(path(itemId));
+    if (!d.open) return;
+    box.innerHTML = invoiceCardDetails(item) + (canW() ? '<button type="button" class="btn mt" data-card-edit>تعديل</button>' : "");
+    $("[data-card-edit]", box)?.addEventListener("click", () => run(async () => {
+      const cats = await loadCats(true);
+      if (!d.open) return;
+      renderItemEdit(box, itemId, item, cats, { run, onSave: (saved) => finish(onSaved, saved) });
+      $("[name=name_en]", box).focus();
+    }));
+  };
+  const newItem = () => {
+    box.innerHTML = `<form><h3>صنف جديد</h3>
+      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(upperEn(newName))}"></label>
+      <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
+      <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
+    const form = $("form", box);
+    form.name_en.focus();
+    $("[data-card-back]", box).addEventListener("click", () => { if (!busy) searchForm(); });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      run(async () => {
+        const item = { name_en: form.name_en.value.trim(), pack_size: form.pack_size.valueAsNumber };
+        try { await finish(onCreate, item, false); }
+        catch (err) {
+          if (err.code !== "possible_duplicate") throw err;
+          const labels = (err.details?.duplicates || []).map((entry) => entry.label).join("، ");
+          if (confirm(`يوجد صنف مشابه: ${labels}\nهل أنت متأكد أنه صنف مختلف؟`)) await finish(onCreate, item, true);
+        }
+      });
+    });
+  };
+  const searchForm = () => {
+    box.innerHTML = `<form><label class="f">دَوّر على الصنف بالاسم أو الكود أو الباركود
+      <input type="search" autocomplete="off" value="${esc(query)}"></label>
+      <div class="row"><button class="btn secondary">بحث</button>
+      ${onCreate ? '<button type="button" class="btn secondary" data-card-new>صنف جديد</button>' : ""}</div></form>
+      <div data-card-results></div>`;
+    const input = $("input", box), results = $("[data-card-results]", box);
+    let request = 0, timer;
+    const search = async () => {
+      clearTimeout(timer);
+      const n = ++request, value = input.value.trim();
+      if (value.length < 2) return;
+      try {
+        const { items } = await findItems(value);
+        if (!d.open || !input.isConnected || n !== request) return;
+        results.innerHTML = items.map((item, i) => `<div class="row between"><span>${itemHtml(item)}</span>
+          <button type="button" class="btn small secondary" data-card-result="${i}">${onPick ? (newName === undefined ? "اختار الصنف" : "ربط الصنف") : "كارت الصنف"}</button></div>`).join("") ||
+          '<p class="muted">مفيش أصناف مطابقة</p>';
+        results.querySelectorAll("[data-card-result]").forEach((button) => button.addEventListener("click", () => {
+          const item = items[+button.dataset.cardResult];
+          run(() => onPick ? finish(onPick, item) : show(item.id));
+        }));
+      } catch (err) { if (d.open && input.isConnected && n === request) showError(err); }
+    };
+    input.addEventListener("input", () => {
+      query = input.value;
+      request++;
+      results.replaceChildren();
+      error.hidden = true;
+      clearTimeout(timer);
+      timer = setTimeout(search, 200);
+    });
+    $("form", box).addEventListener("submit", (e) => { e.preventDefault(); search(); });
+    $("[data-card-new]", box)?.addEventListener("click", () => { if (!busy) newItem(); });
+    input.focus();
+    search();
+  };
+
+  document.body.append(d);
+  d.showModal();
+  if (id) show(id).catch((err) => { if (d.open) showError(err); });
+  else searchForm();
+}
+
 async function viewItemEdit(id) {
   if (!canW()) { location.hash = id ? `#/items/${id}` : "#/items"; return; }
   const it = id ? await api(`/api/items/${id}/card`) : { pack_size: 1, base_unit_name: "unit", pack_unit_name: "pack", barcodes: [] };
-  const cats = (await loadCats(true)).filter((c) => c.is_active || c.id === it.category_id);
+  const cats = await loadCats(true);
+  renderItemEdit(app, id, it, cats);
+}
+
+function renderItemEdit(root, id, it, categories, modal = null) {
+  const cats = categories.filter((c) => c.is_active || c.id === it.category_id);
+  const $ = (s) => root.querySelector(s);
   const canPrice = ME.permissions.includes("items.price") || !id;
   const unitVal = (v, def) => (v === "unit" ? "" : v === "pack" ? "" : v) || def;
-  app.innerHTML = `<form class="panel" id="itemForm"><div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
-      <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>
+  root.innerHTML = `<form class="panel" id="itemForm">${modal
+    ? '<h3>تعديل الصنف</h3>'
+    : `<div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
+      <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>`}
     <div class="formgrid">
-      <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
-      <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
+      <label class="f">الاسم بالإنجليزي <input name="name_en" lang="en" data-upper dir="ltr" value="${esc(it.name_en || "")}"></label>
+      <label class="f">الاسم بالعربي <input name="name_ar" lang="ar" value="${esc(it.name_ar || "")}"></label>
       <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
       <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}" placeholder="Amoxicillin + Clavulanic acid">
         <span class="muted">بالإنجليزية كما على العلبة، ومنها يُعثر على المثيل.</span></label>
       <label class="f">التركيز <input name="strength" dir="ltr" value="${esc(it.strength || it.strength_norm || "")}" placeholder="500 mg"></label>
       <label class="f">الشكل <select name="dosage_form"><option value="">—</option>${(it.dosage_form && !FORMS.some((x) => x[0] === it.dosage_form) ? [[it.dosage_form, it.dosage_form], ...FORMS] : FORMS).map(([c, t]) => `<option value="${esc(c)}" ${c === it.dosage_form ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
-      <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
+      <label class="f">الكود الداخلي <input name="code" lang="en" dir="ltr" value="${esc(it.code || "")}"></label>
       <label class="f">القسم <select name="category_id"><option value="">— بدون قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">تحديث السعر للمالك والمدير فقط</span>`}</label>
       <label class="f">اسم العبوة <input name="pack_unit_name" value="${esc(unitVal(it.pack_unit_name, "علبة"))}"></label>
-      <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
+      <label class="f">اسم الوحدة الصغيرة <input name="base_unit_name" value="${esc(unitVal(it.base_unit_name, modal ? "وحدة" : "شريط"))}" placeholder="شريط / أمبول / قرص"></label>
       <label class="f">عدد الوحدات في العبوة <input name="pack_size" type="number" min="1" step="1" value="${it.pack_size}" ${id && it.stock_qty ? "disabled" : ""}>
         ${id && it.stock_qty ? `<span class="muted">مقفلة لأن للصنف رصيدًا</span>` : ""}
-        ${id && ME.permissions.includes("inventory.adjust") && ME.permissions.includes("items.write") ? `<button type="button" class="btn small secondary" id="packFixBtn">تصحيح عدد الوحدات (الرصيد يتحوّل معاه)</button>` : ""}</label>
+        ${!modal && id && !it.is_service && canFixPack() ? `<button type="button" class="btn small secondary" id="packFixBtn">${it.pack_size === 1 ? PACK_QUESTION : "تصحيح عدد الوحدات (الرصيد يتحوّل معاه)"}</button>` : ""}</label>
       <label class="f">حد الطلب (بالعبوة) <input name="min_packs" type="number" min="0" step="1" value="${it.min_stock ? Math.round(it.min_stock / it.pack_size) : ""}"></label>
       <label class="f">الحد الأقصى (بالعبوة) <input name="max_packs" type="number" min="0" step="1" value="${it.max_stock ? Math.round(it.max_stock / it.pack_size) : ""}"></label>
       <label class="f">المكان (الرف) <input name="location" value="${esc(it.location || "")}" placeholder="مثال: أقراص — A"></label>
@@ -2091,9 +2717,12 @@ async function viewItemEdit(id) {
     <p class="muted">امسح هنا الباركود أو الكود المربع الموجود على العلبة. يُحفظ الكود المربع بالكود الدولي الذي بداخله.</p>
     <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
       ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">إزالة</button>` : ""}</li>`).join("")}</ul>
-    <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
+    <div class="row"><input id="bcNew" lang="en" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
     <div class="row mt"><button class="btn">احفظ</button></div></form>`;
-  const newCodes = [];
+  const newCodes = new Set(), removedCodes = new Set();
+  const perform = modal ? modal.run : async (action) => {
+    try { await action(); } catch (err) { toast(err.message, true); }
+  };
   const readCode = (raw) => {     // a 2D code -> its GTIN (as the EAN-13 printed on most packs when it starts with 0)
     const m = raw.trim().replace(/^\](d2|Q3|C1)/, "").match(/^(?:\(01\)|01)(\d{14})/) || raw.match(/\/01\/(\d{8,14})/);
     if (!m) return raw.trim();
@@ -2101,22 +2730,42 @@ async function viewItemEdit(id) {
     return g.startsWith("0") ? g.slice(1) : g;
   };
   $("#bcNew").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#bcAdd").click(); } });
-  $("#bcAdd").addEventListener("click", async () => {
-    const code = readCode($("#bcNew").value); if (!code) return;
-    if (id) {
-      try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: code } }); viewItemEdit(id); }
-      catch (err) { toast(err.message, true); }
-    } else { newCodes.push(code); $("#bcList").insertAdjacentHTML("beforeend", `<li><bdi dir="ltr">${esc(code)}</bdi></li>`); $("#bcNew").value = ""; }
+  const appendCode = (code) => $("#bcList").insertAdjacentHTML("beforeend", `<li><bdi dir="ltr">${esc(code)}</bdi>
+    ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(code)}">إزالة</button>` : ""}</li>`);
+  $("#bcAdd").addEventListener("click", () => {
+    const input = $("#bcNew"), code = readCode(input.value);
+    if (!code) return;
+    if (id && !modal) perform(async () => {
+      await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: code } });
+      return viewItemEdit(id);
+    });
+    else {
+      if (!$(`[data-rm="${CSS.escape(code)}"]`) && !newCodes.has(code)) {
+        if (!removedCodes.delete(code)) newCodes.add(code);
+        appendCode(code);
+      }
+      input.value = "";
+    }
   });
-  document.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirmInline(b)) return;
-    try { await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode: b.dataset.rm, remove: true } }); viewItemEdit(id); }
-    catch (err) { toast(err.message, true); }
-  }));
-  $("#packFixBtn")?.addEventListener("click", () => packFix(id).then((ok) => { if (ok) viewItemEdit(id); }));
-  $("#itemForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const f = e.target, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
+  $("#bcList").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-rm]");
+    if (!button) return;
+    const barcode = button.dataset.rm;
+    if (modal) {
+      if (!newCodes.delete(barcode)) removedCodes.add(barcode);
+      button.closest("li").remove();
+    } else if (confirmInline(button)) perform(async () => {
+      await api(`/api/items/${id}/barcode`, { method: "POST", body: { barcode, remove: true } });
+      await viewItemEdit(id);
+    });
+  });
+  $("#packFixBtn")?.addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    if (await withBusy(button, () => packFix(id, null, it.pack_size === 1)) && button.isConnected) viewItemEdit(id);
+  });
+  const form = $("#itemForm");
+  const readFields = () => {
+    const f = form, v = (n) => f[n] && !f[n].disabled ? f[n].value.trim() : undefined;
     const pack = +(v("pack_size") ?? it.pack_size) || 1;
     const data = { name_en: v("name_en") || null, name_ar: v("name_ar") || null, manufacturer: v("manufacturer") || null,
       active_ingredient: v("active_ingredient") || null, code: v("code") || null, location: v("location") || null,
@@ -2128,26 +2777,63 @@ async function viewItemEdit(id) {
     if (data.is_service && !id && ["شريط", "وحدة"].includes(data.base_unit_name)) { data.base_unit_name = "مرة"; data.pack_unit_name = "خدمة"; }
     if (v("pack_size") !== undefined) data.pack_size = pack;
     if (v("public_price") !== undefined) data.public_price = toPiasters(v("public_price"));
+    return data;
+  };
+  const original = readFields();
+  let category = it.category_id || null;
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const data = readFields();
+    if (modal) {
+      for (const key of Object.keys(data)) if (data[key] === original[key]) delete data[key];
+    }
     if (id && data.public_price === it.public_price) delete data.public_price;
     if (id && data.pack_size === it.pack_size) delete data.pack_size;
     if (id && (data.strength || "") === (it.strength || it.strength_norm || "")) delete data.strength;     // untouched: don't rewrite
     if (id && (data.dosage_form || "") === (it.dosage_form || "")) delete data.dosage_form;
-    try {
-      let iid = id;
-      if (id) await api(`/api/items/${id}`, { method: "PATCH", body: data });
-      else {
-        try { iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes } })).id; }
+    perform(async () => {
+      let iid = id, saved = it;
+      if (id && (!modal || Object.keys(data).length)) {
+        saved = await api(`/api/items/${id}`, { method: "PATCH", body: data });
+        if (modal) {
+          Object.assign(original, data);
+          const { barcodes, ...fields } = saved;
+          Object.assign(it, fields);
+          saved = it;
+        }
+      } else if (!id) {
+        try { iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: [...newCodes] } })).id; }
         catch (err) {
           if (err.code !== "possible_duplicate") throw err;
           const d = (err.details?.duplicates || []).map((x) => x.name || x.name_en).join("، ");
           if (!confirm(`يوجد صنف مشابه: ${d}\nهل أنت متأكد أنه صنف مختلف؟`)) return;
-          iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: newCodes, force: true } })).id;
+          iid = (await api("/api/items", { method: "POST", body: { item: data, barcodes: [...newCodes], force: true } })).id;
         }
       }
-      const cat = f.category_id.value || null;
-      if (cat !== (it.category_id || null)) await api(`/api/items/${iid}/category`, { method: "POST", body: { category_id: cat } });
-      toast("تم الحفظ"); location.hash = `#/items/${iid}`;
-    } catch (err) { toast(err.message, true); }
+      const cat = form.category_id.value || null;
+      if (cat !== category) {
+        await api(`/api/items/${iid}/category`, { method: "POST", body: { category_id: cat } });
+        category = cat;
+      }
+      if (modal) {
+        const changeBarcode = (barcode, remove) => api(`/api/items/${iid}/barcode`, {
+          method: "POST", body: { barcode, remove },
+        });
+        for (const barcode of newCodes) {
+          await changeBarcode(barcode, false);
+          newCodes.delete(barcode);
+        }
+        for (const barcode of removedCodes) {
+          await changeBarcode(barcode, true);
+          removedCodes.delete(barcode);
+        }
+      }
+      toast("تم الحفظ");
+      if (modal) {
+        Object.assign(it, saved, { category_id: category });
+        await modal.onSave(it);
+      } else location.hash = `#/items/${iid}`;
+    });
   });
 }
 
@@ -2289,6 +2975,14 @@ const ISSUE_AR = {
   same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم هاتف غير صحيح",
   invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
+  unknown_pack_layout: "عدد الشرائط في العلبة غير معروف — حدده",
+};
+// QA-007: the choices for a counted item whose file gives no pack layout (never guessed as "whole box")
+const packLayoutOptions = (x) => {
+  const lay = x.issues.find((i) => i.code === "unknown_pack_layout");
+  if (!lay) return "";
+  return (lay.suggest || []).filter((n) => n > 1 && n < lay.count).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
+    + `<option value="pack:${lay.count}">بالواحدة: ${lay.count} في العلبة</option><option value="pack:1">علبة كاملة فقط</option><option value="pack:?">عدد آخر في العلبة…</option>`;
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
 
@@ -2365,14 +3059,20 @@ async function viewImportRun(id) {
       <td>${open ? `<select data-dec="${esc(x.id)}">
         <option value="">${x.decision ? esc(x.decision) : "— اختر —"}</option>
         <option value="skip">تجاهل السطر</option>
-        ${x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : ""}
+        ${packLayoutOptions(x) || (x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : "")}
         ${x.target_id && r.kind === "items" ? `<option value="link:${esc(x.target_id)}">ربط بالصنف الموجود</option>` : ""}
       </select>` : esc(x.decision || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا يوجد</td></tr>`}</tbody>
   </table></div></section>`;
   app.querySelectorAll("[data-dec]").forEach((s) => s.addEventListener("change", async () => {
     if (!s.value) return;
-    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision: s.value } }); toast("تم الحفظ"); }
-    catch (e) { toast(e.message, true); }
+    let decision = s.value;
+    if (decision === "pack:?") {
+      const n = prompt("عدد وحدات البيع (الشرائط) في العلبة");
+      if (n === null || !/^[0-9]+$/.test(n.trim())) { s.value = ""; return; }
+      decision = `pack:${Number(n.trim())}`;
+    }
+    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision } }); toast("تم الحفظ"); }
+    catch (e) { s.value = ""; toast(e.message, true); }
   }));
   $("#impApply")?.addEventListener("click", async () => {
     if (!confirm("تطبيق الاستيراد؟ العملية تتم مرة واحدة بالكامل أو لا شيء.")) return;
@@ -2451,11 +3151,21 @@ async function viewCounts() {
       <label class="f">القسم <select name="cat"><option value="">—</option>${(await loadCats()).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label>
       <label class="f">المواقع (إذا كان النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
       <button class="btn" type="submit">بدء جرد</button></form>` : ""}
+    ${canManage ? `<div class="row mt"><button class="btn secondary" id="cntDaily">جرد يومي صغير (10 أصناف)</button>
+      <span class="muted">البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.</span></div>
+      <div id="cntPick" class="muted small"></div>` : ""}
   </section>
   <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
     <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${{ full: "شامل", location: "مواقع", items: "أصناف / قسم" }[c.scope] || esc(c.scope)}</td>
       <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(dayOf(c.created_at))}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
+  if (canManage) api("/api/counts/daily-pick").then(({ items }) => {
+    if ($("#cntPick")) $("#cntPick").innerHTML = items.length ? `هيتجرد: ${items.map((x) => `${esc(x.label)} (${esc(x.why)})`).join("، ")}` : "مفيش أصناف محتاجة جرد النهارده";
+  }).catch(() => {});
+  $("#cntDaily")?.addEventListener("click", async () => {
+    try { const r = await api("/api/counts", { method: "POST", body: { daily: true } }); location.hash = `#/counts/${r.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
   $("#cntForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2471,6 +3181,9 @@ let COUNT_ITEM = null;
 
 async function viewCountSession(id) {
   const canManage = ME.permissions.includes("inventory.adjust");
+  setTimeout(() => api(`/api/counts/${id}/items`).then(({ items }) => {     // the items this count covers
+    if ($("#cntScope") && items.length) $("#cntScope").textContent = "الأصناف المطلوب جردها: " + items.map((x) => x.name + (x.location ? ` (${x.location})` : "")).join("، ");
+  }).catch(() => {}), 0);
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>تسجيل الجرد</h1><a href="#/counts">رجوع</a></div>
@@ -2479,6 +3192,7 @@ async function viewCountSession(id) {
       <label class="f grow">باركود أو اسم الصنف <input id="cntQ" autocomplete="off" autofocus></label>
       ${"BarcodeDetector" in window ? `<button class="btn secondary" id="cntCam" type="button">كاميرا</button>` : ""}
     </div>
+    <div id="cntScope" class="muted small"></div>
     <video id="cntVideo" playsinline hidden class="scanvideo"></video>
     <div id="cntPick"></div>
     <div id="cntItem" class="mt"></div>
@@ -2489,7 +3203,7 @@ async function viewCountSession(id) {
   const chooseItem = (it) => {
     COUNT_ITEM = it;
     $("#cntPick").innerHTML = "";
-    $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
+    $("#cntItem").innerHTML = `<div class="panel"><b>${bidi(upperEn(it.name_en || it.name_ar))}</b>
       <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(unitName(it))} — موقع ${esc(it.location || "—")}</div>
       <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
       <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
@@ -2627,6 +3341,75 @@ async function renderDeviceRestore() {
     } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
   });
 }
+async function viewEstockMove() {
+  if (!isOwnerMe()) {
+    app.innerHTML = `<section class="panel"><h1>نقل من إي ستوك</h1><p>الشاشة دي للمالك بس.</p></section>`;
+    return;
+  }
+  app.innerHTML = `<section class="panel" id="estockMove">
+    <h1>نقل من إي ستوك</h1>
+    <p>ابدأ من الكمبيوتر اللي عليه إي ستوك. البرنامج هيقرا البيانات ويجرّب النقل على نسخة، وبعدها يعرض تقرير المطابقة.</p>
+    <p class="muted">يفضّل توقف التسجيل في إي ستوك وقت القراية عشان التقرير يعكس البيانات في نفس الوقت.</p>
+    <p id="estockMoveStatus" role="status"></p>
+    <progress aria-label="تقدّم تجربة النقل" hidden></progress>
+    <div class="row"><button class="btn" type="button" hidden></button><a class="btn secondary" href="#/system">ارجع للبرنامج</a></div>
+    <pre id="estockMoveReport" dir="rtl" data-raw hidden></pre>
+  </section>`;
+  const panel = $("#estockMove"), button = panel.querySelector("button"), bar = panel.querySelector("progress");
+  const status = $("#estockMoveStatus"), report = $("#estockMoveReport");
+  const path = "/api/estock/move";
+  const isCurrent = () => panel.isConnected && location.hash === "#/estock-move";
+  let state, lastMessage;
+
+  async function refresh() {
+    if (!isCurrent()) return;
+    try {
+      const next = await api(path);
+      if (!isCurrent()) return;
+      state = next;
+      const labels = {
+        idle: "جاهز للبحث عن إي ستوك.",
+        finding: "بندور على قاعدة إي ستوك على الجهاز…",
+        reading: `لقينا قاعدة إي ستوك. بنقرا البيانات… الجداول اللي اتقرت: ${next.tables}`,
+        rehearsing: "القراية خلصت. بنجرّب النقل على نسخة وبنجهّز تقرير المطابقة…",
+        interrupted: "التجربة وقفت. اضغط «كمّل التجربة» عشان تتابع.",
+        failed: next.message,
+        done: next.reconciled ? "التجربة خلصت والمطابقة نجحت. راجع التقرير." : "التجربة خلصت. راجع الملاحظات والفروق في التقرير.",
+      };
+      const actions = { idle: "ابدأ تجربة النقل", failed: "جرّب تاني", interrupted: "كمّل التجربة", done: "اعمل تجربة جديدة" };
+      const working = ["finding", "reading", "rehearsing"].includes(next.phase);
+      const message = next.supported ? labels[next.phase] : "تجربة نقل إي ستوك متاحة على ويندوز ١٠ و١١.";
+      if (lastMessage !== message) status.textContent = lastMessage = message;
+      bar.hidden = !working;
+      button.hidden = !next.supported || working;
+      button.textContent = actions[next.phase] || "";
+      report.hidden = next.phase !== "done";
+      if (next.report) {
+        const content = document.createElement("span");
+        content.textContent = next.report;
+        report.replaceChildren(content);
+      } else report.replaceChildren();
+      if (working) setTimeout(refresh, 1000);
+    } catch (err) {
+      if (!isCurrent()) return;
+      status.textContent = err.message;
+      lastMessage = undefined;
+      // A running job can outlive a brief disconnect or browser reload.
+      if (!err.code) setTimeout(refresh, 2000);
+      else { bar.hidden = true; button.hidden = true; report.hidden = true; report.textContent = ""; }
+    }
+  }
+  button.addEventListener("click", () => withBusy(button, async () => {
+    try {
+      await api(path, { method: "POST", body: state.phase === "done" ? { replace_id: state.id } : {} });
+      await refresh();
+    } catch (err) {
+      if (isCurrent()) toast(err.message, true);
+    }
+  }));
+  await refresh();
+}
+
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
@@ -2635,7 +3418,9 @@ async function viewSystem() {
     <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
-    <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
+    <section class="panel"><h1>البرنامج</h1>
+      ${isOwnerMe() ? `<p><a class="btn secondary" href="#/estock-move">نقل من إي ستوك</a></p>` : ""}
+      <div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
@@ -2769,7 +3554,8 @@ async function renderReceiptCfg(c) {
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الإيصال <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
-    <label class="f">مقدمة الفاتورة (أول سطر، اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
+    <label class="f">قالب الإيصال <select name="template">${[["detailed", "مفصّل"], ["compact", "مختصر"], ["large", "خط كبير"]].map(([v, label]) => `<option value="${v}" ${(c.template || "detailed") === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="f">مقدمة الفاتورة (اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
     <label class="f">اسم الصيدلية على الفاتورة (فارغ = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
     <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
     <label class="f">سطر 2 (الهاتف) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
@@ -2792,9 +3578,12 @@ async function renderReceiptCfg(c) {
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
       <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
-      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة. الحل: أعد التثبيت بآخر نسخة من المثبّت.</b></p>`}
+      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
+      <label class="f">الباركود على الملصق <select name="label_barcode_source">
+        <option value="internal" ${c.label_barcode_source === "internal" ? "selected" : ""}>كود الصنف</option>
+        <option value="international" ${c.label_barcode_source === "international" ? "selected" : ""}>الكود الدولي</option></select></label>
       <label class="f">المقاس <select name="label_preset">${["38x25", "50x30", "58x40"].map((v) => `<option value="${v}" ${c.label_size === v ? "selected" : ""}>${v.replace("x", " × ")} مم</option>`).join("")}<option value="custom" ${["38x25", "50x30", "58x40"].includes(c.label_size) ? "" : "selected"}>مقاس آخر (اكتبه)</option></select></label>
       <div class="row" id="lbCustom"><label class="f">العرض (مم) <input name="label_w" type="number" min="20" max="110" step="0.1" value="${esc(c.label_size.split("x")[0])}"></label>
         <label class="f">الارتفاع (مم) <input name="label_h" type="number" min="10" max="80" step="0.1" value="${esc(c.label_size.split("x")[1])}"></label></div>
@@ -2825,18 +3614,23 @@ async function renderReceiptCfg(c) {
       <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
-    <fieldset class="lblp"><legend>اللوجو والكود المربع (QR) أعلى الإيصال</legend>
+    <fieldset class="lblp"><legend>اللوجو والأكواد المربعة (QR)</legend>
       <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
       <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
         <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
         <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>احذف اللوجو</button></div>
       <p class="muted">في كل كود: اكتب <b>رقم الهاتف المحمول للصيدلية</b> (للواتساب — يحوّله البرنامج تلقائيًا)، أو الصق رابط صفحة الفيسبوك، أو رابط الموقع من خرائط جوجل (مشاركة ← نسخ الرابط)، أو رابط الدفع من تطبيق إنستاباي. تُكتب الكلمة التي تحت الكود تلقائيًا حسب الرابط، أو اكتبها بنفسك.</p>
-      <label class="f">الكود العلوي (بجانب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+      <label class="f">الكود الأول أسفل الإيصال <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
       <label class="f">كود ثانٍ أسفل الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
-    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
+    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}${chk("show_item_discount", "سطر خصم الأصناف")}${chk("show_invoice_discount", "سطر خصم الفاتورة")}${chk("show_rounding", "سطر التقريب")}</div>
+    <p class="muted small">لو خبّيت سطر خصم، الإيصال يطبع الأسعار بعد الخصم والإجمالي النهائي بس. اسم البائع = اللي عمل البيعة.</p>
+    <fieldset class="lblp lbprev"><legend>معاينة الإيصال</legend>
+      <p id="rcPreviewMessage" class="muted" role="status"></p>
+      <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
+    </fieldset>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
   RC_LOGO = undefined;
@@ -2845,23 +3639,72 @@ async function renderReceiptCfg(c) {
     try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
     $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
     $("#rcLogoMsg").textContent = "هذا شكله على الورق تمامًا (أبيض وأسود). إذا اختفى جزء منه أو صار أسود، فارفع نسخة أبيض وأسود من اللوجو. يُحفظ عند الضغط على «احفظ»";
+    previewReceipt();
   });
   $("#rcLogoDel").addEventListener("click", () => {
     RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
     $("#rcLogoMsg").textContent = "سيُحذف عند الضغط على «احفظ»";
+    previewReceipt();
   });
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
   let prevT = null, prevUrl = null;
+  const previewCurrent = onThisScreen();
+  const appearanceFields = ["title", "header", "footer", "tax_no", "cr_no", "time_format", "names",
+    "template", "qr_text", "qr_caption", "qr2_text", "qr2_caption"];
+  const appearanceChecks = ["show_cashier", "show_customer", "show_expiry", "show_return_policy",
+    "show_item_count", "show_change", "show_item_discount", "show_invoice_discount", "show_rounding"];
+  const appearance = () => ({
+    paper: +lf.paper.value, lines: [lf.l0.value, lf.l1.value, ...c.lines.slice(2)],
+    ...Object.fromEntries(appearanceFields.map((key) => [key, lf.elements[key].value])),
+    ...Object.fromEntries(appearanceChecks.map((key) => [key, lf.elements[key].checked])),
+    ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}),
+  });
+  const receiptImage = $("#rcPreview"), receiptMessage = $("#rcPreviewMessage");
+  let receiptTimer, receiptRequest = 0;
+  const previewReceipt = () => {
+    clearTimeout(receiptTimer);
+    const seq = ++receiptRequest;
+    receiptTimer = setTimeout(async () => {
+      const current = () => previewCurrent() && lf.isConnected && seq === receiptRequest;
+      if (!current()) return;
+      try {
+        const res = await fetch("/api/settings/receipt", { method: "PUT",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
+          body: JSON.stringify({ ...appearance(), preview: true }) });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error?.message || "تعذرت المعاينة");
+        if (!current()) return;
+        receiptImage.src = "data:image/png;base64," + result.png;
+        receiptImage.hidden = false;
+        receiptMessage.textContent = "بيانات تجريبية";
+      } catch (error) {
+        if (!current()) return;
+        receiptImage.hidden = true;
+        receiptMessage.textContent = "تعذرت المعاينة" + (error.message ? " · " + error.message : "");
+      }
+    }, 300);
+  };
+  for (const key of ["paper", "l0", "l1", ...appearanceFields, ...appearanceChecks]) {
+    lf.elements[key].addEventListener("input", previewReceipt);
+  }
+  previewReceipt();
   const preview = () => { clearTimeout(prevT); prevT = setTimeout(async () => {
+    if (!previewCurrent() || !lf.isConnected) return;
     try {
       const r = await fetch("/api/print/label-preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
-        body: JSON.stringify({ label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
+        body: JSON.stringify({ label_barcode_source: lf.label_barcode_source.value, label_size: labelSize(lf), label_fields: labelFields(lf), label_pharmacy: lf.label_pharmacy.value, label_phone: lf.label_phone.value,
           label_lang: lf.label_lang.value, label_a4: lf.label_a4.value.trim(), label_dpi: +lf.label_dpi.value, label_target: lf.label_target.value.trim(), label_rows: +lf.label_rows.value, label_gap: +lf.label_gap.value || 0, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() }) });
-      if (!r.ok) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + ((await r.json()).error?.message || "تعذرت المعاينة"); return; }
+      if (!r.ok) {
+        const error = (await r.json()).error?.message || "تعذرت المعاينة";
+        if (previewCurrent() && lf.isConnected) { $("#lbPrev").hidden = true; $("#lbPrevMsg").textContent = "⚠ " + error; }
+        return;
+      }
+      const png = await r.blob();
+      if (!previewCurrent() || !lf.isConnected) return;
       const dropped = (r.headers.get("X-Label-Dropped") || "").split(",").filter(Boolean);
       if (prevUrl) URL.revokeObjectURL(prevUrl);
-      prevUrl = URL.createObjectURL(await r.blob());
+      prevUrl = URL.createObjectURL(png);
       $("#lbPrev").src = prevUrl; $("#lbPrev").hidden = false;
       const fromWin = r.headers.get("X-Label-Source") === "windows" ? ` على مقاس ويندوز ${(r.headers.get("X-Label-Size") || "").replace("x", " × ")} مم` : "";
       $("#lbPrevMsg").textContent = dropped.length ? `⚠ المقاس لا يتسع: حُذف ${dropped.map((k) => ({ phone: "الهاتف", pharmacy: "اسم الصيدلية" }[k] || k)).join(" و")}${fromWin}` : `المعاينة بنفس شكل الطباعة المباشرة${fromWin} (بيانات تجربة).`;
@@ -2873,22 +3716,17 @@ async function renderReceiptCfg(c) {
   lbMode(); lf.label_lang.addEventListener("change", lbMode); lf.label_target.addEventListener("change", preview); lf.label_rows.addEventListener("change", preview); lf.label_gap.addEventListener("change", preview); lf.label_text_lang.addEventListener("change", preview); lf.label_pharmacy_en.addEventListener("change", preview);
   showCustom(); preview();
   lf.label_preset.addEventListener("change", () => { if (lf.label_preset.value !== "custom") [lf.label_w.value, lf.label_h.value] = lf.label_preset.value.split("x"); showCustom(); preview(); });
-  ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi"].forEach((k) => lf[k].addEventListener("change", preview));
+  ["label_w", "label_h", "label_pharmacy", "label_phone", "label_a4", "label_lang", "label_dpi", "label_barcode_source"].forEach((k) => lf[k].addEventListener("change", preview));
   lf.querySelectorAll("[data-lf]").forEach((x) => x.addEventListener("change", preview));
   $("#rcForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
-      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
-      header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
+      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { ...appearance(), auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
-      footer: f.footer.value, names: f.names.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim(), show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
-      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
-      qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
-      qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
-      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
+      label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim() } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
@@ -2899,7 +3737,7 @@ async function renderReceiptCfg(c) {
   });
   $("#lbTest").addEventListener("click", async () => {
     try {
-      const r = await api("/api/print/label-test", { method: "POST", body: { label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
+      const r = await api("/api/print/label-test", { method: "POST", body: { label_barcode_source: lf.label_barcode_source.value, label_size: labelSize(lf), label_fields: labelFields(lf), label_lang: lf.label_lang.value,
         label_target: lf.label_target.value.trim(), label_dpi: +lf.label_dpi.value, label_gap: +lf.label_gap.value || 0, label_shift: +lf.label_shift.value || 0,
         label_variant: lf.label_variant.value, label_flip: lf.label_flip.checked, label_rows: +lf.label_rows.value, label_text_lang: lf.label_text_lang.value, label_pharmacy_en: lf.label_pharmacy_en.value.trim() } });
       toast(`أُرسل ${r.labels} ملصق تجربة${r.size ? ` على مقاس ${r.size.replace("x", " × ")} مم` : ""} — إذا خرجت سليمة فاضغط «احفظ»`);
@@ -2994,7 +3832,11 @@ function renderBackup(b) {
 }
 async function checkUpdateBadge() {
   if (!ME?.permissions?.includes("settings.manage")) { $("#navSystem")?.setAttribute("hidden", ""); return; }
-  try { const st = await api("/api/system/update"); $("#updBadge").hidden = !st.available; } catch { /* offline */ }
+  const user = ME.user.id;
+  try {
+    const st = await api("/api/system/update", { settleAfterNavigation: true });
+    if (ME?.user.id === user) $("#updBadge").hidden = !st.available;
+  } catch { /* offline */ }
 }
 
 // An open tab keeps its old app.js after an update (#153): compare the shell it was loaded with to the server's.
@@ -3052,6 +3894,7 @@ async function viewSalesAdvanced() {
   const now = new Date(), dt = (d, h) => `${isoDay(d)}T${h}`;
   const sel = new Set(), types = new Set();
   let R = null, item = null, open = null, loadSeq = 0;
+  let marks = [""];     // where each listed page starts: "" = the newest invoice, else the last invoice of the page before
   app.innerHTML = `<section class="panel noprint"><div class="row between"><h1>فواتير البيع</h1><a href="#/owner-reports">تقارير المالك ←</a></div>
     <div class="row range"><div class="seg2 small">${Object.entries(periodPresets()).map(([k, [t]]) => `<button type="button" data-ip="${k}" class="${k === "today" ? "on" : ""}">${t}</button>`).join("")}</div>
       <label class="f">من <input type="datetime-local" id="iF" value="${dt(now, "00:00")}"></label><label class="f">إلى <input type="datetime-local" id="iT" value="${dt(now, "23:59")}"></label></div>
@@ -3063,26 +3906,65 @@ async function viewSalesAdvanced() {
       <button class="btn" id="iGo">اعرض</button></div><div id="iItemRes" class="cands"></div><div id="iItemChip"></div></section>
   <section class="panel" id="iRep"><div id="iBox"><p class="muted">جارٍ التحميل…</p></div></section><div id="iDetail"></div>`;
   const reportBox = $("#iBox");
-  const load = async () => {
-    const seq = ++loadSeq;
+  // a first load asks the question afresh; another page of the same answer keeps its totals and its moment
+  // (`until`), so the pages stay the ones the totals describe and nothing is added up again (#461)
+  // Pages are cut by the invoice they follow (`after`), not by a position: a void or a sale at the till between
+  // two clicks cannot push an invoice off both pages (Codex P2)
+  const load = async (page = 0) => {
+    const seq = ++loadSeq, keep = page && R ? R : null;
+    if (!keep) marks = [""];
     const current = () => seq === loadSeq && reportBox.isConnected;
     const f = $("#iF").value, t = $("#iT").value;
     if (!f || !t) return toast("اختر الفترة", true);
     $("#iBox").innerHTML = `<p class="muted">جارٍ التحميل…</p>`; $("#iDetail").innerHTML = ""; sel.clear(); open = null;
-    const qs = new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
-    const asked = { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
+    // another page repeats the question that was answered, not the controls as they stand now
+    const qs = keep ? new URLSearchParams(keep.base)
+      : new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
+    const base = new URLSearchParams(qs);       // the same question, for the other pages and for an export
+    if (keep) { qs.set("after", marks[page]); qs.set("totals", "0"); qs.set("until", keep.as_of); }
+    const asked = keep ? keep.asked : { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
     let result;
     try { result = await api(`/api/reports/invoices?${qs}`); }
     catch (er) { if (current()) { reportBox.innerHTML = ""; toast(er.message, true); } return; }
     if (!current()) return;
     R = result;
+    if (keep) { R.totals = keep.totals; R.as_of = keep.as_of; }
+    R.page = page;
+    if (R.next_after) marks[page + 1] = R.next_after;
+    R.base = base;
     R.asked = asked;               // the E-Stock side follows the request that was answered, not the live controls (Codex P2)
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
     draw();
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
   // a file or a printout of a capped list says so, as the screen does (#324 R22)
-  const subOut = () => sub() + (R.truncated ? " — ⚠ أول 3000 فاتورة فقط من الفترة" : "");
+  const paged = () => R.truncated || R.page > 0;
+  const pageText = () => `الفواتير ${R.offset + 1} إلى ${R.offset + R.rows.length} من ${R.total_rows}`;
+  const subOut = () => sub() + (paged() ? ` — ⚠ ${pageText()} — الإجماليات لكل الفترة` : "");
+  // every match of the period, page by page in the server's stable order; the totals came with the first answer (#461)
+  // The file is its own fresh answer: totals and rows asked together, each page strictly after the last invoice
+  // of the one before and nothing newer than the first answer. A void or a return at the till while the pages
+  // are read would leave rows that no longer add up to the totals: that is detected and the whole read is
+  // done again, so the file never carries a total its rows do not make (Codex P2).
+  const allRows = async () => {
+    if (!paged()) return { rows: R.rows, totals: R.totals };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = []; let first = null;
+      for (let after = "", more = true; more;) {
+        const qs = new URLSearchParams(R.base);
+        if (first) { qs.set("totals", "0"); qs.set("until", first.as_of); qs.set("after", after); }
+        const page = await api(`/api/reports/invoices?${qs}`);
+        first = first || page;
+        rows.push(...page.rows);
+        after = page.next_after; more = Boolean(after);
+      }
+      const done = rows.filter((r) => r.status === "completed"), T = first.totals;
+      const sum = (k) => done.reduce((a, r) => a + r[k], 0);
+      if (rows.length === T.n && ["total", "returned_total", "net", "paid_cash", "paid_card", "paid_transfer", "on_credit"].every((k) => sum(k) === T[k])
+        && (!R.show_cost || done.reduce((a, r) => a + (r.unknown_cost ? 1 : 0), 0) === T.unknown_cost_n)) return { rows, totals: T };
+    }
+    throw new Error("الفواتير بتتغير دلوقتي على الكاشير؛ جرّب التصدير تاني بعد لحظة");
+  };
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -3090,7 +3972,8 @@ async function viewSalesAdvanced() {
       <span class="row noprint"><button class="btn small secondary" id="iXl">⬇ Excel</button><button class="btn small secondary" data-pr="short">🖨 مختصر</button>
         <button class="btn small secondary" data-pr="full">🖨 كامل بالأصناف</button><button class="btn small secondary" data-pr="sel" disabled>🖨 المحدد</button>
         ${can("items.write") ? `<button class="btn small secondary" id="iShort" disabled>📝 أضف أصناف الفواتير المحددة إلى النواقص</button>` : ""}</span></div>
-      ${R.truncated ? `<p class="badge b-warn">⚠ أول 3000 فاتورة فقط — قلّل الفترة</p>` : ""}
+      ${paged() ? `<p class="row noprint"><span class="badge b-info">${pageText()} — <span>الإجماليات لكل فواتير الفترة، وملف Excel فيه كل الفواتير</span></span>
+        <button class="btn small secondary" id="iPrev" ${R.page ? "" : "disabled"}>→ السابق</button><button class="btn small secondary" id="iNext" ${R.truncated ? "" : "disabled"}>التالي ←</button></p>` : ""}
       <div class="totals"><div>الفواتير<b>${T.n}</b><span>${T.returned_n} <span>عليها مرتجع</span> · ${T.discounted_n} <span>عليها خصم</span></span></div><div>قبل الخصم<b>${money(T.subtotal)}</b></div>
         <div>خصم الأصناف<b>${money(T.item_discount)}</b></div><div>خصم العميل (تعاقد)<b>${money(T.customer_discount)}</b></div><div>بعد الخصم<b>${money(T.total)}</b>${T.delivery_fee ? `<span>منها توصيل ${money(T.delivery_fee)}</span>` : ""}</div>
         <div>المرتجع<b>${money(T.returned_total)}</b></div><div class="t-ok">الصافي<b>${money(T.net)}</b></div><div>النقدي<b>${money(T.paid_cash)}</b></div>
@@ -3120,14 +4003,22 @@ async function viewSalesAdvanced() {
     }));
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
-    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
+    $("#iXl").addEventListener("click", async (e) => {
+      const asked = R;
+      try {
+        const all = await withBusy(e.currentTarget, allRows);
+        if (all && asked === R) exportXlsx("فواتير البيع", sub(), sheets(all.rows, all.totals));
+      } catch (er) { toast(er.message, true); }
+    });
+    $("#iPrev")?.addEventListener("click", () => load(R.page - 1));
+    $("#iNext")?.addEventListener("click", () => load(R.page + 1));
     // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
-    // E-Stock counts whole days: part of a day would add sales outside the window; a capped program total (first
-    // 3000 invoices) is never added up (U4 review)
+    // E-Stock counts whole days: part of a day would add sales outside the window. The program total is the
+    // whole period's, whatever page is listed (#461)
     const A = R.asked, fullDays = A.f.slice(11) === "00:00" && A.t.slice(11) === "23:59";
     if (!A.types && !A.user && fullDays) {
       estockSalesBelow($("#iBox"), A.f.slice(0, 10), A.t.slice(0, 10), A.q,
-        A.item || R.truncated ? null : T.total, A.item).catch(() => {});
+        A.item ? null : T.total, A.item).catch(() => {});
     } else { ES_SEQ++; document.querySelector("#esBelow")?.remove(); }   // a pending answer is dropped too (Codex P2)
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
@@ -3156,22 +4047,22 @@ async function viewSalesAdvanced() {
     }));
     $("#iDet").scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const sheets = () => {
-    const cost = R.show_cost, T = R.totals;
+  const sheets = (all = R.rows, T = R.totals) => {
+    const cost = R.show_cost;
     return [{ name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("الحالة"), Tx("العميل"), Tx("الموظف"), N("أصناف"), M("قبل الخصم"), M("خصم الأصناف"), M("خصم العميل"), M("بعد الخصم"),
         M("المرتجع"), M("الصافي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), ...(cost ? [M("الربح")] : [])],
-      rows: R.rows.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
+      rows: all.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
         r.customer || "", r.seller || "", r.lines, r.subtotal, r.item_discount, r.customer_discount, r.total, r.returned_total, r.net, r.paid_cash, r.paid_card, r.paid_transfer, r.on_credit, ...(cost ? [r.status === "completed" ? r.profit : null] : [])]),
       total: ["الإجمالي", "", "", "", "", null, T.subtotal, T.item_discount, T.customer_discount, T.total, T.returned_total, T.net, T.paid_cash, T.paid_card, T.paid_transfer, T.on_credit, ...(cost ? [T.profit] : [])] },
     { name: "الأصناف", columns: [N("رقم الفاتورة"), Tx("الصنف"), N("الكمية بالوحدة"), N("المُرتجع منها"), M("قبل الخصم"), Tx("الخصم"), M("بعد الخصم")],
-      rows: R.rows.flatMap((r) => (r.items || []).map((x) => [r.sale_no, x.name_en || x.name_ar, x.qty, x.returned, x.gross, x.discount_bp ? `${pct(x.discount_bp)}%` : "", x.net])) }];
+      rows: all.flatMap((r) => (r.items || []).map((x) => [r.sale_no, x.name_en || x.name_ar, x.qty, x.returned, x.gross, x.discount_bp ? `${pct(x.discount_bp)}%` : "", x.net])) }];
   };
   const printInv = (mode) => {
     const rows = mode === "sel" ? [...sel].sort((a, b) => a - b).map((i) => R.rows[i]) : R.rows;
     const box = document.createElement("div");
     if (mode === "full") {
       box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "بدون عميل")} — ${esc(r.seller || "")}</h3>
-        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${esc(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(upperEn(x.name_en || x.name_ar))}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
@@ -3193,9 +4084,9 @@ async function viewSalesAdvanced() {
     document.querySelectorAll("[data-it]").forEach((x) => { const on = types.has(x.dataset.it); x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
     load();
   }));
-  $("#iGo").addEventListener("click", load);
+  $("#iGo").addEventListener("click", () => load());
   $("#iQ").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
-  $("#iUser").addEventListener("change", load);
+  $("#iUser").addEventListener("change", () => load());
   let tm;
   $("#iItem").addEventListener("input", (e) => { clearTimeout(tm); tm = setTimeout(async () => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#iItemRes").innerHTML = ""; return; }
@@ -3270,7 +4161,7 @@ function cashRefundRoom(s) {
 
 function refundOptions(s, includeWallet = false) {
   const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
-  const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
+  const cash = !room ? "نقدًا من الدرج — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الدرج (حتى ${money(room)} ج)` : "نقدًا من الدرج";
   const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
     ...(includeWallet && s.paid_transfer ? [["transfer", "رجّع للمحفظة الأصلية", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
@@ -3313,7 +4204,7 @@ async function viewExchange() {
   const drawDraft = () => {
     // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
     findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
-    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
       try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
@@ -3325,7 +4216,7 @@ async function viewExchange() {
     $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
       ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
-      ${sale.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+      ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
@@ -3433,7 +4324,7 @@ async function viewSale(id) {
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الجمهور</th><th>قبل الخصم</th><th>الخصم</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
-    ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td>
+    ${s.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td>
       <td>${l.official_prices.map((p) => salePriceQty(p, l.item)).join("<br>") || esc(fq(l.qty_base, l))}</td>
       <td class="num">${l.official_prices.map((p) => money(p.price)).join("<br>")}</td>
       <td class="num">${l.official_prices.map((p) => money(p.gross)).join("<br>")}</td>
@@ -3448,10 +4339,11 @@ async function viewSale(id) {
       ${wallets.length ? `<label id="rWalletChoice" class="f" hidden>المحفظة الأصلية<select id="rWallet">
         ${wallets.map(([id, name]) => `<option value="${esc(id || "")}">${esc(name || "تحويل من غير قناة مسجلة")}</option>`).join("")}
       </select><small class="muted">الرد في حدود التحويل المؤكد وصوله</small></label>` : ""}
-      <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
+      <label class="f grow">سبب المرتجع<input id="rReason" lang="ar" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
-      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
+      <input id="vReason" lang="ar"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
+      <small class="muted void-why">يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.</small></div>` : ""}
   </section>`;
   // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
   app.querySelectorAll("[data-ret]").forEach((i) => i.addEventListener("focus", () => i.select()));
@@ -3665,13 +4557,20 @@ async function viewDispensingNotes() {
 // ------------------------------------------------------------------ item data health (U3-1)
 // Correcting a wrong pack size of an item with stock: the server converts every lot (boxes stay boxes) and refuses
 // an open box, a draft sale or an open count. Nothing changes until the person confirms with a reason.
-async function packFix(id, suggest) {
-  const v = typedWhole(prompt("عدد الوحدات الصحيح في العلبة:", suggest ? String(suggest) : "") || "");
+async function packFix(id, suggest, strips = false) {
+  const current = onThisScreen();
+  const v = typedWhole(prompt(strips ? PACK_QUESTION : "عدد الوحدات الصحيح في العلبة:", suggest ? String(suggest) : "") || "");
   if (!(Number(v) > 0)) return false;
   try {
     const p = await api(`/api/items/${id}/pack-fix?pack=${encodeURIComponent(v)}`);
-    const lines = [`العبوة هتتغير من ${p.old_pack} لـ ${p.new_pack} ${p.unit}.`,
-      ...p.lots.map((l) => `رصيد ${l.qty} ← ${l.new_qty} ${p.unit} (نفس عدد العلب)`)];
+    if (strips && p.drafts) {
+      toast("شيل الصنف من الفاتورة المفتوحة، وبعدها صحّح العبوة من نتيجة البحث أو بطاقة الصنف وأضفه تاني.", true);
+      return false;
+    }
+    const unit = strips ? (prompt("اسم الوحدة اللي بتتباع من العلبة", p.unit === "unit" ? "شريط" : p.unit) || "").trim() : p.unit;
+    if (!unit) return false;
+    const lines = [`العبوة هتتغير من ${p.old_pack} لـ ${p.new_pack} ${unit}.`,
+      ...p.lots.map((l) => `رصيد ${l.qty} ← ${l.new_qty} ${unit} (نفس عدد العلب)`)];
     if (p.not_whole.length) lines.push("⚠ فيه علبة مفتوحة مش هتتحول لوحدات كاملة: اعمل جرد للصنف الأول.");
     if (p.drafts) lines.push(`⚠ الصنف في ${p.drafts} فاتورة بيع مفتوحة: اقفلها الأول.`);
     if (p.counting) lines.push("⚠ الصنف في جرد مفتوح: اعتمده أو الغيه الأول.");
@@ -3680,10 +4579,84 @@ async function packFix(id, suggest) {
     if (!confirm(lines.join("\n"))) return false;
     const reason = (prompt("سبب التصحيح (إجباري):", "العبوة متسجلة غلط") || "").trim();
     if (reason.length < 3) { toast("اكتب السبب", true); return false; }
-    await api(`/api/items/${id}/pack-fix`, { method: "POST", body: { pack_size: Number(v), reason } });
-    toast("اتصححت العبوة والرصيد اتحوّل");
-    return true;
-  } catch (er) { toast(er.message, true); return false; }
+    const body = { pack_size: Number(v), reason, expected_pack: p.old_pack };
+    if (strips) { body.expected_pack = 1; body.base_unit_name = unit; }
+    await api(`/api/items/${id}/pack-fix`, { method: "POST", body });
+    if (current()) toast("اتصححت العبوة والرصيد اتحوّل");
+    return current();
+  } catch (er) { if (current()) toast(er.message, true); return false; }
+}
+
+async function viewPackReview() {
+  if (ME.role !== "owner") { app.textContent = "المراجعة دي للمالك فقط"; return; }
+  const { items } = await api("/api/estock/pack-review");
+  const current = onThisScreen();
+  app.innerHTML = `<section class="panel"><a href="#/items">← الأصناف</a><h1>${PACK_REVIEW_TITLE}</h1>
+    <p class="muted">القائمة مرتبة بقيمة الرصيد بسعر التكلفة. العدد في الاسم يساعدك تلاقي الصنف. راجع العلبة نفسها قبل اعتماد الوحدة اللي بتتباع.</p>
+    <div id="packReviewRows">${items.map((it) => `<form class="row" data-item="${esc(it.id)}">
+      <div class="grow"><a href="#/items/${esc(it.id)}">${itemHtml(it)}</a> <bdi>${esc(it.code || "")}</bdi>
+        <div class="muted">العدد في الاسم: ${it.printed_count} · الرصيد: ${it.stock_qty} · قيمة الرصيد: ${it.stock_value == null ? "التكلفة غير متاحة" : `${money(it.stock_value)} ج`}</div></div>
+      <label class="f">عدد الوحدات المباعة في العلبة<input name="size" type="number" min="1" max="10000" step="1" placeholder="1 للعلبة الكاملة" required></label>
+      <label class="f">اسم الوحدة الصغيرة<input name="unit" maxlength="30" placeholder="شريط / أمبول / كيس"
+        value="${esc(it.base_unit_name === "unit" ? "" : it.base_unit_name)}"></label>
+      <label class="f">السبب<input name="reason" minlength="3" maxlength="200" required></label>
+      <button class="btn small">اعتمد العبوة</button><span class="t-err small" role="status"></span>
+    </form>`).join("")}</div><p id="packReviewEmpty" ${items.length ? "hidden" : ""}>مفيش عبوات محتاجة مراجعة.</p>
+    <p class="muted">لو العدد اتغيّر، الرصيد بيتحوّل مع الحفاظ على عدد العلب. مرتجعات الفواتير والتشغيلات القديمة بتحتاج تسوية أو جرد.</p></section>`;
+  for (const form of $("#packReviewRows").querySelectorAll("form")) {
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const [button, status] = [form.querySelector("button"), form.querySelector("[role=status]")];
+      withBusy(button, async () => {
+        const id = form.dataset.item, size = Number(form.elements.size.value);
+        const reason = form.elements.reason.value.trim(), unit = form.elements.unit.value.trim();
+        status.textContent = "";
+        if (size > 1 && !unit) { status.textContent = "اكتب اسم الوحدة الصغيرة"; return; }
+        try {
+          await api(`/api/estock/pack-review/${id}`, { method: "POST",
+            body: { reason, pack_size: size, base_unit_name: unit || null } });
+          if (!current() || !form.isConnected) return;
+          form.remove();
+          $("#packReviewEmpty").hidden = !!$("#packReviewRows").children.length;
+          toast("تم اعتماد العبوة");
+        } catch (err) { if (current()) status.textContent = err.message; }
+      });
+    });
+  }
+}
+
+async function viewCustomerNameReview() {
+  if (ME.role !== "owner") { app.textContent = "المراجعة دي للمالك فقط"; return; }
+  const { customers } = await api("/api/estock/customer-name-review");
+  const current = onThisScreen();
+  app.innerHTML = `<section class="panel"><a href="#/customers">← العملاء</a><h1>${NAME_REVIEW_TITLE}</h1>
+    <div id="nameReviewRows">${customers.map((row) => `<form class="row">
+      <div class="grow"><a href="#/customers/${esc(row.customer_id)}">${esc(row.current_name)}</a> <bdi>${esc(row.estock_code || "")}</bdi>
+        ${row.name_ar ? `<div>إي ستوك (عربي): <bdi>${esc(row.name_ar)}</bdi></div>` : ""}
+        ${row.name_en ? `<div>إي ستوك (إنجليزي): <bdi>${esc(row.name_en)}</bdi></div>` : ""}
+        ${row.history.length ? `<div>في فواتير البيع: ${row.history.map((n) => `<bdi>${esc(n)}</bdi>`).join(" · ")}</div>` : ""}</div>
+      <label class="f grow">الاسم المعتمد<select name="picked" required>
+        <option value="">اختر الاسم</option>${row.options.map((name) =>
+          `<option value="${esc(name)}">${esc(name)}${name === row.current_name ? " (الاسم الحالي)" : ""}</option>`).join("")}</select></label>
+      <button class="btn small">اعتمد الاسم</button><span class="t-err small" role="status"></span>
+    </form>`).join("")}</div><p id="nameReviewEmpty" ${customers.length ? "hidden" : ""}>مفيش أسماء محتاجة مراجعة في الأرشيف المتاح.</p></section>`;
+  [...$("#nameReviewRows").querySelectorAll("form")].forEach((form, i) => {
+    const row = customers[i];
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const button = form.querySelector("button");
+      withBusy(button, async () => {
+        try {
+          await api(`/api/estock/customer-name-review/${row.customer_id}`, { method: "POST",
+            body: { name: form.elements.picked.value, current_name: row.current_name } });
+          if (!current() || !form.isConnected) return;
+          form.remove();
+          $("#nameReviewEmpty").hidden = !!$("#nameReviewRows").children.length;
+          toast("تم اعتماد اسم العميل");
+        } catch (err) { if (current()) form.querySelector("[role=status]").textContent = err.message; }
+      });
+    });
+  });
 }
 
 const IH_KEYS = { pack_vs_name: "العبوة مش زي الاسم", unit_price_split: "سعر الوحدة × العدد ≠ سعر العلبة", no_public_price: "مفيش سعر جمهور",
@@ -4100,17 +5073,17 @@ async function viewPos(afterCheckout = false) {
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
-        <input id="posQ" class="big" autocomplete="off" autofocus></label>
+        <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
-      <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · ${posKeysHtml()}</p>
+      <div id="posQuick"></div>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
   <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>`;
-  renderCart(); renderSide(); renderQuick();
+  renderCart(); renderSide();                    // renderCart draws the quick row too (syncQuick)
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
     if (e.target.dataset.close) return;
     await openDraft(b.dataset.tab); viewPos();
@@ -4136,15 +5109,19 @@ async function viewPos(afterCheckout = false) {
   const search = async (unit, live = false, given = null) => {
     const v = given ?? q.value.trim(); if (!v) return;
     const mine = live ? ++liveSeq : null, saleId = SALE.id;
-    const isScan = /^\d{6,}$/.test(v) || /^01\d{14}/.test(v);
+    const isScan = /^\d{3,}$/.test(v) || /^01\d{14}/.test(v);
+    const short = /^\d{3,5}$/.test(v), current = onThisScreen();
     // update 1 (owner): items with stock first; typed names leave out the ones with no stock unless «اعرض كمان»
-    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only");
+    const found = await findItems(v, 8, isScan || posShowAll() ? "first" : "only", true);
+    if (!current()) return;
     if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;
     res = found.items;
     const scanned = /^\d{6,}$/.test(v) || found.hint?.kind === "gs1";
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
-    if (!live && res.length === 1 && sellable(res[0]) && (scanned || !found.hint)) {
-      return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
+    const exactShort = !short || res[0]?.code === v || res[0]?.code === `E${v}`;
+    if (!live && res.length === 1 && sellable(res[0]) && exactShort && (scanned || !found.hint)) {
+      const [packs, units, partial] = scanAddQty(res[0], unit);
+      return addItem(res[0], packs, units, given != null, partial ? `مفيش علبة كاملة، اتنزل ${unitName(res[0])}` : "");
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
@@ -4156,12 +5133,17 @@ async function viewPos(afterCheckout = false) {
         ${r.is_service || r.available_qty >= r.pack_size ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>` : ""}
         ${r.pack_size > 1 && !r.is_service && r.available_qty > 0 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}
         ${!r.is_service && !r.available_qty ? `<span class="badge b-err">✕ نفد</span>` : ""}
+        ${r.pack_size === 1 && !r.is_service && canFixPack() ? `<button class="btn small secondary" data-search-pack="${i}">${PACK_QUESTION}</button>` : ""}
         ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
       + (found.hidden_no_stock ? `<p class="muted small">${found.hidden_no_stock} صنف رصيده صفر مش ظاهر — <a href="#" id="posShowZero">اعرضهم</a></p>` : "")
       || `<p class="muted">لا توجد نتائج</p>`;
     $("#posShowZero")?.addEventListener("click", (e) => { e.preventDefault(); $("#posAll").checked = true; $("#posAll").dispatchEvent(new Event("change")); });
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
+    $("#posRes").querySelectorAll("[data-search-pack]").forEach((button) => button.addEventListener("click", async () => {
+      const item = res[+button.dataset.searchPack];
+      if (await withBusy(button, () => packFix(item.id, null, true)) && q.isConnected) await search(false, true);
+    }));
     $("#posRes").querySelectorAll("[data-alt]").forEach((b) => b.addEventListener("click", () => altPanel(res[+b.dataset.alt].id, $("#posRes"), addItem)));
     if (live) q.dataset.searched = v;                                   // Enter now adds the first result shown
     if (!live && (isScan || scanned)) return false;       // an unresolved scan needs the cashier's attention
@@ -4175,16 +5157,26 @@ async function viewPos(afterCheckout = false) {
     }
     liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
   });
+  let lastEnter = -Infinity;
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.ctrlKey) return;          // Ctrl+Enter is a sale-screen key (U2-19), not a search
     e.preventDefault();
+    const prevEnter = lastEnter; lastEnter = e.timeStamp;
     clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
-    if (first && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
+    if (first && !/^\d{3,5}$/.test(q.value.trim()) && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
     const v = q.value.trim();
-    if (/^\d{6,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
+    // U4-17: Enter on the empty search line goes to the payment («العميل دفع», or the done button);
+    // Enter there finishes the sale. Scan, Enter, Enter = sold at the exact amount.
+    // Not on a held key, nor on the second Enter of a scanner that sends two (CR+LF) right after the code.
+    if (!v) {
+      if (e.repeat || e.timeStamp - prevEnter < 150 || e.timeStamp - (POS.scanAt || -Infinity) < 150) return;
+      if (SALE?.lines.length || pendingPosAdds(SALE?.id).length) ($("#payGiven:not([disabled])") || $("#posDone:not([disabled])"))?.focus();
+      return;
+    }
+    if (/^\d{3,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
       q.value = ""; delete q.dataset.searched;
       trackPosAdd(search(e.shiftKey, false, v));
       return;
@@ -4192,6 +5184,17 @@ async function viewPos(afterCheckout = false) {
     q.dataset.searched = v;
     trackPosAdd(search(e.shiftKey));
   });
+  POS.scan = (code) => {
+    if (!q.isConnected || !SALE) return;
+    // a discount or amount typed in the focused field is saved first (its change event), then the item is added
+    const at = document.activeElement;
+    if (at && at !== q && at.matches?.("input, select, textarea")) at.blur();
+    trackPosAdd(Promise.resolve(POS.saving).then(() => search(false, false, code)).then((r) => {
+      // a code nobody has: show it in the search box with the results, so the cashier sees what was read
+      if (r === false && q.isConnected && !q.value) { q.value = code; q.focus(); q.select(); }
+      return r;
+    }));
+  };
   bindPosExtras();
 }
 
@@ -4206,24 +5209,40 @@ window.addEventListener("pageshow", (e) => {
 // أزرار البيع السريع: اللي الصاحب ثبّتها، وبعدها الأكتر بيعًا آخر 30 يوم
 let QUICK = null;
 const quickOpen = () => { try { return localStorage.getItem("posQuick") !== "0"; } catch { return true; } };
+// U4-17 (owner 17/11): one compact sideways row under the invoice. Open while the invoice is empty, shrunk to its
+// title after the first item; its button opens or shrinks it for this invoice. On an empty invoice the button is
+// also remembered on this PC, as the old «إخفاء» was.
+const quickWide = () => {
+  const mine = SALE && POS.quickWide?.[SALE.id];
+  return mine ?? (!(SALE?.lines.length) && quickOpen());
+};
+function syncQuick() {
+  const box = $("#posQuick");
+  if (box && box.dataset.wide !== String(quickWide())) renderQuick();
+}
 async function renderQuick() {
   const box = $("#posQuick"); if (!box) return;
-  const open = quickOpen();
+  const open = quickWide();
+  box.dataset.wide = String(open);
   if (open && !QUICK) { try { QUICK = await api("/api/pos/quick"); } catch { QUICK = { items: [] }; } }
-  if (!$("#posQuick")) return;
+  if (!$("#posQuick") || box.dataset.wide !== String(open) || quickWide() !== open) return;   // a newer state draws itself
   const list = QUICK?.items || [];
-  box.innerHTML = `<section class="panel qsale"><div class="row between"><h2>⚡ البيع السريع</h2>
-      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl">${open ? "إخفاء" : "إظهار"}</button></span></div>
-    ${open ? (list.length ? `<div class="qgrid">${list.map((x, i) => {
+  box.innerHTML = `<section class="panel qsale ${open ? "" : "shrunk"}"><div class="row between"><h2>⚡ البيع السريع</h2>
+      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl" aria-expanded="${open}">${open ? "صغّر ▴" : "افتح ▾"}</button></span></div>
+    ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}</div>
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
-    ${open && (QUICK?.services || []).length ? `<h3>🛎 خدمات</h3><div class="qgrid">${QUICK.services.map((x, i) => `<button class="qbtn" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
-        <b class="qn">${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>` : ""}
     ${open && canW() && (QUICK?.suggested_services || []).length ? `<p class="muted small">🛎 خدمات مقترحة تعملها من شاشة الأصناف (علّم «خدمة» وحط السعر): ${QUICK.suggested_services.map((x) => `<span class="chip">${esc(x)}</span>`).join(" ")}</p>` : ""}</section>`;
-  $("#qkTgl").addEventListener("click", () => { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } renderQuick(); });
+  $("#qkTgl").addEventListener("click", () => {
+    if (!SALE) return;
+    (POS.quickWide ||= {})[SALE.id] = !open;
+    if (!SALE.lines.length) { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } }
+    renderQuick();
+  });
   $("#qkRef")?.addEventListener("click", () => { QUICK = null; renderQuick(); });
   box.querySelectorAll("[data-svc]").forEach((b) => b.addEventListener("click", () => addItem(QUICK.services[+b.dataset.svc], 0, 1)));
   box.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => {
@@ -4234,6 +5253,14 @@ async function renderQuick() {
 async function newTab() {
   try { await openDraft(null); viewPos(); } catch (er) { toast(er.message, true); }
 }
+// U4-22: a scan while the focus is in any other field of the sale screen (discount, customer, payment, a button)
+// adds the item and never types into that field. The search box reads scans itself; dialogs keep their keys
+// (the item card's barcode field is scanned on purpose).
+const posScanStop = globalThis.PharmScan?.installScanDetector({
+  active: () => location.hash.startsWith("#/pos") && !!POS.scan && !POS.completing && !document.querySelector("dialog[open]"),
+  skip: (el) => el?.id === "posQ",
+  onScan: (code, el, at) => { POS.scanAt = at; POS.scan(code); },
+});
 document.addEventListener("keydown", (e) => {
   // The pharmacy scanner (HH360) sends F12 with each barcode (#81): never open the browser's tools, and on the
   // sales screen move to the search box so the code lands there wherever the focus was. Capture phase: first.
@@ -4275,6 +5302,20 @@ function posLine() {
   const id = rows[POS_SEL]?.querySelector("[data-rm]")?.dataset.rm;
   return SALE.lines.find((l) => l.id === id) || (POS_SEL < 0 ? SALE.lines[SALE.lines.length - 1] : null);
 }
+function posInvoiceCard(line) {
+  const sid = SALE.id, active = document.activeElement;
+  const attr = ["data-pos-card", "data-disc", "data-dunit", "data-unit", "data-plus", "data-minus", "data-rm"]
+    .find((name) => active.hasAttribute(name));
+  showInvoiceItemCard(line.item_id, {
+    restore: async () => {
+      await POS.saving;
+      await Promise.allSettled(pendingPosAdds(sid));
+      if (SALE?.id !== sid) return;
+      if (active.isConnected) return active;
+      return (attr && $(`#posCart [${attr}="${CSS.escape(active.getAttribute(attr))}"]`)) || $("#posQ");
+    },
+  });
+}
 async function posBranchStock(l) {
   const r = await api(`/api/items/${l.item_id || l.item.id}/branch-stock`);
   const d = document.createElement("dialog");
@@ -4290,11 +5331,15 @@ document.addEventListener("keydown", async (e) => {
   const act = posAction(k);
   if (POS.completing) { if (act) e.preventDefault(); return; }
   if (act === "search") return go(() => { POS_SEL = -1; posMark(); $("#posQ")?.focus(); $("#posQ")?.select(); });
-  if (act === "branch_stock" || act === "item_card" || act === "qty") {
+  if (act === "item_card") {
+    const id = e.target.closest?.("#posCart tr")?.querySelector("[data-rm]")?.dataset.rm;
+    const line = SALE?.lines.find((l) => l.id === id) || posLine();
+    return go(() => line ? posInvoiceCard(line) : toast("مفيش صنف في الفاتورة", true));
+  }
+  if (act === "branch_stock" || act === "qty") {
     const l = posLine();
     if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
     if (act === "branch_stock") return go(() => posBranchStock(l));
-    if (act === "item_card") return go(() => window.open(`#/items/${encodeURIComponent(l.item_id || l.item.id)}`, "_blank"));
     return go(() => {
       const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
       const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
@@ -4339,7 +5384,7 @@ function drawerDialog() {
   const d = document.createElement("dialog");
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>فتح الدرج بدون بيع</h2>
     <label class="f">السبب <select name="reason"><option value="change">فكة</option><option value="cash_check">مراجعة النقدية</option><option value="other">أخرى</option></select></label>
-    <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»"></label>
+    <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»" autocomplete="off"></label>
     <p class="muted small">يُسجَّل باسمك مع الشيفت والوقت والنتيجة. الطابعة لا تؤكد فتح الدرج فعليًا: المسجَّل هو «أمر فتح».</p>
     <div class="row"><button class="btn" value="ok">إرسال أمر الفتح</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -4376,19 +5421,30 @@ function trackPosAdd(work) {
   return pending;
 }
 
-// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
-function addItem(item, packs, units, scanned = false) {
-  return trackPosAdd(addPosLine(item, packs, units, scanned));
+// UX-26 (owner 26/11): a scan of an item with no full box left but some strips/units adds one unit
+// instead of being refused. [packs, units, partial]; with nothing left it stays a box and the server refuses.
+function scanAddQty(r, unit) {
+  if (unit) return [0, 1, false];
+  if (r.is_service || r.pack_size <= 1 || r.available_qty == null || r.available_qty >= r.pack_size || r.available_qty <= 0)
+    return [1, 0, false];
+  return [0, 1, true];
 }
 
-async function addPosLine(item, packs, units, scanned) {
+// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
+// note = a line for the cashier once the add succeeded (UX-26: a unit instead of a box), shown with any warning
+function addItem(item, packs, units, scanned = false, note = "") {
+  return trackPosAdd(addPosLine(item, packs, units, scanned, note));
+}
+
+async function addPosLine(item, packs, units, scanned, note = "") {
   const sid = SALE.id;
   const update = await api(`/api/sales/${sid}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
   if (SALE?.id !== sid || !$("#posCart") || update.version < SALE.version) return;
   SALE = update;
   const added = SALE.lines.find((l) => l.item_id === item.id);
   if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
-    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
+    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`, note].filter(Boolean).join(" · "), true);
+  else if (note) toast(note);          // Codex P2 on #478: never replaces a dispensing warning
   $("#posRes").innerHTML = "";
   if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
   $("#posQ").focus();
@@ -4431,22 +5487,30 @@ function renderCart(findings = null) {
         <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
           ${l.item.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${l.item.hide_on_receipt ? `<span class="badge" title="لن يظهر اسمه في الإيصال">🙈</span>` : ""}${l.item.rx_required ? `<span class="badge b-err" title="يُصرف بوصفة طبية فقط">📋 وصفة طبية</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="يُساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية غير متاحة"}</span>` : ""}
+          ${invoiceCardButton("data-pos-card", l.id, posKey("item_card"))}
           ${l.item.stock != null ? `<div class="muted small">الرصيد: ${esc(fmtStock(l.item.stock, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit }))}</div>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
           ${l.item.pack_size > 1 && !l.item.is_service ? `<select class="small" data-unit="${esc(l.id)}" aria-label="الوحدة" title="غيّر الوحدة">
             <option value="pack" ${l.qty_base % l.item.pack_size === 0 ? "selected" : ""}>${esc(l.item.pack_unit && l.item.pack_unit !== "pack" ? l.item.pack_unit : "علبة")}</option>
-            <option value="unit" ${l.qty_base % l.item.pack_size ? "selected" : ""}>${esc(unitName({ base_unit_name: l.item.base_unit }))}</option></select>` : ""}</td>
+            <option value="unit" ${l.qty_base % l.item.pack_size ? "selected" : ""}>${esc(unitName({ base_unit_name: l.item.base_unit }))}</option></select>` : ""}
+          ${l.item.pack_size === 1 && !l.item.is_service && canFixPack()
+            ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
-        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
+        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم" autocomplete="off"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
           : l.discount_amount ? `${money(l.discount_amount)} ج` : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}${l.invoice_share ? `<div class="muted small" title="نصيبه من الخصم على الفاتورة">+ ${money(l.invoice_share)}</div>` : ""}</td>
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
   posMark();
+  syncQuick();
   const line = (id) => s.lines.find((l) => l.id === id);
+  $("#posCart").querySelectorAll("[data-pos-card]").forEach((button) => button.addEventListener("click", () =>
+    posInvoiceCard(line(button.dataset.posCard))));
+  $("#posCart").querySelectorAll("[data-cart-pack]").forEach((button) => button.addEventListener("click", () =>
+    withBusy(button, () => packFix(line(button.dataset.cartPack).item_id, null, true))));
   const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
   // U2-13: the same count in the other unit (1 box -> 1 strip, 2 strips -> 2 boxes); the server re-checks the stock
   $("#posCart").querySelectorAll("[data-unit]").forEach((sel) => sel.addEventListener("change", () => {
@@ -4496,6 +5560,28 @@ function chanOptions(kind, sel) {
   return list.length ? `<select data-ch>${list.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>` : "";
 }
 
+// U3-6: the chosen customer's usual items (last 6 months), one click adds his usual quantity
+async function posUsual() {
+  const box = $("#posUsual"), cid = SALE?.customer_id;
+  if (!box || !cid) return;
+  const sale = SALE.id;
+  // one request per customer and invoice, even while renderSide runs again before it answers (review of #419)
+  if (POS.usual?.cid !== cid || POS.usual?.sale !== sale) {
+    POS.usual = { cid, sale, items: api(`/api/customers/${cid}/usual`).then((r) => r.items) };
+  }
+  const mine = POS.usual;
+  let all;
+  try { all = await mine.items; } catch { if (POS.usual === mine) POS.usual = null; return; }
+  if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
+  const items = all.slice(0, 8);
+  $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${bidi(upperEn(x.name_en || x.name_ar || ""))}
+      <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
+  $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
+    const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
+    addItem({ ...x, id: x.item_id }, q % ps === 0 ? q / ps : 0, q % ps === 0 ? 0 : q);
+  }));
+}
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
@@ -4511,15 +5597,16 @@ function renderSide() {
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
         ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 له رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
-        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
+        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}
+        <div id="posUsual" class="usual"></div>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
-        <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
-        <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
-        <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}"></label>
-        <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}"></label></div>` : ""}
+        <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}" autocomplete="off"></label>
+        <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}" autocomplete="off"></label>
+        <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}" autocomplete="off"></label>
+        <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}" autocomplete="off"></label></div>` : ""}
       <div class="sum"><span>الإجمالي</span><b>${money(s.subtotal)}</b></div>
       ${s.lines.length ? `<div class="row nowrap mt" id="posInvDiscRow"><label class="f">خصم على الفاتورة
-        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0"></label>
+        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0" autocomplete="off"></label>
         <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
@@ -4530,7 +5617,7 @@ function renderSide() {
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
           <select data-pm="${i}">${METHODS.map(([m, t]) => `<option value="${m}" ${p.method === m ? "selected" : ""}>${t}</option>`).join("")}</select>
           ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
-          <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}">
+          <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}" autocomplete="off">
           <button class="btn small secondary" data-prm="${i}" aria-label="إزالة">✕</button></div>`).join("")}
         ${POS.parts.some((p) => p.method === "transfer") ? proofInput(s) : ""}
         <button class="btn small secondary" id="partAdd">+ طريقة دفع</button>
@@ -4539,7 +5626,7 @@ function renderSide() {
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
-        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
+        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'} autocomplete="off"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
           ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
@@ -4613,6 +5700,19 @@ function renderSide() {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
   $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
+  $("#payGiven")?.addEventListener("keydown", (e) => {      // U4-17: Enter here finishes the sale, like F9
+    if (e.key !== "Enter" || e.ctrlKey) return;
+    e.preventDefault();
+    if (e.repeat || e.timeStamp - (POS.scanAt || -Infinity) < 150) return;
+    if (e.target.validity?.badInput) {                       // «50..» reads as empty: never the exact amount
+      toast("المبلغ اللي العميل دفعه مش رقم صحيح. صحّحه أو امسحه", true);
+      e.target.select();
+      return;
+    }
+    const confirmButton = $("#posConfirm");
+    if (confirmButton) confirmButton.focus();
+    else complete();
+  });
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - dueNow(s);
     $("#changeBox").hidden = !(g >= dueNow(s)); $("#changeV").textContent = money(ch);
@@ -4659,11 +5759,15 @@ function renderSide() {
     POS.rcpt[s.id] = e.target.checked;              // an explicit choice for this sale, kept when the total changes
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
   });
+  $("#posDone").addEventListener("keydown", (e) => {          // a held Enter (key repeat) never presses it (U4-17 review)
+    if ((e.key === "Enter" || e.key === " ") && (e.repeat || e.timeStamp - (POS.scanAt || -Infinity) < 150)) e.preventDefault();
+  });
   $("#posDone").addEventListener("click", () => {
     const confirmButton = $("#posConfirm");
     if (confirmButton) confirmButton.focus();
     else complete();
   });
+  posUsual();
 }
 
 // A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
@@ -4673,10 +5777,10 @@ function newCustomerDialog() {
   const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
   const d = document.createElement("dialog"); d.id = "custNewDlg";
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
-    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">اسم العميل <input name="name" lang="ar" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
     <label class="f">الموبايل (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
     <label class="f">رقم تاني (اختياري) <input name="phone2" inputmode="tel" maxlength="20" autocomplete="off"></label>
-    <label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
+    <label class="f">العنوان (اختياري) <input name="address1" lang="ar" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
     <p class="badge b-err" data-err hidden></p>
     <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -4721,7 +5825,7 @@ function renderFindings(findings) {
     ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${{ item_rx: "📋 بوصفة طبية فقط", item_misuse: "⚠ يُساء استخدامه", item_note: "📝 ملاحظة", item_recall_pending: "⚠ منشور سحب لم يُراجَع" }[f.code] || SEV[f.severity][0]}</span> ${esc(f.message)}
       ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
       ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
-      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
+      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}" autocomplete="off">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
     <button class="btn mt" id="posConfirm">تأكيد وإتمام البيع</button></div>`;
   $("#posConfirm").addEventListener("click", () => complete(findings));
   // Heikal PC 17/11 (S1): the panel opens under the cart; on a short window «إتمام البيع» seemed to do nothing.
@@ -4760,6 +5864,7 @@ async function complete(findings = null) {
   const sid = SALE.id;
   try {
     // A delivery field or discount still being typed must dispatch its change before the till is frozen.
+    posScanStop?.flush?.();                       // typing held back by the scan detector goes back first
     const active = document.activeElement;
     if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
     app.inert = true;
@@ -4949,6 +6054,18 @@ async function dayHealth(el) {
 // U2-29: where a drawer difference usually comes from (the shift history, open or not)
 function wireHunt() {
   $("#shHist")?.addEventListener("click", async (e) => {
+    const sm = e.target.closest(".shSum");        // U3-8: the owner's summary, ready to copy (nothing is sent)
+    if (sm) {
+      try {
+        const r = await api(`/api/cash/shifts/${sm.dataset.id}/owner-summary`);
+        $("#shHuntOut").innerHTML = `<section class="panel"><h3>ملخص للمالك</h3><textarea id="shSumT" rows="10" readonly>${esc(r.text)}</textarea>
+          <div class="row"><button class="btn" id="shSumCopy">انسخ</button><span class="muted">البرنامج مبيبعتش حاجة: انسخه وابعته بنفسك.</span></div></section>`;
+        $("#shSumCopy").addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }
+        });
+      } catch (er) { toast(er.message, true); }
+      return;
+    }
     const b = e.target.closest(".shHunt"); if (!b) return;
     try {
       const h = await api(`/api/cash/shifts/${b.dataset.id}/hunt`), row = (x) => `<li>فاتورة ${x.sale_no}: الإجمالي ${money(x.total)}، نقدي ${money(x.paid_cash)}</li>`;
@@ -4973,7 +6090,7 @@ async function viewShift(opts = {}) {
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
-      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""} <button type="button" class="btn small secondary shSum" data-id="${esc(r.id)}">ملخص للمالك</button>` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
   if (!sh) {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
@@ -5658,7 +6775,7 @@ const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتو
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
-    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
+    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" lang="ar" placeholder="اسم المورد" required>
       <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
@@ -6033,17 +7150,17 @@ async function viewShortages() {
 const CL_KIND = { credit_sale: "فاتورة آجل", payment: "دفعة", return: "مرتجع", void: "إلغاء", opening: "رصيد أول المدة", adjustment: "تسوية", discount: "خصم مطالبة" };
 async function viewCustomers(filter = "") {
   const canM = ME.permissions.includes("customers.manage");
-  app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${reportTools("cust")}</div>
+  app.innerHTML = `<section class="panel" id="cuRep"><div class="row between"><h1>العملاء</h1>${ME.role === "owner" ? `<a class="btn secondary" href="#/customer-name-review">${NAME_REVIEW_TITLE}</a>` : ""}${reportTools("cust")}</div>
     <div class="row"><input id="cuQ" class="grow" placeholder="الاسم أو الموبايل أو الكود" autocomplete="off">
       <div class="seg2 small" id="cuF"><button data-f="" class="${!filter ? "on" : ""}">الكل</button><button data-f="debt" class="${filter === "debt" ? "on" : ""}">عليهم مستحقات</button><button data-f="refill" class="${filter === "refill" ? "on" : ""}">اقترب موعد طلبهم الشهري</button></div></div>
     <label class="f small">الترتيب <select id="cuSort"><option value="code">بالكود</option><option value="name">بالاسم</option><option value="balance">بالرصيد (الأكبر أولًا)</option></select></label>
     <table class="mt"><thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
-  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" lang="ar" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
     <label class="f">الهاتف <input name="phone" inputmode="tel"></label><label class="f">هاتف 2 <input name="phone2" inputmode="tel"></label>
-    <label class="f">العنوان <input name="address1"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+    <label class="f">العنوان <input name="address1" lang="ar"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
     <button class="btn">أضف</button></form>` : ""}`;
   const today = isoDay(new Date());
   let cur = { list: [], f: "" };
@@ -6158,6 +7275,7 @@ async function viewCustomer(id) {
     <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
     <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
+    <section class="panel" id="cUsual"><h2>أدوية العميل</h2><p class="muted">بيتحمل…</p></section>
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
       ${c.reminded_at ? `<p class="muted small">آخر تذكير أُرسل: ${esc(dayOf(c.reminded_at))}</p>` : ""}
       <table><thead><tr><th>الصنف</th><th>الكمية</th><th>كل</th><th>ميعاده</th><th>متوفر لدينا؟</th><th></th></tr></thead><tbody>
@@ -6211,6 +7329,13 @@ async function viewCustomer(id) {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { whatsapp: true } }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }
     catch (err) { w?.close(); toast(err.message, true); }
   });
+  const usualBox = $("#cUsual");            // this customer's own panel (Codex P2 on #419: a late answer for A never fills B)
+  api(`/api/customers/${id}/usual`).then(({ items }) => {       // U3-6 «أدوية العميل»: last 6 months
+    if (!usualBox?.isConnected) return;
+    usualBox.innerHTML = `<h2>أدوية العميل <span class="muted small">(آخر 6 شهور)</span></h2>${items.length ? `<table><thead><tr><th>الصنف</th><th>مرات الشراء</th><th>آخر مرة</th><th>الكمية المعتادة</th><th>ميعاد الطلب الشهري</th><th>متوفر؟</th></tr></thead><tbody>
+      ${items.map((x) => `<tr><td>${itemHtml(x)}</td><td class="num">${x.times}</td><td>${esc(dayOf(x.last_at))}</td><td>${esc(fmtStock(x.last_qty || 1, x))}</td>
+        <td>${x.refill_due ? `${esc(x.refill_due)}${x.refill_days_left <= 0 ? ` <span class="badge b-warn">جه ميعاده</span>` : ""}` : "—"}</td><td>${x.in_stock ? "✓" : `<span class="badge b-err">لأ</span>`}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">مفيش مشتريات في آخر 6 شهور</p>`}`;
+  }).catch(() => { if (usualBox?.isConnected) usualBox.remove(); });
   $("#cPrep")?.addEventListener("click", async () => {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { prepare: true } }); await toPos(r.sale_id); } catch (err) { toast(err.message, true); }
   });
@@ -6962,6 +8087,27 @@ async function viewUsers() {
   // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
   if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
+  // U3-7: the dhikr strip (on for all, off for some) and each employee's hours (a reminder before the end)
+  if (ME.permissions.includes("users.manage")) api("/api/settings/staff-ui?all=1").then((su) => {
+    const box = $("#suPanel"); if (!box) return;
+    box.innerHTML = `<h2>الذِكر ومواعيد الشغل</h2>
+      <label class="f"><input type="checkbox" id="suOn" ${su.dhikr_on ? "checked" : ""}> شريط ذِكر صغير تحت الشاشة (مبيغطيش أي زرار ومبيوقفش البيع)</label>
+      <table><thead><tr><th>الموظف</th><th>الذِكر</th><th>من</th><th>لحد</th></tr></thead><tbody>${users.filter((u) => u.role !== "owner").map((u) => `<tr data-u="${esc(u.id)}"><td>${esc(u.full_name)}</td>
+        <td><input type="checkbox" data-dk ${su.dhikr_off_users.includes(u.id) ? "" : "checked"}></td>
+        <td><input type="time" data-st value="${esc(su.hours[u.id]?.start || "")}"></td><td><input type="time" data-en value="${esc(su.hours[u.id]?.end || "")}"></td></tr>`).join("")}</tbody></table>
+      <p class="muted">قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.</p><button class="btn" id="suSave">حفظ</button>`;
+    $("#suSave").addEventListener("click", async () => {
+      const rows = [...box.querySelectorAll("tr[data-u]")], hours = {};
+      let half = false;
+      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; half ||= !!st !== !!en; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      if (half) { toast("اكتب الميعادين (من ولحد) أو سيبهم فاضيين", true); return; }
+      try {
+        await api("/api/settings/staff-ui", { method: "PUT", body: { dhikr_on: $("#suOn").checked, hours,
+          dhikr_off_users: rows.filter((tr) => !tr.querySelector("[data-dk]").checked).map((tr) => tr.dataset.u) } });
+        STAFF_UI = null; staffUiStop(); staffUi(); toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    });
+  }).catch(() => {});
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
     <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
@@ -6969,6 +8115,7 @@ async function viewUsers() {
       <td>${u.active ? `<span class="badge b-ok">✓ مفعّل</span>` : `<span class="badge b-err">✕ موقوف</span>`}</td>
       <td>${u.has_pin ? "✓" : `<span class="badge b-warn">⚠ لا يوجد</span>`}</td>
       <td>${u.role === "owner" ? "كل الصلاحيات" : u.changes ? `${u.changes} تعديل` : "على الافتراضي"}</td></tr>`).join("")}</tbody></table></section>
+  ${ME.permissions.includes("users.manage") ? `<section class="panel" id="suPanel"><h2>الذِكر ومواعيد الشغل</h2><p class="muted">بيتحمل…</p></section>` : ""}
   <section class="panel"><h2>مستخدم جديد</h2>
     <form id="uNew" class="row">
       <label class="f">الاسم <input name="full_name" required></label>
@@ -7057,6 +8204,47 @@ async function viewUser(id) {
   $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
   $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
 }
+
+// UX-26 (owner 26/11): the keyboard follows the field. A field marked lang="ar" asks the PC for the Arabic layout,
+// lang="en" (barcode, English name, codes, item search) for the English one. Fire-and-forget and debounced: it never
+// waits, never shows an error, and turns itself off when the PC cannot switch (404 / not supported).
+function keyboardSwitcher(send, delay = 120) {
+  let timer = null, last = null, off = false, busy = false, want = null;
+  const fire = (lang) => {
+    if (off) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish (even = last) goes after it
+    if (lang === last) return;
+    last = lang; busy = true; want = null;
+    Promise.resolve().then(() => send("/api/system/keyboard-layout", {
+      method: "POST", credentials: "same-origin",
+      ...(typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(1500) } : {}),
+      headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
+      body: JSON.stringify({ lang }),
+    })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
+      .catch(() => { last = null; })
+      .finally(() => { busy = false; const next = want; want = null; if (next) fire(next); });
+  };
+  return (lang) => {
+    if (off || (lang !== "ar" && lang !== "en")) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => fire(lang), delay);
+  };
+}
+const KB_SWITCH = keyboardSwitcher((url, opts) => fetch(url, opts));
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (el?.matches?.("input:not([type=checkbox]):not([type=radio]):not([type=number]), textarea")) KB_SWITCH(el.getAttribute("lang"));
+});
+// English-name fields write capitals as they are typed (data-upper); the cursor stays where it was
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el?.matches?.("input[data-upper]") || e.isComposing) return;
+  const up = upperEn(el.value);
+  if (up === el.value) return;
+  const a = el.selectionStart, b = el.selectionEnd;
+  el.value = up;
+  try { el.setSelectionRange(a, b); } catch { /* not a text field */ }
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 route();
