@@ -31,7 +31,7 @@ def _fn(name):
 class TestRules(unittest.TestCase):
     def run_js(self, body):
         src = "const esc = (v) => String(v ?? '');\n" + "".join(
-            _const(n) for n in ("unitName", "packName", "fmtStock", "qtyText")) + _fn("mixedQty") + body
+            _const(n) for n in ("unitName", "packName", "fmtStock", "qtyText", "qtyStep")) + _fn("mixedQty") + body
         r = subprocess.run([shutil.which("node"), "-e", src], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
@@ -62,6 +62,13 @@ console.log(JSON.stringify([
         self.assertEqual(out, ["3 علبة", "3 علبة + 2 شريط", "2 شريط", "0", "",
                                "7 وحدة", "2 زجاجة + 1 وحدة",
                                "1 علبة + 1 شريط", "2 علبة", "2 شريط", "3 وحدة"])
+
+    def test_plus_minus_step_follows_the_typed_quantity(self):
+        # Codex on #490: 1 box saved, 0 boxes + 2 strips typed, then − must take one strip, not a box
+        out = self.run_js("console.log(JSON.stringify([qtyStep(3, 3), qtyStep(2, 3), qtyStep(4, 3), qtyStep(5, 1)]));")
+        self.assertEqual(out, [3, 1, 1, 1])
+        self.assertIn("q = typedQty(l), n = q - step(l, q)", JS)
+        self.assertIn("const q = typedQty(l); patchLine(l.id, { qty_base: q + step(l, q) })", JS)
 
     def test_the_screen_uses_them(self):
         self.assertIn("data-qp=", JS)                      # boxes field on each cart line
