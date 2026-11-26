@@ -105,11 +105,12 @@ class TestEndpoint(APICase):
         self.assertEqual((r.status_code, r.json()), (501, {"ok": False, "reason": "unsupported", "detail": "not_windows"}))
         with mock.patch.object(kl, "switch", return_value={"ok": False, "reason": "unsupported", "detail": "not_installed"}):
             self.assertEqual(self.c.post(self.URL, json={"lang": "ar"}, headers=H).status_code, 501)
-        # a passing condition (no window in front, the window refused) is a 200: asked again on the next field
-        for detail in ("no_window", "refused", "error", "bad_lang"):
+        # a passing condition (no window in front, the window refused) is a 503: keyboardSwitcher reads only the
+        # status, forgets what it asked and asks again on the next field (Codex on #485); a wrong language is a 400
+        for detail, status in (("no_window", 503), ("refused", 503), ("error", 503), ("bad_lang", 400)):
             with mock.patch.object(kl, "switch", return_value={"ok": False, "reason": "unsupported", "detail": detail}):
                 r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
-            self.assertEqual((r.status_code, r.json()["detail"]), (200, detail))
+            self.assertEqual((r.status_code, r.json()["detail"]), (status, detail))
 
     def test_another_device_is_refused_and_nothing_is_switched(self):
         phone = TestClient(self.app, client=("192.168.1.50", 50000))
@@ -134,10 +135,11 @@ class TestEndpoint(APICase):
         for body in (b"not json", b"[1,2]", b'"ar"', b'{"lang": 7}'):
             with mock.patch.object(kl.sys, "platform", "win32"), mock.patch.object(kl, "_user32", side_effect=OSError):
                 r = self.c.post(self.URL, content=body, headers={**H, "Content-Type": "application/json"})
-            self.assertEqual((r.status_code, r.json()["ok"], r.json()["reason"]), (200, False, "unsupported"), body)
+            self.assertEqual((r.status_code, r.json()["ok"], r.json()["reason"]),
+                             (400, False, "unsupported"), body)
         with mock.patch.object(kl, "switch", side_effect=RuntimeError("boom")):
             r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
-        self.assertEqual((r.status_code, r.json()), (200, {"ok": False, "reason": "unsupported", "detail": "error"}))
+        self.assertEqual((r.status_code, r.json()), (503, {"ok": False, "reason": "unsupported", "detail": "error"}))
         self.assertEqual(self.c.get(self.URL).status_code, 405)
 
     def test_another_host_name_never_reaches_it(self):

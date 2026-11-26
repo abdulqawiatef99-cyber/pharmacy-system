@@ -3422,9 +3422,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """POST {"lang": "ar" | "en"}: the input language of the window in front, on the cashier PC itself.
         No session and no database (it must answer while a sale is being written, and the sign-in screen
         may ask too): only this PC's own screen may call it, and it can do nothing but switch the language.
-        It never raises. The body is always {"ok": ...} (app/core/keyboard_layout.py); the status tells the
-        screen whether to ask again: 200 asked (or could not just now), 501 this device can never switch
-        (not Windows, language not installed, not the cashier PC itself), 403 not this program's screen."""
+        It never raises. The body is always {"ok": ...} (app/core/keyboard_layout.py); the status is what the
+        screen reads (keyboardSwitcher): 200 asked; 503 could not just now (no window in front, refused): it
+        asks again on the next field; 501 this device can never switch (not Windows, language not installed,
+        not the cashier PC itself): it stops asking; 403 not this program's screen; 400 not "ar" / "en"."""
         from ..core import keyboard_layout
         no = lambda detail, status: J({"ok": False, "reason": "unsupported", "detail": detail}, status_code=status)  # noqa: E731
         try:
@@ -3439,9 +3440,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             except ValueError:
                 b = {}
             out = keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None)
-            return J(out, status_code=501 if out.get("detail") in ("not_windows", "not_installed") else 200)
+            status = 200 if out.get("ok") else {"not_windows": 501, "not_installed": 501, "bad_lang": 400}.get(out.get("detail"), 503)
+            return J(out, status_code=status)
         except Exception:
-            return no("error", 200)
+            return no("error", 503)
 
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
