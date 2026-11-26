@@ -314,6 +314,19 @@ class Purchasing:
                                   total_tolerance=self.s.total_tolerance_piasters,
                                   duplicate_no=dup_no, duplicate_content=dup_content)
         out += self._slow_before_expiry(ctx, inv, lines)
+        if inv["supplier_id"] and any((l["bonus_qty"] or 0) > 0 for l in lines):
+            # The screen hides bonus for a warehouse supplier (DEV-PUR); a bonus already on a line (supplier switched
+            # from a company, or an import) would post free stock nobody can see. Refused until cleared (review P1).
+            t = self.db.one("SELECT supplier_type FROM suppliers WHERE id=? AND org_id=?",
+                            (inv["supplier_id"], ctx.org_id))
+            if t and t["supplier_type"] == "warehouse":
+                for l in lines:
+                    if (l["bonus_qty"] or 0) > 0:
+                        out.append(validation.Issue(
+                            "error", "warehouse_bonus",
+                            "المورد مخزن ومفيش بونص في فواتير المخازن: البونص مسجّل على السطر ده ومش ظاهر."
+                            " غيّر نوع المورد لشركة أو امسح البونص قبل الاعتماد",
+                            l["id"], "bonus_qty", {"bonus_qty": l["bonus_qty"]}))
         if inv["status"] == "draft":
             out += sanity.unusual_issues(self.db, inv, lines, items, entry_settings.get(self.db, ctx.org_id))
         return out

@@ -326,3 +326,29 @@ class TestPurchaseEntryPerformance(APICase):
         print(f"Purchase add-line at 30,000 items, 20 runs: median {statistics.median(samples):.1f} ms, "
               f"p95 {p95:.1f} ms, max {max(samples):.1f} ms")
         self.assertLess(p95, 300)
+
+
+class TestWarehouseBonusHidden(APICase):
+    """Independent review of #463 (P1): the screen hides bonus for a warehouse supplier, but a bonus already on the
+    line (supplier switched from company, or an imported invoice) would still post to stock and spread the cost.
+    Approval must stop with an Arabic reason until it is cleared."""
+
+    def test_stored_bonus_on_a_warehouse_invoice_blocks_approval(self):
+        from app.core.errors import Conflict
+        p = Purchasing(self.db, self.s)
+        company = catalog.create_supplier(self.db, self.ctx, name="Synthetic Co B", supplier_type="company")
+        warehouse = catalog.create_supplier(self.db, self.ctx, name="Synthetic Store B", supplier_type="warehouse")
+        sid = p.create_manual(self.ctx, supplier_id=company)
+        p.update_header(self.ctx, sid, {"invoice_no": "SYN-WH-BONUS"}, None)
+        p.add_line(self.ctx, sid, {"item_id": self.pan, "qty": 2, "bonus_qty": 3, "public_price": 4000,
+                                   "discount_bp": 2500, "expiry_date": EXPIRY}, None)
+        p.update_header(self.ctx, sid, {"supplier_id": warehouse}, None)
+        got = p.get(self.ctx, sid)
+        self.assertEqual(got["invoice"]["supplier_type"], "warehouse")
+        codes = [i["code"] for i in got["issues"] if i["level"] == "error"]
+        self.assertIn("warehouse_bonus", codes)
+        self.assertFalse(got["can_approve"])
+        with self.assertRaises(Conflict):
+            p.approve(self.ctx, sid, got["invoice"]["version"])
+        moved = self.db.one("SELECT count(*) c FROM stock_movements WHERE ref_id=?", (sid,))["c"]
+        self.assertEqual(moved, 0)
