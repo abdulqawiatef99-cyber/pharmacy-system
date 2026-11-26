@@ -24,6 +24,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -398,6 +399,7 @@ def _raw_copy(db_path: Path, dest_dir: Path) -> Path:
 
 RESTORE_JOURNAL = "restore-in-progress.json"     # next to the database while a restore moves files
 OLD_SIDE = ".before-restore"
+JOURNAL_READ_TRIES = 10
 
 
 def _write_journal(db_path: Path, journal: dict) -> None:
@@ -472,11 +474,24 @@ def finish_interrupted_restore(db_path: Path) -> str | None:
     path = db_path.parent / RESTORE_JOURNAL
     if str(db_path) == ":memory:" or not path.is_file():
         return None
+    text = None
+    for attempt in range(JOURNAL_READ_TRIES):   # Windows: antivirus may hold the file for a moment
+        try:
+            text = path.read_text(encoding="utf-8")
+            break
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            if attempt == JOURNAL_READ_TRIES - 1:
+                # a journal that is there but cannot be read may describe a half-moved set: never open it
+                raise RuntimeError(f"an interrupted restore cannot be settled: {RESTORE_JOURNAL} is held by"
+                                   f" another program ({e}). Close what uses the data folder and start again") from e
+            time.sleep(0.3)
     try:
-        journal = json.loads(path.read_text(encoding="utf-8"))
+        journal = json.loads(text)
         if not isinstance(journal, dict) or journal.get("db") != db_path.name or not journal.get("staged"):
             raise ValueError("not this database's restore journal")
-    except (ValueError, OSError):
+    except ValueError:
         return None                             # written whole or not at all (.part + rename): not ours
     if (db_path.parent / Path(journal["staged"]).name).exists():
         _undo_restore(db_path, journal)

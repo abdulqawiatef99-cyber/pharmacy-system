@@ -336,3 +336,46 @@ class TestSideFilesBelongToOneRestore(Base):
         self.assertEqual(wal.read_bytes(), b"LIVE WAL")
         wal.unlink()
         self.assert_original_set()
+
+
+class TestAJournalThatCannotBeReadStopsTheStart(Base):
+    """Codex P2: a cut restore whose journal exists but cannot be read (a Windows sharing violation) must not
+    be taken for "nothing to settle": the mixed set would be opened."""
+
+    def cut(self):
+        with self.failing_replace(lambda s, t: t == self.db_path), \
+                mock.patch.object(backup, "_undo_restore", lambda *a, **k: None):
+            with self.assertRaises(OSError):
+                self.restore()
+
+    def unreadable(self, times):
+        real, left = Path.read_text, [times]
+
+        def read_text(p, *a, **k):
+            if Path(p).name == backup.RESTORE_JOURNAL and left[0]:
+                left[0] -= 1
+                raise PermissionError(13, "The process cannot access the file (injected)")
+            return real(p, *a, **k)
+        return mock.patch.object(Path, "read_text", read_text)
+
+    def test_a_short_hold_is_waited_out(self):
+        self.cut()
+        with self.unreadable(2), mock.patch.object(backup.time, "sleep", lambda s: None):
+            self.assertEqual(backup.finish_interrupted_restore(self.db_path), "rolled_back")
+        self.assert_original_set()
+
+    def test_a_lasting_hold_refuses_to_go_on(self):
+        self.cut()
+        with self.unreadable(10 ** 6), mock.patch.object(backup.time, "sleep", lambda s: None):
+            with self.assertRaises(RuntimeError) as e:
+                backup.finish_interrupted_restore(self.db_path)
+        self.assertIn(backup.RESTORE_JOURNAL, str(e.exception))
+        self.assertEqual(self.arch.read_bytes(), OLD_ARCH)             # still mixed: nothing may open it
+        self.assertEqual(backup.finish_interrupted_restore(self.db_path), "rolled_back")     # once it is free
+        self.assert_original_set()
+
+    def test_a_journal_that_is_not_ours_is_still_ignored(self):
+        (self.db_path.parent / backup.RESTORE_JOURNAL).write_text("not json", encoding="utf-8")
+        self.assertIsNone(backup.finish_interrupted_restore(self.db_path))
+        (self.db_path.parent / backup.RESTORE_JOURNAL).unlink()
+        self.assert_original_set()
