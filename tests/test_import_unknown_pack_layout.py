@@ -93,3 +93,28 @@ class TestUnknownPackLayout(DBTestCase):
         self.assertEqual(row["action"], "update")
         self.di.apply(self.ctx, run)
         self.assertEqual(self.pack("201"), 2)
+
+
+class TestTheSourceNameIsNoWayAround(DBTestCase):
+    """Review P1: "E-Stock" is the preselected source on the import screen. Naming it must not switch the
+    question off; only the E-Stock move itself (which sets packs from its own reviewed file) may."""
+
+    def test_a_file_sent_as_estock_is_still_asked(self):
+        di = DataImport(self.db)
+        run = di.analyze(self.ctx, sheet(ROWS), "items.xlsx", source_system="estock")
+        rows = {r["data"]["code"]: r for r in di.get(self.ctx, run)["rows"]}
+        self.assertEqual(rows["201"]["action"], "review")
+        self.assertIn("unknown_pack_layout", [i["code"] for i in rows["201"]["issues"]])
+        with self.assertRaises(Conflict):
+            di.apply(self.ctx, run)
+
+    def test_the_route_cannot_switch_it_off(self):
+        import inspect
+        from app.api import app as api
+        src = inspect.getsource(api)
+        self.assertNotIn("packs_set_later", src)             # the flag is internal to the E-Stock move
+
+    def test_the_estock_move_keeps_its_own_pack_step(self):
+        di = DataImport(self.db)
+        run = di.analyze(self.ctx, sheet(ROWS), "items.xlsx", source_system="estock", packs_set_later=True)
+        self.assertEqual({r["action"] for r in di.get(self.ctx, run)["rows"]}, {"create"})

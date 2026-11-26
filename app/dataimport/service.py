@@ -214,7 +214,7 @@ class DataImport:
     # ------------------------------------------------------------ analyze
     def analyze(self, ctx: Context, data: bytes, filename: str, *, kind: str = "items",
                 mapping: dict[int, str] | None = None, source_system: str = "generic",
-                options: dict | None = None) -> str:
+                options: dict | None = None, packs_set_later: bool = False) -> str:
         ctx.require("items.import")
         if kind not in HEADERS_BY_KIND:
             raise ValidationFailed("نوع استيراد غير معروف")
@@ -311,8 +311,9 @@ class DataImport:
                     else:
                         store[key] = idx
             # QA-007: a counted product with no pack layout in the file is never created as "whole box
-            # only" by silence. The E-Stock move is exempt: it sets packs from its own reviewed file.
-            if kind == "items" and source_system != "estock" and action in ("create", "review"):
+            # only" by silence. Only the E-Stock move is exempt (packs_set_later: it sets packs from its own
+            # reviewed file right after); never by the source name, which the import screen sends.
+            if kind == "items" and not packs_set_later and action in ("create", "review"):
                 layout = _unknown_layout(d)
                 if layout:
                     issues.append(layout)

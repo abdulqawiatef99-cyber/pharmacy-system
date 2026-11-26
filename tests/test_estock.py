@@ -123,7 +123,9 @@ class TestNames(unittest.TestCase):
 class TestEstockImport(DBTestCase):
     def test_catalog_then_stock_end_to_end(self):
         di = DataImport(self.db)
-        run = di.analyze(self.ctx, xlsx(CATALOG), "c.xlsx", kind="items", source_system="estock")
+        # the E-Stock move's own steps: packs are confirmed after the catalog (as estock_job does)
+        run = di.analyze(self.ctx, xlsx(CATALOG), "c.xlsx", kind="items", source_system="estock",
+                         packs_set_later=True)
         self.assertEqual(di.get(self.ctx, run)["report"]["counts"], {"create": 4})
         di.apply(self.ctx, run)
         run = di.analyze(self.ctx, xlsx(stock_rows()), "s.xlsx", kind="opening_stock",

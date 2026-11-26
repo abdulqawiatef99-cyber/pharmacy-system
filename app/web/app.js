@@ -2974,8 +2974,8 @@ const ISSUE_AR = {
 const packLayoutOptions = (x) => {
   const lay = x.issues.find((i) => i.code === "unknown_pack_layout");
   if (!lay) return "";
-  return (lay.suggest || []).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
-    + `<option value="pack:1">علبة كاملة فقط</option><option value="pack:?" data-count="${lay.count}">عدد شرائط آخر…</option>`;
+  return (lay.suggest || []).filter((n) => n > 1 && n < lay.count).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
+    + `<option value="pack:${lay.count}">بالواحدة: ${lay.count} في العلبة</option><option value="pack:1">علبة كاملة فقط</option><option value="pack:?">عدد آخر في العلبة…</option>`;
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
 
@@ -3060,7 +3060,7 @@ async function viewImportRun(id) {
     if (!s.value) return;
     let decision = s.value;
     if (decision === "pack:?") {
-      const n = prompt("عدد الشرائط في العلبة");
+      const n = prompt("عدد وحدات البيع (الشرائط) في العلبة");
       if (n === null || !/^[0-9]+$/.test(n.trim())) { s.value = ""; return; }
       decision = `pack:${Number(n.trim())}`;
     }
