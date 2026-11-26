@@ -186,3 +186,26 @@ The offline status switch used by tests leaves explicit updater network tests on
 
 Reproduce the timed checkout and worker assertions with
 `python -m unittest tests.test_u4_5_checkout`. The cashier's Windows device timing remains to be measured.
+
+## Sale screen smoothness (2026-11-26, U4-17 / U4-22 / U4-24)
+
+The synthetic snapshot came from `scripts/perf/loadgen.py --years 2 --items 30000 --customers 600 --per-day 22-28 --seed 253`. It holds 18,264 sales, 46,420 sale lines, 52,660 batches and 198,116 audit rows.
+- It was served with `manage.py serve` and driven by Chromium through Playwright, with 10 runs of 3 scans, 4 new customers, F9, then the home screen and back.
+- Each run used a fresh copy of the snapshot.
+- Times are medians in milliseconds, measured in the browser from the key press to the screen being ready.
+- "4× CPU" throttles Chromium's CPU; "LAN" adds 20 ms of latency per request, as for a second PC on the shop network.
+- Base is develop `c893c18`; after is `claude/u4-24-sale-speed`.
+
+| Measure | plain base → after | 4× CPU base → after | 4× CPU + LAN base → after |
+|---|---:|---:|---:|
+| Scan → line on screen | 29 → 32 | 64 → 61 | 89 → 89 |
+| F9 → next empty invoice ready | 115 → 110 | 143 → 141 | 196 → 163 |
+| Back to the sale screen from home | 18 → 13 | 52 → 46 | 90 → 43 |
+| Save a new customer on the invoice | 62 → 65 | 105 → 103 | 138 → 142 |
+
+- **Back to the sale screen:** it is now drawn at once from the kept state, then checked with the server: settings, open invoices and the invoice, all in parallel. Before, it waited for three requests in a row.
+- **After a sale:** when the finished sale was the only open invoice, the list and the next empty invoice are requested together.
+- **The scan path is unchanged:** search, then add, which is two requests. Every median here is under the 300 ms target.
+- **One slow add per run.** Every run had one add of about 450 ms on the server, about 60 s after the server started. This is the daily maintenance checkpoint, `dbhealth.daily_maintenance`, which took 424 ms on this snapshot. The snapshot starts with a WAL the program never wrote, so on a real database the checkpoint is probably small. This is unverified; it is noted on #113.
+- **Backup verification under load:** with the backup's hash-chain check running in a thread, 216 adds had a p95 of 27 ms and a max of 47 ms. In a child process, the p95 was 11 ms.
+
