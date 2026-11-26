@@ -109,7 +109,7 @@ def _clean_item(data: dict) -> dict:
 
 def find_duplicates(db: Database, ctx: Context, name: str, *, exclude_id: str | None = None,
                     limit: int = 3) -> list[dict]:
-    cands = matching.fuzzy_candidates(db, ctx.org_id, name, limit + 1)
+    cands = matching.fuzzy_candidates(db, ctx.org_id, name, limit + 1, sure_from=DUPLICATE_SCORE)
     return [{"item_id": c.item_id, "label": c.label, "score": c.score, "reasons": c.reasons}
             for c in cands if c.score >= DUPLICATE_SCORE and not c.reasons
             and c.item_id != exclude_id][:limit]
