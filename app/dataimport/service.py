@@ -310,6 +310,13 @@ class DataImport:
                             action = "review"
                     else:
                         store[key] = idx
+            # QA-007: a counted product with no pack layout in the file is never created as "whole box
+            # only" by silence. The E-Stock move is exempt: it sets packs from its own reviewed file.
+            if kind == "items" and source_system != "estock" and action in ("create", "review"):
+                layout = _unknown_layout(d)
+                if layout:
+                    issues.append(layout)
+                    action = "review"
             if any(i["code"].startswith("missing_") or i["code"].startswith("invalid_")
                    for i in issues) and action != "skip":
                 action = "error" if not d.get("_name") and not d.get("code") else (
@@ -691,8 +698,19 @@ class DataImport:
             if not self.db.one(f"SELECT 1 FROM {target_table} WHERE id=? AND org_id=?",
                                (decision[5:], ctx.org_id)):
                 raise NotFound("السجل المراد الربط به غير موجود")
+        elif decision.startswith("pack:"):
+            layout = next((i for i in json.loads(row["issues"]) if i["code"] == "unknown_pack_layout"), None)
+            if run["kind"] != "items" or not layout:
+                raise ValidationFailed("هذا السطر لا يحتاج إلى تحديد عدد الشرائط")
+            n = decision[5:]
+            if not (n.isascii() and n.isdigit()) or int(n) < 1 or layout["count"] % int(n):
+                raise ValidationFailed(f"عدد الوحدات في العلبة لازم يكون رقمًا صحيحًا يقسم {layout['count']}"
+                                       " بالتساوي (أو 1 لو الصنف بيتباع علبة كاملة فقط)")
         elif decision not in ("create", "skip"):
             raise ValidationFailed("قرار غير صحيح")
+        if decision == "create" and any(i["code"] == "unknown_pack_layout" for i in json.loads(row["issues"])):
+            raise ValidationFailed("عدد الشرائط في العلبة غير معروف لهذا الصنف؛ حدده أولًا"
+                                   " (أو اختر «علبة كاملة فقط»)")
         if run["kind"] == "opening_stock" and decision == "create" and row["action"] == "review":
             issues = {i["code"] for i in json.loads(row["issues"])}
             if "item_has_history" in issues:
@@ -756,8 +774,10 @@ class DataImport:
                     action, target = "link", r["decision"][5:]
                 elif r["decision"] == "create":
                     action = "create"
+                elif r["decision"] and r["decision"].startswith("pack:") and run["kind"] == "items":
+                    action, d["pack_size"] = "create", int(r["decision"][5:])     # the layout a person confirmed
                 if run["kind"] == "items":
-                    dup = r["decision"] == "create" and any(
+                    dup = action == "create" and bool(r["decision"]) and any(
                         i["code"] in ("duplicate_item_in_file", "same_item_exists", "duplicate_code_in_file")
                         for i in json.loads(r["issues"]))
                     self._apply_item(ctx, d, action, target, run_id, done,
@@ -932,6 +952,18 @@ class DataImport:
             if not n:
                 raise Conflict("لا يمكن إلغاء هذه العملية")
             audit.record(self.db, ctx, "import.discard", "import_run", run_id)
+
+
+def _unknown_layout(d: dict) -> dict | None:
+    """The issue for an item row whose name says "N tablets" (a counted form) while the file gives no pack
+    layout: N cannot be split by guessing, so a person says how many strips, or "whole box only"."""
+    if d.get("pack_size") is not None or not d.get("_name"):
+        return None
+    from ..reports.item_health import _COUNTED_FORMS, strip_suggestions
+    p = parse_name(d["_name"])
+    if not p.pack_count or p.pack_count < 2 or p.form not in _COUNTED_FORMS:
+        return None
+    return {"code": "unknown_pack_layout", "count": p.pack_count, "suggest": strip_suggestions(p.pack_count)}
 
 
 KIND_PERMISSION = {"opening_stock": "inventory.adjust", "suppliers": "suppliers.write", "customers": "customers.manage"}
