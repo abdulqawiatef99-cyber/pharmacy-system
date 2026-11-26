@@ -156,11 +156,30 @@ const { chromium } = require('playwright');
   await p.fill('#qaQ', '');
   await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: '6229999999990' })));
   await p.waitForSelector('#qaRes [data-qa-new]');
-  await p.click('#qaRes [data-qa-new]');
+  await p.dblclick('#qaRes [data-qa-new]');                     // review P2: a double click opens one card
   await p.waitForSelector('dialog.new-item-card[open]');
+  await p.waitForTimeout(300);
+  out.cards = await p.$$eval('dialog.new-item-card', (ds) => ds.length);
   out.scanBarcode = await p.inputValue('dialog.new-item-card [name=barcode]');
+  out.scanName = await p.inputValue('dialog.new-item-card [name=name_en]');
   await p.keyboard.press('Escape');
   await p.waitForSelector('dialog.new-item-card', { state: 'detached' });
+  // review P1: a GS1 code: the card gets the GTIN, the line the code's expiry and batch
+  await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: '01062212345678971728123110LOT7' })));
+  await p.waitForSelector('#qaRes [data-qa-new]');
+  await p.click('#qaRes [data-qa-new]');
+  await p.waitForSelector('dialog.new-item-card[open]');
+  out.gs1Barcode = await p.inputValue('dialog.new-item-card [name=barcode]');
+  out.gs1Name = await p.inputValue('dialog.new-item-card [name=name_en]');
+  await p.fill('dialog.new-item-card [name=name_en]', 'SYNTHO GS1 DROPS');
+  await p.press('dialog.new-item-card [name=name_en]', 'Enter');
+  await p.waitForSelector('dialog.new-item-card', { state: 'detached' });
+  out.gs1Batch = await p.inputValue('#qaBatch');
+  out.gs1Exp = await p.inputValue('#qaExp');
+  // the same box scanned again (another batch) now finds the item
+  await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: '01062212345678971729063010LOT8' })));
+  await p.waitForFunction(() => document.querySelector('#qaQ').value.includes('SYNTHO GS1'));
+  out.rescan = await p.inputValue('#qaBatch');
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -211,6 +230,12 @@ class TestScreen(APICase):
         self.assertEqual(out["stillOnInvoice"], "#/purchases/" + inv)
         self.assertEqual(self.db.one("SELECT name_en FROM items WHERE id=?", (item["id"],))["name_en"], "SYNTHOCLAV 1 G TAB")
         self.assertEqual(out["scanBarcode"], "6229999999990")
+        self.assertEqual((out["cards"], out["scanName"]), (1, ""))
+        self.assertIn(out["gs1Barcode"], ("06221234567897", "6221234567897"))
+        self.assertEqual(out["gs1Name"], "")
+        self.assertEqual(out["gs1Batch"], "LOT7")
+        self.assertTrue(out["gs1Exp"])
+        self.assertEqual(out["rescan"], "LOT8")
 
     def test_no_button_without_items_write(self):
         inv = self.draft()

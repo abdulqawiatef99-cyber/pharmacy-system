@@ -1686,7 +1686,7 @@ function bindQuickAdd() {
     showPicked(item);
   });
   price.addEventListener("input", warnPrice);
-  let timer, seq = 0, res = [], resultsFor = "";
+  let timer, seq = 0, res = [], resultsFor = "", newFrom = null;
   const resultLabel = (r) => `${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span>`;
   const current = onThisScreen();
   const search = async (v, select, scan) => {
@@ -1709,6 +1709,8 @@ function bindQuickAdd() {
     if (scan || code) {
       if (res.length === 1) { pickResult(res[0]); return; }
       if (!res.length) {
+        // review P1: a GS1 code gives the new item its GTIN (not the raw scan) and the line its expiry and batch
+        newFrom = code ? { barcode: code.gtin, expiry: code.expiry, batch: code.batch } : { barcode: v };
         $("#qaRes").innerHTML = '<p class="badge b-warn">الباركود مش مسجل على أي صنف. سجّله من كارت الصنف.</p>' + newItemButton();
         return;
       }
@@ -1726,7 +1728,7 @@ function bindQuickAdd() {
   const runSearch = (select, scan = false) => search(q.value.trim(), select, scan)
     .catch((err) => { if (current()) toast(err.message, true); });
   const resetResults = () => {
-    item = null; resultsFor = ""; seq++; clearTimeout(timer); warnPrice();
+    item = null; resultsFor = ""; seq++; newFrom = null; clearTimeout(timer); warnPrice();
     $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
   };
   q.addEventListener("input", () => {
@@ -1761,7 +1763,13 @@ function bindQuickAdd() {
     if (button) openCard(button);
     if (e.target.closest("[data-qa-new]")) {                     // UX-28: not found → a new item, then it is picked
       clearTimeout(timer); seq++;
-      showNewItemCard(q.value.trim(), (created) => { if (current() && q.isConnected) pick(created); });
+      const from = newFrom;
+      showNewItemCard(from?.barcode || q.value.trim(), (created) => {
+        if (!current() || !q.isConnected) { toast("الصنف اتضاف؛ دوّر عليه تاني عشان تحطه في الفاتورة"); return; }
+        pick(created);
+        if (from?.expiry) { $("#qaExp").value = from.expiry; $("#qaExpSee").textContent = "الصلاحية من الباركود"; }
+        if (from?.batch) $("#qaBatch").value = from.batch;
+      });
     }
   });
   picker.addEventListener("keydown", (e) => {
@@ -2573,12 +2581,18 @@ function invoiceCardDetails(c) {
 // UX-28 (owner 23/11, 26/11): a new item from inside the purchase invoice. A short card in place: names, barcode, the
 // pack and its small units, the public price and the group. Saved in one step (the group with the item: a refused
 // group refuses the whole item); the created item comes back to `onCreated` (the invoice's entry row picks it).
+let NEW_ITEM_OPENING = false;
 async function showNewItemCard(query, onCreated) {
+  if ($("dialog[open]") || NEW_ITEM_OPENING) return;        // review P2: a double click opened two cards
+  NEW_ITEM_OPENING = true;
+  let cats;
+  try { cats = await loadCats(true).catch(() => []); } finally { NEW_ITEM_OPENING = false; }
   if ($("dialog[open]")) return;
   const focused = document.activeElement;
-  const q = String(query || "").trim(), code = /^\d{6,}$/.test(q), latin = /[a-z]/i.test(q);
-  const canPrice = ME.permissions.includes("items.price");
-  const cats = await loadCats(true).catch(() => []);
+  // digits typed on the Arabic keyboard count as digits; a short number (an item code) fills no name (review P2)
+  const q = String(query || "").trim().replace(/[٠-٩]/g, (x) => "٠١٢٣٤٥٦٧٨٩".indexOf(x));
+  const digits = /^\d+$/.test(q), code = digits && q.length >= 6, latin = /[a-z]/i.test(q);
+  const canPrice = ME.permissions.includes("items.price"), canNoReturn = ME.permissions.includes("items.no_return");
   const d = document.createElement("dialog");
   d.className = "invoice-item-card new-item-card";
   d.setAttribute("aria-labelledby", "newItemTitle");
@@ -2586,15 +2600,15 @@ async function showNewItemCard(query, onCreated) {
       <button type="button" class="btn small secondary" data-ni-close>قفل</button></div>
     <p class="err" role="alert" hidden></p>
     <div class="formgrid">
-      <label class="f">الاسم بالإنجليزي<input name="name_en" lang="en" data-upper dir="ltr" autocomplete="off" value="${latin && !code ? esc(upperEn(q)) : ""}"></label>
-      <label class="f">الاسم بالعربي<input name="name_ar" lang="ar" autocomplete="off" value="${!latin && !code ? esc(q) : ""}"></label>
+      <label class="f">الاسم بالإنجليزي<input name="name_en" lang="en" data-upper dir="ltr" autocomplete="off" value="${latin && !digits ? esc(upperEn(q)) : ""}"></label>
+      <label class="f">الاسم بالعربي<input name="name_ar" lang="ar" autocomplete="off" value="${!latin && !digits ? esc(q) : ""}"></label>
       <label class="f">الباركود<input name="barcode" dir="ltr" inputmode="numeric" autocomplete="off" value="${code ? esc(q) : ""}"></label>
       <label class="f">اسم العبوة<input name="pack_unit_name" autocomplete="off" value="علبة"></label>
       <label class="f">عدد الوحدات الصغيرة في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <label class="f">اسم الوحدة الصغيرة<input name="base_unit_name" autocomplete="off" placeholder="شريط / أمبول / قرص"></label>
-      <label class="f">سعر الجمهور للعبوة (ج)<input name="public_price" type="number" step="0.01" min="0" ${canPrice ? "" : "disabled"}>
+      <label class="f">سعر الجمهور للعبوة (ج)<input name="public_price" type="number" step="0.01" min="0.01" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">السعر للمالك والمدير؛ سعر الفاتورة بيتسجل مع الاعتماد</span>`}</label>
-      <label class="f">القسم<select name="category_id"><option value="">— بدون قسم —</option>${cats.filter((c) => c.is_active)
+      <label class="f">القسم<select name="category_id"><option value="">— بدون قسم —</option>${cats.filter((c) => c.is_active && (canNoReturn || !c.no_return))
         .map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
     </div>
     <div class="row mt"><button class="btn" type="submit">احفظ وحطه في الفاتورة</button></div></form>`;
@@ -2632,8 +2646,7 @@ async function showNewItemCard(query, onCreated) {
   });
   document.body.append(d);
   d.showModal();
-  (code || !q ? f0() : (latin ? form.elements.name_ar : form.elements.name_en)).focus();
-  function f0() { return form.elements.name_en; }
+  (digits || !q ? form.elements.name_en : (latin ? form.elements.name_ar : form.elements.name_en)).focus();
 }
 
 function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCreate, onSaved, restore } = {}) {
