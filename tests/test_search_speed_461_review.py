@@ -84,6 +84,94 @@ class TestNameInTheOtherScript(ReviewCase):
                 self.assertEqual((got[0].item_id, got[0].score), (ids[0], self.full("Vitamin Zorbex" + tail_en)[0].score))
 
 
+class TestOtherScriptInALargeCatalog(ReviewCase):
+    """Second review: at 12,000 items every skeleton letter group is common, so a name in the other script was
+    cut before it was ranked. 60 planted pairs: an English item spelt one vowel short and an Arabic-only item
+    with the exact name; the invoice line is the full English spelling, so two items are within 0.05."""
+    SYL = ("pan", "dol", "cet", "am", "ox", "il", "vor", "tra", "max", "zen", "lor", "fen", "bru", "cal", "dex",
+           "mox", "ator", "glu", "cor", "neo", "flu", "ket", "rin", "sol", "vit", "omep", "raz", "tor", "lin", "gab")
+    AR = ("بان", "دول", "سيت", "ام", "وكس", "يل", "فور", "ترا", "ماكس", "زين", "لور", "فين", "برو", "كال", "ديكس",
+          "موكس", "اتور", "جلو", "كور", "نيو", "فلو", "كيت", "رين", "سول", "فيت", "اوميب", "راز", "تور", "لين", "جاب")
+    TAILS = {"none": ("", ""), "form": (" cream", " كريم"), "full": (" 500mg 20 tab", " 500 مجم 20 قرص")}
+
+    def brand(self, rng, words=None, syllables=None):
+        en, ar = [], []
+        for _ in range(words or rng.choice((1, 2, 2))):
+            k = [rng.randrange(len(self.SYL)) for _ in range(syllables or rng.choice((2, 3, 3, 4)))]
+            en.append("".join(self.SYL[i] for i in k).capitalize())
+            ar.append("".join(self.AR[i] for i in k))
+        return " ".join(en), " ".join(ar)
+
+    def test_an_ambiguous_line_is_never_matched_without_a_person(self):
+        rng = random.Random(2)
+        names, seen = [], set()
+        while len(names) < 12000:
+            en, ar = self.brand(rng)
+            te, ta = self.TAILS[rng.choice(("none", "form", "full", "full"))]
+            if en + te in seen:
+                continue
+            seen.add(en + te)
+            script = rng.choice(("en", "ar", "both"))
+            names.append((en + te if script != "ar" else "", ar + ta if script != "en" else ""))
+        lines = []
+        for p in range(60):
+            en, ar = self.brand(rng, 2, 3)
+            te, ta = self.TAILS[("none", "form", "full")[p % 3]]
+            first, second = en.split()
+            vowels = [i for i, c in enumerate(first) if c in "aeiou" and 0 < i < len(first) - 1]
+            i = rng.choice(vowels)
+            names += [(first[:i] + first[i + 1:] + " " + second + te, ""), ("", ar + ta)]
+            lines.append(en + te)
+        add_items(self.db, self.ctx.org_id, names)
+        wrong, differ, ambiguous = [], [], 0
+        for line in lines:
+            want = self.full(line)
+            status = self.full_status(line)
+            r = matching.match_line(self.db, self.ctx.org_id, raw_name=line)
+            ambiguous += status == "suggested"
+            if r.status == "auto" and status != "auto":
+                wrong.append((line, [(c.label, c.score) for c in want[:2]], [(c.label, c.score) for c in r.candidates[:2]]))
+            if [c.score for c in r.candidates[:2]] != [c.score for c in want[:2]]:
+                differ.append(line)
+        self.assertGreater(ambiguous, 15)            # the catalog does hold ambiguous lines
+        self.assertEqual(wrong, [])
+        self.assertEqual(differ, [])
+
+    def test_a_line_whose_only_match_is_in_the_other_script(self):
+        rng = random.Random(4)
+        names, seen = [], set()
+        while len(names) < 12000:
+            en, ar = self.brand(rng)
+            if en in seen:
+                continue
+            seen.add(en)
+            script = rng.choice(("en", "ar", "both"))
+            names.append((en if script != "ar" else "", ar if script != "en" else ""))
+        ids = add_items(self.db, self.ctx.org_id, names)
+        one_script = [(i, en, ar) for i, (en, ar) in zip(ids, names) if not en or not ar]
+        missed = []
+        for i, en, ar in rng.sample(one_script, 80):
+            line = self._other(en, ar)
+            want = self.full(line)
+            got = matching.fuzzy_candidates(self.db, self.ctx.org_id, line, 5)
+            if want and (not got or got[0].score != want[0].score):
+                missed.append((line, want[0].label, want[0].score, got[0].label if got else None))
+        self.assertEqual(missed, [])
+
+    def _other(self, en, ar):
+        """The same brand written in the script the item does not have."""
+        table = dict(zip(self.SYL, self.AR)) if en else dict(zip(self.AR, self.SYL))
+        out = []
+        for word in (en or ar).lower().split():
+            parts, rest = [], word
+            while rest:
+                syl = next(s for s in sorted(table, key=len, reverse=True) if rest.startswith(s))
+                parts.append(table[syl])
+                rest = rest[len(syl):]
+            out.append("".join(parts))
+        return " ".join(out)
+
+
 class TestIndexAndTransactions(ReviewCase):
     def setUp(self):
         super().setUp()
@@ -137,6 +225,42 @@ class TestIndexAndTransactions(ReviewCase):
                 self.assertNotEqual(matching._version(self.db, self.ctx.org_id), before)
                 raise RuntimeError
         self.assertEqual(matching._version(self.db, self.ctx.org_id), before)
+
+    def test_an_edit_that_changes_no_name_never_hides_the_item(self):
+        idx = matching._index(self.db, self.ctx.org_id)
+        entry = idx.items[self.ids[1]]
+        seen_missing = []
+        real_get = dict.get
+
+        class Watch(dict):
+            def pop(self, *a):
+                seen_missing.append(a[0])
+                return dict.pop(self, *a)
+        idx.items = Watch(idx.items)
+        cat.update_item(self.db, self.ctx, self.ids[1], {"min_stock": 3})
+        self.assertIs(matching._index(self.db, self.ctx.org_id), idx)
+        self.assertIs(idx.items[self.ids[1]], entry)
+        self.assertEqual(seen_missing, [])
+        cat.update_item(self.db, self.ctx, self.ids[1], {"name_en": "Renamed 75mg 20 tab"})
+        self.assertEqual(seen_missing, [])                                 # replaced, never taken out first
+        self.assertEqual(idx.items[self.ids[1]].label, "Renamed 75mg 20 tab")
+        matching.forget(self.ctx.org_id)
+        self.assertEqual(shape(idx), shape(matching._index(self.db, self.ctx.org_id)))
+        del real_get
+
+    def test_an_index_built_inside_a_write_is_not_kept_for_others(self):
+        # a build that saw uncommitted rows must never be the shared index under a committed label
+        matching.invalidate(self.ctx.org_id)
+        with self.assertRaises(RuntimeError):
+            with self.db.transaction():
+                self.db.execute("UPDATE items SET name_en='Uncommitted 9mg 10 tab', name_norm='uncommitted 9 mg 10 tab',"
+                                " strength_norm='9mg' WHERE id=?", (self.ids[0],))      # updated_at untouched
+                self.assertEqual(self.status("Uncommitted 9mg 10 tab"), ("auto", self.ids[0]))
+                self.assertEqual(self.status("Uncommitted 9mg 10 tab"), ("auto", self.ids[0]))
+                raise RuntimeError
+        self.assertEqual(self.status("Uncommitted 9mg 10 tab")[0], "unmatched")
+        self.assertEqual(self.elsewhere(lambda: self.status("Uncommitted 9mg 10 tab"))[0], "unmatched")
+        self.assertEqual(self.elsewhere(lambda: self.status("Brandix0 50mg 20 tab")), ("auto", self.ids[0]))
 
     def test_the_followed_version_is_the_real_one(self):
         cat.update_item(self.db, self.ctx, self.ids[2], {"name_en": "Otherol 10mg 30 cap"})

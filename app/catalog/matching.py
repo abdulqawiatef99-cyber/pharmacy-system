@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import heapq
 import re
+from collections import Counter
 from itertools import islice
+from operator import itemgetter
 import threading
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -118,20 +120,27 @@ class _OrgIndex:
         """One item was added, edited or stopped: the index follows without being built again (a rebuild of
         30,000 names cost the next search 0.3 s and more, #461). Searches on other threads read these sets
         while this runs, so a set is never changed in place: it is replaced by a new one."""
-        old = self.items.pop(item_id, None)
-        if old is not None:
-            for table, keys in self._where(old):
-                for key in keys:
-                    left = table.get(key, frozenset()) - {item_id}
-                    if left:
-                        table[key] = left
-                    else:
-                        table.pop(key, None)
-        if it is not None:
-            for table, keys in self._where(it):
+        old = self.items.get(item_id)
+        if old is not it:
+            # the new entry goes in before the old one's leftovers come out: a search running now finds the
+            # item under its old or its new name, never neither (an edit of a price changes no name at all)
+            new = self._where(it) if it is not None else ()
+            for table, keys in new:
                 for key in keys:
                     table[key] = table.get(key, frozenset()) | {item_id}
-            self.items[item_id] = it
+            if it is not None:
+                self.items[item_id] = it
+            else:
+                self.items.pop(item_id, None)
+            if old is not None:
+                stay = {id(table): set(keys) for table, keys in new}
+                for table, keys in self._where(old):
+                    for key in set(keys) - stay.get(id(table), set()):
+                        left = table.get(key, frozenset()) - {item_id}
+                        if left:
+                            table[key] = left
+                        else:
+                            table.pop(key, None)
         self.changes += 1
         self.memo = {}
 
@@ -202,9 +211,12 @@ def _version(db: Database, org_id: str) -> str:
 
 def _index(db: Database, org_id: str) -> _OrgIndex:
     ver = _version(db, org_id)
+    # an index built inside a write may hold rows that are rolled back later: it is kept under a label only
+    # this transaction asks for, so no other thread (and no later transaction) ever takes it for the catalog
+    own = f"{ver}|w{id(db.conn)}.{db.write_serial}" if db.conn.in_transaction and not db.in_snapshot else None
     with _cache_lock:
         hit = _cache.get(org_id)
-        if hit and hit[0] == ver:
+        if hit and hit[0] in (ver, own):
             return hit[1]
         known = _parsed.get(org_id, {})
     rows = db.all("SELECT id, name_en, name_ar, strength_norm, dosage_form FROM items"
@@ -224,8 +236,9 @@ def _index(db: Database, org_id: str) -> _OrgIndex:
             items.append(it)
     idx = _OrgIndex(items)
     with _cache_lock:
-        _cache[org_id] = (ver, idx)
-        _parsed[org_id] = seen           # only the items of this build: a stopped or deleted item is dropped
+        _cache[org_id] = (own or ver, idx)
+        if own is None:
+            _parsed[org_id] = seen       # only the items of this build: a stopped or deleted item is dropped
     return idx
 
 
@@ -347,6 +360,7 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
 
 
 SHORTLIST_MIN, SHORTLIST_MAX = 120, 400
+SKEL_BUDGET, SKEL_KEEP = 60000, 400      # skeleton-group postings counted per question; candidates they add
 RANK_MAX = 1500        # at most this many candidates are ranked one by one (about 3 µs each)
 
 
@@ -406,6 +420,20 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
         same = same & ids
         if len(same) <= RANK_MAX:
             pool |= same
+    # a name in the other script shares only skeleton groups with the query, and in a large catalog every one
+    # of those is common, so nothing above brings it in: the candidates sharing the most skeleton groups are
+    # ranked too. Groups nearly every item has tell nothing and are skipped; the work is bounded.
+    if qs:
+        shared: Counter = Counter()
+        budget, most = SKEL_BUDGET, 0.9 * len(items)
+        for n, g, post in posts:
+            if g[0] != "~" or n >= most:
+                continue
+            if n > budget:
+                break
+            shared.update(post & ids)
+            budget -= n
+        pool = pool.union(i for i, _ in heapq.nlargest(SKEL_KEEP, shared.items(), key=itemgetter(1)))
     found = [it for it in map(items.get, pool) if it is not None]
     if len(found) <= keep:
         return found
