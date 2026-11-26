@@ -196,7 +196,7 @@ class TestS28CancelApprovedPurchase(_Base):
         """An already posted return at a manual value must still be reversed on cancellation."""
         from unittest.mock import patch
 
-        iid, v = self.buy(self.a, self.it, 10, 0)
+        iid, v = self.buy(self.a, self.it, 10, 100, total=0, extra_discount=1000)
         self.assertEqual(self.owed(self.a), 0)
         with patch.object(returns, "_lot_return_rows", return_value=[(4, 90, 0, None, 0)]):
             returns.create(self.db, self.ctx, self.a, [{"item_id": self.it, "batch_id": self.lot(self.it), "qty_base": 4,
