@@ -790,7 +790,7 @@ const TOUR = {
     ["#puRep", "الفواتير", "كل فواتير الشراء. المسودة لسه ماغيّرتش المخزون؛ المعتمدة بس هي اللي زوّدته."],
   ],
   purchase: [
-    ["[data-h=supplier_id]", "المورد", "اختار المورد اللي جت منه الفاتورة."],
+    [".spIn[data-for=supplier_id]", "المورد", "اختار المورد اللي جت منه الفاتورة."],
     ["[data-h=invoice_no]", "رقم فاتورة المورد", "الرقم المطبوع على فاتورة المورد. المسلسل اللي جنب العنوان رقم الفاتورة في البرنامج."],
     ["#addLine", "الأصناف", "ضيف كل صنف بكميته وسعره وتاريخ الصلاحية، والبونص لو فيه."],
     ["#approve", "الاعتماد", "بعد المراجعة اعتمد الفاتورة: ساعتها بس المخزون يزيد وحساب المورد يتسجل."],
@@ -1319,6 +1319,8 @@ async function viewPurchases() {
       <label class="f">الحالة <select id="puSt"><option value="">الكل</option>${Object.entries(STATUS).map(([k, [t]]) => `<option value="${k}">${t}</option>`).join("")}</select></label></div>
     <div id="puBox"></div>
   </section>`;
+  supMetaSet(suppliers);
+  ["#upForm [name=supplier_id]", "#manForm [name=supplier_id]", "#puSup"].forEach((q) => supPicker($(q)));
   let savedPriceDefault = priceSetting?.default;
   $("#puPriceDefault")?.addEventListener("change", async (e) => {
     const select = e.currentTarget;
@@ -1944,6 +1946,118 @@ async function fillPaySources(inv) {
 }
 
 const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
+// UX-28 supplier search: begin
+// (owner 26/11) every supplier picker is a search box: Arabic folded like the server's normalize_text (أ/إ/آ → ا,
+// ى → ي, ة → ه, ؤ → و, ئ → ي, no tashkeel), English in any case, the phone (Arabic numerals too) or the same keys
+// typed on the other keyboard language. An empty box lists the recent suppliers first; a stopped one comes last.
+const SP_AR = { "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه", "ؤ": "و", "ئ": "ي" };
+const SP_EN_AR = { q: "ض", w: "ص", e: "ث", r: "ق", t: "ف", y: "غ", u: "ع", i: "ه", o: "خ", p: "ح", "[": "ج", "]": "د",
+  a: "ش", s: "س", d: "ي", f: "ب", g: "ل", h: "ا", j: "ت", k: "ن", l: "م", ";": "ك", "'": "ط", z: "ئ", x: "ء", c: "ؤ",
+  v: "ر", b: "لا", n: "ى", m: "ة", ",": "و", ".": "ز", "/": "ظ", "`": "ذ" };
+const SP_AR_EN = Object.fromEntries(Object.entries(SP_EN_AR).filter(([, v]) => v.length === 1).map(([k, v]) => [v, k]));
+Object.assign(SP_AR_EN, { "أ": "h", "إ": "y", "آ": "n" });
+const spDigits = (s) => String(s ?? "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+const spFold = (s) => spDigits(String(s ?? "").normalize("NFKC")).replace(/[ؐ-ًؚ-ٰٟـ]/g, "")
+  .replace(/[أإآٱىةؤئ]/g, (c) => SP_AR[c]).toLowerCase().replace(/\s+/g, " ").trim();
+function spOtherLayout(q) {
+  const s = String(q ?? "").trim();
+  const ar = /[؀-ۿ]/.test(s), en = /[a-z]/i.test(s);
+  if (ar && !en) return s.replace(/لا/g, "b").split("").map((c) => SP_AR_EN[c] ?? c).join("");
+  if (en && !ar) return s.toLowerCase().split("").map((c) => SP_EN_AR[c] ?? c).join("");
+  return "";
+}
+function supRank(list, q) {
+  const recent = (a, b) => (!!a.inactive - !!b.inactive) || String(b.last_used || "").localeCompare(String(a.last_used || ""))
+    || String(a.name).localeCompare(String(b.name), "ar");
+  const typed = spFold(q);
+  if (!typed) return [...list].sort(recent);
+  const score = (s, query) => {
+    const name = spFold(s.name), words = query.split(" ");
+    const phone = spDigits(s.phone || "").replace(/\D/g, ""), digits = query.replace(/\D/g, "");
+    if (words.every((w) => name.includes(w))) {
+      if (name.startsWith(query)) return 0;
+      return name.split(" ").some((n) => n.startsWith(words[0])) ? 1 : 2;
+    }
+    return digits.length >= 3 && digits === query.replace(/[\s-]/g, "") && phone.includes(digits) ? 3 : null;
+  };
+  const pass = (query) => list.map((s) => [score(s, query), s]).filter((h) => h[0] !== null);
+  let hits = pass(typed);
+  const alt = hits.length ? "" : spFold(spOtherLayout(q));       // nothing as typed: the same keys on the other layout
+  if (alt) hits = pass(alt);
+  return hits.sort((a, b) => (!!a[1].inactive - !!b[1].inactive) || a[0] - b[0] || recent(a[1], b[1])).map((h) => h[1]);
+}
+// UX-28 supplier search: end
+// The box sits next to the <select>, which stays underneath (see-through, out of the Tab order) as the value holder:
+// forms, `.value`, `selectedOptions` and change handlers work as before. Calling it again on the same select (after its
+// options were refilled) only refreshes the shown name. The rows' phone and recency come from SUP_META.
+let SUP_META = new Map();
+const supMetaSet = (list) => { (list || []).forEach((s) => SUP_META.set(s.id, s)); };
+function supPicker(sel) {
+  if (!sel) return null;
+  if (sel._sp) { sel._sp.sync(); return sel._sp; }
+  const wrap = document.createElement("span");
+  wrap.className = "sp";
+  wrap.innerHTML = `<input class="spIn" type="search" autocomplete="off" spellcheck="false" lang="ar" role="combobox" aria-autocomplete="list" aria-expanded="false"><div class="spList" role="listbox" hidden></div>`;
+  sel.after(wrap);
+  sel.classList.add("spHide");
+  sel.tabIndex = -1;
+  sel.setAttribute("aria-hidden", "true");
+  const inp = wrap.querySelector(".spIn"), box = wrap.querySelector(".spList");
+  inp.dataset.for = sel.dataset.h || sel.id || sel.name || "";
+  let rows = [], at = 0, open = false;
+  const blank = () => [...sel.options].find((o) => o.value === "");
+  const entries = () => [...sel.options].filter((o) => o.value !== "").map((o) => {
+    const m = SUP_META.get(o.value) || {};
+    return { id: o.value, name: o.text, phone: m.phone, last_used: m.last_used, inactive: m.is_active === 0 };
+  });
+  const sync = () => {
+    const o = sel.selectedOptions[0];
+    inp.value = o && o.value !== "" ? o.text : "";
+    inp.placeholder = blank()?.text.replace(/^—\s*|\s*—$/g, "") || "اكتب اسم المورد";
+    inp.disabled = sel.disabled;
+  };
+  const close = () => { open = false; box.hidden = true; inp.setAttribute("aria-expanded", "false"); };
+  const draw = () => {
+    const q = inp.value === (sel.selectedOptions[0]?.value ? sel.selectedOptions[0].text : "") ? "" : inp.value;
+    const b = blank();
+    rows = [...(b && !sel.required && !q.trim() ? [{ id: "", name: b.text }] : []), ...supRank(entries(), q).slice(0, 15)];
+    at = Math.max(0, Math.min(at, rows.length - 1));
+    box.innerHTML = rows.length ? rows.map((r, i) => `<div class="spOpt${i === at ? " on" : ""}${r.inactive ? " muted" : ""}" role="option" data-i="${i}" aria-selected="${i === at}">
+      <b>${esc(r.name)}</b>${r.phone ? ` <small dir="ltr">${esc(r.phone)}</small>` : ""}${r.inactive ? " <small>· موقوف</small>" : ""}</div>`).join("")
+      : `<div class="spNone muted">مفيش مورد بالاسم ده</div>`;
+    box.hidden = false; open = true; inp.setAttribute("aria-expanded", "true");
+    box.querySelector(".spOpt.on")?.scrollIntoView?.({ block: "nearest" });
+  };
+  const pick = (r) => {
+    close();
+    if (!r) { sync(); return; }
+    if (sel.value !== r.id) { sel.value = r.id; sel.dispatchEvent(new Event("change", { bubbles: true })); }
+    sync();
+  };
+  inp.addEventListener("focus", () => { inp.select(); at = 0; draw(); });
+  inp.addEventListener("input", () => { at = 0; draw(); });
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) { draw(); return; }
+      at = (at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % Math.max(rows.length, 1); draw();
+    } else if (e.key === "Enter") {
+      if (!open) return;
+      e.preventDefault(); e.stopPropagation();
+      pick(rows[at]);
+    } else if (e.key === "Escape" && open) {
+      e.preventDefault(); e.stopPropagation(); close(); sync();
+    }
+  });
+  box.addEventListener("mousedown", (e) => { e.preventDefault(); const o = e.target.closest(".spOpt"); if (o) pick(rows[+o.dataset.i]); });
+  inp.addEventListener("blur", () => { close(); sync(); });
+  inp.addEventListener("change", (e) => e.stopPropagation());           // the box itself is never a saved field
+  sel.addEventListener("change", sync);
+  sel.addEventListener("invalid", (e) => { e.preventDefault(); toast("اختر المورد", true); inp.focus(); });
+  sel._sp = { sync, input: inp };
+  sync();
+  return sel._sp;
+}
 function updatePurchaseBonus(type) {
   const hidden = type === "warehouse";
   const bonus = $("#qaBonus");
@@ -1960,9 +2074,11 @@ async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
   const list = await api("/api/suppliers");
   if (!sel.isConnected) return;
+  supMetaSet(list);
   sel.innerHTML = `<option value="">— اختر —</option>` + list.map((s) =>
     `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}${SUP_TYPE[s.supplier_type] ? ` (${SUP_TYPE[s.supplier_type]})` : ""}</option>`).join("");
   sel.disabled = !draft;
+  supPicker(sel);
   const cur = list.find((x) => x.id === selected), box = $("#supType");
   updatePurchaseBonus(cur?.supplier_type);
   if (!box) return;
@@ -4834,6 +4950,7 @@ async function viewProcurement() {
       <td><button type="button" class="btn small ${order[r.item_id] ? "secondary" : ""} prAdd" data-id="${esc(r.item_id)}">${order[r.item_id] ? "في الطلبية ✓" : "ضيف للطلبية"}</button></td></tr>`).join("")
       || `<tr><td colspan="13" class="muted">مفيش أصناف ناقصة للمدة دي (جرّب مدة أطول، أو ارفع مبيعات شهر من تحت لو مفيش بيانات بيع)</td></tr>`;
     document.querySelectorAll("#prChips [data-chip]").forEach((b) => b.classList.toggle("on", st.chips.has(b.dataset.chip)));
+    document.querySelectorAll("#prBody .prSup").forEach(supPicker);
     drawOrder(); drawPrices();
   };
   const groups = () => {
@@ -4886,6 +5003,7 @@ async function viewProcurement() {
     $("#prSupSel").innerHTML = `<option value="">كل الموردين</option>${out.all_suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}`;
     if (st.sup && !st.sups[st.sup]) st.sup = "";
     $("#prSupSel").value = st.sup;
+    supPicker($("#prSupSel"));
     const c = out.counts;
     $("#prCounts").textContent = `منتظم ${c.regular} · شبه منتظم ${c.semi} · متقطع ${c.irregular} · مخفي من العرض الأساسي ${c.hidden}`;
     $("#prAsk").className = out.ask_about.length ? "" : "muted";
@@ -6951,6 +7069,7 @@ async function viewSuppliers() {
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
     ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" lang="ar" placeholder="اسم المورد" required>
       <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
+    <label class="f">افتح حساب مورد (للدفع أو كشف الحساب) <select id="supGo"><option value="">اكتب اسم المورد أو تليفونه</option>${list.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
       <td>${SUP_TYPE[x.supplier_type] ? `<span class="chip">${SUP_TYPE[x.supplier_type]}</span>` : `<span class="badge b-warn">⚠ حدد النوع</span>`}</td>
@@ -6962,6 +7081,8 @@ async function viewSuppliers() {
     <div class="row noprint">${rangeBar("stRange", "last")}<label class="f">النوع <select id="stType"><option value="">الكل</option>${Object.entries(SUP_TYPE).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>
     <div id="stBox"></div></section>` : ""}`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/suppliers/${tr.dataset.go}`; }));
+  supMetaSet(list); supPicker($("#supGo"));
+  $("#supGo").addEventListener("change", (e) => { if (e.target.value) location.hash = `#/suppliers/${e.target.value}`; });
   if (showBal) {
     let st = null;
     const load = async (f, t) => {
@@ -7093,6 +7214,7 @@ async function viewSupplierReturnInvoice() {
   app.innerHTML = `<section class="panel"><a href="#/supplier-returns">← المرتجعات</a><h1>مرتجع من فاتورة شراء</h1>
     <form class="row" id="siF"><label class="f">المورد <select name="sup" required><option value="">— اختر —</option>${sups.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label>
       <label class="f">رقم الفاتورة <input name="no" required></label><button class="btn small">هات الفاتورة</button></form><div id="siBox" class="mt"></div></section>`;
+  supMetaSet(sups); supPicker($("#siF [name=sup]"));
   $("#siF").addEventListener("submit", async (e) => {
     e.preventDefault();
     const sup = e.target.sup.value;
@@ -7139,6 +7261,7 @@ async function viewSupplierReturns(arg) {
       <div class="row mt"><label class="f grow">ملاحظة (اسم المندوب مثلًا) <input id="srNote"></label><b id="srTot"></b><button class="btn" id="srGo">سجّل المرتجع واطبع الإذن</button></div>
       <p class="muted">تخرج الكمية من المخزون، وتُخصم قيمتها من حساب المورد. القيمة المقترحة هي سعر شراء هذه التشغيلة، ويمكنك تغييرها إذا كان المورد سيحسبها بسعر آخر.</p></section>` : ""}
     <section class="panel" id="srRep"><div class="row between"><h2>المرتجعات للموردين</h2>${reportTools("sr")}</div>${rangeBar("srRange")}<div id="srBox"></div></section>`;
+  supMetaSet(sups); supPicker($("#srSup"));
   // ---- new return
   const lines = [];
   const draw = () => {

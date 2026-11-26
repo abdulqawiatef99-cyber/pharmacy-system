@@ -50,8 +50,10 @@ def create_supplier(db: Database, ctx: Context, *, name: str, supplier_type: str
 
 def list_suppliers(db: Database, ctx: Context) -> list[dict]:
     ctx.require("suppliers.read")
-    return [dict(r) for r in db.all("SELECT * FROM suppliers WHERE org_id=? ORDER BY name",
-                                    (ctx.org_id,))]
+    # last_used (UX-28): the newest purchase invoice of the supplier, so the pickers list recent suppliers first
+    return [dict(r) for r in db.all(
+        "SELECT s.*, (SELECT max(p.created_at) FROM purchase_invoices p WHERE p.org_id=s.org_id"
+        " AND p.supplier_id=s.id) last_used FROM suppliers s WHERE s.org_id=? ORDER BY s.name", (ctx.org_id,))]
 
 
 def get_supplier(db: Database, ctx: Context, supplier_id: str) -> dict:

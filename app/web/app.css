@@ -455,3 +455,14 @@ th[data-sort]::after { content: " " attr(data-dir); }
 
 #estockMove progress { inline-size: min(100%, 28rem); margin-block-end: .75rem; }
 #estockMoveReport { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
+/* UX-28: supplier search box over the hidden <select> (the select keeps the value) */
+.spHide { position: absolute !important; opacity: 0; width: 1px !important; min-width: 0 !important; height: 1px; min-height: 0;
+  padding: 0; border: 0; pointer-events: none; }
+.sp { position: relative; display: inline-block; min-width: 14em; }
+.sp .spIn { width: 100%; }
+.spList { position: absolute; inset-inline: 0; top: 100%; z-index: 30; max-height: 22em; overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, .15); color: var(--ink); }
+.spOpt { padding: 6px 10px; cursor: pointer; font-size: .875rem; }
+.spOpt small { color: var(--muted); }
+.spOpt.on, .spOpt:hover { background: var(--line-soft); }
+.spNone { padding: 6px 10px; font-size: .875rem; }
