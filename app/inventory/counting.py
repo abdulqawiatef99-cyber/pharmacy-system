@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -230,6 +231,12 @@ class Counting:
 
     def variances(self, ctx: Context, sid: str) -> dict:
         ctx.require("inventory.adjust")
+        with self.db.read_snapshot():
+            return self._variances(ctx, sid)
+
+    def _variances(self, ctx: Context, sid: str) -> dict:
+        from ..sales.service import local_today
+
         s = self._session(ctx, sid)
         entries = [dict(e) for e in self.db.all(
             "SELECT * FROM count_entries WHERE session_id=? AND superseded_by IS NULL", (sid,))]
@@ -269,8 +276,16 @@ class Counting:
             # items with a cost rank by money; an item without one comes after them, by units (review P2)
             r["_order"] = (1, abs(Decimal(c["avg_cost"]) * r["difference"])) if c and c["avg_cost"] and Decimal(c["avg_cost"]) \
                 else (0, Decimal(abs(r["difference"])))
-            r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=?",
-                                     (item_id,))["n"]
+            r["label"] = self.db.one("SELECT coalesce(name_en,name_ar) n FROM items WHERE id=? AND org_id=?",
+                                     (item_id, ctx.org_id))["n"]
+            if not bk and r["difference"] > 0 and self.db.one(
+                    "SELECT 1 FROM batches b WHERE b.org_id=? AND b.item_id=?"
+                    " AND (b.expiry_date<? OR EXISTS (SELECT 1 FROM recall_matches m"
+                    " WHERE m.org_id=b.org_id AND m.batch_id=b.id AND m.status IN ('confirmed','handled')))"
+                    " LIMIT 1", (ctx.org_id, item_id, local_today().isoformat())):
+                r["problem"] = "surplus_requires_batch"
+                r["problem_message"] = (f"«{r['label']}»: فيه تشغيلة منتهية أو مسحوبة؛"
+                                        " ألغِ الجرد ده وأعد العدّ بالتشغيلة الفعلية قبل الاعتماد")
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
             if r["last_seq"] > r["seq"] and self._moved_between(ctx, s["branch_id"], item_id, bk or None,
@@ -286,19 +301,26 @@ class Counting:
             r.pop("last_seq")
             out.append(r)
         counted_items = {r["item_id"] for r in out}
-        uncounted = []
-        # one grouped query (not one per item): 20,000 items stay quick on a weak PC
-        for it in self.db.all("SELECT i.id, i.name_en, i.name_ar, i.location, sum(sb.qty) q FROM items i"
-                              " JOIN stock_balances sb ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
-                              " WHERE i.org_id=? AND i.status='active' GROUP BY i.id HAVING sum(sb.qty) <> 0",
-                              (s["branch_id"], ctx.org_id)):
+        uncounted, reviewed_stock = [], []
+        # Use each item's last branch movement as well as its quantity. A transfer between lots can
+        # change which units would be zeroed even when the total is unchanged.
+        for it in self.db.all("SELECT i.id, i.name_en, i.name_ar, i.location, sum(sb.qty) q,"
+                              " (SELECT max(m.rowid) FROM stock_movements m WHERE m.org_id=i.org_id"
+                              " AND m.branch_id=sb.branch_id AND m.item_id=i.id) last_movement"
+                              " FROM items i JOIN stock_balances sb"
+                              " ON sb.item_id=i.id AND sb.org_id=i.org_id AND sb.branch_id=?"
+                              " WHERE i.org_id=? AND i.status='active' GROUP BY i.id HAVING sum(sb.qty) <> 0"
+                              " ORDER BY i.id", (s["branch_id"], ctx.org_id)):
             if it["id"] in counted_items or not self._in_scope(s, dict(it)):
                 continue
             uncounted.append({"item_id": it["id"], "label": it["name_en"] or it["name_ar"], "system_qty": it["q"]})
+            reviewed_stock.append((it["id"], it["q"], it["last_movement"]))
+        confirmation = hashlib.sha256(json.dumps([sid, reviewed_stock]).encode("ascii")).hexdigest()
         out.sort(key=lambda r: (*r["_order"], abs(r["difference"])), reverse=True)
         for r in out:
             r.pop("_order", None)
         return {"session": s, "lines": out, "uncounted_with_stock": uncounted,
+                "uncounted_confirmation": confirmation,
                 "summary": {"counted_lines": len(out),
                             "shortage_units": -sum(r["difference"] for r in out if r["difference"] < 0),
                             "excess_units": sum(r["difference"] for r in out if r["difference"] > 0),
@@ -307,11 +329,10 @@ class Counting:
     def approve(self, ctx: Context, sid: str, *, zero_uncounted: bool = False,
                 reason: str | None = None, reasons: dict | None = None,
                 shortage_reason: str = "lost", zero_reason: str = "lost",
-                uncounted_item_ids: list[str] | None = None) -> dict:
+                uncounted_item_ids: list[str] | None = None, uncounted_confirmation: str | None = None) -> dict:
         """reasons: {"item_id|batch_key": reason code} for single lines; others take
         shortage_reason (less than the system) or "found" (more than the system).
-        zero_uncounted zeroes exactly the uncounted items the approver was shown (uncounted_item_ids):
-        an item received after the preview is refused, never zeroed unseen (#324 S15)."""
+        zero_uncounted requires the list and stock revision from the approver's preview."""
         from . import adjust
         ctx.require("inventory.adjust")
         if zero_uncounted is not True and zero_uncounted is not False:
@@ -329,13 +350,17 @@ class Counting:
             v = self.variances(ctx, sid)
             bad = [r for r in v["lines"] if r.get("problem")]
             if bad:
-                stale = [r["problem_message"] for r in bad if r["problem"] == "adjusted_since_count"]
+                messages = [r["problem_message"] for r in bad if r.get("problem_message")]
                 msg = "توجد أصناف تحتاج إلى مراجعة قبل الاعتماد"
-                if stale:
-                    msg = "لا يمكن اعتماد الجرد: " + stale[0] + (
-                        f" (و{len(stale) - 1} صنف آخر بالحالة نفسها)" if len(stale) > 1 else "")
+                if messages:
+                    msg = "لا يمكن اعتماد الجرد: " + messages[0]
                 raise Conflict(msg, code="count_problems",
                                details={"lines": bad})
+            if zero_uncounted and (
+                    uncounted_confirmation != v["uncounted_confirmation"]
+                    or {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}):
+                raise Conflict("رصيد الأصناف اللي لم تُجرد اتغيّر أو التقرير قديم؛ اعرض الفروق تاني قبل التصفير",
+                               code="uncounted_changed")
             posted = 0
             for r in v["lines"]:
                 diff = r["difference"]
@@ -346,9 +371,6 @@ class Counting:
                 self._post_adjust(ctx, s, r["item_id"], r["batch_key"] or None, diff, sid, why)
                 posted += 1
             if zero_uncounted:
-                if {u["item_id"] for u in v["uncounted_with_stock"]} != {str(x) for x in uncounted_item_ids}:
-                    raise Conflict("الأصناف اللي لم تُجرد اتغيّرت بعد ما عرضت التقرير (صنف اتورد أو اتباع)؛"
-                                   " اعرض الفروق تاني قبل التصفير", code="uncounted_changed")
                 for u in v["uncounted_with_stock"]:
                     self._post_adjust(ctx, s, u["item_id"], None, -u["system_qty"], sid, zero_reason)
                     posted += 1

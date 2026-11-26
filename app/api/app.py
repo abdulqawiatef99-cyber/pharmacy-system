@@ -43,6 +43,7 @@ from ..core.numbers import whole_number
 from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
+from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
 from ..dataimport.estock_move import EstockMove
 from ..dataimport.service import DataImport, export_catalog, template_xlsx
@@ -74,7 +75,7 @@ def _static_v(name: str) -> str:
 
 
 # Shell assets referenced by index.html; each gets its content hash in the URL (#85).
-SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
+SHELL_ASSETS = ("app.css", "app.js", "scan.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
 def _web_build() -> str:
@@ -1113,7 +1114,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
                                                  b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
                                                  note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
-        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
+        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note"),
+                                explicit_unit_values=True))
 
     @handler
     async def supplier_return_page(req):
@@ -1890,6 +1892,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(purch.get(ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def purchase_scan(req):
+        return J(purch.scan_item(ctx_of(req), req.path_params["id"], req.query_params.get("barcode", "")))
+
+    @handler
     async def purchase_header(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -1900,7 +1906,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def line_add(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version")))
+        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version"),
+                                picked=b.get("picked") is True))
 
     @handler
     async def line_update(req):
@@ -1957,6 +1964,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             value = purch.price_review_default(ctx)
         return J({"default": value})
+
+    @handler
+    async def purchase_entry_settings(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        if req.method == "PUT":
+            return J(entry_settings.save(db, ctx, await body(req)))
+        return J(entry_settings.get(db, ctx.org_id))
 
     @handler
     async def purchase_approve(req):
@@ -2216,7 +2231,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def counts_variances(req):
-        return J(counting.variances(ctx_of(req), req.path_params["id"]))
+        report = counting.variances(ctx_of(req), req.path_params["id"])
+        # The count screen echoes these IDs from the report it is displaying. Carry the
+        # stock revision in the first reference so existing tabs submit their own preview.
+        if report["uncounted_with_stock"]:
+            first = report["uncounted_with_stock"][0]
+            first["stock_item_id"] = first["item_id"]
+            first["item_id"] = f'{first["stock_item_id"]}:{report["uncounted_confirmation"]}'
+        return J(report)
 
     @handler
     async def counts_approve(req):
@@ -2226,10 +2248,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         zero = b.get("zero_uncounted", False)
         if not isinstance(zero, bool):       # the string "false" was truthy and zeroed every uncounted item (#324 X20)
             raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
+        ids = b.get("uncounted_item_ids")
+        confirmation = b.get("uncounted_confirmation")
+        if zero and isinstance(ids, list) and ids and isinstance(ids[0], str):
+            item_id, separator, revision = ids[0].partition(":")
+            if separator:
+                ids = [item_id, *ids[1:]]
+                if confirmation is None:
+                    confirmation = revision
         return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=zero,
                                   reason=b.get("reason"), reasons=reasons,
                                   shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost",
-                                  uncounted_item_ids=b.get("uncounted_item_ids")))
+                                  uncounted_item_ids=ids, uncounted_confirmation=confirmation))
 
     @handler
     async def counts_cancel(req):
@@ -2865,6 +2895,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def customer_usual(req):
+        from ..sales import customers as cu
+        return J({"items": await off_loop(cu.usual_items, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
     async def hikma_claim_api(req):
         from ..reports import hikma_claim as hk
         ctx, q = ctx_of(req), req.query_params
@@ -3485,6 +3520,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases", purchases_manual, methods=["POST"]),
         Route("/api/purchases/import", purchases_import, methods=["POST"]),
         Route("/api/purchases/{id}", purchase_get),
+        Route("/api/purchases/{id}/scan", purchase_scan),
         Route("/api/purchases/{id}", purchase_header, methods=["PATCH"]),
         Route("/api/purchases/{id}/lines", line_add, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}", line_update, methods=["PATCH"]),
@@ -3494,6 +3530,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/settings/purchase-price", purchase_price_default, methods=["GET", "PUT"]),
+        Route("/api/settings/purchase-entry", purchase_entry_settings, methods=["GET", "PUT"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["GET", "POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
@@ -3572,6 +3609,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
+        Route("/api/customers/{id}/usual", customer_usual),
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),

@@ -4,6 +4,20 @@ Rules: `docs/OWNER_RULES.md` (wins), `AGENTS.md`. Gates and percentage: `docs/ST
 acceptance evidence). Log up to 23/11: `docs/archive/HANDOFF-2026-11.md`. Only the session that claimed this
 file on #113 edits it; other sessions log on #113.
 
+## Day 26/11 — CC-1 (newest line last)
+- **Done:** #463 DEV-PUR (built by Codex) reviewed, review P1 fixed test-first (warehouse invoice with a
+  stored bonus refused at approval), merged `05e52c6`. #471 six owner decisions in OWNER_RULES, merged
+  `0a08c88`. #472 #461 fix A (stocktake expired/recalled surplus P0, stale stocktake approval P1, supplier lot
+  credit P1; built by Codex) reviewed, review P1 fixed test-first (same P0 through the manual adjust screen),
+  merged `768e183`.
+- **Release 6** (develop → main): #469 #419 #471 #463 #462 #468 #473 #472; no migration, no requirements.
+  Not installed: waits for «نزّله».
+- **Not done:** `codex/fix-b-461` (drawer negative refund, shift-close denominations, B3 legacy VAT) and
+  `codex/fix-c-461` (Hikma reissue, refund day #146, update-rollback writes) were not opened by 11:30 Cairo;
+  they go in the next release. #461 P1s not assigned to A/B/C: failed restore + archive pairing, mixed-tender
+  guest refund. Owner decision: free-goods purchase invoice (#463 P2).
+- **Next:** review + merge fix-b/fix-c when they open (next migration 0046; check numbering across both).
+
 ## Night 26/11 — CC-1 progress (newest line last)
 - Claim posted on #113: PRs #458 #452 #418 #421 #422 #377 + rules/handoff docs; CC-2 owns the sale screen
   and #419, Codex the purchase-invoice screen.
@@ -22,10 +36,17 @@ file on #113 edits it; other sessions log on #113.
 - `@codex review` asked on the #451 merge resolution (queue item 9).
 - Every PR: develop merged in, full local suite (only the known local `httpx2` error), fresh-context agent
   review, Codex clean on the merged head, linux green. Windows runs on the release PR.
+- Codex on #451 found a live P1 (untracked receipt without a receipt price sold at an older price); the
+  review of the fix found a second path (net-price-only line with authority). Both fixed test-first: #466
+  merged `dfcba76`. Windows red on the release from my #458 test (needs raqm) → #467 merged `c111afe`.
+- **Release #465 (update 5) merged into main `4db40d4`**, linux + windows green on `c111afe`. No migration,
+  no requirements, no installer. Not installed: waits for the owner's «نزّله». #419 (CC-2) not in it.
+- Known intermittent test (not tonight's): `test_ux1_invoice_item_card` 5 s browser waits fail ~1 in 3
+  locally on plain develop; for Codex (UX-1 owner).
 
 ## Current state (26/11)
-- The program is the pharmacy's live cashier since 21/11. `main` @ `e555df7` = `develop` @ `c893c18`
-  (release #459, 24/11, after update 4b #455). Updates reach the PC through the signed «تحديث» only after
+- The program is the pharmacy's live cashier since 21/11. Release 6 (26/11, after #465 update 5) carries
+  everything in `develop` up to #472; see the release PR for SHAs. Updates reach the PC through the signed «تحديث» only after
   the owner says «نزّله».
 - Migrations in `develop` run to 0045 (two files share 0045: harmless, the runner keys on the filename).
   **The next migration is 0046.**
@@ -39,8 +60,8 @@ file on #113 edits it; other sessions log on #113.
 5. [x] PR #422 U3-8 owner shift summary → `aa96180`.
 6. [x] PR #377 test template database → `ebf98c7`.
 7. [ ] PR #419 U3-6 customer medicines — CC-2 (sale screen).
-8. [ ] One combined release PR `develop` → `main` with everything merged tonight — CC-1.
-9. [~] `@codex review` on the #451 merge resolution asked 26/11; act on any P0/P1 it finds.
+8. [x] Release #465 (update 5) → main `4db40d4` (+ #466 money fix, #467 test fix).
+9. [x] #451 merge resolution reviewed by Codex 26/11: one P1 → fixed in #466.
 10. [ ] P2s left from tonight's reviews (small, after the release): #418 daily pick ranks by cost without
     `costs.read`, double daily session on a double-click; #421 staff timers keep running after a 401;
     #422 another branch's shift summary by id, «نقدي» line = cash sales only; #452 reader process survives a
@@ -61,7 +82,8 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
   the phone prints on every sale with a customer.
 
 ## التذكيرات المفتوحة
-- «نزّله» للتحديث الجاي بعد ما الإصدار المجمّع يتدمج.
+- «نزّله» للتحديث 6 (فيه التحديث 5 كمان): اتدمج في النسخة الرسمية ومستني كلمتك.
+- قرار فاتورة البضاعة المجانية (مرفوضة دلوقتي).
 - ورقة فارما أوفرسيز التانية لاختبار هامش الموزع.
 - مقارنة صنف واحد في الطلب الذكي مع تقرير مبيعات إي ستوك.
 - أول إيصال بعد التحديث: اسم الصيدلية بقى فوق سطر المقدمة، وبيانات العميل بتظهر في الآجل والتوصيل.

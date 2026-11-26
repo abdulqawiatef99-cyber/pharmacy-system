@@ -368,6 +368,11 @@ ul.cols li { break-inside: avoid; }
 /* quick-sale buttons and the similar/alternative panel */
 .qsale h2 { margin: 0; }
 .qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+/* U4-17: the quick sale is one sideways row under the invoice; shrunk to its title once the invoice has an item */
+.qgrid.qrow { display: flex; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 4px; scroll-snap-type: x proximity; }
+.qgrid.qrow .qbtn { flex: 0 0 150px; min-height: 52px; scroll-snap-align: start; }
+.qsale.shrunk { padding-top: 6px; padding-bottom: 6px; }
+.qsale.shrunk h2 { font-size: 1rem; }
 .qbtn { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-height: 64px; padding: 8px 8px 8px 22px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; text-align: start; font: inherit; }
 .qbtn:hover:not(:disabled) { border-color: var(--ink); }

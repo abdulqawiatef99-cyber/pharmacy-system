@@ -42,10 +42,32 @@ def run(db: Database, today: date | None = None) -> int:
         if st.get("last") == today.isoformat():
             continue
         ctx = Context(user_id="system", org_id=o["id"], branch_id=None)
+        # The reads first, with no lock: in the database's WAL mode they never make a sale wait. Inside the write
+        # transaction they held every sale behind them (206 ms on a synthetic 30,000-item, 2-year pharmacy,
+        # tests/test_daily_never_blocks_a_sale.py). Only the notifications and the state are written under the lock.
+        expired = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
+                         " WHERE sb.org_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL AND b.expiry_date<?",
+                         (o["id"], today.isoformat()))["c"]
+        # batches entering the last 30 days: one notice for the ones that are new since last time
+        soon = (today + timedelta(days=30)).isoformat()
+        soon_ids = {r["batch_key"] for r in db.all(
+            "SELECT DISTINCT sb.batch_key FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=?"
+            " AND sb.qty>0 AND b.expiry_date>=? AND b.expiry_date<=?", (o["id"], today.isoformat(), soon))}
+        # selling much faster than usual: last 7 days vs the 8 weeks before
+        lo7, _ = local_day_bounds(today - timedelta(days=7))
+        lo63, _ = local_day_bounds(today - timedelta(days=63))
+        spikes = db.all(
+            "WITH s AS (SELECT l.item_id, sum(CASE WHEN x.completed_at>=? THEN l.qty_base ELSE 0 END) recent,"
+            "  sum(CASE WHEN x.completed_at<? THEN l.qty_base ELSE 0 END) before FROM sale_lines l JOIN sales x ON x.id=l.sale_id"
+            "  WHERE x.org_id=? AND x.status='completed' AND x.completed_at>=? GROUP BY l.item_id)"
+            " SELECT s.*, i.name_en, i.name_ar, i.pack_size, coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.item_id=s.item_id"
+            "  AND b.org_id=?),0) stock FROM s JOIN items i ON i.id=s.item_id"
+            " WHERE s.recent >= 5 AND s.recent >= 3 * (s.before / 8.0) AND s.before > 0 AND i.is_service=0",
+            (lo7, lo7, o["id"], lo63, o["id"]))         # a service (delivery...) never runs short
         with db.transaction():
-            expired = db.one("SELECT count(*) c FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key"
-                             " WHERE sb.org_id=? AND sb.qty>0 AND b.expiry_date IS NOT NULL AND b.expiry_date<?",
-                             (o["id"], today.isoformat()))["c"]
+            st = _state(db, o["id"])                     # read again under the lock: the notices go out once
+            if st.get("last") == today.isoformat():
+                continue
             # expired stock still on the shelf: when the number changes, and again once a week while it stays
             last_exp = st.get("expired_at")
             if expired and (expired != st.get("expired_count") or not last_exp
@@ -55,11 +77,6 @@ def run(db: Database, today: date | None = None) -> int:
                 st["expired_at"] = today.isoformat()
                 sent += 1
             st["expired_count"] = expired
-            # batches entering the last 30 days: one notice for the ones that are new since last time
-            soon = (today + timedelta(days=30)).isoformat()
-            soon_ids = {r["batch_key"] for r in db.all(
-                "SELECT DISTINCT sb.batch_key FROM stock_balances sb JOIN batches b ON b.id=sb.batch_key WHERE sb.org_id=?"
-                " AND sb.qty>0 AND b.expiry_date>=? AND b.expiry_date<=?", (o["id"], today.isoformat(), soon))}
             new_soon = soon_ids - set(st.get("soon_ids", []))
             if new_soon:
                 notify.emit(db, ctx, "expiry_soon", "warning", f"{len(new_soon)} تشغيلة جديدة تنتهي صلاحيتها خلال 30 يومًا",
@@ -67,17 +84,6 @@ def run(db: Database, today: date | None = None) -> int:
                 sent += 1
             st["soon_ids"] = sorted(soon_ids)
             st.pop("soon_count", None)
-            # selling much faster than usual: last 7 days vs the 8 weeks before
-            lo7, _ = local_day_bounds(today - timedelta(days=7))
-            lo63, _ = local_day_bounds(today - timedelta(days=63))
-            spikes = db.all(
-                "WITH s AS (SELECT l.item_id, sum(CASE WHEN x.completed_at>=? THEN l.qty_base ELSE 0 END) recent,"
-                "  sum(CASE WHEN x.completed_at<? THEN l.qty_base ELSE 0 END) before FROM sale_lines l JOIN sales x ON x.id=l.sale_id"
-                "  WHERE x.org_id=? AND x.status='completed' AND x.completed_at>=? GROUP BY l.item_id)"
-                " SELECT s.*, i.name_en, i.name_ar, i.pack_size, coalesce((SELECT sum(qty) FROM stock_balances b WHERE b.item_id=s.item_id"
-                "  AND b.org_id=?),0) stock FROM s JOIN items i ON i.id=s.item_id"
-                " WHERE s.recent >= 5 AND s.recent >= 3 * (s.before / 8.0) AND s.before > 0 AND i.is_service=0",
-                (lo7, lo7, o["id"], lo63, o["id"]))         # a service (delivery...) never runs short
             notified = st.get("spikes", {})
             for r in spikes:
                 last = notified.get(r["item_id"])

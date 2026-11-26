@@ -157,12 +157,13 @@ class TestS15ZeroOnlyWhatWasShown(_Count):
         _stock(self.db, self.ctx, other, 3)
         sid = self.c.create(self.ctx, title="جرد")
         self.c.record(self.ctx, sid, item_id=self.item, qty=10)
-        shown = [u["item_id"] for u in self.c.variances(self.ctx, sid)["uncounted_with_stock"]]
+        preview = self.c.variances(self.ctx, sid)
+        shown = [u["item_id"] for u in preview["uncounted_with_stock"]]
         self.assertEqual(shown, [other])
         _stock(self.db, self.ctx, late, 10)                     # a colleague receives a new item
         with self.assertRaises(Conflict) as e:
             self.c.approve(self.ctx, sid, zero_uncounted=True, reason="مش موجود على الرف",
-                           uncounted_item_ids=shown)
+                           uncounted_item_ids=shown, uncounted_confirmation=preview["uncounted_confirmation"])
         self.assertEqual(e.exception.code, "uncounted_changed")
         self.assertEqual(_qty(self.db, self.ctx, late), 10)
 
@@ -307,8 +308,22 @@ class TestS26PreTaxTotal(unittest.TestCase):
 
 
 class TestS27InvoiceTaxInCost(_Purchase):
+    def test_legacy_line_with_zero_price_and_additive_tax_still_can_post(self):
+        self.item = cat.create_item(self.db, self.ctx, {"name_en": "Synthetic VAT-only unit", "public_price": 200})
+        iid, draft = self.manual({"qty": 4}, declared_total=800)
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoice_lines SET unit_net_price=0,"
+                            " tax_amount=800, tax_included=0, line_total=800 WHERE id=?",
+                            (draft["lines"][0]["id"],))
+        self.p.approve(self.ctx, iid, draft["invoice"]["version"])
+        stock = inv.stock_for_item(self.db, self.ctx, self.item)
+        self.assertEqual(Decimal(stock["avg_cost"]) * stock["total_qty"], Decimal("8.00"))
+
     def test_invoice_tax_on_zero_price_lines_reaches_the_unit_cost(self):
-        iid, d = self.manual({"qty": 4, "unit_net_price": 0}, extra_tax=800, declared_total=800)
+        iid = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        self.p.update_header(self.ctx, iid, {"invoice_no": "77", "extra_tax": 800, "declared_total": 800}, None)
+        d = self.p.add_line(self.ctx, iid, {"item_id": self.item, "qty": 4, "public_price": 10000,
+                                           "discount_bp": 10000, "expiry_date": "12/2029"}, None)
         self.p.approve(self.ctx, iid, d["invoice"]["version"])
         s = inv.stock_for_item(self.db, self.ctx, self.item)
         self.assertEqual(sup.balance(self.db, self.ctx.org_id, self.sup), 800)
