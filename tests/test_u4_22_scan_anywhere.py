@@ -79,3 +79,53 @@ class TestScanFromAnyField(APICase):
         self.assertEqual(out["units"], 4)                     # four scans, four units, nothing else
         if "given" in out:
             self.assertEqual(out["given"], "100")
+
+
+CLICK_SCRIPT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, a] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posQ');
+  await p.waitForTimeout(700);                                 // the first-run tour: «تخطّي»
+  if (await p.locator('[data-tour-go=skip]').count()) await p.locator('[data-tour-go=skip]').click();
+  await p.locator('#posQ').focus();
+  await p.keyboard.type(a, { delay: 2 }); await p.keyboard.press('Enter');
+  await p.waitForSelector('table.cart [data-minus]', { timeout: 10000 });
+  // a discount typed fast, then a mouse click elsewhere: the whole value is saved
+  await p.locator('[data-disc]').first().click();
+  await p.keyboard.type('15', { delay: 2 });
+  await p.locator('table.cart thead').click();
+  await p.waitForFunction(() => document.querySelector('[data-disc]')?.value === '15', null, { timeout: 10000 });
+  await p.waitForTimeout(400);
+  // a delivery address typed fast, then a mouse click on «إتمام البيع» at once
+  await p.locator('button[data-kind="delivery"]').click();
+  await p.waitForSelector('[data-dl="address"]');
+  await p.locator('[data-dl="address"]').click();
+  await p.keyboard.type('شارع التجربة 7', { delay: 2 });
+  const [res] = await Promise.all([p.waitForResponse((r) => r.url().endsWith('/complete'), { timeout: 15000 }), p.locator('#posDone').click()]);
+  console.log(JSON.stringify({ completed: res.status() }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestClickAfterFastTyping(APICase):
+    """Codex P1 on #462: typing held back for a moment is saved when the cashier clicks away or completes."""
+    def test_click_saves_the_whole_text(self):
+        it = cat.create_item(self.db, self.ctx, {"name_en": "Click Item", "public_price": 1000})
+        cat.add_barcode(self.db, self.ctx, it, "6221043010403")
+        with self.db.transaction():
+            bt = inv.get_or_create_batch(self.db, self.ctx, it, "B1", (date.today() + timedelta(days=400)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=20, batch_id=bt, movement_type="purchase",
+                              unit_cost=Decimal("5"))
+        CashDrawer(self.db).open(self.ctx, 0)
+        out = run_node(self, CLICK_SCRIPT, "owner", OWNER_PW, "6221043010403")
+        self.assertEqual(out["completed"], 200)
+        d = self.db.one("SELECT d.address FROM sale_deliveries d JOIN sales s ON s.id=d.sale_id WHERE s.status='completed'"
+                        " ORDER BY s.completed_at DESC LIMIT 1")
+        self.assertEqual(d["address"], "شارع التجربة 7")
+        line = self.db.one("SELECT l.discount_bp FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.status='completed'")
+        self.assertEqual(line["discount_bp"], 1500)

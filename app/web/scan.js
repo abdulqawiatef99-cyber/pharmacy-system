@@ -50,6 +50,13 @@ function giveBack(snap, text) {
     el.setRangeText(text, s, e, "end");
   } catch { el.value = (snap.value ?? el.value) + text; }
   el.dispatchEvent(new Event("input", { bubbles: true }));
+  if (typeof document === "undefined") return;
+  // text put back by a script may not count as typed for the browser's own change event: make sure the field
+  // reports its change once when it loses the focus, or now if it already lost it
+  if (document.activeElement !== el) { el.dispatchEvent(new Event("change", { bubbles: true })); return; }
+  let changed = false;
+  el.addEventListener("change", () => { changed = true; }, { once: true });
+  el.addEventListener("blur", () => { if (!changed) el.dispatchEvent(new Event("change", { bubbles: true })); }, { once: true });
 }
 
 function createScanDetector({ active = () => true, onScan, skip = () => false,
@@ -62,6 +69,11 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
   // a long code (product barcode, GS1) may come at the normal scanner pace; a short one (the shop's 3-5 digit
   // labels) only at a pace no hand reaches, so an amount rolled fast on the number pad stays an amount
   const isScan = () => buf.length >= minLength && worst <= (buf.length >= longLength ? gap : shortGap);
+  const untouched = () => {
+    if (snap?.kind !== "text") return true;
+    const at = snap.start ?? snap.value.length, to = snap.end ?? at;
+    return snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to);
+  };
   const arm = () => { if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; flush(); }, gap * 3); };
 
   function keydown(e) {
@@ -86,7 +98,7 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       }
       // any other key (F9, Tab, an arrow, Backspace) is a person's: the held text goes back before it acts
       if (e.metaKey || e.key == null || e.key.length !== 1) { flush(); last = -Infinity; return; }
-      if (e.repeat) { flush(); return; }
+      if (e.repeat || (snap?.kind === "text" && snap.el.value !== snap.value)) { flush(); last = -Infinity; return; }
       worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e); arm();
       return;
     }
@@ -97,7 +109,9 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       if (!/^(Control|Alt|Shift|AltGraph)$/.test(e.key || "")) { flush(); last = -Infinity; }
       return;
     }
-    if (buf && fast && snap?.el === el) {
+    // only when the field holds exactly what the first key typed: text that came in some other way (an on-screen
+    // keyboard, an input method) is never taken back, and this key starts afresh
+    if (buf && fast && snap?.el === el && untouched()) {
       holding = true;
       restore(snap);                        // the first character already landed: take it back, and tell the field
       if (snap?.kind === "text") snap.el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -110,14 +124,26 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
     }
     arm();                                  // a burst that stops without Enter is someone typing fast: give it back
   }
-  return { keydown, reset, get pending() { return buf; } };
+  // a click elsewhere, the focus leaving, or the screen about to save: held typing goes back now (Codex P1 on #462)
+  const release = () => { if (holding) { flush(); last = -Infinity; } };
+  return { keydown, reset, release, get pending() { return buf; } };
 }
 
 function installScanDetector(opts, target = window) {
   const d = createScanDetector(opts);
-  const h = (e) => d.keydown(e);
+  const h = (e) => d.keydown(e), r = () => d.release();
   target.addEventListener("keydown", h, true);          // capture: before any field or screen key handler
-  return () => { target.removeEventListener("keydown", h, true); d.reset(); };
+  // pointerdown comes before the field's blur and change: the click saves the whole text
+  target.addEventListener("pointerdown", r, true);
+  target.addEventListener("focusout", r, true);
+  const stop = () => {
+    target.removeEventListener("keydown", h, true);
+    target.removeEventListener("pointerdown", r, true);
+    target.removeEventListener("focusout", r, true);
+    d.reset();
+  };
+  stop.flush = r;                                       // the screen calls it before it saves
+  return stop;
 }
 
 // a classic script (the screen's CSP allows no inline import map): app.js reads it from here
