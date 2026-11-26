@@ -26,6 +26,7 @@ from ..db import Database
 KEY = "hikma_claim"
 BRANCHES = {"shibin": ("مستشفى نور الحكمة – فرع شبين", 50), "mitkhalaf": ("مستشفى نور الحكمة – فرع ميت خلف", 10)}
 DEFAULT_ADVANCE = 1_000_000            # 10,000.00 EGP
+OWNERS = ("pharmacy", "hospital")
 
 
 def _p(d: Decimal) -> int:
@@ -51,6 +52,16 @@ def _share(total: int, weights: list[int]) -> list[int]:
     for i in sorted(range(len(w)), key=lambda i: (-(total * w[i] % whole), i))[:rest]:
         base[i] += 1
     return base
+
+
+def _by_owner(total: int, parts) -> dict[str, tuple[int, Decimal, list]]:
+    """Split the exact booked value using the saved prices of the lots for each owner."""
+    from ..sales.service import line_gross
+    grouped = {owner: [(q, a) for q, a in parts if a["owner"] == owner and q] for owner in OWNERS}
+    weights = [line_gross(grouped[owner]) for owner in OWNERS]
+    values = _share(total, weights if any(weights) else [sum(q for q, _ in grouped[owner]) for owner in OWNERS])
+    return {owner: (v, sum((Decimal(a["unit_cost"] or 0) * q * 100 for q, a in grouped[owner]), Decimal(0)),
+                    grouped[owner]) for owner, v in zip(OWNERS, values)}
 
 
 def settings(db: Database, org_id: str) -> dict:
@@ -112,25 +123,18 @@ def _lines(db: Database, org: str, sale_ids: list[str], end: str) -> list[dict]:
                 continue
             events = hist.get(l["sale_id"], [])
             kept = kept_at(allocs, l["id"], events, end)
-            qty = sum(kept.values())
-            if qty <= 0:
+            if not any(kept.values()):
                 continue
             fx = {"fixed": line_fixed(l)} if line_fixed(l) else {}
             history = [r for r in events if r["returned_at"] < end]
             value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"], history, **fx)
-            # the hospital's own lots and the pharmacy's are split by units; the value follows the units, and the
-            # hospital part is what the pharmacy part leaves, so no piastre is lost (review P2)
-            ph_q = sum(kept[a["id"]] for a in allocs if a["owner"] == "pharmacy")
-            ph_v = value * ph_q // qty
-            for owner in ("pharmacy", "hospital"):
-                part_a = [a for a in allocs if a["owner"] == owner and kept[a["id"]] > 0]
-                if not part_a:
+            parts = [(kept[a["id"]], a) for a in allocs]
+            for owner, (v, cost, owned) in _by_owner(value, parts).items():
+                if not owned:
                     continue
-                q = sum(kept[a["id"]] for a in part_a)
-                cost = sum((Decimal(a["unit_cost"]) * kept[a["id"]] * 100 for a in part_a if a["unit_cost"]), Decimal(0))
-                v = ph_v if owner == "pharmacy" else value - ph_v
-                out.append({"item_id": l["item_id"], "name": l["name"], "code": l["code"], "owner": owner, "qty": q,
-                            "value": v, "cost": cost, "no_cost": any(not a["unit_cost"] for a in part_a)})
+                out.append({"item_id": l["item_id"], "name": l["name"], "code": l["code"], "owner": owner,
+                            "qty": sum(q for q, _ in owned), "value": v, "cost": cost,
+                            "no_cost": any(not a["unit_cost"] for _, a in owned)})
     return out
 
 
@@ -162,7 +166,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
         g["cost"] += x["cost"]
         g["no_cost"] = g["no_cost"] or x["no_cost"]
     out = {}
-    for owner in ("pharmacy", "hospital"):
+    for owner in OWNERS:
         ls = sorted((r for (o, _), r in rows.items() if o == owner), key=lambda r: (-r["value"], r["name"] or ""))
         value = sum(r["value"] for r in ls)
         cost = _p(sum((r["cost"] for r in ls), Decimal(0)))
@@ -179,7 +183,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     # the lot it came from (review P1): pharmacy lot = cost + half the margin, hospital lot = half the margin.
     # The units of a return are the line's newest lots first, the way the return took them (_take).
     back_rows = []
-    pv = {"pharmacy": [0, Decimal(0)], "hospital": [0, Decimal(0)]}
+    pv = {owner: [0, Decimal(0)] for owner in OWNERS}
     period = [dict(r) for r in db.all(
         "SELECT r.id, r.total-r.rounding total, r.created_at, s.id sid, s.sale_no, s.completed_at FROM sale_returns r"
         " JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id WHERE r.org_id=? AND s.customer_id=?"
@@ -187,49 +191,65 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     in_period = {r["id"]: r for r in period}
     # each sale's returns are replayed oldest first, from before the period too, so a lot taken by an earlier return
     # is never taken again (Codex P1 on #416); only the returns inside the period are counted
-    from ..sales.service import returns_history
-    hist = returns_history(db, org, sorted({r["sid"] for r in period}))
+    from ..sales.service import line_gross, returns_history
+    hist = returns_history(db, org, {r["sid"] for r in period}, dated=True)
     replay = []
+    line_balances: dict[str, int] = {}
     for sid in sorted({r["sid"] for r in period}):
         consumed: dict = {}
         totals = {x["id"]: x["total"] for x in db.all(
             "SELECT id, total-rounding total FROM sale_returns WHERE org_id=? AND sale_id=?", (org, sid))}
         for after in hist.get(sid, []):
-            replay.append((sid, after, consumed, totals.get(after.get("return_id"), 0)))
-    for sid, after, consumed, ret_total in replay:
+            if after["returned_at"] < hi:
+                replay.append((after, consumed, totals.get(after.get("return_id"), 0)))
+    for after, consumed, ret_total in replay:
         r = in_period.get(after.get("return_id"))
         lines, refunds = after.get("lines") or {}, after.get("line_refunds") or {}
         per_line = []
         for lid, q in lines.items():
             q = int(q)
-            al = db.all("SELECT a.rowid rid, a.qty_base, a.unit_cost, a.unit_price, coalesce(b.owner,'pharmacy') owner"
+            al = [dict(x) for x in db.all(
+                        "SELECT a.rowid rid, a.qty_base, a.unit_cost, a.unit_price, a.pack_price, a.pack_size, l.line_total,"
+                        " coalesce(b.owner,'pharmacy') owner"
                         " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id AND l.org_id=? LEFT JOIN batches b"
-                        " ON b.id=a.batch_id AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))
-            left, takes = q, []
+                        " ON b.id=a.batch_id AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))]
+            left, takes, before, kept = q, [], [], []
             for x in al:
-                t = min(left, x["qty_base"] - consumed.get(x["rid"], 0))
+                remaining = x["qty_base"] - consumed.get(x["rid"], 0)
+                t = min(left, remaining)
+                before.append((remaining, x))
+                kept.append((remaining - t, x))
                 if t > 0:
-                    takes.append((x, t))
+                    takes.append((t, x))
                     consumed[x["rid"]] = consumed.get(x["rid"], 0) + t
                     left -= t
-            per_line.append((lid, q, takes))
-        if r is None:
-            continue                       # an earlier return: replayed for the lots only
+            if takes:
+                per_line.append((lid, takes, before, kept))
         if refunds:
-            values = [int(refunds.get(lid, 0)) for lid, _, _ in per_line]
+            values = [int(refunds.get(lid, 0)) for lid, *_ in per_line]
         else:
             # an older return has only its total (Codex P1 on #416): spread it over its lines by their price, the last
             # line taking the remainder, so the lines add up to the refund exactly
-            weights = [sum((x["unit_price"] or 0) * t for x, t in takes) for _, _, takes in per_line]
+            weights = [line_gross(takes) for _, takes, _, _ in per_line]
             values = _share(ret_total, weights)
-        for (lid, q, takes), line_v in zip(per_line, values):
-            done_v = 0
-            for k, (x, t) in enumerate(takes):
-                v = line_v - done_v if k == len(takes) - 1 else line_v * t // q
-                done_v += v
-                pv[x["owner"]][0] += v
-                pv[x["owner"]][1] += Decimal(x["unit_cost"] or 0) * t * 100
-        back_rows.append({"sale_no": r["sale_no"], "sold_at": r["completed_at"], "returned_at": r["created_at"], "value": r["total"]})
+        for (lid, takes, before, kept), line_v in zip(per_line, values):
+            booked = _by_owner(line_v, takes)
+            line_total = takes[0][1]["line_total"]
+            if line_total is not None:
+                previous = line_balances.get(lid, line_total)
+                line_balances[lid] = max(0, previous - line_v)
+                if line_v <= previous and r is not None:
+                    # Round each owner's share of the line balance, then take the difference. Separately
+                    # splitting each partial refund can assign the same discount piastre to two owners.
+                    opening, closing = _by_owner(previous, before), _by_owner(line_balances[lid], kept)
+                    booked = {owner: (opening[owner][0] - closing[owner][0], cost, parts)
+                              for owner, (_, cost, parts) in booked.items()}
+            if r is not None:
+                for owner, (v, cost, _) in booked.items():
+                    pv[owner][0] += v
+                    pv[owner][1] += cost
+        if r is not None:
+            back_rows.append({"sale_no": r["sale_no"], "sold_at": r["completed_at"], "returned_at": r["created_at"], "value": r["total"]})
     back_v = sum(v for v, _ in pv.values())
     back_c = _p(sum((c for _, c in pv.values()), Decimal(0)))
     ph_v, ph_c = pv["pharmacy"][0], _p(pv["pharmacy"][1])
@@ -239,8 +259,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     due = out["pharmacy"]["due"] + out["hospital"]["due"] - back_due
     adv = st["advance"]
     # The customer's account for the period's own invoices, including refunds posted through the period end.
-    # A part paid in
-    # cash / card never reaches the account and is shown on its own.
+    # Cash and card payments are shown separately from the customer account.
     acct = {"debit": 0, "back": 0}
     paid = 0
     for k in range(0, len(sales), 500):

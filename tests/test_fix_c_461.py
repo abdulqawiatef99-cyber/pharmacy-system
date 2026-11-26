@@ -73,6 +73,19 @@ class TestReissuedHikmaClaim(test_u3_3_hikma_claim.TestHikmaClaim):
         self.assertEqual(later["previous_returns"]["by_owner"], {"pharmacy": 5700, "hospital": 2000})
         self.assertEqual(combined["due"], 0)
 
+    def test_cross_owner_discount_reverses_the_same_piastre_for_each_owner(self):
+        old, new = yesterday(self.s.today.isoformat()), self.s.today.isoformat()
+        sale = self.sell(4, disc=1)
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE item_id=? AND batch_no='NEW'", (self.pan,))
+            self.db.execute("UPDATE sales SET completed_at=? WHERE id=?", (during(old), sale["id"]))
+        first = hikma_claim.claim(self.db, self.ctx, "shibin", old, old)
+        lid = sale["lines"][0]["id"]
+        for _ in range(2):
+            self.s.return_items(self.ctx, sale["id"], {lid: 2}, refund_method="credit", reason="اختبار")
+        returned = hikma_claim.claim(self.db, self.ctx, "shibin", new, new)["previous_returns"]
+        self.assertEqual(returned["by_owner"], {owner: first[owner]["value"] for owner in ("pharmacy", "hospital")})
+
 
 class TestRefundDate(PlanCase):
     def test_return_only_day_reconciles_and_prior_report_is_stable(self):
@@ -191,3 +204,14 @@ class TestPendingDatabaseUpdate(PlanCase):
         self.assertEqual(waiting.status_code, 503)
         self.assertIn("text/html", waiting.headers["content-type"])
         self.assertIn('http-equiv="refresh"', waiting.text)
+
+    def test_waiting_requests_leave_launcher_metadata_free_to_replace(self):
+        _, _, _, client, _, _ = self.candidate()
+        self.assertTrue(client.get("/api/health").json()["ok"])
+        # An open destination can prevent os.replace on Windows. During the wait the
+        # candidate must leave both replaceable files to the installed launcher.
+        with patch.object(releases, "read_journal", wraps=releases.read_journal) as journal:
+            with patch.object(releases, "read_state", wraps=releases.read_state) as state:
+                self.assertEqual(client.post("/api/cash/open", headers=H, json={"opening_cash": 10000}).status_code, 503)
+        journal.assert_not_called()
+        state.assert_not_called()

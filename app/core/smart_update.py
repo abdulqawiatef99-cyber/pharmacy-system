@@ -649,9 +649,32 @@ class UpdateAdmission:
             self.pending_release = journal["release"]
         elif state.get("pending") and active.get("needs_db"):
             self.pending_release = active["id"]
+        self.update_log = home / "update-log.jsonl"
+        self.start_offset = 0
+        if self.pending_release:
+            try:
+                self.start_offset = self.update_log.stat().st_size
+            except FileNotFoundError:
+                pass
 
     def _committed(self) -> bool:
         try:
+            # The launcher appends this event after replacing both metadata files. Poll the append-only
+            # log first so requests cannot hold either destination open during os.replace on Windows.
+            with self.update_log.open("rb") as f:
+                f.seek(self.start_offset)
+                for line in f:
+                    if not line.endswith(b"\n"):
+                        return False
+                    try:
+                        event = json.loads(line)
+                    except (UnicodeError, ValueError):
+                        continue
+                    if (isinstance(event, dict) and event.get("step") == "confirm"
+                            and event.get("ok") is True and event.get("release") == self.pending_release):
+                        break
+                else:
+                    return False
             journal = releases.read_journal(self.home)
             if journal.get("state") != "done" or journal.get("release") != self.pending_release:
                 return False
@@ -664,10 +687,16 @@ class UpdateAdmission:
         if (self.pending_release and scope["type"] == "http"
                 and (scope["method"], scope["path"]) != ("GET", "/api/health")):
             if not self._committed():
-                from starlette.responses import JSONResponse
-                response = JSONResponse({"error": {"code": "update_pending",
-                                                   "message": "تحديث قاعدة البيانات لسه بيخلص. حاول تاني بعد لحظات."}},
-                                        status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "1"})
+                from starlette.responses import HTMLResponse, JSONResponse
+                message = "تحديث قاعدة البيانات لسه بيخلص. حاول تاني بعد لحظات."
+                headers = {"Cache-Control": "no-store", "Retry-After": "1"}
+                if (scope["method"], scope["path"]) == ("GET", "/"):
+                    response = HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8">'
+                                            '<meta http-equiv="refresh" content="1"><title>تحديث قاعدة البيانات</title>'
+                                            f"<p>{message}</p></html>", status_code=503, headers=headers)
+                else:
+                    response = JSONResponse({"error": {"code": "update_pending", "message": message}},
+                                            status_code=503, headers=headers)
                 return await response(scope, receive, send)
             self.pending_release = None
         return await self.app(scope, receive, send)
