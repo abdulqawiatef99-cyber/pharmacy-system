@@ -201,8 +201,17 @@ const { chromium } = require('playwright');
   await p.keyboard.press('Enter');
   await p.waitForFunction(() => document.activeElement.id === 'qaExp');
   const routed = await header.inputValue();
+  const invoiceDate = p.locator('[data-h="invoice_date"]');
+  const dateBefore = await invoiceDate.inputValue();
+  await invoiceDate.focus();
+  await p.keyboard.type(']Q3010' + nextBarcode + '1732121510SYNLOT');
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => document.activeElement.id === 'qaExp');
+  const exactExpiry = await p.inputValue('#qaExp');
+  const gs1Batch = await batch.inputValue();
+  const datePreserved = (await invoiceDate.inputValue()) === dateBefore;
   console.log(JSON.stringify({standard, custom, preserved, qty, enter, autocomplete, stock, help, bonusHidden, routed,
-                              savedQtyMin: setting.qty_min, freshLine, badPriceRejected}));
+                              savedQtyMin: setting.qty_min, freshLine, badPriceRejected, exactExpiry, gs1Batch, datePreserved}));
   await b.close();
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -238,6 +247,9 @@ class TestPurchaseEntryBrowser(APICase):
         self.assertEqual(out["savedQtyMin"], 25)
         self.assertEqual(out["freshLine"], ["", "", "", "0", "", ""])
         self.assertTrue(out["badPriceRejected"])
+        self.assertEqual(out["exactExpiry"], "2032-12-15")
+        self.assertEqual(out["gs1Batch"], "SYNLOT")
+        self.assertTrue(out["datePreserved"])
 
 
 BENCHMARK = r"""
