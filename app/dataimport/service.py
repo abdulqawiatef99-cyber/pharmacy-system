@@ -683,6 +683,11 @@ class DataImport:
             raise NotFound("عملية الاستيراد غير موجودة")
         if run["status"] != "analyzed":
             raise Conflict("عملية الاستيراد مطبقة أو ملغاة")
+        # a row decision is consumed by a later authorized apply: it needs what analyze and apply need (#324 S7)
+        need = {"opening_stock": "inventory.adjust", "suppliers": "suppliers.write",
+                "customers": "customers.manage"}.get(run["kind"])
+        if need:
+            ctx.require(need)
         row = self.db.one("SELECT * FROM import_rows WHERE id=? AND run_id=?", (row_id, run_id))
         if not row:
             raise NotFound("السطر غير موجود")
