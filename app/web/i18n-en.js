@@ -1,6 +1,7 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"التحديث ما بدأش والبرنامج ما اتقفلش": "The update did not start and the program was not stopped",
 "إعدادات إدخال الشراء": "Purchase entry settings",
 "الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.": "Item comes first. Move the remaining fields to change the order for Enter.",
 "الخصم / سعر الصيدلي": "Discount / purchase price",

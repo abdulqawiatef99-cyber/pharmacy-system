@@ -130,3 +130,15 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
   The Windows installer workflow is manual and publishes review builds only.
 - The installer records its commit time. A healthy signed update raises the per-channel version floor,
   which also applies to offline updates and survives a compatible rollback.
+
+## Space check before the program stops (#461)
+`smart_update.check_space` runs when the update is scheduled (the refusal is shown on screen), again just
+before the program leaves for the launcher, and again in the apply step, for code-only updates too (they
+take a verified backup as well). It counts, per disk and at worst case (nothing assumed to compress):
+- backups folder: database + E-Stock archive (its ready `.xz` when there is one) + all attachments;
+- system TEMP: the larger of building the backup (2 x database, + the archive when no `.xz` is ready) and
+  unpacking it for verification (database + archive);
+- data folder: the archive's `.xz` cache when none is ready; with a database change also 3 x the database.
+200 MB stay free on each disk; folders on one disk add up. A refusal names the folder, the need and the free
+space. If the disk filled after scheduling, the request is dropped (no retry loop), the program keeps
+running and the update screen shows why.
