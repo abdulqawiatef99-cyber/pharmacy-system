@@ -100,7 +100,8 @@ class TestEndpoint(APICase):
             r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
         self.assertEqual((r.status_code, r.json()), (200, {"ok": True}))
         sw.assert_called_once_with("ar")
-        r = self.c.post(self.URL, json={"lang": "en"}, headers=H)               # the real call, on Linux
+        with mock.patch.object(kl.sys, "platform", "linux"):                     # the real call, off Windows
+            r = self.c.post(self.URL, json={"lang": "en"}, headers=H)            # (the suite also runs on Windows)
         # 501: the sale screen (keyboardSwitcher in app.js) stops asking a PC that can never switch
         self.assertEqual((r.status_code, r.json()), (501, {"ok": False, "reason": "unsupported", "detail": "not_windows"}))
         with mock.patch.object(kl, "switch", return_value={"ok": False, "reason": "unsupported", "detail": "not_installed"}):
