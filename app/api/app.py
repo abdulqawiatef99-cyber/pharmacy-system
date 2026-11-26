@@ -3422,6 +3422,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
                   "web": _web_build()})
 
+    async def keyboard_layout(req):
+        """POST {"lang": "ar" | "en"}: the input language of the window in front, on the cashier PC itself.
+        No session and no database (it must answer while a sale is being written, and the sign-in screen
+        may ask too): only this PC's own screen may call it, and it can do nothing but switch the language.
+        It never raises. The body is always {"ok": ...} (app/core/keyboard_layout.py); the status is what the
+        screen reads (keyboardSwitcher): 200 asked; 503 could not just now (no window in front, refused): it
+        asks again on the next field; 501 this device can never switch (not Windows, language not installed,
+        not the cashier PC itself): it stops asking; 403 not this program's screen; 400 not "ar" / "en"."""
+        from ..core import keyboard_layout
+        no = lambda detail, status: J({"ok": False, "reason": "unsupported", "detail": detail}, status_code=status)  # noqa: E731
+        try:
+            if client_ip(req) not in ("127.0.0.1", "::1", "testclient"):
+                return no("not_local", 501)
+            try:
+                _auth_screen(req, screen_only=True)      # the sign-in screen's own rule, so the two cannot drift
+            except Unauthorized:
+                return no("not_this_screen", 403)
+            try:
+                b = json.loads(await req.body() or b"{}")
+            except ValueError:
+                b = {}
+            out = keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None)
+            status = 200 if out.get("ok") else {"not_windows": 501, "not_installed": 501, "bad_lang": 400}.get(out.get("detail"), 503)
+            return J(out, status_code=status)
+        except Exception:
+            return no("error", 503)
+
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
 
@@ -3437,6 +3464,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/system/network", system_network, methods=["GET", "PUT"]),
         Route("/api/system/storage", system_storage),
+        Route("/api/system/keyboard-layout", keyboard_layout, methods=["POST"]),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
