@@ -75,6 +75,54 @@ class TestWrongLayout(DBTestCase):
         self.assertEqual(ids[0], self.panadol)
         self.assertEqual((hint["kind"], hint.get("guess")), ("layout", True))
 
+    def test_an_ordinary_misspelling_is_never_replaced_by_the_other_layout(self):
+        # review, 26/11: "banadol" (b for p) as keys is «لاشىشيخم», whose consonants happened to match Lasix
+        # better than the weak, correct guess Panadol matched as typed
+        mk = lambda **d: cat.create_item(self.db, self.ctx, {"public_price": 1000, **d}, force=True)   # noqa: E731
+        pan = mk(name_en="Panadol Extra 500mg 24 tab")
+        mk(name_en="Lasix 40mg 20 tab")
+        mk(name_en="Abimol 500mg 20 tab")
+        for typed, want in (("banadol", pan), ("banadol extra", pan)):
+            ids, hint = self.find(typed)
+            self.assertEqual(hint, {"kind": "fuzzy"}, typed)
+            self.assertIn(ids[0], (want, self.panadol), typed)          # Panadol, in English or in Arabic
+            self.assertIn(want, ids, typed)
+
+    def test_a_guess_from_the_other_layout_must_match_a_name_in_that_script(self):
+        # nothing as typed: keys that read as gibberish in the other script are not guessed from at all
+        mk = lambda **d: cat.create_item(self.db, self.ctx, {"public_price": 1000, **d}, force=True)   # noqa: E731
+        mk(name_en="Lasix 40mg 20 tab")
+        mk(name_en="Hibiotic 1g 16 tab")
+        mk(name_en="Lin seed oil 100ml")
+        for typed in ("bancreas", "اوميغا", "مىش", "لاشىشيخم"):
+            ids, hint = self.find(typed)
+            self.assertNotEqual((hint or {}).get("kind"), "layout", (typed, hint))
+
+    def test_short_keys_do_not_replace_a_spelling_guess(self):
+        # «سا» is "sh" on the English layout: two letters are not read as English ahead of an Arabic guess
+        sh = cat.create_item(self.db, self.ctx, {"name_en": "Kids shampoo 200ml", "public_price": 1000}, force=True)
+        ids, hint = self.find("بك")                    # "f;" is not English; a spelling guess of «بيكتول»
+        self.assertEqual((ids, hint), ([self.pectol], {"kind": "spelling"}))
+        ids, hint = self.find("شه")                    # "ai" as keys; «شاهوخء» by spelling
+        self.assertEqual((ids, hint), ([self.decoy], {"kind": "spelling"}))
+        self.assertNotIn(sh, self.find("سا")[0] if (self.find("سا")[1] or {}).get("kind") == "spelling" else [])
+
+    def test_shifted_keys(self):
+        self.assertEqual(layout_variants("آهلاف"), ["nibt", "night"])           # Shift+N
+        self.assertEqual(layout_variants("لآقعبثى"), ["brufen"])                # Shift+B
+        self.assertEqual(layout_variants("لأثم"), ["gel"])                      # Shift+G
+        self.assertEqual(layout_variants("لإشلا"), ["tab", "tagh"])             # Shift+T
+        self.assertEqual(layout_variants("إثشسف"), ["yeast"])                   # Shift+Y
+        self.assertEqual(layout_variants("ِةخء"), ["amox"])                      # Shift+A (kasra)
+        self.assertEqual(self.find("ِةخء"), ([self.amoxil], {"kind": "layout", "query": "amox"}))
+
+    def test_a_mapped_query_is_scanned_once(self):
+        import app.catalog.search as mod
+        with mock.patch.object(mod, "_by_name", wraps=mod._by_name) as by_name:
+            self.find("ضضضضصصصص")                     # "qqqqwwww": nothing either way
+        asked = [c.args[2] for c in by_name.call_args_list]
+        self.assertEqual(len(asked), len(set(asked)), asked)
+
     def test_a_close_guess_as_typed_is_kept_without_a_second_search(self):
         with mock.patch.object(matching, "fuzzy_candidates", wraps=matching.fuzzy_candidates) as asked:
             ids, hint = self.find("Amoxel 500mg 16 cap")
