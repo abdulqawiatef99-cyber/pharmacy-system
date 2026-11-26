@@ -159,6 +159,23 @@ class PurchasingCase(DBTestCase):
 
 
 class TestPurchaseFlow(PurchasingCase):
+    def test_catalog_price_writes_require_price_authority(self):
+        intake = replace(self.ctx, permissions=self.ctx.permissions - {"items.price"}, role_code="pharmacist")
+        with self.assertRaises(Forbidden):
+            cat.create_item(self.db, intake, {"name_en": "Synthetic Price Check", "public_price": 100})
+        draft = self.p.import_file(intake, self.std_invoice(), "fixture.xlsx")
+        invoice = self.p.get(intake, draft)["invoice"]
+        self.p.approve(intake, draft, invoice["version"])
+        self.assertEqual(cat.get_item(self.db, self.ctx, self.pan)["public_price"], 3800)
+        batch = self.db.one("SELECT public_price FROM batches WHERE org_id=? AND item_id=?",
+                            (self.ctx.org_id, self.pan))
+        self.assertIsNone(batch["public_price"])
+        cat.update_item(self.db, self.ctx, self.pan, {"public_price": 3950})
+        self.assertIsNone(self.db.one("SELECT public_price FROM batches WHERE org_id=? AND item_id=?",
+                                      (self.ctx.org_id, self.pan))["public_price"])
+        self.assertEqual(self.db.one("SELECT count(*) n FROM item_price_history"
+                                     " WHERE org_id=? AND item_id=?", (self.ctx.org_id, self.pan))["n"], 2)
+
     def test_full_happy_path(self):
         inv_id = self.p.import_file(self.ctx, self.std_invoice(), "inv.xlsx")
         d = self.p.get(self.ctx, inv_id)

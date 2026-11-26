@@ -13,7 +13,7 @@ from . import logo, qr, qrlinks
 DEFAULTS = {"paper": 80, "title": "", "lines": ["", ""], "footer": "شكرًا لزيارتكم — ألف سلامة",
             "names": "en", "show_cashier": True, "show_customer": True, "show_expiry": False,
             "show_return_policy": True, "label_size": "38x25",
-            "label_lang": "browser", "label_target": "", "label_dpi": 203, "label_gap": 2,
+            "label_lang": "browser", "label_barcode_source": "internal", "label_target": "", "label_dpi": 203, "label_gap": 2,
             "label_shift": 0,         # #100: move the label print up (negative) or down (positive), mm
             "label_variant": "current",   # #100: how the TSPL job is built (labels.VARIANTS); saved after a device test
             "label_flip": False,          # #100: driver labels turned 180° (a driver set to print upside down)
@@ -55,6 +55,13 @@ def get(db: Database, org_id: str) -> dict:
     out["label_fields"] = {**DEFAULT_FIELDS, **{k: bool(v) for k, v in (out["label_fields"] or {}).items() if k in DEFAULT_FIELDS}}
     out["has_logo"] = bool(db.one("SELECT 1 FROM org_settings WHERE org_id=? AND key=?", (org_id, logo.KEY)))
     return out
+
+
+def label_barcode_source_ok(value) -> str:
+    from .labels import BARCODE_SOURCES
+    if value not in BARCODE_SOURCES:
+        raise ValidationFailed("اختر كود الصنف أو الكود الدولي للملصقات")
+    return value
 
 
 def label_size_ok(size) -> str:
@@ -147,6 +154,8 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
         if data["names"] not in ("en", "ar", "both"):
             raise ValidationFailed("اختيار غير صحيح")
         new["names"] = data["names"]
+    if "label_barcode_source" in data:
+        new["label_barcode_source"] = label_barcode_source_ok(data["label_barcode_source"])
     if "label_size" in data:
         new["label_size"] = label_size_ok(data["label_size"])       # a preset or the owner's own W x H (#84)
     if "label_fields" in data:

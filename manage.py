@@ -9,7 +9,7 @@
   python manage.py preflight backup.zip        (read-only: can this backup move to another PC?)
   python manage.py import-estock --catalog A.xlsx --stock B.xlsx --packs C.xlsx --username owner [--apply]
   python manage.py import-estock-db --dir EXPORT [--confirm openings.xlsx] --username owner [--apply]
-  python manage.py update [--check] [--from-zip file.zip]     (keeps data/)
+  python manage.py update --prepare [--from-bundle DIR]     (keeps data/)
   python manage.py feature ORG_ID FEATURE [--monthly N] [--disable]   (platform operator)
   python manage.py reset-owner-password [--username owner]   (forgotten owner password; on this PC only)
 """
@@ -19,14 +19,29 @@ import argparse
 import getpass
 import os
 import sys
+
 from datetime import datetime
 from pathlib import Path
 
 # Embedded Windows Python ignores PYTHONPATH; choose code before importing app.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_program_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(_program_root))
+if (_program_root / ".release-source.json").is_file():
+    sys.dont_write_bytecode = True
 if __name__ == "__main__":
-    from release_bootstrap import run_selected
-    run_selected(Path(__file__).resolve().parent)
+    import release_bootstrap as _bootstrap
+
+    _bootstrap_root = Path(_bootstrap.__file__).resolve().parent
+    if _bootstrap_root != _program_root and (_program_root / ".release-source.json").is_file():
+        # The deployed bootstrap delegates with runpy and keeps its module in
+        # memory. Restart the selected CLI with its own verifier and the real
+        # installed trust root before it opens packages or data.
+        import subprocess
+
+        _env = {**os.environ, "PHARM_INSTALL_ROOT": str(_bootstrap_root)}
+        raise SystemExit(subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], env=_env))
+    _bootstrap.run_selected(_program_root)
+    _bootstrap.verify_running_release(_program_root)
 
 
 def _use_packages() -> None:
@@ -624,17 +639,16 @@ def _estock_db_print(a, res):
 
 
 def cmd_update(a, s):
-    """Stage immutable code and atomically select it; never migrate the live DB here."""
+    """Offer only publisher-signed updates and verified recovery."""
     import subprocess
-    import tempfile
     import zipfile
-    from app.core import backup, updater
+    from app.core import smart_update as su, update_sign, updater
     import release_bootstrap as releases
     root = Path(__file__).resolve().parent
     home = releases.code_home(s.data_dir)
     try:
-        if a.candidate_check or a.self_check or a.prepare or a.apply_prepared or a.select_prepared:
-            return _smart_update(a, s, root)
+        if a.from_zip:
+            raise updater.UpdateError("A signed release bundle is required; use --prepare --from-bundle DIR")
         if a.rollback:
             if a.from_zip or a.check:
                 raise updater.UpdateError("--rollback cannot be combined with --from-zip or --check")
@@ -644,75 +658,21 @@ def cmd_update(a, s):
                 raise updater.UpdateError(
                     "النسخة دي غيّرت قاعدة البيانات؛ الرجوع للكود القديم وحده مش آمن. استرجع النسخة الاحتياطية "
                     f"اللي اتعملت قبل التحديث: {journal.get('backup', '')}")
+            if previous := state.get("previous"):
+                su.verify_selected_release(home, releases.installer_root(root), previous)
             releases.rollback(home)
             print("Previous code selected. Restart the program; no database restore was performed.")
             return
-        state = releases.read_state(home)
-        expected_active = (state.get("active") or {}).get("id")
-        if a.from_zip:
-            data, sha, source = Path(a.from_zip).read_bytes(), "local", str(a.from_zip)
-        else:
-            token = updater.read_token()
-            if a.ref is None:   # #107: no --ref follows the install's own channel (a develop test PC stays on develop)
-                info = updater.installed(s.data_dir)
-                a.ref = updater.follow(info, a.repo, token)      # a review install: main once main has it
-                if a.ref is None:
-                    raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ "
-                                              "لم يتغير شيء")
-            sha = updater.latest_sha(a.repo, a.ref, token)
-            cur = updater.installed(s.data_dir).get("sha")
-            if cur == sha and not a.force:
-                print("البرنامج محدّث بالفعل:", sha[:7])
-                return
-            print(f"فيه تحديث: {(cur or 'غير معروف')[:7]} -> {sha[:7]}")
-            if a.check:
-                return
-            data, source = updater.download(a.repo, sha, token), f"github:{a.repo}@{sha}"
-        staged = updater.apply_zip(data, root, code_home=home)
-        candidate = Path(staged["release"])
-        releases.check_compatible(releases.current_root(root, home), candidate)
-        # Same requirements as the active release (checked just above): a package set a smart update brought
-        # stays selected, or the code would fall back to the installer's older packages (Codex P2 on 89907fe)
-        deps = (state.get("active") or {}).get("deps")
-        # A candidate check must not open/migrate the real pharmacy database.
-        with tempfile.TemporaryDirectory(prefix="pharm-release-check-") as tmp:
-            isolated = Path(tmp)
-            env = {**os.environ, "PHARM_RELEASE_CANDIDATE": "1", "PHARM_DATA_DIR": str(isolated),
-                   "PHARM_DB_PATH": str(isolated / "test.db"), "PHARM_UPLOAD_DIR": str(isolated / "uploads"),
-                   "PHARM_BACKUP_DIR": str(isolated / "backups"), "PHARM_PRINTER": "none",
-                   "PYTHONUTF8": "1"}
-            env.pop("PHARM_DEPS_DIR", None)
-            if deps:                       # the candidate is checked with the packages it will run with
-                env["PHARM_DEPS_DIR"] = str(home / "deps" / deps)
-            check = subprocess.run([sys.executable, str(candidate / "manage.py"), "selftest", "--quick"],
-                                   cwd=candidate, env=env, timeout=120)
-            if check.returncode:
-                raise updater.UpdateError("Candidate selftest failed; the selected code is unchanged")
-        if s.db_path.exists():
-            db = Database(s.db_path)  # read/snapshot only; do NOT call _db or migrate
-            try:
-                out = backup.create(db, s.upload_dir, _backups(a.backup_dir, s))
-                if backup.verify_archive(out)["problems"]:
-                    raise updater.UpdateError("Backup verification failed; the selected code is unchanged")
-            finally:
-                db.close()
-            print("نسخة احتياطية للبيانات:", out)
-        # #107: remember the channel, so the next check follows the same branch (a zip keeps the current one)
-        ref = updater.installed(s.data_dir).get("ref") if a.from_zip else a.ref
-        releases.activate(root, home, staged["id"],
-                          {"sha": sha, "source": source, "ref": ref, "at": datetime.now().isoformat(),
-                           **({"deps": deps} if deps else {})},
-                          expected_active=expected_active)
-        print(f"Prepared {staged['files']} files; restart to check the selected release.")
-        print("Previous code is retained. No pip install or database migration was run.")
-    except (updater.UpdateError, releases.ReleaseError, OSError, zipfile.BadZipFile,
-            subprocess.TimeoutExpired) as exc:
+        return _smart_update(a, s, root)
+    except (updater.UpdateError, update_sign.SignatureError, releases.ReleaseError, OSError,
+            zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
         sys.exit(f"التحديث فشل: {exc}")
 
 
 def _smart_update(a, s, root: Path):
     """Stage-1 steps of the smart update (docs/SMART_UPDATE.md); every failure keeps code and data as they are."""
     import json
+    import release_bootstrap as releases
     from app.core import smart_update as su, update_sign, updater
     if a.candidate_check:                       # runs inside the NEW code, on a COPY of the database
         report = su.candidate_check(s, _db)
@@ -723,17 +683,25 @@ def _smart_update(a, s, root: Path):
         su.deps_id(b"x", su.python_tag(), su.platform_tag())
         print("SELF-CHECK OK")
         return
-    legacy = Path(releases_legacy_root(s))
+    legacy = releases.installer_root(root)
     backups = _backups(a.backup_dir, s)
-    if a.prepare:
-        if a.from_bundle:
-            source = su.FolderSource(Path(a.from_bundle))
-        else:
-            token = updater.read_token()
-            chan = updater.follow(updater.installed(s.data_dir), a.repo, token)
-            if chan is None:
-                raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ لم يتغير شيء")
-            source = su.GitHubSource(a.repo, chan, token)
+    if not (a.select_prepared or a.apply_prepared):
+        info = updater.installed(s.data_dir)
+        token = None if a.from_bundle else updater.read_token()
+        chan = (updater.channel(info) or "main") if a.from_bundle else updater.follow(info, a.repo, token)
+        if chan is None:
+            raise updater.UpdateError("النسخة دي متثبتة من فرع تجربة، والنسخة الرسمية لسه ما وصلتلهاش؛ لم يتغير شيء")
+        if a.ref and a.ref != chan:
+            raise updater.UpdateError("التحديث يتبع قناة النسخة المثبّتة فقط")
+        source = (su.FolderSource(Path(a.from_bundle)) if a.from_bundle
+                  else su.GitHubSource(a.repo, chan, token))
+        if a.check:
+            m = su.read_manifest(source, update_sign.trusted_keys(legacy))
+            if m["channel"] != (chan or updater.channel(info) or "main"):
+                raise updater.UpdateError("حزمة التحديث لقناة تانية")
+            available = su.meets_version_floor(su.home_of(s.data_dir), m, info, getattr(source, "repo", None), token)
+            print("Signed update available:" if available else "No newer signed update:", m["sha"])
+            return
         out = su.prepare(s, source, legacy=legacy)
         print("SMART-PREPARE " + json.dumps(out, ensure_ascii=False))
         return
@@ -744,13 +712,6 @@ def _smart_update(a, s, root: Path):
     out = su.apply_prepared(s, legacy, a.apply_prepared, backups)
     print("SMART-APPLY " + json.dumps({k: out.get(k) for k in ("release", "sha", "migrated", "backup")},
                                       ensure_ascii=False))
-
-
-def releases_legacy_root(s) -> str:
-    """The installed program folder (stage 0's root), as recorded in the release state; else this folder."""
-    import release_bootstrap as releases
-    state = releases.read_state(releases.code_home(s.data_dir))
-    return state.get("legacy_root") or str(Path(__file__).resolve().parent)
 
 
 def cmd_reset_owner_password(a, s):
@@ -869,7 +830,7 @@ def main(argv=None):
     up = sub.add_parser("update", help="update the program from GitHub; data is kept")
     up.add_argument("--check", action="store_true", help="just say if an update exists")
     up.add_argument("--rollback", action="store_true", help="select previous complete code; does not restore data")
-    up.add_argument("--from-zip", help="install from a local zip (offline / rollback)")
+    up.add_argument("--from-zip", help="retired; use --prepare --from-bundle DIR")
     up.add_argument("--repo", default=os.environ.get("PHARM_UPDATE_REPO", "abdulqawiatef99-cyber/pharmacy-system"))
     up.add_argument("--ref", default=None, help="branch to update from; default: the install's channel (main or develop)")
     up.add_argument("--force", action="store_true")

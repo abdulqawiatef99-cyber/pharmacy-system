@@ -22,7 +22,7 @@ from tests.test_smart_update import SHA_NEW, SmartUpdateBase
 MARK = "\nREHEARSAL_UPDATER = 2   # the updater itself changed in this batch\n"
 
 
-class TestLastInstallerRehearsal(SmartUpdateBase):
+class SmartUpdateLauncher(SmartUpdateBase):
     def press_update_now(self):
         """The owner presses «حدّث دلوقتي»; the program leaves for the launcher when quiet (exit 75 mocked)."""
         from app.db import Database
@@ -84,6 +84,8 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         finally:
             con.close()
 
+
+class TestLastInstallerRehearsal(SmartUpdateLauncher):
     def test_migration_package_and_updater_change_through_the_button_then_auto_rollback(self):
         (self.app_home / "logs").mkdir(exist_ok=True)
         # --- batch 1: a migration, a package change and a change to the updater
@@ -132,7 +134,7 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         for f in self.bundle.iterdir():
             f.unlink()
         with patch("tests.test_smart_update.SHA_NEW", "c" * 40):            # a later commit of the channel
-            self.build(deps_files={"rehearsalpkg/__init__.py": "VALUE = 7\n"})   # CI ships the set every time
+            self.build(deps_files={"rehearsalpkg/__init__.py": "VALUE = 7\n"}, commit_time=3000)
         raw = json.loads((self.bundle / su.MANIFEST).read_bytes())
         self.assertNotEqual(raw["sha"], SHA_NEW)
         p2 = su.prepare(self.s, su.FolderSource(self.bundle), legacy=self.legacy)
@@ -145,6 +147,83 @@ class TestLastInstallerRehearsal(SmartUpdateBase):
         st = releases.read_state(self.home)
         self.assertEqual((st["active"]["id"], st["pending"]), (p["release"], False))   # batch 1's code again
         self.assertEqual(releases.read_journal(self.home)["state"], "rolled_back")
+
+
+class TestPurchaseVATWalletMigration(SmartUpdateLauncher):
+    legacy_pending = ("0045_purchase_vat_wallet_returns",)
+
+    def historical_rows(self):
+        con = sqlite3.connect(self.s.db_path)
+        try:
+            return (
+                con.execute("SELECT id, public_price FROM batches ORDER BY id").fetchall(),
+                con.execute("SELECT id, total, refund_method FROM sale_returns ORDER BY id").fetchall(),
+                con.execute("SELECT id, batch_id, qty_base, returned_qty FROM sale_allocations ORDER BY id").fetchall(),
+                con.execute("SELECT id, line_total, invoice_share FROM sale_lines ORDER BY id").fetchall(),
+                con.execute("SELECT item_id, batch_key, qty FROM stock_balances ORDER BY item_id, batch_key").fetchall(),
+            )
+        finally:
+            con.close()
+
+    def test_existing_database_takes_the_QA_migration_through_the_update_button(self):
+        from decimal import Decimal
+        from app.catalog import service as catalog
+        from app.core import accounts
+        from app.db import Database
+        from app.inventory import service as inventory
+
+        db = Database(self.s.db_path)
+        try:
+            token = accounts.login(db, "owner", "Smoke-Pass-2026")["token"]
+            ctx = accounts.resolve_session(db, token)
+            item = catalog.create_item(db, ctx, {"name_en": "QA synthetic box", "public_price": 10000})
+            with db.transaction():
+                exp = (datetime.now(timezone.utc).date() + timedelta(days=700)).isoformat()
+                batch = inventory.get_or_create_batch(db, ctx, item, "QA-LOT", exp)
+                db.execute("UPDATE batches SET public_price=10000 WHERE id=? AND org_id=?", (batch, ctx.org_id))
+                db.execute("INSERT INTO sales (id, org_id, branch_id, sale_no, status, subtotal, discount_total,"
+                           " total, paid_card, returned_total, created_by, completed_at)"
+                           " VALUES ('qa-sale',?,?,1,'completed',20000,2000,18000,18000,9000,?,"
+                           " strftime('%Y-%m-%dT%H:%M:%fZ','now'))", (ctx.org_id, ctx.branch_id, ctx.user_id))
+                db.execute("INSERT INTO sale_lines (id, sale_id, org_id, line_no, item_id, qty_base, line_total, invoice_share)"
+                           " VALUES ('qa-line','qa-sale',?,1,?,2,18000,2000)", (ctx.org_id, item))
+                db.execute("INSERT INTO sale_allocations (id, sale_line_id, batch_id, qty_base,"
+                           " unit_price, returned_qty) VALUES ('qa-alloc','qa-line',?,2,10000,1)", (batch,))
+                db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason, created_by)"
+                           " VALUES ('qa-return',?,'qa-sale',9000,'card','QA synthetic refund',?)",
+                           (ctx.org_id, ctx.user_id))
+                for quantity, kind in ((6, "opening"), (-2, "sale"), (1, "sale_return")):
+                    inventory.post_movement(db, ctx, item_id=item, batch_id=batch, qty_delta=quantity,
+                                            movement_type=kind, unit_cost=Decimal("20"), ref_id="qa-sale",
+                                            ref_line_id="qa-line")
+            self.assertFalse(db.one("SELECT version FROM schema_migrations WHERE version=?", self.legacy_pending))
+        finally:
+            db.close()
+
+        before = self.historical_rows()
+        before_bytes = self.live_bytes()
+        (self.app_home / "logs").mkdir(exist_ok=True)
+        manifest = self.build()
+        self.assertIn(self.legacy_pending[0], manifest["migrations"])
+        prepared = self.prepare()
+        self.assertEqual(prepared["migrations"], list(self.legacy_pending))
+        self.assertTrue(prepared["needs_db"])
+        self.assertEqual(self.live_bytes(), before_bytes)
+
+        self.press_update_now()
+        self.assertEqual(len(self.launcher_starts(healthy=True)), 1)
+        self.assertEqual(releases.read_state(self.home)["active"]["id"], prepared["release"])
+        self.assertEqual(releases.read_journal(self.home)["state"], "done")
+        self.assertTrue(list(self.backups.glob("*pre-update*.zip")))
+        self.assertEqual(self.historical_rows(), before)
+        db = Database(self.s.db_path)
+        try:
+            self.assertEqual(db.pending_migrations(), [])
+            self.assertEqual(db.all("PRAGMA foreign_key_check"), [])
+            self.assertIsNone(db.one("SELECT channel_id FROM sale_returns WHERE id='qa-return'")[0])
+            self.assertIn("tax_included", {r["name"] for r in db.all("PRAGMA table_info(purchase_invoice_lines)")})
+        finally:
+            db.close()
 
 
 class TestCleanInstallThenUpdate(TestLastInstallerRehearsal):

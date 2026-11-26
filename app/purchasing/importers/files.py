@@ -7,6 +7,7 @@ import zipfile
 
 from ...core.errors import ValidationFailed
 from ..model import ExtractedInvoice
+from .supplier_pdf import SupplierPdf
 from .table import grid_to_invoice
 
 KINDS = {"excel", "csv", "pdf", "image"}
@@ -152,6 +153,10 @@ MAX_PDF_PAGES = 60     # far above a supplier invoice; a longer file is refused,
 
 def read_pdf(data: bytes) -> tuple[list[list], list[str], bool]:
     """Returns (grid, page_texts, has_text). has_text False => scanned PDF."""
+    return _read_pdf(data)
+
+
+def _read_pdf(data: bytes, supplier: SupplierPdf | None = None) -> tuple[list[list], list[str], bool]:
     import pdfplumber
     grid: list[list] = []
     texts: list[str] = []
@@ -163,6 +168,8 @@ def read_pdf(data: bytes) -> tuple[list[list], list[str], bool]:
             for page in pdf.pages:
                 t = page.extract_text() or ""
                 texts.extend(t.splitlines())
+                if supplier is not None and supplier.add_page(page):
+                    continue
                 for table in page.extract_tables():
                     grid.extend(table)
     except ValidationFailed:
@@ -184,8 +191,11 @@ def extract_structured(kind: str, data: bytes) -> ExtractedInvoice | None:
     if kind == "csv":
         return grid_to_invoice(read_csv(data), "structured")
     if kind == "pdf":
-        grid, texts, has_text = read_pdf(data)
+        supplier = SupplierPdf()
+        grid, texts, has_text = _read_pdf(data, supplier)
         if not has_text:
             return None
+        if supplier.header is not None:
+            return supplier.invoice()
         return grid_to_invoice(grid, "pdf_text", extra_text=texts)
     return None

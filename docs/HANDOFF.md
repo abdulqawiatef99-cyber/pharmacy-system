@@ -4,9 +4,27 @@
 قواعد العمل وبداية/نهاية الجلسة: [AGENTS.md](../AGENTS.md). البوابات والنسبة: [STATUS.md](STATUS.md) (مسجّلة **73.25%**، مفيش دليل قبول جديد).
 تفاصيل كل مهمة في الـ Issue بتاعتها؛ السجل القديم مش مطلوب لبداية الجلسة.
 
+## 23/11 — UX-1 invoice item card
+
+- Branch `codex/ux-1-invoice-item-card` is based on `develop` `50a9fa7`. The purchase lines, item picker and sale lines open the shared card in place. Purchase prices show a warning as they are entered and use the existing three choices at approval.
+- The independent review caught the branch context and untracked stock price. The new tests cover both. The full Linux suite ran 3,035 tests with 8 skips and 2 expected failures. Chromium showed the loaded card in 36.8 ms on a 30,000-item synthetic catalog.
+- The owner test plan covers opening, editing and closing the card and checking the price prompt. Track the full CI results on the UX-1 PR.
 
 
 
+
+## 23/11 — DEV-3 purchase and sale QA
+
+- Branch `codex/dev3-qa-fixes` includes `develop` at `fdab91c` (checkout speed merged). Covers QA-001–006, QA-011 and QA-013 using synthetic data. Purchase price review records the selected stock changes. Receipt and invoice detail read official prices from saved allocations and preserve the discount amounts used by returns.
+- Migration `0045_purchase_vat_wallet_returns` adds explicit line VAT treatment, wallet return channels and support for two official prices on the same supplier lot. Ships through the smart-update button. The launcher rehearses the migration on a copy, keeps a verified backup and starts the selected release. No installer needed.
+- PR #451 is open into `develop`. The signed-update test applied 0045 to an existing synthetic database. Full suite on `5b2ecec` ran 2,999 tests with 2,984 passes, 12 skips, two existing expected failures and one timing failure. The existing customer-search test recorded 101.7 ms against 100 ms in the full suite and passed at 62.1 ms in isolation. All 21 DEV-3 cases, the update test and the checkout regression passed in the full run. The local green-suite gate for CI is pending.
+
+## 23/11 — FINISH-1 (release update 4b; newest line last)
+- #451 merged into develop at `ed3dc2c`. While merging develop in, both behaviours were kept: #451's price review and #448's price authority. Stock repricing other than "keep" needs `items.price`. A receipt without price authority goes to the lot priced at today's price. Codex is at its usage limit, so an independent agent reviewed the resolution; its one P1 was fixed test-first in `e6ab190`.
+- #450 merged into develop at `a3cf5d0`. Its conflicts were mechanical. Test-only fix: the quick-add keyboard test now dismisses the first-run tour.
+- Windows CI had been red on develop since #448, whose PR never ran Windows. The cause was test-only: the validator sets `PHARM_RELEASE_CANDIDATE=1` and the transition test inherited it; it also compared files with CRLF vs LF. Fixed by #454, merged at `12ba4e4` after linux and full Windows came up green.
+- Release #455 (develop → main) merged at `c6405d8` with linux and windows green on `12ba4e4`. It ships migrations 0043, 0044 and the two 0045 files through the signed «تحديث» update; no installer. After the update every user logs in again once (0045_session_auth_method).
+- Open: develop has two migration files numbered 0045. They are harmless, because the runner keys on the full filename, but the next migration must be 0046. Codex never reviewed the #451 merge resolution (usage limit); ask for `@codex review` on #451 once quota returns. The local container fails `test_item_write_waiting_for_sqlite_does_not_block_other_requests` because of a stray `httpx2` package; CI passes it.
 
 ## 22/11 — UPDATE-4 worker session: progress log (READ THIS FIRST; newest line last)
 Spec: the manager's «Update 4» message (priority U4-0 … U4-13). Each PR: tests first, an independent fresh-context agent review fixed first, then Codex; merge into develop only with linux CI green and no open Codex P0/P1; one release PR into main at the end (owner pre-approved on the gates, linux AND windows green).

@@ -137,3 +137,9 @@ python manage.py import-estock --catalog "قائمة الأصناف.xlsx" --stoc
 
 
 - **زراير سطح المكتب لخطوات النقل (الجزء 3، البند 5):** كل تشغيل للبرنامج بيحط على سطح المكتب «إي ستوك ١ - النسخ الاحتياطية» و«إي ستوك ٢ - القراية» و«إي ستوك ٣ - النقل للبرنامج»؛ كل زرار بيفتح النسخة اللي في فولدر «أدوات الصيدلية» (`app/core/tools_folder.py` `MOVE_BUTTONS`).
+
+## Owner review after the move
+
+- In **الأصناف → مراجعة العبوات بعد النقل**, start with the imported items with the highest on-hand cost value. The number printed in a name such as `20TAB` is a clue to check the physical pack. Enter the count of units you actually sell, their name and the reason. Enter 1 to confirm a whole-box item. A correction uses the stock ledger to keep the same number of boxes and records the reason. Remove the item from open sale drafts and finish any open count before correcting its pack. The item card and the sale search expose the same correction.
+- In **العملاء → مراجعة أسماء العملاء بعد النقل**, compare the current name, available Arabic and English names, and any customer-name snapshots stored on old sales. Pick the name for the active account. The archive stays read-only. The program links evidence by the archived customer ID, so sales with no mapped customer and ticket names are excluded.
+- In **إعدادات الملصقات**, choose **كود الصنف** to print the short internal code and its digits below the bars. Choose **الكود الدولي** for the previous barcode preference. Items without a short internal code use the existing barcode fallback. Search by scanning or typing the digits in a sale or purchase.
