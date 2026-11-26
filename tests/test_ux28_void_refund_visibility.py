@@ -48,6 +48,7 @@ class TestShiftSummary(Base):
         self.assertEqual(len(out["cash_refunds"]), 1)
         y = out["cash_refunds"][0]
         self.assertEqual((y["sale_no"], y["reason"], y["by"]), (dr["sale_no"], "علبة مفتوحة", self.owner_name()))
+        self.assertEqual(y["sale_id"], r_sid)                     # Codex P2: the row links to the invoice
         self.assertGreater(y["amount"], 0)
         t = out["text"]
         self.assertIn(f"فاتورة {dv['sale_no']}", t)
@@ -159,6 +160,7 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#shSumEv tbody tr');
   out.rows = await p.$$eval('#shSumEv tbody tr', (trs) => trs.map((tr) => [...tr.cells].map((c) => c.textContent.trim())));
   out.text = await p.inputValue('#shSumT');
+  out.links = await p.$$eval('#shSumEv tbody tr a[href^="#/sales/"]', (as) => as.length);
   await p.goto(base + '/#/notifications');
   await p.waitForSelector('#nToday');
   out.today = await p.textContent('#nToday');
@@ -194,6 +196,7 @@ class TestScreens(Base):
         self.assertEqual(out["rows"][0][1], str(dv["sale_no"]))
         self.assertEqual(out["rows"][0][6], "العميل رجع في كلامه")
         self.assertEqual(out["rows"][1][6], "علبة مفتوحة")
+        self.assertEqual(out["links"], 2)
         self.assertIn("إجمالي اليوم", out["text"])
         self.assertIn("إلغاء 1 فاتورة", out["today"])
         self.assertIn("مرتجع نقدي 1", out["today"])

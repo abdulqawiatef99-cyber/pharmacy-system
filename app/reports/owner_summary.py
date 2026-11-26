@@ -47,7 +47,7 @@ def _voids_of(db: Database, s) -> list[dict]:
 def _cash_refunds_of(db: Database, s) -> list[dict]:
     """Cash refunds paid from this shift's drawer (found through their drawer movement, as the shift report)."""
     return [dict(r) for r in db.all(
-        "SELECT r.id, x.sale_no, r.total, r.created_at, r.reason, u.full_name by_name, c.full_name sold_by_name"
+        "SELECT r.id, r.sale_id, x.sale_no, r.total, r.created_at, r.reason, u.full_name by_name, c.full_name sold_by_name"
         " FROM sale_returns r JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' AND m.org_id=r.org_id"
         " JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id LEFT JOIN users u ON u.id=r.created_by"
         " LEFT JOIN users c ON c.id=x.created_by WHERE m.shift_id=? AND m.org_id=? ORDER BY r.created_at",
@@ -112,7 +112,7 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     voids = [{"sale_id": v["id"], "sale_no": v["sale_no"], "amount": v["total"], "cash": v["paid_cash"],
               "at": v["voided_at"], "by": v["voided_by_name"], "sold_by": v["sold_by_name"], "reason": v["void_reason"]}
              for v in _voids_of(db, shift)]
-    refunds = [{"return_id": x["id"], "sale_no": x["sale_no"], "amount": x["total"], "at": x["created_at"],
+    refunds = [{"return_id": x["id"], "sale_id": x["sale_id"], "sale_no": x["sale_no"], "amount": x["total"], "at": x["created_at"],
                 "by": x["by_name"], "sold_by": x["sold_by_name"], "reason": x["reason"]} for x in _cash_refunds_of(db, shift)]
     from ..sales.service import _local_date
     the_day = _local_date(shift["opened_at"])
