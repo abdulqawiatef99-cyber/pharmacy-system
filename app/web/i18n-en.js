@@ -7,7 +7,6 @@ window.I18N_EN = {
 "اكتب أرقام صحيحة (صفر أو أكتر)، والمجموع أكبر من صفر": "Enter whole numbers (zero or more), with a total above zero",
 "أكتر من المتاح (0)": "More than available (0)",
 "علبة + شريط": "Box + strip",
-"عدد 0": "Number of 0",
 "الكمية غير صحيحة: اكتب عدد العلب وعدد الشرايط أرقام صحيحة": "Invalid quantity: enter the boxes and strips as whole numbers",
 "التحديث ما بدأش والبرنامج ما اتقفلش": "The update did not start and the program was not stopped",
 "إعدادات إدخال الشراء": "Purchase entry settings",
