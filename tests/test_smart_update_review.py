@@ -5,7 +5,6 @@
   enough once an older installer is back: exit 75 would only restart the program again and again);
 - the bundle build names the committed key that verified its signature, and the owner's keys stay committed.
 Synthetic data only; GitHub is never called (every request is a mock)."""
-import contextlib
 import json
 import os
 from pathlib import Path
@@ -67,36 +66,38 @@ class TestFollowTheOfficialRelease(unittest.TestCase):
         self.assertEqual(get.call_count, 2)                    # not there yet: asked again at the next check
 
 
+@mock.patch.dict("os.environ", {"PHARM_TEST_OFFLINE_UPDATE": "0"})
 class TestReviewInstallOnTheApi(APICase):
     def test_status_follows_main_once_the_official_release_has_it(self):
         self.http_login()
+        signed = {"sha": "b" * 40, "channel": "main", "commit_time": 5, "python": su.python_tag(),
+                  "migrations": [], "notes": []}
         with mock.patch.object(updater, "installed", return_value=REVIEW), \
                 mock.patch.object(updater, "read_token", return_value="t"), \
                 mock.patch.object(updater, "contains", return_value=True) as has, \
-                mock.patch.object(updater, "latest_sha", return_value="b" * 40) as ls:
+                mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
+                mock.patch.object(su, "bootstrap_level", return_value=releases.BOOTSTRAP), \
+                mock.patch.object(su, "read_manifest", return_value=signed) as manifest:
             st = self.c.get("/api/system/update").json()
-        has.assert_called_once_with(updater.DEFAULT_REPO, "a" * 40, "main", "t")
-        self.assertEqual(ls.call_args[0][1], "main")
+        has.assert_any_call(updater.DEFAULT_REPO, "a" * 40, "main", "t")
+        self.assertEqual(manifest.call_args.args[0].channel, "main")
         self.assertEqual((st["channel"], st["latest"], st["available"]), ("main", "b" * 40, True))
         self.assertNotIn("candidate", st)
 
-    def test_button_moves_the_pc_to_main(self):
+    def test_button_starts_signed_preparation(self):
         self.http_login()
         done = mock.Mock(returncode=0, stdout="ok", stderr="")
-        with mock.patch.object(updater, "installed", return_value=REVIEW), \
-                mock.patch.object(updater, "contains", return_value=True), \
-                mock.patch("subprocess.run", return_value=done) as run:
-            r = self.c.post("/api/system/update", headers=H, json={})
+        with mock.patch("subprocess.run", return_value=done) as run:
+            r = self.c.post("/api/system/update", headers=H, json={"action": "prepare"})
         self.assertEqual(r.status_code, 200, r.text)
         cmd = run.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("update"):], ["update", "--ref", "main"])
+        self.assertEqual(cmd[cmd.index("update"):], ["update", "--prepare"])
 
     def test_smart_status_never_offers_an_older_bundle(self):
         self.http_login()
-        m = {"sha": "c" * 40, "commit_time": 5, "python": su.python_tag(), "migrations": [], "notes": []}
+        m = {"sha": "c" * 40, "channel": "main", "commit_time": 5, "python": su.python_tag(), "migrations": [], "notes": []}
         with mock.patch.object(updater, "installed", return_value={"sha": "a" * 40, "ref": "main"}), \
                 mock.patch.object(updater, "read_token", return_value=None), \
-                mock.patch.object(updater, "latest_sha", return_value="a" * 40), \
                 mock.patch.object(update_sign, "trusted_keys", return_value=[b"k" * 32]), \
                 mock.patch.object(su, "bootstrap_level", return_value=releases.BOOTSTRAP), \
                 mock.patch.object(su, "read_manifest", return_value=m), \
@@ -117,33 +118,17 @@ class TestCommandLineFollowsMain(unittest.TestCase):
         import manage
         self.manage = manage
 
-    def test_update_without_ref_moves_a_review_install_to_main_or_changes_nothing(self):
-        from types import SimpleNamespace
-        from app.core import backup
-        staged = {"release": str(self.tmp), "id": "r1", "files": 1}
-        seen = []
-        with contextlib.ExitStack() as stack:
-            for p in (mock.patch.object(updater, "read_token", return_value=None),
-                      mock.patch.object(updater, "installed", return_value=REVIEW),
-                      mock.patch.object(updater, "download", return_value=b"zip"),
-                      mock.patch.object(updater, "apply_zip", return_value=staged),
-                      mock.patch.object(releases, "check_compatible"),
-                      mock.patch.object(subprocess, "run", return_value=SimpleNamespace(returncode=0)),
-                      mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"),
-                      mock.patch.object(backup, "verify_archive", return_value={"problems": []}),
-                      mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3]))):
-                stack.enter_context(p)
-            latest = stack.enter_context(mock.patch.object(updater, "latest_sha", return_value="b" * 40))
+    def test_update_without_ref_requires_a_signed_official_channel(self):
+        with mock.patch.object(updater, "read_token", return_value=None), \
+                mock.patch.object(updater, "installed", return_value=REVIEW), \
+                mock.patch.object(su, "prepare", return_value={"channel": "main"}) as prepare:
             with mock.patch.object(updater, "contains", return_value=False):
-                with self.assertRaises(SystemExit) as stop:
-                    self.manage.main(["update"])
-            self.assertIn("النسخة الرسمية لسه ما وصلتلهاش", str(stop.exception.code))
-            latest.assert_not_called()                         # never an older main
-            self.assertEqual(seen, [])
+                with self.assertRaisesRegex(SystemExit, "النسخة الرسمية لسه ما وصلتلهاش"):
+                    self.manage.main(["update", "--prepare"])
+            prepare.assert_not_called()
             with mock.patch.object(updater, "contains", return_value=True):
-                self.manage.main(["update"])
-        self.assertEqual(latest.call_args[0][1], "main")
-        self.assertEqual(seen[0]["ref"], "main")               # from now on the PC is on main
+                self.manage.main(["update", "--prepare"])
+        self.assertEqual(prepare.call_args.args[1].channel, "main")
 
 
 class TestNeverBackward(unittest.TestCase):
@@ -166,6 +151,15 @@ class TestNeverBackward(unittest.TestCase):
             self.assertTrue(su.is_forward(self.M, {"sha": "a" * 40}))                    # flash drive
             self.assertTrue(su.is_forward(self.M, {"sha": "local"}, "o/r"))              # zip install
         has.assert_not_called()
+
+
+    def test_offline_release_must_respect_the_confirmed_channel_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            releases.atomic_json(home / "version-floor.json", {"main": {"sha": "c" * 40, "commit_time": 3000}})
+            info = {"sha": "a" * 40, "commit_time": 1000}
+            self.assertFalse(su.meets_version_floor(home, {**self.M, "channel": "main"}, info))
+            self.assertTrue(su.meets_version_floor(home, {**self.M, "channel": "develop"}, info))
 
 
 class _GitHubLike(su.FolderSource):
@@ -200,7 +194,7 @@ class TestOnlyALauncherThatCanApply(SmartUpdateBase):
             with mock.patch.object(su, "due", return_value={"release": "c" * 64, "when": "now", "needs_db": True}):
                 self.assertFalse(su.trigger(self.s, self.db(), in_flight=lambda: 0, exit=leave))
             self.build()
-            with self.assertRaisesRegex(UpdateError, "المثبّت"):
+            with self.assertRaisesRegex(UpdateError, "المشغّل"):
                 self.prepare()
         leave.assert_not_called()                                      # no exit 75, so no restart loop
         self.assertFalse((self.home / "apply-go.json").exists())
@@ -313,37 +307,3 @@ class TestAbandonedJournalPutsTheDatabaseBack(Stage0Base):
         self.assertTrue(cand.exists())
         self.assertEqual(releases.resume_journal(self.home), "abandoned")   # next start finishes it
         self.assertEqual(self.live.read_bytes(), b"OLD DATABASE")
-
-
-class TestClassicUpdateKeepsThePackageSet(TestCommandLineFollowsMain):
-    """Codex P2 on 89907fe: after a smart update brought its own packages, a code-only update with the same
-    requirements keeps them selected (and checks the candidate with them)."""
-
-    def test_update_without_ref_moves_a_review_install_to_main_or_changes_nothing(self):
-        pass                                     # covered by the parent class; not repeated here
-
-    def test_deps_carried_through_a_classic_update(self):
-        from types import SimpleNamespace
-        from app.core import backup
-        ident = "d" * 64
-        staged = {"release": str(self.tmp), "id": "r2", "files": 1}
-        seen, envs = [], []
-        state = {"active": {"id": "r1", "sha": "a" * 40, "ref": "main", "deps": ident}}
-        with contextlib.ExitStack() as stack:
-            for p in (mock.patch.object(updater, "read_token", return_value=None),
-                      mock.patch.object(updater, "installed", return_value=state["active"]),
-                      mock.patch.object(updater, "latest_sha", return_value="b" * 40),
-                      mock.patch.object(updater, "download", return_value=b"zip"),
-                      mock.patch.object(updater, "apply_zip", return_value=staged),
-                      mock.patch.object(releases, "read_state", return_value=state),
-                      mock.patch.object(releases, "current_root", return_value=self.tmp),
-                      mock.patch.object(releases, "check_compatible"),
-                      mock.patch.object(subprocess, "run",
-                                        side_effect=lambda *a, **k: envs.append(k["env"]) or SimpleNamespace(returncode=0)),
-                      mock.patch.object(backup, "create", return_value=self.tmp / "b.zip"),
-                      mock.patch.object(backup, "verify_archive", return_value={"problems": []}),
-                      mock.patch.object(releases, "activate", side_effect=lambda *a, **k: seen.append(a[3]))):
-                stack.enter_context(p)
-            self.manage.main(["update"])
-        self.assertEqual(seen[0]["deps"], ident)
-        self.assertTrue(envs[0]["PHARM_DEPS_DIR"].endswith(ident))

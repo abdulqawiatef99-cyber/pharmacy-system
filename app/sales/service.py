@@ -27,6 +27,7 @@ from ..safety.engine import Finding, SafetyEngine
 from . import cash
 
 NEAR_EXPIRY_DAYS = 30
+KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
 DEFAULT_RETURN_DAYS = 14         # owner 21/11 10:17: «مدة المرتجع 14 يوم»; Settings can change it
 
 
@@ -270,6 +271,26 @@ def line_gross_as_sold(allocs: list[dict], bp: int, line_total: int | None, fixe
     return _rule_as_sold(allocs, bp, line_total, fixed)((a["qty_base"], a) for a in allocs)
 
 
+def official_prices(allocs: list[dict], *, per_batch: bool = False) -> list[dict]:
+    """Split allocations into sold pack and loose quantities at the saved public prices."""
+    groups = {}
+    for i, a in enumerate(allocs):
+        price = a.get("unit_price")
+        if price is None:
+            continue
+        key = (price, a.get("pack_price"), a.get("pack_size") or 1, i if per_batch else None)
+        groups[key] = groups.get(key, 0) + a.get("qty", a.get("qty_base", 0))
+    rows = {}
+    for (unit, pack, size, _), qty in groups.items():
+        boxes, loose = divmod(qty, size) if pack is not None and size > 1 else (0, qty)
+        for is_pack, count, price in ((True, boxes, pack), (False, loose, unit)):
+            if count:
+                key = (is_pack, price)
+                rows[key] = rows.get(key, 0) + count
+    return [{"pack": pack, "qty": qty, "price": price, "gross": qty * price}
+            for (pack, price), qty in rows.items()]
+
+
 def kept_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None = None,
                price=_kept_gross, fixed: int = 0) -> int:
     """Net value of the units of a line the customer still keeps (after discount), priced the way the
@@ -467,18 +488,25 @@ class Sales:
         a receipt in the same millisecond as the decision counts as after it (the safe side). A batch owned
         by the hospital (0039: E-Stock's store 2, owner 19/11) is never the pharmacy's to sell: left out."""
         if not hasattr(self, "_owner_sql"):      # 0039 present? (a database before it has no batch owner)
-            has = any(r["name"] == "owner" for r in self.db.all("PRAGMA table_info(batches)"))
-            self._owner_sql = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if has else ""
+            columns = {r["name"] for r in self.db.all("PRAGMA table_info(batches)")}
+            self._owner_sql = " AND coalesce(b.owner,'pharmacy')='pharmacy'" if "owner" in columns else ""
+            self._batch_order = ", b.created_at, b.price_variant, sb.batch_key" if "price_variant" in columns else ""
+        recalled_lot = (
+            " AND m.batch_id IN (SELECT rb.id FROM batches rb WHERE rb.org_id=sb.org_id AND rb.item_id=sb.item_id"
+            " AND rb.batch_no=b.batch_no AND rb.expiry_date IS b.expiry_date"
+            " AND (rb.id=b.id OR b.batch_no<>''))"
+            if self._batch_order else " AND m.batch_id=sb.batch_key"
+        )
         rows = self.db.all(
             "SELECT sb.batch_key, sb.qty, b.batch_no, b.expiry_date, b.public_price,"
-            " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.batch_id=sb.batch_key"
-            "         AND (m.status='confirmed' OR (m.status='handled' AND EXISTS ("
+            " EXISTS (SELECT 1 FROM recall_matches m WHERE m.org_id=sb.org_id AND m.item_id=sb.item_id"
+            + recalled_lot + " AND (m.status='confirmed' OR (m.status='handled' AND EXISTS ("
             "              SELECT 1 FROM stock_movements sm WHERE sm.org_id=sb.org_id AND sm.branch_id=sb.branch_id"
-            "              AND sm.item_id=sb.item_id AND sm.batch_id=m.batch_id"
+            "              AND sm.item_id=sb.item_id AND sm.batch_id=sb.batch_key"
             "              AND sm.qty_delta>0 AND sm.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', m.decided_at))))) recalled"
-            " FROM stock_balances sb LEFT JOIN batches b ON b.id = nullif(sb.batch_key,'')"
+            " FROM stock_balances sb LEFT JOIN batches b ON b.id=nullif(sb.batch_key,'') AND b.org_id=sb.org_id"
             " WHERE sb.org_id=? AND sb.branch_id=? AND sb.item_id=? AND sb.qty > 0" + self._owner_sql +
-            " ORDER BY b.expiry_date IS NULL, b.expiry_date", (ctx.org_id, branch_id, item_id))
+            " ORDER BY b.expiry_date IS NULL, b.expiry_date" + self._batch_order, (ctx.org_id, branch_id, item_id))
         today = self.today.isoformat()
         return [{**dict(r), "expired": bool(r["expiry_date"] and r["expiry_date"] < today)} for r in rows]
 
@@ -591,7 +619,13 @@ class Sales:
         return self.get(ctx, sid)
 
     # ------------------------------------------------------------ pricing preview
-    def _plan(self, ctx: Context, s: dict, line: dict, item: dict, used: dict | None = None) -> list[dict]:
+    @staticmethod
+    def _pack_price(batch: dict, item: dict) -> int | None:
+        price = batch["public_price"] if batch["batch_key"] else item.get("untracked_public_price")
+        return item["public_price"] if price is None else price
+
+    def _plan(self, ctx: Context, s: dict, line: dict, item: dict, used: dict | None = None,
+              *, batches: list[dict] | None = None) -> list[dict]:
         """`used` (preview of a draft): units the earlier lines of this invoice already take from each batch,
         so a second line of the same item is priced from the batch it will really leave from. At completion
         the earlier lines have already left the stock, so nothing is passed."""
@@ -602,7 +636,7 @@ class Sales:
                      "unit_price": unit_price(pp, item["pack_size"]) if pp is not None else None,
                      "pack_price": pp, "pack_size": item["pack_size"], "price_source": "item"}]
         plan = []
-        for b in self._sellable(ctx, s["branch_id"], line["item_id"]):
+        for b in batches if batches is not None else self._sellable(ctx, s["branch_id"], line["item_id"]):
             if need == 0:
                 break
             free = b["qty"] - (used.get((line["item_id"], b["batch_key"]), 0) if used is not None else 0)
@@ -611,7 +645,7 @@ class Sales:
                 continue
             if used is not None:
                 used[(line["item_id"], b["batch_key"])] = used.get((line["item_id"], b["batch_key"]), 0) + take
-            pack_price = b["public_price"] if b["public_price"] is not None else item["public_price"]
+            pack_price = self._pack_price(b, item)
             plan.append({"batch_id": b["batch_key"] or None, "batch_no": b["batch_no"],
                          "expiry_date": b["expiry_date"], "qty": take,
                          "unit_price": unit_price(pack_price, item["pack_size"]) if pack_price is not None else None,
@@ -621,6 +655,53 @@ class Sales:
         if need:
             raise Conflict("الكمية لم تعد متاحة (ربما بيعت من شاشة أخرى)", code="insufficient_stock")
         return plan
+
+    def quote_items(self, ctx: Context, sid: str, items: list[dict]) -> None:
+        """Quote the next POS add and show which public prices are on the sellable shelf."""
+        ctx.require("sales.create")
+        sale = self._draft(ctx, sid)
+        draft_lines = {}
+        for r in self.db.all("SELECT item_id, qty_base, discount_bp, discount_source FROM sale_lines"
+                             " WHERE org_id=? AND sale_id=? ORDER BY line_no", (ctx.org_id, sid)):
+            draft_lines.setdefault(r["item_id"], []).append(dict(r))
+        for item in items:
+            iid, size, public = item["id"], item["pack_size"], item["public_price"]
+            if item["is_service"]:
+                item.update(next_pack_price=public, next_unit_price=unit_price(public, size) if public is not None else None,
+                            price_stock=[], available_qty=None)
+                continue
+            batches = self._sellable(ctx, sale["branch_id"], iid)
+            prices = {}
+            for batch in batches:
+                price = self._pack_price(batch, item)
+                prices[price] = prices.get(price, 0) + batch["qty"]
+            lines = draft_lines.get(iid, [])
+            target = next((i for i in reversed(range(len(lines)))
+                           if not lines[i]["discount_bp"] or lines[i]["discount_source"] == "contract"), len(lines))
+            quantities = [l["qty_base"] for l in lines] + [0]
+            available = max(0, sum(prices.values()) - sum(quantities))
+
+            def gross(add):
+                used, total = {}, 0
+                for i, qty in enumerate(quantities):
+                    qty += add if i == target else 0
+                    if not qty:
+                        continue
+                    plan = self._plan(ctx, sale, {"item_id": iid, "qty_base": qty}, item, used, batches=batches)
+                    if any(a["unit_price"] is None for a in plan):
+                        return None
+                    total += line_gross((a["qty"], a) for a in plan)
+                return total
+
+            base = gross(0) if sum(quantities) <= sum(prices.values()) else None
+
+            def quote(qty):
+                after = gross(qty) if base is not None and available >= qty else None
+                return after - base if after is not None else None
+
+            item.update(next_pack_price=quote(size), next_unit_price=quote(1), available_qty=available,
+                        stock_qty=sum(prices.values()),
+                        price_stock=[{"price": price, "qty": qty} for price, qty in prices.items()])
 
     def get(self, ctx: Context, sid: str) -> dict:
         ctx.require("sales.read")
@@ -665,7 +746,13 @@ class Sales:
             l["allocations"] = plan
             if any(a.get("unit_price") is None for a in plan):
                 l["problem"] = "no_price"
-            gross = line_gross((a["qty"], a) for a in plan if a.get("unit_price") is not None)
+            priced = [a for a in plan if a.get("unit_price") is not None]
+            per_batch = False
+            if s["status"] != "draft":
+                per_batch = _rule_as_sold([{**a, "qty_base": a["qty"]} for a in priced],
+                                          l["discount_bp"], l["line_total"], line_fixed(l)) is _per_batch_gross
+            l["official_prices"] = official_prices(priced, per_batch=per_batch)
+            gross = sum(p["gross"] for p in l["official_prices"])
             disc = discount_of(gross, l["discount_bp"])
             if s["status"] == "draft":
                 disc += min(l["discount_amount"], gross - disc)      # a fixed EGP discount, never past the line
@@ -688,19 +775,50 @@ class Sales:
         if s["status"] == "draft":
             s["subtotal"], s["discount_total"] = subtotal, discount
             s["total"] = subtotal - discount + (s["delivery_fee"] or 0)
+            # U2-14 (owner 22/11): only the CASH part is rounded, at payment; the total stays exact. The screen
+            # gets the step and what a cash-only payment would be
+            from .rounding import nearest, step
+            s["rounding"] = 0
+            s["rounding_step"] = step(self.db, ctx.org_id)
+            r = nearest(s["total"], s["rounding_step"])
+            s["cash_rounding"] = r if s["total"] + r > 0 else 0            # never rounded away to nothing
+            s["cash_total"] = s["total"] + s["cash_rounding"]
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
         s["attachments"] = att_listing(self.db, ctx, sid)
         s["returns"] = [dict(r) for r in self.db.all(
-            "SELECT r.id, r.total, r.refund_method, r.reason, r.created_at, u.full_name by_name FROM sale_returns r"
-            " LEFT JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.created_at", (sid,))]
+            "SELECT r.id, r.total, r.refund_method, r.channel_id, c.name channel, r.reason, r.created_at,"
+            " u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
+            " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
+            " WHERE r.sale_id=? AND r.org_id=? ORDER BY r.created_at", (sid, ctx.org_id))]
+        if s["status"] == "draft":           # U2-21: a reminder once per invoice, never blocking
+            from ..safety import dispensing
+            s["dispensing_notes"] = dispensing.for_items(self.db, ctx.org_id, [l["item"] for l in lines])
         s["payments"] = [dict(r) for r in self.db.all(
-            "SELECT p.method, p.amount, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
-            " ON c.id=p.channel_id WHERE p.sale_id=? ORDER BY p.rowid", (sid,))]
+            "SELECT p.method, p.amount, p.channel_id, c.name channel FROM sale_payments p LEFT JOIN payment_channels c"
+            " ON c.id=p.channel_id AND c.org_id=p.org_id WHERE p.sale_id=? AND p.org_id=? ORDER BY p.rowid",
+            (sid, ctx.org_id))]
+        for payment in s["payments"]:
+            if payment["method"] != "transfer":
+                payment.pop("channel_id")
         if s["customer_id"]:
-            c = self.db.one("SELECT id, name, name_alt, phone, address1, credit_limit FROM customers WHERE id=?", (s["customer_id"],))
+            from .customers import CODE_SQL
+            c = self.db.one(f"SELECT c.id, c.name, c.name_alt, c.phone, c.address1, c.credit_limit, {CODE_SQL} estock_code"
+                            " FROM customers c WHERE c.id=?", (s["customer_id"],))
             s["customer"] = {**dict(c), "balance": self.balance(ctx, c["id"])}
+            if s["status"] == "completed" and s.get("on_credit"):
+                # U2-23: the balance before / after this invoice, printed only while nothing else moved his account
+                # since it (review P1: a reprint after a payment or a return would print wrong figures)
+                # this sale's own rows: its credit and the change kept as credit (both written at completion); any
+                # other row after it (a payment, a return, kept change given back) means his account moved (#423 P1)
+                own = "coalesce(ref_id,'')=? AND kind IN ('credit_sale','payment')"
+                later = self.db.one(f"SELECT 1 FROM customer_ledger WHERE org_id=? AND customer_id=? AND created_at>?"
+                                    f" AND NOT ({own}) LIMIT 1", (ctx.org_id, c["id"], s["completed_at"], sid))
+                if not later:
+                    mine = self.db.one(f"SELECT coalesce(sum(amount),0) a FROM customer_ledger WHERE org_id=? AND"
+                                       f" customer_id=? AND {own}", (ctx.org_id, c["id"], sid))["a"]
+                    s["customer"]["balance_before"] = s["customer"]["balance"] - mine
         if s.get("contract_id"):
             k = self.db.one("SELECT id, name, discount_local_bp, discount_imported_bp FROM contracts WHERE id=?", (s["contract_id"],))
             s["contract"] = dict(k) if k else None
@@ -725,7 +843,8 @@ class Sales:
     def complete(self, ctx: Context, sid: str, *, paid_cash: int = 0, paid_card: int = 0,
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
-                 confirm_below_cost: bool = False, payments: list[dict] | None = None) -> dict:
+                 confirm_below_cost: bool = False, payments: list[dict] | None = None,
+                 cost_reason: str | None = None, round_cash: bool = True, change_to_credit: int = 0) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -794,9 +913,41 @@ class Sales:
             raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
-        if paid_cash + paid_card + paid_transfer + on_credit != preview["total"]:
+        # U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded
+        from .rounding import nearest, step
+        cash_due = preview["total"] - paid_card - paid_transfer - on_credit
+        # an exchange settles exactly: a return is never rounded (owner 22/11)
+        rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and paid_cash > 0 and round_cash else 0
+        if cash_due + rounding <= 0:          # review P2: no cash part rounded away (a card a little short)
+            rounding = 0
+        if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
-                                   details={"total": preview["total"]})
+                                   details={"total": preview["total"], "cash_due": max(0, cash_due),
+                                            "rounding": rounding, "cash_required": max(0, cash_due) + rounding})
+        # «خليها رصيد للعميل» (U2-20 follow-up): the change the customer leaves, kept as his credit. The cash stays in
+        # the drawer and his account is credited, in the same transaction as the sale
+        if isinstance(change_to_credit, bool) or not isinstance(change_to_credit, int) or change_to_credit < 0:
+            raise ValidationFailed("الباقي غير صحيح")
+        if change_to_credit:
+            if not preview["customer_id"]:
+                raise ValidationFailed("الباقي يتساب رصيد لعميل متسجل بس: اختار العميل", code="customer_required")
+            if not paid_cash or delivery:
+                raise ValidationFailed("الباقي بيتساب رصيد من دفع نقدي في الصيدلية بس")
+            # a real person only (owner 22/11): not the pharmacy's own account (E-Stock customer 1) and not a
+            # contract customer (Hikma and the others), whose account is the contract's claim
+            who = self.db.one("SELECT c.name, c.notes, c.contract_id, o.name org FROM customers c JOIN organizations o"
+                              " ON o.id=c.org_id WHERE c.id=? AND c.org_id=?", (preview["customer_id"], ctx.org_id))
+            if who["contract_id"] or preview.get("contract_id"):
+                raise ValidationFailed("عميل التعاقد مايتسابلوش باقي رصيد: حسابه مطالبة التعاقد", code="keep_change_contract")
+            import re
+            if (who["name"] or "").strip() == (who["org"] or "").strip() or re.search(
+                    r"(^|؛ )كود إي ستوك: 1(؛|$)", who["notes"] or ""):
+                raise ValidationFailed("ده حساب الصيدلية نفسها: اختار العميل الحقيقي", code="keep_change_house")
+            # only real change (review P1, OWNER_RULES §13): less than the cash paid and at most 50 EGP. Anything more
+            # is an advance payment, which goes through the customer's account by the owner / a manager
+            if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
+                raise ValidationFailed(f"الباقي اللي يتساب رصيد لحد {egp(KEEP_CHANGE_MAX)} ج وأقل من المدفوع نقدي؛"
+                                       " أكتر من كده يبقى دفعة مقدمة من حساب العميل", code="keep_change_too_big")
         if on_credit:
             if not preview["customer_id"]:
                 raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")
@@ -826,7 +977,7 @@ class Sales:
                     raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
                                    details={"balance": bal, "limit": c["credit_limit"] if c else 0})
             total = subtotal = discount = 0
-            below_cost = []
+            below_cost, at_cost = [], []
             for l in preview["lines"]:
                 item = dict(self.db.one("SELECT * FROM items WHERE id=?", (l["item_id"],)))
                 plan = self._plan(ctx, s, l, item)          # re-plan inside the transaction
@@ -858,19 +1009,33 @@ class Sales:
                     if Decimal(net) < cost:
                         below_cost.append({"line_no": l["line_no"], "name": l["item"]["name"],
                                            "net": net, "cost": cost_piasters(cost)})
+                    elif Decimal(net) - cost < 1 and (l.get("discount_source") != "contract" or l["invoice_share"] > 0):
+                        # the pharmacy's own discount takes it to its cost exactly (U2-33); a contract alone is the
+                        # agreement, but an invoice discount on top of it is the pharmacy's (Codex P1 on #414)
+                        at_cost.append({"line_no": l["line_no"], "name": l["item"]["name"], "net": net})
                 self.db.execute("UPDATE sale_lines SET line_total=?, discount_amount=?, invoice_share=? WHERE id=?",
                                 (net, fixed_part, l["invoice_share"], l["id"]))
                 total += net
             if below_cost:
+                # U2-33, update 3 (owner: «امنعه أساساً»): refused for everyone, the owner included
+                raise Conflict("الخصم ينزل بالسعر عن التكلفة؛ البيع بخسارة ممنوع لأي حد. قلّل الخصم لحد سعر التكلفة",
+                               code="below_cost_refused",
+                               details={"lines": [{"line_no": b["line_no"], "name": b["name"]} for b in below_cost]})
+            cost_reason = str(cost_reason or "").strip()[:200] or None
+            if at_cost:
+                # down to cost only, by the owner or a manager, with a written reason (U2-33)
                 ctx.require("sales.below_cost")
-                if not confirm_below_cost:
-                    raise Conflict("الخصم ينزل بالسعر عن التكلفة — هذا البيع بخسارة", code="below_cost_confirm",
-                                   details={"lines": below_cost})
+                if not cost_reason or len(cost_reason) < 3:
+                    raise Conflict("الخصم بيوصّل الصنف لسعر التكلفة بالظبط: اكتب السبب", code="at_cost_reason",
+                                   details={"lines": [{"line_no": b["line_no"], "name": b["name"]} for b in at_cost]})
             total += s["delivery_fee"] or 0
             if total != preview["total"]:
                 raise Conflict("تغيّر السعر أثناء الإتمام، راجع الفاتورة", code="price_changed")
             no = self._next_no(ctx, s["branch_id"], "sale")
             if delivery:              # the courier carries the cash until he hands it in
+                # B2: a delivery paid by card / InstaPay / wallet / credit has cash_due 0: the goods are on the road
+                # (still 'out', so a return waits and the sale joins a shift when it is closed), but the courier hands
+                # in nothing; the screen lists it apart from the cash to hand in
                 shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
                 self.db.execute("UPDATE sale_deliveries SET status='out', cash_due=?, out_at=? WHERE sale_id=?",
                                 (paid_cash, _now(), sid))
@@ -887,9 +1052,9 @@ class Sales:
                     money.receive(self.db, ctx, p["method"], p.get("channel_id"), p["amount"], "sale",
                                   ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
             self.db.execute("UPDATE sales SET status='completed', sale_no=?, subtotal=?, discount_total=?,"
-                            " total=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
+                            " total=?, rounding=?, paid_cash=?, paid_card=?, paid_transfer=?, on_credit=?, completed_at=?,"
                             " complete_request_id=?, version=version+1 WHERE id=?",
-                            (no, subtotal, discount, total, paid_cash,
+                            (no, subtotal, discount, total, rounding, paid_cash,
                              paid_card, paid_transfer, on_credit, _now(), request_id, sid))
             if paid_transfer:   # a proof already reviewed on the draft counts now the transfer is on its account (#348)
                 from .attachments import transfer_state
@@ -899,10 +1064,18 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], on_credit, sid, ctx.user_id))
+            if change_to_credit:
+                cash.record(self.db, ctx, change_to_credit, "customer_payment", s["customer_id"],
+                            f"باقي فاتورة {no} اتساب رصيد للعميل", branch_id=s["branch_id"])
+                self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note,"
+                                " created_by) VALUES (?,?,?,?, 'payment', ?, ?, ?)",
+                                (new_id(), ctx.org_id, s["customer_id"], -change_to_credit, sid,
+                                 f"باقي فاتورة {no} اتساب رصيد", ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
-                         after={"no": no, "total": total, "cash": paid_cash, "card": paid_card,
+                         after={"no": no, "total": total, "rounding": rounding or None, "cash": paid_cash, "card": paid_card,
+                                "change_to_credit": change_to_credit or None,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
-                                "below_cost": below_cost or None})
+                                "at_cost": at_cost or None, "cost_reason": cost_reason if at_cost else None})
             from . import customers as _cust
             _cust.mark_refilled(self.db, sid)
             disc_lines = [l for l in preview["lines"] if (l["discount_bp"] or l["discount_amount"])
@@ -915,10 +1088,10 @@ class Sales:
                     names = "، ".join(x for x in (names, f"خصم على الفاتورة {egp(inv_disc)} ج") if x)
                 notify.emit(self.db, ctx, "discount", "warning",
                             f"خصم {egp(preview['discount_total'])} ج — فاتورة {no}", names, "sale", sid)
-            if below_cost:
-                notify.emit(self.db, ctx, "below_cost", "error", f"بيع تحت التكلفة — فاتورة {no}",
-                            "، ".join(f"{b['name']}: {egp(b['net'])} والتكلفة {egp(b['cost'])}"
-                                     for b in below_cost[:4]), "sale", sid)
+            if at_cost:
+                notify.emit(self.db, ctx, "below_cost", "warning", f"بيع بسعر التكلفة — فاتورة {no}",
+                            "، ".join(f"{b['name']}: {egp(b['net'])}" for b in at_cost[:4]) + f" — السبب: {cost_reason}",
+                            "sale", sid)
         return self.get(ctx, sid)
 
     def _reprice_contract(self, ctx: Context, sid: str) -> bool:
@@ -1108,13 +1281,14 @@ class Sales:
         """U2-33: per line, how much of the pharmacy's own discount goes under the cost (exact Decimal piasters, the
         rule payment uses). A line priced under cost with no discount loses nothing here (that is a price, not a
         discount); a contract's own discount is the customer's agreement and is left to payment. None = this
-        person may sell under cost (`sales.below_cost`, or the owner's approval), nothing to check."""
-        if ctx.allowed("sales.below_cost"):
-            return None
+        person may sell under cost (`sales.below_cost`, or the owner's approval), nothing to check.
+        Update 3 (owner: «امنعه أساساً»): nobody passes, the owner included; None is no longer returned."""
         draft = self.get(ctx, sid)
         out = {}
         for l in draft["lines"]:
-            disc = l["discount"] if l.get("discount_source") != "contract" else (l.get("invoice_share") or 0)
+            # update 3 (review P1): a contract's discount counts too, so it is refused when the customer or the item
+            # is added, not only at payment where nothing the cashier types could clear it
+            disc = l["discount"]
             if disc <= 0:
                 continue
             c = self.db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
@@ -1137,14 +1311,16 @@ class Sales:
             if loss <= (before.get(lid) or (0,))[0]:
                 continue
             name = l["item"]["name"]
-            msg = f"الخصم ده يخلّي {name} تحت التكلفة؛ مينفعش"
-            details = {"permission": "sales.below_cost", "label": f"خصم تحت التكلفة على {name}", "line_id": lid}
+            msg = (f"خصم التعاقد بينزّل {name} تحت التكلفة؛ ممنوع. بيعه من غير التعاقد أو شيل الصنف"
+                   if l.get("discount_source") == "contract" else
+                   f"الخصم ده يخلّي {name} تحت التكلفة؛ ممنوع لأي حد (أقصى حاجة سعر التكلفة)")
+            details = {"label": f"خصم تحت التكلفة على {name}", "line_id": lid}
             if ctx.can("costs.read"):
                 import math
                 most = max(0, disc - math.ceil(loss))          # the discount on this line that stays at cost
                 msg += f" (أقصى خصم على الصنف {egp(most)} ج)"
                 details["max_discount"] = most
-            raise Forbidden(msg, code="approval_required", details=details)
+            raise ValidationFailed(msg, code="below_cost", details=details)
 
     def _check_fixed_discounts(self, ctx: Context, sid: str, line_id: str | None) -> None:
         """A fixed discount is held to the same limit as a percent: its share of the line's price (and the invoice
@@ -1212,7 +1388,7 @@ class Sales:
         if status not in ("delivered", "settled"):
             raise ValidationFailed("الحالة غير صحيحة")
         with self.db.transaction():
-            d = self.db.one("SELECT d.*, s.status sale_status, s.branch_id, s.sale_no FROM sale_deliveries d"
+            d = self.db.one("SELECT d.*, s.status sale_status, s.branch_id, s.sale_no, s.shift_id FROM sale_deliveries d"
                             " JOIN sales s ON s.id=d.sale_id WHERE d.sale_id=? AND d.org_id=?", (sid, ctx.org_id))
             if not d or d["sale_status"] != "completed":
                 raise NotFound("فاتورة التوصيل غير موجودة")
@@ -1220,6 +1396,10 @@ class Sales:
             if d["status"] not in order or order.index(status) <= order.index(d["status"]):
                 raise Conflict("هذه الحالة سُجّلت من قبل", code="delivery_state")
             if status == "settled":
+                if not d["shift_id"]:
+                    # B2 review P1: a sale in no shift yet joins the open one; with none open (a 0-cash delivery
+                    # records nothing) its card / wallet / credit amount would belong to no shift ever
+                    cash.require_open_shift(self.db, ctx, d["branch_id"])
                 shift = cash.record(self.db, ctx, d["cash_due"], "sale", sid, f"تسليم مبلغ توصيل الفاتورة {d['sale_no']}",
                                     branch_id=d["branch_id"]) or cash.open_shift_id(self.db, ctx, d["branch_id"])
                 # completed while no shift was open: it belongs to the shift its cash came into (#324 M9)
@@ -1249,12 +1429,14 @@ class Sales:
 
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
-                     reason: str) -> dict:
+                     reason: str, give_back_change: bool = True, channel_id: str | None = None) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
-        if refund_method not in ("cash", "card", "credit"):
+        if refund_method not in ("cash", "card", "credit", "transfer"):
             raise ValidationFailed("طريقة الاسترداد غير صحيحة")
+        if channel_id is not None and (refund_method != "transfer" or not isinstance(channel_id, str)):
+            raise ValidationFailed("اختار قناة التحويل الأصلية")
         if len((reason or "").strip()) < 3:
             raise ValidationFailed("اكتب سبب المرتجع")
         if not isinstance(lines, dict) or not lines:      # a return of nothing is not a return
@@ -1338,7 +1520,23 @@ class Sales:
                     r = rest if not any(kept.values()) else max(0, min(r, rest))
                 line_refunds[line_id] = r
                 refund += r
-            if refund_method in ("cash", "card"):
+            # U2-14: the return that empties the invoice gives its rounding back (up or down), so the customer gets
+            # exactly what he paid in all and nobody gains by a return; a partial return is never rounded
+            # (review P1) with a rounding down, the lines are worth more than was paid: no return, alone or added up,
+            # may give back more than the invoice took for its items (total - delivery fee); the emptying one settles
+            # exactly what is left of it
+            rounding_back = 0
+            if s["rounding"]:
+                # the invoice took for its items: the exact total plus its cash rounding, less the delivery fee
+                paid_back = self.db.one("SELECT coalesce(sum(total),0) t FROM sale_returns WHERE sale_id=? AND org_id=?",
+                                        (sid, ctx.org_id))["t"]
+                left = max(0, s["total"] + s["rounding"] - (s["delivery_fee"] or 0) - paid_back)
+                emptied = not self.db.one(
+                    "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id))
+                new = left if emptied else min(refund, left)
+                rounding_back, refund = new - refund, new
+            if refund_method in ("cash", "card", "transfer"):
                 # a refund to the card follows the same cap: money never received cannot go back to a card either
                 # #142 (owner's rule, 11/11): cash can be paid back only for money the shop actually received
                 # on this sale (cash, card or transfer; a courier's cash only once it was handed in), minus what
@@ -1349,24 +1547,50 @@ class Sales:
                 # a transfer the owner or a manager marked "not received" is money the shop never got: it funds no
                 # refund, in cash or to a card (#324 M2-01)
                 # ... and only the part confirmed when a reviewer approved part of it (#324 M2-01)
-                unreceived = False
+                unreceived, verified = False, 0
                 if s["paid_transfer"]:
                     from .attachments import transfer_state
-                    got = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["received"]
+                    state = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])
+                    got, verified = state["received"], state["verified"]
                     unreceived = got < s["paid_transfer"]
                     received -= s["paid_transfer"] - got
                 done = {r["refund_method"]: r["t"] for r in self.db.all(
                     "SELECT refund_method, coalesce(sum(total), 0) t FROM sale_returns WHERE sale_id=? AND org_id=?"
-                    " AND refund_method IN ('cash', 'card') GROUP BY refund_method", (sid, ctx.org_id))}
-                refunded = done.get("cash", 0) + done.get("card", 0)
+                    " AND refund_method IN ('cash', 'card', 'transfer') GROUP BY refund_method", (sid, ctx.org_id))}
+                refunded = sum(done.values())
                 can = max(0, received - refunded)
                 # U2-0 (owner 21/11): a refund goes back by the way the money came in, never above what that way
                 # brought on this invoice. Back to a card / wallet: only money that came by card or transfer.
                 # Cash for an invoice paid by card is a rare real exception: owner or manager, with the reason.
                 by_cash = (s["paid_cash"] or 0) - done.get("cash", 0)
-                by_card = received - (s["paid_cash"] or 0) - done.get("card", 0)
+                by_card = (s["paid_card"] or 0) - done.get("card", 0)
+                if refund_method == "transfer":
+                    channels = {p["channel_id"]: p["amount"] for p in self.db.all(
+                        "SELECT channel_id, sum(amount) amount FROM sale_payments"
+                        " WHERE org_id=? AND sale_id=? AND method='transfer' GROUP BY channel_id",
+                        (ctx.org_id, sid))}
+                    if channel_id is None and len(channels) == 1:
+                        channel_id = next(iter(channels))
+                    if channel_id not in channels:
+                        raise Conflict("اختار المحفظة اللي اتدفعت بيها الفاتورة", code="refund_wallet_channel")
+                    previous = self.db.one(
+                        "SELECT coalesce(sum(total),0) amount FROM sale_returns WHERE org_id=? AND sale_id=?"
+                        " AND refund_method='transfer' AND channel_id IS ?", (ctx.org_id, sid, channel_id))["amount"]
+                    # A review can confirm a partial transfer without identifying its channel. Reserve the
+                    # whole shortfall against the chosen channel so we never refund unverified money.
+                    short = (s["paid_transfer"] or 0) - verified
+                    # Historical card refunds could leave from the wallet regardless of the amount charged to the card.
+                    from ..finance import money
+                    legacy = money.legacy_wallet_refund_reserve(self.db, ctx, sid)
+                    # Cash paid out with an approval can also have used wallet money after exhausting cash.
+                    cash_other = max(0, done.get("cash", 0) - (s["paid_cash"] or 0))
+                    room = max(0, min(can, channels[channel_id] - previous - short - legacy - cash_other,
+                                      verified - done.get("transfer", 0) - legacy - cash_other))
+                    if refund > room:
+                        raise Conflict(f"المبلغ المتاح للرد للمحفظة الأصلية {egp(room)} ج",
+                                       code="refund_exceeds_method", details={"max_transfer": room, "refund": refund})
                 if refund_method == "card" and max(0, by_card) < refund <= can:
-                    raise Conflict(f"الفاتورة دي ما اتدفعتش بالبطاقة أو التحويل بالمبلغ ده، فمينفعش يترد عليها"
+                    raise Conflict(f"الفاتورة دي ما اتدفعتش بالبطاقة بالمبلغ ده، فمينفعش يترد عليها"
                                    f" (الحد الأقصى {egp(max(0, min(by_card, can)))} ج)",
                                    code="refund_exceeds_method", details={"max_card": max(0, min(by_card, can)), "refund": refund})
                 # also inside an exchange: the replacement would record this money as cash-paid, and its own return
@@ -1386,10 +1610,13 @@ class Sales:
             rid = new_id()
             # created_at by the same clock and format as the shift times: the shift report places card and
             # credit refunds by them (Codex P2 on #323; the table default has milliseconds only)
-            self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, refund_method, reason,"
-                            " created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                            (rid, ctx.org_id, sid, refund, refund_method, reason.strip(), ctx.user_id, _now()))
-            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund, sid))
+            self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
+                            " created_by, created_at, channel_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (rid, ctx.org_id, sid, refund, rounding_back, refund_method, reason.strip(), ctx.user_id,
+                             _now(), channel_id))
+            # review P1: the sale's returns are line values (sales and profit stay exact); the money paid back,
+            # with its rounding, is the return's own total and moves the drawer / card / account
+            self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund - rounding_back, sid))
             if refund_method == "credit":
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'return', ?, ?)",
@@ -1400,16 +1627,32 @@ class Sales:
                 # back through the card / wallet the sale was paid with (the first one, if it was split)
                 from ..finance import money
                 money.reverse_sale(self.db, ctx, sid, refund, ref_type="sale_return", note=f"مرتجع فاتورة {s['sale_no']}",
-                                   meta={"return_id": rid})
+                                   meta={"return_id": rid, "method": "card"}, card_only=True)
+            wallet_account = None
+            if refund_method == "transfer" and refund:
+                wallet_account = money.refund_wallet(self.db, ctx, sid, channel_id, refund, return_id=rid,
+                                                    note=f"مرتجع فاتورة {s['sale_no']}")
+            # the return that empties the invoice also gives back in cash the change he left as credit (owner 22/11);
+            # refunded to his account or his card, that change is already his credit and stays
+            # in cash only (review P2): a card refund never needs the drawer or an open shift; his change stays credit
+            change_back = 0
+            if give_back_change and refund_method == "cash" and not self.db.one(
+                    "SELECT 1 FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id WHERE l.sale_id=?"
+                    " AND l.org_id=? AND a.qty_base > a.returned_qty LIMIT 1", (sid, ctx.org_id)):
+                change_back = self._give_back_kept_change(
+                    ctx, s, f"مرتجع فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي", kind="return")
             audit.record(self.db, ctx, "sale.return", "sale", sid,
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
-                                "line_refunds": line_refunds})
+                                "line_refunds": line_refunds, "rounding": rounding_back or None,
+                                **({"channel_id": channel_id, "wallet_account_id": wallet_account} if refund_method == "transfer" else {}),
+                                **({"card_only": True} if refund_method == "card" else {})})
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
                         if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
-        return {"return_id": rid, "refund": refund}
+        # Codex P1: the kept change paid back with it, shown to the cashier on its own (not goods value)
+        return {"return_id": rid, "refund": refund, "change_back": change_back}
 
     def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:
         """Completed sales to return from, by invoice number, item code or barcode, or customer phone or name
@@ -1470,7 +1713,8 @@ class Sales:
             pass
         try:
             with self.db.transaction():
-                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع")
+                r = self.return_items(ctx, sid, lines, refund_method=refund_method, reason="معاينة المرتجع",
+                                      give_back_change=False)
                 raise _Undo(r["refund"] if new_sid is None else (r["refund"], self.get(ctx, new_sid)["total"]))
         except _Undo as u:
             return u.args[0]
@@ -1478,7 +1722,8 @@ class Sales:
     def exchange(self, ctx: Context, sid: str, lines: dict[str, int], new_sid: str, *, refund_method: str,
                  pay_method: str = "cash", reason: str, channel_id: str | None = None, version: int | None = None,
                  request_id: str | None = None, safety_decisions: dict[int, str] | None = None,
-                 confirm_below_cost: bool = False, expected_new_total: int | None = None) -> dict:
+                 confirm_below_cost: bool = False, expected_new_total: int | None = None,
+                 cost_reason: str | None = None) -> dict:
         """A sale return and its replacement sale as ONE operation (one transaction: both or neither).
 
         The returned value R follows every rule of `return_items` (window, who sold it, no-return sections, the
@@ -1543,7 +1788,8 @@ class Sales:
             if orig["customer_id"] and not new["customer_id"]:      # the replacement belongs to the same customer
                 self.db.execute("UPDATE sales SET customer_id=? WHERE id=? AND org_id=?",
                                 (orig["customer_id"], new_sid, ctx.org_id))
-            ret = self.return_items(ctx, sid, lines, refund_method=refund_method,
+            # an exchange never pays out the kept change: it stays his credit (Codex P1 on #424)
+            ret = self.return_items(ctx, sid, lines, refund_method=refund_method, give_back_change=False,
                                     reason=f"استبدال: {(reason or '').strip()}" if len((reason or "").strip()) >= 3 else reason)
             r_value = ret["refund"]
             n_total = self.get(ctx, new_sid)["total"]
@@ -1559,7 +1805,8 @@ class Sales:
             if refund_method == "card" and pay_method == "card" and len(payments) == 2:
                 payments = [{"method": "card", "amount": n_total, "channel_id": channel_id}]
             sale = self.complete(ctx, new_sid, payments=payments, version=version, request_id=request_id,
-                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost)
+                                 safety_decisions=safety_decisions, confirm_below_cost=confirm_below_cost,
+                                 cost_reason=cost_reason, round_cash=False)
             out = {"return_id": ret["return_id"], "original_sale_id": sid, "sale_id": new_sid,
                    "returned": r_value, "new_total": n_total, "net": n_total - r_value,
                    "refund_method": refund_method, "pay_method": pay_method,
@@ -1569,8 +1816,8 @@ class Sales:
 
     def return_receipt(self, ctx: Context, rid: str) -> dict:
         """One return with its items, for the printed return slip."""
-        r = self.db.one("SELECT r.*, u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
-                        " WHERE r.id=? AND r.org_id=?", (rid, ctx.org_id))
+        r = self.db.one("SELECT r.*, u.full_name by_name, c.name channel FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
+                        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id WHERE r.id=? AND r.org_id=?", (rid, ctx.org_id))
         if not r:
             raise NotFound("المرتجع غير موجود")
         sale = self.get(ctx, r["sale_id"])
@@ -1624,12 +1871,39 @@ class Sales:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
+            change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
                         f"السبب: {reason.strip()}", "sale", sid)
-        return self.get(ctx, sid)
+        # Codex P1: the kept change paid back with the void, shown to the cashier on its own
+        return {**self.get(ctx, sid), "change_back": change_back}
+
+    def kept_change(self, ctx: Context, sid: str) -> int:
+        """The change of this sale left as the customer's credit and not yet given back (0 if none)."""
+        # from the sale's own audit rows (append-only): what completion kept, less what was given back
+        r = self.db.one("SELECT coalesce(sum(CASE action WHEN 'sale.complete' THEN json_extract(after_json,'$.change_to_credit')"
+                        " ELSE -json_extract(after_json,'$.amount') END),0) k FROM audit_log WHERE org_id=?"
+                        " AND entity_type='sale' AND entity_id=? AND action IN ('sale.complete','sale.kept_change_back')",
+                        (ctx.org_id, sid))
+        return int(r["k"] or 0)
+
+    def _give_back_kept_change(self, ctx: Context, s, note: str, kind: str = "void") -> int:
+        """Inside the caller's transaction: the kept change of sale `s` leaves the drawer in cash and his credit
+        goes with it (owner 22/11: a void, or the return that empties the invoice, reverses it)."""
+        kept = self.kept_change(ctx, s["id"]) if s["customer_id"] else 0
+        # review P1: only the credit he still holds goes back; what he already spent at a later sale stays spent
+        # (else he would have it twice: the goods and the cash)
+        kept = min(kept, max(0, -self.balance(ctx, s["customer_id"]))) if kept > 0 else 0
+        if kept <= 0:
+            return 0
+        cash.record(self.db, ctx, -kept, "void" if kind == "void" else "refund", s["id"], note, branch_id=s["branch_id"])
+        self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id, note, created_by)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (new_id(), ctx.org_id, s["customer_id"], kept, kind, s["id"], note, ctx.user_id))
+        audit.record(self.db, ctx, "sale.kept_change_back", "sale", s["id"], after={"amount": kept, "note": note})
+        return kept
 
     # ------------------------------------------------------------ reports
     def list_sales(self, ctx: Context, *, day: str | None = None, sale_no: int | None = None,

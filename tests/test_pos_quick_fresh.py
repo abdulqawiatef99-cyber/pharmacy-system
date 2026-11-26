@@ -48,7 +48,7 @@ const { chromium } = require('playwright');
 class QuickListWiring(__import__("unittest").TestCase):
     def test_the_sale_screen_reads_the_quick_list_again_on_every_visit(self):
         js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
-        start = js.index("async function viewPos() {")
+        start = js.index("async function viewPos(afterCheckout = false) {")
         self.assertIn("QUICK = null;", js[start:start + 300])
 
 

@@ -9,6 +9,8 @@ Movement class from the last 90 days (counted in sale invoices, so twenty units 
 - slow (بطيء)   : 1 to 3
 - dead (راكد)   : none
 Imported monthly history (consumption_history, no invoice count) counts one event per whole pack sold.
+U4-1: the E-Stock sales archive counts too (demand.py): before the program's first sale only, returns netted,
+one event per invoice; the manual monthly upload is then used only for days the archive does not cover.
 
 Default view: fast / medium items that need ordering, plus any item someone marked short («مسجل ناقصًا», the
 customers' requests) whose stock is empty. Slow and dead items show only when a customer asked; the rest is one
@@ -81,6 +83,8 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
     o, b = ctx.org_id, ctx.branch_id
     start = (today - timedelta(days=window_days)).isoformat()
     d = p._all_items(ctx, window_days)
+    from . import demand
+    arch, arch_from = demand.archive_window(db, ctx, f"{start}T00:00:00")
     events = {r["item_id"]: int(r["n"]) for r in db.all(
         "WITH w AS MATERIALIZED (SELECT item_id, ref_id FROM stock_movements WHERE org_id=? AND +branch_id=?"
         " AND movement_type='sale' AND created_at >= ?)"
@@ -98,7 +102,8 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
     per_sup: dict[tuple, bool] = {}
     for r in db.all(
             "SELECT l.item_id, p.supplier_id, coalesce(p.invoice_date, substr(p.approved_at,1,10)) day, p.approved_at,"
-            " l.qty, l.bonus_qty, l.public_price, l.discount_bp, l.unit_net_price FROM purchase_invoice_lines l"
+            " l.qty, l.bonus_qty, l.public_price, l.discount_bp,"
+            " l.unit_net_price + l.distributor_margin unit_net_price FROM purchase_invoice_lines l"
             " JOIN purchase_invoices p ON p.id=l.invoice_id WHERE p.org_id=? AND p.branch_id=? AND p.status='approved'"
             " AND l.item_id IS NOT NULL AND l.qty>0 AND p.approved_at>=? ORDER BY p.approved_at DESC, l.line_no",
             (o, b, since)):
@@ -126,11 +131,14 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
                      " WHERE i.org_id=? AND i.status='active' AND i.is_service=0", (o,)):
         iid, pack = it["id"], max(int(it["pack_size"] or 1), 1)
         periods = d["periods"].get(iid, [])
-        u = p._usage_of(d["sold"].get(iid, 0), periods, window_days)
+        if arch_from:                    # the archive covers these days: never the manual upload as well
+            periods = [x for x in periods if str(x["period_end"]) < arch_from]
+        a_units, a_events = arch.get(iid, (0, 0))
+        u = p._usage_of(d["sold"].get(iid, 0) + a_units, periods, window_days)
         total, expired = d["stock"].get(iid, (0, 0))
         on_hand, on_order = total - expired, d["on_order"].get(iid, 0)
         # imported months carry no invoice count: one event per pack sold inside the window (a strip counts)
-        ev = events.get(iid, 0) + (math.ceil(u["history_qty"] / pack) if u["history_qty"] > 0 else 0)
+        ev = events.get(iid, 0) + a_events + (math.ceil(u["history_qty"] / pack) if u["history_qty"] > 0 else 0)
         cls = movement_class(ev)
         asked = bool(it["shortage_at"])
         daily = u["daily"]
@@ -162,6 +170,8 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
         if daily > 0:
             reasons.append(f"بيع {ev} مرة في {window_days} يوم، حوالي {daily:.2f} وحدة في اليوم")
             reasons.append(f"الرصيد {on_hand} يكفي {days_left:.0f} يوم" if on_hand > 0 else "الرصيد صفر")
+        if a_events:
+            reasons.append(f"منها {a_events} فاتورة من أرشيف إي ستوك")
         if asked:
             reasons.append("مسجل ناقصًا (طلبه عميل)")
         if on_order:
@@ -194,7 +204,7 @@ def smart_order(db: Database, ctx: Context, *, today: date | None = None, scope:
     used = sorted({(r["best"] or r["last"] or {}).get("supplier_id") for r in rows} - {None},
                   key=lambda s: sups[s]["name"] if s in sups else "")
     return {"rows": rows, "counts": counts, "suppliers": [{"id": s, "name": sups[s]["name"]} for s in used if s in sups],
-            "expensive_from": expensive_from, "window_days": window_days}
+            "expensive_from": expensive_from, "window_days": window_days, "estock_archive": bool(arch_from)}
 
 
 def order_xlsx(db: Database, ctx: Context, groups: list) -> bytes:

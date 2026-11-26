@@ -48,7 +48,7 @@ PERMISSIONS: dict[str, str] = {
     "sales.read": "فتح فواتير البيع",
     "sales.create": "البيع (البائع)",
     "sales.totals": "عرض إجمالي المبيعات وفواتير كل الموظفين",
-    "sales.below_cost": "بيع تحت سعر التكلفة",
+    "sales.below_cost": "خصم يوصّل الصنف لسعر التكلفة بالظبط (بسبب مكتوب؛ تحت التكلفة ممنوع لأي حد)",
     "sales.void": "إلغاء فاتورة بيع",
     "sales.return": "مرتجع فاتورة باعها بنفسه",
     "sales.return_others": "مرتجع فاتورة باعها شخص آخر",
@@ -98,15 +98,20 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str], int]] = {
         "items.write", "items.price", "items.hidden", "suppliers.write", "suppliers.pay", "suppliers.pay_advance", "purchases.approve", "inventory.adjust",
         "sales.totals", "customers.manage", "cash.see_expected", "cash.manage", "notifications.read",
         "audit.read", "safety.override", "expenses.approve", "balances.correct", "users.permissions",
-        "sales.refund_other_method"], 0),
+        "sales.refund_other_method", "sales.below_cost"], 0),
     "pharmacist": ("صيدلي", _EMPLOYEE + [
         "items.write", "purchases.approve", "customers.manage", "safety.override"], 0),
     "assistant": ("مساعد", list(_EMPLOYEE), 0),
 }
 ROLE_ORDER = ["owner", "manager", "pharmacist", "assistant"]
 APPROVER_ROLES = ("owner", "manager")
+PIN_LOGIN_ROLES = ("assistant", "pharmacist")
+PIN_SESSION_PERMISSIONS = frozenset({
+    "items.read", "inventory.read", "safety.read", "sales.read", "sales.create", "sales.return", "cash.close",
+})
+PASSWORD_SESSION_PERMISSIONS = frozenset({"settings.manage", "users.manage", "users.permissions", "payroll.manage"})
 # bump when DEFAULT_ROLES changes: system roles of existing pharmacies are re-synced once
-ROLES_VERSION = "2026-11-22a"
+ROLES_VERSION = "2026-11-22b"
 
 
 @dataclass(frozen=True)
@@ -123,6 +128,7 @@ class Context:
     approver_id: str | None = None
     approver_permissions: frozenset[str] = field(default_factory=frozenset)
     approver_discount_bp: int = 0
+    auth_method: str = "password"
 
     @property
     def is_owner(self) -> bool:

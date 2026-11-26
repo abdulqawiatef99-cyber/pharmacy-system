@@ -1,8 +1,8 @@
 """Ed25519 signature of a smart-update manifest (docs/SMART_UPDATE.md §2).
 
-The trust root is the set of public keys inside the ACTIVE (already verified) release, never the keys of
-the downloaded one. A new key reaches the PC inside a release signed by an old key. `cryptography` is
-already part of the installed packages (requirements.txt), so nothing new ships.
+The trust root is the public key set in the installer-owned program directory.
+Key rotation requires updating that installation. Cryptography is part of the
+installed package set.
 """
 from __future__ import annotations
 

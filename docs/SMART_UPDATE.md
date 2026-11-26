@@ -1,27 +1,31 @@
 # Smart update — design (protocol 1 state, bootstrap 2)
 
-Goal: after **one** more installer, every change (code, database migrations, Python packages, the
-updater itself) reaches the pharmacy PC through the in-app «تحديث» button, safely.
-Rules kept: the live database is never migrated in place; any failure leaves the old code and the old
-database untouched; data and settings in the data folder survive; every step is audited.
+The deployed bootstrap-2 launcher applies code, schema, package and updater changes through the
+in-app «تحديث» button. Candidate migrations run on a copy of the database. The launcher keeps its
+existing health-supervised rollback.
 
 ## 1. Two stages
-| | Stage 0 (frozen) | Stage 1 (updatable) |
-|---|---|---|
-| Files | installed `launcher.py` + `release_bootstrap.py` (stdlib only) | everything in a release: `manage.py update …`, `app/core/smart_update.py`, `app/core/update_sign.py`, `app/core/updater.py` |
-| Changes by | installer only | the «تحديث» button |
-| Does | select the verified release pointer; run the prepared *apply* step once; swap files from a hash-checked journal; supervise the first start; on failure undo the swap and the pointer | download, verify signature and hashes, stage code and packages, rehearse, apply on a copy, decide when |
 
-Stage 0 is deliberately small and generic (file swaps from a journal, health check, rollback), so a
-future change to the update logic lives in stage 1 and ships by the button. A new updater is checked
-before it is selected: the candidate's own `update --self-check` (keys load, signature verify, deps
-path) must pass. Recovery never depends on stage 1: stage 0 can always undo, and the installer
-remains the last resort. Stage 0 tells the program it starts what it can apply: `PHARM_BOOTSTRAP=2` in
-the server's environment; stage 1 refuses every smart batch when that capability is missing (old
-launcher: installer first; the button keeps today's code-only path there). Under a launcher only the
-environment counts: `code-releases/bootstrap.json` (also written by stage 0) outlives the launcher when
-an older installer is put back, and that launcher never applies a batch, so exit 75 would only restart
-the program again and again (second review). The file is read only by commands run by hand.
+| | Stage 0 (installed) | Stage 1 (updated through the button) |
+| --- | --- | --- |
+| Files | `launcher.py` and `release_bootstrap.py` from the last installer | `manage.py`, `app/core/smart_update.py`, and the rest of the release |
+| Tasks | Run the prepared apply command, swap files using the journal, supervise actual first start and recover on failure | Authenticate bundles, stage and rehearse, recheck code and packages at apply and startup |
+
+The currently deployed updater on `b433c31` accepts the existing signed outer manifest and checks
+the code ZIP before staging. It does not persist that manifest. Each new bundle therefore also
+contains a signed startup proof. It authenticates the staged file tree, release identity, channel,
+and package archive digest. The first hardened release checks this proof at startup using the public
+keys in the installed program root exported by bootstrap 2. It needs neither another download nor an
+installer change. Subsequent preparations retain the signed outer manifest for verification before apply
+and at startup.
+
+Bootstrap 2 still checks its original local checksums before handing off to the selected entry point.
+The signed check runs in that entry point before it loads application packages or opens the database.
+Protection against direct writes to the installed files or staged verifier remains an operating-system
+boundary (SEC-08). Previously installed local emergency tools keep their existing recovery behavior.
+
+The deployed launcher supplies `PHARM_BOOTSTRAP=2`. A candidate runs its self-tests with isolated
+data first. Stage 0 continues to supervise startup and restore the old database and code on failure.
 The state file `active-release.json` keeps format 1 (installed launchers keep reading it);
 `release_protocol.json` stays `{"protocol": 1}` (today's installed updater requires it).
 
@@ -34,9 +38,9 @@ On a push to `main` or `develop`, CI publishes release `update-<channel>` with:
 - `manifest.json` — `{format, channel, sha, commit_time, version, python, platform, code:{sha256,size},
   deps:{id,sha256,size}, migrations:[…]}` and `manifest.sig` (Ed25519, base64).
 Signing key: repository secret `UPDATE_SIGNING_KEY`; public keys in `release_keys/*.pub`. No secret →
-CI publishes nothing (fail closed). Trust root = the keys in the **active** release, never the
-downloaded one; a new key ships inside a release signed by the old key. The secret reaches only the two
-steps that read it. The build log names the committed key that verified the signature (`update-2.pub`
+CI fails the bundle build and publishes nothing. The trust root is the key set in the installed
+program directory. The trust root uses the keys already deployed in that directory. The secret reaches
+only the steps that sign or verify the build. The build log names the committed key that verified the signature (`update-2.pub`
 since 21/11; the next spare, `update-3.pub`, stays offline for rotation and must never be the one signing).
 **Dry run:** a PR labelled `ci` that touches the signing path (this workflow, `scripts/release/`,
 `release_keys/`, `update_sign.py`, `smart_update.py`, `requirements.txt`), or a manual run on a work
@@ -84,12 +88,14 @@ then it is offered nothing. The first update from `main` records `ref = main`, s
    --quick` and `update --self-check` on temporary data; **rehearsal**: online snapshot of the live DB
    (SQLite backup API, read only) → candidate code migrates the snapshot → integrity, foreign keys,
    stock balances, audit chain, row counts, app start + `/api/health`. Result: `prepared.json`.
-   No network needed after this point.
+   No network is needed after this point. Keep the cached signed assets and the proof in
+   `code-releases/proofs/` for application, restart and compatible rollback.
 3. **Choose**: «حدّث دلوقتي» or «حدّث بعد قفل الوردية». Recorded in `apply-request.json` and audited.
 4. **Trigger** (server, every 30 s): never during a sale — no write in the last 60 s, no draft sale with
    lines from the last 30 min; «بعد القفل» also waits until no shift is open. The last check runs while
    holding the database write lock and with no HTTP request in flight; then `apply-go.json`, exit 75.
-5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min). Code-only batch: verified backup,
+5. **Apply** (stage 0 runs stage 1 once, program stopped, max 30 min). Reverify the publisher proof
+   and exact staged files. Code-only batch: verified backup,
    select the pointer (pending), done. Database batch: verified backup of the live DB →
    copy (backup API) to `data/update-candidate/pharmacy.db` → candidate code migrates **the copy** and
    runs the same checks as the rehearsal → journal `update-journal.json` (`ready`: live, candidate,
@@ -116,8 +122,10 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
 ## 4. Limits (known, accepted)
 - After a **confirmed** start, going back means restoring the pre-update backup (later sales lost) or
   a fix forward. Automatic rollback covers "the new version does not start".
-- A new Python version or a changed launcher still needs an installer (manifest `python`, bootstrap).
+- The signed update path keeps the deployed Python and launcher protocol.
 - `pywin32` loads DLLs from the installed set at interpreter start; a pywin32 upgrade is caught by the
   candidate selftest (import check) and then needs an installer.
-- Until the owner adds the signing secret, the button keeps today's code-only path (zipball,
-  migrations and requirements refused).
+- Production releases use signed bundles. The transition retires the branch and raw ZIP paths.
+  The Windows installer workflow is manual and publishes review builds only.
+- The installer records its commit time. A healthy signed update raises the per-channel version floor,
+  which also applies to offline updates and survives a compatible rollback.

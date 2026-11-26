@@ -4,16 +4,13 @@ PC and for approving an action on someone else's screen."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 from ..db import Database, new_id
 from . import accounts, audit, security
 from .errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
 from .numbers import whole_number
-from .permissions import (APPROVER_ROLES, DEFAULT_ROLES, GROUPS, PERMISSIONS, ROLE_ORDER, Context)
+from .permissions import (APPROVER_ROLES, DEFAULT_ROLES, GROUPS, PERMISSIONS, PIN_LOGIN_ROLES, ROLE_ORDER, Context)
 
-MAX_PIN_FAILS = 5
-PIN_LOCKOUT = timedelta(minutes=15)
 WEAK_PINS = {"1234", "12345", "123456", "4321", "54321", "654321", "1212", "2580", "0852"}
 
 
@@ -44,54 +41,50 @@ def set_pin(db: Database, ctx: Context, user_id: str, pin: str) -> None:
     with db.transaction():
         db.execute("UPDATE users SET pin_hash=?, pin_failed=0, pin_locked_until=NULL WHERE id=?",
                    (security.hash_password(pin), user_id))
+        db.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND auth_method='pin' AND revoked_at IS NULL",
+                   (accounts.iso(accounts.utcnow()), user_id))
         audit.record(db, ctx, "user.pin_set", "user", user_id)
 
 
 def verify_pin(db: Database, user_id: str, pin: str, *, org_id: str) -> dict:
-    """Raises on a wrong PIN; 5 wrong tries lock the PIN for 15 minutes."""
+    """Verify the staff PIN without changing its availability to other callers."""
     u = db.one("SELECT u.* FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
                " WHERE u.id=? AND u.is_active=1 AND m.is_active=1", (org_id, user_id))
     generic = Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
     if u is None or not u["pin_hash"]:
         security.dummy_verify(str(pin))
         raise generic
-    now = accounts.utcnow()
-    if u["pin_locked_until"] and accounts.parse_iso(u["pin_locked_until"]) > now:
-        raise Unauthorized("أُوقف الرقم السري مؤقتًا بسبب محاولات خاطئة، انتظر ربع ساعة", code="pin_locked")
     if not security.verify_password(str(pin), u["pin_hash"]):
         with db.transaction():
-            failed = u["pin_failed"] + 1
-            locked = accounts.iso(now + PIN_LOCKOUT) if failed >= MAX_PIN_FAILS else None
-            db.execute("UPDATE users SET pin_failed=?, pin_locked_until=? WHERE id=?",
-                       (0 if locked else failed, locked, user_id))
-            audit.record(db, None, "auth.pin_failed", "user", user_id, after={"locked": bool(locked)},
-                         org_id=org_id, user_id=user_id)
+            audit.record(db, None, "auth.pin_failed", "user", user_id, org_id=org_id)
         raise generic
-    if u["pin_failed"]:
-        with db.transaction():
-            db.execute("UPDATE users SET pin_failed=0 WHERE id=?", (user_id,))
     return dict(u)
 
 
 def pin_login(db: Database, org_id: str, user_id: str, pin: str, *, ip: str | None = None,
               user_agent: str | None = None) -> dict:
-    verify_pin(db, user_id, pin, org_id=org_id)
-    org = db.one("SELECT status FROM organizations WHERE id=?", (org_id,))
-    if not org or org["status"] != "active":
-        raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
+    user = verify_pin(db, user_id, pin, org_id=org_id)
     with db.transaction():
-        return accounts._new_session(db, user_id, org_id, ip, user_agent, "auth.pin_login")
+        eligible = db.one(
+            "SELECT 1 FROM users u JOIN memberships m ON m.user_id=u.id JOIN roles r ON r.id=m.role_id"
+            " JOIN organizations o ON o.id=m.org_id WHERE o.id=? AND u.id=? AND u.pin_hash=?"
+            " AND o.status='active' AND u.is_active=1 AND m.is_active=1 AND r.code IN (?,?)",
+            (org_id, user_id, user["pin_hash"], *PIN_LOGIN_ROLES))
+        if not eligible:
+            raise Unauthorized("الرقم السري غير صحيح", code="invalid_pin")
+        return accounts._new_session(db, user_id, org_id, ip, user_agent, "auth.pin_login", auth_method="pin")
 
 
 def quick_users(db: Database) -> list[dict]:
-    """Names shown on the quick-login screen of the pharmacy PC (single pharmacy only)."""
+    """Quick sign-in accounts on a single-pharmacy installation."""
     orgs = db.all("SELECT id FROM organizations WHERE status='active'")
     if len(orgs) != 1:
         return []
     return [dict(r) for r in db.all(
-        "SELECT u.id, u.full_name, ? org_id FROM users u JOIN memberships m ON m.user_id=u.id"
+        "SELECT u.id, u.full_name, m.org_id FROM users u JOIN memberships m ON m.user_id=u.id"
+        " JOIN roles r ON r.id=m.role_id"
         " WHERE m.org_id=? AND m.is_active=1 AND u.is_active=1 AND u.pin_hash IS NOT NULL"
-        " ORDER BY u.full_name", (orgs[0]["id"], orgs[0]["id"]))]
+        " AND r.code IN (?,?) ORDER BY u.full_name", (orgs[0]["id"], *PIN_LOGIN_ROLES))]
 
 
 def approvers(db: Database, ctx: Context) -> list[dict]:
