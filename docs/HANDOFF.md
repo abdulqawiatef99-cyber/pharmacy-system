@@ -4,6 +4,34 @@ Rules: `docs/OWNER_RULES.md` (wins), `AGENTS.md`. Gates and percentage: `docs/ST
 acceptance evidence). Log up to 23/11: `docs/archive/HANDOFF-2026-11.md`. Only the session that claimed this
 file on #113 edits it; other sessions log on #113.
 
+## Afternoon and evening 26/11 — FX-D, UX-26, FX-E (newest line last)
+Merged into `develop` after release 6 (`5500cd8`), each with a failing test first, the full local suite, a
+fresh-context agent review, linux green (windows where it runs) and Codex clean on the merged code:
+- #477 `7e53d40`: every import-run entry point (analyze, read, decide, apply, cancel) needs the kind's
+  permission (#461 P2, #324 S7).
+- #476 `a73d780`: restore swaps the database and its E-Stock archive as one set; a cut restore is settled
+  before the database is next opened (#461 P1).
+- #481 `6dced6e`: the items import asks for the pack layout of a counted item (`pack:N` / whole box / link /
+  skip) instead of guessing whole box; only the E-Stock move may defer it (#461 QA-007).
+- #479 `53c7846`: invoices report totals of every match, cursor pages, Excel with every invoice (#461 P2).
+- #480 `421d094`: update space check per disk (backups, TEMP, data, database folder) when scheduling,
+  before the stop and in apply (#461 P2).
+- UX-26: #478 `d45d783` (sale words, scan with no full box adds a unit, English names left to right),
+  #482 `19b6a39` (English names in capitals, keyboard follows the field), #484 `9cf20c6` (receipt options:
+  item / invoice discount, rounding line, bigger customer details).
+- FX-E: #483 `5e9cb56` (item search at catalog scale, QA-012), #485 `cb2bdff`
+  (`POST /api/system/keyboard-layout`; **needs one real Windows check on the Heikal PC**). #486 (name typed
+  on the other keyboard language) open at the time of writing.
+- **Release 7** = everything above (+ #486 if merged first): one PR `develop` → `main`; see #113 for its
+  number and SHA. No migration, no requirements change. Not installed: waits for «نزّله».
+- **Not done:** #461 P1 mixed-tender refund / electronic exchange: design first, #487 (it touches the shift
+  and Hikma readers of `sale_returns`). `codex/fix-b-461` and `codex/fix-c-461` still not opened. #461 P2
+  QA-010 (odd-piastre residual at shift close) and #252 (LAN over HTTP) unowned.
+- Open P2/P3 left on purpose: #476 `smart_update.py` / `dbhealth.py` do not settle a cut restore before
+  opening the database, no fsync of the staged database; #479 the two print buttons print the listed page;
+  #480 two cloned disks with one volume serial count as one; #483 clock set backwards in the name-index label.
+- **Next:** #487 (strongest model, fresh session); device checks after «نزّله» (list in the release PR).
+
 ## Day 26/11 — CC-1 (newest line last)
 - **Done:** #463 DEV-PUR (built by Codex) reviewed, review P1 fixed test-first (warehouse invoice with a
   stored bonus refused at approval), merged `05e52c6`. #471 six owner decisions in OWNER_RULES, merged
@@ -46,8 +74,8 @@ file on #113 edits it; other sessions log on #113.
 
 ## Current state (26/11)
 - The program is the pharmacy's live cashier since 21/11. Release 6 (26/11, after #465 update 5) carries
-  everything in `develop` up to #472; see the release PR for SHAs. Updates reach the PC through the signed «تحديث» only after
-  the owner says «نزّله».
+  everything in `develop` up to #472; release 7 (26/11 evening) everything up to #485 (#486 if merged first).
+  Updates reach the PC through the signed «تحديث» only after the owner says «نزّله».
 - Migrations in `develop` run to 0045 (two files share 0045: harmless, the runner keys on the filename).
   **The next migration is 0046.**
 - CI: linux on every labelled PR (`ci`), windows on PRs into `main` and Windows-relevant files.
@@ -82,7 +110,9 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
   the phone prints on every sale with a customer.
 
 ## التذكيرات المفتوحة
-- «نزّله» للتحديث 6 (فيه التحديث 5 كمان): اتدمج في النسخة الرسمية ومستني كلمتك.
+- «نزّله» للتحديث 7 (فيه التحديث 5 و6 كمان): مستني كلمتك بعد ما يتدمج في النسخة الرسمية.
+- بعد التحديث: تجربة تبديل لغة الكيبورد على جهاز هيكل، والبحث باسم مكتوب بلغة الكيبورد الغلط.
+- قرار طريقة رد فاتورة مدفوعة بطريقتين (نقدي + فيزا): الاقتراح مكتوب في #487.
 - قرار فاتورة البضاعة المجانية (مرفوضة دلوقتي).
 - ورقة فارما أوفرسيز التانية لاختبار هامش الموزع.
 - مقارنة صنف واحد في الطلب الذكي مع تقرير مبيعات إي ستوك.
