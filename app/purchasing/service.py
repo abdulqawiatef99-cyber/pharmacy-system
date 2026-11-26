@@ -677,7 +677,7 @@ class Purchasing:
                          after={"line_id": line_id, **{k: changes[k] for k in changes}})
         return self.get(ctx, inv_id)
 
-    def add_line(self, ctx: Context, inv_id: str, data: dict, version: int | None) -> dict:
+    def add_line(self, ctx: Context, inv_id: str, data: dict, version: int | None, *, picked: bool = False) -> dict:
         ctx.require("purchases.edit")
         # one transaction for the line and its values: a refused value (2.5 packs) used to leave the blank
         # line and a new version behind an answer that said "refused" (#324 S34)
@@ -699,8 +699,8 @@ class Purchasing:
                    "unit_net_price": None, "tax_amount": None, "line_total": None, "distributor_margin": 0,
                    "batch_no": None, "expiry_date": None, "expiry_precision": None,
                    "field_sources": {"raw_name": "user"}, "field_confidence": {"raw_name": 1.0}}
-            if data.get("item_id") and not data.get("raw_name"):
-                # The picker already chose the item. Explicit supplier names still go through alias matching.
+            if picked and data.get("item_id") and not data.get("raw_name"):
+                # The picker already chose the item. Other callers still go through supplier alias matching.
                 row.update(item_id=None, match_method=None, match_score=None, match_status="unmatched")
             else:
                 self._apply_match(ctx, row, inv["supplier_id"])

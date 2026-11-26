@@ -308,6 +308,7 @@ class TestS26PreTaxTotal(unittest.TestCase):
 
 class TestS27InvoiceTaxInCost(_Purchase):
     def test_legacy_line_with_zero_price_and_additive_tax_still_can_post(self):
+        self.item = cat.create_item(self.db, self.ctx, {"name_en": "Synthetic VAT-only unit", "public_price": 200})
         iid, draft = self.manual({"qty": 4}, declared_total=800)
         with self.db.transaction():
             self.db.execute("UPDATE purchase_invoice_lines SET unit_net_price=0,"

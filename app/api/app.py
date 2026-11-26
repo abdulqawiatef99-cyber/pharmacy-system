@@ -1875,7 +1875,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def line_add(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version")))
+        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version"),
+                                picked=b.get("picked") is True))
 
     @handler
     async def line_update(req):

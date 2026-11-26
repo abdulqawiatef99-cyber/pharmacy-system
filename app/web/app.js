@@ -1706,7 +1706,7 @@ function bindQuickAdd() {
     await withBusy(button, async () => {
       await waitForPurchaseSave(picker.dataset.invoice);
       if (!current() || !picker.isConnected) return;
-      if (await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST", false)) {
+      if (await save(`/api/purchases/${CUR.invoice.id}/lines`, { line, picked: true }, "POST", false)) {
         $("#qaDisc").value = keepDisc;  // same supplier discount usually repeats
         $("#qaQ").focus();
       }
