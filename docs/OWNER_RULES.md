@@ -1,206 +1,126 @@
-# OWNER_RULES.md — standing rules agreed with the owner
+# OWNER_RULES.md — the owner's standing rules (one set, for this and his next projects)
 
-Every chat and every coding session reads this file at the start. These rules were repeated in many
-chats; they live here so nobody has to repeat them again. If chat memory or an old summary conflicts
-with this file, this file wins. Change it only through a PR, after the owner agrees.
+Every chat and every coding session reads this file first. It wins over chat memory, old summaries and
+older documents. It changes only through a PR the owner agreed to. Consolidated 26/11/2026 (owner 25/11
+and 26/11 02:14); the removed and changed lines are listed in that PR. Old section numbers in code
+comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/archive/OWNER_RULES-2026-11-25.md`).
 
 ## 1. Talking to the owner
-- Short Egyptian Arabic, masculine form, organized, one topic at a time.
-- No English words inside Arabic sentences (they render badly for him). Put technical names on their own line.
-- He is not technical: do not ask him technical questions. Decide, double-check, and say what you decided.
-- Be an independent, constructive critic: correct him when he is wrong, say why, never just agree.
-- Every model that talks to him (manager chat, Claude Code, scheduled sessions) uses this same mindset:
-  smart, critical, constructive, and replies in short, useful, well-organized Arabic.
-- Ask him only before: sending anything in his name, deleting, paying, merging into `main`, building an installer.
-- Never assume facts (times, supplier terms, prices). Check them, or say "estimate" / "unknown".
-- End every reply with «التذكيرات المفتوحة» (the current list is at the top of `docs/HANDOFF.md`).
+- Short Egyptian Arabic, masculine form, organized, one topic at a time. No English words inside Arabic
+  sentences (they render badly); technical names go on their own line.
+- He is not technical: never ask him a technical question. Decide, double-check, say what you decided.
+- Be an independent, constructive critic: correct him when he is wrong and say why; no flattery.
+- Never assume facts (times, supplier terms, prices): check them or say «تقدير» / «مش معروف».
+- One short status of everything in progress, in plain words; fill gaps he did not mention. One or two
+  lines whenever a stage ends. Say at once when a new chat is needed, and where and with which model the
+  next session should start.
+- End every reply with «التذكيرات المفتوحة» (the list is at the top of `docs/HANDOFF.md`).
+- Agent-to-agent text (sessions, Codex, sub-agents, PRs, Issues, commits, agent docs) is short English.
 
-## 2. How the work is split
-- Day = testing with the owner on the pharmacy PC and finding defects. Never ask him whether he is at the
-  pharmacy: he is there about 13:00-24:00 (§9; owner, 17/11).
-- One chat for the owner (17/11): he talks only to the manager chat, even when two PCs work. The manager drives
-  the other PC's chat itself (one self-contained message per stage) and relays any physical step to him.
-- Night = building, review and merging, only from the written queue «الطابور الليلي» in `docs/HANDOFF.md`.
-- Group tasks by place: needs the pharmacy PC / can be done from anywhere.
-- No scheduled sessions unless the owner asks, and never before the current open work is closed
-  (so a run never repeats work already done).
-- Coding goes to Claude Code; the chat coordinates, reviews and merges. Model-to-model talk (manager ↔ Claude Code, Codex, scheduled sessions, sub-agents, PR/Issue notes
-  between agents) is in short English: cheaper and clearer. Only what the owner reads is in Arabic.
+## 2. Needs the owner first (everything else: decide, record, continue)
+- Sending anything in his name; deleting anything (data, files, Issues, unmerged branches); paying or any new
+  recurring cost.
+- Installing anything on the pharmacy PC: only after he says «نزّله» (the manager does it).
+- Building an installer.
+- Touching or migrating real data outside the program's own update path.
+- Changing an agreed business rule (pricing, discounts, returns, cost, dosing) or the `STATUS.md` formula.
+- Pre-approved (owner 22/11, 21:22): every merge into `develop` and every release PR `develop` → `main`
+  that passes the gates of §5, printing and migrations included.
 
-## 3. Parallel sessions (no overlap)
-- Before starting parallel sessions, write on #113 which files/modules each one owns.
-  Two sessions never touch the same files, even "small" edits (payment channels, settings, docs/HANDOFF.md).
-- A session that needs a file owned by another session stops and writes a note on #113 instead.
-- If two open PRs touch the same file, merge one, then rebase the other and re-run CI + Codex before merging it.
+## 3. Places, hours and data
+- The owner is at the pharmacy about 13:00–24:00 Cairo: device tests run inside that window, without
+  asking whether he is there. Cloud work (coding, review, merging) runs any time, mostly 00:00–13:00.
+  Anything that needs him is timed inside 13:00–24:00 with a phone alarm or reminder for him.
+- The program is the pharmacy's live cashier since 21/11 (v0.4.0). E-Stock stays as read-only history.
+- Two PCs: cashier `desktop-5jvh3qd` (live); Heikal `desktop-gqgl6uf` = test machine, synthetic data
+  only, its own E-Stock data never touched. Every device chat reads the device name first.
+- Never take full-screen control of a PC while the owner works. WhatsApp: read only, never send. Never
+  open «اكونتات الشركات» or any note with passwords or codes.
+- Sign-in on a PC: never stop to ask him. Read the test login file in Notepad (open by path), sign in in the browser pane,
+  close Notepad, release the screen. Never write a password in chat, commits or Issues.
+- Real pharmacy, patient or customer data never leaves the pharmacy PC and never enters the repo. Cloud
+  tests use synthetic data at the same scale. Repository: public for now (free CI); private again later.
 
-## 4. Merging
-- `develop` only when `CI / linux` is green on the PR's latest head AND Codex reviewed that same head
-  with no unresolved P0/P1 (AGENTS.md §2, §2a). Merge commit. Never `main` without the owner.
-- `main` (the official release) is the pharmacy PC's update channel (owner 20/11); `develop` is for test PCs. A review installer follows `main` once `main` contains it (`docs/SMART_UPDATE.md`). The in-app «تحديث» button works since 12/11 (#158);
-  use it instead of installers. Changes to `requirements.txt` or `app/migrations` still need an installer:
-  keep them grouped.
-- After merging a batch, check CI on `develop` before telling the owner to press «تحديث».
-- GitHub minutes (owner decision 15/11, after they ran out on 12/11): run the full suite locally first;
-  add the label `ci` to a PR only when its head is final, so GitHub CI runs once per PR, not on every push.
-  Docs-only PRs run the check without the tests; Windows runs only for Windows-relevant files, PRs into
-  `main` or on demand. Target: under 1,000 of the 2,000 free minutes a month.
-- Temporary, while GitHub Actions is blocked by billing: a PR may be merged into `develop` when
-  (a) Codex reviewed its latest head with no unresolved P0/P1, (b) the merging session ran the full
-  suite locally on the merge result (current `develop` + the PR) and posted the exact command and
-  counts on the PR, (c) it does not change `app/printing/`, `installer/`, Windows-only scripts,
-  `requirements.txt` or `app/migrations` (those wait for real CI). Note "merged under the temporary
-  rule, CI blocked" on the PR. The rule ends the day CI runs again; then re-run CI on `develop` and
-  fix anything red first.
+## 4. Who does what
+- Manager = the newest chat in the claude.ai project «برنامج الصيدلية»; one at a time; the owner talks
+  only to it (it drives other PCs' chats and relays physical steps). The role lives in the files, not
+  in one long chat. It keeps the queue, gives work with file ownership, merges by §5, runs device tests.
+- Claude Code sessions: implement and lead technically (`AGENTS.md`). Codex: independent reviewer and
+  selected tasks; it never grades its own work and is never the manager.
+- «إحنا فين؟»: at most 5 lines from `STATUS.md`, `HANDOFF.md` and GitHub; no new work started.
+- Daily ~13:00: before anything else, the manager reviews what was merged since its last review and tells
+  the owner in plain words.
+- Weekly (after the Thursday usage reset): 5 lines on what moved against the `STATUS.md` gates, what is
+  stuck, and the week's plan.
+- Model per task, named before the task starts (the cheapest that does it well; a chat cannot change its
+  own model, the owner picks it): strongest model for reviews and fixes of money, stock and security;
+  Opus for routine coding and device work; Sonnet for docs, routine merges and status.
+- Group work by kind and by place (needs the pharmacy PC / anywhere). When the owner is present and
+  free, intensify now with parallel sessions on separate claimed files instead of waiting for the night.
 
-## 5. Pharmacy PC and data
-- E-Stock is the live cashier. Never use full-screen computer control while the owner is working.
-- WhatsApp: read only, never send. Never open «اكونتات الشركات» or any note with passwords or codes.
-- Real pharmacy data never leaves the pharmacy PC. Cloud tests use synthetic data at the same scale.
-- Never write passwords in chat, commits or issues (the test login lives in a file on the PC).
+## 5. Merging and releasing
+- `develop` = integration and test PCs; `main` = the pharmacy's update channel («تحديث» installs what is on `main`).
+  Work goes through branches and PRs only; never a direct or force push to `develop` or `main`.
+- Merge into `develop` when: the full suite passed locally on the merge with current `develop`; an
+  independent review ran first (§7); `CI / linux` is green on the PR's latest head; Codex reviewed with
+  no unresolved P0/P1 (P2 does not block). Merge commit.
+- Codex silent for 40 minutes: re-request once and continue with other work. Codex unavailable for a
+  working day (or at its usage limit): merge on green CI + the independent review, and write
+  "no Codex review" on the PR.
+- Release: ONE combined PR `develop` → `main` per batch, merged when linux AND windows are green on its
+  head and no Codex P0/P1 is unresolved on what it carries. Then check the update bundle built; the owner presses «تحديث» on the cashier PC only after «نزّله».
+- Migrations and `requirements.txt` changes ship through the signed smart update (`docs/SMART_UPDATE.md`),
+  not an installer. A new migration takes the next free number (never two files with one number again).
+- GitHub minutes (2,000 free a month, Windows counts double; target under 1,000): full suite locally
+  first, then add the label `ci` once the head is final. Windows runs for Windows-relevant files, PRs
+  into `main`, or on demand. Docs-only PRs run the check without tests.
+- Two open PRs on the same file: merge one, merge `develop` into the other, re-run suite, CI and review.
 
-## 6. Continuity (no handoff messages)
-- Start of a session: `AGENTS.md`, this file, `docs/STATUS.md`, `docs/HANDOFF.md`, last comments on #113 and #18.
-- Before a chat or session ends, or when it gets long: update `docs/HANDOFF.md` (done with evidence,
-  not done, assumptions, next step) and push it. The next chat continues from the file, not from a pasted summary.
+## 6. Sessions, queue and continuity
+- One goal per session (one outcome, e.g. "PR queue clean"); tasks are steps toward it. Stop when it is
+  reached, when the usage limit is near, or on signs of drift (contradicting a decision, re-asking a
+  settled question, forgetting a rule).
+- Start: `AGENTS.md`, this file, `docs/STATUS.md`, `docs/HANDOFF.md` (top), last comments on #113 (and on
+  the device Issue, e.g. #18, for device work).
+- Parallel sessions: before starting, write on #113 which files each owns. Two sessions never touch the
+  same file. A session that needs another's file stops and notes it on #113.
+- The queue is the «Queue» section of `docs/HANDOFF.md`. Only the session that claimed `HANDOFF.md`
+  on #113 edits it; the others log on #113 (one comment per step) to avoid conflicts.
+- Who starts sessions: the owner (writing «كمّل» in a new project chat) or the manager. A session may
+  schedule or start the next one only for the next queue item, and never for work already claimed or
+  open. Brakes: at most 6 started sessions or wake-ups a day; stop when the queue is empty, after two
+  failures in a row, or near the usage limit. Items that need the owner go to «مستني المالك» and do not
+  stop the chain. Never claim work will resume unless a real scheduler was configured.
+- Save as you go: after each meaningful step commit and push to your branch (HANDOFF line or #113
+  comment), so a usage-limit cut loses nothing. Continue from the files, never from a pasted summary.
+- End report, in chat and at the top of `HANDOFF.md`: 1. done, with evidence; 2. not done and why;
+  3. decisions; 4. next goal (where and with which model); 5. «المحادثة دي اتحفظت وممكن تتمسح».
 - If you find a mistake, fix everything built on it.
 
-## 7. Short sessions (one goal per session)
-Long chats drift (contradictions, forgotten rules) and burn usage faster. So every chat and every
-coding session has ONE goal (one outcome, e.g. "PR queue clean" or "the 3 PC tests done"); tasks are
-just the steps toward it. When the goal is reached, the session stops and reports.
-- Two kinds of work (§2): cloud work (coding, review, cloud tests) runs at night in scheduled sessions;
-  hands-on work (tests on the pharmacy PC) runs in the day, only when the owner says he is at the pharmacy.
-- Save as you go: after each step, update `docs/HANDOFF.md` and push, so a usage-limit cut loses nothing.
-- Stop early when: you contradict an earlier decision, re-ask a settled question or forget a rule
-  (the real signs of drift); or the usage limit is near. Provisional extra limits: about 25 owner
-  messages or about 2 hours. These numbers are estimates; review them after 5 sessions using the end reports.
-- Who starts the next session: day = the owner, by writing «كمّل» in a new chat inside the project;
-  night = scheduled sessions (only when the owner asked for them). A session never opens another session by itself.
-- End report, in this order, in the chat and at the top of `docs/HANDOFF.md`:
-  1. done, with evidence (PR/commit/test result); 2. not done and why; 3. decisions taken;
-  4. the next goal; 5. the line «المحادثة دي اتحفظت وممكن تتمسح».
-- A chat whose report is in `docs/HANDOFF.md` holds nothing else; the owner can delete it.
-- Known gap: the claude.ai project instructions still say "3 tasks per batch"; this file wins. The owner
-  pastes the corrected text (given in the 13/11 evening chat) into the project settings.
-
-## 8. Roles (who manages the project)
-- Manager = the current chat in the claude.ai project «برنامج الصيدلية». There is one manager chat at a
-  time. The role lives in the files (`OWNER_RULES.md`, `STATUS.md`, `HANDOFF.md`), not in one long chat:
-  every new project chat takes over from them. The owner always talks to the newest project chat.
-- The manager: keeps the queue, splits work into batches, gives coding batches to Claude Code with
-  file ownership on #113, merges by §4, runs device tests with the owner, writes the end report.
-- Claude Code sessions: workers. One batch each, own files only, PR + report, then stop.
-- Codex: independent reviewer only, never the manager (the one who builds must not grade itself).
-- «إحنا فين؟» (any time, in the newest project chat): the manager answers in at most 5 lines from
-  `STATUS.md`, `HANDOFF.md` and GitHub (what moved, what is stuck, next step, anything waiting on him),
-  starts no new work, and does not use a long chat for it.
-- Once a week (after the Thursday usage reset): the manager checks progress against `STATUS.md`
-  gates and tells the owner in 5 lines what moved, what is stuck, and the plan for the week.
-
-## 9. Owner decisions of 16/11/2026
-- Hours: the owner is at the pharmacy about 13:00-24:00 Cairo every day, at home otherwise. Device tests run
-  inside that window; cloud work (review, coding) runs 00:00-13:00.
-- Plan: the Claude account is on Max. Scheduled night sessions are allowed again when they follow the
-  timetable in `docs/WORK_PLAN.md` §4 (one goal each). They open PRs only; merging stays with the manager chat.
-- Pick the tool and model by the task (`docs/WORK_PLAN.md` §5). A chat cannot change its own model: the
-  manager says at the start of a batch which model is enough, the owner picks it.
-- Group the work by kind: review together, coding together, device tests together, development together.
-- Night sessions write their log as comments on #203, not in `docs/HANDOFF.md` (no merge conflicts); the
-  manager folds the result into `docs/HANDOFF.md` the next day.
-- Repository visibility: public for now (free CI). The owner judged the old data files on the #102 branch
-  as ordinary; the repo goes back to private once the reason for making it public is over. No new real
-  data is ever added (§5 unchanged).
-- After launch, once a month: review competing programs and their known faults, update
-  `docs/MARKET_RESEARCH.md` and `docs/FEATURE_GAP.md`; review the pharmacy Claude skills and record the
-  proven ones as program features in `docs/FUTURE_REQUIREMENTS.md`. Nothing is built without the owner.
-- Reports to the owner: one short status of everything in progress, in plain words, no flattery, and the
-  manager fills gaps the owner did not mention instead of waiting to be asked.
-- Model per task (owner, 16/11 evening): before any task, batch or new session starts, the manager names the
-  model that is enough for it (the cheapest that does it well) and whether it is a normal chat or a Claude
-  Code session. Strongest model: reviews and fixes of money, stock and security. Opus: routine coding and
-  device work. Sonnet: docs, routine merges, status.
-- Scheduling comes last (owner, 16/11 evening): schedule only at the end of a working day, for what is
-  really left. Anything that needs the owner is timed inside his hours (13:00-24:00) and gets a phone
-  alarm or reminder for him. When the owner is present and free, work is intensified now instead of waiting
-  for the night: parallel review and fix sessions, each on its own claimed files.
-- Two PCs inside the pharmacy: the cashier PC (desktop-5jvh3qd, E-Stock live) and the Heikal PC
-  (desktop-gqgl6uf). The Heikal PC is the test machine (installer, performance at scale, trial day) with
-  synthetic data only; its own E-Stock data is never touched. Every device chat reads the device name first.
-- While working, the manager sends the owner one or two plain lines whenever a stage ends.
-- The manager says at once when a new chat is needed (long chat, risk of mistakes).
-- Where the next session starts (owner, 16/11 18:15): at the end of every session, tell the owner where to start
-  the next one (a normal Claude chat or a Claude Code session) and with which model, chosen by the task.
-
-## 10. Work chain (owner, 16/11 23:43: approved)
-The owner wants the work to run like automation: when one session ends, the next one starts, without him.
-This section replaces "a session never opens another session by itself" (§7) and "merging stays with the
-manager chat" (§9) inside the limits below.
-- One queue file: `docs/QUEUE.md`. A session takes the first open item, finishes it, marks it, and starts or
-  schedules the next session. Nothing outside the queue is started.
-- Who can do what (checked 16/11: scheduled cloud sessions get read-only git and no GitHub API):
-  - The manager chat has push access. It keeps itself going with timed wake-ups into the same chat; each
-    wake-up applies the workers' patches, opens PRs, merges, and updates the queue.
-  - A scheduled cloud session is a worker: it reads `develop`, does one queue item, and leaves its result as
-    patch files and a log in the claude.ai project «برنامج الصيدلية» (`claude/...`). If a worker does have
-    push access, it opens PRs instead and may merge under the next rule.
-- Merging without the owner: into `develop` only, only when `CI / linux` is green and Codex is clean on the
-  same head (§4). Never by a session: `main`, an installer build, anything under `app/printing/`,
-  `app/migrations/`, `installer/` or `requirements.txt`. Those wait for the owner and the day chat.
-- Brakes: at most 6 sessions or wake-ups a day; the chain stops when the queue is empty, when two in a row
-  fail, or when the usage limit is near. Anything that needs the owner goes to «مستني المالك» in
-  `docs/QUEUE.md` and does not stop the chain.
-- Every day at about 13:00 the manager (day chat) reviews what the chain merged since the last review, before
-  anything else, and tells the owner in plain words.
-- Sign-in on the pharmacy PC (owner, 16/11): never stop to ask the owner to sign in. Folder-access requests
-  are refused automatically; read the test login file with computer use (Notepad, open by path), sign in
-  in the browser pane, close Notepad, release the screen.
-
-## 11. Continuous improvement audits (owner, 18/11 15:56: a standing rule)
-Goal: the program keeps getting better, simpler, faster and stronger, and stays up to date. After the launch
-(#20) every part of the program is audited on a fixed rhythm, with the strongest model that fits each kind of
-work. The model that built a part never grades it alone (Codex or a different model reviews).
-| Rhythm | What | Tool and model |
-|---|---|---|
-| Every merge (already) | the PR itself | Codex on GitHub + full test suite |
-| Weekly (cheap, mostly automatic) | full suite, speed run (`scripts/perf/scale.py`), dependency security scan, new owner findings | Claude Code, mid model (Sonnet); speed run on the Heikal PC |
-| Every 2 weeks | Arabic/English text proofreading of what changed, screen-by-screen test plan pass | normal chat or Claude Code, Opus |
-| Monthly (first week, with the 3/12 cycle and F70) | full audit of everything: code structure, money and stock paths, security, speed, weight (dead code, heavy queries, big files), texts, dependencies to latest safe versions, competitors | money + security: strongest model (Fable) + Codex as independent reviewer; structure, speed, dependencies: Claude Code Opus; texts: Opus |
-| Every 3 months | deep security review (attacker view: sign-in, permissions, backup, updates, network) | strongest model + Codex, separately, then compared |
-Every audit: findings as an issue (file:line, scenario, severity), each verified with a failing test before
-any fix, fixes in small PRs, and a 5-line Arabic summary to the owner. Paid tools or a new service need the owner first.
-
-
-## 12. Two reviews, a second agent first, then Codex (owner, 21/11 03:53: a standing rule)
-Owner's words: «موافق بس حطها قاعدة في المشروع كله ان وكيل تاني يراجع الاول و بعد كده كودكس يراجع».
-- Before ANY `@codex review`, the implementing session runs an independent review by a separate agent
-  (sub-agent or another session) with a fresh context: it gets only the diff and the item's spec, never the
-  implementer's reasoning. It reports findings P0/P1/P2 with file:line and a concrete failing scenario.
-- Its focus: whatever can break money or stock: cancel after a return, partial returns adding up, piastres and
-  rounding, bonus lines, taxes (line and invoice level), permissions and escalation, retries and concurrency,
+## 7. Two reviews: a second agent first, then Codex (owner, 21/11 03:53)
+- Before any `@codex review`, a separate agent with a fresh context (only the diff and the item's spec,
+  never the implementer's reasoning) reviews and reports P0/P1/P2 with file:line and a failing scenario.
+- Focus: what breaks money or stock: cancel after a return, partial returns adding up, piastres and
+  rounding, bonus lines, line and invoice taxes, permissions and escalation, retries and concurrency,
   `org_id`, a migration on a real-size database.
-- Every P0/P1 it finds is fixed test-first; only then Codex is asked. Codex stays the final reviewer; the merge
-  rules of §4 and §10 do not change (no unresolved Codex P0/P1, CI green).
-- Before the launch: one last full review of the whole program by the strongest suitable Claude model and by
-  Codex (owner, same message).
+- Every P0/P1 is fixed test-first; then Codex, which stays the final reviewer.
 
-## 13. «امنع الغلط، متنبهش عليه» — refuse the impossible (owner, 21/11 evening: a standing rule)
-Owner's words: «أي غلط غير قابل للمنطق يكون ممنوع على السيستم، يكون مرفوض».
-- An impossible or illogical money / stock entry is REFUSED by the server (a clear Arabic message saying what
-  is wrong and the allowed limit), never just warned about. A warning is only for something unusual but possible.
-- A rare real exception (for example an advance payment to a supplier, cash back for an invoice paid by card)
-  needs the owner's or a manager's permission and a written reason, and is recorded in the audit log.
-- Every money / stock entry point has a test that tries the impossible value and must be refused
-  (`tests/test_u2_0_refusals.py`). A new entry point adds its own case in the same PR.
-- Covered (U2-0, 22/11): sale or quantity beyond stock; zero or negative quantity or price; discount above the
-  line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
-  (cash for a card invoice = exception); credit sale without a customer; customer collection above the debt;
-  supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
-  today; expired expiry at purchase approval (an expiry before the invoice date is always already expired, since
-  the invoice date cannot be after today); the same supplier invoice number twice. A refund to the customer's
-  own account (store credit) stays allowed whatever the invoice was paid with: no money leaves the pharmacy.
-  The supplier advance and the cash refund of a card invoice can be approved on the screen by the owner or a
-  manager (PIN), with the reason.
-- Not yet covered (needs a migration or a later item): an exception path for a genuinely repeated supplier
-  invoice number (today: always refused), returnable expired goods with permission (today: always refused),
-  sale price above the public price (the screen cannot type a price; it comes from the batch), and a unit change
-  on a line (U2-13).
+## 8. «امنع الغلط، متنبهش عليه» (owner, 21/11)
+- An impossible money / stock entry is REFUSED by the server with a clear Arabic message (what is wrong,
+  the allowed limit). A warning is only for something unusual but possible.
+- A rare real exception (supplier advance payment, cash back for a card invoice) needs the owner's or a
+  manager's permission (PIN) and a written reason, recorded in the audit log.
+- Every money / stock entry point has a refusal test (`tests/test_u2_0_refusals.py`); a new entry point
+  adds its case in the same PR. Covered and pending cases: `docs/DECISIONS.md` ADR-018.
+
+## 9. Continuous improvement (owner, 18/11)
+The builder never grades its own part alone. Findings → an Issue (file:line, scenario, severity),
+verified with a failing test before any fix, small PRs, a 5-line Arabic summary to the owner.
+| Rhythm | What | Who |
+|---|---|---|
+| Every merge | the PR | §7 reviews + full suite |
+| Weekly | full suite, speed run (`scripts/perf/scale.py`, on the Heikal PC), dependency scan, new owner findings | Claude Code, Sonnet |
+| Every 2 weeks | Arabic/English text proofreading of changes, screen-by-screen test plan | Opus |
+| Monthly (first week) | full audit: structure, money and stock paths, security, speed, dead code, dependencies, competitors and `MARKET_RESEARCH.md` / `FEATURE_GAP.md`, proven pharmacy skills → `FUTURE_REQUIREMENTS.md` | money + security: strongest model + Codex; rest: Opus |
+| Every 3 months | deep security review (sign-in, permissions, backup, updates, network) | strongest model and Codex, separately, then compared |
+Nothing new is built from an audit without the owner; paid tools need him first (§2).
