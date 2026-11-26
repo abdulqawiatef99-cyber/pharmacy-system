@@ -190,6 +190,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     s = settings or config_mod.load()
     if db is None:
         s.data_dir.mkdir(parents=True, exist_ok=True)
+        from ..core import backup as _backup
+        _backup.finish_interrupted_restore(Path(s.db_path))   # a restore cut by a power loss: one whole set
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)
@@ -3090,7 +3092,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def return_receipt(req):
         """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
-        from ..printing import settings as rs
+        from ..printing import escpos as _esc, settings as rs
         ctx = ctx_of(req)
         x = Sales(db).return_receipt(ctx, req.path_params["id"])
         r, sale = x["return"], x["sale"]
@@ -3105,13 +3107,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"
         rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -3146,10 +3148,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
             if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):
-                return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it['name_en']))}</bdi><br><small><bdi>{e(it['name_ar'])}</bdi></small>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"   # UX-26: an English name reads left to right
 
         from ..printing import escpos as _esc
 
