@@ -14,6 +14,6 @@
 Planned integration (separate PRs, see project doc `reference-integration-plan-2026-11-19.md`):
 1. category linking screen (items.active_ingredient -> categories), owner approval, local data only;
 2. OTC flag per item from the official EDA OTC list + POS "prescription required" notice;
-3. do-not-crush -> `split_policy` (`allow_tablet_split=false`) drafts with source S16;
+3. do-not-crush -> a counselling note on the item (no split rule: tablet splitting was removed, U2-17), source S16;
 4. `interaction` / `duplicate_ingredient` alerts -> safety-engine drafts with knowledge sources;
 5. recalled batches from EDA bulletins: block sale, flag on receiving and stocktake.

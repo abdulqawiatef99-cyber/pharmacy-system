@@ -177,12 +177,13 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#prBody .prAdd');
   const names = async () => p.$$eval('#prBody tr td:first-child', (t) => t.map((x) => x.childNodes[0].textContent.trim()));
   const out = { first: await names() };
-  await p.click('th[data-sort=label]'); out.asc = await names();
-  await p.click('th[data-sort=label]'); out.desc = await names();
   await p.click('[data-chip=asked]'); out.asked = await names();
   await p.click('[data-chip=asked]');
+  await p.selectOption('#prPeriod', '30'); out.month = await names();
+  out.qty = await p.inputValue('#prBody .prQty');
   await p.click('#prBody .prAdd');
   out.order = await p.textContent('#prOrder');
+  out.track = await p.textContent('#prTrack');
   if (shot) await p.screenshot({ path: shot, fullPage: true });
   console.log(JSON.stringify(out));
   await b.close();
@@ -192,22 +193,28 @@ const { chromium } = require('playwright');
 
 @needs_browser
 class TestScreen(APICase):
-    def test_sort_filter_add(self):
+    """U4-2: the purchases tool screen (replaced the U2-36 smart order screen)."""
+    def test_period_filter_add(self):
         import os
         self.ctx = self.login("owner", OWNER_PW)
         a = cat.create_item(self.db, self.ctx, {"name_en": "Alpha Tab", "public_price": 1000})
         z = cat.create_item(self.db, self.ctx, {"name_en": "Zeta Tab", "public_price": 1000})
+        today = date.today()
         with self.db.transaction():
-            for it, n in ((a, 13), (z, 5)):
-                for _ in range(n):
-                    inv.post_movement(self.db, self.ctx, item_id=it, qty_delta=-1, movement_type="sale",
-                                      ref_type="sale", ref_id=new_id(), allow_negative=True)
+            y, m = today.year, today.month
+            for _ in range(12):                       # 6 units every complete month: regular, 2 a week
+                y, m = (y, m - 1) if m > 1 else (y - 1, 12)
+                end = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1)).isoformat()
+                self.db.execute("INSERT INTO consumption_history (id, org_id, branch_id, item_id, period_start,"
+                                " period_end, qty_base, source) VALUES (?,?,?,?,?,?,6,'manual')",
+                                (new_id(), self.ctx.org_id, self.ctx.branch_id, a, f"{y:04d}-{m:02d}-01", end))
         card.set_shortage(self.db, self.ctx, z, True)
         out = run_node(self, BROWSER, "owner", OWNER_PW, os.environ.get("PHARM_SHOT", ""))
-        self.assertEqual(out["asc"], ["Alpha Tab", "Zeta Tab"])
-        self.assertEqual(out["desc"], ["Zeta Tab", "Alpha Tab"])
+        self.assertEqual(out["first"], ["Zeta Tab", "Alpha Tab"])      # asked first
         self.assertEqual(out["asked"], ["Zeta Tab"])
+        self.assertEqual(out["qty"], "1")                               # Zeta: asked, empty shelf: one box
         self.assertIn("بدون مورد سابق", out["order"])
+        self.assertIn("مفيش طلبيات مفتوحة", out["track"])
 
 
 class TestReviewFixes(SmartCase):

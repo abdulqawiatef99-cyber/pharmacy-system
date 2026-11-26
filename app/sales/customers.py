@@ -214,7 +214,8 @@ def update(db: Database, ctx: Context, cid: str, data: dict) -> dict:
             if any(k.startswith("phone") for k in ch):        # inside the write, as on create (#324 M2-20)
                 check_phones(db, ctx.org_id, [canonical(p) for p in phones if p], exclude=cid)
             try:
-                db.execute(f"UPDATE customers SET {', '.join(f'{k}=?' for k in ch)} WHERE id=?", (*ch.values(), cid))
+                db.execute(f"UPDATE customers SET {', '.join(f'{k}=?' for k in ch)} WHERE id=? AND org_id=?",
+                           (*ch.values(), cid, ctx.org_id))
             except Exception as e:
                 if "UNIQUE" in str(e):
                     raise Conflict("رقم الهاتف مسجل لعميل آخر") from e

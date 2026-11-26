@@ -39,7 +39,7 @@ class TestLiveSearchSource(unittest.TestCase):
         self.assertIn('q.addEventListener("input"', body)
         self.assertRegex(body, r"search\(false, true\)")                        # live search
         self.assertIn("if (!live && res.length === 1", body)                     # live never auto-adds
-        self.assertIn("if (live && mine !== liveSeq) return;", body)             # only stale suggestions are dropped
+        self.assertIn("if (SALE?.id !== saleId || (live && mine !== liveSeq)) return;", body)             # only stale suggestions are dropped
         self.assertRegex(body, r"/\^\\d\+\$/\.test\(v\)\) \{")                 # digits wait for the scanner's Enter
         # Codex on #42: every keystroke drops answers still on their way (also when no new search starts)
         handler = body[body.index('q.addEventListener("input"'):body.index('q.addEventListener("keydown"')]

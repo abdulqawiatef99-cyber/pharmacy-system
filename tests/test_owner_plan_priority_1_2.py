@@ -218,7 +218,12 @@ class TestPriority1(PlanCase):
         self.assertEqual(d["invoice"]["computed_total"], 32800)
         self.assertTrue(d["can_approve"], d["issues"])
         self.assertEqual((self.qty(self.pan), self.qty(self.box)), (20, 30))        # a draft moves nothing
-        d = self.call("POST", f"/api/purchases/{inv_id}/approve", json={"version": d["invoice"]["version"]})
+        review = self.call("GET", f"/api/purchases/{inv_id}/approve")
+        self.assertEqual([change["item_id"] for change in review["changes"]], [self.pan])
+        d = self.call("POST", f"/api/purchases/{inv_id}/approve", json={
+            "version": d["invoice"]["version"], "price_token": review["token"],
+            "price_decisions": {self.pan: {"mode": "keep"}},
+        })
         self.assertEqual(d["invoice"]["status"], "approved")
         self.assertEqual(self.qty(self.pan), 20 + (5 + 1) * 2)                      # quantity + bonus, in strips
         self.assertEqual(self.qty(self.box), 30 + 2 * 3)
@@ -303,17 +308,14 @@ class TestPriority2(PlanCase):
         thin = cat.create_item(self.db, self.ctx, {"name_en": "Trial Thin Margin", "public_price": 1000})
         self.stock(thin, 5, "9.50", batch="TRIAL-T")                             # 10% off 10.00 = 9.00 < 9.50
         sid = self.draft(cust)
-        d = self.line(sid, thin, packs=1)
-        self.assertEqual(d["total"], 900)
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 403)        # the assistant cannot sell at a loss
-        self.assertEqual(r["error"]["details"].get("permission"), "sales.below_cost", r)
+        r = self.line(sid, thin, 422, packs=1)                   # update 3: refused as soon as it is added
+        self.assertEqual(r["error"]["code"], "below_cost", r)
+        self.assertIn("التعاقد", r["error"]["message"])
         self.c.post("/api/auth/logout", headers=H)
         self.http_login()
-        r = self.complete(sid, [{"method": "cash", "amount": 900}], 409)        # the owner must confirm it
-        self.assertEqual(r["error"]["code"], "below_cost_confirm")
+        r = self.line(sid, thin, 422, packs=1)                   # nor the owner
+        self.assertEqual(r["error"]["code"], "below_cost")
         self.assertEqual(self.qty(thin), 5)
-        done = self.complete(sid, [{"method": "cash", "amount": 900}], confirm_below_cost=True)
-        self.assertEqual(done["status"], "completed")
 
     def test_transfer_sale_keeps_its_image_and_warns_on_a_duplicate_upload(self):
         """P2 line 4 (acceptance 17): InstaPay sale + screenshot; the same screenshot on another invoice warns."""

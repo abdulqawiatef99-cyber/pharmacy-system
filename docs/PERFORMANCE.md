@@ -154,3 +154,35 @@ What the numbers say:
 - **Year sales report** 616–622 ms, **stock report** 69–93 ms, **item movements for a year** 145–161 ms:
   acceptable, not changed by these PRs.
 - 3-year snapshot of the default (medium) shape: not measured; large 3 years is above.
+
+## U4-5 checkout (2026-11-23)
+
+Loopback HTTP on Linux with the pinned Python 3.13 dependencies, 30,000 synthetic catalog items,
+an adjacent archive with 500,000 synthetic detail rows, and a two-line cash basket. The catalog
+deliberately shares a common prefix to stress fuzzy queries. Base is develop at `78c3646`. Timings
+are single controlled observations in milliseconds.
+
+| Request | Base | U4-5 |
+|---|---:|---:|
+| Safety check, cold catalog | 9,072 | 64 |
+| Complete after check, device idle | 50 | 37 |
+| Check plus complete | 9,122 | 101 |
+| Complete with a simulated 1.5 s device operation | 1,542 | 24 |
+| First fuzzy search after the index is warm | 5,568 | 1,017 |
+| Repeat fuzzy search | 108 | 92 |
+| Cold fuzzy search before startup warmup can finish | 11,114 | 6,274 |
+| Backup health, stock alert and notifications during a forced 2 s SQLite writer hold | 2,013 each | 24–26 |
+
+Profiling traced the cold check to building the fuzzy catalog index and scoring roughly 30,000 names
+to find informational look-alikes. Checkout now compares same-core candidates and still runs clinical
+rules and warning resolution. The archive was outside the checkout path in this reproduction.
+The server starts warming the fuzzy catalog index in a worker. Item search, checkout and HTTP
+idempotency also use workers. The three measured polls returned while the write was still waiting.
+The forced lock reproduces the stall mechanism. The trigger for the live 11 s incident is unconfirmed.
+
+The cashier waits for the sale commit and can begin the next sale while the device worker issues the
+drawer command first and prints the receipt. Older API callers can keep synchronous device results.
+The offline status switch used by tests leaves explicit updater network tests on their mocked path.
+
+Reproduce the timed checkout and worker assertions with
+`python -m unittest tests.test_u4_5_checkout`. The cashier's Windows device timing remains to be measured.

@@ -127,7 +127,8 @@ def _months_back(today: date, n: int) -> list[str]:
     return out[::-1]
 
 
-def card(db: Database, ctx: Context, item_id: str, today: date | None = None) -> dict:
+def card(db: Database, ctx: Context, item_id: str, today: date | None = None, *,
+         recent_purchases: bool = False) -> dict:
     ctx.require("items.read")
     it = db.one("SELECT i.*, c.name category, c.no_return, c.mark FROM items i LEFT JOIN categories c"
                 " ON c.id=i.category_id WHERE i.id=? AND i.org_id=?", (item_id, ctx.org_id))
@@ -162,20 +163,31 @@ def card(db: Database, ctx: Context, item_id: str, today: date | None = None) ->
                        "source": "sales" if m in sold else "import" if m in imported else None} for m in months]
     if ctx.can("costs.read"):     # owner 17/11: purchase price = margin; owner only unless he opens it per person
         sup = db.all(
-            "SELECT s.name supplier, s.supplier_type, max(p.invoice_date) last_date, l.discount_bp, l.unit_net_price, l.public_price"
+            "SELECT s.name supplier, s.supplier_type, max(p.invoice_date) last_date, l.discount_bp,"
+            " l.unit_net_price + l.distributor_margin unit_net_price, l.public_price"
             " FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id JOIN suppliers s ON s.id=p.supplier_id"
-            " WHERE l.org_id=? AND l.item_id=? AND p.status='approved' GROUP BY s.id ORDER BY l.unit_net_price",
+            " WHERE l.org_id=? AND l.item_id=? AND p.status='approved' GROUP BY s.id ORDER BY unit_net_price",
             (ctx.org_id, item_id))
         out["suppliers"] = [dict(r) for r in sup]
+        if recent_purchases:
+            out["recent_purchases"] = [dict(r) for r in db.all(
+                "SELECT s.name supplier, coalesce(p.invoice_date, substr(p.approved_at,1,10)) invoice_date, l.qty,"
+                " l.unit_net_price + l.distributor_margin unit_net_price"
+                " FROM purchase_invoice_lines l JOIN purchase_invoices p ON p.id=l.invoice_id AND p.org_id=l.org_id"
+                " LEFT JOIN suppliers s ON s.id=p.supplier_id AND s.org_id=l.org_id"
+                " WHERE l.org_id=? AND l.item_id=? AND p.status='approved'"
+                " ORDER BY invoice_date DESC, p.approved_at DESC, p.id DESC, l.line_no LIMIT 10",
+                (ctx.org_id, item_id))]
     if ctx.can("costs.read") and branch:
         c = db.one("SELECT avg_cost FROM item_costs WHERE org_id=? AND branch_id=? AND item_id=?",
                    (ctx.org_id, branch, item_id))
-        if c and c["avg_cost"] is not None and it["public_price"]:
+        if c and c["avg_cost"] is not None and (it["public_price"] or recent_purchases):
             # exact: avg_cost is decimal pounds per unit; float() and round() (half to even) moved a piaster
             pack_cost = Decimal(c["avg_cost"]) * it["pack_size"] * 100
             out["avg_cost_pack"] = int(pack_cost.quantize(Decimal("1"), ROUND_HALF_UP))
-            out["margin_pct"] = float(((it["public_price"] - pack_cost) / it["public_price"] * 100)
-                                      .quantize(Decimal("0.1"), ROUND_HALF_UP)) + 0.0  # never "-0.0%"
+            if it["public_price"]:
+                out["margin_pct"] = float(((it["public_price"] - pack_cost) / it["public_price"] * 100)
+                                          .quantize(Decimal("0.1"), ROUND_HALF_UP)) + 0.0  # never "-0.0%"
     if it["shortage_by"]:
         u = db.one("SELECT full_name FROM users WHERE id=?", (it["shortage_by"],))
         out["shortage_by_name"] = u["full_name"] if u else None
