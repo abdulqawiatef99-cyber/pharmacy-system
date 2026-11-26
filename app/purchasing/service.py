@@ -1266,13 +1266,16 @@ class Purchasing:
         return lot_receipts(self.db, ctx, branch_id, item_id, batch_id)
 
 
-def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch_id: str | None) -> list[dict]:
+def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch_id: str | None, *,
+                 unmatched_credit: dict[str, int] | None = None) -> list[dict]:
     """Every receipt of one lot in ledger order, with what is still its own: `left` = received, minus what
     its cancellation reversed, minus what went back to its supplier; `took` = those returns as
     (units, piasters credited for them, tax included). A return made from an invoice (part 3 item 6b) names
     its purchase line and is taken from that receipt first; a return by item and lot is taken from that
-    supplier's receipts of the lot, oldest first (Codex P1 x2 on #396)."""
+    supplier's receipts of the lot, oldest first (Codex P1 x2 on #396). If requested, record excess
+    credit from legacy returns that exhausted a known supplier's receipts before taking all their units."""
     receipts: list[dict] = []
+    invoiced_suppliers = set()
     by_line: dict[str, dict] = {}
     for r in db.all(
             "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
@@ -1293,6 +1296,7 @@ def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch
                 receipts.append(p)
                 if p["ref_id"] and p["line_id"]:
                     by_line[p["line_id"]] = p
+                    invoiced_suppliers.add(p["supplier_id"])
         elif r["movement_type"] == "purchase_reversal":
             p = by_line.get(r["ref_line_id"])
             if p:
@@ -1309,4 +1313,7 @@ def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch
                     p["took"].append((t, t * (r["unit_value"] or 0) + tax, r["purchase_line_id"]))
                     tax = 0                   # the row's tax is credited once, with its first units
                     n -= t
+            if n > 0 and unmatched_credit is not None and r["returned_to"] in invoiced_suppliers:
+                supplier = r["returned_to"]
+                unmatched_credit[supplier] = unmatched_credit.get(supplier, 0) + n * (r["unit_value"] or 0) + tax
     return receipts

@@ -148,10 +148,12 @@ def create(db: Database, ctx: Context, supplier_id: str, lines: list[dict], note
 
 
 def _lot_invoice_lines(db: Database, ctx: Context, supplier_id: str, item_id: str,
-                       batch_id: str | None) -> tuple[list[dict], dict[str, dict], bool]:
+                       batch_id: str | None) -> tuple[list[dict], dict[str, dict], list[dict], int]:
     from ..purchasing.service import lot_receipts
 
-    traced = [r for r in lot_receipts(db, ctx, ctx.branch_id, item_id, batch_id)
+    unmatched_credit: dict[str, int] = {}
+    history_rows = lot_receipts(db, ctx, ctx.branch_id, item_id, batch_id, unmatched_credit=unmatched_credit)
+    traced = [r for r in history_rows
               if r["supplier_id"] and r["invoice_status"] == "approved" and r["line_id"]]
     receipts = [r for r in traced if r["supplier_id"] == supplier_id]
     line_ids_by_invoice = {}
@@ -160,11 +162,9 @@ def _lot_invoice_lines(db: Database, ctx: Context, supplier_id: str, item_id: st
     history = {(ctx.branch_id, item_id, batch_id): {r["id"]: r for r in receipts}}
     lines = {line["id"]: line for invoice_id, line_ids in line_ids_by_invoice.items()
              for line in _invoice_lines(db, ctx, invoice_id, line_ids=line_ids, receipt_history=history)}
-    return receipts, lines, bool(traced)
-
-
-def _lot_credit_remaining(lines) -> int:
-    return max(0, sum(max(0, line["amount"]) - line["credited"] for line in lines))
+    balance = sum(max(0, line["amount"]) - line["credited"] for line in lines.values())
+    credit_remaining = max(0, balance - unmatched_credit.get(supplier_id, 0))
+    return receipts, lines, traced, credit_remaining
 
 
 def _lot_return_rows(db: Database, ctx: Context, supplier_id: str, item_id: str,
@@ -174,7 +174,13 @@ def _lot_return_rows(db: Database, ctx: Context, supplier_id: str, item_id: str,
     # Some clients echo an unchanged unit suggestion. An explicit zero is a zero-credit return.
     proposed = {_half_up(cost) if cost is not None else 0, _unit_value(db, ctx, item_id, batch_id)}
     at_cost = value is None or (not explicit_unit_values and cost is not None and value > 0 and value in proposed)
-    receipts, lines, traced = _lot_invoice_lines(db, ctx, supplier_id, item_id, batch_id)
+    receipts, lines, traced, credit_remaining = _lot_invoice_lines(db, ctx, supplier_id, item_id, batch_id)
+    available = sum(r["left"] for r in receipts)
+    if traced and not available and value == 0:
+        on_hand = inv.batch_qty(db, ctx.org_id, ctx.branch_id, item_id, batch_id)
+        if qty <= on_hand - sum(r["left"] for r in traced):
+            # The selected supplier has no receipt units left, so ledger replay cannot assign this return to one.
+            return [(qty, 0, 0, None, 0)]
     if not receipts:
         if traced:
             raise Conflict("مفيش فاتورة شراء من المورد ده للرصيد المختار؛ اختر المورد اللي سلّم الكمية",
@@ -182,7 +188,6 @@ def _lot_return_rows(db: Database, ctx: Context, supplier_id: str, item_id: str,
         total = (_half_up(cost * qty) if cost is not None else 0) if at_cost else qty * value
         return [(q, unit, 0, None, 0) for q, unit in _pieces(qty, total)]
 
-    available = sum(r["left"] for r in receipts)
     if qty > available:
         raise Conflict(f"الكمية أكبر من المتبقي في فواتير المورد لهذه التشغيلة؛ المتاح {available} وحدة",
                        code="return_exceeds")
@@ -204,7 +209,7 @@ def _lot_return_rows(db: Database, ctx: Context, supplier_id: str, item_id: str,
         plan.append((line["id"], paid, take - paid, net, tax))
         remaining -= take
 
-    limit = min(_lot_credit_remaining(lines.values()), sum(net + tax for _, _, _, net, tax in plan))
+    limit = min(credit_remaining, sum(net + tax for _, _, _, net, tax in plan))
     if not at_cost and qty * value > limit:
         raise Conflict(f"قيمة المرتجع أكبر من قيمة الكمية في فواتير المورد؛ الحد الأقصى {limit} قرش",
                        code="return_value_exceeds")
@@ -467,8 +472,7 @@ def create_from_invoice(db: Database, ctx: Context, supplier_id: str, invoice_id
             if pu:
                 lot = (l["item_id"], l["batch_id"])
                 if lot not in credit_left:
-                    _, lot_lines, _ = _lot_invoice_lines(db, ctx, supplier_id, *lot)
-                    credit_left[lot] = _lot_credit_remaining(lot_lines.values())
+                    _, _, _, credit_left[lot] = _lot_invoice_lines(db, ctx, supplier_id, *lot)
                 net, tax = line_value(l, pu)
                 credit = min(net + tax, credit_left[lot])
                 credit_left[lot] -= credit

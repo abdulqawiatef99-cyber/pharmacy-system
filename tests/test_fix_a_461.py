@@ -1,5 +1,6 @@
 """Synthetic regressions for the stock and supplier credit findings in #461."""
 from datetime import timedelta
+from decimal import Decimal
 
 from app.core.errors import Conflict
 from app.inventory import service as inv
@@ -222,6 +223,33 @@ class TestSupplierLotReturn(_Base):
         self.assertEqual(returns.suggest_value(self.db, self.ctx, self.product, self.batch, self.vendor), 0)
         self.assertEqual(self.lot_return(1, 0)["total"], 0)
         self.assertEqual(self.owed(self.vendor), 4500)
+
+    def test_legacy_credit_for_extra_units_still_counts_against_the_lot_limit(self):
+        from unittest.mock import patch
+
+        other = self.supplier("Synthetic QA461 second supplier")
+        self.buy(other, self.product, 2, 2500)
+        with patch.object(returns, "_lot_return_rows", return_value=[(3, 2500, 0, None, 0)]):
+            self.lot_return(3)
+        latest, _ = self.buy(self.vendor, self.product, 1, 2500)
+        before = self.owed(self.vendor)
+        self.assertEqual(before, -500)
+        line = returns.from_invoice(self.db, self.ctx, self.vendor, "INV-4")["lines"][0]
+        result = returns.create_from_invoice(self.db, self.ctx, self.vendor, latest, [{
+            "purchase_line_id": line["id"], "paid_units": 1, "reason": "overstock",
+        }])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(self.owed(self.vendor), before)
+        self.assertEqual(self.qty(self.product), 1)
+
+    def test_opening_stock_can_leave_at_zero_after_the_invoiced_units_are_returned(self):
+        with self.db.transaction():
+            inv.post_movement(self.db, self.ctx, item_id=self.product, qty_delta=2, batch_id=self.batch,
+                              movement_type="opening", unit_cost=Decimal("22"))
+        self.assertEqual(self.lot_return(2)["total"], 4500)
+        self.assertEqual(self.lot_return(2, 0)["total"], 0)
+        self.assertEqual(self.qty(self.product), 0)
+        self.assertEqual(self.owed(self.vendor), 0)
 
 
 class TestSupplierReturnAPI(APICase, _Base):
