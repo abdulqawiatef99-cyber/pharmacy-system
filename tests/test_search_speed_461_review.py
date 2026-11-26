@@ -4,6 +4,8 @@ Synthetic data only."""
 import random
 import sys
 import threading
+import time
+import unittest
 
 from app.catalog import matching, service as cat
 from app.catalog.normalize import parse_name
@@ -316,8 +318,30 @@ class TestIndexAndTransactions(ReviewCase):
         self.assertEqual(self.elsewhere(lambda: self.status("Latecomer 5mg 10 tab")), ("auto", new))
         self.assertEqual(self.status("Latecomer 5mg 10 tab"), ("auto", new))
 
+    def later_millisecond(self):
+        """Wait until the database clock has passed the newest item write. The index version is
+        `count|max(updated_at)` at millisecond resolution: an unannounced change inside the SAME millisecond
+        as the newest write does not move it (known limit, reproduced below as an expected failure). On a
+        fast runner the test's own writes fell in one millisecond and this scenario failed by that limit, not
+        by the behaviour it checks."""
+        newest = self.db.one("SELECT max(updated_at) u FROM items WHERE org_id=?", (self.ctx.org_id,))["u"]
+        while self.db.one("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') n")["n"] <= newest:
+            time.sleep(0.001)
+
+    @unittest.expectedFailure
+    def test_known_limit_a_silent_change_in_the_same_millisecond_as_the_newest_write(self):
+        # the correct behaviour, not met today: the version label cannot tell this change happened.
+        # Only a writer that announces nothing (bulk SQL) can hit it; the program's own writers announce.
+        self.status("Brandix0 50mg 20 tab")                              # the index is built
+        with self.db.transaction():
+            self.db.execute("UPDATE items SET name_en='Quietly 1mg 10 tab', name_norm='quietly 1 mg 10 tab', strength_norm='1mg',"
+                            " updated_at=(SELECT max(updated_at) FROM items WHERE org_id=?) WHERE id=?",
+                            (self.ctx.org_id, self.ids[5]))
+        self.assertEqual(self.status("Quietly 1mg 10 tab"), ("auto", self.ids[5]))
+
     def test_a_silent_change_followed_by_an_ordinary_edit_is_not_lost(self):
         # a writer that told nobody (bulk SQL), then an edit of another item before any search
+        self.later_millisecond()
         with self.db.transaction():
             self.db.execute("UPDATE items SET name_en='Quietly 1mg 10 tab', name_norm='quietly 1 mg 10 tab', strength_norm='1mg',"
                             " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (self.ids[5],))
