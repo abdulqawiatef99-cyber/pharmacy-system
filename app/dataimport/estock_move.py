@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
@@ -93,10 +94,13 @@ class EstockMove:
         except FileNotFoundError:
             return {"phase": "idle", "tables": 0}
         except (ValueError, UnicodeError):
-            raise ValidationFailed("حالة تجربة إي ستوك مش مقروءة.") from None
+            state = None
         if (not isinstance(state, dict) or not re.fullmatch(r"[0-9a-f]{32}", str(state.get("id")))
                 or state.get("phase") not in WORKING | {"done", "failed"}):
-            raise ValidationFailed("حالة تجربة إي ستوك مش مقروءة.")
+            # Codex P2 on #452: an unreadable checkpoint must not block the screen for good. Set it aside
+            # (kept for diagnosis) and start from idle: the next read is a fresh export, never the old one.
+            path.replace(path.with_name(f"state.json.bad-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"))
+            return {"phase": "idle", "tables": 0}
         return state
 
     @staticmethod

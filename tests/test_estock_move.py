@@ -144,6 +144,19 @@ class TestMove(DBTestCase):
             reader.assert_not_called()
         self.assertFalse((home / run_id / "preview" / "copy.db").exists())
 
+    def test_corrupt_state_is_set_aside_and_a_fresh_read_can_start(self):
+        """Codex P2 on #452: an unreadable state.json blocked status and start for good."""
+        home = self.tmp / "estock-move" / self.ctx.org_id
+        home.mkdir(parents=True)
+        (home / "state.json").write_text("{not json", encoding="utf-8")
+        status = self.c.get(URL)
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["phase"], "idle")
+        self.assertTrue(list(home.glob("state.json.bad-*")))               # kept for diagnosis, never reused
+        with mock.patch.object(estock_move, "read_export", side_effect=self.export):
+            self.assertEqual(self.c.post(URL, headers=POST).status_code, 202)
+            self.assertIn("تقرير نقل إي ستوك", self.wait_for("done")["report"])
+
     def test_restart_checks_export_fingerprint_before_reusing_it(self):
         home = self.tmp / "estock-move" / self.ctx.org_id
         run_id = "a" * 32
