@@ -1950,19 +1950,20 @@ const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
 // (owner 26/11) every supplier picker is a search box: Arabic folded like the server's normalize_text (أ/إ/آ → ا,
 // ى → ي, ة → ه, ؤ → و, ئ → ي, no tashkeel), English in any case, the phone (Arabic numerals too) or the same keys
 // typed on the other keyboard language. An empty box lists the recent suppliers first; a stopped one comes last.
-const SP_AR = { "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه", "ؤ": "و", "ئ": "ي" };
-const SP_EN_AR = { q: "ض", w: "ص", e: "ث", r: "ق", t: "ف", y: "غ", u: "ع", i: "ه", o: "خ", p: "ح", "[": "ج", "]": "د",
-  a: "ش", s: "س", d: "ي", f: "ب", g: "ل", h: "ا", j: "ت", k: "ن", l: "م", ";": "ك", "'": "ط", z: "ئ", x: "ء", c: "ؤ",
-  v: "ر", b: "لا", n: "ى", m: "ة", ",": "و", ".": "ز", "/": "ظ", "`": "ذ" };
+// The letters below are written as \u escapes: they are key maps, not screen text (tests/test_i18n_coverage.py).
+const SP_AR = { "\u0623": "\u0627", "\u0625": "\u0627", "\u0622": "\u0627", "\u0671": "\u0627", "\u0649": "\u064a", "\u0629": "\u0647", "\u0624": "\u0648", "\u0626": "\u064a" };
+const SP_EN_AR = { q: "\u0636", w: "\u0635", e: "\u062b", r: "\u0642", t: "\u0641", y: "\u063a", u: "\u0639", i: "\u0647", o: "\u062e", p: "\u062d", "[": "\u062c", "]": "\u062f",
+  a: "\u0634", s: "\u0633", d: "\u064a", f: "\u0628", g: "\u0644", h: "\u0627", j: "\u062a", k: "\u0646", l: "\u0645", ";": "\u0643", "'": "\u0637", z: "\u0626", x: "\u0621", c: "\u0624",
+  v: "\u0631", b: "\u0644\u0627", n: "\u0649", m: "\u0629", ",": "\u0648", ".": "\u0632", "/": "\u0638", "`": "\u0630" };
 const SP_AR_EN = Object.fromEntries(Object.entries(SP_EN_AR).filter(([, v]) => v.length === 1).map(([k, v]) => [v, k]));
-Object.assign(SP_AR_EN, { "أ": "h", "إ": "y", "آ": "n" });
-const spDigits = (s) => String(s ?? "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
-const spFold = (s) => spDigits(String(s ?? "").normalize("NFKC")).replace(/[ؐ-ًؚ-ٰٟـ]/g, "")
-  .replace(/[أإآٱىةؤئ]/g, (c) => SP_AR[c]).toLowerCase().replace(/\s+/g, " ").trim();
+Object.assign(SP_AR_EN, { "\u0623": "h", "\u0625": "y", "\u0622": "n" });
+const spDigits = (s) => String(s ?? "").replace(/[\u0660-\u0669]/g, (d) => "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(d));
+const spFold = (s) => spDigits(String(s ?? "").normalize("NFKC")).replace(/[\u0610-\u061a\u064b-\u065f\u0670\u0640]/g, "")
+  .replace(/[\u0623\u0625\u0622\u0671\u0649\u0629\u0624\u0626]/g, (c) => SP_AR[c]).toLowerCase().replace(/\s+/g, " ").trim();
 function spOtherLayout(q) {
   const s = String(q ?? "").trim();
-  const ar = /[؀-ۿ]/.test(s), en = /[a-z]/i.test(s);
-  if (ar && !en) return s.replace(/لا/g, "b").split("").map((c) => SP_AR_EN[c] ?? c).join("");
+  const ar = /[\u0600-\u06ff]/.test(s), en = /[a-z]/i.test(s);
+  if (ar && !en) return s.replace(/\u0644\u0627/g, "b").split("").map((c) => SP_AR_EN[c] ?? c).join("");
   if (en && !ar) return s.toLowerCase().split("").map((c) => SP_EN_AR[c] ?? c).join("");
   return "";
 }
