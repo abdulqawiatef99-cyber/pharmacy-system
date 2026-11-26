@@ -45,6 +45,12 @@ class TestPurchaseEntry(APICase):
         for changes in ({"field_order": ["qty"] * 7}, {"qty_multiple": True}, {"public_delta_pct": -1}):
             self.assertEqual(self.c.put(SETTINGS, json=changes, headers=H).status_code, 422)
 
+    def test_typed_invoice_date_is_stored_in_report_format(self):
+        today = date.today()
+        result = self.c.patch(self.path, json={"changes": {"invoice_date": today.strftime("%Y%m%d")}}, headers=H)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["invoice"]["invoice_date"], today.isoformat())
+
     def test_impossible_line_writes_are_atomic_and_have_arabic_limits(self):
         for changes, label in [({"qty": 0}, "الكمية"), ({"public_price": 0}, "سعر الجمهور"),
                                ({"unit_net_price": 0}, "سعر الصيدلي"), ({"discount_bp": 10001}, "100"),
