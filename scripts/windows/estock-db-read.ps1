@@ -10,17 +10,22 @@
 #   so an out-of-range or odd value (seen 19/11 on the cashier PC: SqlDateTime overflow) cannot stop a table.
 # - Arguments: -Only <table[,table]> reads only these tables (schema.table, db.schema.table or table);
 #   -RetryFailed reads only the tables the last run listed as not read (estock-db-read-one.bat).
-param([string]$Only = '', [switch]$RetryFailed)
+param([string]$Only = '', [switch]$RetryFailed, [switch]$Guided, [string]$OutputDirectory = '')
+if ($Guided -and (-not $OutputDirectory -or $Only -or $RetryFailed)) {
+    [Console]::Error.WriteLine('Guided requires OutputDirectory and a full read.')
+    exit 2
+}
 $ErrorActionPreference = 'Stop'
 # CSV dates and numbers in one fixed format (not the PC's Arabic culture: AM/PM marks, decimal comma)
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$out = Join-Path $env:LOCALAPPDATA "PharmacyPlatform\estock-db-read\$stamp"
+if ($Guided) { $out = $OutputDirectory }
+else { $out = Join-Path $env:LOCALAPPDATA "PharmacyPlatform\estock-db-read\$stamp" }
 $tables = Join-Path $out 'tables'
 New-Item -ItemType Directory -Force -Path $tables | Out-Null
 $summary = Join-Path $out 'summary.txt'
 $log = New-Object System.Collections.Generic.List[string]
-function Say([string]$s) { $log.Add($s); Write-Host $s }
+function Say([string]$s) { $log.Add($s); if (-not $Guided) { Write-Host $s } }
 # manifest.csv: one row per table written, with the exact original names; the file and folder names carry a
 # running index first (01_, 001_), so two names that sanitize alike can never overwrite each other.
 $manifest = New-Object System.Collections.Generic.List[object]
@@ -82,6 +87,25 @@ function Q($conn, [string]$sql) {
     return ,$t
 }
 function Qn([string]$n) { '[' + $n.Replace(']', ']]') + ']' }
+# Identify E-Stock by its table layout before exporting any rows in guided mode.
+function Find-Estock($c) {
+    try { $dbs = Q $c "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE'" } catch { return }
+    foreach ($db in $dbs.Rows) {
+        try {
+            $c.ChangeDatabase($db.name)
+            $tl = Q $c "SELECT TABLE_NAME nm, HAS_PERMS_BY_NAME(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME), 'OBJECT', 'SELECT') allowed FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
+            $names = @($tl.Rows | ForEach-Object { $_.nm })
+            if ($names -contains 'Products' -and $names -contains 'Customer' -and $names -contains 'Vendor' -and
+                ($names -contains 'Product_Amount' -or $names -contains 'Branches_Product_Amount')) {
+                $readable = @($tl.Rows | Where-Object { $_.allowed -eq 1 } | ForEach-Object { $_.nm })
+                $core = $readable -contains 'Products' -and $readable -contains 'Customer' -and $readable -contains 'Vendor' -and
+                    ($readable -contains 'Product_Amount' -or $readable -contains 'Branches_Product_Amount')
+                [pscustomobject]@{ Connection = $c; Database = [string]$db.name; CoreReadable = $core; ReadableTables = $readable.Count }
+            }
+        } catch { }
+    }
+    try { $c.ChangeDatabase('master') } catch { }
+}
 # How many user databases this connection can really open (a sign-in may connect and still see none).
 function Usable($c) {
     $n = 0
@@ -117,6 +141,13 @@ function Cell($v) {
 
 function Try-Open([string]$cs) {
     try {
+        if ($Guided) {
+            $config = New-Object System.Data.SqlClient.SqlConnectionStringBuilder $cs
+            $local = [regex]::Escape($env:COMPUTERNAME)
+            if ($config.DataSource -notmatch ('^(?:(?:tcp|lpc):)?(?:\(local\)|\.|localhost|127\.0\.0\.1|' +
+                    $local + ')(?:\\[\w-]+)?(?:,[0-9]+)?$') -or $config.FailoverPartner -or
+                    $config.AttachDBFilename -or $config.UserInstance) { return $null }
+        }
         $c = New-Object System.Data.SqlClient.SqlConnection $cs
         $c.Open(); return $c
     } catch { return $null }
@@ -124,9 +155,31 @@ function Try-Open([string]$cs) {
 
 $conns = @()
 $have = @{}      # instances already connected (by Who)
+$guidedCandidates = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+function Register-Guided($c) {
+    try { $id = Who $c } catch { return 0 }
+    if ($id.Split('\')[0] -ne $env:COMPUTERNAME) { return 0 }
+    $added = 0
+    foreach ($match in (Find-Estock $c)) {
+        $key = "$id/$($match.Database)"
+        $previous = $guidedCandidates[$key]
+        # The Windows login may see the table names without having permission to read the rows.
+        if (-not $previous -or ($match.CoreReadable -and -not $previous.CoreReadable) -or
+            ($match.CoreReadable -eq $previous.CoreReadable -and $match.ReadableTables -gt $previous.ReadableTables)) {
+            $guidedCandidates[$key] = $match
+            $added++
+        }
+    }
+    return $added
+}
 foreach ($s in $servers) {
     $c = Try-Open "Server=$s;Integrated Security=True;Connect Timeout=8;Application Name=estock-db-read"
     if (-not $c) { Say "no Windows sign-in to: $s"; continue }
+    if ($Guided) {
+        if ((Register-Guided $c) -gt 0) { $conns += ,@($s, $c) }
+        else { $c.Close() }
+        continue
+    }
     $u = Usable $c
     if ($u -gt 0) { Say "connected (Windows sign-in): $s, $u user database(s) open"; $conns += ,@($s, $c); try { $have[(Who $c)] = 1 } catch { } }
     else { Say "connected (Windows sign-in): $s, but no user database opens with it"; $c.Close() }
@@ -135,7 +188,10 @@ foreach ($s in $servers) {
 # 2. Fallback for every running instance not reached yet (no Windows sign-in, or one that opens no user
 #    database): connection strings in E-Stock's own folder (used here only, never printed).
 $missing = { @($want.Keys | Where-Object { -not $have.ContainsKey($_) }).Count }
-if ($conns.Count -eq 0 -or (& $missing) -gt 0) {
+# Guided discovery also checks the vendor's configurations after a Windows sign-in: the two
+# accounts may see different databases on the same instance (for example a restored copy and live).
+if ($Guided -or ($conns.Count -eq 0 -or (& $missing) -gt 0)) {
+    $checked = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $roots = @('D:\Modern Soft for Programming', 'C:\Program Files (x86)\Modern Soft for Programming', 'C:\Program Files\Modern Soft for Programming')
     foreach ($r in $roots) {
         if (-not (Test-Path $r)) { continue }
@@ -145,24 +201,46 @@ if ($conns.Count -eq 0 -or (& $missing) -gt 0) {
             foreach ($m in [regex]::Matches($text, '(?i)(Data Source|Server)\s*=[^"<>\r\n]+')) {
                 $cs = $m.Value -replace '(?i)Provider\s*=[^;]*;?', ''
                 if ($cs -notmatch '(?i)(Connect|Connection)\s*Timeout') { $cs = $cs.TrimEnd(';') + ';Connect Timeout=8' }
+                if ($Guided -and -not $checked.Add($cs)) { continue }
                 $c = Try-Open $cs
                 if (-not $c) { continue }
+                if ($Guided) {
+                    if ((Register-Guided $c) -gt 0) { $conns += ,@($c.DataSource, $c) }
+                    else { $c.Close() }
+                    continue
+                }
                 $id = $null; try { $id = Who $c } catch { }
                 if ($id -and -not $have.ContainsKey($id) -and (Usable $c) -gt 0) {
                     Say ("connected with a connection string from: " + $f.FullName); $conns += ,@($c.DataSource, $c); $have[$id] = 1
                 } else { $c.Close() }
             }
-            if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
+            if (-not $Guided -and $conns.Count -gt 0 -and (& $missing) -eq 0) { break }
         }
-        if ($conns.Count -gt 0 -and (& $missing) -eq 0) { break }
+        if (-not $Guided -and $conns.Count -gt 0 -and (& $missing) -eq 0) { break }
     }
 }
-foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
+if (-not $Guided) {
+    foreach ($k in $want.Keys) { if (-not $have.ContainsKey($k)) { Say ("instance " + $want[$k] + ": could not sign in"); $failed.Add($want[$k] + " (could not sign in)") } }
+}
 if ($conns.Count -eq 0) {
     Say 'RESULT: FAIL - could not open any database on a local SQL Server. Nothing was read or changed.'
+    if ($Guided) { [Console]::WriteLine('ESTOCK: NOT FOUND') }
     Save; exit 2
 }
 
+$selected = $null
+if ($Guided) {
+    $candidates = @($guidedCandidates.Values)
+    if ($candidates.Count -ne 1) {
+        if ($candidates.Count) { [Console]::WriteLine('ESTOCK: AMBIGUOUS') }
+        else { [Console]::WriteLine('ESTOCK: NOT FOUND') }
+        foreach ($pair in $conns) { $pair[1].Close() }
+        Say 'RESULT: FAIL - expected one local E-Stock database.'
+        Save; exit 2
+    }
+    $selected = $candidates[0]
+    [Console]::WriteLine('ESTOCK: FOUND')
+}
 
 $numTypes = 'int','bigint','smallint','tinyint','decimal','numeric','money','smallmoney','float','real','bit'
 $private = '(?i)phone|tel|mob|hatef|card|visa|nat|ssn|pass|pwd|هاتف|تليفون|موبايل|بطاق|رقم.?قومي|كلمة'
@@ -174,11 +252,13 @@ $si = 0
 foreach ($pair in $conns) {
     $srv = $pair[0]; $conn = $pair[1]; $si++; $di = 0
     $srvDir = Join-Path $tables (('{0:D2}_' -f $si) + (Safe $srv))
+  if ($Guided -and $conn -ne $selected.Connection) { $conn.Close(); continue }
   try {
     $v = Q $conn "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) v, CAST(SERVERPROPERTY('Edition') AS nvarchar(100)) e"
     Say ("server $srv  version " + $v.Rows[0].v + "  " + $v.Rows[0].e)
     $dbs = Q $conn "SELECT name, state_desc FROM sys.databases WHERE database_id > 4 ORDER BY name"
     foreach ($db in $dbs.Rows) {
+        if ($Guided -and $db.name -cne $selected.Database) { continue }
         if ($db.state_desc -ne 'ONLINE') { Say ("database " + $db.name + " : " + $db.state_desc + " (not read)"); $failed.Add("$srv / " + $db.name + " (" + $db.state_desc + ")"); continue }
         $dbn = $db.name; $di++; $ti = 0
         try { $conn.ChangeDatabase($dbn) } catch { Say ("database $dbn : no access (" + $_.Exception.Message + ")"); $failed.Add("$srv / $dbn (no access)"); continue }
@@ -260,6 +340,7 @@ foreach ($pair in $conns) {
             $got = $data.Rows.Count
             if ($null -ne $rows -and $got -ne $rows) { Say ("   note: $got rows exported (count was $rows; the cashier changed it meanwhile)") }
             Say ("   exported: $got rows")
+            if ($Guided) { [Console]::WriteLine('ESTOCK: TABLE') }
             $totalRows += $got; $totalTables++               # counted only once its CSV is written
             $manifest.Add([pscustomobject][ordered]@{ index = ('{0:D2}/{1:D2}/{2:D3}' -f $si, $di, $ti); instance = $srv
                 database = $dbn; schema = $t.sc; table = $t.nm; rows = $got; file = $csv.Substring($tables.Length + 1) + '.csv' })
@@ -284,6 +365,6 @@ if ($failed.Count -gt 0) {
 Say "full tables (stay on this PC): $tables  (exact names: manifest.csv)"
 Say "note: read WITH (NOLOCK) while the cashier works; a row changed during the read can be missing or twice."
 Save
-Start-Process notepad.exe -ArgumentList "`"$summary`""
+if (-not $Guided) { Start-Process notepad.exe -ArgumentList "`"$summary`"" }
 if ($failed.Count -gt 0) { exit 4 }
 exit 0

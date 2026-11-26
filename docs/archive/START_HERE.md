@@ -1,3 +1,5 @@
+> Archived 26/11/2026: obsolete pre-launch order (#18 → #20). Current state and queue: `docs/HANDOFF.md`.
+
 # ابدأ من هنا — الباقي على الإطلاق
 
 آخر تحديث: 2026-11-11 · Claude · بقرار المالك. القواعد الكاملة: [AGENTS.md](../AGENTS.md) و[LAUNCH_PLAN.md](LAUNCH_PLAN.md)، والحالة التفصيلية: [HANDOFF.md](HANDOFF.md).
