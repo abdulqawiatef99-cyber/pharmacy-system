@@ -159,5 +159,5 @@ class TestPosUsualPending(APICase):
         self.assertEqual(out["whileWaiting"], 1)                 # four redraws, still one request
         self.assertEqual(out["total"], 2)                        # one per invoice
         self.assertEqual(len(out["shown"]), 1)
-        self.assertIn("New Item", out["shown"][0])
-        self.assertNotIn("Old Item", out["shown"][0])
+        self.assertIn("NEW ITEM", out["shown"][0])
+        self.assertNotIn("OLD ITEM", out["shown"][0])
