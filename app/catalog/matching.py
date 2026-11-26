@@ -325,8 +325,8 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
     return Candidate(it.item_id, it.label, round(score, 4), reasons)
 
 
-SHORTLIST_MIN, SHORTLIST_MAX = 200, 400
-RANK_MAX = 2000        # at most this many candidates are ranked one by one (about 3 µs each)
+SHORTLIST_MIN, SHORTLIST_MAX = 120, 400
+RANK_MAX = 1500        # at most this many candidates are ranked one by one (about 3 µs each)
 
 
 def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[_IndexedItem]:

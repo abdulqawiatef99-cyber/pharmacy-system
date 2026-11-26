@@ -25,7 +25,7 @@ _EN_AR = {
 }
 _AR_EN = {v: k for k, v in _EN_AR.items() if len(v) == 1}
 _AR_EN.update({"ﻻ": "b", "ﻷ": "b", "ﻹ": "b", "ﻵ": "b", "أ": "h", "إ": "h", "آ": "h"})
-FUZZY_MAX = 60
+FUZZY_MAX = 40
 _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
@@ -110,8 +110,11 @@ def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | 
 def _exact_code(db: Database, org_id: str, q: str) -> list[dict]:
     """The code typed in full comes first (launch day: «3796» found nothing): the item code as typed or in any
     letter case, and E<code> (an E-Stock item moved without a code of its own gets E + its E-Stock id)."""
-    return [dict(r) for r in db.all("SELECT * FROM items WHERE org_id=? AND status='active' AND"
-                                    " (lower(code)=lower(?) OR code=?) ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
+    # read from the code index alone (a third of the time of reading every item row, #461); an item without
+    # a code cannot match
+    return [dict(r) for r in db.all("SELECT * FROM items INDEXED BY ux_items_org_code WHERE org_id=? AND code IS NOT NULL"
+                                    " AND (lower(code)=lower(?) OR code=?) AND status='active'"
+                                    " ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
 
 
 def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:

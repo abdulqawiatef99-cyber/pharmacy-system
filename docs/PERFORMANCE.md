@@ -186,3 +186,49 @@ The offline status switch used by tests leaves explicit updater network tests on
 
 Reproduce the timed checkout and worker assertions with
 `python -m unittest tests.test_u4_5_checkout`. The cashier's Windows device timing remains to be measured.
+
+## Item search at catalog scale (#461 QA-012, 2026-11-26)
+
+`python scripts/perf/search_bench.py` — 30,000 synthetic items, an adjacent archive of 500,000 rows, every
+request through the HTTP app (TestClient, Linux, this cloud machine). Two catalogs: **prefix** (every name
+starts with the same word, the worst case for fuzzy matching) and **varied** (generated brand names with
+strengths, forms and Arabic names). Median / p95 in ms; before = develop `09e148e`. Target: p95 < 100.
+
+| Request | prefix before | prefix after | varied before | varied after |
+|---|---:|---:|---:|---:|
+| Sale screen, misspelt name, first time (warm index) | 1318 / 1529 | 75 / 93 | 97 / 149 | 59 / 80 |
+| Same, asked again | 68 / 91 | 50 / 64 | 57 / 79 | 50 / 66 |
+| Same, right after an item was edited | 1580 / 1816 | 82 / 99 | 353 / 505 | 57 / 82 |
+| Purchase item search, misspelt name | 1293 / 1522 | 74 / 101 | 85 / 179 | 58 / 84 |
+| Purchase line, typed name matched to the catalog | 1377 / 1649 | 57 / 65 | 251 / 848 | 46 / 65 |
+| Purchase invoice opened, 31 lines | 109 / 151 | 20 / 24 | 115 / 154 | 18 / 22 |
+| Sale screen, Arabic name | 97 / 121 | 41 / 50 | 117 / 154 | 34 / 51 |
+| Sale screen, start of a name | 43 / 65 | 39 / 53 | 35 / 41 | 22 / 31 |
+| Sale screen, full name | 33 / 48 | 25 / 36 | 29 / 39 | 21 / 25 |
+| Sale screen, item code | 27 / 38 | 26 / 30 | 27 / 35 | 24 / 29 |
+| Purchase line, known item from the picker | 7.6 / 15 | 7.9 / 12 | 7.7 / 13 | 8.0 / 10 |
+| Name index built from nothing (once, background warm-up at start) | 3978 | 4644 | 3729 | 5238 |
+
+Run-to-run noise on this machine is about ±10 ms: the prefix purchase search measured p95 86, 94 and 101
+in three runs. The archive is not read on any of these paths.
+
+What was slow and what changed (`app/catalog/matching.py`, `app/catalog/search.py`):
+- **Every item was a candidate.** Candidates are found by the first three letters of each name word; with
+  one shared prefix that is the whole catalog, and each candidate was compared in full (`SequenceMatcher`,
+  ~45 µs). Now only a shortlist is compared: candidates are ranked by the letter groups (trigrams of the
+  name words, bigrams of the consonant skeleton) they share with the query, weighted like the full score
+  for strength, form and pack; the pool is cut with set operations first, so 30,000 candidates cost ~15 ms.
+  On 640 test questions against a full comparison the best answer was always the same, the first three in
+  99.7%, and no answer in the first ten scored more than 0.05 lower (`tests/test_search_speed_461.py`).
+- **One item edit rebuilt the index** (0.3-0.5 s for the next search). `catalog.create_item` and
+  `update_item` now update the index in place (`matching.item_changed`). Bulk paths (imports, purchase
+  approval) still invalidate it; a change nobody announced is still caught by the version check.
+- **The version check scanned every item on every question** (6 ms, 31 times to open one invoice). A
+  connection now reads it again only after the database changed (SQLite `data_version` / `total_changes`).
+- **The sale screen asked for 500 fuzzy guesses** and read each with its own query: the closest 40 are
+  kept and read in one query.
+- **Arabic spelling search** ran ten `replace()` calls on all 30,000 names: cheap tests now run first.
+- **Item code** is read from the code index.
+
+Not measured here: Windows and the pharmacy PC (the weekly speed run), and the first search after a start
+before the background warm-up finished (it waits for the build, 4-5 s on 30,000 items).
