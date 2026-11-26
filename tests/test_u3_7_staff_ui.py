@@ -72,3 +72,13 @@ class TestSettingsRoutesKeepHandler(DBTestCase):
         for path in ("/api/settings/rounding", "/api/settings/staff-ui", "/api/settings/dispensing-notes"):
             with self.subTest(path=path):
                 self.assertEqual(c.get(path, headers={"X-Requested-With": "pharm"}).status_code, 401)
+
+
+class TestStaffUiBackgroundFetch(_ut.TestCase):
+    def test_background_fetch_settles_after_navigation(self):
+        """Codex P2 on #421: api() leaves a GET pending forever when the screen changed; the background staff
+        settings fetch must settle anyway, or STAFF_LOADING never clears and no strip/reminder starts."""
+        from pathlib import Path
+        js = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        line = next(ln for ln in js.splitlines() if 'cfg = { uid, ...(await api("/api/settings/staff-ui"' in ln)
+        self.assertIn("settleAfterNavigation: true", line)

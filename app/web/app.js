@@ -435,7 +435,7 @@ async function staffUi(force = false) {
   STAFF_LOADING = uid;
   let cfg;
   // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
-  try { cfg = { uid, ...(await api("/api/settings/staff-ui")) }; } catch { STAFF_LOADING = null; return; }
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui", { settleAfterNavigation: true })) }; } catch { STAFF_LOADING = null; return; }
   STAFF_LOADING = null;
   if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
   staffUiStop();
