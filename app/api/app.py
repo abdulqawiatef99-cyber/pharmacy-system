@@ -3411,6 +3411,28 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
                   "web": _web_build()})
 
+    async def keyboard_layout(req):
+        """POST {"lang": "ar" | "en"}: the input language of the window in front, on the cashier PC itself.
+        No session and no database (it must answer while a sale is being written, and the sign-in screen
+        may ask too): only this PC's own screen may call it, and it can do nothing but switch the language.
+        Always 200 with {"ok": ...}; see app/core/keyboard_layout.py."""
+        from ..core import keyboard_layout
+        try:
+            origin = req.headers.get("origin")
+            if client_ip(req) not in ("127.0.0.1", "::1", "testclient"):
+                return J({"ok": False, "reason": "unsupported", "detail": "not_local"})
+            if (req.headers.get("x-requested-with") != "pharm"
+                    or origin is not None and origin != f"{req.url.scheme}://{req.url.netloc}"
+                    or req.headers.get("sec-fetch-site") not in (None, "none", "same-origin")):
+                return J({"ok": False, "reason": "unsupported", "detail": "not_this_screen"})
+            try:
+                b = json.loads(await req.body() or b"{}")
+            except ValueError:
+                b = {}
+            return J(keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None))
+        except Exception:
+            return J({"ok": False, "reason": "unsupported", "detail": "error"})
+
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
 
@@ -3426,6 +3448,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/system/network", system_network, methods=["GET", "PUT"]),
         Route("/api/system/storage", system_storage),
+        Route("/api/system/keyboard-layout", keyboard_layout, methods=["POST"]),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),
