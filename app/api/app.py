@@ -840,6 +840,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler
+    async def staff_ui_api(req):
+        from ..core import staff_ui
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(staff_ui.save(db, ctx, await body(req)))
+        if req.query_params.get("all"):
+            ctx.require("users.manage")
+            return J(staff_ui.get(db, ctx.org_id))
+        return J(staff_ui.mine(db, ctx))
+
+    @handler
     async def rounding_api(req):
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
@@ -3383,6 +3394,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/staff-ui", staff_ui_api, methods=["GET", "PUT"]),
         Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
         Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),

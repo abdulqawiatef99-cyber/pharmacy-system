@@ -19,7 +19,8 @@ PERSONAL = {"/api/me", "/api/me/prefs", "/api/me/pin", "/api/me/password", "/api
             "/api/approvals/check", "/api/system/update-badge", "/api/version",
             # harmless to anyone signed in: approver names for the approval box, fixed reason lists, screen
             # settings, and the home page (which shows only the person's own figures without permissions)
-            "/api/approvers", "/api/stock/reasons", "/api/settings/sales", "/api/settings/receipt", "/api/home"}
+            "/api/approvers", "/api/stock/reasons", "/api/settings/sales", "/api/settings/receipt", "/api/home",
+            "/api/settings/staff-ui"}   # GET = only the signed-in person's own strip and hours (staff_ui.mine)
 
 
 class TestPermissionSweep(APICase):

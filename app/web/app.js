@@ -413,6 +413,61 @@ function printInFrame(url) {
   document.body.appendChild(f);
 }
 
+// ------------------------------------------------------------------ dhikr ticker and work hours (U3-7)
+// The ticker is a passive strip at the very bottom (pointer-events: none, never over a button, hidden in print);
+// the work-hours reminder is one toast WARN_MIN minutes before the end of the person's hours. Neither stops work.
+let STAFF_UI = null, STAFF_TIMERS = [], STAFF_LOADING = null;
+function staffUiStop() {                 // on sign-out and before every reload of the settings (review P1)
+  STAFF_TIMERS.forEach(clearInterval); STAFF_TIMERS = [];
+  document.getElementById("dhikrBar")?.remove();
+  document.body.style.paddingBottom = "";
+}
+// minutes left until a shift end «HH:MM» seen from `now` (the end after midnight when it is still ahead)
+function shiftEndLeft(now, endHHMM) {
+  const [eh, em] = endHHMM.split(":").map(Number), end = new Date(now);
+  end.setHours(eh, em, 0, 0);
+  if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
+  return (end - now) / 60000;
+}
+async function staffUi(force = false) {
+  const uid = ME?.user?.id;
+  if (!uid || (!force && STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  STAFF_LOADING = uid;
+  let cfg;
+  // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui", { settleAfterNavigation: true })) }; } catch { STAFF_LOADING = null; return; }
+  STAFF_LOADING = null;
+  if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
+  staffUiStop();
+  STAFF_UI = cfg;
+  // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
+  STAFF_TIMERS.push(setInterval(() => { staffUi(true); }, 600000));
+  if (cfg.dhikr.length) {
+    const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.cssText = "position:fixed;inset-inline:0;bottom:0;height:1.4em;line-height:1.4em;font-size:.8em;opacity:.75;"
+      + "pointer-events:none;overflow:hidden;white-space:nowrap;text-align:center;z-index:1;background:var(--panel,transparent)";
+    let i = 0;
+    const show = () => { bar.textContent = cfg.dhikr[i++ % cfg.dhikr.length]; };
+    show(); STAFF_TIMERS.push(setInterval(show, 20000));
+    document.body.append(bar);
+    document.body.style.paddingBottom = "1.6em";
+  }
+  const h = cfg.hours;
+  if (h?.end) {
+    const tick = () => {
+      const now = new Date(), left = shiftEndLeft(now, h.end), key = `endWarn:${uid}:${h.end}:${new Date(now.getTime() + left * 60000).toDateString()}`;
+      if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
+        sessionStorageSet(key, "1");
+        toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
+      }
+    };
+    tick(); STAFF_TIMERS.push(setInterval(tick, 60000));
+  }
+}
+function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* blocked storage: warn again later */ } }
+
 // ------------------------------------------------------------------ routing
 const routes = [
   [/^#\/login$/, viewLogin],
@@ -490,6 +545,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
+    staffUi();
     $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
@@ -981,6 +1037,7 @@ $("#logout").addEventListener("click", async () => {
     try { if (ME?.permissions?.includes("sales.read") && await api("/api/cash/current")) warn.push("الشيفت لسه مفتوح: اقفله لو هتمشي."); } catch { /* no open shift */ }
     if (!confirm(["تخرج من البرنامج؟", ...warn].join("\n"))) return;
   }
+  staffUiStop(); STAFF_UI = null;
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
 });
@@ -7555,6 +7612,27 @@ async function viewUsers() {
   // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
   if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
+  // U3-7: the dhikr strip (on for all, off for some) and each employee's hours (a reminder before the end)
+  if (ME.permissions.includes("users.manage")) api("/api/settings/staff-ui?all=1").then((su) => {
+    const box = $("#suPanel"); if (!box) return;
+    box.innerHTML = `<h2>الذِكر ومواعيد الشغل</h2>
+      <label class="f"><input type="checkbox" id="suOn" ${su.dhikr_on ? "checked" : ""}> شريط ذِكر صغير تحت الشاشة (مبيغطيش أي زرار ومبيوقفش البيع)</label>
+      <table><thead><tr><th>الموظف</th><th>الذِكر</th><th>من</th><th>لحد</th></tr></thead><tbody>${users.filter((u) => u.role !== "owner").map((u) => `<tr data-u="${esc(u.id)}"><td>${esc(u.full_name)}</td>
+        <td><input type="checkbox" data-dk ${su.dhikr_off_users.includes(u.id) ? "" : "checked"}></td>
+        <td><input type="time" data-st value="${esc(su.hours[u.id]?.start || "")}"></td><td><input type="time" data-en value="${esc(su.hours[u.id]?.end || "")}"></td></tr>`).join("")}</tbody></table>
+      <p class="muted">قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.</p><button class="btn" id="suSave">حفظ</button>`;
+    $("#suSave").addEventListener("click", async () => {
+      const rows = [...box.querySelectorAll("tr[data-u]")], hours = {};
+      let half = false;
+      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; half ||= !!st !== !!en; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      if (half) { toast("اكتب الميعادين (من ولحد) أو سيبهم فاضيين", true); return; }
+      try {
+        await api("/api/settings/staff-ui", { method: "PUT", body: { dhikr_on: $("#suOn").checked, hours,
+          dhikr_off_users: rows.filter((tr) => !tr.querySelector("[data-dk]").checked).map((tr) => tr.dataset.u) } });
+        STAFF_UI = null; staffUiStop(); staffUi(); toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    });
+  }).catch(() => {});
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
     <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
@@ -7562,6 +7640,7 @@ async function viewUsers() {
       <td>${u.active ? `<span class="badge b-ok">✓ مفعّل</span>` : `<span class="badge b-err">✕ موقوف</span>`}</td>
       <td>${u.has_pin ? "✓" : `<span class="badge b-warn">⚠ لا يوجد</span>`}</td>
       <td>${u.role === "owner" ? "كل الصلاحيات" : u.changes ? `${u.changes} تعديل` : "على الافتراضي"}</td></tr>`).join("")}</tbody></table></section>
+  ${ME.permissions.includes("users.manage") ? `<section class="panel" id="suPanel"><h2>الذِكر ومواعيد الشغل</h2><p class="muted">بيتحمل…</p></section>` : ""}
   <section class="panel"><h2>مستخدم جديد</h2>
     <form id="uNew" class="row">
       <label class="f">الاسم <input name="full_name" required></label>
