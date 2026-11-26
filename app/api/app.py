@@ -1055,9 +1055,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
+        offset = qp.get("offset") or "0"
+        if not (offset.isascii() and offset.isdigit()) or len(offset) > 9:
+            raise ValidationFailed("رقم الصفحة غير صحيح")
         return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
-                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
+                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1",
+                                 offset=int(offset), totals=qp.get("totals") != "0",
+                                 after=qp.get("after") or None, until=qp.get("until") or None))
 
     @handler
     async def owner_report(req):
