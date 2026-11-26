@@ -51,7 +51,10 @@ class TestR22CappedExportsSaySo(unittest.TestCase):
         start = JS.index('const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;')
         body = JS[start:JS.index("\nasync function ", start)]
         self.assertIn("R.truncated", body[:400])
-        self.assertIn('exportXlsx("فواتير البيع", subOut()', body)
+        self.assertIn("pageText()", body[:400])               # the printout of one page says which page it is
+        # since #461 the file is no longer capped: it is built from every page of the period
+        self.assertIn("await withBusy(e.currentTarget, allRows)", body)
+        self.assertIn('exportXlsx("فواتير البيع", sub(), sheets(rows))', body)
         self.assertIn("subOut())", body[body.index("printPreview(box"):][:200])
 
 
