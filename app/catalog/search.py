@@ -30,17 +30,35 @@ _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
 
-def swap_layout(q: str) -> str | None:
-    """The same keys typed with the other keyboard language, or None if mixed/not letters."""
+def layout_variants(q: str) -> list[str]:
+    """The same physical keys typed with the other keyboard language (Windows Arabic 101 <-> US QWERTY), most
+    likely reading first; empty if the query mixes both scripts or has no letters. The B key types «لا», two
+    letters that are also G then H: both readings are offered, B first."""
     s = q.strip()
     if not s:
-        return None
+        return []
     if _ARABIC.search(s) and not _LATIN.search(s):
-        out = "".join(_AR_EN.get(ch, ch) for ch in s)
-        return out if _LATIN.search(out) else None
+        s = s.replace("ﻻ", "لا")
+        out = []
+        for text in dict.fromkeys((s.replace("لا", "\x00"), s)):
+            alt = "".join("b" if ch == "\x00" else _AR_EN.get(ch, ch) for ch in text)
+            if _LATIN.search(alt):
+                out.append(alt)
+        return out
     if _LATIN.search(s) and not _ARABIC.search(s):
-        return "".join(_EN_AR.get(ch, ch) for ch in s.lower())
-    return None
+        return ["".join(_EN_AR.get(ch, ch) for ch in s.lower())]
+    return []
+
+
+def swap_layout(q: str) -> str | None:
+    """The same keys typed with the other keyboard language, or None if mixed/not letters."""
+    return next(iter(layout_variants(q)), None)
+
+
+# a query meant in English but typed on the Arabic layout comes out as Arabic letters only: the keys that
+# give ك ط ج د ذ و ز ظ are punctuation in English, so a mapped query with ; ' [ ] ` , . / in it was Arabic
+_CLEAN_LATIN = re.compile(r"[a-z0-9\s%+-]+")
+FUZZY_SURE = 0.75      # a guess this close as typed is kept without trying the other layout
 
 
 def _patterns(q: str) -> list[str]:
@@ -157,6 +175,17 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
     hint = None
+    alts = layout_variants(q)
+    if not found:
+        # nothing as typed: the same keys on the other layout, before any guess by spelling. Only a mapped
+        # query that reads as plain English may go first, so «بكتول» (f;j,g) still gets its spelling guess.
+        for alt in alts:
+            if _ARABIC.search(alt) or not _CLEAN_LATIN.fullmatch(alt):
+                continue
+            for row in _by_name(db, ctx.org_id, alt, limit, category):
+                found.setdefault(row["id"], row)
+            if found:
+                return {"items": list(found.values())[:limit], "hint": {"kind": "layout", "query": alt}}
     if len(found) < limit and "%" not in q:
         exact = bool(found)
         for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
@@ -165,24 +194,33 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         if found and not exact:
             hint = {"kind": "spelling"}          # a guess by spelling: Enter on the sale screen never adds it alone
     if not found:
-        alt = swap_layout(q)
-        if alt:
+        for alt in alts:
             for row in _by_name(db, ctx.org_id, alt, limit, category):
                 found.setdefault(row["id"], row)
             if found:
                 hint = {"kind": "layout", "query": alt}
+                break
     if not found and "%" not in q and not category:
         from . import matching
         # guesses: the closest FUZZY_MAX are enough even when the sale screen asks for 500 rows to sort by
         # stock, and they are read in one query (500 single reads cost more than the search itself, #461)
-        ids = [c.item_id for c in matching.fuzzy_candidates(db, ctx.org_id, q, min(limit, FUZZY_MAX))]
+        most = min(limit, FUZZY_MAX)
+        cands = matching.fuzzy_candidates(db, ctx.org_id, q, most)
+        hint = {"kind": "fuzzy"}
+        if not cands or cands[0].score < FUZZY_SURE:
+            # a misspelt name typed on the wrong layout: the guess of the mapped query wins when it is closer
+            for alt in alts:
+                other = matching.fuzzy_candidates(db, ctx.org_id, alt, most)
+                if other and (not cands or other[0].score > cands[0].score):
+                    cands, hint = other, {"kind": "layout", "query": alt, "guess": True}
+        ids = [c.item_id for c in cands]
         rows = {r["id"]: dict(r) for r in db.all(
             f"SELECT * FROM items WHERE org_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.org_id, *ids))} if ids else {}
         for i in ids:
             if i in rows:
                 found.setdefault(i, rows[i])
-        if found:
-            hint = {"kind": "fuzzy"}
+        if not found:
+            hint = None
     return {"items": list(found.values())[:limit], "hint": hint}
 
 
