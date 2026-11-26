@@ -102,3 +102,62 @@ class TestPosUsualClick(APICase):
                             " JOIN items i ON i.id=l.item_id WHERE s.status='draft' AND s.customer_id=?", (cust,))
         self.assertEqual(sorted((r["name_en"], r["qty_base"]) for r in lines),
                          [("Usual Box 3 strips", 3), ("Usual Loose 10 tab", 4)])   # one box, 4 loose units
+
+
+POS_USUAL_PENDING = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  let n = 0;
+  const item = (name) => ({ item_id: 'x-' + name, name_en: name, name_ar: null, pack_size: 1, base_unit: 'unit',
+    is_service: 0, times: 1, last_qty: 1, add_qty: 1, stock: 5, in_stock: true, refill_due: null, refill_days_left: null });
+  // the first answer (for the first invoice) is slow and says «Old Item»; the second is quick and says «New Item»
+  await p.route('**/api/customers/*/usual', (r) => {
+    const mine = ++n;
+    setTimeout(() => r.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ items: [item(mine === 1 ? 'Old Item' : 'New Item')] }) }).catch(() => {}), mine === 1 ? 2500 : 100);
+  });
+  const pick = async () => {
+    await p.locator('#posCust').fill('عميل');
+    await p.waitForSelector('#posCustRes [data-cust]');
+    await p.locator('#posCustRes [data-cust]').first().click();
+    await p.waitForSelector('#custClear');
+  };
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posCust');
+  await p.waitForTimeout(700);                                 // the first-run tour: «تخطّي»
+  if (await p.locator('[data-tour-go=skip]').count()) await p.locator('[data-tour-go=skip]').click();
+  await pick();
+  for (const m of ['card', 'cash', 'card', 'cash']) {          // the side panel is drawn again while it waits
+    await p.locator(`[data-m=${m}]`).click();
+    await p.waitForTimeout(50);
+  }
+  const whileWaiting = n;
+  await p.locator('#tabNew').click();                          // another invoice for the same customer
+  await p.waitForFunction(() => document.querySelectorAll('[data-tab]').length === 2);
+  await pick();
+  await p.waitForSelector('#posUsual [data-usual]');
+  await p.waitForTimeout(3000);                                // the slow answer for the first invoice arrives now
+  const shown = await p.$$eval('#posUsual [data-usual]', (x) => x.map((b) => b.textContent.replace(/\s+/g, ' ').trim()));
+  console.log(JSON.stringify({ whileWaiting, total: n, shown }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestPosUsualPending(APICase):
+    """Codex P1 on #419 (538d9ad): one request per customer and invoice while the panel redraws, and a late
+    answer for the invoice before never fills the invoice on screen."""
+    def test_one_request_and_late_answer_ignored(self):
+        from app.sales.cash import CashDrawer
+        from app.sales.service import Sales
+        Sales(self.db).create_customer(self.ctx, name="عميل الانتظار", credit_limit=0)
+        CashDrawer(self.db).open(self.ctx, 0)
+        out = run_node(self, POS_USUAL_PENDING, "owner", OWNER_PW)
+        self.assertEqual(out["whileWaiting"], 1)                 # four redraws, still one request
+        self.assertEqual(out["total"], 2)                        # one per invoice
+        self.assertEqual(len(out["shown"]), 1)
+        self.assertIn("New Item", out["shown"][0])
+        self.assertNotIn("Old Item", out["shown"][0])
