@@ -55,3 +55,20 @@ console.log(JSON.stringify([shiftEndLeft(at(17, 50), "18:00"), shiftEndLeft(at(2
         r = _sp.run([_shutil.which("node"), "-e", code], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(_json.loads(r.stdout), [10, 10, 20, -30])     # in the window, overnight, after the end
+
+
+class TestSettingsRoutesKeepHandler(DBTestCase):
+    """The merge with develop put staff_ui_api between @handler and rounding_api: signed out = 500, not 401."""
+
+    def test_signed_out_settings_routes_answer_401(self):
+        from dataclasses import replace as _replace
+        from starlette.testclient import TestClient
+        from app import config
+        from app.api.app import create_app
+        from app.purchasing.service import Purchasing
+        s = _replace(config.load(), upload_dir=self.tmp / "up", anthropic_api_key=None, data_dir=self.tmp,
+                     backup_dir=self.tmp / "backups")
+        c = TestClient(create_app(self.db, s, Purchasing(self.db, s)), raise_server_exceptions=False)
+        for path in ("/api/settings/rounding", "/api/settings/staff-ui", "/api/settings/dispensing-notes"):
+            with self.subTest(path=path):
+                self.assertEqual(c.get(path, headers={"X-Requested-With": "pharm"}).status_code, 401)

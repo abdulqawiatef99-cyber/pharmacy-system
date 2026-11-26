@@ -849,6 +849,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             ctx.require("users.manage")
             return J(staff_ui.get(db, ctx.org_id))
         return J(staff_ui.mine(db, ctx))
+
+    @handler
     async def rounding_api(req):
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
