@@ -84,6 +84,10 @@ def _now() -> str:
     return iso(utcnow())
 
 
+# UX-28: the refund method in the owner's notification title (a cash refund is the one to watch)
+_REFUND_WORD = {"cash": "نقدي ", "card": "على البطاقة ", "transfer": "تحويل ", "credit": "على الحساب "}
+
+
 def local_day_bounds(day: date) -> tuple[str, str]:
     """UTC ISO bounds of a calendar day in the pharmacy PC's local timezone
     (timestamps are stored in UTC; 'today' means the pharmacy's today)."""
@@ -1675,7 +1679,8 @@ class Sales:
                                 **({"channel_id": channel_id, "wallet_account_id": wallet_account} if refund_method == "transfer" else {}),
                                 **({"card_only": True} if refund_method == "card" else {})})
             notify.emit(self.db, ctx, "return", "error" if restricted else "warning"
-                        if age > days or s["created_by"] != ctx.user_id else "info", f"مرتجع {egp(refund)} ج — فاتورة {s['sale_no']}",
+                        if age > days or s["created_by"] != ctx.user_id else "info",
+                        f"مرتجع {_REFUND_WORD.get(refund_method, '')}{egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
                         + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
