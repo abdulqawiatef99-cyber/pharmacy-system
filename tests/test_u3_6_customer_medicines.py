@@ -6,7 +6,7 @@ from app.sales import customers as cu
 from tests.test_sales import SalesCase
 
 
-class TestUsualItems(SalesCase):
+class UsualBase(SalesCase):
     def setUp(self):
         super().setUp()
         self.cust = new_id()
@@ -19,6 +19,8 @@ class TestUsualItems(SalesCase):
         d = self.s.add_line(self.ctx, sid, self.pan, units=units)
         return self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
 
+
+class TestUsualItems(UsualBase):
     def test_items_last_qty_and_refill(self):
         self.sell(1)
         self.sell(2)
@@ -43,7 +45,7 @@ class TestUsualItems(SalesCase):
             cu.usual_items(self.db, other, self.cust)
 
 
-class TestCodexOn419(TestUsualItems):
+class TestCodexOn419(UsualBase):
     def test_hidden_and_expired(self):
         from dataclasses import replace
         self.sell(1)
@@ -54,7 +56,7 @@ class TestCodexOn419(TestUsualItems):
         self.assertEqual(len(cu.usual_items(self.db, self.ctx, self.cust)), 1)
 
 
-class TestCodexOn419Stock(TestUsualItems):
+class TestCodexOn419Stock(UsualBase):
     def test_unsellable_stock_is_not_available(self):
         self.sell(1)
         with self.db.transaction():          # what is left is only expired: nothing to sell
@@ -68,10 +70,36 @@ class TestCodexOn419Stock(TestUsualItems):
         self.assertEqual(cu.usual_items(self.db, self.ctx, self.cust)[0]["last_qty"], 1)
 
 
-class TestCodexOn419Lines(TestUsualItems):
+class TestCodexOn419Lines(UsualBase):
     def test_two_lines_of_the_same_item(self):
         sid = self.s.create(self.ctx, self.cust)
         self.s.add_line(self.ctx, sid, self.pan, units=2)
         d = self.s.add_line(self.ctx, sid, self.pan, units=3, discount_bp=500)    # kept on its own line
         self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
         self.assertEqual(cu.usual_items(self.db, self.ctx, self.cust)[0]["last_qty"], 5)
+
+
+class TestReviewOn419(UsualBase):
+    """The fresh-context review of #419 (P2s)."""
+
+    def test_less_stock_than_his_usual_still_sells_what_is_there(self):
+        self.sell(5)
+        sellable = self.s._held(self.ctx, self.ctx.branch_id, self.pan)[0]
+        if sellable > 2:                                            # leave exactly 2 units to sell
+            sid = self.s.create(self.ctx, None)
+            d = self.s.add_line(self.ctx, sid, self.pan, units=sellable - 2)
+            self.s.complete(self.ctx, sid, paid_cash=d["total"], safety_decisions=self.ack_all(sid))
+        it = cu.usual_items(self.db, self.ctx, self.cust)[0]
+        self.assertEqual((it["last_qty"], it["stock"]), (5, 2))
+        self.assertTrue(it["in_stock"])                             # the button stays on
+        self.assertEqual(it["add_qty"], 2)                          # and adds what can be sold
+
+    def test_expiry_follows_the_given_day(self):
+        from datetime import date, timedelta
+        self.sell(1)
+        later = date.today() + timedelta(days=100)
+        with self.db.transaction():          # every lot expires before that day
+            self.db.execute("UPDATE batches SET expiry_date=? WHERE item_id=?",
+                            ((date.today() + timedelta(days=50)).isoformat(), self.pan))
+        it = cu.usual_items(self.db, self.ctx, self.cust, today=later)[0]
+        self.assertEqual((it["stock"], it["in_stock"], it["add_qty"]), (0, False, 0))

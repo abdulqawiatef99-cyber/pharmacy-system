@@ -372,13 +372,16 @@ def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: da
     refills = {r["item_id"]: r for r in profile(db, ctx, cid, today)["refills"]}
     out = []
     from .service import Sales
-    sales = Sales(db)
+    sales = Sales(db, today)                          # expiry on the same day as the window (review of #419)
     for r in rows:
         d = dict(r)
         if not d["is_service"] and ctx.branch_id:      # what the sale path can really sell: no expired, recalled
             d["stock"] = sales._held(ctx, ctx.branch_id, d["item_id"])[0]      # or hospital lots (Codex P2 on #419)
         rf = refills.get(d["item_id"])
         d["refill_due"], d["refill_days_left"] = (rf["due"], rf["days_left"]) if rf else (None, None)
-        d["in_stock"] = bool(d["is_service"]) or d["stock"] >= (d["last_qty"] or 1)
+        # some stock but less than his usual: the button stays on and adds what is there (review of #419)
+        want = d["last_qty"] or 1
+        d["in_stock"] = bool(d["is_service"]) or d["stock"] > 0
+        d["add_qty"] = want if d["is_service"] else max(0, min(want, d["stock"]))
         out.append(d)
     return out

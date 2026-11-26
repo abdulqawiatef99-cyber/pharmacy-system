@@ -5039,16 +5039,21 @@ function chanOptions(kind, sel) {
 async function posUsual() {
   const box = $("#posUsual"), cid = SALE?.customer_id;
   if (!box || !cid) return;
-  try {
-    if (POS.usual?.cid !== cid || POS.usual?.sale !== SALE.id) POS.usual = { cid, sale: SALE.id, items: (await api(`/api/customers/${cid}/usual`)).items };
-  } catch { return; }
-  if (SALE?.customer_id !== cid || !$("#posUsual")) return;
-  const items = POS.usual.items.slice(0, 8);
+  const sale = SALE.id;
+  // one request per customer and invoice, even while renderSide runs again before it answers (review of #419)
+  if (POS.usual?.cid !== cid || POS.usual?.sale !== sale) {
+    POS.usual = { cid, sale, items: api(`/api/customers/${cid}/usual`).then((r) => r.items) };
+  }
+  const mine = POS.usual;
+  let all;
+  try { all = await mine.items; } catch { if (POS.usual === mine) POS.usual = null; return; }
+  if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
+  const items = all.slice(0, 8);
   $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
     `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
-      <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
+      <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
   $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
-    const x = items[+b.dataset.usual], q = x.last_qty || 1, ps = x.pack_size || 1;
+    const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
     addItem({ ...x, id: x.item_id }, q % ps === 0 ? q / ps : 0, q % ps === 0 ? 0 : q);
   }));
 }
