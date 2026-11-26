@@ -253,10 +253,13 @@ class TestCodexRound5(TestCodexReview397):
         self.p.update_header(self.ctx, inv, {"invoice_no": "X-1", "invoice_date": date.today().isoformat(),
                                              "extra_discount": 13000}, v)
         v = self.p.get(self.ctx, inv)["invoice"]["version"]
-        self.p.add_line(self.ctx, inv, {"item_id": self.tax, "qty": 3, "bonus_qty": 0, "unit_net_price": 4000,
-                                        "tax_amount": 1680, "line_total": 13680, "batch_no": "T1", "expiry_date": FUT}, v)
+        draft = self.p.add_line(self.ctx, inv, {"item_id": self.tax, "qty": 3, "bonus_qty": 0, "unit_net_price": 4000,
+                                              "tax_amount": 1680, "line_total": 13680, "batch_no": "T1", "expiry_date": FUT}, v)
+        unusual = next(i for i in draft["issues"] if i["code"] == "unusual_last_cost")
+        confirmed = self.p.acknowledge(self.ctx, inv, unusual["code"], "خصم كبير موثّق في فاتورة التجربة",
+                                      unusual["line_id"], draft["invoice"]["version"])
         bal = self.balance()
-        self.p.approve(self.ctx, inv, self.p.get(self.ctx, inv)["invoice"]["version"])
+        self.p.approve(self.ctx, inv, confirmed["invoice"]["version"])
         self.assertEqual(self.balance() - bal, 680)
         self.assertEqual(self.full_return(inv, "X-1")["total"], 680)
         self.assertEqual(self.balance(), bal)

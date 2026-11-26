@@ -169,7 +169,11 @@ class PurchaseRefused(SalesCase):
 
     def test_expired_purchase_line_cannot_be_approved(self):
         inv_id = self.draft(no="EXP1")
-        self._line(inv_id, (TODAY - timedelta(days=3)).isoformat())
+        expired = (TODAY - timedelta(days=3)).isoformat()
+        self.refuses(self._line, inv_id, expired)
+        line = self._line(inv_id, (TODAY + timedelta(days=400)).isoformat())["lines"][0]
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoice_lines SET expiry_date=? WHERE id=?", (expired, line["id"]))
         self.refuses(self.pur.approve, self.ctx, inv_id, None)
 
     def test_duplicate_supplier_invoice_number(self):
@@ -177,13 +181,11 @@ class PurchaseRefused(SalesCase):
         self.refuses(self.draft, no="DUP")
 
     def test_distributor_margin_negative_or_above_half_the_public_price(self):
-        """B3: a negative margin is refused at entry; a margin above half the public price (a negative pharmacist
-        price) cannot be approved."""
+        """B3: a negative margin or a margin above half the public price is refused at entry."""
         inv_id = self.draft(no="MRG")
         line = self._line(inv_id, (TODAY + timedelta(days=400)).isoformat())["lines"][0]
         self.refuses(self.pur.update_line, self.ctx, inv_id, line["id"], {"distributor_margin": -100}, None)
-        self.pur.update_line(self.ctx, inv_id, line["id"], {"distributor_margin": 2100}, None)
-        self.refuses(self.pur.approve, self.ctx, inv_id, None)
+        self.refuses(self.pur.update_line, self.ctx, inv_id, line["id"], {"distributor_margin": 2100}, None)
 
 
 

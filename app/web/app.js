@@ -1193,10 +1193,70 @@ const cairoWhen = (iso) => {
 let PU_SORT = { k: null, desc: true };               // the purchase list's column sort (this tab only)
 const STATUS = { draft: ["مسودة", "b-warn"], approved: ["معتمدة", "b-ok"], cancelled: ["ملغاة", "b-err"] };
 
+const PURCHASE_ENTRY_FIELDS = {
+  qty: "الكمية", expiry: "الصلاحية", discount: "الخصم / سعر الصيدلي", bonus: "البونص",
+  batch: "التشغيلة", public_price: "سعر الجمهور", tax_margin: "هامش الموزع / الضريبة",
+};
+const PURCHASE_ENTRY_LIMITS = {
+  qty_multiple: ["مضاعف الكمية المعتادة", 100],
+  qty_min: ["أقل كمية للمراجعة (علبة)", 1000000],
+  public_delta_pct: ["فرق السعر عن سعر الجمهور %", 1000],
+  last_cost_delta_pct: ["فرق السعر عن آخر تكلفة %", 1000],
+};
+
+function purchaseEntrySettingsHtml(setting) {
+  return `<details class="panel"><summary>إعدادات إدخال الشراء</summary>
+    <form id="puEntrySettings">
+      <p>الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.</p>
+      <ol id="puEntryOrder">${setting.field_order.map((field) => `<li data-order-field="${field}">
+        <span id="puEntryField-${field}">${PURCHASE_ENTRY_FIELDS[field]}</span>
+        <button type="button" class="btn small secondary" data-move="-1" aria-label="قدّم" aria-describedby="puEntryField-${field}">↑</button>
+        <button type="button" class="btn small secondary" data-move="1" aria-label="أخّر" aria-describedby="puEntryField-${field}">↓</button>
+      </li>`).join("")}</ol>
+      <div class="row">${Object.entries(PURCHASE_ENTRY_LIMITS).map(([key, [label, max]]) => `<label class="f">${label}
+        <input name="${key}" type="number" min="1" max="${max}" step="1" required autocomplete="off" value="${esc(setting[key])}">
+        </label>`).join("")}
+        <button class="btn" type="submit">حفظ إعدادات الشراء</button></div>
+    </form></details>`;
+}
+
+function bindPurchaseEntrySettings() {
+  const form = $("#puEntrySettings");
+  const list = $("#puEntryOrder", form);
+  const updateButtons = () => {
+    for (const row of list.children) {
+      $('[data-move="-1"]', row).disabled = !row.previousElementSibling;
+      $('[data-move="1"]', row).disabled = !row.nextElementSibling;
+    }
+  };
+  updateButtons();
+  list.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-move]");
+    if (!button) return;
+    const row = button.closest("li");
+    if (button.dataset.move === "-1") row.previousElementSibling?.before(row);
+    else row.nextElementSibling?.after(row);
+    updateButtons();
+    (button.disabled ? $('button:not(:disabled)', row) : button)?.focus();
+  });
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    withBusy($('button[type="submit"]', form), async () => {
+      const changes = { field_order: Array.from(list.children, row => row.dataset.orderField) };
+      for (const key of Object.keys(PURCHASE_ENTRY_LIMITS)) changes[key] = form.elements[key].valueAsNumber;
+      try {
+        await api("/api/settings/purchase-entry", { method: "PUT", body: changes });
+        toast("تم حفظ إعدادات الشراء");
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+}
+
 async function viewPurchases() {
   const canSetPriceDefault = ME.permissions.includes("settings.manage");
-  const [list, suppliers, priceSetting] = await Promise.all([api("/api/purchases"), api("/api/suppliers"),
-    canSetPriceDefault ? api("/api/settings/purchase-price") : null]);
+  const [list, suppliers, priceSetting, entrySetting] = await Promise.all([api("/api/purchases"), api("/api/suppliers"),
+    canSetPriceDefault ? api("/api/settings/purchase-price") : null,
+    canSetPriceDefault ? api("/api/settings/purchase-entry") : null]);
   app.innerHTML = `
   <section class="panel">
     <h1>إدخال فاتورة شراء</h1>
@@ -1218,13 +1278,14 @@ async function viewPurchases() {
     <form id="manForm" class="row">
       <label class="f">المورد<select name="supplier_id" required><option value="">— اختر —</option>
         ${suppliers.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>
-      <label class="f">رقم فاتورة المورد<input name="invoice_no" required></label>
+      <label class="f">رقم فاتورة المورد<input name="invoice_no" autocomplete="off" required></label>
       <label class="f">تاريخ فاتورة المورد<input name="invoice_date" type="date" value="${localDay()}"></label>
       <button class="btn" type="submit">ابدأ الفاتورة</button>
     </form>
     <p class="muted">${suppliers.length ? "المورد غير موجود في القائمة؟" : "لا يوجد موردون مسجلون بعد."} اكتب اسمه:
       <input id="newSup" placeholder="اسم المورد"> <button class="btn small secondary" id="addSup" type="button">إضافة مورد</button></p>
   </section>
+  ${entrySetting ? purchaseEntrySettingsHtml(entrySetting) : ""}
   <section class="panel" id="puRep">
     <div class="row between"><h2>الفواتير</h2>${reportTools("pur")}</div>
     <div class="row noprint">${rangeBar("puRange")}
@@ -1243,6 +1304,7 @@ async function viewPurchases() {
     } catch (err) { select.value = savedPriceDefault; toast(err.message, true); }
     finally { select.disabled = false; }
   });
+  if (entrySetting) bindPurchaseEntrySettings();
   let rows = list, sub = "";
   const puSorted = (xs) => {
     const k = PU_SORT.k; if (!k) return xs;
@@ -1341,7 +1403,7 @@ function fieldInput(line, field, value, { type = "number", step = "0.01", descri
   const dis = CUR.invoice.status !== "draft" ? "disabled" : "";
   return `<input class="${cls}" data-line="${esc(line.id)}" data-field="${field}" type="${type}"
     ${type === "number" ? `step="${step}" min="0"` : ""} value="${esc(value)}" title="${esc(title)}"
-    aria-label="${esc(field)}" ${describedBy ? `aria-describedby="${esc(describedBy)}"` : ""} ${dis}>
+    autocomplete="off" aria-label="${esc(FIELD_AR[field] || field)}" ${describedBy ? `aria-describedby="${esc(describedBy)}"` : ""} ${dis}>
     ${low && !dis ? `<button class="btn small secondary" data-confirm="${esc(line.id)}" data-cfield="${field}">تأكيد</button>` : ""}`;
 }
 
@@ -1379,7 +1441,8 @@ function renderInvoice(keepPicker = true) {
   const { invoice: inv, lines, issues } = CUR;
   const draft = inv.status === "draft";
   const picker = $("#qa");
-  const keep = draft && keepPicker && picker?.dataset.invoice === inv.id;
+  const keep = draft && keepPicker && picker?.dataset.invoice === inv.id
+    && picker.dataset.order === CUR.entry_order.join(",");
   const errs = issues.filter((i) => i.level === "error" && !i.acknowledged);
   const warns = issues.filter((i) => (i.level === "warning" || i.level === "info") && (!draft || i.code !== "public_price_changed"));
   const lineNo = Object.fromEntries(lines.map((l) => [l.id, l.line_no]));
@@ -1403,17 +1466,19 @@ function renderInvoice(keepPicker = true) {
       <label class="f">المورد <select data-h="supplier_id" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
       <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
-      <label class="f">رقم فاتورة المورد <input data-h="invoice_no" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
-      <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" type="date" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
+      <label class="f">رقم فاتورة المورد <input data-h="invoice_no" autocomplete="off" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
+      <label class="f">تاريخ فاتورة المورد <input data-h="invoice_date" autocomplete="off" dir="ltr"
+        placeholder="YYYY-MM-DD" value="${esc(inv.invoice_date || "")}" ${draft ? "" : "disabled"}></label>
+      ${draft ? '<input type="date" id="puDatePicker" hidden><button class="btn small secondary" type="button" id="puDateOpen">التقويم</button>' : ""}
       <label class="f">تاريخ الإدخال على السيستم <input id="pinEntered" value="${esc(cairoWhen(inv.created_at))}" readonly disabled></label>
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
-      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
+      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" autocomplete="off" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
         <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
         ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
-      <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
+      <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" autocomplete="off" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
       <label class="f">طريقة الدفع <select data-h="pay_source" id="paySrc" ${draft ? "" : "disabled"}></select>
         <small class="muted">${inv.pay?.default ? "الافتراضي حسب نوع المورد" : ""}</small></label>
-      ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
+      ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" autocomplete="off" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
         <label class="f">مرجع الدفع (رقم التحويل)<input data-h="pay_ref" autocomplete="off" value="${esc(inv.pay_ref || "")}" ${draft ? "" : "disabled"}></label>` : ""}
     </div>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
@@ -1429,13 +1494,13 @@ function renderInvoice(keepPicker = true) {
     </div>
     <h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة يجب حلها قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
     <ul class="issues">
-      ${errs.map((i) => `<li class="err">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
+      ${errs.map((i) => `<li class="${i.code.startsWith("unusual_") ? "warn" : "err"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
         ${i.details?.difference != null ? ` (الفرق ${money(i.details.difference)} ج)` : ""}
         ${i.details?.expected != null ? ` (المتوقع ${money(i.details.expected)})` : ""}
         ${i.code === "low_confidence" && draft ? ` [${esc(FIELD_AR[i.field] || i.field)}] <button class="btn small secondary" data-confirm="${esc(i.line_id)}" data-cfield="${esc(i.field)}">القيمة صحيحة</button>` : ""}
         ${i.code === "unreadable" ? ` [${esc(FIELD_AR[i.field] || i.field)}]` : ""}
-        ${["total_mismatch", "line_total_mismatch", "net_price_mismatch", "short_expiry", "slow_before_expiry"].includes(i.code) && draft && ME.permissions.includes("purchases.approve")
-          ? `<button class="btn small secondary" data-ack="${esc(i.code)}" data-ackline="${esc(i.line_id || "")}">قبول الفرق مع ذكر السبب</button>` : ""}</li>`).join("")}
+        ${(["total_mismatch", "line_total_mismatch", "net_price_mismatch", "short_expiry", "slow_before_expiry"].includes(i.code) || i.code.startsWith("unusual_")) && draft && ME.permissions.includes("purchases.approve")
+          ? `<button class="btn small secondary" data-ack="${esc(i.code)}" data-ackline="${esc(i.line_id || "")}">${i.code.startsWith("unusual_") ? "تأكيد القيمة مع ذكر السبب" : "قبول الفرق مع ذكر السبب"}</button>` : ""}</li>`).join("")}
       ${warns.map((i) => `<li class="${i.level === "info" ? "muted" : "warn"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}${i.details?.other_line ? ` (سطر ${lineNo[i.details.other_line]})` : ""}
         ${i.details?.mergeable && draft ? `<button class="btn small secondary" data-merge="${esc(i.details.other_line)}" data-mergewith="${esc(i.line_id)}">دمج السطرين</button>` : ""}
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
@@ -1455,7 +1520,7 @@ function renderInvoice(keepPicker = true) {
       <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج إلى مراجعة</span>
         <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
       <div class="tablewrap"><table class="lines">
-        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
+        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>الرصيد</th><th data-purchase-bonus ${inv.supplier_type === "warehouse" ? "hidden" : ""}>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
           <th title="هامش ثابت للعلبة زي «4+4» في ورقة الموزع: بيتشال مرتين من سعر الجمهور قبل الخصم ويتزوّد مرة بعده">هامش الموزع</th><th>الصافي</th><th>ضريبة السطر</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
         <tbody>${lines.map(renderLine).join("")}</tbody>
       </table></div>
@@ -1463,8 +1528,20 @@ function renderInvoice(keepPicker = true) {
   </div>`;
   fillSuppliers(inv.supplier_id, draft);
   fillPaySources(inv);
+  const invoiceDate = $('[data-h="invoice_date"]'), calendar = $("#puDatePicker");
+  if (calendar) {
+    $("#puDateOpen").addEventListener("click", () => {
+      calendar.value = invoiceDate.value;
+      calendar.showPicker();
+    });
+    calendar.addEventListener("change", () => {
+      invoiceDate.value = calendar.value;
+      invoiceDate.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
   if (keep) $("#qaSlot").replaceWith(picker);
   else if (draft) bindQuickAdd();
+  updatePurchaseBonus(inv.supplier_type);
   if (keep) picker.dispatchEvent(new Event("invoice-lines-changed"));
   purchaseTabs(inv.id);
 }
@@ -1513,22 +1590,28 @@ function purchaseLabels(cur) {
   d.showModal();
 }
 
-// fast manual entry: search/scan -> qty, bonus, discount, expiry -> Enter
+// The picker displays the same order that Enter and Tab use.
 function quickAddHtml() {
-  return `<section class="panel" id="qa" data-invoice="${esc(CUR.invoice.id)}"><h2>إضافة صنف للفاتورة</h2>
+  const warehouse = CUR.invoice.supplier_type === "warehouse";
+  const fields = {
+    qty: `<label class="f">كمية (علبة)<input id="qaQty" autocomplete="off" type="number" min="1" step="1" value="1" class="narrow"></label>`,
+    expiry: `<label class="f">الصلاحية (شهر/سنة)<input id="qaExp" autocomplete="off" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>`,
+    discount: `<label class="f">خصم %<input id="qaDisc" autocomplete="off" type="number" min="0" max="100" step="0.01" class="narrow"></label>
+      <label class="f">سعر الصيدلي<input id="qaNet" autocomplete="off" type="number" min="0.01" step="0.01" class="narrow"></label>`,
+    bonus: `<label class="f" id="qaBonusField" ${warehouse ? "hidden" : ""}>بونص<input id="qaBonus" ${warehouse ? "disabled" : ""} autocomplete="off" type="number" min="0" step="1" value="0" class="narrow"></label>`,
+    batch: `<label class="f">التشغيلة<input id="qaBatch" autocomplete="off" class="narrow"></label>`,
+    public_price: `<label class="f">سعر الجمهور<input id="qaPrice" autocomplete="off" type="number" min="0.01" step="0.01" class="narrow" aria-describedby="qaPriceWarning">
+      <small class="badge b-warn" id="qaPriceWarning" role="status" hidden></small></label>`,
+    tax_margin: `<label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" autocomplete="off" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">ضريبة السطر<input id="qaTax" autocomplete="off" type="number" min="0" step="0.01" class="narrow"></label>
+      <label class="f">معاملة الضريبة<select id="qaTaxMode"><option value="0">مضافة على الصافي</option><option value="1">مشمولة في الصافي</option></select></label>`,
+  };
+  const order = CUR.entry_order;
+  return `<section class="panel" id="qa" data-invoice="${esc(CUR.invoice.id)}" data-order="${esc(order.join(","))}"><h2>إضافة صنف للفاتورة</h2>
     <div class="row">
       <label class="f grow">الصنف (اسم أو كود أو باركود)<input id="qaQ" autocomplete="off" placeholder="اكتب الكود أو امسح الباركود"></label>
       ${invoiceCardButton("data-qa-card", "picked", purchaseCardKey())}
-      <label class="f">كمية (علبة)<input id="qaQty" type="number" min="1" step="1" class="narrow"></label>
-      <label class="f" id="qaBonusField" hidden>بونص<input id="qaBonus" disabled type="number" min="0" step="1" value="0" class="narrow"></label>
-      <label class="f">سعر الجمهور<input id="qaPrice" type="number" min="0" step="0.01" class="narrow" aria-describedby="qaPriceWarning">
-        <small class="badge b-warn" id="qaPriceWarning" role="status" hidden></small></label>
-      <label class="f">خصم %<input id="qaDisc" type="number" min="0" max="100" step="0.01" class="narrow"></label>
-      <label class="f" title="الرقم اللي في ورقة الموزع زي «4+4» (اكتب 4)">هامش الموزع للعلبة<input id="qaMargin" type="number" min="0" step="0.01" class="narrow"></label>
-      <label class="f">ضريبة السطر<input id="qaTax" type="number" min="0" step="0.01" class="narrow"></label>
-      <label class="f">معاملة الضريبة<select id="qaTaxMode"><option value="0">مضافة على الصافي</option><option value="1">مشمولة في الصافي</option></select></label>
-      <label class="f">الصلاحية (شهر/سنة)<input id="qaExp" placeholder="1128" class="narrow"><small class="muted" id="qaExpSee"></small></label>
-      <label class="f">التشغيلة<input id="qaBatch" class="narrow"></label>
+      ${order.map(key => `<div class="row" data-entry-field="${key}" ${key === "bonus" && warehouse ? "hidden" : ""}>${fields[key]}</div>`).join("")}
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
     <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
@@ -1538,7 +1621,7 @@ function bindQuickAdd() {
   const q = $("#qaQ");
   if (!q) return;
   const picker = $("#qa"), price = $("#qaPrice");
-  let item = null;
+  let item = null, entryItemId;
   const warnPrice = () => showPurchasePriceWarning($("#qaPriceWarning", picker), item?.public_price, price.value);
   const showPicked = (it) => {
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
@@ -1548,13 +1631,21 @@ function bindQuickAdd() {
     warnPrice();
   };
   const pick = (it) => {
+    if (entryItemId && entryItemId !== it.id) {
+      for (const [id, value] of Object.entries({
+        qaQty: "1", qaExp: "", qaNet: "", qaBonus: "0", qaBatch: "", qaMargin: "", qaTax: "", qaTaxMode: "0",
+      })) $(`#${id}`, picker).value = value;
+      $("#qaExpSee", picker).textContent = "";
+    }
+    entryItemId = it.id;
     item = it;
     $("#qaRes").innerHTML = "";
     q.value = itemText(it);
     price.value = money(it.public_price);
     showPicked(it);
-    $("#qaQty").focus();
+    entryFields()[0]?.focus();
   };
+  const entryFields = () => [...picker.querySelectorAll("[data-entry-field] :is(input, select):enabled")];
   picker.addEventListener("invoice-lines-changed", () => { if (item) showPicked(item); });
   picker.addEventListener("invoice-item-saved", ({ detail }) => {
     res = res.map((r) => r.id === detail.id ? { ...r, ...detail } : r);
@@ -1571,38 +1662,62 @@ function bindQuickAdd() {
   let timer, seq = 0, res = [], resultsFor = "";
   const resultLabel = (r) => `${itemHtml(r)} <span class="muted">${esc(r.strength_norm || "")} · ${money(r.public_price)} ج</span>`;
   const current = onThisScreen();
-  const search = async (v, select) => {
+  const search = async (v, select, scan) => {
     const request = ++seq;
-    if (v.length < 2 || !current() || !q.isConnected) return;
-    const found = await findItems(v);
+    if (!v || (!scan && v.length < 2) || !current() || !q.isConnected) return;
+    const found = scan ? await api(`/api/purchases/${picker.dataset.invoice}/scan?barcode=${encodeURIComponent(v)}`)
+      : await findItems(v);
     if (request !== seq || !q.isConnected || v !== q.value.trim()) return;
     res = found.items;
-    resultsFor = v;
-    if (found.hint?.kind === "gs1") {
-      if (!res.length) { $("#qaRes").innerHTML = '<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. سجّله من بطاقة الصنف.</p>'; return; }
+    resultsFor = scan ? "" : v;
+    const code = found.hint?.kind === "gs1" ? found.hint : null;
+    const pickResult = (it) => {
+      pick(it);
+      if (code?.expiry) {
+        $("#qaExp").value = code.expiry;
+        $("#qaExpSee").textContent = "الصلاحية من الباركود";
+      }
+      if (code?.batch) $("#qaBatch").value = code.batch;
+    };
+    if (scan || code) {
+      if (res.length === 1) { pickResult(res[0]); return; }
+      if (!res.length) {
+        $("#qaRes").innerHTML = '<p class="badge b-warn">الباركود مش مسجل على أي صنف. سجّله من كارت الصنف.</p>';
+        return;
+      }
+    } else if (res.length === 1 && (/^\d{6,}$/.test(v) || (/^\d{3,5}$/.test(v) && res[0].code === v))) {
       pick(res[0]);
-      if (found.hint.expiry) { const [y, m] = found.hint.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
-      if (found.hint.batch) $("#qaBatch").value = found.hint.batch;
-      $("#qaPicked").textContent += found.hint.expiry ? " · قُرئت الصلاحية والتشغيلة من الكود" : "";
+      return;
+    } else if (select && res.length && !/^\d+$/.test(v)) {
+      pick(res[0]);
       return;
     }
-    if (res.length === 1 && (/^\d{6,}$/.test(v) || (/^\d{3,5}$/.test(v) && res[0].code === v))) {
-      pick(res[0]); return;
-    }
-    if (select && res.length && !/^\d+$/.test(v)) { pick(res[0]); return; }
-    $("#qaRes").innerHTML = hintHtml(found.hint) + (res.map((r, i) => `<span class="row nowrap"><button type="button"
+    $("#qaRes").innerHTML = (code ? "" : hintHtml(found.hint)) + (res.map((r, i) => `<span class="row nowrap"><button type="button"
       class="btn small secondary" data-qa="${i}">${resultLabel(r)}</button>${invoiceCardButton("data-qa-card", i, purchaseCardKey())}</span>`).join("") || '<p class="muted">لا توجد نتائج</p>');
-    $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pick(res[+b.dataset.qa])));
+    $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pickResult(res[+b.dataset.qa])));
   };
-  const runSearch = (select) => search(q.value.trim(), select).catch((err) => { if (current()) toast(err.message, true); });
-  q.addEventListener("input", () => {
+  const runSearch = (select, scan = false) => search(q.value.trim(), select, scan)
+    .catch((err) => { if (current()) toast(err.message, true); });
+  const resetResults = () => {
     item = null; resultsFor = ""; seq++; clearTimeout(timer); warnPrice();
     $("#qaRes").innerHTML = ""; $("#qaPicked").textContent = "";
+  };
+  q.addEventListener("input", () => {
+    resetResults();
     timer = setTimeout(() => runSearch(false), 250);
   });
+  picker.addEventListener("purchase-scan", ({ detail }) => {
+    q.focus();
+    q.value = detail;
+    $("#qaQty").value = "1";
+    resetResults();
+    runSearch(true, true);
+  });
   q.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || item) return;
-    e.preventDefault(); clearTimeout(timer);
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (item) { entryFields()[0]?.focus(); return; }
+    clearTimeout(timer);
     const v = q.value.trim();
     if (resultsFor === v && res.length && !/^\d+$/.test(v)) pick(res[0]);
     else runSearch(true);
@@ -1626,11 +1741,18 @@ function bindQuickAdd() {
   });
   const add = async () => {
     if (!item) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    const bad = entryFields().find(field => field.validity.badInput);
+    if (bad) {
+      toast(`اكتب رقم صحيح في خانة ${bad.labels[0].firstChild.textContent.trim()}`, true);
+      bad.focus();
+      return;
+    }
     const qty = typedWhole($("#qaQty").value);
     if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
     const line = { item_id: item.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
-    if ($("#qaPrice").value !== "") line.public_price = toPiasters($("#qaPrice").value);
-    if ($("#qaDisc").value !== "") line.discount_bp = toBp($("#qaDisc").value);
+    if ($("#qaPrice").value !== "") line.public_price = CONVERT.public_price($("#qaPrice").value);
+    if ($("#qaNet").value !== "") line.unit_net_price = CONVERT.unit_net_price($("#qaNet").value);
+    else if ($("#qaDisc").value !== "") line.discount_bp = CONVERT.discount_bp($("#qaDisc").value);
     if ($("#qaMargin").value.trim() !== "") line.distributor_margin = exactPiasters($("#qaMargin").value) ?? $("#qaMargin").value;
     if ($("#qaTax").value !== "" || $("#qaTaxMode").value === "1") {
       line.tax_amount = CONVERT.tax_amount($("#qaTax").value);
@@ -1639,19 +1761,23 @@ function bindQuickAdd() {
     if ($("#qaExp").value.trim()) line.expiry_date = normExpiry($("#qaExp").value);
     if ($("#qaBatch").value.trim()) line.batch_no = $("#qaBatch").value.trim();
     const keepDisc = $("#qaDisc").value;
-    await save(`/api/purchases/${CUR.invoice.id}/lines`, { line }, "POST", false);
-    if ($("#qaDisc")) $("#qaDisc").value = keepDisc;     // same supplier discount usually repeats
-    $("#qaQ")?.focus();
+    const button = $("#qaAdd", picker);
+    await withBusy(button, async () => {
+      await waitForPurchaseSave(picker.dataset.invoice);
+      if (!current() || !picker.isConnected) return;
+      if (await save(`/api/purchases/${CUR.invoice.id}/lines`, { line, picked: true }, "POST", false)) {
+        $("#qaDisc").value = keepDisc;  // same supplier discount usually repeats
+        $("#qaQ").focus();
+      }
+    });
   };
   $("#qaAdd").addEventListener("click", add);
   // U2-1: Enter moves to the next box, the last one adds the line and goes back to the item search; the arrows
   // move between the boxes; U2-2: a number box is selected on focus, so typing replaces it
-  const order = ["#qaQty", "#qaBonus", "#qaPrice", "#qaDisc", "#qaMargin", "#qaTax", "#qaTaxMode", "#qaExp", "#qaBatch"];
-  order.forEach((sel) => {
-    const el = $(sel);
+  picker.querySelectorAll("[data-entry-field] :is(input, select)").forEach((el) => {
     el.addEventListener("focus", () => { try { el.select(); } catch { /* not selectable */ } });
     el.addEventListener("keydown", (e) => {
-      const fields = order.map((key) => $(key)).filter((field) => !field.disabled);
+      const fields = entryFields();
       const i = fields.indexOf(el);
       if (e.key === "Enter") { e.preventDefault(); if (i === fields.length - 1 || e.ctrlKey) add(); else fields[i + 1].focus(); return; }
       const back = e.key === (document.dir === "rtl" ? "ArrowRight" : "ArrowLeft"), fwd = e.key === (document.dir === "rtl" ? "ArrowLeft" : "ArrowRight");
@@ -1666,6 +1792,68 @@ function bindQuickAdd() {
     $("#qaExpSee").textContent = m && +m[1] >= 1 && +m[1] <= 12 ? `← ${String(+m[1]).padStart(2, "0")}/${m[2].length === 2 ? `20${m[2]}` : m[2]}` : "";
   });
 }
+
+// Buffer a keyboard-wedge burst before it can edit the focused control.
+// The pharmacy scanner's F12 prefix is definitive. Unprefixed scanners send a fast burst followed by Enter.
+const PURCHASE_SCAN_GAP = 55;
+let purchaseKeys, purchaseKeyTimer;
+function flushPurchaseKeys() {
+  clearTimeout(purchaseKeyTimer);
+  const keys = purchaseKeys;
+  purchaseKeys = null;
+  if (keys && !keys.prefixed && keys.text && keys.target === document.activeElement &&
+      keys.target.matches("input, textarea, [contenteditable=true]")) {
+    // Use the browser's edit so selection, input events and undo also work for numeric inputs.
+    document.execCommand("insertText", false, keys.text);
+  }
+}
+
+document.addEventListener("pointerdown", flushPurchaseKeys, true);
+document.addEventListener("focusout", flushPurchaseKeys, true);
+document.addEventListener("keydown", (e) => {
+  const picker = $("#qa");
+  if (!picker || !routeHash().startsWith("#/purchases/")) return;
+  const capture = () => { e.preventDefault(); e.stopPropagation(); };
+  if (e.key === "F12") {
+    flushPurchaseKeys();
+    purchaseKeys = { target: e.target, prefixed: true, text: "" };
+    purchaseKeyTimer = setTimeout(flushPurchaseKeys, 1000);
+    capture();
+    return;
+  }
+  if (e.key === "Shift") return;
+  const separator = e.ctrlKey && e.key === "]" && purchaseKeys;
+  if (e.isComposing || e.repeat || e.altKey || e.metaKey || (e.ctrlKey && !separator)) {
+    flushPurchaseKeys();
+    return;
+  }
+  if (e.key === "Enter" && purchaseKeys &&
+      (purchaseKeys.prefixed || /^\p{Nd}{8,}$/u.test(purchaseKeys.text) ||
+        /^(?:\](?:d2|Q3|C1)|\(01\)|01\d{14}|https?:\/\/[^/]+\/.*01\/\d{8,14})/i.test(purchaseKeys.text))) {
+    const barcode = purchaseKeys.text;
+    purchaseKeys = null;
+    clearTimeout(purchaseKeyTimer);
+    capture();
+    if (barcode) {
+      const send = () => picker.dispatchEvent(new CustomEvent("purchase-scan", { detail: barcode }));
+      const dialog = $("dialog[open]");
+      if (dialog) dialog.addEventListener("close", () => { if (picker.isConnected) send(); }, { once: true });
+      else send();
+    }
+    return;
+  }
+  if (e.key.length !== 1 || e.key === " ") {
+    flushPurchaseKeys();
+    return;
+  }
+  // Start buffering on a digit or a GS1 introducer. Other text and keyboard shortcuts stay native.
+  if (!purchaseKeys && !/^[\p{Nd}(\]hH]$/u.test(e.key)) return;
+  purchaseKeys ||= { target: e.target, prefixed: false, text: "" };
+  purchaseKeys.text += separator ? "\x1d" : e.key;
+  capture();
+  clearTimeout(purchaseKeyTimer);
+  purchaseKeyTimer = setTimeout(flushPurchaseKeys, purchaseKeys.prefixed ? 1000 : PURCHASE_SCAN_GAP);
+}, true);
 
 function renderLine(l) {
   const draft = CUR.invoice.status === "draft";
@@ -1691,7 +1879,8 @@ function renderLine(l) {
       ${invoiceCardButton("data-purchase-card", l.id, purchaseCardKey())}
       ${iss.length ? `<div class="muted">${iss.map((i) => (i.level === "error" ? "⛔ " : "⚠️ ") + esc(i.message)).join("<br>")}</div>` : ""}</td>
     <td data-label="كمية">${fieldInput(l, "qty", l.qty ?? "", { step: "1" })}</td>
-    <td data-label="بونص">${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
+    <td data-label="الرصيد">${l.item && l.stock_qty != null ? esc(fmtStock(l.stock_qty, l.item)) : "—"}</td>
+    <td data-label="بونص" data-purchase-bonus ${CUR.invoice.supplier_type === "warehouse" ? "hidden" : ""}>${fieldInput(l, "bonus_qty", l.bonus_qty ?? 0, { step: "1" })}</td>
     <td data-label="سعر الجمهور">${fieldInput(l, "public_price", money(l.public_price), { describedBy: warningId })}
       ${draft ? `<small class="badge b-warn" id="${esc(warningId)}" data-price-warning role="status" ${warning ? "" : "hidden"}>${esc(warning)}</small>` : ""}</td>
     <td data-label="خصم %">${fieldInput(l, "discount_bp", pct(l.discount_bp))}</td>
@@ -1705,7 +1894,8 @@ function renderLine(l) {
       </select></td>
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
-    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_date ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : "", { type: "text" })}</td>
+    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_precision === "month" && l.expiry_date
+      ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : l.expiry_date || "", { type: "text" })}</td>
     <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>
       ${l.item_id && l.qty > 1 ? `<button class="btn small secondary" data-split="${esc(l.id)}" title="جزء من الكمية بصلاحية تانية">+ صلاحية</button>` : ""}` : ""}</td>
   </tr>`;
@@ -1729,6 +1919,18 @@ async function fillPaySources(inv) {
 }
 
 const SUP_TYPE = { company: "شركة", warehouse: "مخزن" };
+function updatePurchaseBonus(type) {
+  const hidden = type === "warehouse";
+  const bonus = $("#qaBonus");
+  if (bonus) {
+    bonus.disabled = hidden;
+    $("#qaBonusField").hidden = hidden;
+    bonus.closest("[data-entry-field]").hidden = hidden;
+    if (hidden) bonus.value = "0";
+  }
+  for (const cell of app.querySelectorAll("[data-purchase-bonus]")) cell.hidden = hidden;
+}
+
 async function fillSuppliers(selected, draft) {
   const sel = $('[data-h="supplier_id"]');
   const list = await api("/api/suppliers");
@@ -1736,12 +1938,8 @@ async function fillSuppliers(selected, draft) {
   sel.innerHTML = `<option value="">— اختر —</option>` + list.map((s) =>
     `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(s.name)}${SUP_TYPE[s.supplier_type] ? ` (${SUP_TYPE[s.supplier_type]})` : ""}</option>`).join("");
   sel.disabled = !draft;
-  const cur = list.find((x) => x.id === selected), box = $("#supType"), bonus = $("#qaBonus");
-  if (bonus) {
-    bonus.disabled = cur?.supplier_type === "warehouse";
-    $("#qaBonusField").hidden = bonus.disabled;
-    if (bonus.disabled) bonus.value = "0";
-  }
+  const cur = list.find((x) => x.id === selected), box = $("#supType");
+  updatePurchaseBonus(cur?.supplier_type);
   if (!box) return;
   if (!cur) { box.innerHTML = `<span class="muted">اختر المورد</span>`; return; }
   const canEdit = ME.permissions.includes("suppliers.write");
@@ -1763,12 +1961,17 @@ async function purchaseTabs(curId) {
   });
 }
 
+function purchaseDecimal(value) {
+  const text = value.trim().replace(/^(-?)\./, (_, sign) => `${sign}0.`);
+  return text === "" ? null : exactPiasters(text) ?? { invalid: value };
+}
+
 const CONVERT = {
-  public_price: toPiasters, unit_net_price: toPiasters, line_total: toPiasters,
-  tax_amount: (v) => (String(v).trim() === "" ? null : exactPiasters(v) ?? String(v)),
+  public_price: purchaseDecimal, unit_net_price: purchaseDecimal, line_total: purchaseDecimal,
+  tax_amount: purchaseDecimal,
   // exact piasters, never a float round: 4.005 goes to the server as typed and is refused there (review P2)
   distributor_margin: (v) => (String(v).trim() === "" ? 0 : exactPiasters(v) ?? String(v)),
-  discount_bp: toBp, qty: (v) => typedWhole(v),
+  discount_bp: purchaseDecimal, qty: (v) => typedWhole(v),
   bonus_qty: (v) => typedWhole(v) ?? 0, batch_no: (v) => v, expiry_date: (v) => normExpiry(v),
 };
 
@@ -1850,17 +2053,19 @@ app.addEventListener("input", (e) => {
 
 function pgTarget(el, key) {
   const rows = [...new Set([...app.querySelectorAll("input[data-line][data-field]")].map((x) => x.dataset.line))];
-  const r = rows.indexOf(el.dataset.line), c = PG_FIELDS.indexOf(el.dataset.field);
+  const fields = app.querySelector("[data-purchase-bonus]")?.hidden
+    ? PG_FIELDS.filter(field => field !== "bonus_qty") : PG_FIELDS;
+  const r = rows.indexOf(el.dataset.line), c = fields.indexOf(el.dataset.field);
   if (r < 0 || c < 0) return null;
   const rtl = document.dir === "rtl";
   let [nr, nc] = [r, c];
-  if (key === "Enter") { nc = c + 1; if (nc >= PG_FIELDS.length) { nc = 0; nr = r + 1; } }
+  if (key === "Enter") { nc = c + 1; if (nc >= fields.length) { nc = 0; nr = r + 1; } }
   else if (key === "ArrowDown") nr = r + 1;
   else if (key === "ArrowUp") nr = r - 1;
   else if (key === (rtl ? "ArrowLeft" : "ArrowRight")) nc = c + 1;
   else if (key === (rtl ? "ArrowRight" : "ArrowLeft")) nc = c - 1;
-  if (nr < 0 || nr >= rows.length || nc < 0 || nc >= PG_FIELDS.length) return null;
-  return { line: rows[nr], field: PG_FIELDS[nc] };
+  if (nr < 0 || nr >= rows.length || nc < 0 || nc >= fields.length) return null;
+  return { line: rows[nr], field: fields[nc] };
 }
 app.addEventListener("focusin", (e) => {       // U2-2 in the grid too: typing replaces the box
   const el = e.target;
@@ -1908,6 +2113,7 @@ async function savePurchase(path, body, method, keepPicker) {
     CUR = updated;
     renderInvoice(keepPicker);
     pgFocus();
+    return true;
   } catch (e) {
     if (!current()) return;
     toast(e.message, true);
@@ -1926,6 +2132,10 @@ async function viewInvoice(id) {
 app.addEventListener("change", async (e) => {
   const t = e.target;
   if (!CUR) return;
+  if ((t.dataset.field || t.dataset.h) && t.validity?.badInput) {
+    toast("اكتب قيمة رقمية صحيحة", true);
+    return;
+  }
   const base = `/api/purchases/${CUR.invoice.id}`;
   if (t.dataset.taxmode) {
     await save(`${base}/lines/${t.dataset.taxmode}`, { changes: { tax_included: t.value === "" ? null : +t.value } });
@@ -1938,7 +2148,7 @@ app.addEventListener("change", async (e) => {
     await save(`${base}/lines/${t.dataset.line}`, { changes });
   } else if (t.dataset.h) {
     const f = t.dataset.h;
-    const v = ["declared_total", "extra_discount"].includes(f) ? toPiasters(t.value)
+    const v = ["declared_total", "extra_discount"].includes(f) ? purchaseDecimal(t.value)
       : f === "pay_amount" ? (t.value.trim() === "" ? null : exactPiasters(t.value) ?? t.value) : (t.value || null);
     await save(base, { changes: { [f]: v } });
   } else if (t.dataset.pick && t.value) {
@@ -2022,7 +2232,7 @@ app.addEventListener("click", async (e) => {
     } catch (err) {
       if (!t.isConnected) return;
       toast(err.message, true);
-      if (err.code === "stale_version") await viewInvoice(invoice.id);
+      if (["stale_version", "has_blocking_issues"].includes(err.code)) await viewInvoice(invoice.id);
     } finally { t.disabled = false; }
   } else if (t.id === "invLabels") {
     purchaseLabels(CUR);
