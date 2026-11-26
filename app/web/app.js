@@ -4788,7 +4788,7 @@ async function newTab() {
 // U4-22: a scan while the focus is in any other field of the sale screen (discount, customer, payment, a button)
 // adds the item and never types into that field. The search box reads scans itself; dialogs keep their keys
 // (the item card's barcode field is scanned on purpose).
-globalThis.PharmScan?.installScanDetector({
+const posScanStop = globalThis.PharmScan?.installScanDetector({
   active: () => location.hash.startsWith("#/pos") && !!POS.scan && !POS.completing && !document.querySelector("dialog[open]"),
   skip: (el) => el?.id === "posQ",
   onScan: (code, el, at) => { POS.scanAt = at; POS.scan(code); },
@@ -5361,6 +5361,7 @@ async function complete(findings = null) {
   const sid = SALE.id;
   try {
     // A delivery field or discount still being typed must dispatch its change before the till is frozen.
+    posScanStop?.flush?.();                       // typing held back by the scan detector goes back first
     const active = document.activeElement;
     if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
     app.inert = true;
