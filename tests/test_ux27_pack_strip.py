@@ -166,6 +166,10 @@ const { chromium } = require('playwright');
   await p.click('dialog button[value=ok]');
   await p.waitForFunction(() => document.querySelector('#posCart .qty b').textContent.trim() === '2 علبة');
   out.total4 = await p.textContent('#posCart tbody tr td.num b');
+  // review P1: F9 while the boxes field still has the typed number saves it first, then sells
+  await p.fill('#posCart [data-qp]', '3');
+  const [res] = await Promise.all([p.waitForResponse((r) => r.url().endsWith('/complete')), p.keyboard.press('F9')]);
+  out.f9 = res.status();
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -195,6 +199,9 @@ class TestScreen(PlanCase):
         self.assertIn("الكمية المتاحة للبيع 10 علبة", out["refusal"])
         self.assertEqual(out["f6"], ["1", "2"])
         self.assertEqual(out["total4"], "200.00")
+        self.assertEqual(out["f9"], 200)
+        row = self.db.one("SELECT total FROM sales WHERE status='completed'")
+        self.assertEqual(row["total"], 30000)                      # the typed 3 boxes, not the 2 shown before
 
 
 if __name__ == "__main__":

@@ -5482,7 +5482,8 @@ function scanAddQty(r, unit) {
 // note = a line for the cashier once the add succeeded (UX-26: a unit instead of a box), shown with any warning
 // UX-27: boxes and strips of one item in one add (one line, one request)
 async function addMixed(item) {
-  const r = await qtyDialog(item, (item.pack_size || 1) + 1, "علبة + شريط", item.available_qty ?? null);
+  const want = (item.pack_size || 1) + 1, avail = item.available_qty ?? null;
+  const r = await qtyDialog(item, avail != null ? Math.max(1, Math.min(want, avail)) : want, "علبة + شريط", avail);
   if (r) return addItem(item, r.packs, r.units);
 }
 
@@ -5544,7 +5545,11 @@ function discAsk(v, mode = "pct") {
 
 async function patchLine(lineId, body) {
   POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9); false = not saved
-    try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); return true; }
+    try {
+      const sid = SALE.id, update = await api(`/api/sales/${sid}/lines/${lineId}`, { method: "PATCH", body });
+      if (SALE?.id !== sid || update.version < SALE.version) return true;       // a newer change already shown
+      SALE = update; renderCart(); renderSide(); return true;
+    }
     catch (er) { toast(er.message, true); renderCart(); return false; }     // the controls show what is saved
   })();
   await POS.saving;
@@ -5586,8 +5591,8 @@ function renderCart(findings = null) {
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
           ${l.item.pack_size > 1 && !l.item.is_service ? `<div class="qty mix" data-qline="${esc(l.id)}">
-            <input class="qn" data-qp="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${Math.floor(l.qty_base / l.item.pack_size)}" aria-label="عدد ${esc(packName(l.item))}"> <span>${esc(packName(l.item))}</span> +
-            <input class="qn" data-qu="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${l.qty_base % l.item.pack_size}" aria-label="عدد ${esc(unitName(l.item))}"> <span>${esc(unitName(l.item))}</span></div>` : ""}
+            <input class="qn" data-qp="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${Math.floor(l.qty_base / l.item.pack_size)}" aria-label="${esc(packName(l.item))}"> <span>${esc(packName(l.item))}</span> +
+            <input class="qn" data-qu="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${l.qty_base % l.item.pack_size}" aria-label="${esc(unitName(l.item))}"> <span>${esc(unitName(l.item))}</span></div>` : ""}
           ${l.item.pack_size === 1 && !l.item.is_service && canFixPack()
             ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
@@ -5622,9 +5627,14 @@ function renderCart(findings = null) {
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); inp.blur(); $("#posQ")?.focus(); } });
     });
   });
-  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
+  // UX-27 review: a quantity typed in the line's fields and not saved yet is the base for + / −
+  const typedQty = (l) => {
+    const box = $(`[data-qline="${CSS.escape(l.id)}"]`, $("#posCart"));
+    return (box && mixedQty(box.querySelector("[data-qp]").value, box.querySelector("[data-qu]").value, l.item.pack_size)) || l.qty_base;
+  };
+  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: typedQty(l) + step(l) }); }));
   $("#posCart").querySelectorAll("[data-minus]").forEach((b) => b.addEventListener("click", async () => {
-    const l = line(b.dataset.minus), n = l.qty_base - step(l);
+    const l = line(b.dataset.minus), n = typedQty(l) - step(l);
     if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
     else patchLine(l.id, { qty_base: n });
   }));
@@ -5980,7 +5990,7 @@ async function complete(findings = null) {
     // A delivery field or discount still being typed must dispatch its change before the till is frozen.
     posScanStop?.flush?.();                       // typing held back by the scan detector goes back first
     const active = document.activeElement;
-    if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
+    if (active?.dataset?.dl || active?.dataset?.pa || active?.closest?.("[data-qline]") || isDiscField(active)) active.blur();
     app.inert = true;
     // A barcode can be resolving while the cart is still empty. Wait for work started before F9.
     const added = await Promise.all(pendingPosAdds(sid));
