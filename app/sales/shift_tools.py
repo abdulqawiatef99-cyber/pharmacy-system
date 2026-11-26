@@ -119,15 +119,6 @@ def split_for(counted: dict, target: dict, float_left: int | None = None) -> dic
     return {"keep": {}, "move": {}, "float_left": float_left, "to_treasury": total - float_left, "short": 0, "exact": False}
 
 
-def record_split(db: Database, ctx: Context, shift_id: str, counted: dict | None, float_left: int) -> None:
-    """Inside the close transaction: which notes stayed, for the printed report."""
-    if not counted:
-        return
-    sp = split_for(counted, get_target(db, ctx.org_id), float_left)
-    audit.record(db, ctx, "cash.float_split", "cash_shift", shift_id, after={"keep": sp["keep"], "move": sp["move"],
-                                                                              "float_left": float_left})
-
-
 def _exact_notes(counted: dict, amount: int) -> dict | None:
     """Notes from the count that make `amount` exactly (bounded search in 25-piaster steps), largest notes first;
     None when no combination makes it (Codex P2 on #404)."""

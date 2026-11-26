@@ -262,11 +262,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
         req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
-        approver = req.headers.get("x-approver", "").strip()
-        if approver and req.url.path == "/api/approvals/check":
-            # the PIN is typed once and checked here only; every other request carries the approval token (#137)
-            approver_limiter.check(ctx.user_id)
-            ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
@@ -1638,17 +1633,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def approvers_list(req):
-        return J({"approvers": people.approvers(db, ctx_of(req))})
+        ctx = ctx_of(req)
+        own_pin = ctx.can(approvals.CASH_REFUND) and approvals.cash_refund_challenge_pending(ctx, req.state.session_token)
+        return J({"approvers": people.approvers(db, ctx, include_self=own_pin)})
 
     @handler
     async def approval_check(req):
         """The approver typed his PIN: confirm it before the screen retries the action."""
         ctx = await run_in_threadpool(ctx_of, req)
-        if not ctx.approver_id:
+        approver = req.headers.get("x-approver", "").strip()[:64]
+        if not approver:
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
         perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
         method = str(b.get("method") or "GET").upper()
+        # A written cash-refund exception requires fresh PIN verification even for an acting owner/manager.
+        own_pin = (perm == approvals.CASH_REFUND and method == "POST"
+                   and re.fullmatch(r"/api/sales/[^/]+/(?:return|exchange)", path) is not None)
+        approver_limiter.check(ctx.user_id)
+        ctx = await run_in_threadpool(accounts.with_approval, db, ctx, approver,
+                                      req.headers.get("x-approver-pin", "")[:6], allow_self=own_pin)
         ok = approvals.eligible(ctx, perm) and (
             ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT)
         out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
@@ -2642,7 +2646,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
-                                        reason=str(b.get("reason", "")), channel_id=b.get("channel_id")))
+                                        reason=b.get("reason", ""), channel_id=b.get("channel_id")))
 
     @handler
     async def sales_exchange(req):
@@ -2665,7 +2669,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
                                   refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
-                                  reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
+                                  reason=b.get("reason", ""), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                   safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),

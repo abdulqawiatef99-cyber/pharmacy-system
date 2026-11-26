@@ -425,6 +425,9 @@ class Purchasing:
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
         ctx.require("purchases.read")
         inv, lines = self._load(ctx, inv_id)
+        if inv["status"] == "draft":
+            # A draft saved by a previous version may still have its old cached calculation.
+            inv["computed_total"] = validation.computed_total(inv, lines)
         issues = self.issues(ctx, inv, lines)
         items = {}
         for l in lines:
@@ -666,10 +669,11 @@ class Purchasing:
             merged = {**line, **upd, "field_sources": src, "field_confidence": conf}
             validation.derive_line(merged)
             from ..sales.service import local_today
-            for code, _, related in validation.impossible_line(merged, local_today(), tax_only=inv["extra_tax"] > 0):
+            for code, _, related in validation.impossible_line(merged, local_today(),
+                                                                tax_only=inv["extra_tax"] > 0, draft=True):
                 if related.intersection(changes):
                     raise ValidationFailed(validation.MESSAGES[code], code=code)
-            amount = validation.effective_amount(merged)
+            amount = validation.effective_amount(merged, draft=True)
             if amount is not None and abs(amount) > MAX_SAFE:
                 raise ValidationFailed("إجمالي السطر أكبر من الحد المسموح")
             if merged["item_id"] and merged["qty"]:
@@ -773,13 +777,13 @@ class Purchasing:
             # in payable amounts (validation.effective_amount): a total printed without tax on one line and with
             # tax on the other must not change what the invoice pays (Codex P1 on #406)
             # without the distributor's margin, which is per pack and follows the quantity (B3)
-            pay_a, pay_b = validation.line_amount(dict(a)), validation.line_amount(dict(b))
+            pay_a, pay_b = validation.line_amount(dict(a), draft=True), validation.line_amount(dict(b), draft=True)
             tax = None if a["tax_amount"] is None and b["tax_amount"] is None else (a["tax_amount"] or 0) + (b["tax_amount"] or 0)
             merged = {**dict(a), "qty": a["qty"] + b["qty"], "tax_amount": tax,
                       "line_total": None if a["line_total"] is None and b["line_total"] is None
                       else (pay_a + pay_b if pay_a is not None and pay_b is not None else None)}
             if (pay_a is None) != (pay_b is None) or (merged["line_total"] is None and (a["line_total"], b["line_total"]) != (None, None)) \
-                    or (pay_a is not None and validation.line_amount(merged) != pay_a + pay_b):
+                    or (pay_a is not None and validation.line_amount(merged, draft=True) != pay_a + pay_b):
                 raise ValidationFailed("السطرين مش هيتدمجوا من غير ما إجمالي الفاتورة يتغير؛ عدّل الكمية يدويًا", code="not_mergeable")
             sources = json.loads(a["field_sources"])
             if a["tax_included"] is not None and merged["line_total"] is not None:
@@ -824,7 +828,7 @@ class Purchasing:
             # add up to what the line had (independent review: a None share dropped the tax from the invoice)
             half_up = lambda v: None if v is None else (2 * v * qty + a["qty"]) // (2 * a["qty"])   # noqa: E731
             # the line's own amount; the distributor's margin is per pack and follows each part's quantity (B3)
-            pay = validation.line_amount(dict(a))
+            pay = validation.line_amount(dict(a), draft=True)
             moved_tax = half_up(a["tax_amount"])
             # the new line takes its share of what the line PAYS (tax included, half up); the original keeps the rest,
             # so the invoice total cannot move (Codex P1 on #406: raw total and tax split apart re-read the tax)
@@ -848,12 +852,12 @@ class Purchasing:
                 # validator would read that one as "before tax", the same share minus its tax
                 for part, share in ((row, moved_total), (rest, pay - moved_total)):
                     for cand in (share, share - (part["tax_amount"] or 0)):
-                        if validation.line_amount({**part, "line_total": cand}) == share:
+                        if validation.line_amount({**part, "line_total": cand}, draft=True) == share:
                             part["line_total"] = cand
                             break
                 self.db.execute("UPDATE purchase_invoice_lines SET line_total=? WHERE id=? AND org_id=?",
                                 (row["line_total"], row["id"], ctx.org_id))
-            if pay is not None and validation.line_amount(row) + validation.line_amount(rest) != pay:
+            if pay is not None and validation.line_amount(row, draft=True) + validation.line_amount(rest, draft=True) != pay:
                 raise ValidationFailed("التقسيم كان هيغيّر إجمالي السطر؛ قسّمه يدويًا", code="split_changes_total")
             self.db.execute("UPDATE purchase_invoice_lines SET qty=?, line_total=?, tax_amount=?, field_sources=?"
                             " WHERE id=? AND org_id=?",
@@ -1041,7 +1045,7 @@ class Purchasing:
                 if date.fromisoformat(inv["invoice_date"]) > local_today():     # U2-0: an import may carry it
                     raise Conflict("تاريخ فاتورة المورد بعد النهارده: مستحيل، صحّح التاريخ قبل الاعتماد",
                                    code="invoice_date_future")
-            amounts = [validation.effective_amount(l) for l in lines]
+            amounts = [validation.effective_amount(l, draft=True) for l in lines]
             cost_ups: list[str] = []
             price_changes: list[str] = []
             if any(a < 0 for a in amounts) or inv["extra_discount"] < 0 or inv["extra_tax"] < 0:
@@ -1069,6 +1073,11 @@ class Purchasing:
             units = {l["id"]: (l["qty"] + (l["bonus_qty"] or 0)) * packs_of[l["id"]] for l in lines}
             all_units = sum(units.values())
             for l, amount in zip(lines, amounts):
+                if l["line_total"] is not None and amount != validation.effective_amount(l):
+                    # Keep the corrected VAT basis for later invoice returns. Historical approved lines keep
+                    # their original basis and can still be credited for what was charged.
+                    self.db.execute("UPDATE purchase_invoice_lines SET tax_included=0 WHERE id=? AND org_id=?",
+                                    (l["id"], ctx.org_id))
                 # read again per line: an earlier line of the same item may have changed its public price
                 # (the preloaded row skipped the second change and logged a stale previous price, #336 review)
                 item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
