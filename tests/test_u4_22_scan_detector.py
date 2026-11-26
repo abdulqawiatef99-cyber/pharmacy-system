@@ -38,7 +38,45 @@ const run = (keys, field, opts = {}) => {
 };
 const burst = (code, start = 1000, step = 5) => [...[...code].map((c, i) => [c, start + i * step]), ["Enter", start + code.length * step]];
 const typed = (text, start = 1000, step = 150) => [...[...text].map((c, i) => [c, start + i * step]), ["Enter", start + text.length * step]];
-const out = {
+// Codex P1 on #462: a mouse click (pointerdown) or the focus leaving gives held typing back at once
+const viaInstall = (() => {
+  const L = {}, target = { addEventListener: (t, f) => { (L[t] ||= []).push(f); }, removeEventListener() {} };
+  const f = new Field("x");
+  const stop = PharmScan.installScanDetector({ onScan: () => {}, setTimer: () => 1, clearTimer: () => {} }, target);
+  for (const [key, t] of [["a", 1000], ["b", 1005]]) {
+    let prevented = false;
+    L.keydown.forEach((h) => h({ key, timeStamp: t, target: f, preventDefault() { prevented = true; }, stopImmediatePropagation() {} }));
+    if (!prevented) f.setRangeText(key, f.selectionStart, f.selectionEnd);
+  }
+  const held = f.value;
+  (L.pointerdown || []).forEach((h) => h({ target: {} }));
+  const afterClick = f.value;
+  L.keydown.forEach((h) => h({ key: "c", timeStamp: 2000, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
+  f.setRangeText("c", f.selectionStart, f.selectionEnd);
+  L.keydown.forEach((h) => h({ key: "d", timeStamp: 2004, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
+  const held2 = f.value;
+  (L.focusout || []).forEach((h) => h({ target: f }));
+  const afterBlur = f.value;
+  L.keydown.forEach((h) => h({ key: "e", timeStamp: 3000, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
+  f.setRangeText("e", f.selectionStart, f.selectionEnd);
+  L.keydown.forEach((h) => h({ key: "f", timeStamp: 3004, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
+  const held3 = f.value;
+  stop.flush?.();
+  return { held, afterClick, held2, afterBlur, held3, afterFlush: f.value };
+})();
+// text that reaches the field without a key event (an on-screen keyboard, an input method) is never taken back
+const insertedBetween = (() => {
+  const f = new Field("شارع");
+  const d = createScanDetector({ onScan: () => {}, setTimer: () => 1, clearTimer: () => {} });
+  const key = (k, t) => { let prevented = false; d.keydown({ key: k, timeStamp: t, target: f, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    if (!prevented) f.setRangeText(k, f.selectionStart, f.selectionEnd); };
+  key(" ", 1000);
+  f.setRangeText("التجربة", f.selectionStart, f.selectionEnd);   // no keydown for these
+  key(" ", 1004); key("7", 1008);
+  d.release();
+  return f.value;
+})();
+const out = { viaInstall, insertedBetween,
   scanInDiscount: run(burst("6223001234567"), new Field("5")),
   scanShortCode: run(burst("1234"), new Field("")),
   personTyping: run(typed("100"), new Field("")),
@@ -129,6 +167,15 @@ class TestScanDetector(unittest.TestCase):
         self.assertEqual(o["scans"], [])
         self.assertIn("F9", o["passed"])
         self.assertEqual(o["valueAtKey"]["F9"], "xabc")
+
+    def test_a_click_blur_or_checkout_gives_held_typing_back_at_once(self):
+        o = self.out["viaInstall"]
+        self.assertEqual((o["held"], o["afterClick"]), ("x", "xab"))      # pointerdown: before the field blurs
+        self.assertEqual((o["held2"], o["afterBlur"]), ("xab", "xabcd"))  # the focus leaving
+        self.assertEqual((o["held3"], o["afterFlush"]), ("xabcd", "xabcdef"))   # the sale screen asks before checkout
+
+    def test_text_inserted_without_keys_is_never_taken(self):
+        self.assertEqual(self.out["insertedBetween"], "شارع التجربة 7")
 
     def test_skipped_field_and_inactive_screen_are_left_alone(self):
         for case in ("skipped", "inactive"):
