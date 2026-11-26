@@ -1001,16 +1001,19 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     ws.append(["id", "code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
                "manufacturer", "pack_size", "public_price_egp", "barcodes"] + (["stock_base_units"] if stock_ok else [])
               + ["status"])
+    # three questions for the whole catalog (QA-29): one barcode and one stock question per item scanned the
+    # barcode table once per item (it has no item_id index), 89.9 s at 30,000 items
+    bcs: dict[str, list[str]] = {}
+    for r in db.all("SELECT item_id, barcode FROM item_barcodes WHERE org_id=? ORDER BY item_id, barcode", (ctx.org_id,)):
+        bcs.setdefault(r["item_id"], []).append(r["barcode"])
+    stock = {r["item_id"]: r["q"] for r in db.all(
+        "SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? GROUP BY item_id", (ctx.org_id,))} if stock_ok else {}
     for it in db.all("SELECT * FROM items WHERE org_id=? AND (hidden=0 OR ?) ORDER BY coalesce(name_en,name_ar)",
                      (ctx.org_id, int(hidden_ok))):
-        bcs = ",".join(r["barcode"] for r in db.all(
-            "SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, it["id"])))
-        q = db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND item_id=?",
-                   (ctx.org_id, it["id"]))["q"] if stock_ok else None
         ws.append([it["id"], it["code"], it["name_en"], it["name_ar"], it["active_ingredient"],
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
-                   bcs] + ([q] if stock_ok else []) + [it["status"]])
+                   ",".join(bcs.get(it["id"], ()))] + ([stock.get(it["id"], 0)] if stock_ok else []) + [it["status"]])
     from ..core.xlsx_safe import as_text
     as_text(wb)
     buf = io.BytesIO()

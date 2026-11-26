@@ -46,11 +46,11 @@ from ..inventory import service as inventory
 from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
 from ..dataimport.estock_move import EstockMove
-from ..dataimport.service import DataImport, export_catalog, template_xlsx
+from ..dataimport.service import DataImport, template_xlsx
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
-from ..procurement.service import Procurement, import_consumption, suggestions_xlsx
+from ..procurement.service import Procurement, import_consumption
 from ..procurement import deadstock
 from ..sales.service import Sales
 from ..sales.cash import CashDrawer, redact_summary
@@ -941,7 +941,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def item_health_api(req):
         from ..reports.item_health import item_health
-        return J(await off_loop(item_health, db, ctx_of(req)))
+        return J(await off_loop(item_health, db, ctx_of(req), key=req.query_params.get("key") or None,
+                                limit=_qlimit(req, 200, 50_000)))
 
     @handler
     async def item_pack_preview(req):
@@ -1882,8 +1883,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def purchases_list(req):
         qp = req.query_params
-        return J(purch.list(ctx_of(req), qp.get("status") or None, date_from=qp.get("from") or None,
-                            date_to=qp.get("to") or None, supplier_id=qp.get("supplier") or None))
+        args = dict(date_from=qp.get("from") or None, date_to=qp.get("to") or None,
+                    supplier_id=qp.get("supplier") or None)
+        if qp.get("totals") == "1":                # QA-29: totals of every match, not of the rows sent
+            return J(await off_loop(purch.list_with_totals, ctx_of(req), qp.get("status") or None, **args))
+        return J(purch.list(ctx_of(req), qp.get("status") or None, **args))
 
     @handler
     async def purchases_import(req):
@@ -2098,8 +2102,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def export_items(req):
+        from ..dataimport import service as dimp_service
         ctx = ctx_of(req)
-        return Response(export_catalog(db, ctx), media_type=(
+        # QA-29: off the event loop (the whole program waited ~170 s for it at 30k items)
+        return Response(await off_loop(dimp_service.export_catalog, db, ctx), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=items-export.xlsx"})
 
@@ -2331,9 +2337,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def proc_suggest_xlsx(req):
-        ctx = ctx_of(req)
-        rows = Procurement(db).suggest(ctx, **_sugg_params(req))
-        return Response(suggestions_xlsx(rows, db, ctx), media_type=(
+        from ..procurement import service as proc_service
+        ctx, params = ctx_of(req), _sugg_params(req)
+
+        def build():
+            return proc_service.suggestions_xlsx(Procurement(db).suggest(ctx, **params), db, ctx)
+        return Response(await off_loop(build), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=order-suggestions.xlsx"})
 
@@ -2367,7 +2376,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def proc_plan_xlsx(req):
         from ..procurement import purchase_plan as pp
         b = await body(req)
-        return Response(pp.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+        return Response(await off_loop(pp.order_xlsx, db, ctx_of(req), b.get("groups")), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
 
@@ -2404,13 +2413,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def proc_order_xlsx(req):
         from ..procurement import smart_order
         b = await body(req)
-        return Response(smart_order.order_xlsx(db, ctx_of(req), b.get("groups")), media_type=(
+        return Response(await off_loop(smart_order.order_xlsx, db, ctx_of(req), b.get("groups")), media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": "attachment; filename=order-by-supplier.xlsx"})
 
     @handler
     async def proc_health(req):
-        return J(await off_loop(Procurement(db).stock_health, ctx_of(req)))
+        return J(await off_loop(Procurement(db).stock_health, ctx_of(req), limit=_qlimit(req, 200, 50_000)))
 
     @handler
     async def proc_supplier_costs(req):
@@ -2460,7 +2469,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         rep = await run_in_threadpool(deadstock.compute, files["stock"], files["sales"], files["purchases"],
                                       store=str(form.get("store") or "الصيدلية"))
         if req.query_params.get("format") == "xlsx":
-            return Response(deadstock.to_xlsx(rep), media_type=(
+            return Response(await run_in_threadpool(deadstock.to_xlsx, rep), media_type=(
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 headers={"Content-Disposition": f"attachment; filename=deadstock-{rep['as_of']}.xlsx"})
         return J(rep)

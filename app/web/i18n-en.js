@@ -3647,4 +3647,10 @@ window.I18N_EN = {
 "مفصّل": "Detailed",
 "⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة.": "⚠ Arabic shaping (raqm) is not available on this computer: the receipt will print from the browser, and the drawer opens only if a printer is chosen.",
 "بيانات تجريبية": "Sample data",
+"، والإجمالي فوق محسوب على كل الفواتير": ", and the total above counts every invoice",
+"، والبحث بيدوّر في المعروض بس: ضيّق المدة": ", and the search looks only in what is shown: narrow the period",
+"المزيد ▾": "More ▾",
+"تصدير كل الأصناف Excel": "Export all items to Excel",
+"بياخد وقت مع كتالوج كبير (ممكن دقيقة)، والبيع شغال عادي في الوقت ده.": "Takes a while with a large catalog (up to a minute); selling keeps working meanwhile.",
+"اعرض أكتر": "Show more",
 };
