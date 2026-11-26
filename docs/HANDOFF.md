@@ -4,6 +4,20 @@ Rules: `docs/OWNER_RULES.md` (wins), `AGENTS.md`. Gates and percentage: `docs/ST
 acceptance evidence). Log up to 23/11: `docs/archive/HANDOFF-2026-11.md`. Only the session that claimed this
 file on #113 edits it; other sessions log on #113.
 
+## Day 26/11 — CC-1 (newest line last)
+- **Done:** #463 DEV-PUR (built by Codex) reviewed, review P1 fixed test-first (warehouse invoice with a
+  stored bonus refused at approval), merged `05e52c6`. #471 six owner decisions in OWNER_RULES, merged
+  `0a08c88`. #472 #461 fix A (stocktake expired/recalled surplus P0, stale stocktake approval P1, supplier lot
+  credit P1; built by Codex) reviewed, review P1 fixed test-first (same P0 through the manual adjust screen),
+  merged `768e183`.
+- **Release 6** (develop → main): #469 #419 #471 #463 #462 #468 #473 #472; no migration, no requirements.
+  Not installed: waits for «نزّله».
+- **Not done:** `codex/fix-b-461` (drawer negative refund, shift-close denominations, B3 legacy VAT) and
+  `codex/fix-c-461` (Hikma reissue, refund day #146, update-rollback writes) were not opened by 11:30 Cairo;
+  they go in the next release. #461 P1s not assigned to A/B/C: failed restore + archive pairing, mixed-tender
+  guest refund. Owner decision: free-goods purchase invoice (#463 P2).
+- **Next:** review + merge fix-b/fix-c when they open (next migration 0046; check numbering across both).
+
 ## Night 26/11 — CC-1 progress (newest line last)
 - Claim posted on #113: PRs #458 #452 #418 #421 #422 #377 + rules/handoff docs; CC-2 owns the sale screen
   and #419, Codex the purchase-invoice screen.
@@ -31,8 +45,8 @@ file on #113 edits it; other sessions log on #113.
   locally on plain develop; for Codex (UX-1 owner).
 
 ## Current state (26/11)
-- The program is the pharmacy's live cashier since 21/11. `main` @ `4db40d4` = `develop` @ `c111afe`
-  (release #465, update 5, 26/11; before it #459 24/11). Updates reach the PC through the signed «تحديث» only after
+- The program is the pharmacy's live cashier since 21/11. Release 6 (26/11, after #465 update 5) carries
+  everything in `develop` up to #472; see the release PR for SHAs. Updates reach the PC through the signed «تحديث» only after
   the owner says «نزّله».
 - Migrations in `develop` run to 0045 (two files share 0045: harmless, the runner keys on the filename).
   **The next migration is 0046.**
@@ -68,7 +82,8 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
   the phone prints on every sale with a customer.
 
 ## التذكيرات المفتوحة
-- «نزّله» للتحديث 5 (اتدمج في النسخة الرسمية، مستني كلمتك قبل ما يتنزل على جهاز الصيدلية).
+- «نزّله» للتحديث 6 (فيه التحديث 5 كمان): اتدمج في النسخة الرسمية ومستني كلمتك.
+- قرار فاتورة البضاعة المجانية (مرفوضة دلوقتي).
 - ورقة فارما أوفرسيز التانية لاختبار هامش الموزع.
 - مقارنة صنف واحد في الطلب الذكي مع تقرير مبيعات إي ستوك.
 - أول إيصال بعد التحديث: اسم الصيدلية بقى فوق سطر المقدمة، وبيانات العميل بتظهر في الآجل والتوصيل.
