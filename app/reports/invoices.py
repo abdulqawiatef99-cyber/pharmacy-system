@@ -69,16 +69,32 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
 
 def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: list[str] | None = None,
            q: str | None = None, item_id: str | None = None, user_id: str | None = None, with_lines: bool = False,
-           offset: int = 0, totals: bool = True) -> dict:
+           offset: int = 0, totals: bool = True, after: str | None = None, until: str | None = None) -> dict:
     """One page of the matching invoices (MAX_ROWS from `offset`, newest first, a stable order) and the totals
     of EVERY match, whatever the page (#461: the totals used to be those of the listed rows only, so a busy
-    period stopped at 3,000 invoices). `totals=False` skips the adding up, for the later pages of an export."""
+    period stopped at 3,000 invoices). `totals=False` skips the adding up, for the later pages of an export.
+
+    An export walks the pages while the till keeps selling: it passes the first answer's `as_of` back as
+    `until` (later invoices stay out) and each page's `next_after` as `after` (the page starts strictly
+    after that invoice, wherever it now sits), so no invoice is listed twice and none is skipped."""
     ctx.require("sales.totals")
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValidationFailed("رقم الصفحة غير صحيح")
     lo, hi = _utc(date_from), _utc(date_to, end=True)
     if hi < lo:
         raise ValidationFailed("النهاية قبل البداية")
+    as_of = datetime.now(timezone.utc).strftime(_F)
+    cursor = None
+    try:
+        if until:
+            as_of = datetime.strptime(until, _F).strftime(_F)
+        if after is not None:
+            at, _, last_id = after.partition("|")
+            cursor = (datetime.strptime(at, _F).strftime(_F), last_id)
+            if not last_id or "|" in last_id:
+                raise ValueError(after)
+    except (TypeError, ValueError):
+        raise ValidationFailed("رقم الصفحة غير صحيح")
     if (datetime.strptime(hi, _F) - datetime.strptime(lo, _F)).days > 400:
         raise ValidationFailed("الفترة سنة على الأكثر")
     types = [t for t in (types or []) if t in TYPES]
@@ -90,9 +106,9 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
             " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
             " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.created_by"
             " LEFT JOIN contracts k ON k.id=s.contract_id")
-    sql = ["SELECT s.id FROM sales s LEFT JOIN customers c ON c.id=s.customer_id",
+    sql = [f"SELECT s.id, {when} at FROM sales s LEFT JOIN customers c ON c.id=s.customer_id",
            f" WHERE s.org_id=? AND s.branch_id=? AND {when}>=? AND {when}<=?"]
-    p: list = [ctx.org_id, ctx.branch_id, lo, hi]
+    p: list = [ctx.org_id, ctx.branch_id, lo, min(hi, as_of)]
     if drafts:
         sql.append(" AND s.status='draft' AND EXISTS (SELECT 1 FROM sale_lines l WHERE l.sale_id=s.id)")
     elif "voided" in types:
@@ -125,7 +141,10 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
         p.append(user_id)
     # every match, in one stable order (the id settles equal times): the pages never overlap or skip
     sql.append(f" ORDER BY {when} DESC, s.id DESC")
-    ids = [r["id"] for r in db.all("".join(sql), tuple(p))]
+    found = [(r["at"], r["id"]) for r in db.all("".join(sql), tuple(p))]
+    if cursor:                  # strictly after the last invoice of the previous page, in the same order
+        offset = next((k for k, key in enumerate(found) if key < cursor), len(found))
+    ids = [i for _, i in found]
     page_ids = set(ids[offset:offset + MAX_ROWS])
     truncated = len(ids) > offset + MAX_ROWS
     show_cost = ctx.can("costs.read")
@@ -173,6 +192,7 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
                                          " WHERE m.org_id=? ORDER BY u.full_name", (ctx.org_id,))]
     return {"from": date_from, "to": date_to, "types": types, "rows": rows, "totals": tot if totals else None,
             "truncated": truncated, "total_rows": len(ids), "offset": offset, "page_size": MAX_ROWS,
+            "as_of": as_of, "next_after": "|".join(found[offset + len(rows) - 1]) if truncated and rows else None,
             "show_cost": show_cost, "sellers": sellers}
 
 

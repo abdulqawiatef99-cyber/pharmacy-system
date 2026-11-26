@@ -3884,21 +3884,26 @@ async function viewSalesAdvanced() {
       <button class="btn" id="iGo">اعرض</button></div><div id="iItemRes" class="cands"></div><div id="iItemChip"></div></section>
   <section class="panel" id="iRep"><div id="iBox"><p class="muted">جارٍ التحميل…</p></div></section><div id="iDetail"></div>`;
   const reportBox = $("#iBox");
+  // a first load asks the question afresh; another page of the same answer keeps its totals and its moment
+  // (`until`), so the pages stay the ones the totals describe and nothing is added up again (#461)
   const load = async (offset = 0) => {
-    const seq = ++loadSeq;
+    const seq = ++loadSeq, keep = offset && R ? R : null;
     const current = () => seq === loadSeq && reportBox.isConnected;
     const f = $("#iF").value, t = $("#iT").value;
     if (!f || !t) return toast("اختر الفترة", true);
     $("#iBox").innerHTML = `<p class="muted">جارٍ التحميل…</p>`; $("#iDetail").innerHTML = ""; sel.clear(); open = null;
-    const qs = new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
-    const base = new URLSearchParams(qs);       // the same question, for the other pages of an export
-    if (offset) qs.set("offset", offset);
-    const asked = { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
+    // another page repeats the question that was answered, not the controls as they stand now
+    const qs = keep ? new URLSearchParams(keep.base)
+      : new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
+    const base = new URLSearchParams(qs);       // the same question, for the other pages and for an export
+    if (keep) { qs.set("offset", offset); qs.set("totals", "0"); qs.set("until", keep.as_of); }
+    const asked = keep ? keep.asked : { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
     let result;
     try { result = await api(`/api/reports/invoices?${qs}`); }
     catch (er) { if (current()) { reportBox.innerHTML = ""; toast(er.message, true); } return; }
     if (!current()) return;
     R = result;
+    if (keep) { R.totals = keep.totals; R.as_of = keep.as_of; }
     R.base = base;
     R.asked = asked;               // the E-Stock side follows the request that was answered, not the live controls (Codex P2)
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
@@ -3913,11 +3918,14 @@ async function viewSalesAdvanced() {
   const allRows = async () => {
     if (!paged()) return R.rows;
     const rows = [];
-    for (let at = 0; at < R.total_rows;) {
-      const qs = new URLSearchParams(R.base); qs.set("offset", at); qs.set("totals", "0");
+    // each page starts strictly after the last invoice of the one before, and nothing newer than this
+    // report joins: a sale or a void at the till meanwhile cannot repeat or hide an invoice
+    for (let after = "", more = true; more;) {
+      const qs = new URLSearchParams(R.base); qs.set("totals", "0"); qs.set("until", R.as_of);
+      if (after) qs.set("after", after);
       const page = await api(`/api/reports/invoices?${qs}`);
-      if (!page.rows.length) break;
-      rows.push(...page.rows); at += page.rows.length;
+      rows.push(...page.rows);
+      after = page.next_after; more = Boolean(after);
     }
     return rows;
   };

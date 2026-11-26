@@ -130,3 +130,55 @@ class TestRoute(APICase):
         self.assertEqual((r.json()["offset"], r.json()["totals"]), (3000, None))
         for bad in ("-1", "x", "1.5", "9999999999"):
             self.assertEqual(self.c.get(base + f"&offset={bad}", headers=H).status_code, 422, bad)
+
+
+class TestPagesHoldWhileTheTillKeepsSelling(TestTotalsCoverEveryMatch):
+    """Review P2: an export walks the pages while the cashier works. A sale completed in between must not
+    push an invoice onto two pages, and a void must not make another one vanish."""
+
+    def walk(self, between):
+        first = self.rep()
+        rows, cursor = list(first["rows"]), first["next_after"]
+        between()
+        while cursor:
+            page = self.rep(after=cursor, until=first["as_of"], totals=False)
+            rows += page["rows"]
+            cursor = page["next_after"]
+        return first, rows
+
+    def test_a_sale_completed_between_pages_does_not_repeat_or_join(self):
+        new = []
+        first, rows = self.walk(lambda: new.append(self.sell(units=1)))
+        ids = [x["id"] for x in rows]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(set(ids), {x["id"] for x in self.sales})          # the period as it was asked
+        self.assertNotIn(new[0]["id"], ids)
+        self.assertEqual(sum(x["total"] for x in rows), first["totals"]["total"])
+
+    def test_a_void_between_pages_does_not_hide_another_invoice(self):
+        gone = self.sales[-1]                                              # the newest: on the first page already
+        first, rows = self.walk(lambda: self.s.void(self.ctx, gone["id"], "اختبار"))
+        ids = [x["id"] for x in rows]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(set(ids), {x["id"] for x in self.sales})
+
+    def test_the_last_page_has_no_cursor_and_a_bad_one_is_refused(self):
+        from app.core.errors import ValidationFailed
+        self.assertIsNone(self.rep(offset=8)["next_after"])
+        for bad in ("x", "|", "2026-01-01|", "nonsense|id|more"):
+            with self.subTest(bad=bad), self.assertRaises(ValidationFailed):
+                self.rep(after=bad)
+        with self.assertRaises(ValidationFailed):
+            self.rep(until="yesterday")
+
+
+class TestRouteCursor(APICase):
+    def test_cursor_parameters_reach_the_report(self):
+        self.http_login()
+        base = f"/api/reports/invoices?from={D}T00:00&to={D}T23:59"
+        first = self.c.get(base, headers=H).json()
+        self.assertIsNone(first["next_after"])
+        r = self.c.get(base + f"&until={first['as_of']}&totals=0", headers=H)
+        self.assertEqual((r.status_code, r.json()["as_of"]), (200, first["as_of"]))
+        self.assertEqual(self.c.get(base + "&after=bad", headers=H).status_code, 422)
+        self.assertEqual(self.c.get(base + "&until=bad", headers=H).status_code, 422)
