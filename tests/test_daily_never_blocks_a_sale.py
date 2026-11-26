@@ -37,7 +37,8 @@ class TestDailyNeverBlocksASale(Base):
         waited = []
 
         def cashier():
-            reading.wait(5)
+            if not reading.wait(5):
+                return                                                  # the daily reads never ran: failed below
             time.sleep(0.05)                                            # the daily read is under way
             t = time.perf_counter()
             with self.db.transaction():                                 # what a sale does first
@@ -53,7 +54,9 @@ class TestDailyNeverBlocksASale(Base):
             th.join(10)
         finally:
             Database.all, Database.one = real_all, real_one
-        self.assertTrue(in_tx)
+        self.assertFalse(th.is_alive(), "the cashier's write never finished")
+        self.assertTrue(in_tx, "the daily stock / sales-spike reads were not seen")
+        self.assertTrue(waited, "the cashier's write did not run")
         self.assertFalse(any(in_tx), "a daily read ran inside the write transaction")
         self.assertLess(waited[0], HOLD / 2, f"the sale waited {waited[0]:.3f} s for the daily checks")
         # and the checks still did their work, once
