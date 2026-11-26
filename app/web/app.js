@@ -5575,8 +5575,27 @@ function discFields(l) {
   return `<span class="row nowrap disc2">${f[m]}${f[m === "egp" ? "pct" : "egp"]}</span>`;
 }
 
+// Codex on #490: a box/strip number being typed on one line survives a redraw caused by another line's save;
+// kept only while that line's saved quantity is still the one the fields were drawn from
+function keepTypedQty() {
+  const cart = $("#posCart"), active = document.activeElement, kept = [];
+  cart?.querySelectorAll("[data-qline]").forEach((box) => box.querySelectorAll("input").forEach((inp) => {
+    if (inp.value !== inp.defaultValue || inp === active)
+      kept.push({ line: box.dataset.qline, was: box.dataset.was, key: inp.hasAttribute("data-qp") ? "qp" : "qu",
+                  value: inp.value, focus: inp === active, at: inp.selectionStart });
+  }));
+  return () => kept.forEach((k) => {
+    const box = $(`[data-qline="${CSS.escape(k.line)}"]`, $("#posCart"));
+    if (!box || box.dataset.was !== k.was) return;
+    const inp = box.querySelector(`[data-${k.key}]`);
+    inp.value = k.value;
+    if (k.focus) { inp.focus(); try { inp.setSelectionRange(k.at, k.at); } catch { /* not a text field */ } }
+  });
+}
+
 function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
+  const restoreTyped = keepTypedQty();
   refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
   // U2-21: dispensing notes, shown once per invoice (a toast the first time) and kept as one line above the items
@@ -5584,7 +5603,8 @@ function renderCart(findings = null) {
   POS.dnSeen ||= {};
   const seen = (POS.dnSeen[s.id] ||= new Set());
   dn.filter((n) => !seen.has(n.ingredient)).forEach((n) => { seen.add(n.ingredient); toast(`📋 ${n.item}: ${n.rules.join(" · ")}`); });
-  $("#posCart").innerHTML = `
+  POS.redrawing = true;              // the old fields leave the page: their focusout is not the cashier leaving them
+  try { $("#posCart").innerHTML = `
     ${dn.length ? `<div class="badge b-info dnotes" role="note">${dn.map((n) => `📋 <b>${esc(n.item || n.ingredient)}</b>: ${esc(n.rules.join(" · "))}${n.source ? ` <span class="muted small">(${esc(n.source)})</span>` : ""}`).join("<br>")}</div>` : ""}
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف بترتيب إدخالها" : "الأصناف مرتبة أبجديًا A→Z (أسرع في التحضير)"} — آخر صنف مُضاف عليه علامة ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
     <div class="tablewrap"><table class="cart">
@@ -5597,7 +5617,7 @@ function renderCart(findings = null) {
           ${l.item.stock != null ? `<div class="muted small">الرصيد: ${esc(fmtStock(l.item.stock, l.item))}</div>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
-          ${l.item.pack_size > 1 && !l.item.is_service ? `<div class="qty mix" data-qline="${esc(l.id)}">
+          ${l.item.pack_size > 1 && !l.item.is_service ? `<div class="qty mix" data-qline="${esc(l.id)}" data-was="${l.qty_base}">
             <input class="qn" data-qp="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${Math.floor(l.qty_base / l.item.pack_size)}" aria-label="${esc(packName(l.item))}"> <span>${esc(packName(l.item))}</span> +
             <input class="qn" data-qu="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${l.qty_base % l.item.pack_size}" aria-label="${esc(unitName(l.item))}"> <span>${esc(unitName(l.item))}</span></div>` : ""}
           ${l.item.pack_size === 1 && !l.item.is_service && canFixPack()
@@ -5610,6 +5630,8 @@ function renderCart(findings = null) {
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
+  } finally { POS.redrawing = false; }
+  restoreTyped();
   posMark();
   syncQuick();
   const line = (id) => s.lines.find((l) => l.id === id);
@@ -5628,7 +5650,7 @@ function renderCart(findings = null) {
       else if (q !== l.qty_base) patchLine(l.id, { qty_base: q }).then(() => back && $("#posQ")?.focus());
       else if (back) $("#posQ")?.focus();
     };
-    box.addEventListener("focusout", (e) => { if (!box.contains(e.relatedTarget) && box.isConnected) save(false); });
+    box.addEventListener("focusout", (e) => { if (!POS.redrawing && !box.contains(e.relatedTarget) && box.isConnected) save(false); });
     box.querySelectorAll("input").forEach((inp) => {
       inp.addEventListener("focus", () => inp.select());
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); inp.blur(); $("#posQ")?.focus(); } });
