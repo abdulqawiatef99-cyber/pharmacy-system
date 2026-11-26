@@ -413,6 +413,61 @@ function printInFrame(url) {
   document.body.appendChild(f);
 }
 
+// ------------------------------------------------------------------ dhikr ticker and work hours (U3-7)
+// The ticker is a passive strip at the very bottom (pointer-events: none, never over a button, hidden in print);
+// the work-hours reminder is one toast WARN_MIN minutes before the end of the person's hours. Neither stops work.
+let STAFF_UI = null, STAFF_TIMERS = [], STAFF_LOADING = null;
+function staffUiStop() {                 // on sign-out and before every reload of the settings (review P1)
+  STAFF_TIMERS.forEach(clearInterval); STAFF_TIMERS = [];
+  document.getElementById("dhikrBar")?.remove();
+  document.body.style.paddingBottom = "";
+}
+// minutes left until a shift end «HH:MM» seen from `now` (the end after midnight when it is still ahead)
+function shiftEndLeft(now, endHHMM) {
+  const [eh, em] = endHHMM.split(":").map(Number), end = new Date(now);
+  end.setHours(eh, em, 0, 0);
+  if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
+  return (end - now) / 60000;
+}
+async function staffUi(force = false) {
+  const uid = ME?.user?.id;
+  if (!uid || (!force && STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  STAFF_LOADING = uid;
+  let cfg;
+  // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui", { settleAfterNavigation: true })) }; } catch { STAFF_LOADING = null; return; }
+  STAFF_LOADING = null;
+  if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
+  staffUiStop();
+  STAFF_UI = cfg;
+  // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
+  STAFF_TIMERS.push(setInterval(() => { staffUi(true); }, 600000));
+  if (cfg.dhikr.length) {
+    const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.cssText = "position:fixed;inset-inline:0;bottom:0;height:1.4em;line-height:1.4em;font-size:.8em;opacity:.75;"
+      + "pointer-events:none;overflow:hidden;white-space:nowrap;text-align:center;z-index:1;background:var(--panel,transparent)";
+    let i = 0;
+    const show = () => { bar.textContent = cfg.dhikr[i++ % cfg.dhikr.length]; };
+    show(); STAFF_TIMERS.push(setInterval(show, 20000));
+    document.body.append(bar);
+    document.body.style.paddingBottom = "1.6em";
+  }
+  const h = cfg.hours;
+  if (h?.end) {
+    const tick = () => {
+      const now = new Date(), left = shiftEndLeft(now, h.end), key = `endWarn:${uid}:${h.end}:${new Date(now.getTime() + left * 60000).toDateString()}`;
+      if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
+        sessionStorageSet(key, "1");
+        toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
+      }
+    };
+    tick(); STAFF_TIMERS.push(setInterval(tick, 60000));
+  }
+}
+function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* blocked storage: warn again later */ } }
+
 // ------------------------------------------------------------------ routing
 const routes = [
   [/^#\/login$/, viewLogin],
@@ -460,6 +515,7 @@ const routes = [
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
+  [/^#\/estock-move$/, viewEstockMove],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
@@ -490,6 +546,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
+    staffUi();
     $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
@@ -609,6 +666,7 @@ const HELP = {
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
+  "estock-move": ["جرّب نقل إي ستوك على نسخة من قاعدة البرنامج الجديدة وراجع تقرير المطابقة.", ["افتح الشاشة من الكمبيوتر اللي عليه إي ستوك. لو الجهاز فصل، ارجع للشاشة واضغط «كمّل التجربة»."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
   procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
@@ -981,6 +1039,7 @@ $("#logout").addEventListener("click", async () => {
     try { if (ME?.permissions?.includes("sales.read") && await api("/api/cash/current")) warn.push("الشيفت لسه مفتوح: اقفله لو هتمشي."); } catch { /* no open shift */ }
     if (!confirm(["تخرج من البرنامج؟", ...warn].join("\n"))) return;
   }
+  staffUiStop(); STAFF_UI = null;
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
 });
@@ -3261,6 +3320,75 @@ async function renderDeviceRestore() {
     } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
   });
 }
+async function viewEstockMove() {
+  if (!isOwnerMe()) {
+    app.innerHTML = `<section class="panel"><h1>نقل من إي ستوك</h1><p>الشاشة دي للمالك بس.</p></section>`;
+    return;
+  }
+  app.innerHTML = `<section class="panel" id="estockMove">
+    <h1>نقل من إي ستوك</h1>
+    <p>ابدأ من الكمبيوتر اللي عليه إي ستوك. البرنامج هيقرا البيانات ويجرّب النقل على نسخة، وبعدها يعرض تقرير المطابقة.</p>
+    <p class="muted">يفضّل توقف التسجيل في إي ستوك وقت القراية عشان التقرير يعكس البيانات في نفس الوقت.</p>
+    <p id="estockMoveStatus" role="status"></p>
+    <progress aria-label="تقدّم تجربة النقل" hidden></progress>
+    <div class="row"><button class="btn" type="button" hidden></button><a class="btn secondary" href="#/system">ارجع للبرنامج</a></div>
+    <pre id="estockMoveReport" dir="rtl" data-raw hidden></pre>
+  </section>`;
+  const panel = $("#estockMove"), button = panel.querySelector("button"), bar = panel.querySelector("progress");
+  const status = $("#estockMoveStatus"), report = $("#estockMoveReport");
+  const path = "/api/estock/move";
+  const isCurrent = () => panel.isConnected && location.hash === "#/estock-move";
+  let state, lastMessage;
+
+  async function refresh() {
+    if (!isCurrent()) return;
+    try {
+      const next = await api(path);
+      if (!isCurrent()) return;
+      state = next;
+      const labels = {
+        idle: "جاهز للبحث عن إي ستوك.",
+        finding: "بندور على قاعدة إي ستوك على الجهاز…",
+        reading: `لقينا قاعدة إي ستوك. بنقرا البيانات… الجداول اللي اتقرت: ${next.tables}`,
+        rehearsing: "القراية خلصت. بنجرّب النقل على نسخة وبنجهّز تقرير المطابقة…",
+        interrupted: "التجربة وقفت. اضغط «كمّل التجربة» عشان تتابع.",
+        failed: next.message,
+        done: next.reconciled ? "التجربة خلصت والمطابقة نجحت. راجع التقرير." : "التجربة خلصت. راجع الملاحظات والفروق في التقرير.",
+      };
+      const actions = { idle: "ابدأ تجربة النقل", failed: "جرّب تاني", interrupted: "كمّل التجربة", done: "اعمل تجربة جديدة" };
+      const working = ["finding", "reading", "rehearsing"].includes(next.phase);
+      const message = next.supported ? labels[next.phase] : "تجربة نقل إي ستوك متاحة على ويندوز ١٠ و١١.";
+      if (lastMessage !== message) status.textContent = lastMessage = message;
+      bar.hidden = !working;
+      button.hidden = !next.supported || working;
+      button.textContent = actions[next.phase] || "";
+      report.hidden = next.phase !== "done";
+      if (next.report) {
+        const content = document.createElement("span");
+        content.textContent = next.report;
+        report.replaceChildren(content);
+      } else report.replaceChildren();
+      if (working) setTimeout(refresh, 1000);
+    } catch (err) {
+      if (!isCurrent()) return;
+      status.textContent = err.message;
+      lastMessage = undefined;
+      // A running job can outlive a brief disconnect or browser reload.
+      if (!err.code) setTimeout(refresh, 2000);
+      else { bar.hidden = true; button.hidden = true; report.hidden = true; report.textContent = ""; }
+    }
+  }
+  button.addEventListener("click", () => withBusy(button, async () => {
+    try {
+      await api(path, { method: "POST", body: state.phase === "done" ? { replace_id: state.id } : {} });
+      await refresh();
+    } catch (err) {
+      if (isCurrent()) toast(err.message, true);
+    }
+  }));
+  await refresh();
+}
+
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
@@ -3269,7 +3397,9 @@ async function viewSystem() {
     <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
-    <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
+    <section class="panel"><h1>البرنامج</h1>
+      ${isOwnerMe() ? `<p><a class="btn secondary" href="#/estock-move">نقل من إي ستوك</a></p>` : ""}
+      <div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
@@ -5300,6 +5430,28 @@ function chanOptions(kind, sel) {
   return list.length ? `<select data-ch>${list.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>` : "";
 }
 
+// U3-6: the chosen customer's usual items (last 6 months), one click adds his usual quantity
+async function posUsual() {
+  const box = $("#posUsual"), cid = SALE?.customer_id;
+  if (!box || !cid) return;
+  const sale = SALE.id;
+  // one request per customer and invoice, even while renderSide runs again before it answers (review of #419)
+  if (POS.usual?.cid !== cid || POS.usual?.sale !== sale) {
+    POS.usual = { cid, sale, items: api(`/api/customers/${cid}/usual`).then((r) => r.items) };
+  }
+  const mine = POS.usual;
+  let all;
+  try { all = await mine.items; } catch { if (POS.usual === mine) POS.usual = null; return; }
+  if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
+  const items = all.slice(0, 8);
+  $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
+      <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
+  $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
+    const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
+    addItem({ ...x, id: x.item_id }, q % ps === 0 ? q / ps : 0, q % ps === 0 ? 0 : q);
+  }));
+}
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
@@ -5315,7 +5467,8 @@ function renderSide() {
       <div id="posCustRes" class="cands"></div>
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
         ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 له رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
-        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
+        ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}
+        <div id="posUsual" class="usual"></div>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
         <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
         <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
@@ -5468,6 +5621,7 @@ function renderSide() {
     if (confirmButton) confirmButton.focus();
     else complete();
   });
+  posUsual();
 }
 
 // A real form instead of two prompt() boxes (device test 11/01): what was typed in the customer search
@@ -5753,6 +5907,18 @@ async function dayHealth(el) {
 // U2-29: where a drawer difference usually comes from (the shift history, open or not)
 function wireHunt() {
   $("#shHist")?.addEventListener("click", async (e) => {
+    const sm = e.target.closest(".shSum");        // U3-8: the owner's summary, ready to copy (nothing is sent)
+    if (sm) {
+      try {
+        const r = await api(`/api/cash/shifts/${sm.dataset.id}/owner-summary`);
+        $("#shHuntOut").innerHTML = `<section class="panel"><h3>ملخص للمالك</h3><textarea id="shSumT" rows="10" readonly>${esc(r.text)}</textarea>
+          <div class="row"><button class="btn" id="shSumCopy">انسخ</button><span class="muted">البرنامج مبيبعتش حاجة: انسخه وابعته بنفسك.</span></div></section>`;
+        $("#shSumCopy").addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }
+        });
+      } catch (er) { toast(er.message, true); }
+      return;
+    }
     const b = e.target.closest(".shHunt"); if (!b) return;
     try {
       const h = await api(`/api/cash/shifts/${b.dataset.id}/hunt`), row = (x) => `<li>فاتورة ${x.sale_no}: الإجمالي ${money(x.total)}، نقدي ${money(x.paid_cash)}</li>`;
@@ -5777,7 +5943,7 @@ async function viewShift(opts = {}) {
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
-      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""} <button type="button" class="btn small secondary shSum" data-id="${esc(r.id)}">ملخص للمالك</button>` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
   if (!sh) {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
@@ -6949,6 +7115,7 @@ async function viewCustomer(id) {
     <label class="f">المصدر <select name="m"><option value="cash">نقدًا في الخزينة</option><option value="card">فيزا</option><option value="transfer">محفظة إلكترونية</option></select></label>
     <label class="f" id="cPayCh" hidden>عن طريق <select name="ch"></select></label><button class="btn">سجّل</button></form>` : ""}
   <div class="grid2">
+    <section class="panel" id="cUsual"><h2>أدوية العميل</h2><p class="muted">بيتحمل…</p></section>
     <section class="panel"><div class="row between"><h2>الطلب الشهري</h2>${c.refills.length && ME.permissions.includes("sales.create") ? `<span class="row"><button class="btn small" id="cPrep">جهّز الطلب في شاشة البيع</button>${c.whatsapp_ok && c.wa.length && canM ? `<button class="btn small secondary" id="cWaSend">📲 ذكّره عبر واتساب</button>` : ""}</span>` : ""}</div>
       ${c.reminded_at ? `<p class="muted small">آخر تذكير أُرسل: ${esc(dayOf(c.reminded_at))}</p>` : ""}
       <table><thead><tr><th>الصنف</th><th>الكمية</th><th>كل</th><th>ميعاده</th><th>متوفر لدينا؟</th><th></th></tr></thead><tbody>
@@ -7002,6 +7169,13 @@ async function viewCustomer(id) {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { whatsapp: true } }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }
     catch (err) { w?.close(); toast(err.message, true); }
   });
+  const usualBox = $("#cUsual");            // this customer's own panel (Codex P2 on #419: a late answer for A never fills B)
+  api(`/api/customers/${id}/usual`).then(({ items }) => {       // U3-6 «أدوية العميل»: last 6 months
+    if (!usualBox?.isConnected) return;
+    usualBox.innerHTML = `<h2>أدوية العميل <span class="muted small">(آخر 6 شهور)</span></h2>${items.length ? `<table><thead><tr><th>الصنف</th><th>مرات الشراء</th><th>آخر مرة</th><th>الكمية المعتادة</th><th>ميعاد الطلب الشهري</th><th>متوفر؟</th></tr></thead><tbody>
+      ${items.map((x) => `<tr><td>${itemHtml(x)}</td><td class="num">${x.times}</td><td>${esc(dayOf(x.last_at))}</td><td>${esc(fmtStock(x.last_qty || 1, x))}</td>
+        <td>${x.refill_due ? `${esc(x.refill_due)}${x.refill_days_left <= 0 ? ` <span class="badge b-warn">جه ميعاده</span>` : ""}` : "—"}</td><td>${x.in_stock ? "✓" : `<span class="badge b-err">لأ</span>`}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">مفيش مشتريات في آخر 6 شهور</p>`}`;
+  }).catch(() => { if (usualBox?.isConnected) usualBox.remove(); });
   $("#cPrep")?.addEventListener("click", async () => {
     try { const r = await api(`/api/customers/${id}/refills`, { method: "POST", body: { prepare: true } }); await toPos(r.sale_id); } catch (err) { toast(err.message, true); }
   });
@@ -7753,6 +7927,27 @@ async function viewUsers() {
   // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
   if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
+  // U3-7: the dhikr strip (on for all, off for some) and each employee's hours (a reminder before the end)
+  if (ME.permissions.includes("users.manage")) api("/api/settings/staff-ui?all=1").then((su) => {
+    const box = $("#suPanel"); if (!box) return;
+    box.innerHTML = `<h2>الذِكر ومواعيد الشغل</h2>
+      <label class="f"><input type="checkbox" id="suOn" ${su.dhikr_on ? "checked" : ""}> شريط ذِكر صغير تحت الشاشة (مبيغطيش أي زرار ومبيوقفش البيع)</label>
+      <table><thead><tr><th>الموظف</th><th>الذِكر</th><th>من</th><th>لحد</th></tr></thead><tbody>${users.filter((u) => u.role !== "owner").map((u) => `<tr data-u="${esc(u.id)}"><td>${esc(u.full_name)}</td>
+        <td><input type="checkbox" data-dk ${su.dhikr_off_users.includes(u.id) ? "" : "checked"}></td>
+        <td><input type="time" data-st value="${esc(su.hours[u.id]?.start || "")}"></td><td><input type="time" data-en value="${esc(su.hours[u.id]?.end || "")}"></td></tr>`).join("")}</tbody></table>
+      <p class="muted">قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.</p><button class="btn" id="suSave">حفظ</button>`;
+    $("#suSave").addEventListener("click", async () => {
+      const rows = [...box.querySelectorAll("tr[data-u]")], hours = {};
+      let half = false;
+      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; half ||= !!st !== !!en; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      if (half) { toast("اكتب الميعادين (من ولحد) أو سيبهم فاضيين", true); return; }
+      try {
+        await api("/api/settings/staff-ui", { method: "PUT", body: { dhikr_on: $("#suOn").checked, hours,
+          dhikr_off_users: rows.filter((tr) => !tr.querySelector("[data-dk]").checked).map((tr) => tr.dataset.u) } });
+        STAFF_UI = null; staffUiStop(); staffUi(); toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    });
+  }).catch(() => {});
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
     <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
@@ -7760,6 +7955,7 @@ async function viewUsers() {
       <td>${u.active ? `<span class="badge b-ok">✓ مفعّل</span>` : `<span class="badge b-err">✕ موقوف</span>`}</td>
       <td>${u.has_pin ? "✓" : `<span class="badge b-warn">⚠ لا يوجد</span>`}</td>
       <td>${u.role === "owner" ? "كل الصلاحيات" : u.changes ? `${u.changes} تعديل` : "على الافتراضي"}</td></tr>`).join("")}</tbody></table></section>
+  ${ME.permissions.includes("users.manage") ? `<section class="panel" id="suPanel"><h2>الذِكر ومواعيد الشغل</h2><p class="muted">بيتحمل…</p></section>` : ""}
   <section class="panel"><h2>مستخدم جديد</h2>
     <form id="uNew" class="row">
       <label class="f">الاسم <input name="full_name" required></label>
