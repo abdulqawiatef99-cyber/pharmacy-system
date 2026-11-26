@@ -72,7 +72,9 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
   const untouched = () => {
     if (snap?.kind !== "text") return true;
     const at = snap.start ?? snap.value.length, to = snap.end ?? at;
-    return snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to);
+    if (snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to)) return true;
+    // a number box shows no selection: its first key may have replaced a selected amount (Codex P2 on #462)
+    return snap.start == null && snap.el.value === buf;
   };
   const arm = () => { if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; flush(); }, gap * 3); };
 
@@ -133,12 +135,12 @@ function installScanDetector(opts, target = window) {
   const h = (e) => d.keydown(e), r = () => d.release();
   target.addEventListener("keydown", h, true);          // capture: before any field or screen key handler
   // pointerdown comes before the field's blur and change: the click saves the whole text
+  // (no focusout: the screen itself moves the focus to the search box while a scan is coming in, Codex P2 on #462;
+  // a person leaving a field does it by a key or a click, and the screen calls flush before it saves)
   target.addEventListener("pointerdown", r, true);
-  target.addEventListener("focusout", r, true);
   const stop = () => {
     target.removeEventListener("keydown", h, true);
     target.removeEventListener("pointerdown", r, true);
-    target.removeEventListener("focusout", r, true);
     d.reset();
   };
   stop.flush = r;                                       // the screen calls it before it saves

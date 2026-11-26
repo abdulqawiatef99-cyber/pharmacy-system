@@ -55,11 +55,10 @@ const viaInstall = (() => {
   f.setRangeText("c", f.selectionStart, f.selectionEnd);
   L.keydown.forEach((h) => h({ key: "d", timeStamp: 2004, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
   const held2 = f.value;
+  // Codex P2 on #462: the focus moving by script (an added item focuses the search box) does not end a scan
   (L.focusout || []).forEach((h) => h({ target: f }));
   const afterBlur = f.value;
-  L.keydown.forEach((h) => h({ key: "e", timeStamp: 3000, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
-  f.setRangeText("e", f.selectionStart, f.selectionEnd);
-  L.keydown.forEach((h) => h({ key: "f", timeStamp: 3004, target: f, preventDefault() {}, stopImmediatePropagation() {} }));
+  L.keydown.forEach((h) => h({ key: "e", timeStamp: 2008, target: {}, preventDefault() {}, stopImmediatePropagation() {} }));
   const held3 = f.value;
   stop.flush?.();
   return { held, afterClick, held2, afterBlur, held3, afterFlush: f.value };
@@ -76,7 +75,19 @@ const insertedBetween = (() => {
   d.release();
   return f.value;
 })();
-const out = { viaInstall, insertedBetween,
+// Codex P2 on #462: a scan over a selected amount in a number box (the browser shows no selection there)
+const overSelected = (() => {
+  const f = new Field("5", "number"); f.selectionStart = f.selectionEnd = null;
+  f.setSelectionRange = () => {}; f.setRangeText = () => { throw new Error("number box"); };
+  const scans = [];
+  const d = createScanDetector({ onScan: (c) => scans.push(c), setTimer: () => 1, clearTimer: () => {} });
+  [..."6221043010366"].forEach((k, i) => { let prevented = false;
+    d.keydown({ key: k, timeStamp: 1000 + i * 4, target: f, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    if (!prevented) f.value = i === 0 ? k : f.value + k; });       // the first key replaces the selected «5»
+  d.keydown({ key: "Enter", timeStamp: 1060, target: f, preventDefault() {}, stopImmediatePropagation() {} });
+  return { scans, value: f.value };
+})();
+const out = { viaInstall, insertedBetween, overSelected,
   scanInDiscount: run(burst("6223001234567"), new Field("5")),
   scanShortCode: run(burst("1234"), new Field("")),
   personTyping: run(typed("100"), new Field("")),
@@ -171,8 +182,13 @@ class TestScanDetector(unittest.TestCase):
     def test_a_click_blur_or_checkout_gives_held_typing_back_at_once(self):
         o = self.out["viaInstall"]
         self.assertEqual((o["held"], o["afterClick"]), ("x", "xab"))      # pointerdown: before the field blurs
-        self.assertEqual((o["held2"], o["afterBlur"]), ("xab", "xabcd"))  # the focus leaving
-        self.assertEqual((o["held3"], o["afterFlush"]), ("xabcd", "xabcdef"))   # the sale screen asks before checkout
+        self.assertEqual((o["held2"], o["afterBlur"]), ("xab", "xab"))    # focus moved by script: still held
+        self.assertEqual((o["held3"], o["afterFlush"]), ("xab", "xabcde"))  # the sale screen asks before checkout
+
+    def test_scan_over_a_selected_amount_keeps_the_amount_and_the_whole_code(self):
+        o = self.out["overSelected"]
+        self.assertEqual(o["scans"], ["6221043010366"])
+        self.assertEqual(o["value"], "5")
 
     def test_text_inserted_without_keys_is_never_taken(self):
         self.assertEqual(self.out["insertedBetween"], "شارع التجربة 7")
