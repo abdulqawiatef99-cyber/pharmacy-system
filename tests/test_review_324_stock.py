@@ -307,6 +307,16 @@ class TestS26PreTaxTotal(unittest.TestCase):
 
 
 class TestS27InvoiceTaxInCost(_Purchase):
+    def test_legacy_line_with_zero_price_and_additive_tax_still_can_post(self):
+        iid, draft = self.manual({"qty": 4}, declared_total=800)
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoice_lines SET unit_net_price=0,"
+                            " tax_amount=800, tax_included=0, line_total=800 WHERE id=?",
+                            (draft["lines"][0]["id"],))
+        self.p.approve(self.ctx, iid, draft["invoice"]["version"])
+        stock = inv.stock_for_item(self.db, self.ctx, self.item)
+        self.assertEqual(Decimal(stock["avg_cost"]) * stock["total_qty"], Decimal("8.00"))
+
     def test_invoice_tax_on_zero_price_lines_reaches_the_unit_cost(self):
         iid = self.p.create_manual(self.ctx, supplier_id=self.sup)
         self.p.update_header(self.ctx, iid, {"invoice_no": "77", "extra_tax": 800, "declared_total": 800}, None)
