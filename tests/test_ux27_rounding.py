@@ -152,9 +152,12 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#posSide [data-mround]');
   const out = { choices: await p.$$eval('#posSide [data-mround]', (b) => b.map((x) => x.textContent.trim())) };
   out.dueAuto = await p.textContent('#posSide .sum.due b');
+  await p.fill('#payGiven', '50');                              // the tender typed first (Codex on #492)
   await p.click('#posSide [data-mround="-33"]');
   await p.waitForSelector('#posSide [data-mround="off"]');
   out.dueManual = await p.textContent('#posSide .sum.due b');
+  out.given = await p.inputValue('#payGiven');
+  out.change = await p.textContent('#changeV');
   out.label = await p.textContent('#posSide .panel');
   const [res] = await Promise.all([p.waitForResponse((r) => r.url().endsWith('/complete')), p.click('#posDone')]);
   out.status = res.status();
@@ -178,6 +181,8 @@ class TestScreen(PlanCase):
         self.assertEqual(out["choices"], ["33.00 ج", "34.00 ج"])
         self.assertEqual(out["dueAuto"], "33.50")                     # nearest half pound
         self.assertEqual(out["dueManual"], "33.00")
+        self.assertEqual((out["given"], out["change"]), ("50", "17.00"))     # kept, change against the new total
+        self.assertEqual(out["sent"]["cash_given"], 5000)
         self.assertIn("تقريب يدوي", out["label"])
         self.assertEqual(out["status"], 200)
         self.assertEqual(out["sent"]["manual_rounding"], -33)

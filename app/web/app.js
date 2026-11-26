@@ -5822,8 +5822,11 @@ function renderSide() {
     POS.manual ||= {};
     if (b.dataset.mround === "off") delete POS.manual[SALE.id];
     else POS.manual[SALE.id] = { total: SALE.total, d: +b.dataset.mround };
+    const given = $("#payGiven")?.value || "";       // Codex on #492: the tender typed before stays, its change recalculated
     renderSide();
-    $("#payGiven")?.focus();
+    const g = $("#payGiven");
+    if (g && given) { g.value = given; g.dispatchEvent(new Event("input")); }
+    g?.focus();
   }));
   const invDisc = async (mode) => {     // one discount on the whole invoice, spread over the lines (update 1)
     const typed = discBody(mode, $(mode === "egp" ? "#posInvAmt" : "#posInvDisc").value);
