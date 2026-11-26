@@ -1490,7 +1490,7 @@ function renderInvoice(keepPicker = true) {
       <a href="#/purchases">رجوع للفواتير</a>
     </div>
     <div class="row">
-      <label class="f">المورد <select data-h="supplier_id" ${draft ? "" : "disabled"}>
+      <label class="f">المورد <select data-h="supplier_id" class="spHide" tabindex="-1" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
       <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
       <label class="f">رقم فاتورة المورد <input data-h="invoice_no" autocomplete="off" value="${esc(inv.invoice_no || "")}" ${draft ? "" : "disabled"}></label>
@@ -1997,7 +1997,7 @@ function supPicker(sel) {
   if (sel._sp) { sel._sp.sync(); return sel._sp; }
   const wrap = document.createElement("span");
   wrap.className = "sp";
-  wrap.innerHTML = `<input class="spIn" type="search" autocomplete="off" spellcheck="false" lang="ar" role="combobox" aria-autocomplete="list" aria-expanded="false"><div class="spList" role="listbox" hidden></div>`;
+  wrap.innerHTML = `<input class="spIn" type="text" autocomplete="off" spellcheck="false" lang="ar" role="combobox" aria-autocomplete="list" aria-expanded="false"><div class="spList" role="listbox" hidden></div>`;
   sel.after(wrap);
   sel.classList.add("spHide");
   sel.tabIndex = -1;
@@ -2021,6 +2021,7 @@ function supPicker(sel) {
     const q = inp.value === (sel.selectedOptions[0]?.value ? sel.selectedOptions[0].text : "") ? "" : inp.value;
     const b = blank();
     rows = [...(b && !sel.required && !q.trim() ? [{ id: "", name: b.text }] : []), ...supRank(entries(), q).slice(0, 15)];
+    if (at < 0) at = Math.max(0, rows.findIndex((r) => r.id === sel.value));
     at = Math.max(0, Math.min(at, rows.length - 1));
     box.innerHTML = rows.length ? rows.map((r, i) => `<div class="spOpt${i === at ? " on" : ""}${r.inactive ? " muted" : ""}" role="option" data-i="${i}" aria-selected="${i === at}">
       <b>${esc(r.name)}</b>${r.phone ? ` <small dir="ltr">${esc(r.phone)}</small>` : ""}${r.inactive ? " <small>· موقوف</small>" : ""}</div>`).join("")
@@ -2034,7 +2035,8 @@ function supPicker(sel) {
     if (sel.value !== r.id) { sel.value = r.id; sel.dispatchEvent(new Event("change", { bubbles: true })); }
     sync();
   };
-  inp.addEventListener("focus", () => { inp.select(); at = 0; draw(); });
+  // review P1: the list opens on the supplier already chosen, so Enter with nothing typed keeps it
+  inp.addEventListener("focus", () => { inp.select(); at = -1; draw(); });
   inp.addEventListener("input", () => { at = 0; draw(); });
   inp.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -2045,15 +2047,23 @@ function supPicker(sel) {
       if (!open) return;
       e.preventDefault(); e.stopPropagation();
       pick(rows[at]);
-    } else if (e.key === "Escape" && open) {
-      e.preventDefault(); e.stopPropagation(); close(); sync();
+    } else if (e.key === "Escape") {
+      if (open) { e.preventDefault(); e.stopPropagation(); }
+      close(); sync();
     }
   });
   box.addEventListener("mousedown", (e) => { e.preventDefault(); const o = e.target.closest(".spOpt"); if (o) pick(rows[+o.dataset.i]); });
   inp.addEventListener("blur", () => { close(); sync(); });
   inp.addEventListener("change", (e) => e.stopPropagation());           // the box itself is never a saved field
   sel.addEventListener("change", sync);
-  sel.addEventListener("invalid", (e) => { e.preventDefault(); toast("اختر المورد", true); inp.focus(); });
+  // review P1: a click on the field's caption focuses the label's select: send it to the box (the select's own
+  // type-ahead would pick, and on the invoice header save, a supplier per key)
+  sel.addEventListener("focus", () => inp.focus());
+  sel.addEventListener("invalid", (e) => {
+    e.preventDefault();
+    if (sel.form && sel.form.querySelector(":invalid") !== sel) return;     // the browser points at the first one
+    toast("اختر المورد", true); inp.focus();
+  });
   sel._sp = { sync, input: inp };
   sync();
   return sel._sp;
@@ -4996,7 +5006,8 @@ async function viewProcurement() {
       : "مفيش طلبيات مفتوحة. بعد ما تبعت طلبية لمورد اضغط «اتبعتت: تابعها».";
   };
   const load = async () => {
-    const out = await api(`/api/procurement/plan?${params()}`);
+    const [out] = await Promise.all([api(`/api/procurement/plan?${params()}`),
+      ME.permissions.includes("suppliers.read") ? api("/api/suppliers").then(supMetaSet).catch(() => {}) : null]);  // recency for the pickers
     st.rows = out.rows;
     st.all = out.all_suppliers;
     st.sups = Object.fromEntries(out.all_suppliers.map((s) => [s.id, s.name]));
@@ -7081,7 +7092,7 @@ async function viewSuppliers() {
     <div class="row noprint">${rangeBar("stRange", "last")}<label class="f">النوع <select id="stType"><option value="">الكل</option>${Object.entries(SUP_TYPE).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>
     <div id="stBox"></div></section>` : ""}`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/suppliers/${tr.dataset.go}`; }));
-  supMetaSet(list); supPicker($("#supGo"));
+  supMetaSet(list.map((x) => ({ ...x, last_used: x.last_used ?? x.last_invoice }))); supPicker($("#supGo"));
   $("#supGo").addEventListener("change", (e) => { if (e.target.value) location.hash = `#/suppliers/${e.target.value}`; });
   if (showBal) {
     let st = null;

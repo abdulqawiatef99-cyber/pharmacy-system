@@ -70,10 +70,13 @@ class TestLastUsed(APICase):
         used = cat.create_supplier(self.db, self.ctx, name="Synthetic Used Supplier")
         cat.create_supplier(self.db, self.ctx, name="Synthetic Idle Supplier")
         purch.create_manual(self.ctx, supplier_id=used)
+        gone = cat.create_supplier(self.db, self.ctx, name="Synthetic Cancelled Supplier")
+        purch.cancel(self.ctx, purch.create_manual(self.ctx, supplier_id=gone), "اتلغت تجربة", None)
         self.http_login()
         rows = {r["name"]: r for r in self.c.get("/api/suppliers").json()}
         self.assertTrue(rows["Synthetic Used Supplier"]["last_used"])
         self.assertIsNone(rows["Synthetic Idle Supplier"]["last_used"])
+        self.assertIsNone(rows["Synthetic Cancelled Supplier"]["last_used"])    # a cancelled upload is not "recent"
 
 
 SCRIPT = r"""
@@ -128,6 +131,22 @@ const { chromium } = require('playwright');
   await p.fill('.spIn[data-for="supplier_id"]', 'متحد');
   await p.keyboard.press('Enter');
   out.patch = JSON.parse((await saved).request().postData());
+  await p.waitForFunction(() => document.querySelector('.spIn[data-for="supplier_id"]')?.value.includes('المتحدة'));
+  // review P1: coming back to the box and pressing Enter with nothing typed keeps the chosen supplier (no save)
+  let extra = 0;
+  p.on('request', (r) => { if (r.method() === 'PATCH' && r.url().includes('/api/purchases/')) extra++; });
+  await p.click('body');
+  await p.focus('.spIn[data-for="supplier_id"]');
+  await p.keyboard.press('Enter');
+  await p.waitForTimeout(300);
+  out.enterKeeps = [extra, await p.evaluate(() => document.querySelector('[data-h="supplier_id"]').selectedOptions[0].text)];
+  // review P1: a click on the caption lands in the box, never in the hidden list (its type-ahead would save)
+  await p.click('body');
+  await p.evaluate(() => document.querySelector('[data-h="supplier_id"]').closest('label').firstChild.parentElement.click());
+  out.captionFocus = await p.evaluate(() => document.activeElement.classList.contains('spIn'));
+  await p.keyboard.type('ph');
+  await p.waitForTimeout(300);
+  out.typedNoSave = extra;
   // supplier return screen
   await p.goto(base + '/#/supplier-returns/new');
   await p.fill('.spIn[data-for="srSup"]', 'overseas');
@@ -167,6 +186,10 @@ class TestScreen(APICase):
         self.assertEqual(out["stillHere"], "#/purchases")
         sup = self.db.one("SELECT id FROM suppliers WHERE name='الشركة المتحدة'")["id"]
         self.assertEqual(out["patch"]["changes"], {"supplier_id": sup})
+        self.assertEqual(out["enterKeeps"][0], 0)
+        self.assertIn("المتحدة", out["enterKeeps"][1])
+        self.assertTrue(out["captionFocus"])
+        self.assertEqual(out["typedNoSave"], 0)
         self.assertEqual(out["returns"], "Pharma Overseas")
         self.assertEqual(out["account"], "#/suppliers/" + self.db.one("SELECT id FROM suppliers WHERE name='ابن سينا فارما'")["id"])
 

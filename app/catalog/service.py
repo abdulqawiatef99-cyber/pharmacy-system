@@ -50,10 +50,13 @@ def create_supplier(db: Database, ctx: Context, *, name: str, supplier_type: str
 
 def list_suppliers(db: Database, ctx: Context) -> list[dict]:
     ctx.require("suppliers.read")
-    # last_used (UX-28): the newest purchase invoice of the supplier, so the pickers list recent suppliers first
+    # last_used (UX-28): the newest purchase invoice of the supplier that was not cancelled, so the pickers list
+    # recent suppliers first. One grouped read of the org's invoices (review P1: a per-supplier subquery scanned
+    # them once per supplier, and the invoice screen asks for this list after every save).
     return [dict(r) for r in db.all(
-        "SELECT s.*, (SELECT max(p.created_at) FROM purchase_invoices p WHERE p.org_id=s.org_id"
-        " AND p.supplier_id=s.id) last_used FROM suppliers s WHERE s.org_id=? ORDER BY s.name", (ctx.org_id,))]
+        "SELECT s.*, u.last_used FROM suppliers s LEFT JOIN (SELECT supplier_id, max(created_at) last_used"
+        " FROM purchase_invoices WHERE org_id=? AND status<>'cancelled' AND supplier_id IS NOT NULL"
+        " GROUP BY supplier_id) u ON u.supplier_id=s.id WHERE s.org_id=? ORDER BY s.name", (ctx.org_id, ctx.org_id))]
 
 
 def get_supplier(db: Database, ctx: Context, supplier_id: str) -> dict:
