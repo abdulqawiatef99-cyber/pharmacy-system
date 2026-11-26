@@ -190,6 +190,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     s = settings or config_mod.load()
     if db is None:
         s.data_dir.mkdir(parents=True, exist_ok=True)
+        from ..core import backup as _backup
+        _backup.finish_interrupted_restore(Path(s.db_path))   # a restore cut by a power loss: one whole set
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)

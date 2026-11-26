@@ -2974,6 +2974,14 @@ const ISSUE_AR = {
   same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم هاتف غير صحيح",
   invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
+  unknown_pack_layout: "عدد الشرائط في العلبة غير معروف — حدده",
+};
+// QA-007: the choices for a counted item whose file gives no pack layout (never guessed as "whole box")
+const packLayoutOptions = (x) => {
+  const lay = x.issues.find((i) => i.code === "unknown_pack_layout");
+  if (!lay) return "";
+  return (lay.suggest || []).filter((n) => n > 1 && n < lay.count).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
+    + `<option value="pack:${lay.count}">بالواحدة: ${lay.count} في العلبة</option><option value="pack:1">علبة كاملة فقط</option><option value="pack:?">عدد آخر في العلبة…</option>`;
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
 
@@ -3050,14 +3058,20 @@ async function viewImportRun(id) {
       <td>${open ? `<select data-dec="${esc(x.id)}">
         <option value="">${x.decision ? esc(x.decision) : "— اختر —"}</option>
         <option value="skip">تجاهل السطر</option>
-        ${x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : ""}
+        ${packLayoutOptions(x) || (x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : "")}
         ${x.target_id && r.kind === "items" ? `<option value="link:${esc(x.target_id)}">ربط بالصنف الموجود</option>` : ""}
       </select>` : esc(x.decision || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا يوجد</td></tr>`}</tbody>
   </table></div></section>`;
   app.querySelectorAll("[data-dec]").forEach((s) => s.addEventListener("change", async () => {
     if (!s.value) return;
-    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision: s.value } }); toast("تم الحفظ"); }
-    catch (e) { toast(e.message, true); }
+    let decision = s.value;
+    if (decision === "pack:?") {
+      const n = prompt("عدد وحدات البيع (الشرائط) في العلبة");
+      if (n === null || !/^[0-9]+$/.test(n.trim())) { s.value = ""; return; }
+      decision = `pack:${Number(n.trim())}`;
+    }
+    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision } }); toast("تم الحفظ"); }
+    catch (e) { s.value = ""; toast(e.message, true); }
   }));
   $("#impApply")?.addEventListener("click", async () => {
     if (!confirm("تطبيق الاستيراد؟ العملية تتم مرة واحدة بالكامل أو لا شيء.")) return;
@@ -8134,8 +8148,9 @@ async function viewUser(id) {
 function keyboardSwitcher(send, delay = 120) {
   let timer = null, last = null, off = false, busy = false, want = null;
   const fire = (lang) => {
-    if (off || lang === last) return;
-    if (busy) { want = lang; return; }                // one request at a time; the newest wish goes after it
+    if (off) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish (even = last) goes after it
+    if (lang === last) return;
     last = lang; busy = true; want = null;
     Promise.resolve().then(() => send("/api/system/keyboard-layout", {
       method: "POST", credentials: "same-origin",
@@ -8144,7 +8159,7 @@ function keyboardSwitcher(send, delay = 120) {
       body: JSON.stringify({ lang }),
     })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
       .catch(() => { last = null; })
-      .finally(() => { busy = false; if (want) fire(want); });
+      .finally(() => { busy = false; const next = want; want = null; if (next) fire(next); });
   };
   return (lang) => {
     if (off || (lang !== "ar" && lang !== "en")) return;
