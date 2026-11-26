@@ -66,7 +66,8 @@ class TestSettingsAndJob(DBTestCase):
         self.assertFalse([x for x in plain if "السجل" in x[1] or "الضريبي" in x[1]])
         cfg = {**rs.get(self.db, self.ctx.org_id), "header": "يوجد خدمة توصيل", "tax_no": "123", "cr_no": "456"}
         lines = escpos.receipt_lines("ص", sale, "w", cfg)
-        self.assertEqual(lines[0], ("small", "يوجد خدمة توصيل", ""))
+        self.assertEqual(lines[0][:2], ("title", "ص"))                    # RCPT-1: the name first, then the intro
+        self.assertIn(("center", "يوجد خدمة توصيل", ""), lines[1:4])
         self.assertIn(("small", "رقم التسجيل الضريبي: 123", ""), lines)
         self.assertIn(("small", "السجل التجاري: 456", ""), lines)
 

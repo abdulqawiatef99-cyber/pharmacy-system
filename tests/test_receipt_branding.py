@@ -72,7 +72,7 @@ class TestSettings(DBTestCase):
 class TestDirectReceipt(DBTestCase):
     def test_lines_show_cashier_count_and_change_only_when_due(self):
         cfg = rs.get(self.db, self.ctx.org_id)
-        lines = escpos.receipt_lines("ص", SALE, "w", cfg, cashier="منى", given=5000)
+        lines = escpos.receipt_lines("ص", SALE, "w", cfg, seller="منى", given=5000)
         self.assertIn(("small", "البائع: منى", ""), lines)
         self.assertIn(("small", "عدد الأصناف: 2", ""), lines)
         self.assertIn(("row", "المدفوع من العميل", "50.00"), lines)
@@ -80,12 +80,12 @@ class TestDirectReceipt(DBTestCase):
         for given in (0, 3000, 2000):                                   # nothing handed over beyond the cash part
             self.assertFalse([x for x in escpos.receipt_lines("ص", SALE, "w", cfg, given=given) if x[1] == "الباقي"])
         off = {**cfg, "show_change": False, "show_item_count": False, "show_cashier": False}
-        lines = escpos.receipt_lines("ص", SALE, "w", off, cashier="منى", given=5000)
+        lines = escpos.receipt_lines("ص", SALE, "w", off, seller="منى", given=5000)
         self.assertFalse([x for x in lines if x[1] in ("الباقي", "عدد الأصناف: 2", "البائع: منى")])
         card = {**SALE, "paid_cash": 0, "paid_card": 3000}
         self.assertFalse([x for x in escpos.receipt_lines("ص", card, "w", cfg, given=5000) if x[1] == "الباقي"])
         disc = {**SALE, "subtotal": 3500, "discount_total": 500}
-        self.assertIn(("row", "الإجمالي", "35.00"), escpos.receipt_lines("ص", disc, "w", cfg))
+        self.assertIn(("row", "الإجمالي قبل الخصم", "35.00"), escpos.receipt_lines("ص", disc, "w", cfg))
 
     def test_header_layouts(self):
         png = logo.clean(png_data_url())
@@ -103,7 +103,9 @@ class TestDirectReceipt(DBTestCase):
     def test_printed_bytes_carry_the_logo_and_a_readable_qr(self):
         rs.save(self.db, self.ctx, {"logo": png_data_url(), "qr_text": "https://wa.me/201000000000"})
         cfg = rs.get(self.db, self.ctx.org_id)
-        img = escpos.stack(printing._header(self.db, self.ctx, cfg, escpos.DOTS_80MM), Image.new("L", (576, 40), 255))
+        if not escpos.shaping_available():
+            self.skipTest("The thermal receipt requires libraqm")
+        img = printing.receipt_image("صيدلية تجربة", SALE, "w", cfg, logo_png=logo.get_png(self.db, self.ctx.org_id))
         job = escpos.raster_bytes(img)
         wb, h = job[4] | job[5] << 8, job[6] | job[7] << 8
         bits = job[8:]
@@ -114,13 +116,18 @@ class TestDirectReceipt(DBTestCase):
             import numpy as np
         except ImportError:
             self.skipTest("OpenCV not installed (optional cross-check)")
-        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(printed))[0], "https://wa.me/201000000000")
+        qr_footer = printed.crop((0, printed.height - 240, printed.width, printed.height))
+        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(np.array(qr_footer))[0], "https://wa.me/201000000000")
 
     def test_broken_logo_never_stops_the_receipt(self):
         rs.save(self.db, self.ctx, {"qr_text": "https://wa.me/201000000000"})
         cfg = {**rs.get(self.db, self.ctx.org_id), "has_logo": True}
-        with mock.patch.object(logo, "get_png", return_value=b"broken"):
-            self.assertIsNone(printing._header(self.db, self.ctx, cfg, escpos.DOTS_80MM))
+        if not escpos.shaping_available():
+            self.skipTest("The thermal receipt requires libraqm")
+        expected = printing.receipt_image("صيدلية تجربة", SALE, "w", cfg)
+        with self.assertLogs(printing.log, "WARNING"):
+            actual = printing.receipt_image("صيدلية تجربة", SALE, "w", cfg, logo_png=b"broken")
+        self.assertEqual(actual.tobytes(), expected.tobytes())
 
 
 def ImageOps_dark(img):  # noqa: N802 — bounding box of the dark pixels

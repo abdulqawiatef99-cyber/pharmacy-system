@@ -444,3 +444,6 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .cart tbody tr.sel { outline: 2px solid var(--brand, #0a7); outline-offset: -2px; }
 th[data-sort] { cursor: pointer; user-select: none; }
 th[data-sort]::after { content: " " attr(data-dir); }
+
+#estockMove progress { inline-size: min(100%, 28rem); margin-block-end: .75rem; }
+#estockMoveReport { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
