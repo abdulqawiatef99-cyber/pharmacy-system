@@ -535,6 +535,7 @@ class Purchasing:
                     if d > local_today():          # U2-0: a supplier invoice is never dated after today
                         raise ValidationFailed("تاريخ فاتورة المورد بعد النهارده: مستحيل، راجع التاريخ",
                                                code="invoice_date_future")
+                    v = d.isoformat()
                 clean[k] = v
             if clean:
                 sets = ", ".join(f"{k}=?" for k in clean)
