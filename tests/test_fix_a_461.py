@@ -70,7 +70,6 @@ class TestStocktake(APICase):
             return self.c.post(f"{url}/approve", headers=H, json={
                 "zero_uncounted": True, "reason": "Synthetic stocktake confirmation",
                 "uncounted_item_ids": [row["item_id"] for row in view["uncounted_with_stock"]],
-                "uncounted_confirmation": view.get("uncounted_confirmation"),
             })
 
         old = preview()
@@ -137,4 +136,45 @@ class TestSupplierLotReturn(_Base):
         self.assertIn("4500", refusal.exception.message)
         self.assertEqual(self.owed(self.vendor), before)
         self.assertEqual(self.qty(self.product), 2)
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))
+
+    def test_lot_and_invoice_returns_preserve_vat_and_zero_value_bonus(self):
+        product = self.item("Synthetic QA461 VAT tab", price=5500)
+        invoice_id = self.p.create_manual(self.ctx, supplier_id=self.vendor)
+        version = self.p.get(self.ctx, invoice_id)["invoice"]["version"]
+        version = self.p.update_header(self.ctx, invoice_id, {
+            "invoice_no": "VAT-461", "invoice_date": local_today().isoformat(),
+        }, version)["invoice"]["version"]
+        version = self.p.add_line(self.ctx, invoice_id, {
+            "item_id": product, "qty": 2, "bonus_qty": 1, "unit_net_price": 3000,
+            "tax_amount": 413, "line_total": 6413, "vat_mode": "additive",
+            "batch_no": "VAT-461", "expiry_date": (local_today() + timedelta(days=365)).isoformat(),
+        }, version)["invoice"]["version"]
+        before = self.owed(self.vendor)
+        result = self.p.approve(self.ctx, invoice_id, version)
+        self.assertEqual(result["invoice"]["status"], "approved", result["issues"])
+        self.assertEqual(self.owed(self.vendor) - before, 6413)
+
+        line = returns.from_invoice(self.db, self.ctx, self.vendor, "VAT-461")["lines"][0]
+        first = returns.create(self.db, self.ctx, self.vendor, [{
+            "item_id": product, "batch_id": line["batch_id"], "qty_base": 1, "reason": "overstock",
+        }])
+        rest = returns.create_from_invoice(self.db, self.ctx, self.vendor, invoice_id, [{
+            "purchase_line_id": line["id"], "paid_units": 1, "bonus_units": 1, "reason": "overstock",
+        }])
+        self.assertEqual(first["total"] + rest["total"], 6413)
+        self.assertEqual(first["tax_total"] + rest["tax_total"], 413)
+        self.assertEqual([l["unit_value"] for l in rest["lines"] if l["is_bonus"]], [0])
+        self.assertEqual(self.owed(self.vendor), before)
+        self.assertEqual(self.qty(product), 0)
+
+    def test_two_lines_cannot_reuse_the_same_receipt_in_one_request(self):
+        other = self.supplier("Synthetic QA461 second supplier")
+        self.buy(other, self.product, 2, 2400)
+        line = {"item_id": self.product, "batch_id": self.batch, "qty_base": 2, "reason": "overstock"}
+        with self.assertRaises(Conflict) as refusal:
+            returns.create(self.db, self.ctx, self.vendor, [line, line])
+        self.assertEqual(refusal.exception.code, "return_exceeds")
+        self.assertEqual(self.owed(self.vendor), 4500)
+        self.assertEqual(self.qty(self.product), 4)
         self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))

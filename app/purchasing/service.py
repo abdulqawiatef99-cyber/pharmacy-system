@@ -1206,11 +1206,11 @@ def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch
     its purchase line and is taken from that receipt first; a return by item and lot is taken from that
     supplier's receipts of the lot, oldest first (Codex P1 x2 on #396)."""
     receipts: list[dict] = []
-    by_line: dict[tuple, dict] = {}
+    by_line: dict[str, dict] = {}
     for r in db.all(
             "SELECT m.rowid seq, m.id, m.qty_delta, m.movement_type, m.ref_type, m.ref_id, m.ref_line_id,"
             " pi.supplier_id bought_from, sr.supplier_id returned_to, sl.unit_value,"
-            " coalesce(sl.tax_value, 0) tax_value, sl.purchase_line_id, sr.purchase_invoice_id"
+            " coalesce(sl.tax_value, 0) tax_value, sl.purchase_line_id, pi.status invoice_status"
             " FROM stock_movements m"
             " LEFT JOIN purchase_invoices pi ON m.ref_type='purchase_invoice' AND pi.id=m.ref_id AND pi.org_id=m.org_id"
             " LEFT JOIN supplier_returns sr ON m.movement_type='supplier_return' AND sr.id=m.ref_id AND sr.org_id=m.org_id"
@@ -1221,17 +1221,18 @@ def lot_receipts(db: Database, ctx: Context, branch_id: str, item_id: str, batch
         if r["movement_type"] in ("purchase", "opening"):
             if r["qty_delta"] > 0:
                 p = {"seq": r["seq"], "id": r["id"], "ref_id": r["ref_id"] if r["ref_type"] == "purchase_invoice" else None,
-                     "supplier_id": r["bought_from"], "left": r["qty_delta"], "took": []}
+                     "supplier_id": r["bought_from"], "line_id": r["ref_line_id"],
+                     "invoice_status": r["invoice_status"], "left": r["qty_delta"], "took": []}
                 receipts.append(p)
-                if p["ref_id"]:
-                    by_line[(r["ref_id"], r["ref_line_id"])] = p
+                if p["ref_id"] and p["line_id"]:
+                    by_line[p["line_id"]] = p
         elif r["movement_type"] == "purchase_reversal":
-            p = by_line.get((r["ref_id"], r["ref_line_id"]))
+            p = by_line.get(r["ref_line_id"])
             if p:
                 p["left"] = max(p["left"] + r["qty_delta"], 0)
         elif r["returned_to"]:
             n, tax = -r["qty_delta"], r["tax_value"]
-            named = by_line.get((r["purchase_invoice_id"], r["purchase_line_id"])) if r["purchase_line_id"] else None
+            named = by_line.get(r["purchase_line_id"])
             for p in ([named] if named else []) + receipts:
                 if n <= 0:
                     break
