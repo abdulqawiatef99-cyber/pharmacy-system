@@ -1,5 +1,4 @@
-"""Update panel (app.js `updatePanelHtml`) in Node: the last smart-update result is shown on its own and never
-hides the classic «حدّث البرنامج الآن» button (Codex P2 on #386 e9f9f20). Skipped only where Node is missing."""
+"""The update panel offers only the signed release path."""
 import json
 import re
 import shutil
@@ -25,12 +24,12 @@ console.log(JSON.stringify(out));
 
 @unittest.skipUnless(shutil.which("node"), "Node not available")
 class TestUpdatePanel(unittest.TestCase):
-    def test_last_result_never_hides_the_classic_button(self):
+    def test_last_result_never_exposes_an_unsigned_update(self):
         r = subprocess.run([shutil.which("node"), "-e", HARNESS], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         classic, current, smart = json.loads(r.stdout)
         self.assertIn("رجع لوحده", classic)
-        self.assertIn('id="updGo"', classic)                     # newer code-only fix still installable
+        self.assertNotIn('id="updGo"', classic)
         self.assertIn("رجع لوحده", current)
         self.assertIn("البرنامج محدّث", current)
         self.assertIn('id="updNow"', smart)

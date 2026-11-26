@@ -2,7 +2,8 @@
 
 Two jobs:
   derive_line()   fill values that follow arithmetically from others
-                  (net = public x (1 - discount), total = net x qty + tax;
+                  (net = (public - 2 x margin) x (1 - discount), total = net x qty + tax;
+                  margin = the distributor's fixed margin per pack, B3, 0 for most lines;
                   integers only, rounded half up; with an inferred net the total
                   is qty x public x (1 - discount) rounded once),
                   tagging them source='inferred'. Never invents a quantity,
@@ -39,6 +40,7 @@ MESSAGES = {
     "net_price_mismatch": "السعر الصافي لا يساوي سعر الجمهور بعد الخصم",
     "line_total_mismatch": "إجمالي السطر لا يساوي الكمية × السعر الصافي",
     "net_above_public": "السعر الصافي أعلى من سعر الجمهور",
+    "margin_too_large": "هامش الموزع أكبر من نص سعر الجمهور: مستحيل، راجع الهامش",
     "public_price_changed": "سعر الجمهور مختلف عن السعر المسجل للصنف",
     "expired": "الصنف منتهي الصلاحية",
     "short_expiry": "صلاحية قصيرة: اكتب سبب قبولها",
@@ -51,6 +53,7 @@ MESSAGES = {
     "same_item_other_expiry": "الصنف موجود في سطر تاني بصلاحية مختلفة (عادي: تشغيلتين)",
     "extra_discount_too_large": "الخصم الإضافي على الفاتورة أكبر من إجمالي الأصناف",
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
+    "tax_above_total": "الضريبة المشمولة أكبر من إجمالي السطر",
     "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
 }
 
@@ -80,28 +83,45 @@ def half_up_div(n: int, d: int) -> int:
     return (2 * n + d) // (2 * d)
 
 
+def margin_of(line: dict) -> int:
+    """The distributor's fixed margin per pack (B3), piasters; 0 when the line has none."""
+    return line.get("distributor_margin") or 0
+
+
+def _base(pub: int | None, line: dict) -> int | None:
+    """What the discount applies to: the public price less the margin twice (the paper's «m+m», B3)."""
+    return None if pub is None else pub - 2 * margin_of(line)
+
+
+def _line_net(line: dict, net: int, qty: int, sources: dict) -> int:
+    base, discount = _base(line.get("public_price"), line), line.get("discount_bp")
+    if sources.get("unit_net_price") == "inferred" and base is not None and base >= 0 and discount is not None:
+        return half_up_div(qty * base * (10000 - discount), 10000)
+    return net * qty
+
+
 def derive_line(line: dict) -> dict:
     """Mutates and returns line (DB-shaped dict). Only arithmetic consequences."""
     src, conf = _j(line.get("field_sources")), _j(line.get("field_confidence"))
     pub, disc, net = line.get("public_price"), line.get("discount_bp"), line.get("unit_net_price")
     qty, tax, total = line.get("qty"), line.get("tax_amount"), line.get("line_total")
+    base = _base(pub, line)
 
     def put(k, v):
         line[k] = v
         src[k] = "inferred"
         conf[k] = 1.0
 
-    if net is None and pub is not None and disc is not None:
-        put("unit_net_price", half_up_div(pub * (10000 - disc), 10000))
-    elif disc is None and pub and net is not None and net <= pub:
-        put("discount_bp", half_up_div((pub - net) * 10000, pub))
+    if base is not None and base < 0:
+        base = None             # a margin above half the public price: refused by validate(), nothing derived
+    if net is None and base is not None and disc is not None:
+        put("unit_net_price", half_up_div(base * (10000 - disc), 10000))
+    elif disc is None and base and net is not None and net <= base:
+        put("discount_bp", half_up_div((base - net) * 10000, base))
     net = line.get("unit_net_price")
     if total is None and net is not None and qty:
-        if src.get("unit_net_price") == "inferred" and pub is not None and disc is not None:
-            # the net is itself a rounded value: round the line once, from the exact figures
-            put("line_total", half_up_div(qty * pub * (10000 - disc), 10000) + (tax or 0))
-        else:
-            put("line_total", net * qty + (tax or 0))
+        added_tax = 0 if line.get("tax_included") == 1 else tax or 0
+        put("line_total", _line_net(line, net, qty, src) + added_tax)
     line["field_sources"], line["field_confidence"] = src, conf
     return line
 
@@ -111,11 +131,20 @@ def line_tolerance(expected: int, qty: int | None) -> int:
 
 
 def effective_amount(line: dict) -> int | None:
-    """What the pharmacy pays for the line (piasters)."""
+    """What the pharmacy pays for the line (piasters): the line's amount + qty x the distributor's margin (B3)."""
+    amount = line_amount(line)
+    return None if amount is None else amount + (line.get("qty") or 0) * margin_of(line)
+
+
+def line_amount(line: dict) -> int | None:
+    """The line as the paper prints it (tax included), without the distributor's margin."""
     net, qty, tax, total = (line.get("unit_net_price"), line.get("qty"),
                             line.get("tax_amount") or 0, line.get("line_total"))
+    included = line.get("tax_included")
     if total is None:
-        return None if net is None or not qty else net * qty + tax
+        return None if net is None or not qty else net * qty + (0 if included == 1 else tax)
+    if included is not None:
+        return total
     if net is not None and qty and tax:
         pre = net * qty
         # printed total excludes tax: it is within tolerance of the pre-tax amount and closer to it than to the
@@ -130,6 +159,25 @@ def computed_total(invoice: dict, lines: list[dict]) -> int | None:
     if not lines or any(a is None for a in amounts):
         return None
     return sum(amounts) - (invoice.get("extra_discount") or 0) + (invoice.get("extra_tax") or 0)
+
+
+def line_total_mismatch(line: dict) -> dict | None:
+    total, net, qty = (line.get(k) for k in ("line_total", "unit_net_price", "qty"))
+    if total is None or net is None or not qty:
+        return None
+    tax, included = line.get("tax_amount") or 0, line.get("tax_included")
+    if included is None:
+        pre = net * qty
+        expected = pre + tax
+        tol = line_tolerance(expected, qty)
+        mismatch = abs(total - expected) > tol and abs(total - pre) > tol
+    else:
+        sources = _j(line.get("field_sources"))
+        expected = _line_net(line, net, qty, sources) + (0 if included else tax)
+        # A split or merge preserves a validated total and assigns any rounding difference.
+        tol = line_tolerance(expected, qty) if sources.get("line_total") == "allocated" else 0
+        mismatch = abs(total - expected) > tol
+    return {"expected": expected, "actual": total} if mismatch else None
 
 
 def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today: date,
@@ -176,29 +224,31 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "bonus_invalid", lid, "bonus_qty")
         pub, disc, net = l.get("public_price"), l.get("discount_bp"), l.get("unit_net_price")
         # a file can carry what the screen refuses: a negative price gave a negative unit and average cost
-        for f in ("public_price", "unit_net_price", "tax_amount", "line_total"):
+        for f in ("public_price", "unit_net_price", "tax_amount", "line_total", "distributor_margin"):
             if (l.get(f) or 0) < 0:
                 add("error", "negative_amount", lid, f)
         if disc is not None and not 0 <= disc <= 10000:
             add("error", "negative_amount", lid, "discount_bp")
         if net is None:
             add("error", "price_missing", lid, "unit_net_price")
+        base = _base(pub, l)
+        if base is not None and base < 0 and margin_of(l) > 0:
+            add("error", "margin_too_large", lid, "distributor_margin", margin=margin_of(l), public=pub)
+            base = None
         if pub is not None and net is not None:
-            if net > pub:
+            if net + margin_of(l) > pub:      # the pack's cost (with the distributor's margin) above the public price
                 add("warning", "net_above_public", lid, "unit_net_price")
-            if disc is not None and _j(l.get("field_sources")).get("unit_net_price") != "inferred":
-                exp = half_up_div(pub * (10000 - disc), 10000)
+            if disc is not None and base is not None and _j(l.get("field_sources")).get("unit_net_price") != "inferred":
+                exp = half_up_div(base * (10000 - disc), 10000)
                 if abs(exp - net) > max(2, round(pub * 0.005)):
                     add("warning", "net_price_mismatch", lid, "unit_net_price",
                         expected=exp, actual=net)
+        mismatch = line_total_mismatch(l)
+        if mismatch:
+            add("error", "line_total_mismatch", lid, "line_total", **mismatch)
         total = l.get("line_total")
-        if total is not None and net is not None and qty:
-            pre = net * qty
-            tax = l.get("tax_amount") or 0
-            tol = line_tolerance(pre + tax, qty)
-            if abs(total - (pre + tax)) > tol and abs(total - pre) > tol:
-                add("error", "line_total_mismatch", lid, "line_total", expected=pre + tax,
-                    actual=total)
+        if l.get("tax_included") == 1 and total is not None and (l.get("tax_amount") or 0) > total:
+            add("error", "tax_above_total", lid, "tax_amount")
         item = items.get(l.get("item_id") or "")
         if item and pub is not None and item.get("public_price") is not None \
                 and item["public_price"] != pub:
@@ -225,6 +275,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             if twin:
                 same = all(twin.get(k) == l.get(k) for k in ("public_price", "discount_bp", "unit_net_price",
                                                              "expiry_precision")) \
+                    and margin_of(twin) == margin_of(l) \
                     and twin.get("qty") is not None and l.get("qty") is not None
                 add("warning", "duplicate_line" if batch else "duplicate_line_no_batch", lid, None,
                     other_line=twin["id"], mergeable=same)

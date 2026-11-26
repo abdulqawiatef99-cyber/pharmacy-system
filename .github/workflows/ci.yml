@@ -6,6 +6,7 @@ name: CI
 #   full suite passed locally); later pushes to a labelled PR run again. Unlabelled pushes run nothing.
 # - docs-only changes run the linux job without the test steps (the branch guard still sees "linux" green).
 # - Windows runs on PRs into main, on demand, and on pushes to develop that touch Windows-relevant files.
+#   For a PR into develop that needs both runners, put <!-- run-windows-ci --> in its body before adding ci.
 
 on:
   pull_request:
@@ -61,11 +62,13 @@ jobs:
   linux:
     needs: changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # the suite takes 11-13 minutes on the runner (22/11: 12m50s): 15 cut a green run; 25 leaves room (U4-5)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0  # signed-update transition tests exercise the deployed release by revision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -102,6 +105,7 @@ jobs:
     needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' || github.base_ref == 'main' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- run-windows-ci -->')) ||
       (github.event_name == 'push' && needs.changes.outputs.windows == 'true')
     runs-on: windows-2025
     # the validator stops the tests at 30 minutes (scripts/validate_local_release.py); the rest needs a few more
@@ -110,6 +114,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0  # signed-update transition tests exercise the deployed release by revision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

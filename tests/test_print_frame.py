@@ -29,7 +29,7 @@ JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_te
 class TestPrintFallbackSource(unittest.TestCase):
     def test_printable_pages_are_never_opened_as_popups(self):
         self.assertNotRegex(JS, r"window\.open\(`/(receipt|labels|shift-report)")
-        for page in ("/receipt/${done.id}", "/receipt/${last.id}", "/shift-report/${r.id}", "/labels?items="):
+        for page in ("/receipt/${sale.id}", "/receipt/${last.id}", "/shift-report/${r.id}", "/labels?items="):
             self.assertIn("printInFrame(`" + page, JS)
 
     def test_frame_is_hidden_and_loads_the_page(self):

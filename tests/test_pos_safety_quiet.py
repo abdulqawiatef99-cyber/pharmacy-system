@@ -19,7 +19,7 @@ JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_te
 
 class TestRule(unittest.TestCase):
     def test_only_blocking_findings_stop_the_sale(self):
-        body = re.search(r"\nasync function complete\(findings\) \{.*?\n\}\n", JS, re.S).group(0)
+        body = re.search(r"\nasync function finishSale\(findings, sid\) \{.*?\n\}\n", JS, re.S).group(0)
         self.assertIn('if (blocking.length || r.findings.some((f) => f.code === "item_recall_pending"))', body)
         self.assertNotIn('f.severity !== "insufficient"', body)
 
@@ -65,4 +65,4 @@ if __name__ == "__main__":
 class TestPaidBoxOnAnEmptyInvoice(unittest.TestCase):
     def test_disabled_until_there_is_a_line(self):
         # launch day 21/11: «العميل دفع» could be typed in on an empty invoice
-        self.assertIn('placeholder="${money(s.total)}" ${s.lines.length ? "" : \'disabled title="ضيف صنف الأول"\'}', JS)
+        self.assertIn('placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : \'disabled title="ضيف صنف الأول"\'}', JS)

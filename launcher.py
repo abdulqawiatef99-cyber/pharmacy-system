@@ -53,11 +53,46 @@ def running() -> bool:
         return False
 
 
+def app_browser(env=os.environ, exists=os.path.exists) -> str | None:
+    """U3-4: Edge (always on Windows 10/11) or Chrome, to open the program in its own window (no tabs, no address
+    bar, the program's own icon from its manifest). None = use the default browser as before."""
+    if os.name != "nt" or env.get("PHARM_APP_WINDOW") == "0":
+        return None
+    roots = [env.get(k) for k in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA") if env.get(k)]
+    for rel in (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe"):
+        for root in roots:
+            exe = os.path.join(root, rel)
+            if exists(exe):
+                return exe
+    return None
+
+
+def app_command(exe: str, url: str, profile: Path) -> list[str]:
+    """One window of its own: --app (no tabs: Ctrl+Tab and F11 reach the program, F11 is full screen), a profile of
+    its own so a second click goes to the same browser process and the pharmacy's normal browsing is untouched."""
+    return [exe, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
+            "--disable-features=Translate"]
+
+
+def open_program(url: str = None) -> None:
+    url = url or URL
+    exe = app_browser()
+    if exe:
+        try:
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(app_command(exe, url, home() / "app-window"), close_fds=True, creationflags=flags,
+                             cwd=str(home()))       # never the program folder: uninstall can remove it
+            return
+        except OSError:
+            pass                                   # the browser could not start: the default browser instead
+    webbrowser.open(url)
+
+
 def open_when_ready(timeout: float = 60) -> None:
     end = time.time() + timeout
     while time.time() < end:
         if running():
-            webbrowser.open(URL)
+            open_program(URL)
             return
         time.sleep(0.5)
 
@@ -88,6 +123,12 @@ def _log_update(h: Path, text: str) -> None:
         log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
 
 
+def _selected_program(code_home: Path) -> Path:
+    if (ROOT / "build_info.json").is_file():
+        return releases.verified_program(ROOT, code_home)
+    return releases.current_root(ROOT, code_home)
+
+
 def settle(code_home: Path, h: Path, env: dict, flags: int, attempts: int = 3) -> bool:
     """Smart update (docs/SMART_UPDATE.md): finish or undo a swap left by a power cut, run a prepared apply once
     if the program asked for it, swap the checked copy in. Nothing here migrates. False = do not start."""
@@ -95,7 +136,7 @@ def settle(code_home: Path, h: Path, env: dict, flags: int, attempts: int = 3) -
         try:
             releases.resume_journal(code_home)
             if (code_home / "apply-go.json").exists():
-                releases.run_apply(code_home, releases.current_root(ROOT, code_home), env, h / "logs", flags)
+                releases.run_apply(code_home, _selected_program(code_home), env, h / "logs", flags)
                 releases.resume_journal(code_home)
             if releases.settled(code_home):
                 return True
@@ -123,7 +164,7 @@ def recover(code_home: Path, h: Path, selected_id, attempts: int = 3) -> bool:
 
 def main() -> int:
     if running():
-        webbrowser.open(URL)
+        open_program(URL)
         return 0
     h = home()
     lock = releases.stage0_lock(releases.code_home(h / "data"))
@@ -143,7 +184,10 @@ def _main(h: Path) -> int:
         (h / d).mkdir(parents=True, exist_ok=True)
     # PHARM_BOOTSTRAP: what this launcher can apply (docs/SMART_UPDATE.md §1); an older launcher sets none
     env = {**os.environ, "PHARM_DATA_DIR": str(h / "data"), "PYTHONUTF8": "1", "PHARM_LAUNCHER": "1",
-           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PYTHONPATH": str(ROOT)}
+           "PHARM_BOOTSTRAP": str(releases.BOOTSTRAP), "PHARM_INSTALL_ROOT": str(ROOT),
+           "PYTHONPATH": str(ROOT)}
+    env.pop("PHARM_RELEASE_CANDIDATE", None)
+    env.pop("PHARM_DEPS_DIR", None)
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
     first = True
     code_home = releases.code_home(h / "data")
@@ -160,7 +204,7 @@ def _main(h: Path) -> int:
         state = releases.read_state(code_home)
         selected_id = (state.get("active") or {}).get("id")
         try:
-            program = releases.current_root(ROOT, code_home)
+            program = _selected_program(code_home)
         except releases.ReleaseError:
             if not state.get("pending"):
                 raise
