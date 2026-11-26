@@ -44,6 +44,7 @@ from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
 from ..purchasing.service import Purchasing
+from ..dataimport.estock_move import EstockMove
 from ..dataimport.service import DataImport, export_catalog, template_xlsx
 from ..safety.engine import SafetyEngine
 from ..recalls.service import Recalls, extract_batches
@@ -207,6 +208,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     autob = AutoBackup(db, s.upload_dir, s.backup_path, s.data_dir)
     purch = purchasing or Purchasing(db, s)
     dimp = DataImport(db)
+    estock_move = EstockMove(db, s.data_dir)
     safety = SafetyEngine(db)
     recalls = Recalls(db)
     counting = Counting(db)
@@ -367,7 +369,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
         # This database-only route commits its action and replay record together.
-        if req.method == "POST" and (req.url.path == "/api/cash/movements" or
+        if req.method == "POST" and (req.url.path in ("/api/cash/movements", "/api/estock/move") or
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
             return await fn(req)
         key = req.headers.get("idempotency-key", "").strip()
@@ -840,6 +842,17 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(await run_in_threadpool(integrity.report, db, ctx))
 
     @handler
+    async def staff_ui_api(req):
+        from ..core import staff_ui
+        ctx = ctx_of(req)
+        if req.method == "PUT":
+            return J(staff_ui.save(db, ctx, await body(req)))
+        if req.query_params.get("all"):
+            ctx.require("users.manage")
+            return J(staff_ui.get(db, ctx.org_id))
+        return J(staff_ui.mine(db, ctx))
+
+    @handler
     async def rounding_api(req):
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
@@ -1251,6 +1264,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(att.review(db, ctx_of(req), req.path_params["id"], bool(b.get("ok")), b.get("note"), amount=amount))
 
     # ------------------------------------------------------------- E-Stock history (read only) and old-invoice returns
+    def estock_move_context(req):
+        ctx = ctx_of(req)
+        if client_ip(req) not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise Forbidden("افتح تجربة نقل إي ستوك من الكمبيوتر اللي عليه إي ستوك.", code="local_only")
+        return ctx
+
+    @handler
+    async def estock_move_status(req):
+        return J(await run_in_threadpool(estock_move.status, estock_move_context(req)))
+
+    @handler
+    async def estock_move_start(req):
+        ctx = estock_move_context(req)
+        replace_id = (await body(req)).get("replace_id")
+        await run_in_threadpool(estock_move.start, ctx, replace_id=replace_id)
+        return J({}, status_code=202)
+
     @handler
     async def estock_available(req):
         from ..dataimport import estock_history as eh
@@ -2059,6 +2089,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_items(req):
+        """The items an items-scope count covers, by name (Codex P2 on #418: the daily count's picks stay visible)."""
+        ctx = ctx_of(req)
+        ctx.require("inventory.count")
+        s = db.one("SELECT scope, scope_filter FROM count_sessions WHERE id=? AND org_id=?", (req.path_params["id"], ctx.org_id))
+        if not s:
+            raise NotFound("الجرد غير موجود")
+        ids = (json.loads(s["scope_filter"] or "{}").get("item_ids") or []) if s["scope"] == "items" else []
+        names = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            hide = "" if ctx.can("items.hidden") else " AND coalesce(hidden,0)=0"     # Codex P1 on #418
+            names += [dict(r) for r in db.all(f"SELECT id, coalesce(name_en, name_ar) name, location FROM items"
+                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))}){hide}", (ctx.org_id, *part))]
+        return J({"items": names if len(ids) <= 50 else []})
+
+    @handler
     async def safety_rule_create(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2131,9 +2178,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_daily_pick(req):
+        return J({"items": counting.daily_pick(ctx_of(req), 10)})
+
+    @handler
     async def counts_create(req):
         ctx = ctx_of(req)
         b = await body(req)
+        if b.get("daily"):                  # U3-5: today's mini-count, picked by the program
+            sid = counting.create_daily(ctx, 10)
+            return J({"id": sid}, status_code=201)
         scope, ids = b.get("scope", "full"), b.get("item_ids")
         if scope == "category":            # count one section: its items, stored as an items-scope count
             cid = str(b.get("category_id") or "")
@@ -2847,6 +2901,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
 
     @handler
+    async def shift_owner_summary(req):
+        from ..reports.owner_summary import shift_summary
+        return J(shift_summary(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
@@ -3359,6 +3418,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/notifications/read", notifications_read, methods=["POST"]),
         Route("/api/settings/sales", sales_settings, methods=["GET", "PUT"]),
         Route("/api/settings/ui", ui_settings_api, methods=["GET", "PUT"]),
+        Route("/api/settings/staff-ui", staff_ui_api, methods=["GET", "PUT"]),
         Route("/api/settings/rounding", rounding_api, methods=["GET", "PUT"]),
         Route("/api/settings/dispensing-notes", dispensing_notes_api, methods=["GET", "PUT"]),
         Route("/api/sales/{id}/attachments", sale_attach, methods=["POST"]),
@@ -3495,6 +3555,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/sales/{id}/exchange", sales_exchange, methods=["POST"]),
         Route("/api/returns/find", returns_find),
         Route("/api/sales/{id}/void", sales_void, methods=["POST"]),
+        Route("/api/estock/move", estock_move_status),
+        Route("/api/estock/move", estock_move_start, methods=["POST"]),
         Route("/api/estock/available", estock_available),
         Route("/api/estock/invoices", estock_invoices),
         Route("/api/estock/period", estock_period),
@@ -3543,6 +3605,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reports/hikma-claim", hikma_claim_api),
         Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/owner-summary", shift_owner_summary),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
         Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
@@ -3563,9 +3626,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
+        Route("/api/counts/daily-pick", counts_daily_pick),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
         Route("/api/counts/{id}/variances", counts_variances),
+        Route("/api/counts/{id}/items", counts_items),
         Route("/api/counts/{id}/approve", counts_approve, methods=["POST"]),
         Route("/api/counts/{id}/cancel", counts_cancel, methods=["POST"]),
         Route("/api/recalls/extract", recall_extract, methods=["POST"]),

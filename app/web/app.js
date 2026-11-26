@@ -413,6 +413,61 @@ function printInFrame(url) {
   document.body.appendChild(f);
 }
 
+// ------------------------------------------------------------------ dhikr ticker and work hours (U3-7)
+// The ticker is a passive strip at the very bottom (pointer-events: none, never over a button, hidden in print);
+// the work-hours reminder is one toast WARN_MIN minutes before the end of the person's hours. Neither stops work.
+let STAFF_UI = null, STAFF_TIMERS = [], STAFF_LOADING = null;
+function staffUiStop() {                 // on sign-out and before every reload of the settings (review P1)
+  STAFF_TIMERS.forEach(clearInterval); STAFF_TIMERS = [];
+  document.getElementById("dhikrBar")?.remove();
+  document.body.style.paddingBottom = "";
+}
+// minutes left until a shift end «HH:MM» seen from `now` (the end after midnight when it is still ahead)
+function shiftEndLeft(now, endHHMM) {
+  const [eh, em] = endHHMM.split(":").map(Number), end = new Date(now);
+  end.setHours(eh, em, 0, 0);
+  if (end - now < -12 * 3600000) end.setDate(end.getDate() + 1);
+  return (end - now) / 60000;
+}
+async function staffUi(force = false) {
+  const uid = ME?.user?.id;
+  if (!uid || (!force && STAFF_UI?.uid === uid && STAFF_TIMERS.length) || STAFF_LOADING === uid) return;
+  STAFF_LOADING = uid;
+  let cfg;
+  // a failed reload keeps the running strip, reminder and refresh (Codex P2 on #421): nothing is stopped before
+  try { cfg = { uid, ...(await api("/api/settings/staff-ui", { settleAfterNavigation: true })) }; } catch { STAFF_LOADING = null; return; }
+  STAFF_LOADING = null;
+  if (ME?.user?.id !== uid) return;      // someone else signed in meanwhile
+  staffUiStop();
+  STAFF_UI = cfg;
+  // the owner's changes reach open sessions within 10 minutes (Codex P2 on #421)
+  STAFF_TIMERS.push(setInterval(() => { staffUi(true); }, 600000));
+  if (cfg.dhikr.length) {
+    const bar = Object.assign(document.createElement("div"), { id: "dhikrBar", className: "dhikr noprint" });
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.cssText = "position:fixed;inset-inline:0;bottom:0;height:1.4em;line-height:1.4em;font-size:.8em;opacity:.75;"
+      + "pointer-events:none;overflow:hidden;white-space:nowrap;text-align:center;z-index:1;background:var(--panel,transparent)";
+    let i = 0;
+    const show = () => { bar.textContent = cfg.dhikr[i++ % cfg.dhikr.length]; };
+    show(); STAFF_TIMERS.push(setInterval(show, 20000));
+    document.body.append(bar);
+    document.body.style.paddingBottom = "1.6em";
+  }
+  const h = cfg.hours;
+  if (h?.end) {
+    const tick = () => {
+      const now = new Date(), left = shiftEndLeft(now, h.end), key = `endWarn:${uid}:${h.end}:${new Date(now.getTime() + left * 60000).toDateString()}`;
+      if (left > 0 && left <= cfg.warn_min && !sessionStorageGet(key)) {
+        sessionStorageSet(key, "1");
+        toast(`⏰ شيفتك بيخلص الساعة ${h.end} (فاضل ${Math.ceil(left)} دقيقة): لو هتمشي اقفل الشيفت وسجّل انصرافك`);
+      }
+    };
+    tick(); STAFF_TIMERS.push(setInterval(tick, 60000));
+  }
+}
+function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* blocked storage: warn again later */ } }
+
 // ------------------------------------------------------------------ routing
 const routes = [
   [/^#\/login$/, viewLogin],
@@ -460,6 +515,7 @@ const routes = [
   [/^#\/customers\/([\w-]+)$/, async (id) => { await viewCustomer(id); estockPanel("customer", id); }],
   [/^#\/import$/, viewImport],
   [/^#\/import\/([\w-]+)$/, viewImportRun],
+  [/^#\/estock-move$/, viewEstockMove],
   [/^#\/recalls$/, viewRecalls],
   [/^#\/counts$/, viewCounts],
   [/^#\/procurement$/, viewProcurement],
@@ -490,6 +546,7 @@ async function route() {
   if (ME) {
     if (ME.prefs) { applyPrefs(ME.prefs); if ((ME.prefs.lang === "en") !== I18N.on || (I18N.want && I18N.want !== ME.prefs.lang)) setLanguage(ME.prefs.lang); }
     $("#who").textContent = `${ME.user.full_name} (${ME.role_name || ""}) — ${ME.organization.name}`;
+    staffUi();
     $("#navUsers").hidden = !(ME.permissions.includes("users.manage") || ME.permissions.includes("users.permissions"));
     $("#navProfit").hidden = !ME.permissions.includes("costs.read");
     $("#navStaff").hidden = !ME.permissions.includes("payroll.manage");
@@ -609,6 +666,7 @@ const HELP = {
   "item-health": ["فحص بيانات الأصناف: الأخطاء في عدد الوحدات والأسعار والأسماء والصلاحية والرصيد، صنف صنف.", ["البرنامج مبيغيّرش حاجة لوحده: «صحّح» بيفتح بطاقة الصنف.", "«صحّح العبوة» بيحوّل الرصيد معاه (نفس عدد العلب)."]],
   "day-review": ["مراجعة اليوم: كل حركة يوم في صفحة واحدة: الشراء ومرتجعه، والبيع ومرتجعه، والخصومات، والآجل، وكل طريقة دفع، والخزينة.", ["اختار التاريخ من فوق.", "المتوقع في الخزينة من الشيفتات اللي اتقفلت في اليوم ده."]],
   import: ["نقل البيانات من برنامج آخر: ارفع الملف، وراجع التقرير، ثم طبّق.", ["لا يُطبَّق شيء قبل موافقتك."]],
+  "estock-move": ["جرّب نقل إي ستوك على نسخة من قاعدة البرنامج الجديدة وراجع تقرير المطابقة.", ["افتح الشاشة من الكمبيوتر اللي عليه إي ستوك. لو الجهاز فصل، ارجع للشاشة واضغط «كمّل التجربة»."]],
   recalls: ["تنبيهات السحب: الصق منشور هيئة الدواء وراجع التشغيلات المطابقة.", []],
   counts: ["الجرد: ابدأ جردًا شاملًا أو جزئيًا، وسجّل الكميات، ثم راجع الفروق واعتمد.", ["لكل عجز أو زيادة سبب."]],
   procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
@@ -981,6 +1039,7 @@ $("#logout").addEventListener("click", async () => {
     try { if (ME?.permissions?.includes("sales.read") && await api("/api/cash/current")) warn.push("الشيفت لسه مفتوح: اقفله لو هتمشي."); } catch { /* no open shift */ }
     if (!confirm(["تخرج من البرنامج؟", ...warn].join("\n"))) return;
   }
+  staffUiStop(); STAFF_UI = null;
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   ME = null; location.hash = "#/login";
 });
@@ -2861,11 +2920,21 @@ async function viewCounts() {
       <label class="f">القسم <select name="cat"><option value="">—</option>${(await loadCats()).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label>
       <label class="f">المواقع (إذا كان النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
       <button class="btn" type="submit">بدء جرد</button></form>` : ""}
+    ${canManage ? `<div class="row mt"><button class="btn secondary" id="cntDaily">جرد يومي صغير (10 أصناف)</button>
+      <span class="muted">البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.</span></div>
+      <div id="cntPick" class="muted small"></div>` : ""}
   </section>
   <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
     <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${{ full: "شامل", location: "مواقع", items: "أصناف / قسم" }[c.scope] || esc(c.scope)}</td>
       <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(dayOf(c.created_at))}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
+  if (canManage) api("/api/counts/daily-pick").then(({ items }) => {
+    if ($("#cntPick")) $("#cntPick").innerHTML = items.length ? `هيتجرد: ${items.map((x) => `${esc(x.label)} (${esc(x.why)})`).join("، ")}` : "مفيش أصناف محتاجة جرد النهارده";
+  }).catch(() => {});
+  $("#cntDaily")?.addEventListener("click", async () => {
+    try { const r = await api("/api/counts", { method: "POST", body: { daily: true } }); location.hash = `#/counts/${r.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
   $("#cntForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2881,6 +2950,9 @@ let COUNT_ITEM = null;
 
 async function viewCountSession(id) {
   const canManage = ME.permissions.includes("inventory.adjust");
+  setTimeout(() => api(`/api/counts/${id}/items`).then(({ items }) => {     // the items this count covers
+    if ($("#cntScope") && items.length) $("#cntScope").textContent = "الأصناف المطلوب جردها: " + items.map((x) => x.name + (x.location ? ` (${x.location})` : "")).join("، ");
+  }).catch(() => {}), 0);
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>تسجيل الجرد</h1><a href="#/counts">رجوع</a></div>
@@ -2889,6 +2961,7 @@ async function viewCountSession(id) {
       <label class="f grow">باركود أو اسم الصنف <input id="cntQ" autocomplete="off" autofocus></label>
       ${"BarcodeDetector" in window ? `<button class="btn secondary" id="cntCam" type="button">كاميرا</button>` : ""}
     </div>
+    <div id="cntScope" class="muted small"></div>
     <video id="cntVideo" playsinline hidden class="scanvideo"></video>
     <div id="cntPick"></div>
     <div id="cntItem" class="mt"></div>
@@ -3037,6 +3110,75 @@ async function renderDeviceRestore() {
     } catch (e) { out.innerHTML = `<p class="badge b-err">✕ ${esc(e.message)}</p>`; } finally { b.disabled = false; }
   });
 }
+async function viewEstockMove() {
+  if (!isOwnerMe()) {
+    app.innerHTML = `<section class="panel"><h1>نقل من إي ستوك</h1><p>الشاشة دي للمالك بس.</p></section>`;
+    return;
+  }
+  app.innerHTML = `<section class="panel" id="estockMove">
+    <h1>نقل من إي ستوك</h1>
+    <p>ابدأ من الكمبيوتر اللي عليه إي ستوك. البرنامج هيقرا البيانات ويجرّب النقل على نسخة، وبعدها يعرض تقرير المطابقة.</p>
+    <p class="muted">يفضّل توقف التسجيل في إي ستوك وقت القراية عشان التقرير يعكس البيانات في نفس الوقت.</p>
+    <p id="estockMoveStatus" role="status"></p>
+    <progress aria-label="تقدّم تجربة النقل" hidden></progress>
+    <div class="row"><button class="btn" type="button" hidden></button><a class="btn secondary" href="#/system">ارجع للبرنامج</a></div>
+    <pre id="estockMoveReport" dir="rtl" data-raw hidden></pre>
+  </section>`;
+  const panel = $("#estockMove"), button = panel.querySelector("button"), bar = panel.querySelector("progress");
+  const status = $("#estockMoveStatus"), report = $("#estockMoveReport");
+  const path = "/api/estock/move";
+  const isCurrent = () => panel.isConnected && location.hash === "#/estock-move";
+  let state, lastMessage;
+
+  async function refresh() {
+    if (!isCurrent()) return;
+    try {
+      const next = await api(path);
+      if (!isCurrent()) return;
+      state = next;
+      const labels = {
+        idle: "جاهز للبحث عن إي ستوك.",
+        finding: "بندور على قاعدة إي ستوك على الجهاز…",
+        reading: `لقينا قاعدة إي ستوك. بنقرا البيانات… الجداول اللي اتقرت: ${next.tables}`,
+        rehearsing: "القراية خلصت. بنجرّب النقل على نسخة وبنجهّز تقرير المطابقة…",
+        interrupted: "التجربة وقفت. اضغط «كمّل التجربة» عشان تتابع.",
+        failed: next.message,
+        done: next.reconciled ? "التجربة خلصت والمطابقة نجحت. راجع التقرير." : "التجربة خلصت. راجع الملاحظات والفروق في التقرير.",
+      };
+      const actions = { idle: "ابدأ تجربة النقل", failed: "جرّب تاني", interrupted: "كمّل التجربة", done: "اعمل تجربة جديدة" };
+      const working = ["finding", "reading", "rehearsing"].includes(next.phase);
+      const message = next.supported ? labels[next.phase] : "تجربة نقل إي ستوك متاحة على ويندوز ١٠ و١١.";
+      if (lastMessage !== message) status.textContent = lastMessage = message;
+      bar.hidden = !working;
+      button.hidden = !next.supported || working;
+      button.textContent = actions[next.phase] || "";
+      report.hidden = next.phase !== "done";
+      if (next.report) {
+        const content = document.createElement("span");
+        content.textContent = next.report;
+        report.replaceChildren(content);
+      } else report.replaceChildren();
+      if (working) setTimeout(refresh, 1000);
+    } catch (err) {
+      if (!isCurrent()) return;
+      status.textContent = err.message;
+      lastMessage = undefined;
+      // A running job can outlive a brief disconnect or browser reload.
+      if (!err.code) setTimeout(refresh, 2000);
+      else { bar.hidden = true; button.hidden = true; report.hidden = true; report.textContent = ""; }
+    }
+  }
+  button.addEventListener("click", () => withBusy(button, async () => {
+    try {
+      await api(path, { method: "POST", body: state.phase === "done" ? { replace_id: state.id } : {} });
+      await refresh();
+    } catch (err) {
+      if (isCurrent()) toast(err.message, true);
+    }
+  }));
+  await refresh();
+}
+
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
@@ -3045,7 +3187,9 @@ async function viewSystem() {
     <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
     <section class="panel"><h1>أجهزة البطاقات وطرق التحويل</h1><div id="chBox"></div></section>
-    <section class="panel"><h1>البرنامج</h1><div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
+    <section class="panel"><h1>البرنامج</h1>
+      ${isOwnerMe() ? `<p><a class="btn secondary" href="#/estock-move">نقل من إي ستوك</a></p>` : ""}
+      <div id="sysBox"><p class="muted">جارٍ البحث عن تحديثات…</p></div></section>`;
   renderBackup(await api("/api/backup"));
   renderChannels((await api("/api/payment-channels")).channels);
   renderReceiptCfg(await api("/api/settings/receipt"));
@@ -3179,7 +3323,8 @@ async function renderReceiptCfg(c) {
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الإيصال <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
-    <label class="f">مقدمة الفاتورة (أول سطر، اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
+    <label class="f">قالب الإيصال <select name="template">${[["detailed", "مفصّل"], ["compact", "مختصر"], ["large", "خط كبير"]].map(([v, label]) => `<option value="${v}" ${(c.template || "detailed") === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="f">مقدمة الفاتورة (اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
     <label class="f">اسم الصيدلية على الفاتورة (فارغ = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
     <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
     <label class="f">سطر 2 (الهاتف) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
@@ -3202,7 +3347,7 @@ async function renderReceiptCfg(c) {
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
       <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
-      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة. الحل: أعد التثبيت بآخر نسخة من المثبّت.</b></p>`}
+      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
       <label class="f">الباركود على الملصق <select name="label_barcode_source">
@@ -3238,18 +3383,22 @@ async function renderReceiptCfg(c) {
       <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
-    <fieldset class="lblp"><legend>اللوجو والكود المربع (QR) أعلى الإيصال</legend>
+    <fieldset class="lblp"><legend>اللوجو والأكواد المربعة (QR)</legend>
       <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
       <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
         <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
         <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>احذف اللوجو</button></div>
       <p class="muted">في كل كود: اكتب <b>رقم الهاتف المحمول للصيدلية</b> (للواتساب — يحوّله البرنامج تلقائيًا)، أو الصق رابط صفحة الفيسبوك، أو رابط الموقع من خرائط جوجل (مشاركة ← نسخ الرابط)، أو رابط الدفع من تطبيق إنستاباي. تُكتب الكلمة التي تحت الكود تلقائيًا حسب الرابط، أو اكتبها بنفسك.</p>
-      <label class="f">الكود العلوي (بجانب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+      <label class="f">الكود الأول أسفل الإيصال <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
       <label class="f">كود ثانٍ أسفل الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
+    <fieldset class="lblp lbprev"><legend>معاينة الإيصال</legend>
+      <p id="rcPreviewMessage" class="muted" role="status"></p>
+      <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
+    </fieldset>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
   RC_LOGO = undefined;
@@ -3258,15 +3407,56 @@ async function renderReceiptCfg(c) {
     try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
     $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
     $("#rcLogoMsg").textContent = "هذا شكله على الورق تمامًا (أبيض وأسود). إذا اختفى جزء منه أو صار أسود، فارفع نسخة أبيض وأسود من اللوجو. يُحفظ عند الضغط على «احفظ»";
+    previewReceipt();
   });
   $("#rcLogoDel").addEventListener("click", () => {
     RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
     $("#rcLogoMsg").textContent = "سيُحذف عند الضغط على «احفظ»";
+    previewReceipt();
   });
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
   let prevT = null, prevUrl = null;
   const previewCurrent = onThisScreen();
+  const appearanceFields = ["title", "header", "footer", "tax_no", "cr_no", "time_format", "names",
+    "template", "qr_text", "qr_caption", "qr2_text", "qr2_caption"];
+  const appearanceChecks = ["show_cashier", "show_customer", "show_expiry", "show_return_policy",
+    "show_item_count", "show_change"];
+  const appearance = () => ({
+    paper: +lf.paper.value, lines: [lf.l0.value, lf.l1.value, ...c.lines.slice(2)],
+    ...Object.fromEntries(appearanceFields.map((key) => [key, lf.elements[key].value])),
+    ...Object.fromEntries(appearanceChecks.map((key) => [key, lf.elements[key].checked])),
+    ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}),
+  });
+  const receiptImage = $("#rcPreview"), receiptMessage = $("#rcPreviewMessage");
+  let receiptTimer, receiptRequest = 0;
+  const previewReceipt = () => {
+    clearTimeout(receiptTimer);
+    const seq = ++receiptRequest;
+    receiptTimer = setTimeout(async () => {
+      const current = () => previewCurrent() && lf.isConnected && seq === receiptRequest;
+      if (!current()) return;
+      try {
+        const res = await fetch("/api/settings/receipt", { method: "PUT",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
+          body: JSON.stringify({ ...appearance(), preview: true }) });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error?.message || "تعذرت المعاينة");
+        if (!current()) return;
+        receiptImage.src = "data:image/png;base64," + result.png;
+        receiptImage.hidden = false;
+        receiptMessage.textContent = "بيانات تجريبية";
+      } catch (error) {
+        if (!current()) return;
+        receiptImage.hidden = true;
+        receiptMessage.textContent = "تعذرت المعاينة" + (error.message ? " · " + error.message : "");
+      }
+    }, 300);
+  };
+  for (const key of ["paper", "l0", "l1", ...appearanceFields, ...appearanceChecks]) {
+    lf.elements[key].addEventListener("input", previewReceipt);
+  }
+  previewReceipt();
   const preview = () => { clearTimeout(prevT); prevT = setTimeout(async () => {
     if (!previewCurrent() || !lf.isConnected) return;
     try {
@@ -3301,15 +3491,10 @@ async function renderReceiptCfg(c) {
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
-      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
-      header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
+      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { ...appearance(), auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
-      footer: f.footer.value, names: f.names.value, label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim(), show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
-      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
-      qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
-      qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
-      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
+      label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim() } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
@@ -5512,6 +5697,18 @@ async function dayHealth(el) {
 // U2-29: where a drawer difference usually comes from (the shift history, open or not)
 function wireHunt() {
   $("#shHist")?.addEventListener("click", async (e) => {
+    const sm = e.target.closest(".shSum");        // U3-8: the owner's summary, ready to copy (nothing is sent)
+    if (sm) {
+      try {
+        const r = await api(`/api/cash/shifts/${sm.dataset.id}/owner-summary`);
+        $("#shHuntOut").innerHTML = `<section class="panel"><h3>ملخص للمالك</h3><textarea id="shSumT" rows="10" readonly>${esc(r.text)}</textarea>
+          <div class="row"><button class="btn" id="shSumCopy">انسخ</button><span class="muted">البرنامج مبيبعتش حاجة: انسخه وابعته بنفسك.</span></div></section>`;
+        $("#shSumCopy").addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }
+        });
+      } catch (er) { toast(er.message, true); }
+      return;
+    }
     const b = e.target.closest(".shHunt"); if (!b) return;
     try {
       const h = await api(`/api/cash/shifts/${b.dataset.id}/hunt`), row = (x) => `<li>فاتورة ${x.sale_no}: الإجمالي ${money(x.total)}، نقدي ${money(x.paid_cash)}</li>`;
@@ -5536,7 +5733,7 @@ async function viewShift(opts = {}) {
     ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
-      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""} <button type="button" class="btn small secondary shSum" data-id="${esc(r.id)}">ملخص للمالك</button>` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
   if (!sh) {
     app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
@@ -7520,6 +7717,27 @@ async function viewUsers() {
   // part 3 A: the manager (users.permissions) opens the page to switch staff permissions; the rest stays the owner's
   if (!ME.permissions.includes("users.manage") && !ME.permissions.includes("users.permissions")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   const [{ users, roles }, sales] = await Promise.all([api("/api/users"), api("/api/settings/sales")]);
+  // U3-7: the dhikr strip (on for all, off for some) and each employee's hours (a reminder before the end)
+  if (ME.permissions.includes("users.manage")) api("/api/settings/staff-ui?all=1").then((su) => {
+    const box = $("#suPanel"); if (!box) return;
+    box.innerHTML = `<h2>الذِكر ومواعيد الشغل</h2>
+      <label class="f"><input type="checkbox" id="suOn" ${su.dhikr_on ? "checked" : ""}> شريط ذِكر صغير تحت الشاشة (مبيغطيش أي زرار ومبيوقفش البيع)</label>
+      <table><thead><tr><th>الموظف</th><th>الذِكر</th><th>من</th><th>لحد</th></tr></thead><tbody>${users.filter((u) => u.role !== "owner").map((u) => `<tr data-u="${esc(u.id)}"><td>${esc(u.full_name)}</td>
+        <td><input type="checkbox" data-dk ${su.dhikr_off_users.includes(u.id) ? "" : "checked"}></td>
+        <td><input type="time" data-st value="${esc(su.hours[u.id]?.start || "")}"></td><td><input type="time" data-en value="${esc(su.hours[u.id]?.end || "")}"></td></tr>`).join("")}</tbody></table>
+      <p class="muted">قبل آخر الميعاد بربع ساعة البرنامج بيفكّر الموظف يقفل الشيفت ويسجل انصرافه. تذكير بس.</p><button class="btn" id="suSave">حفظ</button>`;
+    $("#suSave").addEventListener("click", async () => {
+      const rows = [...box.querySelectorAll("tr[data-u]")], hours = {};
+      let half = false;
+      rows.forEach((tr) => { const st = tr.querySelector("[data-st]").value, en = tr.querySelector("[data-en]").value; half ||= !!st !== !!en; hours[tr.dataset.u] = st && en ? { start: st, end: en } : null; });
+      if (half) { toast("اكتب الميعادين (من ولحد) أو سيبهم فاضيين", true); return; }
+      try {
+        await api("/api/settings/staff-ui", { method: "PUT", body: { dhikr_on: $("#suOn").checked, hours,
+          dhikr_off_users: rows.filter((tr) => !tr.querySelector("[data-dk]").checked).map((tr) => tr.dataset.u) } });
+        STAFF_UI = null; staffUiStop(); staffUi(); toast("اتحفظ");
+      } catch (er) { toast(er.message, true); }
+    });
+  }).catch(() => {});
   app.innerHTML = `<section class="panel"><div class="row between"><h1>المستخدمون</h1></div>
     <table><thead><tr><th>الاسم</th><th>النوع</th><th>الحالة</th><th>رقم سري</th><th>تعديلات على الافتراضي</th></tr></thead>
     <tbody>${users.map((u) => `<tr class="clickable" data-go="${esc(u.id)}"><td><b>${esc(u.full_name)}</b><div class="muted">${esc(u.username)}</div></td>
@@ -7527,6 +7745,7 @@ async function viewUsers() {
       <td>${u.active ? `<span class="badge b-ok">✓ مفعّل</span>` : `<span class="badge b-err">✕ موقوف</span>`}</td>
       <td>${u.has_pin ? "✓" : `<span class="badge b-warn">⚠ لا يوجد</span>`}</td>
       <td>${u.role === "owner" ? "كل الصلاحيات" : u.changes ? `${u.changes} تعديل` : "على الافتراضي"}</td></tr>`).join("")}</tbody></table></section>
+  ${ME.permissions.includes("users.manage") ? `<section class="panel" id="suPanel"><h2>الذِكر ومواعيد الشغل</h2><p class="muted">بيتحمل…</p></section>` : ""}
   <section class="panel"><h2>مستخدم جديد</h2>
     <form id="uNew" class="row">
       <label class="f">الاسم <input name="full_name" required></label>
