@@ -5055,9 +5055,10 @@ async function viewPos(afterCheckout = false) {
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
     const exactShort = !short || res[0]?.code === v || res[0]?.code === `E${v}`;
     if (!live && res.length === 1 && sellable(res[0]) && exactShort && (scanned || !found.hint)) {
-      const [packs, units, partial] = scanAddQty(res[0], unit);
-      if (partial) toast(`اتنزل ${unitName(res[0])} لأن مفيش علبة كاملة`);
-      return addItem(res[0], packs, units, given != null);
+      const [packs, units, partial] = scanAddQty(res[0], unit), hit = res[0];
+      const added = addItem(hit, packs, units, given != null);
+      if (partial) added.then((r) => { if (r !== false) toast(`مفيش علبة كاملة، اتنزل ${unitName(hit)}`); });   // only once it is in
+      return added;
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))

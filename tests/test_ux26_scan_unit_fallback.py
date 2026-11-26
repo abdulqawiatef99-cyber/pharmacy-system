@@ -43,7 +43,7 @@ console.log(JSON.stringify([
 
     def test_the_auto_add_uses_it_and_tells_the_cashier(self):
         self.assertIn("scanAddQty(res[0], unit)", JS)
-        self.assertIn("لأن مفيش علبة كاملة", JS)
+        self.assertIn("مفيش علبة كاملة، اتنزل", JS)
 
 
 if __name__ == "__main__":
