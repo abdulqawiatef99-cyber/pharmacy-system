@@ -32,17 +32,20 @@ const { chromium } = require('playwright');
     await p.waitForFunction(b => { const x = [...document.querySelectorAll('#iTable tbody tr[data-i] td:nth-child(2) b')].map(e => e.innerText).join(); return x && x !== b; }, before);
     pages.push(await snap());
   }
-  // the Excel button: every page is fetched (keyset, pinned moment) and a file comes out
+  // the screen moved by cursors, never by position
+  const moves = [];
+  p.on('request', r => { const u = new URL(r.url()); if (u.pathname === '/api/reports/invoices') moves.push([u.searchParams.get('after'), u.searchParams.get('offset')]); });
+  // the Excel button: a fresh answer, every page fetched (keyset, pinned moment), and a file comes out
   const fetched = [];
   p.on('response', async r => {
     const u = new URL(r.url());
-    if (u.pathname === '/api/reports/invoices' && u.searchParams.get('until') && !u.searchParams.get('offset'))
+    if (u.pathname === '/api/reports/invoices')
       fetched.push({ after: u.searchParams.get('after'), totals: u.searchParams.get('totals'), rows: (await r.json()).rows.map(x => String(x.sale_no)) });
   });
   const download = p.waitForEvent('download');
   await p.click('#iXl');
   const name = (await download).suggestedFilename();
-  const file = { name, fetched };
+  const file = { name, fetched: fetched.slice(), moves };
   await p.click('#iPrev');
   await p.waitForFunction(b => [...document.querySelectorAll('#iTable tbody tr[data-i] td:nth-child(2) b')].map(e => e.innerText).join() === b, pages[1].numbers.join());
   console.log(JSON.stringify({ pages, file, back: await snap() }));
@@ -80,6 +83,7 @@ class TestInvoicePagesOnScreen(APICase):
         got = out["file"]["fetched"]
         self.assertEqual(sum((x["rows"] for x in got), []), numbers[::-1])          # every invoice, once, for the file
         self.assertEqual([bool(x["after"]) for x in got], [False, True, True])
-        self.assertEqual({x["totals"] for x in got}, {"0"})                         # nothing is added up again
+        self.assertEqual([x["totals"] for x in got], [None, "0", "0"])              # totals asked once, with the rows
+        self.assertTrue(all(offset is None for _, offset in out["file"]["moves"]))  # pages are cut by cursor
         self.assertTrue(out["file"]["name"].endswith(".xlsx"))
         self.assertEqual(out["back"]["numbers"], pages[1]["numbers"])

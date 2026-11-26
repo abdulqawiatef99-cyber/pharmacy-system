@@ -2772,6 +2772,7 @@ window.I18N_EN = {
 "مفيش فواتير بالفلاتر دي": "No invoices match these filters",
 "⚠ أول 3000 فاتورة فقط — قلّل الفترة": "⚠ First 3000 invoices only — shorten the period",
 "الإجماليات لكل الفترة": "Totals are for the whole period",
+"الفواتير بتتغير دلوقتي على الكاشير؛ جرّب التصدير تاني بعد لحظة": "Invoices are changing at the till right now; try the export again in a moment",
 "الإجماليات لكل فواتير الفترة، وملف Excel فيه كل الفواتير": "Totals cover every invoice of the period, and the Excel file holds them all",
 "→ السابق": "→ Previous",
 "التالي ←": "Next ←",

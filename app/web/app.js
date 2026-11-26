@@ -3889,6 +3889,7 @@ async function viewSalesAdvanced() {
   const now = new Date(), dt = (d, h) => `${isoDay(d)}T${h}`;
   const sel = new Set(), types = new Set();
   let R = null, item = null, open = null, loadSeq = 0;
+  let marks = [""];     // where each listed page starts: "" = the newest invoice, else the last invoice of the page before
   app.innerHTML = `<section class="panel noprint"><div class="row between"><h1>فواتير البيع</h1><a href="#/owner-reports">تقارير المالك ←</a></div>
     <div class="row range"><div class="seg2 small">${Object.entries(periodPresets()).map(([k, [t]]) => `<button type="button" data-ip="${k}" class="${k === "today" ? "on" : ""}">${t}</button>`).join("")}</div>
       <label class="f">من <input type="datetime-local" id="iF" value="${dt(now, "00:00")}"></label><label class="f">إلى <input type="datetime-local" id="iT" value="${dt(now, "23:59")}"></label></div>
@@ -3902,8 +3903,11 @@ async function viewSalesAdvanced() {
   const reportBox = $("#iBox");
   // a first load asks the question afresh; another page of the same answer keeps its totals and its moment
   // (`until`), so the pages stay the ones the totals describe and nothing is added up again (#461)
-  const load = async (offset = 0) => {
-    const seq = ++loadSeq, keep = offset && R ? R : null;
+  // Pages are cut by the invoice they follow (`after`), not by a position: a void or a sale at the till between
+  // two clicks cannot push an invoice off both pages (Codex P2)
+  const load = async (page = 0) => {
+    const seq = ++loadSeq, keep = page && R ? R : null;
+    if (!keep) marks = [""];
     const current = () => seq === loadSeq && reportBox.isConnected;
     const f = $("#iF").value, t = $("#iT").value;
     if (!f || !t) return toast("اختر الفترة", true);
@@ -3912,7 +3916,7 @@ async function viewSalesAdvanced() {
     const qs = keep ? new URLSearchParams(keep.base)
       : new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
     const base = new URLSearchParams(qs);       // the same question, for the other pages and for an export
-    if (keep) { qs.set("offset", offset); qs.set("totals", "0"); qs.set("until", keep.as_of); }
+    if (keep) { qs.set("after", marks[page]); qs.set("totals", "0"); qs.set("until", keep.as_of); }
     const asked = keep ? keep.asked : { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
     let result;
     try { result = await api(`/api/reports/invoices?${qs}`); }
@@ -3920,6 +3924,8 @@ async function viewSalesAdvanced() {
     if (!current()) return;
     R = result;
     if (keep) { R.totals = keep.totals; R.as_of = keep.as_of; }
+    R.page = page;
+    if (R.next_after) marks[page + 1] = R.next_after;
     R.base = base;
     R.asked = asked;               // the E-Stock side follows the request that was answered, not the live controls (Codex P2)
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
@@ -3927,23 +3933,32 @@ async function viewSalesAdvanced() {
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
   // a file or a printout of a capped list says so, as the screen does (#324 R22)
-  const paged = () => R.truncated || R.offset > 0;
+  const paged = () => R.truncated || R.page > 0;
   const pageText = () => `الفواتير ${R.offset + 1} إلى ${R.offset + R.rows.length} من ${R.total_rows}`;
   const subOut = () => sub() + (paged() ? ` — ⚠ ${pageText()} — الإجماليات لكل الفترة` : "");
   // every match of the period, page by page in the server's stable order; the totals came with the first answer (#461)
+  // The file is its own fresh answer: totals and rows asked together, each page strictly after the last invoice
+  // of the one before and nothing newer than the first answer. A void or a return at the till while the pages
+  // are read would leave rows that no longer add up to the totals: that is detected and the whole read is
+  // done again, so the file never carries a total its rows do not make (Codex P2).
   const allRows = async () => {
-    if (!paged()) return R.rows;
-    const rows = [];
-    // each page starts strictly after the last invoice of the one before, and nothing newer than this
-    // report joins: a sale or a void at the till meanwhile cannot repeat or hide an invoice
-    for (let after = "", more = true; more;) {
-      const qs = new URLSearchParams(R.base); qs.set("totals", "0"); qs.set("until", R.as_of);
-      if (after) qs.set("after", after);
-      const page = await api(`/api/reports/invoices?${qs}`);
-      rows.push(...page.rows);
-      after = page.next_after; more = Boolean(after);
+    if (!paged()) return { rows: R.rows, totals: R.totals };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = []; let first = null;
+      for (let after = "", more = true; more;) {
+        const qs = new URLSearchParams(R.base);
+        if (first) { qs.set("totals", "0"); qs.set("until", first.as_of); qs.set("after", after); }
+        const page = await api(`/api/reports/invoices?${qs}`);
+        first = first || page;
+        rows.push(...page.rows);
+        after = page.next_after; more = Boolean(after);
+      }
+      const done = rows.filter((r) => r.status === "completed"), T = first.totals;
+      const sum = (k) => done.reduce((a, r) => a + r[k], 0);
+      if (rows.length === T.n && ["total", "returned_total", "net", "paid_cash", "paid_card", "paid_transfer", "on_credit"].every((k) => sum(k) === T[k])
+        && (!R.show_cost || done.reduce((a, r) => a + (r.unknown_cost ? 1 : 0), 0) === T.unknown_cost_n)) return { rows, totals: T };
     }
-    return rows;
+    throw new Error("الفواتير بتتغير دلوقتي على الكاشير؛ جرّب التصدير تاني بعد لحظة");
   };
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
@@ -3953,7 +3968,7 @@ async function viewSalesAdvanced() {
         <button class="btn small secondary" data-pr="full">🖨 كامل بالأصناف</button><button class="btn small secondary" data-pr="sel" disabled>🖨 المحدد</button>
         ${can("items.write") ? `<button class="btn small secondary" id="iShort" disabled>📝 أضف أصناف الفواتير المحددة إلى النواقص</button>` : ""}</span></div>
       ${paged() ? `<p class="row noprint"><span class="badge b-info">${pageText()} — <span>الإجماليات لكل فواتير الفترة، وملف Excel فيه كل الفواتير</span></span>
-        <button class="btn small secondary" id="iPrev" ${R.offset ? "" : "disabled"}>→ السابق</button><button class="btn small secondary" id="iNext" ${R.truncated ? "" : "disabled"}>التالي ←</button></p>` : ""}
+        <button class="btn small secondary" id="iPrev" ${R.page ? "" : "disabled"}>→ السابق</button><button class="btn small secondary" id="iNext" ${R.truncated ? "" : "disabled"}>التالي ←</button></p>` : ""}
       <div class="totals"><div>الفواتير<b>${T.n}</b><span>${T.returned_n} <span>عليها مرتجع</span> · ${T.discounted_n} <span>عليها خصم</span></span></div><div>قبل الخصم<b>${money(T.subtotal)}</b></div>
         <div>خصم الأصناف<b>${money(T.item_discount)}</b></div><div>خصم العميل (تعاقد)<b>${money(T.customer_discount)}</b></div><div>بعد الخصم<b>${money(T.total)}</b>${T.delivery_fee ? `<span>منها توصيل ${money(T.delivery_fee)}</span>` : ""}</div>
         <div>المرتجع<b>${money(T.returned_total)}</b></div><div class="t-ok">الصافي<b>${money(T.net)}</b></div><div>النقدي<b>${money(T.paid_cash)}</b></div>
@@ -3986,12 +4001,12 @@ async function viewSalesAdvanced() {
     $("#iXl").addEventListener("click", async (e) => {
       const asked = R;
       try {
-        const rows = await withBusy(e.currentTarget, allRows);
-        if (rows && asked === R) exportXlsx("فواتير البيع", sub(), sheets(rows));
+        const all = await withBusy(e.currentTarget, allRows);
+        if (all && asked === R) exportXlsx("فواتير البيع", sub(), sheets(all.rows, all.totals));
       } catch (er) { toast(er.message, true); }
     });
-    $("#iPrev")?.addEventListener("click", () => load(Math.max(0, R.offset - R.page_size)));
-    $("#iNext")?.addEventListener("click", () => load(R.offset + R.rows.length));
+    $("#iPrev")?.addEventListener("click", () => load(R.page - 1));
+    $("#iNext")?.addEventListener("click", () => load(R.page + 1));
     // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
     // E-Stock counts whole days: part of a day would add sales outside the window. The program total is the
     // whole period's, whatever page is listed (#461)
@@ -4027,8 +4042,8 @@ async function viewSalesAdvanced() {
     }));
     $("#iDet").scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const sheets = (all = R.rows) => {
-    const cost = R.show_cost, T = R.totals;
+  const sheets = (all = R.rows, T = R.totals) => {
+    const cost = R.show_cost;
     return [{ name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("الحالة"), Tx("العميل"), Tx("الموظف"), N("أصناف"), M("قبل الخصم"), M("خصم الأصناف"), M("خصم العميل"), M("بعد الخصم"),
         M("المرتجع"), M("الصافي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), ...(cost ? [M("الربح")] : [])],
       rows: all.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
