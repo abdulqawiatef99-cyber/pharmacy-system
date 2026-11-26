@@ -32,3 +32,6 @@ body.w58 .hd.one img { max-width: 36mm; }
 .chg td { font-weight: bold; font-size: 14px; }
 .hd figure.qr { margin: 0; text-align: center; flex: none; }
 .hd figcaption { font-size: 10px; font-weight: bold; margin-top: 1px; }
+/* UX-26 (owner 26/11): the customer's name, phone and address bold and larger */
+b.cu { font-size: 14px; }
+body.w58 b.cu { font-size: 12px; }

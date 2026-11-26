@@ -3625,7 +3625,8 @@ async function renderReceiptCfg(c) {
       <label class="f">كود ثانٍ أسفل الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
-    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
+    <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}${chk("show_item_discount", "سطر خصم الأصناف")}${chk("show_invoice_discount", "سطر خصم الفاتورة")}${chk("show_rounding", "سطر التقريب")}</div>
+    <p class="muted small">لو خبّيت سطر خصم، الإيصال يطبع الأسعار بعد الخصم والإجمالي النهائي بس. اسم البائع = اللي عمل البيعة.</p>
     <fieldset class="lblp lbprev"><legend>معاينة الإيصال</legend>
       <p id="rcPreviewMessage" class="muted" role="status"></p>
       <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
@@ -3652,7 +3653,7 @@ async function renderReceiptCfg(c) {
   const appearanceFields = ["title", "header", "footer", "tax_no", "cr_no", "time_format", "names",
     "template", "qr_text", "qr_caption", "qr2_text", "qr2_caption"];
   const appearanceChecks = ["show_cashier", "show_customer", "show_expiry", "show_return_policy",
-    "show_item_count", "show_change"];
+    "show_item_count", "show_change", "show_item_discount", "show_invoice_discount", "show_rounding"];
   const appearance = () => ({
     paper: +lf.paper.value, lines: [lf.l0.value, lf.l1.value, ...c.lines.slice(2)],
     ...Object.fromEntries(appearanceFields.map((key) => [key, lf.elements[key].value])),
