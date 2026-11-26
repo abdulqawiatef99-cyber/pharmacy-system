@@ -4706,6 +4706,13 @@ async function viewPos(afterCheckout = false) {
     q.dataset.searched = v;
     trackPosAdd(search(e.shiftKey));
   });
+  POS.scan = (code) => {
+    if (!q.isConnected || !SALE) return;
+    // a discount or amount typed in the focused field is saved first (its change event), then the item is added
+    const at = document.activeElement;
+    if (at && at !== q && at.matches?.("input, select, textarea")) at.blur();
+    trackPosAdd(Promise.resolve(POS.saving).then(() => search(false, false, code)));
+  };
   bindPosExtras();
 }
 
@@ -4748,6 +4755,14 @@ async function renderQuick() {
 async function newTab() {
   try { await openDraft(null); viewPos(); } catch (er) { toast(er.message, true); }
 }
+// U4-22: a scan while the focus is in any other field of the sale screen (discount, customer, payment, a button)
+// adds the item and never types into that field. The search box reads scans itself; dialogs keep their keys
+// (the item card's barcode field is scanned on purpose).
+globalThis.PharmScan?.installScanDetector({
+  active: () => location.hash.startsWith("#/pos") && !!POS.scan && !POS.completing && !document.querySelector("dialog[open]"),
+  skip: (el) => el?.id === "posQ",
+  onScan: (code) => POS.scan(code),
+});
 document.addEventListener("keydown", (e) => {
   // The pharmacy scanner (HH360) sends F12 with each barcode (#81): never open the browser's tools, and on the
   // sales screen move to the search box so the code lands there wherever the focus was. Capture phase: first.
