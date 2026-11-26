@@ -3453,6 +3453,7 @@ function updatePanelHtml(st) {
 }
 function smartLastHtml(u) {
   const res = u.result || {};
+  if (u.refused && !u.request) return `<p class="badge b-warn">التحديث ما بدأش والبرنامج ما اتقفلش: ${esc(u.refused.reason || "")}</p>`;
   return res.state === "rolled_back" ? `<p class="badge b-warn">آخر تحديث ما اشتغلش، فالبرنامج رجع لوحده للنسخة اللي قبله وبياناتك زي ما هي.</p>`
     : res.state === "aborted" ? `<p class="badge b-warn">آخر تحديث اتلغى قبل ما يغيّر حاجة: ${esc(res.reason || "")}</p>` : "";
 }

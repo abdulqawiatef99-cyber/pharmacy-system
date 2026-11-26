@@ -652,7 +652,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..core import smart_update as su, update_sign, updater
         import release_bootstrap as releases
         out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
-               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
+               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None,
+               "refused": su.last_refusal(s.data_dir) or None}
         try:
             home = su.home_of(s.data_dir)
             legacy = releases.installer_root(upd_root)
@@ -735,7 +736,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if action == "schedule":
             when = b.get("when")
             try:
-                value = su.request(s.data_dir, when, ctx.user_id)
+                # off the event loop: the space check reads the whole E-Stock archive (its sha256)
+                value = await run_in_threadpool(su.request, s.data_dir, when, ctx.user_id, settings=s)
             except updater.UpdateError as e:
                 raise ValidationFailed(str(e), code="update_failed") from e
             with db.transaction():
