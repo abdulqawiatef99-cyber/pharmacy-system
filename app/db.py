@@ -107,6 +107,17 @@ class Database:
             raise RuntimeError("writes must run inside db.transaction()")
         return self.conn.execute(sql, params)
 
+    @property
+    def in_snapshot(self) -> bool:
+        """This thread is inside read_snapshot(): it reads one fixed state and cannot write."""
+        return bool(getattr(self._local, "snapshot", False))
+
+    @property
+    def write_serial(self) -> int:
+        """How many write transactions this thread has begun: tells one transaction from the next (a value
+        remembered inside one that was rolled back must not be used in the next)."""
+        return getattr(self._local, "writes", 0)
+
     @contextmanager
     def read_snapshot(self) -> Iterator["Database"]:
         """Read-only block that sees one consistent state of the database (one WAL snapshot), for
@@ -137,6 +148,7 @@ class Database:
             return
         with self._write_lock:
             conn.execute("BEGIN IMMEDIATE")
+            self._local.writes = getattr(self._local, "writes", 0) + 1
             try:
                 yield self
             except BaseException:
