@@ -59,3 +59,52 @@ class TestOpeningStockReviewPermission(DBTestCase):
         run = self.di.analyze(ctx, sheet(ITEMS[:3]), "again.xlsx")
         row = self.di.get(ctx, run)["rows"][0]
         self.di.decide(ctx, run, row["id"], "skip")
+
+    def test_import_access_alone_cannot_read_or_cancel_the_run(self):
+        ctx = self.staff("importer3", "items.import")
+        before = self.state()
+        with self.assertRaises(Forbidden):
+            self.di.get(ctx, self.run_id)                 # quantities and costs of the count
+        with self.assertRaises(Forbidden):
+            self.di.discard(ctx, self.run_id)             # an authorized user's review, cancelled
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (self.run_id,))["status"], "analyzed")
+
+    def test_both_permissions_can_read_and_cancel(self):
+        ctx = self.staff("both2", "items.import", "inventory.adjust")
+        self.assertEqual(len(self.di.get(ctx, self.run_id)["rows"]), 1)
+        self.di.discard(ctx, self.run_id)
+        self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (self.run_id,))["status"], "discarded")
+
+    def test_refusal_comes_before_the_run_status_is_told(self):
+        ctx = self.staff("importer4", "items.import")
+        self.di.discard(self.ctx, self.run_id)
+        with self.assertRaises(Forbidden):
+            self.di.decide(ctx, self.run_id, self.row["id"], "skip")
+
+
+class TestPartyImportRunsNeedTheirOwnPermission(DBTestCase):
+    """The same gap for supplier and customer files: names, phones and balances."""
+    FILES = {"suppliers": ([["اسم المورد", "تليفون"], ["Synthetic Pharma Co", "01000000001"]], "suppliers.write"),
+             "customers": ([["اسم العميل", "تليفون"], ["Synthetic Customer", "01000000002"]], "customers.manage")}
+
+    def test_import_access_alone_cannot_read_decide_or_cancel(self):
+        di = DataImport(self.db)
+        uid = people.add_user(self.db, self.ctx, username="importer", full_name="x", password="Staff-Pass-2026",
+                              role_code="assistant")
+        people.set_exception(self.db, self.ctx, uid, "items.import", "grant")
+        for kind, (rows, perm) in self.FILES.items():
+            with self.subTest(kind=kind):
+                people.set_exception(self.db, self.ctx, uid, perm, "deny")
+                ctx = self.login("importer", "Staff-Pass-2026")
+                run = di.analyze(self.ctx, sheet(rows), f"{kind}.xlsx", kind=kind)
+                row = di.get(self.ctx, run)["rows"][0]
+                audits = self.db.one("SELECT count(*) c FROM audit_log")["c"]
+                with self.assertRaises(Forbidden):
+                    di.get(ctx, run)
+                with self.assertRaises(Forbidden):
+                    di.decide(ctx, run, row["id"], "skip")
+                with self.assertRaises(Forbidden):
+                    di.discard(ctx, run)
+                self.assertEqual(self.db.one("SELECT count(*) c FROM audit_log")["c"], audits)
+                self.assertEqual(self.db.one("SELECT status FROM import_runs WHERE id=?", (run,))["status"], "analyzed")
