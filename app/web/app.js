@@ -5027,7 +5027,14 @@ async function posRevalidate(sid) {
   const sameSettings = JSON.stringify(rcfg) === JSON.stringify(RCFG) && JSON.stringify(ui) === JSON.stringify(ME.ui);
   RCFG = rcfg; ME.ui = ui; POS.tabs = tabs;
   if (sale.status !== "draft" || !tabs.some((d) => d.id === sid)) { SALE = null; return viewPos(); }  // closed elsewhere
-  const busy = POS.saving || pendingPosAdds(sid).length || SALE.version !== version;
+  // a save still running (not one that finished long ago: POS.saving keeps its settled promise, Codex P2 on #470)
+  const saving = POS.saving && await new Promise((resolve) => {
+    let settled = false;
+    POS.saving.then(() => { settled = true; }, () => { settled = true; });
+    setTimeout(() => resolve(!settled), 0);
+  });
+  if (!current() || SALE?.id !== sid) return;
+  const busy = saving || pendingPosAdds(sid).length || SALE.version !== version;
   const newer = !busy && sale.version !== SALE.version;
   if (newer) SALE = sale;
   if (sameTabs && sameSettings && !newer) return;
@@ -5045,13 +5052,26 @@ function keepTyping(draw) {
   const attr = a && [...a.attributes].find((x) => x.name.startsWith("data-") && x.name !== "data-tour");
   const sel = a?.id ? `#${CSS.escape(a.id)}` : attr ? `[${attr.name}="${CSS.escape(attr.value)}"]` : null;
   const typed = a && "value" in a ? a.value : null;
+  // a discount keeps its unit (% or ج) with its amount: 5 ج must never come back as 5 % (Codex P1 on #470)
+  const unitSel = a?.dataset?.disc ? `[data-dunit="${CSS.escape(a.dataset.disc)}"]` : a?.id === "posInvDisc" ? "#posInvDiscU" : null;
+  const unit = unitSel ? app.querySelector(unitSel)?.value : null;
   let caret = null;
   try { caret = [a.selectionStart, a.selectionEnd]; } catch { /* number boxes have no caret */ }
   draw();
+  const u = unitSel && app.querySelector(unitSel);
+  if (u && unit != null && u.value !== unit) u.value = unit;
   const b = sel && app.querySelector(sel);
   if (!b || typed == null) return;
+  const drawn = b.value;
   if (b.value !== typed) { b.value = typed; b.dispatchEvent(new Event("input", { bubbles: true })); }
   b.focus();
+  // the browser takes the text put back as the box's starting value, so leaving it would save nothing: the box
+  // reports its change itself when it is left with something other than what the server has
+  if (typed !== drawn) {
+    let changed = false;
+    b.addEventListener("change", () => { changed = true; }, { once: true });
+    b.addEventListener("blur", () => { if (!changed && b.value !== drawn) b.dispatchEvent(new Event("change", { bubbles: true })); }, { once: true });
+  }
   try { if (caret?.[0] != null) b.setSelectionRange(...caret); } catch { /* not selectable */ }
 }
 
