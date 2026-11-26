@@ -21,7 +21,7 @@ class Field {
 globalThis.Event = class { constructor(type) { this.type = type; } };
 const timers = [];
 const run = (keys, field, opts = {}) => {
-  const scans = [], passed = [];
+  const scans = [], passed = [], valueAtKey = {};
   const d = createScanDetector({ onScan: (c) => scans.push(c), setTimer: (f) => { timers.push(f); return timers.length; },
     clearTimer: (id) => { timers[id - 1] = null; }, ...opts });
   for (const [key, t, extra = {}] of keys) {
@@ -30,10 +30,11 @@ const run = (keys, field, opts = {}) => {
     const e = { key, timeStamp: t, target, ctrlKey: !!extra.ctrl, repeat: !!extra.repeat,
       preventDefault() { prevented = true; }, stopImmediatePropagation() {} };
     d.keydown(e);
+    if (!prevented && key.length > 1) valueAtKey[key] = target.value;
     if (!prevented) { passed.push(key); if (key.length === 1 && !extra.ctrl) target.setRangeText(key, target.selectionStart, target.selectionEnd); }
   }
   timers.splice(0).forEach((f) => f && f());           // let any pending "burst ended" timer fire
-  return { scans, passed, value: field.value, events: field.events };
+  return { scans, passed, value: field.value, events: field.events, valueAtKey };
 };
 const burst = (code, start = 1000, step = 5) => [...[...code].map((c, i) => [c, start + i * step]), ["Enter", start + code.length * step]];
 const typed = (text, start = 1000, step = 150) => [...[...text].map((c, i) => [c, start + i * step]), ["Enter", start + text.length * step]];
@@ -52,6 +53,7 @@ const out = {
   gs1Separator: run([..."0106221043010359"].map((c, i) => [c, 1000 + i * 4]).concat([["Control", 1066], ["]", 1067, { ctrl: true }],
     ..."10ABC".split("").map((c, i) => [c, 1070 + i * 4]), ["Enter", 1092]]), new Field("5", "number")),
   keyRepeat: run([["1", 1000], ["1", 1033, { repeat: true }], ["1", 1066, { repeat: true }], ["Enter", 1090]], new Field("")),
+  fastThenF9: run([["a", 1000], ["b", 1005], ["c", 1010], ["F9", 1015]], new Field("x")),
   inactive: run(burst("6223001234567"), new Field(""), { active: () => false }),
 };
 console.log(JSON.stringify(out));
@@ -121,6 +123,12 @@ class TestScanDetector(unittest.TestCase):
         o = self.out["keyRepeat"]
         self.assertEqual(o["scans"], [])
         self.assertIn("Enter", o["passed"])
+
+    def test_a_function_key_gives_the_held_text_back_before_it_acts(self):
+        o = self.out["fastThenF9"]                              # F9 saves the field's value: it must be all there
+        self.assertEqual(o["scans"], [])
+        self.assertIn("F9", o["passed"])
+        self.assertEqual(o["valueAtKey"]["F9"], "xabc")
 
     def test_skipped_field_and_inactive_screen_are_left_alone(self):
         for case in ("skipped", "inactive"):

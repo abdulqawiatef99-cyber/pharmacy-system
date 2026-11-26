@@ -81,17 +81,21 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
         flush(); last = -Infinity;          // not a scan after all: the characters go back, and Enter acts as usual
         return;
       }
-      if (e.ctrlKey || e.altKey || e.metaKey || e.key == null || e.key.length !== 1) {
-        if (e.key?.length === 1 || /^(Control|Alt|Shift|AltGraph)$/.test(e.key || "")) { swallow(e); last = now; arm(); }
-        return;
+      if (/^(Control|Alt|Shift|AltGraph)$/.test(e.key || "") || ((e.ctrlKey || e.altKey) && e.key?.length === 1)) {
+        swallow(e); last = now; arm(); return;
       }
+      // any other key (F9, Tab, an arrow, Backspace) is a person's: the held text goes back before it acts
+      if (e.metaKey || e.key == null || e.key.length !== 1) { flush(); last = -Infinity; return; }
       if (e.repeat) { flush(); return; }
       worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e); arm();
       return;
     }
     if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || (el && skip(el))) { flush(); last = -Infinity; return; }
     if (e.key === "Enter") { flush(); last = -Infinity; return; }      // a person's Enter: it acts in the field as usual
-    if (e.key == null || e.key.length !== 1) return;        // Shift (scanners send it for capitals), F12, arrows
+    if (e.key == null || e.key.length !== 1) {              // Shift (scanners send it for capitals), F12, arrows
+      if (!/^(Control|Alt|Shift|AltGraph)$/.test(e.key || "")) { flush(); last = -Infinity; }
+      return;
+    }
     if (buf && fast && snap?.el === el) {
       holding = true;
       restore(snap);                        // the first character already landed: take it back, and tell the field
