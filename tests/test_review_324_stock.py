@@ -157,12 +157,13 @@ class TestS15ZeroOnlyWhatWasShown(_Count):
         _stock(self.db, self.ctx, other, 3)
         sid = self.c.create(self.ctx, title="جرد")
         self.c.record(self.ctx, sid, item_id=self.item, qty=10)
-        shown = [u["item_id"] for u in self.c.variances(self.ctx, sid)["uncounted_with_stock"]]
+        preview = self.c.variances(self.ctx, sid)
+        shown = [u["item_id"] for u in preview["uncounted_with_stock"]]
         self.assertEqual(shown, [other])
         _stock(self.db, self.ctx, late, 10)                     # a colleague receives a new item
         with self.assertRaises(Conflict) as e:
             self.c.approve(self.ctx, sid, zero_uncounted=True, reason="مش موجود على الرف",
-                           uncounted_item_ids=shown)
+                           uncounted_item_ids=shown, uncounted_confirmation=preview["uncounted_confirmation"])
         self.assertEqual(e.exception.code, "uncounted_changed")
         self.assertEqual(_qty(self.db, self.ctx, late), 10)
 
