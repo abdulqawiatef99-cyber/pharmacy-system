@@ -104,6 +104,19 @@ class TestPurchaseEntry(APICase):
         self.assertIn("unusual_last_cost", {i["code"] for i in state["issues"]})
         self.assertFalse(state["can_approve"])
 
+    def test_legacy_negative_bonus_can_be_opened_and_corrected(self):
+        draft = self.purch.add_line(self.ctx, self.inv, self.line(), None)
+        line_id = draft["lines"][0]["id"]
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoice_lines SET bonus_qty=-2 WHERE id=?", (line_id,))
+        result = self.c.get(self.path)
+        self.assertEqual(result.status_code, 200, result.text)
+        state = result.json()
+        self.assertIn("bonus_invalid", {i["code"] for i in state["issues"]})
+        self.assertFalse(state["can_approve"])
+        corrected = self.purch.update_line(self.ctx, self.inv, line_id, {"bonus_qty": 0}, None)
+        self.assertTrue(corrected["can_approve"])
+
 
 BROWSER = r"""
 const { chromium } = require('playwright');
