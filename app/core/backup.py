@@ -396,6 +396,87 @@ def _raw_copy(db_path: Path, dest_dir: Path) -> Path:
     return folder
 
 
+RESTORE_JOURNAL = "restore-in-progress.json"     # next to the database while a restore moves files
+OLD_SIDE = ".before-restore"
+
+
+def _write_journal(db_path: Path, journal: dict) -> None:
+    path = db_path.parent / RESTORE_JOURNAL
+    part = path.with_suffix(".json.part")
+    with open(part, "w", encoding="utf-8") as f:
+        json.dump(journal, f)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    part.replace(path)
+
+
+def _force_unlink(path: Path) -> None:
+    if path.exists():
+        path.chmod(0o644)                       # Windows refuses to delete a read-only file
+        path.unlink()
+
+
+def _undo_restore(db_path: Path, journal: dict) -> None:
+    """Back to the original set. Only valid while the staged database has NOT replaced the live one."""
+    folder = db_path.parent
+    live_arch = folder / ESTOCK_ARCHIVE
+    aside = folder / Path(journal["archive_aside"]).name if journal.get("archive_aside") else None
+    if aside is not None and aside.exists():             # the live history was moved aside: it goes back
+        _force_unlink(live_arch)                         # the backup's history, if it already took the place
+        aside.replace(live_arch)
+    elif aside is None and journal.get("archive_new"):   # there was no history before: the new one goes
+        _force_unlink(live_arch)
+    if aside is not None and journal.get("archive_readonly") and live_arch.exists():
+        live_arch.chmod(0o444)
+    for suffix in ("-wal", "-shm"):
+        old = Path(str(db_path) + suffix + OLD_SIDE)
+        if old.exists():
+            old.replace(Path(str(db_path) + suffix))
+    live_arch.with_suffix(".part").unlink(missing_ok=True)
+    (folder / RESTORE_JOURNAL).unlink(missing_ok=True)
+    staged = folder / Path(journal["staged"]).name
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(staged) + suffix).unlink(missing_ok=True)
+
+
+def _restore_done(db_path: Path, journal: dict) -> None:
+    """The restored database is in place: drop what belonged to the old one. The compressed-history cache
+    is checked by sha256 before every use, so it is only removed to save the space."""
+    folder = db_path.parent
+    for suffix in ("-wal", "-shm"):
+        Path(str(db_path) + suffix + OLD_SIDE).unlink(missing_ok=True)
+    if journal.get("archive_aside") or journal.get("archive_new"):
+        for name in (ARCHIVE_MEMBER, ARCHIVE_MEMBER + ".sha256"):
+            (folder / name).unlink(missing_ok=True)
+    (folder / RESTORE_JOURNAL).unlink(missing_ok=True)
+
+
+def finish_interrupted_restore(db_path: Path) -> str | None:
+    """Settle a restore that was cut (power, kill) between its file moves. Called before the database is
+    opened. Returns 'rolled_back' (original set again), 'completed' (restored set) or None (nothing to do).
+
+    The staged database is moved over the live one in one atomic step, last: while the staged file is still
+    there the live database is the original, so everything goes back; once it is gone the restore finished."""
+    db_path = Path(db_path)
+    path = db_path.parent / RESTORE_JOURNAL
+    if str(db_path) == ":memory:" or not path.is_file():
+        return None
+    try:
+        journal = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(journal, dict) or journal.get("db") != db_path.name or not journal.get("staged"):
+            raise ValueError("not this database's restore journal")
+    except (ValueError, OSError):
+        return None                             # written whole or not at all (.part + rename): not ours
+    if (db_path.parent / Path(journal["staged"]).name).exists():
+        _undo_restore(db_path, journal)
+        return "rolled_back"
+    _restore_done(db_path, journal)
+    return "completed"
+
+
 def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Path, *,
             allow_missing_attachments: bool = False) -> dict:
     """Server must be stopped. Returns {'pre_restore_backup', 'pre_restore_kind', 'pre_restore_error',
@@ -411,6 +492,7 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
     allow_missing_attachments: then the database and the files that are there are restored and
     missing_attachments lists the rest ({'source_id', 'filename', 'problem'}). Any other problem
     (database, checksum, counts) is always refused."""
+    finish_interrupted_restore(db_path)             # an earlier restore that was cut: settle it first
     info = verify_archive(archive)
     hard, soft = split_problems(info["problems"])
     if hard or (soft and not allow_missing_attachments):
@@ -483,34 +565,64 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
                     if f.is_file():
                         target = upload_dir / f.relative_to(up_src)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(f, target)
+                        # files are named by their sha256: an identical one is left alone, and a new one
+                        # arrives whole or not at all (a copy cut by a full disk never truncates a good file)
+                        if target.is_file() and target.stat().st_size == f.stat().st_size \
+                                and _sha256(target) == _sha256(f):
+                            continue
+                        part = target.with_name(target.name + ".part")
+                        try:
+                            shutil.copy2(f, part)
+                            part.replace(target)
+                        except BaseException:
+                            part.unlink(missing_ok=True)
+                            raise
         except BaseException:
             staged.unlink(missing_ok=True)
             raise
-        # the E-Stock history goes back with its database; one that the backup does not have is kept aside,
-        # renamed, never deleted (it is in the pre-restore backup too)
+        # 3) the E-Stock history and the database change places together. Everything is staged first; the
+        # moves are journaled, so a failure (or a power cut: finish_interrupted_restore at the next start)
+        # leaves the original database with its own history, or the whole restored set, never a mix (#461).
+        # A history the backup does not have is kept aside, renamed, never deleted.
         live_arch = db_path.parent / ESTOCK_ARCHIVE
+        arch_part = live_arch.with_suffix(".part")
         try:
             arch_new = _extract_archive(z, tmp) if info.get("estock_archive") else None
-            if arch_new and live_arch.exists() and _sha256(live_arch) == _sha256(arch_new):
-                arch_new = None                         # the same history: nothing to move
-            elif live_arch.exists():
-                live_arch.chmod(0o644)
-                aside = live_arch.with_name(f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
-                live_arch.replace(aside)
-            for f in (live_arch.with_name(ARCHIVE_MEMBER), live_arch.with_name(ARCHIVE_MEMBER + ".sha256")):
-                f.unlink(missing_ok=True)
-            if arch_new:
-                shutil.copy2(arch_new, live_arch.with_suffix(".part"))
-                live_arch.with_suffix(".part").replace(live_arch)
-                live_arch.chmod(0o444)
+            same = bool(arch_new and live_arch.exists() and _sha256(live_arch) == _sha256(arch_new))
+            arch_part.unlink(missing_ok=True)
+            if arch_new and not same:
+                shutil.copy2(arch_new, arch_part)
         except BaseException:
+            arch_part.unlink(missing_ok=True)
             staged.unlink(missing_ok=True)
             raise
-        # 3) only now the database itself
-        for suffix in ("-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-        staged.replace(db_path)
+        aside = None
+        if live_arch.exists() and not same:
+            stamp, n = f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}", 1
+            aside = live_arch.with_name(stamp + ".sqlite")
+            while aside.exists():                       # never over an earlier kept history
+                aside = live_arch.with_name(f"{stamp}-{n}.sqlite")
+                n += 1
+        journal = {"db": db_path.name, "staged": staged.name, "archive_aside": aside.name if aside else None,
+                   "archive_new": arch_part.exists(),
+                   "archive_readonly": bool(aside and not live_arch.stat().st_mode & 0o200)}
+        _write_journal(db_path, journal)
+        try:
+            if aside:
+                live_arch.chmod(0o644)
+                live_arch.replace(aside)
+            if arch_part.exists():
+                arch_part.replace(live_arch)
+                live_arch.chmod(0o444)
+            for suffix in ("-wal", "-shm"):             # the old database's own side files, out of SQLite's sight
+                side = Path(str(db_path) + suffix)
+                if side.exists():
+                    side.replace(Path(str(side) + OLD_SIDE))
+            staged.replace(db_path)
+        except BaseException:
+            _undo_restore(db_path, journal)
+            raise
+        _restore_done(db_path, journal)
     return {"pre_restore_backup": str(pre) if pre else None, "pre_restore_kind": pre_kind,
             "pre_restore_error": pre_error, "missing_attachments": missing, "manifest": info}
 
