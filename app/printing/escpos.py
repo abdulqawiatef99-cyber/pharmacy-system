@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import socket
 import time
+import unicodedata
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, features
@@ -56,6 +57,17 @@ def find_font() -> str:
 
 def shaping_available() -> bool:
     return bool(features.check("raqm"))
+
+
+def text_direction(value: str) -> str:
+    """UX-26: the base direction of a name, from its first letter (English -> ltr, Arabic or none -> rtl)."""
+    for ch in value or "":
+        kind = unicodedata.bidirectional(ch)
+        if kind == "L":
+            return "ltr"
+        if kind in ("R", "AL"):
+            return "rtl"
+    return "rtl"
 
 
 ReceiptRow = tuple[str, str, str | tuple[str, ...]]
@@ -148,7 +160,8 @@ def render_receipt(lines: list[ReceiptRow], width: int = DOTS_80MM, font_path: s
             heading = kind == "columns"
             n = size - 2
             h = max(cell(value, edges[i + 1] + 3, edges[i] - 3, n,
-                         bold=heading, direction="ltr" if not heading and i in (0, 3, 4) else "rtl",
+                         bold=heading, direction="ltr" if not heading and i in (0, 3, 4)
+                         else text_direction(value) if not heading and i == 1 else "rtl",
                          single=heading or i in (0, 3, 4))
                     for i, value in enumerate(values))
             y += h + gap
