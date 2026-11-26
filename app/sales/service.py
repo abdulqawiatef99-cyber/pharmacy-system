@@ -375,6 +375,21 @@ def retail_value(qty: int, pack_price: int, pack_size: int) -> int:
     return alloc_gross(qty, {"unit_price": unit_price(pack_price, ps), "pack_price": pack_price, "pack_size": ps})
 
 
+def qty_words(qty: int, item: dict) -> str:
+    """Base units in the item's own words, the screen's rule (`fmtStock`): «3 علبة + 2 شريط», «2 شريط», «0»."""
+    ps = max(1, item.get("pack_size") or 1)
+    unit = item.get("base_unit_name") or "unit"
+    unit = "وحدة" if unit == "unit" else unit
+    if qty == 0:
+        return "0"
+    if ps <= 1:
+        return f"{qty} {unit}"
+    pack = item.get("pack_unit_name") or "pack"
+    pack = "علبة" if pack == "pack" else pack
+    whole, rest = divmod(qty, ps)
+    return " + ".join(x for x in (f"{whole} {pack}" if whole else "", f"{rest} {unit}" if rest else "") if x)
+
+
 def cost_piasters(cost: Decimal) -> int:
     """An exact cost in piasters (from the decimal average cost) as whole piasters, half up: the rule
     the sale already uses for a line's cost (below-cost warning)."""
@@ -526,12 +541,14 @@ class Sales:
         return sellable, expired + recalled
 
     @staticmethod
-    def _short(sellable: int, expired: int, recalled: int) -> Conflict:
-        msg = f"الكمية المتاحة للبيع {sellable} وحدة"
+    def _short(sellable: int, expired: int, recalled: int, item: dict | None = None) -> Conflict:
+        # UX-27: in the item's boxes and strips («10 علبة + 1 شريط»), as the screen shows the stock
+        words = (lambda q: qty_words(q, item)) if item else (lambda q: f"{q} وحدة")
+        msg = f"الكمية المتاحة للبيع {words(sellable)}"
         if expired:
-            msg += f" (يوجد {expired} وحدة منتهية الصلاحية لا تُباع)"
+            msg += f" (يوجد {words(expired)} منتهية الصلاحية لا تُباع)"
         if recalled:
-            msg += f" (يوجد {recalled} وحدة من تشغيلة عليها منشور سحب مؤكد لا تُباع)"
+            msg += f" (يوجد {words(recalled)} من تشغيلة عليها منشور سحب مؤكد لا تُباع)"
         return Conflict(msg, code="insufficient_stock",
                         details={"available": sellable, "expired": expired, **({"recalled": recalled} if recalled else {})})
 
@@ -566,7 +583,7 @@ class Sales:
                                   " AND item_id=?", (sid, item_id))["q"]
             sellable, expired, recalled = (10 ** 9, 0, 0) if item["is_service"] else self._held(ctx, s["branch_id"], item_id)
             if already + qty > sellable:
-                raise self._short(sellable, expired, recalled)
+                raise self._short(sellable, expired, recalled, dict(item))
             # the same item again (scanned twice, quick button tapped twice) goes on its line, so whole
             # packs are priced as packs and not as loose units on separate lines
             # only into a line with the same discount (final review P2-3): units scanned without a discount never
@@ -1252,9 +1269,10 @@ class Sales:
                                      " item_id=? AND id<>?", (sid, l["item_id"], line_id))["q"]
                 svc = self.db.one("SELECT is_service FROM items WHERE id=?", (l["item_id"],))["is_service"]
                 sellable, expired, recalled = (10 ** 9, 0, 0) if svc else self._held(ctx, s["branch_id"], l["item_id"])
+                item = self.db.one("SELECT pack_size, base_unit_name, pack_unit_name FROM items WHERE id=?",
+                                   (l["item_id"],))
                 if others + qty_base > sellable:
-                    raise self._short(sellable, expired, recalled)
-                item = self.db.one("SELECT pack_size FROM items WHERE id=?", (l["item_id"],))
+                    raise self._short(sellable, expired, recalled, dict(item))
                 self.db.execute("UPDATE sale_lines SET qty_base=?, partial_pack=? WHERE id=?",
                                 (qty_base, 1 if qty_base % item["pack_size"] else 0, line_id))
             if discount_bp is not None:

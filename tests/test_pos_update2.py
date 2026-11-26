@@ -70,10 +70,12 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#posRes [data-add]');
   const out = { res: await p.textContent('#posRes') };
   await p.click('#posRes [data-add][data-kind=pack]');
-  await p.waitForSelector('#posCart [data-unit]');
+  await p.waitForSelector('#posCart [data-qp]');
   out.stock = await p.textContent('#posCart tbody tr td:first-child');
   out.before = await p.textContent('#posCart .qty b');
-  await p.selectOption('#posCart [data-unit]', 'unit');
+  await p.fill('#posCart [data-qp]', '0');                       // UX-27: boxes + strips fields replace the unit select
+  await p.fill('#posCart [data-qu]', '1');
+  await p.press('#posCart [data-qu]', 'Enter');
   await p.waitForFunction(() => !/علبة/.test(document.querySelector('#posCart .qty b').textContent));
   out.after = await p.textContent('#posCart .qty b');
   await p.click('#posCustNew');
