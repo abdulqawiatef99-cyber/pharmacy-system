@@ -47,6 +47,23 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 })();""")
         self.assertEqual(out, ["ar", "en", "ar", "ar"])
 
+    def test_latest_focus_wins_while_a_call_is_open(self):
+        # Codex P2 on #482: ar (open) -> en -> ar queued English and sent it after the Arabic field won
+        out = self.node(_fn("keyboardSwitcher") + r"""
+const calls = []; let release = null;
+const fakeFetch = (url, opts) => { calls.push(JSON.parse(opts.body).lang);
+  return calls.length === 1 ? new Promise((r) => { release = r; }) : Promise.resolve({ status: 200, ok: true }); };
+const sw = keyboardSwitcher(fakeFetch, 5);
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  sw("ar"); await wait(20);
+  sw("en"); await wait(20);
+  sw("ar"); await wait(20);
+  release({ status: 200, ok: true }); await wait(20);
+  console.log(JSON.stringify(calls));
+})();""")
+        self.assertEqual(out, ["ar"])
+
     def test_keyboard_switch_is_debounced_deduplicated_and_quiet(self):
         out = self.node(_fn("keyboardSwitcher") + r"""
 const calls = []; let mode = "ok";

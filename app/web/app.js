@@ -8133,8 +8133,9 @@ async function viewUser(id) {
 function keyboardSwitcher(send, delay = 120) {
   let timer = null, last = null, off = false, busy = false, want = null;
   const fire = (lang) => {
-    if (off || lang === last) return;
-    if (busy) { want = lang; return; }                // one request at a time; the newest wish goes after it
+    if (off) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish (even = last) goes after it
+    if (lang === last) return;
     last = lang; busy = true; want = null;
     Promise.resolve().then(() => send("/api/system/keyboard-layout", {
       method: "POST", credentials: "same-origin",
@@ -8143,7 +8144,7 @@ function keyboardSwitcher(send, delay = 120) {
       body: JSON.stringify({ lang }),
     })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
       .catch(() => { last = null; })
-      .finally(() => { busy = false; if (want) fire(want); });
+      .finally(() => { busy = false; const next = want; want = null; if (next) fire(next); });
   };
   return (lang) => {
     if (off || (lang !== "ar" && lang !== "en")) return;
