@@ -56,6 +56,23 @@ class TestReissuedHikmaClaim(test_u3_3_hikma_claim.TestHikmaClaim):
         self.assertTrue(all(second["by_owner"].values()))
         self.assertEqual(hikma_claim.claim(self.db, self.ctx, "shibin", old, old), first)
 
+    def test_mixed_price_returns_reverse_the_amount_due_for_the_same_lots(self):
+        old, new = yesterday(self.s.today.isoformat()), self.s.today.isoformat()
+        sale = self.sell(4)
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE item_id=? AND batch_no='NEW'", (self.pan,))
+            self.db.execute("UPDATE sales SET completed_at=? WHERE id=?", (during(old), sale["id"]))
+        issued = hikma_claim.claim(self.db, self.ctx, "shibin", old, old)
+        lid = sale["lines"][0]["id"]
+        for qty in (1, 3):
+            self.s.return_items(self.ctx, sale["id"], {lid: qty}, refund_method="credit", reason="اختبار")
+            later = hikma_claim.claim(self.db, self.ctx, "shibin", new, new)
+            combined = hikma_claim.claim(self.db, self.ctx, "shibin", old, new)
+            with self.subTest(qty=qty):
+                self.assertEqual(issued["due"] + later["due"], combined["due"])
+        self.assertEqual(later["previous_returns"]["by_owner"], {"pharmacy": 5700, "hospital": 2000})
+        self.assertEqual(combined["due"], 0)
+
 
 class TestRefundDate(PlanCase):
     def test_return_only_day_reconciles_and_prior_report_is_stable(self):
@@ -164,3 +181,13 @@ class TestPendingDatabaseUpdate(PlanCase):
             self.assertEqual(done.json()["status"], "completed")
             self.assertEqual(db.one("SELECT status FROM sales WHERE id=?", (sale,))["status"], "completed")
             devices.assert_called_once()
+        self.assertEqual(releases.resume_journal(home), "done")
+        self.assertEqual(db.one("SELECT status FROM sales WHERE id=?", (sale,))["status"], "completed")
+
+    def test_shortcut_retries_the_page_while_candidate_is_pending(self):
+        _, _, _, client, _, _ = self.candidate()
+        self.assertTrue(client.get("/api/health").json()["ok"])
+        waiting = client.get("/")
+        self.assertEqual(waiting.status_code, 503)
+        self.assertIn("text/html", waiting.headers["content-type"])
+        self.assertIn('http-equiv="refresh"', waiting.text)
