@@ -402,7 +402,7 @@ OLD_SIDE = ".before-restore"
 
 def _write_journal(db_path: Path, journal: dict) -> None:
     path = db_path.parent / RESTORE_JOURNAL
-    part = path.with_suffix(".json.part")
+    part = path.with_name(RESTORE_JOURNAL + ".part")
     with open(part, "w", encoding="utf-8") as f:
         json.dump(journal, f)
         f.flush()
@@ -443,15 +443,19 @@ def _undo_restore(db_path: Path, journal: dict) -> None:
 
 
 def _restore_done(db_path: Path, journal: dict) -> None:
-    """The restored database is in place: drop what belonged to the old one. The compressed-history cache
-    is checked by sha256 before every use, so it is only removed to save the space."""
+    """The restored database is in place: drop what belonged to the old one. Best effort: the restore is
+    finished whatever happens here, and a leftover that Windows will not delete right now (antivirus, the
+    indexer) is harmless: the side files are renamed out of SQLite's sight, the compressed-history cache is
+    checked by sha256 before every use, and a journal without a staged database only means "finished"."""
     folder = db_path.parent
-    for suffix in ("-wal", "-shm"):
-        Path(str(db_path) + suffix + OLD_SIDE).unlink(missing_ok=True)
+    names = [RESTORE_JOURNAL] + [db_path.name + suffix + OLD_SIDE for suffix in ("-wal", "-shm")]
     if journal.get("archive_aside") or journal.get("archive_new"):
-        for name in (ARCHIVE_MEMBER, ARCHIVE_MEMBER + ".sha256"):
+        names += [ARCHIVE_MEMBER, ARCHIVE_MEMBER + ".sha256"]
+    for name in names:
+        try:
             (folder / name).unlink(missing_ok=True)
-    (folder / RESTORE_JOURNAL).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def finish_interrupted_restore(db_path: Path) -> str | None:
@@ -493,6 +497,10 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
     missing_attachments lists the rest ({'source_id', 'filename', 'problem'}). Any other problem
     (database, checksum, counts) is always refused."""
     finish_interrupted_restore(db_path)             # an earlier restore that was cut: settle it first
+    if str(db_path) != ":memory:" and (Path(db_path).parent / RESTORE_JOURNAL).exists():
+        # an old journal read together with this restore's staged files would undo the wrong restore
+        raise RuntimeError(f"the journal of an earlier restore ({RESTORE_JOURNAL}) cannot be removed (a program"
+                           " is holding it); nothing restored. Close what uses the data folder and repeat")
     info = verify_archive(archive)
     hard, soft = split_problems(info["problems"])
     if hard or (soft and not allow_missing_attachments):
@@ -596,17 +604,22 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
             arch_part.unlink(missing_ok=True)
             staged.unlink(missing_ok=True)
             raise
-        aside = None
-        if live_arch.exists() and not same:
-            stamp, n = f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}", 1
-            aside = live_arch.with_name(stamp + ".sqlite")
-            while aside.exists():                       # never over an earlier kept history
-                aside = live_arch.with_name(f"{stamp}-{n}.sqlite")
-                n += 1
-        journal = {"db": db_path.name, "staged": staged.name, "archive_aside": aside.name if aside else None,
-                   "archive_new": arch_part.exists(),
-                   "archive_readonly": bool(aside and not live_arch.stat().st_mode & 0o200)}
-        _write_journal(db_path, journal)
+        try:
+            aside = None
+            if live_arch.exists() and not same:
+                stamp, n = f"estock-archive-replaced-{datetime.now():%Y%m%d-%H%M%S}", 1
+                aside = live_arch.with_name(stamp + ".sqlite")
+                while aside.exists():                       # never over an earlier kept history
+                    aside = live_arch.with_name(f"{stamp}-{n}.sqlite")
+                    n += 1
+            journal = {"db": db_path.name, "staged": staged.name, "archive_aside": aside.name if aside else None,
+                       "archive_new": arch_part.exists(),
+                       "archive_readonly": bool(aside and not live_arch.stat().st_mode & 0o200)}
+            _write_journal(db_path, journal)
+        except BaseException:                           # nothing moved yet: only the staged files go
+            for f in (arch_part, staged, db_path.parent / (RESTORE_JOURNAL + ".part")):
+                f.unlink(missing_ok=True)
+            raise
         try:
             if aside:
                 live_arch.chmod(0o644)

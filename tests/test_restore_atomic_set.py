@@ -255,3 +255,43 @@ class TestManageSettlesACutRestore(Base):
                     backup_dir=self.tmp / "auto")
         manage._db(s).close()
         self.assert_original_set()
+
+
+class TestCleanupAfterAFinishedRestoreIsBestEffort(Base):
+    """Windows: antivirus or the indexer can hold a leftover file for a moment. The restore is done once the
+    database moved: a leftover that cannot be deleted must not report a failure, nor block the next start."""
+
+    def held(self, *names):
+        real = Path.unlink
+
+        def unlink(p, missing_ok=False):
+            if Path(p).name in names and Path(p).exists():
+                raise PermissionError(13, "The process cannot access the file (injected)")
+            return real(p, missing_ok=missing_ok)
+        return mock.patch.object(Path, "unlink", unlink)
+
+    def test_a_held_leftover_does_not_fail_the_restore(self):
+        Path(str(self.db_path) + "-wal").write_bytes(b"")           # the old database's side file
+        cache = self.arch.with_name(backup.ARCHIVE_MEMBER)
+        cache.write_bytes(b"old cache")
+        with self.held(self.db_path.name + "-wal" + backup.OLD_SIDE, cache.name):
+            r = self.restore()
+        self.assertEqual(r["manifest"]["problems"], [])
+        self.assertFalse((self.db_path.parent / backup.RESTORE_JOURNAL).exists())
+        self.assertIsNone(backup.finish_interrupted_restore(self.db_path))
+        self.assert_restored_set()
+
+    def test_a_journal_that_cannot_be_removed_never_stops_the_next_start(self):
+        with self.held(backup.RESTORE_JOURNAL):
+            self.restore()                                           # done; only the journal is left
+            self.assertEqual(backup.finish_interrupted_restore(self.db_path), "completed")
+        self.assertEqual(backup.finish_interrupted_restore(self.db_path), "completed")
+        self.assert_restored_set()
+
+    def test_a_failed_journal_write_leaves_no_staged_files(self):
+        def full(*a, **k):
+            raise OSError(28, "No space left on device (injected)")
+        with mock.patch.object(backup, "_write_journal", full):
+            with self.assertRaises(OSError):
+                self.restore()
+        self.assert_original_set()
