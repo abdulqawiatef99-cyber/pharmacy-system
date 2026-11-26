@@ -56,7 +56,6 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
 - On the PC: E-Stock `amount` on sale lines = packs? compare one item-month of the smart order (#431).
 - Label print after the device-settings restore (B4): photo if one label still spans two.
 - Odd piastres at shift close (#299): tolerance under 0.25 or leave as is.
-
 - RCPT-1 receipt changes to confirm on the first printed receipt: the pharmacy name now prints above the
   intro line; on credit/delivery the customer's name, phone and address print even with "show customer" off;
   the phone prints on every sale with a customer.
@@ -65,3 +64,4 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
 - «نزّله» للتحديث الجاي بعد ما الإصدار المجمّع يتدمج.
 - ورقة فارما أوفرسيز التانية لاختبار هامش الموزع.
 - مقارنة صنف واحد في الطلب الذكي مع تقرير مبيعات إي ستوك.
+- أول إيصال بعد التحديث: اسم الصيدلية بقى فوق سطر المقدمة، وبيانات العميل بتظهر في الآجل والتوصيل.
