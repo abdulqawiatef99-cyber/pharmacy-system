@@ -200,8 +200,10 @@ document.addEventListener("mouseup", (e) => {   // the click that focused it wou
 });
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
 const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+// UX-26 (owner 26/11): each name in its own direction, so an English name reads left to right in Arabic screens
+const bidi = (t) => `<bdi>${esc(t)}</bdi>`;
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
-  ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
+  ? `${bidi(it.name_en)}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
 async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
   const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
@@ -641,7 +643,7 @@ const HELP = {
   "customer-name-review": ["راجع أسماء نفس الحساب في إي ستوك وتاريخ البيع.", ["اختار الاسم اللي هيظهر في البرنامج واضغط اعتمد الاسم."]],
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
   pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "أسرع بيع: امسح الأصناف، ثم Enter على البحث الفاضي يوديك لخانة «العميل دفع»، وEnter تاني يتمم البيع بالمبلغ بالظبط (أو اكتب المبلغ اللي دفعه الأول). المسح من أي خانة في الشاشة بيضيف الصنف ومبيكتبش في الخانة.", "البيع السريع صف واحد تحت الفاتورة: بيصغر بعد أول صنف، وزرار «افتح ▾» يفتحه.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
-  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
+  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها.", "«إلغاء الفاتورة» يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
   "items/1": ["بطاقة الصنف: الرصيد والتشغيلات والأسعار والحركة والمثيل والبديل.", ["التسوية تحتاج إلى سبب، وتظهر في تقرير خسائر المخزون.", "المثيل يظهر عند كتابة المادة الفعالة والتركيز والشكل في تعديل الصنف."]],
@@ -1861,7 +1863,7 @@ function renderLine(l) {
   const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   let match;
   if (l.item_id && l.match_status !== "suggested") {
-    match = `<div><span data-line-item>${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
+    match = `<div><span data-line-item dir="auto">${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
       <div class="muted small" data-line-item-info>${esc(purchaseItemInfo(l.item))}</div>`;
   } else {
     const c = l.candidates || [];
@@ -2968,6 +2970,14 @@ const ISSUE_AR = {
   same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم هاتف غير صحيح",
   invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
+  unknown_pack_layout: "عدد الشرائط في العلبة غير معروف — حدده",
+};
+// QA-007: the choices for a counted item whose file gives no pack layout (never guessed as "whole box")
+const packLayoutOptions = (x) => {
+  const lay = x.issues.find((i) => i.code === "unknown_pack_layout");
+  if (!lay) return "";
+  return (lay.suggest || []).filter((n) => n > 1 && n < lay.count).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
+    + `<option value="pack:${lay.count}">بالواحدة: ${lay.count} في العلبة</option><option value="pack:1">علبة كاملة فقط</option><option value="pack:?">عدد آخر في العلبة…</option>`;
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
 
@@ -3044,14 +3054,20 @@ async function viewImportRun(id) {
       <td>${open ? `<select data-dec="${esc(x.id)}">
         <option value="">${x.decision ? esc(x.decision) : "— اختر —"}</option>
         <option value="skip">تجاهل السطر</option>
-        ${x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : ""}
+        ${packLayoutOptions(x) || (x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : "")}
         ${x.target_id && r.kind === "items" ? `<option value="link:${esc(x.target_id)}">ربط بالصنف الموجود</option>` : ""}
       </select>` : esc(x.decision || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا يوجد</td></tr>`}</tbody>
   </table></div></section>`;
   app.querySelectorAll("[data-dec]").forEach((s) => s.addEventListener("change", async () => {
     if (!s.value) return;
-    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision: s.value } }); toast("تم الحفظ"); }
-    catch (e) { toast(e.message, true); }
+    let decision = s.value;
+    if (decision === "pack:?") {
+      const n = prompt("عدد وحدات البيع (الشرائط) في العلبة");
+      if (n === null || !/^[0-9]+$/.test(n.trim())) { s.value = ""; return; }
+      decision = `pack:${Number(n.trim())}`;
+    }
+    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision } }); toast("تم الحفظ"); }
+    catch (e) { s.value = ""; toast(e.message, true); }
   }));
   $("#impApply")?.addEventListener("click", async () => {
     if (!confirm("تطبيق الاستيراد؟ العملية تتم مرة واحدة بالكامل أو لا شيء.")) return;
@@ -3992,7 +4008,7 @@ async function viewSalesAdvanced() {
     const box = document.createElement("div");
     if (mode === "full") {
       box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "بدون عميل")} — ${esc(r.seller || "")}</h3>
-        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${esc(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
@@ -4091,7 +4107,7 @@ function cashRefundRoom(s) {
 
 function refundOptions(s, includeWallet = false) {
   const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
-  const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
+  const cash = !room ? "نقدًا من الدرج — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الدرج (حتى ${money(room)} ج)` : "نقدًا من الدرج";
   const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
     ...(includeWallet && s.paid_transfer ? [["transfer", "رجّع للمحفظة الأصلية", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
@@ -4134,7 +4150,7 @@ async function viewExchange() {
   const drawDraft = () => {
     // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
     findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
-    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
       try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
@@ -4146,7 +4162,7 @@ async function viewExchange() {
     $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
       ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
-      ${sale.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+      ${sale.lines.map((l) => `<tr><td>${bidi(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
@@ -4254,7 +4270,7 @@ async function viewSale(id) {
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الجمهور</th><th>قبل الخصم</th><th>الخصم</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
-    ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td>
+    ${s.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td>
       <td>${l.official_prices.map((p) => salePriceQty(p, l.item)).join("<br>") || esc(fq(l.qty_base, l))}</td>
       <td class="num">${l.official_prices.map((p) => money(p.price)).join("<br>")}</td>
       <td class="num">${l.official_prices.map((p) => money(p.gross)).join("<br>")}</td>
@@ -4272,7 +4288,8 @@ async function viewSale(id) {
       <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
-      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
+      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
+      <small class="muted void-why">يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.</small></div>` : ""}
   </section>`;
   // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
   app.querySelectorAll("[data-ret]").forEach((i) => i.addEventListener("focus", () => i.select()));
@@ -5049,7 +5066,8 @@ async function viewPos(afterCheckout = false) {
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
     const exactShort = !short || res[0]?.code === v || res[0]?.code === `E${v}`;
     if (!live && res.length === 1 && sellable(res[0]) && exactShort && (scanned || !found.hint)) {
-      return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
+      const [packs, units, partial] = scanAddQty(res[0], unit);
+      return addItem(res[0], packs, units, given != null, partial ? `مفيش علبة كاملة، اتنزل ${unitName(res[0])}` : "");
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
@@ -5349,19 +5367,30 @@ function trackPosAdd(work) {
   return pending;
 }
 
-// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
-function addItem(item, packs, units, scanned = false) {
-  return trackPosAdd(addPosLine(item, packs, units, scanned));
+// UX-26 (owner 26/11): a scan of an item with no full box left but some strips/units adds one unit
+// instead of being refused. [packs, units, partial]; with nothing left it stays a box and the server refuses.
+function scanAddQty(r, unit) {
+  if (unit) return [0, 1, false];
+  if (r.is_service || r.pack_size <= 1 || r.available_qty == null || r.available_qty >= r.pack_size || r.available_qty <= 0)
+    return [1, 0, false];
+  return [0, 1, true];
 }
 
-async function addPosLine(item, packs, units, scanned) {
+// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
+// note = a line for the cashier once the add succeeded (UX-26: a unit instead of a box), shown with any warning
+function addItem(item, packs, units, scanned = false, note = "") {
+  return trackPosAdd(addPosLine(item, packs, units, scanned, note));
+}
+
+async function addPosLine(item, packs, units, scanned, note = "") {
   const sid = SALE.id;
   const update = await api(`/api/sales/${sid}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
   if (SALE?.id !== sid || !$("#posCart") || update.version < SALE.version) return;
   SALE = update;
   const added = SALE.lines.find((l) => l.item_id === item.id);
   if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
-    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
+    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`, note].filter(Boolean).join(" · "), true);
+  else if (note) toast(note);          // Codex P2 on #478: never replaces a dispensing warning
   $("#posRes").innerHTML = "";
   if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
   $("#posQ").focus();

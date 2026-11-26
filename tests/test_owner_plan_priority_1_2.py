@@ -171,7 +171,7 @@ class TestPriority1(PlanCase):
         self.assertIn('<p class="tag">مرتجع</p>', slip)
         self.assertIn(f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", slip)
         self.assertRegex(slip, r"المبلغ المرتجع</td><td>18\.00<")
-        self.assertIn("نقدًا من الخزينة", slip)
+        self.assertIn("نقدًا من الدرج", slip)
         self.assertIn("العميل مش محتاجه", slip)
         inv_page = self.call("GET", f"/api/sales/{sid}")
         self.assertEqual(inv_page["returned_total"], 1800)
