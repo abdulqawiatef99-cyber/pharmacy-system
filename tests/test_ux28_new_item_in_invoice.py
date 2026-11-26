@@ -176,6 +176,29 @@ const { chromium } = require('playwright');
   await p.waitForSelector('dialog.new-item-card', { state: 'detached' });
   out.gs1Batch = await p.inputValue('#qaBatch');
   out.gs1Exp = await p.inputValue('#qaExp');
+  // Codex P2: an alphanumeric scan is the barcode, never the English name
+  await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: 'ABC12345' })));
+  await p.waitForSelector('#qaRes [data-qa-new]');
+  await p.click('#qaRes [data-qa-new]');
+  await p.waitForSelector('dialog.new-item-card[open]');
+  out.alnum = [await p.inputValue('dialog.new-item-card [name=barcode]'), await p.inputValue('dialog.new-item-card [name=name_en]')];
+  await p.keyboard.press('Escape');
+  await p.waitForSelector('dialog.new-item-card', { state: 'detached' });
+  // Codex P2: leaving the screen while the card is still opening does not lock the button for good
+  await p.route('**/api/categories*', () => {});                 // held for ever, as an abandoned request is
+  await p.fill('#qaQ', 'Nothingsuch');
+  await p.waitForSelector('#qaRes [data-qa-new]');
+  await p.click('#qaRes [data-qa-new]');
+  await p.evaluate(() => { location.hash = '#/purchases'; });
+  await p.waitForSelector('#manForm');
+  await p.unroute('**/api/categories*');
+  await p.evaluate((d) => { location.hash = '#/purchases/' + d; }, draft);
+  await p.waitForSelector('#qaQ');
+  await p.fill('#qaQ', 'Nothingsuch');
+  await p.waitForSelector('#qaRes [data-qa-new]');
+  await p.click('#qaRes [data-qa-new]');
+  out.reopened = await p.waitForSelector('dialog.new-item-card[open]', { timeout: 5000 }).then(() => true, () => false);
+  await p.keyboard.press('Escape');
   // the same box scanned again (another batch) now finds the item
   await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: '01062212345678971729063010LOT8' })));
   await p.waitForFunction(() => document.querySelector('#qaQ').value.includes('SYNTHO GS1'));
@@ -236,6 +259,8 @@ class TestScreen(APICase):
         self.assertEqual(out["gs1Batch"], "LOT7")
         self.assertTrue(out["gs1Exp"])
         self.assertEqual(out["rescan"], "LOT8")
+        self.assertEqual(out["alnum"], ["ABC12345", ""])
+        self.assertTrue(out["reopened"])
 
     def test_no_button_without_items_write(self):
         inv = self.draft()

@@ -1765,12 +1765,12 @@ function bindQuickAdd() {
     if (e.target.closest("[data-qa-new]")) {                     // UX-28: not found → a new item, then it is picked
       clearTimeout(timer); seq++;
       const from = newFrom;
-      showNewItemCard(from?.barcode || q.value.trim(), (created) => {
+      showNewItemCard(from ? "" : q.value.trim(), (created) => {
         if (!current() || !q.isConnected) { toast("الصنف اتضاف؛ دوّر عليه تاني عشان تحطه في الفاتورة"); return; }
         pick(created);
         if (from?.expiry) { $("#qaExp").value = from.expiry; $("#qaExpSee").textContent = "الصلاحية من الباركود"; }
         if (from?.batch) $("#qaBatch").value = from.batch;
-      });
+      }, from?.barcode || null);
     }
   });
   picker.addEventListener("keydown", (e) => {
@@ -2582,8 +2582,12 @@ function invoiceCardDetails(c) {
 // UX-28 (owner 23/11, 26/11): a new item from inside the purchase invoice. A short card in place: names, barcode, the
 // pack and its small units, the public price and the group. Saved in one step (the group with the item: a refused
 // group refuses the whole item); the created item comes back to `onCreated` (the invoice's entry row picks it).
+// Codex P2: an abandoned request (the screen changed while the groups were loading) never settles, so the guard
+// is cleared on every screen change too
 let NEW_ITEM_OPENING = false;
-async function showNewItemCard(query, onCreated) {
+window.addEventListener("hashchange", () => { NEW_ITEM_OPENING = false; });
+// `scanned`: the barcode a scan gave (any characters), so it is never read as a name (Codex P2)
+async function showNewItemCard(query, onCreated, scanned = null) {
   if ($("dialog[open]") || NEW_ITEM_OPENING) return;        // review P2: a double click opened two cards
   NEW_ITEM_OPENING = true;
   let cats;
@@ -2592,7 +2596,7 @@ async function showNewItemCard(query, onCreated) {
   const focused = document.activeElement;
   // digits typed on the Arabic keyboard count as digits; a short number (an item code) fills no name (review P2)
   const q = String(query || "").trim().replace(/[٠-٩]/g, (x) => "٠١٢٣٤٥٦٧٨٩".indexOf(x));
-  const digits = /^\d+$/.test(q), code = digits && q.length >= 6, latin = /[a-z]/i.test(q);
+  const digits = !!scanned || /^\d+$/.test(q), code = scanned || (digits && q.length >= 6 ? q : ""), latin = /[a-z]/i.test(q);
   const canPrice = ME.permissions.includes("items.price"), canNoReturn = ME.permissions.includes("items.no_return");
   const d = document.createElement("dialog");
   d.className = "invoice-item-card new-item-card";
@@ -2603,7 +2607,7 @@ async function showNewItemCard(query, onCreated) {
     <div class="formgrid">
       <label class="f">الاسم بالإنجليزي<input name="name_en" lang="en" data-upper dir="ltr" autocomplete="off" value="${latin && !digits ? esc(upperEn(q)) : ""}"></label>
       <label class="f">الاسم بالعربي<input name="name_ar" lang="ar" autocomplete="off" value="${!latin && !digits ? esc(q) : ""}"></label>
-      <label class="f">الباركود<input name="barcode" dir="ltr" inputmode="numeric" autocomplete="off" value="${code ? esc(q) : ""}"></label>
+      <label class="f">الباركود<input name="barcode" dir="ltr" inputmode="numeric" autocomplete="off" value="${esc(code)}"></label>
       <label class="f">اسم العبوة<input name="pack_unit_name" autocomplete="off" value="علبة"></label>
       <label class="f">عدد الوحدات الصغيرة في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <label class="f">اسم الوحدة الصغيرة<input name="base_unit_name" autocomplete="off" placeholder="شريط / أمبول / قرص"></label>
