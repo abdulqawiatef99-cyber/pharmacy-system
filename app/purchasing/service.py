@@ -582,7 +582,7 @@ class Purchasing:
         if bad:
             raise ValidationFailed(f"حقول غير قابلة للتعديل: {', '.join(sorted(bad))}")
         with self.db.transaction():
-            self._draft_for_update(ctx, inv_id, version)
+            inv = self._draft_for_update(ctx, inv_id, version)
             line = self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=?"
                                " AND org_id=?", (line_id, inv_id, ctx.org_id))
             if not line:
