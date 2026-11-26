@@ -308,7 +308,10 @@ class TestS26PreTaxTotal(unittest.TestCase):
 
 class TestS27InvoiceTaxInCost(_Purchase):
     def test_invoice_tax_on_zero_price_lines_reaches_the_unit_cost(self):
-        iid, d = self.manual({"qty": 4, "unit_net_price": 0}, extra_tax=800, declared_total=800)
+        iid = self.p.create_manual(self.ctx, supplier_id=self.sup)
+        self.p.update_header(self.ctx, iid, {"invoice_no": "77", "extra_tax": 800, "declared_total": 800}, None)
+        d = self.p.add_line(self.ctx, iid, {"item_id": self.item, "qty": 4, "public_price": 10000,
+                                           "discount_bp": 10000, "expiry_date": "12/2029"}, None)
         self.p.approve(self.ctx, iid, d["invoice"]["version"])
         s = inv.stock_for_item(self.db, self.ctx, self.item)
         self.assertEqual(sup.balance(self.db, self.ctx.org_id, self.sup), 800)
