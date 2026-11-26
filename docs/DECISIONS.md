@@ -119,3 +119,17 @@ tables per row. Decision:
   run in a worker thread on that thread's own connection inside one read snapshot (`Database.read_snapshot`,
   writes refused inside it), so a long report never stops the cashier screen.
 Tests: `tests/test_report_freeze_249.py` (fail before the change).
+
+## ADR-018 Refuse the impossible: covered and pending cases (owner 21/11; moved from OWNER_RULES §13 on 26/11)
+Rule: `docs/OWNER_RULES.md` §8. Tests: `tests/test_u2_0_refusals.py`.
+- Covered (U2-0, 22/11): sale or quantity beyond stock; zero or negative quantity or price; discount above the
+  line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
+  (cash for a card invoice = exception); credit sale without a customer; customer collection above the debt;
+  supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
+  today; expired expiry at purchase approval (an expiry before the invoice date is always already expired);
+  the same supplier invoice number twice. A refund to the customer's own account (store credit) stays allowed
+  whatever the invoice was paid with: no money leaves the pharmacy. The supplier advance and the cash refund of
+  a card invoice can be approved on the screen by the owner or a manager (PIN), with the reason.
+- Pending (needs a migration or a later item): an exception path for a genuinely repeated supplier invoice
+  number (today always refused), returnable expired goods with permission (today always refused), sale price
+  above the public price (the screen cannot type a price; it comes from the batch), a unit change on a line (U2-13).
