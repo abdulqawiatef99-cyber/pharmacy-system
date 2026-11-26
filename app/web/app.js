@@ -4979,8 +4979,17 @@ async function openDraft(id) {
   POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = [];
 }
 
-async function viewPos(afterCheckout = false) {
+async function viewPos(afterCheckout = false, doneId = null) {
   QUICK = null;      // stock may have changed since the last visit (a purchase approved): no stale "نفد" (11/01; «ناقص» = not in the market, update 1)
+  // U4-24 (owner 23/11: no lag going back to the sale screen): back from another screen, or on another invoice tab,
+  // the screen is drawn at once from what it kept (the invoices, the open invoice, the settings), and checked
+  // with the server right after; anything changed meanwhile (another PC, the settings) is drawn again.
+  if (!afterCheckout && POS.tabs && POS.tabsUser === ME.user.id && CHANNELS && SALE?.status === "draft") {
+    if (!POS.tabs.some((d) => d.id === SALE.id)) POS.tabs.push({ id: SALE.id, kind: SALE.kind, lines: SALE.lines.length });
+    drawPos(POS.tabs);
+    posRevalidate(SALE.id);
+    return;
+  }
   CHANNELS = CHANNELS || (await api("/api/payment-channels")).channels.filter((c) => c.is_active);
   if (!afterCheckout) {
     // Another PC may have changed the settings since this screen was opened.
@@ -4988,11 +4997,85 @@ async function viewPos(afterCheckout = false) {
       api("/api/settings/receipt").catch(() => RCFG), api("/api/settings/ui").catch(() => ME.ui),
     ]);
   }
-  const tabs = (await api("/api/sales/drafts")).drafts;
+  // after a sale that was the only open invoice, the next empty one is asked for together with the list
+  // (one wait instead of two)
+  const alone = afterCheckout && doneId && POS.tabsUser === ME.user.id && POS.tabs?.length === 1 && POS.tabs[0].id === doneId;
+  const [tabs, fresh] = await Promise.all([api("/api/sales/drafts").then((r) => r.drafts),
+    alone && !SALE ? api("/api/sales", { method: "POST", body: {} }) : null]);
+  if (fresh) { SALE = fresh; POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = []; }
   if (!SALE || SALE.status !== "draft" || !tabs.some((d) => d.id === SALE.id)) {
-    await openDraft(tabs.at(-1)?.id);
-    if (!tabs.length) tabs.push({ id: SALE.id, kind: SALE.kind, lines: SALE.lines.length });
+    if (!(fresh && SALE?.id === fresh.id)) await openDraft(tabs.at(-1)?.id);
+    if (!tabs.some((d) => d.id === SALE.id)) tabs.push({ id: SALE.id, kind: SALE.kind, lines: SALE.lines.length });
   }
+  POS.tabs = tabs; POS.tabsUser = ME.user.id;
+  drawPos(tabs);
+}
+
+// U4-24: the kept screen is checked with the server; only a real difference draws it again. A redraw never
+// takes text the cashier is typing: then only the invoice and the payment side are drawn.
+async function posRevalidate(sid) {
+  const current = onThisScreen(), version = SALE.version;
+  let got;
+  try {
+    got = await Promise.all([api("/api/settings/receipt"), api("/api/settings/ui"),
+      api("/api/sales/drafts").then((r) => r.drafts), api(`/api/sales/${sid}`)]);
+  } catch { return; }                       // offline: what is shown stays; every change is checked by the server
+  if (!current() || SALE?.id !== sid) return;
+  const [rcfg, ui, tabs, sale] = got;
+  const key = (list) => JSON.stringify(list.map((d) => [d.id, d.kind, d.lines]));
+  const sameTabs = key(tabs) === key(POS.tabs || []);
+  const sameSettings = JSON.stringify(rcfg) === JSON.stringify(RCFG) && JSON.stringify(ui) === JSON.stringify(ME.ui);
+  RCFG = rcfg; ME.ui = ui; POS.tabs = tabs;
+  if (sale.status !== "draft" || !tabs.some((d) => d.id === sid)) { SALE = null; return viewPos(); }  // closed elsewhere
+  // a save still running (not one that finished long ago: POS.saving keeps its settled promise, Codex P2 on #470)
+  const saving = POS.saving && await new Promise((resolve) => {
+    let settled = false;
+    POS.saving.then(() => { settled = true; }, () => { settled = true; });
+    setTimeout(() => resolve(!settled), 0);
+  });
+  if (!current() || SALE?.id !== sid) return;
+  const busy = saving || pendingPosAdds(sid).length || SALE.version !== version;
+  const newer = !busy && sale.version !== SALE.version;
+  if (newer) SALE = sale;
+  if (sameTabs && sameSettings && !newer) return;
+  const q = $("#posQ"), typing = (q && q.value) || (document.activeElement && document.activeElement !== q &&
+    document.activeElement !== document.body && app.contains(document.activeElement));
+  if (busy || typing) {                      // only a changed invoice is drawn, and the box being typed in keeps its text
+    if (newer) keepTyping(() => { renderCart(); renderSide(); });
+    return;
+  }
+  drawPos(tabs);
+}
+// the focused box (an amount, a discount, the customer search) is found again after a redraw, with its text and caret
+function keepTyping(draw) {
+  const a = document.activeElement;
+  const attr = a && [...a.attributes].find((x) => x.name.startsWith("data-") && x.name !== "data-tour");
+  const sel = a?.id ? `#${CSS.escape(a.id)}` : attr ? `[${attr.name}="${CSS.escape(attr.value)}"]` : null;
+  const typed = a && "value" in a ? a.value : null;
+  // a discount keeps its unit (% or ج) with its amount: 5 ج must never come back as 5 % (Codex P1 on #470)
+  const unitSel = a?.dataset?.disc ? `[data-dunit="${CSS.escape(a.dataset.disc)}"]` : a?.id === "posInvDisc" ? "#posInvDiscU" : null;
+  const unit = unitSel ? app.querySelector(unitSel)?.value : null;
+  let caret = null;
+  try { caret = [a.selectionStart, a.selectionEnd]; } catch { /* number boxes have no caret */ }
+  draw();
+  const u = unitSel && app.querySelector(unitSel);
+  if (u && unit != null && u.value !== unit) u.value = unit;
+  const b = sel && app.querySelector(sel);
+  if (!b || typed == null) return;
+  const drawn = b.value;
+  if (b.value !== typed) { b.value = typed; b.dispatchEvent(new Event("input", { bubbles: true })); }
+  b.focus();
+  // the browser takes the text put back as the box's starting value, so leaving it would save nothing: the box
+  // reports its change itself when it is left with something other than what the server has
+  if (typed !== drawn) {
+    let changed = false;
+    b.addEventListener("change", () => { changed = true; }, { once: true });
+    b.addEventListener("blur", () => { if (!changed && b.value !== drawn) b.dispatchEvent(new Event("change", { bubbles: true })); }, { once: true });
+  }
+  try { if (caret?.[0] != null) b.setSelectionRange(...caret); } catch { /* not selectable */ }
+}
+
+function drawPos(tabs) {
   app.innerHTML = `
   <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
@@ -5018,9 +5101,15 @@ async function viewPos(afterCheckout = false) {
   }));
   document.querySelectorAll("[data-close]").forEach((x) => x.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const d = tabs.find((t) => t.id === x.dataset.close);
-    if (d?.lines && !confirm("هذه الفاتورة بها أصناف. هل تغلقها دون بيع؟")) return;
-    try { await api(`/api/sales/${x.dataset.close}/discard`, { method: "POST", body: {} }); if (SALE.id === x.dataset.close) SALE = null; viewPos(); }
+    const d = (POS.tabs || tabs).find((t) => t.id === x.dataset.close);
+    const n = x.dataset.close === SALE?.id ? SALE.lines.length : d?.lines;     // the open invoice: its real count
+    if ((n || n == null) && !confirm("هذه الفاتورة بها أصناف. هل تغلقها دون بيع؟")) return;
+    try {
+      await api(`/api/sales/${x.dataset.close}/discard`, { method: "POST", body: {} });
+      if (POS.tabs) POS.tabs = POS.tabs.filter((t) => t.id !== x.dataset.close);
+      if (SALE.id === x.dataset.close) SALE = null;
+      viewPos();
+    }
     catch (er) { toast(er.message, true); }
   }));
   $("#tabNew").addEventListener("click", newTab);
@@ -5729,6 +5818,8 @@ function newCustomerDialog() {
 
 function refreshTabLabel() {
   const t = document.querySelector(`.tab.on`);
+  const kept = SALE && POS.tabs?.find((d) => d.id === SALE.id);
+  if (kept) { kept.lines = SALE.lines.length; kept.kind = SALE.kind; }    // U4-24: the kept list stays true
   if (!t || !SALE) return;
   const n = (t.dataset.n ||= (t.firstChild.textContent.match(/\d+/) || ["1"])[0]);
   t.firstChild.textContent = `\n      فاتورة ${n}${SALE.kind === "delivery" ? " · توصيل" : ""} · ${SALE.lines.length ? `${SALE.lines.length} صنف` : "فارغة"}\n      `;
@@ -5852,7 +5943,7 @@ async function finishSale(findings, sid) {
     toast(`✓ تم البيع — فاتورة رقم ${done.sale_no}${done.kind === "delivery" ? (done.delivery?.cash_due ? ` (توصيل: ${money(done.delivery.cash_due)} ج نقدي مع مندوب التوصيل حتى يسلّمها)` : " (توصيل: مدفوعة من غير نقدي، مفيش فلوس مع المندوب)") : ""}`);
     if (SALE?.id === sid) SALE = null;
     try {
-      if (location.hash.startsWith("#/pos")) await viewPos(true);
+      if (location.hash.startsWith("#/pos")) await viewPos(true, sid);
     } finally {
       app.inert = false;
       $("#posQ")?.focus();
