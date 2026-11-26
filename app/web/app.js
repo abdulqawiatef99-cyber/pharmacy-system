@@ -110,6 +110,7 @@ const I18N_PATTERNS = [
   [new RegExp(`${NUM}\\s*(?:يوم|أيام)(?![\\u0600-\\u06FF])`, "g"), "$1 days"],
   [new RegExp(`${NUM}\\s*(?:وحدة|وحدات)(?![\\u0600-\\u06FF])`, "g"), "$1 units"],
   [new RegExp(`${NUM}\\s*(?:علبة|علب)(?![\\u0600-\\u06FF])`, "g"), "$1 packs"],
+  [new RegExp(`\\(أقصى خصم لك ${NUM}%\\)`, "g"), "(your maximum discount $1%)"],
   [new RegExp(`${NUM}\\s*(?:صنف|أصناف)(?![\\u0600-\\u06FF])`, "g"), "$1 items"],
   [new RegExp(`${NUM}\\s*(?:شهر|شهور)(?![\\u0600-\\u06FF])`, "g"), "$1 months"],
   [new RegExp(`${NUM}\\s*(?:ساعة|ساعات)(?![\\u0600-\\u06FF])`, "g"), "$1 hours"],
@@ -5325,7 +5326,7 @@ function posLine() {
 }
 function posInvoiceCard(line) {
   const sid = SALE.id, active = document.activeElement;
-  const attr = ["data-pos-card", "data-disc", "data-dunit", "data-qp", "data-qu", "data-plus", "data-minus", "data-rm"]
+  const attr = ["data-pos-card", "data-disc", "data-damt", "data-qp", "data-qu", "data-plus", "data-minus", "data-rm"]
     .find((name) => active.hasAttribute(name));
   showInvoiceItemCard(line.item_id, {
     restore: async () => {
@@ -5508,14 +5509,45 @@ async function addPosLine(item, packs, units, scanned, note = "") {
   renderCart(); renderSide();
 }
 
-// a typed discount: "5" / "5%" = percent, "3ج" / "3 ج" / "3egp" = EGP (update 1); null when not a number
-function discAsk(v) {
+// UX-27 PR2 (owner 26/11): a discount is typed in EGP or in percent, in two fields side by side; the screen
+// remembers the last one each person used on this PC (the owner discounts in EGP). Per viewer only.
+const DISC_MODES = ["egp", "pct"];
+function discMode() {
+  try { const m = localStorage.getItem(`discMode:${ME?.user?.id || ""}`); return DISC_MODES.includes(m) ? m : "pct"; }
+  catch { return "pct"; }
+}
+function setDiscMode(m) {
+  try { if (DISC_MODES.includes(m)) localStorage.setItem(`discMode:${ME?.user?.id || ""}`, m); } catch { /* per-viewer only */ }
+}
+// a typed number as the screen reads it: Arabic digits, the Arabic decimal mark ٫ and «ز» (the "." key on the Arabic
+// keyboard) become a plain number; a trailing % or ج is the field's own sign (review of UX-27 PR2)
+const discText = (v) => String(v ?? "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+  .replace(/[٫ز]/g, ".").replace(/\s*(%|ج|جنيه)\s*$/, "");
+// what the other field shows while one is typed: the percent an EGP amount is of `gross`, or the EGP a percent
+// takes (the server's half-up discount_of). "" when the typed text is not a valid discount or there is no price.
+function discOther(mode, text, gross) {
+  const v = discText(text);
+  if (v === "" || !(gross > 0)) return "";
+  const n = exactPiasters(v);                    // EGP -> piasters; percent -> basis points (same 2-decimal rule)
+  if (n == null || n < 0) return "";
+  if (mode === "egp") return n > gross ? "" : pct(Math.round((n * 10000) / gross));
+  return n > 10000 ? "" : money(discountOf(gross, n));
+}
+// the body a typed discount sends: EGP exact to the piastre, percent exact to 0.01%; null when invalid
+function discBody(mode, text) {
+  const v = discText(text), n = v === "" ? 0 : exactPiasters(v);
+  if (n == null || n < 0 || (mode === "pct" && n > 10000)) return null;
+  return mode === "egp" ? { discount_amount: n } : { discount_bp: n };
+}
+// a typed discount: "5" / "5%" = percent, "3ج" / "3 ج" / "3egp" = EGP (update 1); a bare number follows the
+// person's last mode (UX-27); null when not a number
+function discAsk(v, mode = "pct") {
   const t = String(v ?? "").trim();
   if (!t) return null;
-  const egp = /(ج|جنيه|egp)\s*$/i.test(t), num = t.replace(/(ج|جنيه|egp|%)\s*$/i, "").trim();
+  const egp = /(ج|جنيه|egp)\s*$/i.test(t) || (mode === "egp" && !/%\s*$/.test(t)), num = t.replace(/(ج|جنيه|egp|%)\s*$/i, "").trim();
   if (egp) { const p = exactPiasters(num); return p == null || p < 0 ? (toast("مبلغ الخصم غير صحيح", true), null) : { discount_amount: p }; }
-  const bp = toBp(num);
-  return bp == null || Number.isNaN(bp) ? (toast("نسبة الخصم غير صحيحة", true), null) : { discount_bp: bp };
+  const bp = exactPiasters(num);              // exact to 0.01%, never rounded (review of UX-27 PR2)
+  return bp == null || bp < 0 || bp > 10000 ? (toast("نسبة الخصم غير صحيحة", true), null) : { discount_bp: bp };
 }
 
 async function patchLine(lineId, body) {
@@ -5527,7 +5559,20 @@ async function patchLine(lineId, body) {
     }
     catch (er) { toast(er.message, true); renderCart(); return false; }     // the controls show what is saved
   })();
-  await POS.saving;
+  return POS.saving;
+}
+
+// the two discount fields of a line, the person's last mode first; each shows what is saved
+function discFields(l) {
+  const amt = l.discount_amount ? money(l.discount_amount) : l.discount_bp ? money(discountOf(l.gross, l.discount_bp)) : "";
+  const per = l.discount_bp ? pct(l.discount_bp) : l.discount_amount ? discOther("egp", money(l.discount_amount), l.gross) : "";
+  const most = ME.role === "owner" ? "" : ` (أقصى خصم لك ${pct(ME.max_discount_bp)}%)`;
+  const f = {
+    egp: `<label class="dfield"><input class="narrow" data-damt="${esc(l.id)}" inputmode="decimal" lang="en" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="الخصم بالجنيه" title="${esc("الخصم بالجنيه" + most)}"> ج</label>`,
+    pct: `<label class="dfield"><input class="narrow" data-disc="${esc(l.id)}" inputmode="decimal" lang="en" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="الخصم بالنسبة" title="${esc("الخصم بالنسبة" + most)}"> %</label>`,
+  };
+  const m = discMode();
+  return `<span class="row nowrap disc2">${f[m]}${f[m === "egp" ? "pct" : "egp"]}</span>`;
 }
 
 // Codex on #490: a box/strip number being typed on one line survives a redraw caused by another line's save;
@@ -5579,7 +5624,7 @@ function renderCart(findings = null) {
             ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
-        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم" autocomplete="off"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
+        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? discFields(l)
           : l.discount_amount ? `${money(l.discount_amount)} ج` : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}${l.invoice_share ? `<div class="muted small" title="نصيبه من الخصم على الفاتورة">+ ${money(l.invoice_share)}</div>` : ""}</td>
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
@@ -5622,23 +5667,23 @@ function renderCart(findings = null) {
     if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
     else patchLine(l.id, { qty_base: n });
   }));
-  const sendDisc = (id) => {
-    const inp = $(`[data-disc="${CSS.escape(id)}"]`, $("#posCart")), unit = $(`[data-dunit="${CSS.escape(id)}"]`, $("#posCart")).value;
-    const v = inp.value.trim();
-    if (unit === "egp") {
-      const p = v === "" ? 0 : exactPiasters(v);
-      if (p == null || p < 0) { POS.saving = Promise.resolve(false); return toast("مبلغ الخصم غير صحيح", true); }
-      return patchLine(id, { discount_amount: p });
-    }
-    patchLine(id, { discount_bp: toBp(v) || 0 });
+  // UX-27 PR2: typing in one field fills the other; the typed one is what is saved (and remembered)
+  const sendDisc = (id, mode, text) => {
+    const body = discBody(mode, text);
+    if (!body) { POS.saving = Promise.resolve(false); return toast(mode === "egp" ? "مبلغ الخصم غير صحيح" : "نسبة الخصم غير صحيحة", true); }
+    return patchLine(id, body).then((ok) => { if (ok) setDiscMode(mode); return ok; });
   };
-  $("#posCart").querySelectorAll("[data-disc]").forEach((inp) => inp.addEventListener("change", () => sendDisc(inp.dataset.disc)));
-  $("#posCart").querySelectorAll("[data-dunit]").forEach((sel) => sel.addEventListener("change", () => {
-    if ($(`[data-disc="${CSS.escape(sel.dataset.dunit)}"]`, $("#posCart")).value.trim() !== "") sendDisc(sel.dataset.dunit);
-  }));
+  [["damt", "egp", "disc"], ["disc", "pct", "damt"]].forEach(([key, mode, other]) => {
+    $("#posCart").querySelectorAll(`[data-${key}]`).forEach((inp) => {
+      const id = inp.dataset[key], l = line(id), twin = () => $(`[data-${other}="${CSS.escape(id)}"]`, $("#posCart"));
+      inp.addEventListener("input", () => { if (twin()) twin().value = discOther(mode, inp.value, l.gross); });
+      inp.addEventListener("change", () => sendDisc(id, mode, inp.value));
+    });
+  });
   $("#posCart").querySelectorAll("[data-askdisc]").forEach((b) => b.addEventListener("click", () => {
-    const v = discAsk(prompt("الخصم: نسبة (مثال 5) أو مبلغ بالجنيه (مثال 3ج):"));
-    if (v) patchLine(b.dataset.askdisc, v);
+    const m = discMode();
+    const v = discAsk(prompt(m === "egp" ? "الخصم بالجنيه (مثال 3)، أو نسبة (مثال 5%):" : "الخصم: نسبة (مثال 5) أو مبلغ بالجنيه (مثال 3ج):"), m);
+    if (v) patchLine(b.dataset.askdisc, v).then((ok) => { if (ok) setDiscMode(v.discount_amount != null ? "egp" : "pct"); });
   }));
   $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
     SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart(); renderSide();
@@ -5673,6 +5718,20 @@ async function posUsual() {
     addItem({ ...x, id: x.item_id }, q % ps === 0 ? q / ps : 0, q % ps === 0 ? 0 : q);
   }));
 }
+// the invoice discount, the same two fields; its percent is of the lines after their own discounts (the server's base)
+const invDiscBase = (s) => s.lines.reduce((a, l) => a + Math.max(0, l.net + (l.invoice_share || 0)), 0);
+function invDiscFields(s) {
+  const base = invDiscBase(s), share = s.lines.reduce((a, l) => a + (l.invoice_share || 0), 0);
+  const amt = s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? money(share) : "";
+  const per = s.invoice_discount_bp ? pct(s.invoice_discount_bp) : s.invoice_discount_amount ? discOther("egp", money(s.invoice_discount_amount), base) : "";
+  const f = {
+    egp: `<label class="dfield"><input id="posInvAmt" class="narrow" inputmode="decimal" lang="en" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالجنيه"> ج</label>`,
+    pct: `<label class="dfield"><input id="posInvDisc" class="narrow" inputmode="decimal" lang="en" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالنسبة"> %</label>`,
+  };
+  const m = discMode();
+  return `<div class="row nowrap mt disc2" id="posInvDiscRow"><span class="f">خصم على الفاتورة</span>${f[m]}${f[m === "egp" ? "pct" : "egp"]}</div>`;
+}
+
 function renderSide() {
   const s = SALE, d = s.delivery || {};
   if (!POS.split) POS.parts = [];
@@ -5696,9 +5755,7 @@ function renderSide() {
         <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}" autocomplete="off"></label>
         <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}" autocomplete="off"></label></div>` : ""}
       <div class="sum"><span>الإجمالي</span><b>${money(s.subtotal)}</b></div>
-      ${s.lines.length ? `<div class="row nowrap mt" id="posInvDiscRow"><label class="f">خصم على الفاتورة
-        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0" autocomplete="off"></label>
-        <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
+      ${s.lines.length ? invDiscFields(s) : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
       ${rnd ? `<div class="sum"><span>تقريب النقدي</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
@@ -5772,21 +5829,24 @@ function renderSide() {
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
   $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
-  const invDisc = async () => {         // one discount on the whole invoice, spread over the lines (update 1)
-    const v = $("#posInvDisc").value.trim(), egp = $("#posInvDiscU").value === "egp";
-    const body = egp ? { amount: v === "" ? 0 : exactPiasters(v) } : { bp: toBp(v) || 0 };
-    if ((egp && (body.amount == null || body.amount < 0)) || (!egp && (Number.isNaN(body.bp) || body.bp < 0))) {
+  const invDisc = async (mode) => {     // one discount on the whole invoice, spread over the lines (update 1)
+    const typed = discBody(mode, $(mode === "egp" ? "#posInvAmt" : "#posInvDisc").value);
+    if (!typed) {
       POS.saving = Promise.resolve(false);          // an invalid discount stops F9 too (Codex #400)
       return toast("الخصم غير صحيح", true);
     }
+    const body = mode === "egp" ? { amount: typed.discount_amount } : { bp: typed.discount_bp };
     POS.saving = (async () => {          // complete() waits for it; false = not saved, the sale waits (Codex #400)
       try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); return true; }
       catch (er) { toast(er.message, true); renderSide(); return false; }
     })();
-    await POS.saving;
+    if (await POS.saving) setDiscMode(mode);
   };
-  $("#posInvDisc")?.addEventListener("change", invDisc);
-  $("#posInvDiscU")?.addEventListener("change", () => { if ($("#posInvDisc").value.trim() !== "") invDisc(); });
+  [["#posInvAmt", "egp", "#posInvDisc"], ["#posInvDisc", "pct", "#posInvAmt"]].forEach(([sel, mode, other]) => {
+    const inp = $(sel); if (!inp) return;
+    inp.addEventListener("input", () => { if ($(other)) $(other).value = discOther(mode, inp.value, invDiscBase(SALE)); });
+    inp.addEventListener("change", () => invDisc(mode));
+  });
   document.querySelectorAll("[data-m]").forEach((b) => b.addEventListener("click", () => {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
@@ -5948,7 +6008,7 @@ function currentPayments() {
 }
 
 // a discount still being typed (line or invoice): saved before completion like a delivery field (Codex #400)
-const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");
+const isDiscField = (el) => !!(el?.dataset?.disc || el?.dataset?.damt || el?.id === "posInvDisc" || el?.id === "posInvAmt");
 async function complete(findings = null) {
   if (POS.completing || !SALE || !$("#posDone")) return;
   POS.completing = true;

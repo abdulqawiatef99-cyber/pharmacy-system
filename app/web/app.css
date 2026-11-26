@@ -286,6 +286,9 @@ input.big { min-height: 54px; font-size: 1.25rem; border: 2px solid var(--brand)
 .qtydlg input { width: 6em; }
 .qtydlg .plus { align-self: flex-end; padding-bottom: 8px; font-weight: bold; }
 .qbtn .qs { display: block; }
+.disc2 { gap: 6px; align-items: center; }
+.disc2 .dfield { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.disc2 .dfield input { width: 4.5em; min-width: 0; }
 td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; }
 .keys { font-size: .8125rem; color: var(--muted); }
 .pos-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 76px; }
