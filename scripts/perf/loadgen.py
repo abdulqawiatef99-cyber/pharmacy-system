@@ -551,15 +551,16 @@ def main(argv=None):
     return info
 
 
-GUARD_CODES = ("short_expiry", "slow_before_expiry")     # update 2 (U2-22): approved only with a written reason
-
-
 def approve_with_reasons(p, ctx, inv):
-    """Synthetic history: the owner's written reason for the near-expiry guards, then approval (U2-22)."""
+    """Record reasons for the generator's synthetic purchase quantities and prices before approval."""
+    from app.purchasing.validation import UNUSUAL
+
+    guard_codes = {"short_expiry", "slow_before_expiry"} | UNUSUAL
     d = p.get(ctx, inv, with_candidates=False)
     for i in d["issues"]:
-        if i["code"] in GUARD_CODES and not i["acknowledged"]:
-            d = p.acknowledge(ctx, inv, i["code"], "بيانات تجربة: كمية متفق عليها", i["line_id"], d["invoice"]["version"])
+        if i["code"] in guard_codes and not i["acknowledged"]:
+            d = p.acknowledge(ctx, inv, i["code"], "بيانات تجربة: حالة شراء متفق عليها",
+                              i["line_id"], d["invoice"]["version"])
     return p.approve(ctx, inv, d["invoice"]["version"])
 
 

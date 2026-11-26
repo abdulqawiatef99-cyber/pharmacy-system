@@ -76,9 +76,9 @@ record each level separately in `docs/STATUS.md`.
 - Never skip, disable or weaken a test to get green. Never invent test results or percentages.
 
 ## 5. Needs the owner's explicit approval
-The list in OWNER_RULES §2 (installing on the pharmacy PC, an installer build, real data, costs,
+The list in OWNER_RULES §2 (installing on the pharmacy PC, a usage reset, real data, costs,
 irreversible operations, business rules). Merges into `develop` and release PRs into `main` are
-pre-approved on the gates. Everything else: decide, document (`docs/DECISIONS.md` if architectural), continue.
+pre-approved on the gates. No new installer is built, ever (OWNER_RULES §3). Everything else: decide, document (`docs/DECISIONS.md` if architectural), continue.
 
 ## 6. New ideas
 Do not interrupt the active task. Add or update an entry in `docs/FUTURE_REQUIREMENTS.md`

@@ -218,7 +218,7 @@ class ReviewBrowser(_ReviewCase):
         self.assertEqual(result["activeItems"], 1, result)
         self.assertFalse(result["warehouseBonus"], result)
         self.assertTrue(result["companyBonus"], result)
-        self.assertEqual(result["warehouseNext"], "qaPrice", result)
+        self.assertEqual(result["warehouseNext"], "qaExp", result)
         self.assertEqual(result["savedBonus"], "2", result)
         self.assertEqual(result["picked"], "Synthetic Violet 10TAB", result)
         self.assertIn("Synthetic Violet 10TAB", result["cart"], result)

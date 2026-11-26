@@ -43,6 +43,7 @@ from ..core.numbers import whole_number
 from ..finance import money, reconcile
 from ..db import Database
 from ..inventory import service as inventory
+from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
 from ..dataimport.estock_move import EstockMove
 from ..dataimport.service import DataImport, export_catalog, template_xlsx
@@ -1890,6 +1891,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(purch.get(ctx_of(req), req.path_params["id"]))
 
     @handler
+    async def purchase_scan(req):
+        return J(purch.scan_item(ctx_of(req), req.path_params["id"], req.query_params.get("barcode", "")))
+
+    @handler
     async def purchase_header(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -1900,7 +1905,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def line_add(req):
         ctx = ctx_of(req)
         b = await body(req)
-        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version")))
+        return J(purch.add_line(ctx, req.path_params["id"], b.get("line") or {}, b.get("version"),
+                                picked=b.get("picked") is True))
 
     @handler
     async def line_update(req):
@@ -1957,6 +1963,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         else:
             value = purch.price_review_default(ctx)
         return J({"default": value})
+
+    @handler
+    async def purchase_entry_settings(req):
+        ctx = ctx_of(req)
+        ctx.require("settings.manage")
+        if req.method == "PUT":
+            return J(entry_settings.save(db, ctx, await body(req)))
+        return J(entry_settings.get(db, ctx.org_id))
 
     @handler
     async def purchase_approve(req):
@@ -3490,6 +3504,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases", purchases_manual, methods=["POST"]),
         Route("/api/purchases/import", purchases_import, methods=["POST"]),
         Route("/api/purchases/{id}", purchase_get),
+        Route("/api/purchases/{id}/scan", purchase_scan),
         Route("/api/purchases/{id}", purchase_header, methods=["PATCH"]),
         Route("/api/purchases/{id}/lines", line_add, methods=["POST"]),
         Route("/api/purchases/{id}/lines/{line_id}", line_update, methods=["PATCH"]),
@@ -3499,6 +3514,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/purchases/{id}/lines/{line_id}/split", line_split, methods=["POST"]),
         Route("/api/purchases/{id}/acknowledge", purchase_ack, methods=["POST"]),
         Route("/api/settings/purchase-price", purchase_price_default, methods=["GET", "PUT"]),
+        Route("/api/settings/purchase-entry", purchase_entry_settings, methods=["GET", "PUT"]),
         Route("/api/purchases/{id}/approve", purchase_approve, methods=["GET", "POST"]),
         Route("/api/purchases/{id}/cancel", purchase_cancel, methods=["POST"]),
         Route("/api/files/{id}", file_get),
