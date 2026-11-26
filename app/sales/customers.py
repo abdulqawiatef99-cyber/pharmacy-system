@@ -341,3 +341,47 @@ def whatsapp_reminder(db: Database, ctx: Context, cid: str, today: date | None =
         db.execute("UPDATE customers SET reminded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (cid,))
         audit.record(db, ctx, "customer.whatsapp_reminder", "customer", cid)
     return {"url": f"https://wa.me/{p['wa'][0]}?text={quote(text)}", "text": text, "phone": p["wa"][0]}
+
+
+def usual_items(db: Database, ctx: Context, cid: str, months: int = 6, today: date | None = None) -> list[dict]:
+    """U3-6 «أدوية العميل»: what this customer bought in the last `months` months (completed sales, net of what he
+    returned), most often first, with his usual quantity (the last one), the stock now and, for his monthly list,
+    the refill date. The sale screen adds one with a click."""
+    ctx.require("sales.read")
+    if not db.one("SELECT 1 FROM customers WHERE id=? AND org_id=?", (cid, ctx.org_id)):
+        raise NotFound("العميل غير موجود")
+    today = today or date.today()
+    since = (today - timedelta(days=31 * months)).isoformat()
+    rows = db.all(
+        "SELECT l.item_id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.is_service, count(DISTINCT s.id) times,"
+        " max(s.completed_at) last_at,"
+        # the last purchase that he kept something of: all its lines of this item, net of returns (Codex P2 on #419)
+        " (SELECT sum(a3.qty_base - a3.returned_qty) FROM sale_lines l3 JOIN sale_allocations a3 ON a3.sale_line_id=l3.id"
+        "   WHERE l3.item_id=l.item_id AND l3.sale_id=(SELECT s2.id FROM sales s2 JOIN sale_lines l2 ON l2.sale_id=s2.id"
+        "     WHERE s2.org_id=s.org_id AND s2.customer_id=s.customer_id AND s2.status='completed' AND l2.item_id=l.item_id"
+        "     AND s2.completed_at>=?"
+        "     AND (SELECT coalesce(sum(a2.qty_base - a2.returned_qty),0) FROM sale_allocations a2 WHERE a2.sale_line_id=l2.id) > 0"
+        "     ORDER BY s2.completed_at DESC LIMIT 1)) last_qty,"
+        " coalesce((SELECT sum(b.qty) FROM stock_balances b WHERE b.item_id=l.item_id AND b.org_id=s.org_id"
+        "   AND b.branch_id=?),0) stock"
+        " FROM sale_lines l JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id JOIN items i ON i.id=l.item_id"
+        " WHERE s.org_id=? AND s.customer_id=? AND s.status='completed' AND s.completed_at>=? AND i.status='active'"
+        + ("" if ctx.can("items.hidden") else " AND coalesce(i.hidden,0)=0") +     # Codex P2 on #419: as search
+        " AND (SELECT coalesce(sum(a.qty_base - a.returned_qty),0) FROM sale_allocations a WHERE a.sale_line_id=l.id) > 0"
+        " GROUP BY l.item_id ORDER BY times DESC, last_at DESC LIMIT 30", (since, ctx.branch_id, ctx.org_id, cid, since))
+    refills = {r["item_id"]: r for r in profile(db, ctx, cid, today)["refills"]}
+    out = []
+    from .service import Sales
+    sales = Sales(db, today)                          # expiry on the same day as the window (review of #419)
+    for r in rows:
+        d = dict(r)
+        if not d["is_service"] and ctx.branch_id:      # what the sale path can really sell: no expired, recalled
+            d["stock"] = sales._held(ctx, ctx.branch_id, d["item_id"])[0]      # or hospital lots (Codex P2 on #419)
+        rf = refills.get(d["item_id"])
+        d["refill_due"], d["refill_days_left"] = (rf["due"], rf["days_left"]) if rf else (None, None)
+        # some stock but less than his usual: the button stays on and adds what is there (review of #419)
+        want = d["last_qty"] or 1
+        d["in_stock"] = bool(d["is_service"]) or d["stock"] > 0
+        d["add_qty"] = want if d["is_service"] else max(0, min(want, d["stock"]))
+        out.append(d)
+    return out

@@ -22,10 +22,17 @@ file on #113 edits it; other sessions log on #113.
 - `@codex review` asked on the #451 merge resolution (queue item 9).
 - Every PR: develop merged in, full local suite (only the known local `httpx2` error), fresh-context agent
   review, Codex clean on the merged head, linux green. Windows runs on the release PR.
+- Codex on #451 found a live P1 (untracked receipt without a receipt price sold at an older price); the
+  review of the fix found a second path (net-price-only line with authority). Both fixed test-first: #466
+  merged `dfcba76`. Windows red on the release from my #458 test (needs raqm) → #467 merged `c111afe`.
+- **Release #465 (update 5) merged into main `4db40d4`**, linux + windows green on `c111afe`. No migration,
+  no requirements, no installer. Not installed: waits for the owner's «نزّله». #419 (CC-2) not in it.
+- Known intermittent test (not tonight's): `test_ux1_invoice_item_card` 5 s browser waits fail ~1 in 3
+  locally on plain develop; for Codex (UX-1 owner).
 
 ## Current state (26/11)
-- The program is the pharmacy's live cashier since 21/11. `main` @ `e555df7` = `develop` @ `c893c18`
-  (release #459, 24/11, after update 4b #455). Updates reach the PC through the signed «تحديث» only after
+- The program is the pharmacy's live cashier since 21/11. `main` @ `4db40d4` = `develop` @ `c111afe`
+  (release #465, update 5, 26/11; before it #459 24/11). Updates reach the PC through the signed «تحديث» only after
   the owner says «نزّله».
 - Migrations in `develop` run to 0045 (two files share 0045: harmless, the runner keys on the filename).
   **The next migration is 0046.**
@@ -39,8 +46,8 @@ file on #113 edits it; other sessions log on #113.
 5. [x] PR #422 U3-8 owner shift summary → `aa96180`.
 6. [x] PR #377 test template database → `ebf98c7`.
 7. [ ] PR #419 U3-6 customer medicines — CC-2 (sale screen).
-8. [ ] One combined release PR `develop` → `main` with everything merged tonight — CC-1.
-9. [~] `@codex review` on the #451 merge resolution asked 26/11; act on any P0/P1 it finds.
+8. [x] Release #465 (update 5) → main `4db40d4` (+ #466 money fix, #467 test fix).
+9. [x] #451 merge resolution reviewed by Codex 26/11: one P1 → fixed in #466.
 10. [ ] P2s left from tonight's reviews (small, after the release): #418 daily pick ranks by cost without
     `costs.read`, double daily session on a double-click; #421 staff timers keep running after a 401;
     #422 another branch's shift summary by id, «نقدي» line = cash sales only; #452 reader process survives a
@@ -61,7 +68,7 @@ After launch (label `after-launch`): #132, #102, #99, #83, #77.
   the phone prints on every sale with a customer.
 
 ## التذكيرات المفتوحة
-- «نزّله» للتحديث الجاي بعد ما الإصدار المجمّع يتدمج.
+- «نزّله» للتحديث 5 (اتدمج في النسخة الرسمية، مستني كلمتك قبل ما يتنزل على جهاز الصيدلية).
 - ورقة فارما أوفرسيز التانية لاختبار هامش الموزع.
 - مقارنة صنف واحد في الطلب الذكي مع تقرير مبيعات إي ستوك.
 - أول إيصال بعد التحديث: اسم الصيدلية بقى فوق سطر المقدمة، وبيانات العميل بتظهر في الآجل والتوصيل.
