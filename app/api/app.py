@@ -1114,7 +1114,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
                                                  b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
                                                  note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
-        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
+        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note"),
+                                explicit_unit_values=True))
 
     @handler
     async def supplier_return_page(req):
@@ -2230,7 +2231,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def counts_variances(req):
-        return J(counting.variances(ctx_of(req), req.path_params["id"]))
+        report = counting.variances(ctx_of(req), req.path_params["id"])
+        # The count screen echoes these IDs from the report it is displaying. Carry the
+        # stock revision in the first reference so existing tabs submit their own preview.
+        if report["uncounted_with_stock"]:
+            first = report["uncounted_with_stock"][0]
+            first["stock_item_id"] = first["item_id"]
+            first["item_id"] = f'{first["stock_item_id"]}:{report["uncounted_confirmation"]}'
+        return J(report)
 
     @handler
     async def counts_approve(req):
@@ -2240,10 +2248,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         zero = b.get("zero_uncounted", False)
         if not isinstance(zero, bool):       # the string "false" was truthy and zeroed every uncounted item (#324 X20)
             raise ValidationFailed("قيمة تصفير الأصناف غير المجرودة غير صحيحة")
+        ids = b.get("uncounted_item_ids")
+        confirmation = b.get("uncounted_confirmation")
+        if zero and isinstance(ids, list) and ids and isinstance(ids[0], str):
+            item_id, separator, revision = ids[0].partition(":")
+            if separator:
+                ids = [item_id, *ids[1:]]
+                if confirmation is None:
+                    confirmation = revision
         return J(counting.approve(ctx, req.path_params["id"], zero_uncounted=zero,
                                   reason=b.get("reason"), reasons=reasons,
                                   shortage_reason=b.get("shortage_reason") or "lost", zero_reason=b.get("zero_reason") or "lost",
-                                  uncounted_item_ids=b.get("uncounted_item_ids")))
+                                  uncounted_item_ids=ids, uncounted_confirmation=confirmation))
 
     @handler
     async def counts_cancel(req):
