@@ -1057,9 +1057,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
+        offset = qp.get("offset") or "0"
+        if not (offset.isascii() and offset.isdigit()) or len(offset) > 9:
+            raise ValidationFailed("رقم الصفحة غير صحيح")
         return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
-                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
+                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1",
+                                 offset=int(offset), totals=qp.get("totals") != "0",
+                                 after=qp.get("after") or None, until=qp.get("until") or None))
 
     @handler
     async def owner_report(req):
@@ -3094,7 +3099,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def return_receipt(req):
         """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
-        from ..printing import settings as rs
+        from ..printing import escpos as _esc, settings as rs
         ctx = ctx_of(req)
         x = Sales(db).return_receipt(ctx, req.path_params["id"])
         r, sale = x["return"], x["sale"]
@@ -3109,8 +3114,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return f"<bdi>{e(it.get('name_ar') or it['name'])}</bdi>"
-            return f"<bdi>{e(it.get('name_en') or it['name'])}</bdi>"
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"
         rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
@@ -3150,10 +3155,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return f"<bdi>{e(it.get('name_ar') or it['name'])}</bdi>"
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
             if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):
-                return f"<bdi>{e(it['name_en'])}</bdi><br><small><bdi>{e(it['name_ar'])}</bdi></small>"
-            return f"<bdi>{e(it.get('name_en') or it['name'])}</bdi>"   # UX-26: an English name reads left to right
+                return f"<bdi>{e(_esc.upper_en(it['name_en']))}</bdi><br><small><bdi>{e(it['name_ar'])}</bdi></small>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"   # UX-26: an English name reads left to right
 
         from ..printing import escpos as _esc
 

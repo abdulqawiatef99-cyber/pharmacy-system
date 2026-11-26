@@ -21,6 +21,7 @@ Chosen in Settings → receipt (falls back to PHARM_PRINTER); PHARM_RECEIPT_FONT
 from __future__ import annotations
 
 import os
+import re
 import socket
 import time
 import unicodedata
@@ -57,6 +58,11 @@ def find_font() -> str:
 
 def shaping_available() -> bool:
     return bool(features.check("raqm"))
+
+
+def upper_en(value: str | None) -> str:
+    """UX-26 (owner 26/11): English letters in capitals on paper; Arabic and signs such as µ are left alone."""
+    return re.sub(r"[a-z]+", lambda m: m.group(0).upper(), value or "")
 
 
 def text_direction(value: str) -> str:
@@ -534,7 +540,7 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
             name = " / ".join(dict.fromkeys(n for n in (item.get("name_en"), item.get("name_ar")) if n))
         else:
             name = item.get("name_ar" if cfg.get("names") == "ar" else "name_en")
-        name = (name or item["name"]) + (" ✱" if item.get("no_return") else "")
+        name = upper_en(name or item["name"]) + (" ✱" if item.get("no_return") else "")
         prices = public_price_rows(line)
         for qty, price, gross in prices:
             number += 1

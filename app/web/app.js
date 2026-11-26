@@ -86,6 +86,7 @@ const I18N_FULL_TEXT = [
     "The price changed from $1 to $2. Reprice the current stock ($3)?"],
   [/سعر الجمهور اتغير من ([\d.,]+) لـ ([\d.,]+)/g, "The public price changed from $1 to $2"],
   [/مبيعات ([\d.,]+) · مرتجع ([\d.,]+)/g, "Sales $1 · Refunds $2"],
+  [/الفواتير ([\d.,]+) إلى ([\d.,]+) من ([\d.,]+)/g, "Invoices $1 to $2 of $3"],
 ];
 const I18N_PATTERNS = [
   [new RegExp(`${NUM}\\s*فواتير|${NUM}\\s*فاتورة`, "g"), (m, a, b) => `${a || b} invoices`],
@@ -199,11 +200,15 @@ document.addEventListener("mouseup", (e) => {   // the click that focused it wou
   zeroPick = null;
 });
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
-const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+// UX-26 (owner 26/11): English letters in capitals on screen; what is stored is not rewritten
+function upperEn(t) {
+  return String(t ?? "").replace(/[a-z]+/g, (w) => w.toUpperCase());
+}
+const itemText = (it) => upperEn((PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "");
 // UX-26 (owner 26/11): each name in its own direction, so an English name reads left to right in Arabic screens
 const bidi = (t) => `<bdi>${esc(t)}</bdi>`;
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
-  ? `${bidi(it.name_en)}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
+  ? `${bidi(upperEn(it.name_en))}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
 async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
   const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
@@ -2303,7 +2308,7 @@ async function altPanel(itemId, box, onAdd = null) {
   };
   const all = [...r.similar, ...r.other_strength, ...r.alternatives];
   const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
-  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${esc(r.item.name_en || r.item.name_ar)}</h2>
+  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${bidi(upperEn(r.item.name_en || r.item.name_ar))}</h2>
       <button class="btn small secondary" data-aclose>✕ إغلاق</button></div>
     ${r.missing.includes("ingredient") ? `<p class="badge b-warn">⚠ المادة الفعالة غير مكتوبة في بطاقة هذا الصنف، لذلك لا يمكن العثور على المثيل. ${canW() ? `<a href="#/items/${esc(r.item.id)}/edit">أضِفها</a>` : "اطلب من المدير إضافتها."}</p>` : ""}
     ${r.missing.includes("strength") ? `<p class="badge b-warn">⚠ التركيز غير مكتوب، لذلك يُقارَن المثيل دون تركيز.</p>` : ""}
@@ -2344,7 +2349,7 @@ async function viewItems() {
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
-      <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
+      <input id="q" lang="en" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
       <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">بدون قسم</option>
         ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label></div>
   </section>
@@ -2598,7 +2603,7 @@ function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCrea
   };
   const newItem = () => {
     box.innerHTML = `<form><h3>صنف جديد</h3>
-      <label class="f">اسم الصنف<input name="name_en" required value="${esc(newName || "")}"></label>
+      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(upperEn(newName))}"></label>
       <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
     const form = $("form", box);
@@ -2678,14 +2683,14 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     : `<div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
       <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>`}
     <div class="formgrid">
-      <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
-      <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
+      <label class="f">الاسم بالإنجليزي <input name="name_en" lang="en" data-upper dir="ltr" value="${esc(it.name_en || "")}"></label>
+      <label class="f">الاسم بالعربي <input name="name_ar" lang="ar" value="${esc(it.name_ar || "")}"></label>
       <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
       <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}" placeholder="Amoxicillin + Clavulanic acid">
         <span class="muted">بالإنجليزية كما على العلبة، ومنها يُعثر على المثيل.</span></label>
       <label class="f">التركيز <input name="strength" dir="ltr" value="${esc(it.strength || it.strength_norm || "")}" placeholder="500 mg"></label>
       <label class="f">الشكل <select name="dosage_form"><option value="">—</option>${(it.dosage_form && !FORMS.some((x) => x[0] === it.dosage_form) ? [[it.dosage_form, it.dosage_form], ...FORMS] : FORMS).map(([c, t]) => `<option value="${esc(c)}" ${c === it.dosage_form ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
-      <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
+      <label class="f">الكود الداخلي <input name="code" lang="en" dir="ltr" value="${esc(it.code || "")}"></label>
       <label class="f">القسم <select name="category_id"><option value="">— بدون قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">تحديث السعر للمالك والمدير فقط</span>`}</label>
@@ -2712,7 +2717,7 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     <p class="muted">امسح هنا الباركود أو الكود المربع الموجود على العلبة. يُحفظ الكود المربع بالكود الدولي الذي بداخله.</p>
     <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
       ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">إزالة</button>` : ""}</li>`).join("")}</ul>
-    <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
+    <div class="row"><input id="bcNew" lang="en" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
     <div class="row mt"><button class="btn">احفظ</button></div></form>`;
   const newCodes = new Set(), removedCodes = new Set();
   const perform = modal ? modal.run : async (action) => {
@@ -3198,7 +3203,7 @@ async function viewCountSession(id) {
   const chooseItem = (it) => {
     COUNT_ITEM = it;
     $("#cntPick").innerHTML = "";
-    $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
+    $("#cntItem").innerHTML = `<div class="panel"><b>${bidi(upperEn(it.name_en || it.name_ar))}</b>
       <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(unitName(it))} — موقع ${esc(it.location || "—")}</div>
       <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
       <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
@@ -3889,6 +3894,7 @@ async function viewSalesAdvanced() {
   const now = new Date(), dt = (d, h) => `${isoDay(d)}T${h}`;
   const sel = new Set(), types = new Set();
   let R = null, item = null, open = null, loadSeq = 0;
+  let marks = [""];     // where each listed page starts: "" = the newest invoice, else the last invoice of the page before
   app.innerHTML = `<section class="panel noprint"><div class="row between"><h1>فواتير البيع</h1><a href="#/owner-reports">تقارير المالك ←</a></div>
     <div class="row range"><div class="seg2 small">${Object.entries(periodPresets()).map(([k, [t]]) => `<button type="button" data-ip="${k}" class="${k === "today" ? "on" : ""}">${t}</button>`).join("")}</div>
       <label class="f">من <input type="datetime-local" id="iF" value="${dt(now, "00:00")}"></label><label class="f">إلى <input type="datetime-local" id="iT" value="${dt(now, "23:59")}"></label></div>
@@ -3900,26 +3906,65 @@ async function viewSalesAdvanced() {
       <button class="btn" id="iGo">اعرض</button></div><div id="iItemRes" class="cands"></div><div id="iItemChip"></div></section>
   <section class="panel" id="iRep"><div id="iBox"><p class="muted">جارٍ التحميل…</p></div></section><div id="iDetail"></div>`;
   const reportBox = $("#iBox");
-  const load = async () => {
-    const seq = ++loadSeq;
+  // a first load asks the question afresh; another page of the same answer keeps its totals and its moment
+  // (`until`), so the pages stay the ones the totals describe and nothing is added up again (#461)
+  // Pages are cut by the invoice they follow (`after`), not by a position: a void or a sale at the till between
+  // two clicks cannot push an invoice off both pages (Codex P2)
+  const load = async (page = 0) => {
+    const seq = ++loadSeq, keep = page && R ? R : null;
+    if (!keep) marks = [""];
     const current = () => seq === loadSeq && reportBox.isConnected;
     const f = $("#iF").value, t = $("#iT").value;
     if (!f || !t) return toast("اختر الفترة", true);
     $("#iBox").innerHTML = `<p class="muted">جارٍ التحميل…</p>`; $("#iDetail").innerHTML = ""; sel.clear(); open = null;
-    const qs = new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
-    const asked = { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
+    // another page repeats the question that was answered, not the controls as they stand now
+    const qs = keep ? new URLSearchParams(keep.base)
+      : new URLSearchParams({ from: f, to: t, types: [...types].join(","), q: $("#iQ").value.trim(), item: item?.id || "", user: $("#iUser").value, lines: "1" });
+    const base = new URLSearchParams(qs);       // the same question, for the other pages and for an export
+    if (keep) { qs.set("after", marks[page]); qs.set("totals", "0"); qs.set("until", keep.as_of); }
+    const asked = keep ? keep.asked : { f, t, q: $("#iQ").value.trim(), user: $("#iUser").value, types: types.size, item: item ? item.id : "" };
     let result;
     try { result = await api(`/api/reports/invoices?${qs}`); }
     catch (er) { if (current()) { reportBox.innerHTML = ""; toast(er.message, true); } return; }
     if (!current()) return;
     R = result;
+    if (keep) { R.totals = keep.totals; R.as_of = keep.as_of; }
+    R.page = page;
+    if (R.next_after) marks[page + 1] = R.next_after;
+    R.base = base;
     R.asked = asked;               // the E-Stock side follows the request that was answered, not the live controls (Codex P2)
     if ($("#iUser").options.length === 1) $("#iUser").insertAdjacentHTML("beforeend", R.sellers.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join(""));
     draw();
   };
   const sub = () => `${stamp(R.from)} ← ${stamp(R.to)}`;
   // a file or a printout of a capped list says so, as the screen does (#324 R22)
-  const subOut = () => sub() + (R.truncated ? " — ⚠ أول 3000 فاتورة فقط من الفترة" : "");
+  const paged = () => R.truncated || R.page > 0;
+  const pageText = () => `الفواتير ${R.offset + 1} إلى ${R.offset + R.rows.length} من ${R.total_rows}`;
+  const subOut = () => sub() + (paged() ? ` — ⚠ ${pageText()} — الإجماليات لكل الفترة` : "");
+  // every match of the period, page by page in the server's stable order; the totals came with the first answer (#461)
+  // The file is its own fresh answer: totals and rows asked together, each page strictly after the last invoice
+  // of the one before and nothing newer than the first answer. A void or a return at the till while the pages
+  // are read would leave rows that no longer add up to the totals: that is detected and the whole read is
+  // done again, so the file never carries a total its rows do not make (Codex P2).
+  const allRows = async () => {
+    if (!paged()) return { rows: R.rows, totals: R.totals };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = []; let first = null;
+      for (let after = "", more = true; more;) {
+        const qs = new URLSearchParams(R.base);
+        if (first) { qs.set("totals", "0"); qs.set("until", first.as_of); qs.set("after", after); }
+        const page = await api(`/api/reports/invoices?${qs}`);
+        first = first || page;
+        rows.push(...page.rows);
+        after = page.next_after; more = Boolean(after);
+      }
+      const done = rows.filter((r) => r.status === "completed"), T = first.totals;
+      const sum = (k) => done.reduce((a, r) => a + r[k], 0);
+      if (rows.length === T.n && ["total", "returned_total", "net", "paid_cash", "paid_card", "paid_transfer", "on_credit"].every((k) => sum(k) === T[k])
+        && (!R.show_cost || done.reduce((a, r) => a + (r.unknown_cost ? 1 : 0), 0) === T.unknown_cost_n)) return { rows, totals: T };
+    }
+    throw new Error("الفواتير بتتغير دلوقتي على الكاشير؛ جرّب التصدير تاني بعد لحظة");
+  };
   const cls = (r) => (r.status === "voided" ? "inv-void" : r.status === "draft" ? "inv-draft" : r.returned_total ? "inv-ret" : r.discount_total ? "inv-disc" : "");
   const draw = () => {
     const T = R.totals, cost = R.show_cost;
@@ -3927,7 +3972,8 @@ async function viewSalesAdvanced() {
       <span class="row noprint"><button class="btn small secondary" id="iXl">⬇ Excel</button><button class="btn small secondary" data-pr="short">🖨 مختصر</button>
         <button class="btn small secondary" data-pr="full">🖨 كامل بالأصناف</button><button class="btn small secondary" data-pr="sel" disabled>🖨 المحدد</button>
         ${can("items.write") ? `<button class="btn small secondary" id="iShort" disabled>📝 أضف أصناف الفواتير المحددة إلى النواقص</button>` : ""}</span></div>
-      ${R.truncated ? `<p class="badge b-warn">⚠ أول 3000 فاتورة فقط — قلّل الفترة</p>` : ""}
+      ${paged() ? `<p class="row noprint"><span class="badge b-info">${pageText()} — <span>الإجماليات لكل فواتير الفترة، وملف Excel فيه كل الفواتير</span></span>
+        <button class="btn small secondary" id="iPrev" ${R.page ? "" : "disabled"}>→ السابق</button><button class="btn small secondary" id="iNext" ${R.truncated ? "" : "disabled"}>التالي ←</button></p>` : ""}
       <div class="totals"><div>الفواتير<b>${T.n}</b><span>${T.returned_n} <span>عليها مرتجع</span> · ${T.discounted_n} <span>عليها خصم</span></span></div><div>قبل الخصم<b>${money(T.subtotal)}</b></div>
         <div>خصم الأصناف<b>${money(T.item_discount)}</b></div><div>خصم العميل (تعاقد)<b>${money(T.customer_discount)}</b></div><div>بعد الخصم<b>${money(T.total)}</b>${T.delivery_fee ? `<span>منها توصيل ${money(T.delivery_fee)}</span>` : ""}</div>
         <div>المرتجع<b>${money(T.returned_total)}</b></div><div class="t-ok">الصافي<b>${money(T.net)}</b></div><div>النقدي<b>${money(T.paid_cash)}</b></div>
@@ -3957,14 +4003,22 @@ async function viewSalesAdvanced() {
     }));
     $("#iBox").querySelectorAll("[data-s]").forEach((cb) => cb.addEventListener("change", () => { cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); selUi(); }));
     $("#iAll")?.addEventListener("change", (e) => { $("#iBox").querySelectorAll("[data-s]").forEach((cb) => { cb.checked = e.target.checked; cb.checked ? sel.add(+cb.dataset.s) : sel.delete(+cb.dataset.s); }); selUi(); });
-    $("#iXl").addEventListener("click", () => exportXlsx("فواتير البيع", subOut(), sheets()));
+    $("#iXl").addEventListener("click", async (e) => {
+      const asked = R;
+      try {
+        const all = await withBusy(e.currentTarget, allRows);
+        if (all && asked === R) exportXlsx("فواتير البيع", sub(), sheets(all.rows, all.totals));
+      } catch (er) { toast(er.message, true); }
+    });
+    $("#iPrev")?.addEventListener("click", () => load(R.page - 1));
+    $("#iNext")?.addEventListener("click", () => load(R.page + 1));
     // E-Stock has no payment types or sellers here: with those filters on, its rows would not answer the question
-    // E-Stock counts whole days: part of a day would add sales outside the window; a capped program total (first
-    // 3000 invoices) is never added up (U4 review)
+    // E-Stock counts whole days: part of a day would add sales outside the window. The program total is the
+    // whole period's, whatever page is listed (#461)
     const A = R.asked, fullDays = A.f.slice(11) === "00:00" && A.t.slice(11) === "23:59";
     if (!A.types && !A.user && fullDays) {
       estockSalesBelow($("#iBox"), A.f.slice(0, 10), A.t.slice(0, 10), A.q,
-        A.item || R.truncated ? null : T.total, A.item).catch(() => {});
+        A.item ? null : T.total, A.item).catch(() => {});
     } else { ES_SEQ++; document.querySelector("#esBelow")?.remove(); }   // a pending answer is dropped too (Codex P2)
     $("#iBox").querySelectorAll("[data-pr]").forEach((b) => b.addEventListener("click", () => printInv(b.dataset.pr)));
     $("#iShort")?.addEventListener("click", async () => {
@@ -3993,22 +4047,22 @@ async function viewSalesAdvanced() {
     }));
     $("#iDet").scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const sheets = () => {
-    const cost = R.show_cost, T = R.totals;
+  const sheets = (all = R.rows, T = R.totals) => {
+    const cost = R.show_cost;
     return [{ name: "الفواتير", columns: [N("رقم"), Tx("الوقت"), Tx("الحالة"), Tx("العميل"), Tx("الموظف"), N("أصناف"), M("قبل الخصم"), M("خصم الأصناف"), M("خصم العميل"), M("بعد الخصم"),
         M("المرتجع"), M("الصافي"), M("نقدي"), M("بطاقة"), M("تحويل"), M("آجل"), ...(cost ? [M("الربح")] : [])],
-      rows: R.rows.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
+      rows: all.map((r) => [r.sale_no, `${dayOf(r.completed_at || r.created_at)} ${hhmm(r.completed_at || r.created_at)}`, r.status === "voided" ? "ملغاة" : r.status === "draft" ? "معلقة" : r.returned_total ? "عليها مرتجع" : "مكتملة",
         r.customer || "", r.seller || "", r.lines, r.subtotal, r.item_discount, r.customer_discount, r.total, r.returned_total, r.net, r.paid_cash, r.paid_card, r.paid_transfer, r.on_credit, ...(cost ? [r.status === "completed" ? r.profit : null] : [])]),
       total: ["الإجمالي", "", "", "", "", null, T.subtotal, T.item_discount, T.customer_discount, T.total, T.returned_total, T.net, T.paid_cash, T.paid_card, T.paid_transfer, T.on_credit, ...(cost ? [T.profit] : [])] },
     { name: "الأصناف", columns: [N("رقم الفاتورة"), Tx("الصنف"), N("الكمية بالوحدة"), N("المُرتجع منها"), M("قبل الخصم"), Tx("الخصم"), M("بعد الخصم")],
-      rows: R.rows.flatMap((r) => (r.items || []).map((x) => [r.sale_no, x.name_en || x.name_ar, x.qty, x.returned, x.gross, x.discount_bp ? `${pct(x.discount_bp)}%` : "", x.net])) }];
+      rows: all.flatMap((r) => (r.items || []).map((x) => [r.sale_no, x.name_en || x.name_ar, x.qty, x.returned, x.gross, x.discount_bp ? `${pct(x.discount_bp)}%` : "", x.net])) }];
   };
   const printInv = (mode) => {
     const rows = mode === "sel" ? [...sel].sort((a, b) => a - b).map((i) => R.rows[i]) : R.rows;
     const box = document.createElement("div");
     if (mode === "full") {
       box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "بدون عميل")} — ${esc(r.seller || "")}</h3>
-        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(upperEn(x.name_en || x.name_ar))}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
@@ -4030,9 +4084,9 @@ async function viewSalesAdvanced() {
     document.querySelectorAll("[data-it]").forEach((x) => { const on = types.has(x.dataset.it); x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
     load();
   }));
-  $("#iGo").addEventListener("click", load);
+  $("#iGo").addEventListener("click", () => load());
   $("#iQ").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
-  $("#iUser").addEventListener("change", load);
+  $("#iUser").addEventListener("change", () => load());
   let tm;
   $("#iItem").addEventListener("input", (e) => { clearTimeout(tm); tm = setTimeout(async () => {
     const v = e.target.value.trim(); if (v.length < 2) { $("#iItemRes").innerHTML = ""; return; }
@@ -4150,7 +4204,7 @@ async function viewExchange() {
   const drawDraft = () => {
     // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
     findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
-    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
       try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
@@ -4162,7 +4216,7 @@ async function viewExchange() {
     $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
       ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
-      ${sale.lines.map((l) => `<tr><td>${bidi(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+      ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
@@ -4270,7 +4324,7 @@ async function viewSale(id) {
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الجمهور</th><th>قبل الخصم</th><th>الخصم</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
-    ${s.lines.map((l) => `<tr><td>${bidi(l.item.name)}</td>
+    ${s.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td>
       <td>${l.official_prices.map((p) => salePriceQty(p, l.item)).join("<br>") || esc(fq(l.qty_base, l))}</td>
       <td class="num">${l.official_prices.map((p) => money(p.price)).join("<br>")}</td>
       <td class="num">${l.official_prices.map((p) => money(p.gross)).join("<br>")}</td>
@@ -4285,10 +4339,10 @@ async function viewSale(id) {
       ${wallets.length ? `<label id="rWalletChoice" class="f" hidden>المحفظة الأصلية<select id="rWallet">
         ${wallets.map(([id, name]) => `<option value="${esc(id || "")}">${esc(name || "تحويل من غير قناة مسجلة")}</option>`).join("")}
       </select><small class="muted">الرد في حدود التحويل المؤكد وصوله</small></label>` : ""}
-      <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
+      <label class="f grow">سبب المرتجع<input id="rReason" lang="ar" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
-      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
+      <input id="vReason" lang="ar"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
       <small class="muted void-why">يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.</small></div>` : ""}
   </section>`;
   // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
@@ -5019,7 +5073,7 @@ async function viewPos(afterCheckout = false) {
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
-        <input id="posQ" class="big" autocomplete="off" autofocus></label>
+        <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
       <section class="panel" id="posCart"></section>
@@ -5178,7 +5232,7 @@ async function renderQuick() {
     ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
         <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
@@ -5521,7 +5575,7 @@ async function posUsual() {
   if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
   const items = all.slice(0, 8);
   $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
-    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${bidi(upperEn(x.name_en || x.name_ar || ""))}
       <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
   $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
     const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
@@ -5723,10 +5777,10 @@ function newCustomerDialog() {
   const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
   const d = document.createElement("dialog"); d.id = "custNewDlg";
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
-    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">اسم العميل <input name="name" lang="ar" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
     <label class="f">الموبايل (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
     <label class="f">رقم تاني (اختياري) <input name="phone2" inputmode="tel" maxlength="20" autocomplete="off"></label>
-    <label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
+    <label class="f">العنوان (اختياري) <input name="address1" lang="ar" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
     <p class="badge b-err" data-err hidden></p>
     <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -6708,7 +6762,7 @@ const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتو
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
-    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
+    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" lang="ar" placeholder="اسم المورد" required>
       <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
@@ -7090,10 +7144,10 @@ async function viewCustomers(filter = "") {
     <table class="mt"><thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
-  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" lang="ar" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
     <label class="f">الهاتف <input name="phone" inputmode="tel"></label><label class="f">هاتف 2 <input name="phone2" inputmode="tel"></label>
-    <label class="f">العنوان <input name="address1"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+    <label class="f">العنوان <input name="address1" lang="ar"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
     <button class="btn">أضف</button></form>` : ""}`;
   const today = isoDay(new Date());
   let cur = { list: [], f: "" };
@@ -8137,6 +8191,47 @@ async function viewUser(id) {
   $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
   $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
 }
+
+// UX-26 (owner 26/11): the keyboard follows the field. A field marked lang="ar" asks the PC for the Arabic layout,
+// lang="en" (barcode, English name, codes, item search) for the English one. Fire-and-forget and debounced: it never
+// waits, never shows an error, and turns itself off when the PC cannot switch (404 / not supported).
+function keyboardSwitcher(send, delay = 120) {
+  let timer = null, last = null, off = false, busy = false, want = null;
+  const fire = (lang) => {
+    if (off) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish (even = last) goes after it
+    if (lang === last) return;
+    last = lang; busy = true; want = null;
+    Promise.resolve().then(() => send("/api/system/keyboard-layout", {
+      method: "POST", credentials: "same-origin",
+      ...(typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(1500) } : {}),
+      headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
+      body: JSON.stringify({ lang }),
+    })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
+      .catch(() => { last = null; })
+      .finally(() => { busy = false; const next = want; want = null; if (next) fire(next); });
+  };
+  return (lang) => {
+    if (off || (lang !== "ar" && lang !== "en")) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => fire(lang), delay);
+  };
+}
+const KB_SWITCH = keyboardSwitcher((url, opts) => fetch(url, opts));
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (el?.matches?.("input:not([type=checkbox]):not([type=radio]):not([type=number]), textarea")) KB_SWITCH(el.getAttribute("lang"));
+});
+// English-name fields write capitals as they are typed (data-upper); the cursor stays where it was
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el?.matches?.("input[data-upper]") || e.isComposing) return;
+  const up = upperEn(el.value);
+  if (up === el.value) return;
+  const a = el.selectionStart, b = el.selectionEnd;
+  el.value = up;
+  try { el.setSelectionRange(a, b); } catch { /* not a text field */ }
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 route();
