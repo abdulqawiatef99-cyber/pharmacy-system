@@ -21,6 +21,8 @@ const fmtStock = (q, it) => {
 };
 // UX-27 (owner 26/11): one line carries boxes and strips, "1 علبة + 1 شريط" typed in one go -> base units.
 // Each part is a whole number (Arabic digits too, empty = 0); null when a part is not, or nothing is asked.
+// + / − on a line: a box when the line is whole boxes, else one strip
+const qtyStep = (q, ps) => (ps > 1 && q % ps === 0 ? ps : 1);
 function mixedQty(packs, units, ps) {
   const whole = (v) => {
     const t = String(v ?? "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
@@ -5570,7 +5572,7 @@ function renderCart(findings = null) {
     posInvoiceCard(line(button.dataset.posCard))));
   $("#posCart").querySelectorAll("[data-cart-pack]").forEach((button) => button.addEventListener("click", () =>
     withBusy(button, () => packFix(line(button.dataset.cartPack).item_id, null, true))));
-  const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
+  const step = (l, q = l.qty_base) => qtyStep(q, l.item.pack_size);
   // UX-27: boxes and strips of one line in two fields; saved once the cashier leaves the pair (or Enter), so typing
   // the box then Tab to the strip is one change. The server re-checks the stock and refuses beyond it.
   $("#posCart").querySelectorAll("[data-qline]").forEach((box) => {
@@ -5592,9 +5594,9 @@ function renderCart(findings = null) {
     const box = $(`[data-qline="${CSS.escape(l.id)}"]`, $("#posCart"));
     return (box && mixedQty(box.querySelector("[data-qp]").value, box.querySelector("[data-qu]").value, l.item.pack_size)) || l.qty_base;
   };
-  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: typedQty(l) + step(l) }); }));
+  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); const q = typedQty(l); patchLine(l.id, { qty_base: q + step(l, q) }); }));
   $("#posCart").querySelectorAll("[data-minus]").forEach((b) => b.addEventListener("click", async () => {
-    const l = line(b.dataset.minus), n = typedQty(l) - step(l);
+    const l = line(b.dataset.minus), q = typedQty(l), n = q - step(l, q);     // Codex on #490: the typed quantity's step
     if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
     else patchLine(l.id, { qty_base: n });
   }));
