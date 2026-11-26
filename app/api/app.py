@@ -1833,8 +1833,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
 
         def create():
-            iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
-                                      force=bool(b.get("force")))
+            # UX-28: the group (section) of a new item is saved with it, so a refused group (unknown, or a
+            # no-return one without the owner's right) refuses the whole item, never leaves it half made
+            with db.transaction():
+                iid = catalog.create_item(db, ctx, b.get("item") or {}, barcodes=b.get("barcodes") or [],
+                                          force=bool(b.get("force")))
+                if b.get("category_id"):
+                    item_card.set_category(db, ctx, [iid], str(b["category_id"]))
             return J(catalog.get_item(db, ctx, iid), status_code=201)
 
         return await run_in_threadpool(create)

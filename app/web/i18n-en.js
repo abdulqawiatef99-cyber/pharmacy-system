@@ -1,6 +1,13 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"عدد الوحدات الصغيرة في العبوة": "Small units in the pack",
+"سعر الجمهور للعبوة (ج)": "Public price per pack (EGP)",
+"احفظ وحطه في الفاتورة": "Save and put it on the invoice",
+"✓ اتضاف الصنف": "✓ Item added",
+"اكتب اسم الصنف (عربي أو إنجليزي)": "Type the item name (Arabic or English)",
+"السعر للمالك والمدير؛ سعر الفاتورة بيتسجل مع الاعتماد": "Price is for the owner and manager; the invoice price is recorded at approval",
+"الصنف مش موجود؟ ضيفه من هنا وكمّل الفاتورة": "Item not found? Add it here and carry on with the invoice",
 "الإجمالي في الإيصال بيطلع بعد التقريب، وتقدر تظهر سطر التقريب من إعدادات الإيصال.": "The receipt total is printed after rounding; you can show the rounding line in the receipt settings.",
 "أقصى تقريب يدوي عند الدفع (جنيه)": "Maximum manual rounding at payment (EGP)",
 "زرار «تقريب يدوي» في الدفع النقدي بيقرّب لأقرب جنيه تحت أو فوق، لحد المبلغ ده بس. صفر = الزرار مقفول. أقصى حاجة 5 جنيه.": "The «manual rounding» button on a cash payment rounds to the whole pound below or above, up to this amount only. Zero = the button is off. At most 5 EGP.",

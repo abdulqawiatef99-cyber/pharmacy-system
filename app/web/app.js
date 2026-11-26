@@ -1642,6 +1642,8 @@ function quickAddHtml() {
     <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
 }
 
+const newItemButton = () => (ME.permissions.includes("items.write")
+  ? ' <button type="button" class="btn small" data-qa-new title="الصنف مش موجود؟ ضيفه من هنا وكمّل الفاتورة">+ صنف جديد</button>' : "");
 function bindQuickAdd() {
   const q = $("#qaQ");
   if (!q) return;
@@ -1707,7 +1709,7 @@ function bindQuickAdd() {
     if (scan || code) {
       if (res.length === 1) { pickResult(res[0]); return; }
       if (!res.length) {
-        $("#qaRes").innerHTML = '<p class="badge b-warn">الباركود مش مسجل على أي صنف. سجّله من كارت الصنف.</p>';
+        $("#qaRes").innerHTML = '<p class="badge b-warn">الباركود مش مسجل على أي صنف. سجّله من كارت الصنف.</p>' + newItemButton();
         return;
       }
     } else if (res.length === 1 && (/^\d{6,}$/.test(v) || (/^\d{3,5}$/.test(v) && res[0].code === v))) {
@@ -1718,7 +1720,7 @@ function bindQuickAdd() {
       return;
     }
     $("#qaRes").innerHTML = (code ? "" : hintHtml(found.hint)) + (res.map((r, i) => `<span class="row nowrap"><button type="button"
-      class="btn small secondary" data-qa="${i}">${resultLabel(r)}</button>${invoiceCardButton("data-qa-card", i, purchaseCardKey())}</span>`).join("") || '<p class="muted">لا توجد نتائج</p>');
+      class="btn small secondary" data-qa="${i}">${resultLabel(r)}</button>${invoiceCardButton("data-qa-card", i, purchaseCardKey())}</span>`).join("") || '<p class="muted">لا توجد نتائج</p>') + newItemButton();
     $("#qaRes").querySelectorAll("[data-qa]").forEach((b) => b.addEventListener("click", () => pickResult(res[+b.dataset.qa])));
   };
   const runSearch = (select, scan = false) => search(q.value.trim(), select, scan)
@@ -1757,6 +1759,10 @@ function bindQuickAdd() {
   picker.addEventListener("click", (e) => {
     const button = e.target.closest("[data-qa-card]");
     if (button) openCard(button);
+    if (e.target.closest("[data-qa-new]")) {                     // UX-28: not found → a new item, then it is picked
+      clearTimeout(timer); seq++;
+      showNewItemCard(q.value.trim(), (created) => { if (current() && q.isConnected) pick(created); });
+    }
   });
   picker.addEventListener("keydown", (e) => {
     if (!purchaseCardShortcut(e)) return;
@@ -2562,6 +2568,72 @@ function invoiceCardDetails(c) {
       <tbody>${c.recent_purchases.map((p) => `<tr><td>${esc(p.supplier || "—")}</td><td>${esc(p.invoice_date || "—")}</td>
         <td>${p.qty}</td><td>${money(p.unit_net_price) || "—"}</td></tr>`).join("") ||
         '<tr><td colspan="4" class="muted">لا يوجد شراء مسجل بعد</td></tr>'}</tbody></table></div>` : ""}`;
+}
+
+// UX-28 (owner 23/11, 26/11): a new item from inside the purchase invoice. A short card in place: names, barcode, the
+// pack and its small units, the public price and the group. Saved in one step (the group with the item: a refused
+// group refuses the whole item); the created item comes back to `onCreated` (the invoice's entry row picks it).
+async function showNewItemCard(query, onCreated) {
+  if ($("dialog[open]")) return;
+  const focused = document.activeElement;
+  const q = String(query || "").trim(), code = /^\d{6,}$/.test(q), latin = /[a-z]/i.test(q);
+  const canPrice = ME.permissions.includes("items.price");
+  const cats = await loadCats(true).catch(() => []);
+  const d = document.createElement("dialog");
+  d.className = "invoice-item-card new-item-card";
+  d.setAttribute("aria-labelledby", "newItemTitle");
+  d.innerHTML = `<form id="niForm"><div class="row between"><h2 id="newItemTitle">صنف جديد</h2>
+      <button type="button" class="btn small secondary" data-ni-close>قفل</button></div>
+    <p class="err" role="alert" hidden></p>
+    <div class="formgrid">
+      <label class="f">الاسم بالإنجليزي<input name="name_en" lang="en" data-upper dir="ltr" autocomplete="off" value="${latin && !code ? esc(upperEn(q)) : ""}"></label>
+      <label class="f">الاسم بالعربي<input name="name_ar" lang="ar" autocomplete="off" value="${!latin && !code ? esc(q) : ""}"></label>
+      <label class="f">الباركود<input name="barcode" dir="ltr" inputmode="numeric" autocomplete="off" value="${code ? esc(q) : ""}"></label>
+      <label class="f">اسم العبوة<input name="pack_unit_name" autocomplete="off" value="علبة"></label>
+      <label class="f">عدد الوحدات الصغيرة في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
+      <label class="f">اسم الوحدة الصغيرة<input name="base_unit_name" autocomplete="off" placeholder="شريط / أمبول / قرص"></label>
+      <label class="f">سعر الجمهور للعبوة (ج)<input name="public_price" type="number" step="0.01" min="0" ${canPrice ? "" : "disabled"}>
+        ${canPrice ? "" : `<span class="muted">السعر للمالك والمدير؛ سعر الفاتورة بيتسجل مع الاعتماد</span>`}</label>
+      <label class="f">القسم<select name="category_id"><option value="">— بدون قسم —</option>${cats.filter((c) => c.is_active)
+        .map((c) => `<option value="${esc(c.id)}">${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
+    </div>
+    <div class="row mt"><button class="btn" type="submit">احفظ وحطه في الفاتورة</button></div></form>`;
+  const form = $("form", d), error = $("[role=alert]", d);
+  let busy = false;
+  const dismiss = () => { if (!d.open) return; d.close(); d.remove(); if (document.activeElement === document.body) focused?.focus?.(); };
+  $("[data-ni-close]", d).addEventListener("click", () => { if (!busy) dismiss(); });
+  d.addEventListener("cancel", (e) => { e.preventDefault(); if (!busy) dismiss(); });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const f = form.elements, txt = (n) => f[n].value.trim() || null;
+    if (!txt("name_en") && !txt("name_ar")) { error.textContent = "اكتب اسم الصنف (عربي أو إنجليزي)"; error.hidden = false; f.name_en.focus(); return; }
+    // an empty field is left out (the item's own defaults: علبة / وحدة), never sent as null
+    const item = Object.fromEntries(Object.entries({ name_en: txt("name_en") && upperEn(txt("name_en")), name_ar: txt("name_ar"),
+      pack_size: typedWhole(f.pack_size.value) ?? f.pack_size.value, pack_unit_name: txt("pack_unit_name"),
+      base_unit_name: txt("base_unit_name") }).filter(([, v]) => v !== null && v !== ""));
+    if (canPrice && f.public_price.value.trim() !== "") item.public_price = exactPiasters(f.public_price.value) ?? f.public_price.value;
+    const body = { item, barcodes: txt("barcode") ? [txt("barcode")] : [], ...(f.category_id.value ? { category_id: f.category_id.value } : {}) };
+    busy = true; error.hidden = true;
+    try {
+      let created;
+      try { created = await api("/api/items", { method: "POST", body }); }
+      catch (err) {
+        if (err.code !== "possible_duplicate") throw err;
+        const names = (err.details?.duplicates || []).map((x) => x.label || x.name || x.name_en).join("، ");
+        if (!confirm(`يوجد صنف مشابه: ${names}\nهل أنت متأكد أنه صنف مختلف؟`)) return;
+        created = await api("/api/items", { method: "POST", body: { ...body, force: true } });
+      }
+      dismiss();
+      onCreated?.(created);
+      toast("✓ اتضاف الصنف");
+    } catch (err) { if (d.open) { error.textContent = err.message; error.hidden = false; } }
+    finally { busy = false; }
+  });
+  document.body.append(d);
+  d.showModal();
+  (code || !q ? f0() : (latin ? form.elements.name_ar : form.elements.name_en)).focus();
+  function f0() { return form.elements.name_en; }
 }
 
 function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCreate, onSaved, restore } = {}) {
