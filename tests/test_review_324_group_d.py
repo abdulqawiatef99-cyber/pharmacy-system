@@ -195,7 +195,7 @@ class TestS28CancelApprovedPurchase(_Base):
     def test_a_free_invoice_with_a_credited_return_still_comes_to_zero(self):
         """Codex P2 on #347: nothing was posted for the invoice, but a return of its units was credited at an
         agreed value; the cancel must take that credit back or the supplier is left owing 3.60."""
-        iid, v = self.buy(self.a, self.it, 10, 0)
+        iid, v = self.buy(self.a, self.it, 10, 100, total=0, extra_discount=1000)
         self.assertEqual(self.owed(self.a), 0)
         returns.create(self.db, self.ctx, self.a, [{"item_id": self.it, "batch_id": self.lot(self.it), "qty_base": 4,
                                                     "reason": "expired", "unit_value": 90}])

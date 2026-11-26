@@ -16,12 +16,13 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
   next session should start.
 - End every reply with «التذكيرات المفتوحة» (the list is at the top of `docs/HANDOFF.md`).
 - Agent-to-agent text (sessions, Codex, sub-agents, PRs, Issues, commits, agent docs) is short English.
+- Every idea the owner mentions is written to a file (`docs/FUTURE_REQUIREMENTS.md`) in the same reply (18/11).
 
 ## 2. Needs the owner first (everything else: decide, record, continue)
 - Sending anything in his name; deleting anything (data, files, Issues, unmerged branches); paying or any new
   recurring cost.
 - Installing anything on the pharmacy PC: only after he says «نزّله» (the manager does it).
-- Building an installer.
+- Pressing any Claude or Codex usage reset: only when he approves that exact reset in chat (19/11).
 - Touching or migrating real data outside the program's own update path.
 - Changing an agreed business rule (pricing, discounts, returns, cost, dosing) or the `STATUS.md` formula.
 - Pre-approved (owner 22/11, 21:22): every merge into `develop` and every release PR `develop` → `main`
@@ -34,6 +35,9 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
 - The program is the pharmacy's live cashier since 21/11 (v0.4.0). E-Stock stays as read-only history.
 - Two PCs: cashier `desktop-5jvh3qd` (live); Heikal `desktop-gqgl6uf` = test machine, synthetic data
   only, its own E-Stock data never touched. Every device chat reads the device name first.
+- No new installer, ever: everything ships through the «تحديث» button (20/11, 23/11).
+- Close every window, tab or app you open on his PCs as soon as the step is done (20/11).
+- Never touch the WhatsApp Desktop app on the cashier PC (19/11).
 - Never take full-screen control of a PC while the owner works. WhatsApp: read only, never send. Never
   open «اكونتات الشركات» or any note with passwords or codes.
 - Sign-in on a PC: never stop to ask him. Read the test login file in Notepad (open by path), sign in in the browser pane,
@@ -52,6 +56,7 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
   the owner in plain words.
 - Weekly (after the Thursday usage reset): 5 lines on what moved against the `STATUS.md` gates, what is
   stuck, and the week's plan.
+- Effort Medium for every session and Codex task unless the owner names another level (20/11).
 - Model per task, named before the task starts (the cheapest that does it well; a chat cannot change its
   own model, the owner picks it): strongest model for reviews and fixes of money, stock and security;
   Opus for routine coding and device work; Sonnet for docs, routine merges and status.

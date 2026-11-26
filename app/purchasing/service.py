@@ -14,19 +14,19 @@ import json
 import sqlite3
 from fractions import Fraction
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 
 from .. import config as config_mod
-from ..catalog import matching, service as catalog
-from ..catalog.normalize import normalize_text
+from ..catalog import gs1, matching, service as catalog
+from ..catalog.normalize import normalize_barcode, normalize_text
 from ..core import accounts, audit, notify
 from ..core.errors import Conflict, DomainError, NotFound, ValidationFailed
-from ..core.numbers import whole_number
+from ..core.numbers import MAX_SAFE, whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
-from . import validation
+from . import entry_settings, sanity, validation
 from .importers import ai_vision, files
 from .model import ExtractedInvoice, parse_expiry, pct_to_bp, to_piasters
 
@@ -237,6 +237,8 @@ class Purchasing:
             "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
             (inv_id, ctx.org_id))]
         comp = validation.computed_total(inv, lines)
+        if comp is not None and abs(comp) > MAX_SAFE:
+            raise ValidationFailed("إجمالي الفاتورة أكبر من الحد المسموح")
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
             # the distributor's margin only when there is one: invoices without it keep the hash they had (B3)
@@ -257,6 +259,29 @@ class Purchasing:
             raise NotFound("الفاتورة غير موجودة")
         return replace(ctx, branch_id=r["branch_id"])
 
+    def scan_item(self, ctx: Context, inv_id: str, raw: str) -> dict:
+        ctx.require("purchases.edit")
+        ctx.require("items.read")
+        receiving = self.receiving_context(ctx, inv_id)
+        raw = raw.strip()[:100]
+        code = gs1.parse(raw)
+        barcode = code["gtin"] if code else normalize_barcode(raw) if raw.isdecimal() else None
+        if not barcode:
+            return {"items": [], "hint": None}
+        keys = gs1.gtin_keys(barcode)
+        rows = self.db.all(
+            f"SELECT DISTINCT i.* FROM item_barcodes b JOIN items i ON i.id=b.item_id AND i.org_id=b.org_id"
+            f" WHERE b.org_id=? AND b.barcode IN ({','.join('?' * len(keys))}) AND i.status='active'"
+            " AND (i.hidden=0 OR ?)",
+            (ctx.org_id, *keys, ctx.can("items.hidden")))
+        items = [dict(row) for row in rows]
+        if ctx.can("inventory.read"):
+            for item in items:
+                item["stock_qty"] = self.db.one(
+                    "SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND branch_id=? AND item_id=?",
+                    (ctx.org_id, receiving.branch_id, item["id"]))["q"]
+        return {"items": items, "hint": {"kind": "gs1", **code} if code else None}
+
     def _load(self, ctx: Context, inv_id: str) -> tuple[dict, list[dict]]:
         r = self.db.one("SELECT * FROM purchase_invoices WHERE id=? AND org_id=?",
                         (inv_id, ctx.org_id))
@@ -268,10 +293,11 @@ class Purchasing:
         return dict(r), lines
 
     def issues(self, ctx: Context, inv: dict, lines: list[dict]) -> list[validation.Issue]:
+        from ..sales.service import local_today
         item_ids = {l["item_id"] for l in lines if l["item_id"]}
         items = {}
         for iid in item_ids:
-            it = self.db.one("SELECT id, public_price, is_drug FROM items WHERE id=? AND org_id=?",
+            it = self.db.one("SELECT id, public_price, is_drug, pack_size FROM items WHERE id=? AND org_id=?",
                              (iid, ctx.org_id))
             if it:
                 items[iid] = dict(it)
@@ -283,11 +309,27 @@ class Purchasing:
             "SELECT 1 FROM purchase_invoices WHERE org_id=? AND content_hash=? AND status<>'cancelled'"
             " AND id<>? AND coalesce(supplier_id,'')=coalesce(?, '')",
             (ctx.org_id, inv["content_hash"], inv["id"], inv["supplier_id"])))
-        out = validation.validate(inv, lines, items=items, today=date.today(),
+        out = validation.validate(inv, lines, items=items, today=local_today(),
                                   short_expiry_days=self.s.short_expiry_days,
                                   total_tolerance=self.s.total_tolerance_piasters,
                                   duplicate_no=dup_no, duplicate_content=dup_content)
-        return out + self._slow_before_expiry(ctx, inv, lines)
+        out += self._slow_before_expiry(ctx, inv, lines)
+        if inv["supplier_id"] and any((l["bonus_qty"] or 0) > 0 for l in lines):
+            # The screen hides bonus for a warehouse supplier (DEV-PUR); a bonus already on a line (supplier switched
+            # from a company, or an import) would post free stock nobody can see. Refused until cleared (review P1).
+            t = self.db.one("SELECT supplier_type FROM suppliers WHERE id=? AND org_id=?",
+                            (inv["supplier_id"], ctx.org_id))
+            if t and t["supplier_type"] == "warehouse":
+                for l in lines:
+                    if (l["bonus_qty"] or 0) > 0:
+                        out.append(validation.Issue(
+                            "error", "warehouse_bonus",
+                            "المورد مخزن ومفيش بونص في فواتير المخازن: البونص مسجّل على السطر ده ومش ظاهر."
+                            " غيّر نوع المورد لشركة أو امسح البونص قبل الاعتماد",
+                            l["id"], "bonus_qty", {"bonus_qty": l["bonus_qty"]}))
+        if inv["status"] == "draft":
+            out += sanity.unusual_issues(self.db, inv, lines, items, entry_settings.get(self.db, ctx.org_id))
+        return out
 
     NEAR_DAYS = 90          # an item is "near expiry" from 3 months before its date (U2-22)
 
@@ -296,7 +338,8 @@ class Purchasing:
         More than that needs a written reason to approve. Items never sold here are left out (a new item would
         always be flagged)."""
         from ..procurement.service import Procurement
-        today = date.today()
+        from ..sales.service import local_today
+        today = local_today()
         acks = {(a.get("code"), a.get("line_id") or "", json.dumps(a.get("details") or {}, sort_keys=True))
                 for a in json.loads(inv.get("acknowledged_issues") or "[]")}
         p, out, by_item = Procurement(self.db, today=today), [], {}
@@ -382,28 +425,37 @@ class Purchasing:
     def get(self, ctx: Context, inv_id: str, *, with_candidates: bool = True) -> dict:
         ctx.require("purchases.read")
         inv, lines = self._load(ctx, inv_id)
+        issues = self.issues(ctx, inv, lines)
+        items = {}
         for l in lines:
             l["field_sources"] = json.loads(l["field_sources"])
             l["field_confidence"] = json.loads(l["field_confidence"])
             if l["item_id"]:
-                it = self.db.one("SELECT name_en, name_ar, strength, dosage_form, pack_size, code,"
-                                 " pack_unit_name, base_unit_name, public_price FROM items WHERE id=? AND org_id=?",
-                                 (l["item_id"], ctx.org_id))
-                l["item"] = dict(it) if it else None
+                iid = l["item_id"]
+                if iid not in items:
+                    it = self.db.one(
+                        "SELECT name_en, name_ar, strength, dosage_form, pack_size, code,"
+                        " pack_unit_name, base_unit_name, public_price,"
+                        " (SELECT coalesce(sum(qty),0) FROM stock_balances"
+                        " WHERE org_id=i.org_id AND branch_id=? AND item_id=i.id) stock_qty"
+                        " FROM items i WHERE id=? AND org_id=?", (inv["branch_id"], iid, ctx.org_id))
+                    items[iid] = dict(it) if it else None
+                item = items[iid]
+                l["item"] = {k: v for k, v in item.items() if k != "stock_qty"} if item else None
+                l["stock_qty"] = item["stock_qty"] if item and ctx.can("inventory.read") else None
             if with_candidates and l["match_status"] in ("suggested", "unmatched"):
                 cands = matching.fuzzy_candidates(self.db, ctx.org_id, l["raw_name"], 5)
                 l["candidates"] = [c.__dict__ for c in cands]
-        raw_lines = [dict(x) for x in self.db.all(
-            "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
-            (inv_id, ctx.org_id))]
-        issues = self.issues(ctx, inv, raw_lines)
         inv["acknowledged_issues"] = json.loads(inv["acknowledged_issues"])
         inv.pop("raw_extraction", None)
         inv["pay"] = self.pay_plan(ctx, inv)
         if inv["supplier_id"]:
-            s = self.db.one("SELECT name FROM suppliers WHERE id=? AND org_id=?", (inv["supplier_id"], ctx.org_id))
+            s = self.db.one("SELECT name, supplier_type FROM suppliers WHERE id=? AND org_id=?",
+                            (inv["supplier_id"], ctx.org_id))
             inv["supplier_name"] = s["name"] if s else None
+            inv["supplier_type"] = s["supplier_type"] if s else None
         return {"invoice": inv, "lines": lines, "issues": [i.as_dict() for i in issues],
+                "entry_order": entry_settings.get(self.db, ctx.org_id)["field_order"],
                 "can_approve": inv["status"] == "draft" and not validation.blocking(issues)}
 
     def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
@@ -496,6 +548,7 @@ class Purchasing:
                     if d > local_today():          # U2-0: a supplier invoice is never dated after today
                         raise ValidationFailed("تاريخ فاتورة المورد بعد النهارده: مستحيل، راجع التاريخ",
                                                code="invoice_date_future")
+                    v = d.isoformat()
                 clean[k] = v
             if clean:
                 sets = ", ".join(f"{k}=?" for k in clean)
@@ -542,7 +595,7 @@ class Purchasing:
         if bad:
             raise ValidationFailed(f"حقول غير قابلة للتعديل: {', '.join(sorted(bad))}")
         with self.db.transaction():
-            self._draft_for_update(ctx, inv_id, version)
+            inv = self._draft_for_update(ctx, inv_id, version)
             line = self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=?"
                                " AND org_id=?", (line_id, inv_id, ctx.org_id))
             if not line:
@@ -568,15 +621,15 @@ class Purchasing:
                             else "manual"))
                     else:
                         upd.update(item_id=None, match_status="unmatched", match_method=None)
-                elif k in ("qty", "bonus_qty", "public_price", "discount_bp", "unit_net_price",
-                           "tax_amount", "line_total", "distributor_margin"):
+                elif k in validation.NUMERIC_FIELDS:
                     if v is not None:
+                        _, minimum, maximum = validation.NUMERIC_FIELDS[k]
                         try:
                             v = whole_number(v)      # 2.5 boxes or 12.5 piasters is refused, never cut
                         except (TypeError, ValueError):
-                            raise ValidationFailed(f"قيمة غير صحيحة: {k}")
-                        if v < 0 or (k == "discount_bp" and v > 10000):
-                            raise ValidationFailed(f"قيمة غير صحيحة: {k}")
+                            raise ValidationFailed(validation.numeric_message(k))
+                        if not minimum <= v <= maximum:
+                            raise ValidationFailed(validation.numeric_message(k))
                     if k in ("bonus_qty", "distributor_margin") and v is None:
                         v = 0
                     upd[k] = v
@@ -612,6 +665,17 @@ class Purchasing:
                     conf.pop(dep, None)
             merged = {**line, **upd, "field_sources": src, "field_confidence": conf}
             validation.derive_line(merged)
+            from ..sales.service import local_today
+            for code, _, related in validation.impossible_line(merged, local_today(), tax_only=inv["extra_tax"] > 0):
+                if related.intersection(changes):
+                    raise ValidationFailed(validation.MESSAGES[code], code=code)
+            amount = validation.effective_amount(merged)
+            if amount is not None and abs(amount) > MAX_SAFE:
+                raise ValidationFailed("إجمالي السطر أكبر من الحد المسموح")
+            if merged["item_id"] and merged["qty"]:
+                item = catalog.item_row(self.db, ctx, merged["item_id"])
+                if (merged["qty"] + merged["bonus_qty"]) * item["pack_size"] > MAX_SAFE:
+                    raise ValidationFailed("الكمية مع البونص أكبر من الحد المسموح للصنف")
             for k in ("unit_net_price", "discount_bp", "line_total"):
                 upd[k] = merged[k]
             upd["field_sources"] = json.dumps(merged["field_sources"])
@@ -626,7 +690,7 @@ class Purchasing:
                          after={"line_id": line_id, **{k: changes[k] for k in changes}})
         return self.get(ctx, inv_id)
 
-    def add_line(self, ctx: Context, inv_id: str, data: dict, version: int | None) -> dict:
+    def add_line(self, ctx: Context, inv_id: str, data: dict, version: int | None, *, picked: bool = False) -> dict:
         ctx.require("purchases.edit")
         # one transaction for the line and its values: a refused value (2.5 packs) used to leave the blank
         # line and a new version behind an answer that said "refused" (#324 S34)
@@ -648,7 +712,11 @@ class Purchasing:
                    "unit_net_price": None, "tax_amount": None, "line_total": None, "distributor_margin": 0,
                    "batch_no": None, "expiry_date": None, "expiry_precision": None,
                    "field_sources": {"raw_name": "user"}, "field_confidence": {"raw_name": 1.0}}
-            self._apply_match(ctx, row, inv["supplier_id"])
+            if picked and data.get("item_id") and not data.get("raw_name"):
+                # The picker already chose the item. Other callers still go through supplier alias matching.
+                row.update(item_id=None, match_method=None, match_score=None, match_status="unmatched")
+            else:
+                self._apply_match(ctx, row, inv["supplier_id"])
             self._insert_line(row)
             self._bump(inv_id)
             audit.record(self.db, ctx, "purchase.line_add", "purchase_invoice", inv_id,
@@ -737,6 +805,9 @@ class Purchasing:
         iso, prec = parse_expiry(expiry, compact=True)
         if not iso:
             raise ValidationFailed("الصلاحية مش مفهومة (مثال: 1128 أو 11/2028)")
+        from ..sales.service import local_today
+        if date.fromisoformat(iso) < local_today():
+            raise ValidationFailed(validation.MESSAGES["expired"], code="expired")
         with self.db.transaction():
             inv = self._draft_for_update(ctx, inv_id, version)
             a = self.db.one("SELECT * FROM purchase_invoice_lines WHERE id=? AND invoice_id=? AND org_id=?",
@@ -963,7 +1034,7 @@ class Purchasing:
                 (inv_id, ctx.org_id))]
             blocking = validation.blocking(self.issues(ctx, inv, lines))
             if blocking:
-                raise Conflict("لا يمكن اعتماد الفاتورة قبل حل المشكلات", code="has_blocking_issues",
+                raise Conflict(blocking[0].message, code="has_blocking_issues",
                                details={"issues": [i.as_dict() for i in blocking]})
             if inv["invoice_date"]:
                 from ..sales.service import local_today
@@ -1001,12 +1072,8 @@ class Purchasing:
                 # read again per line: an earlier line of the same item may have changed its public price
                 # (the preloaded row skipped the second change and logged a stale previous price, #336 review)
                 item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
-                # allocate invoice-level discount/tax proportionally to line value; lines worth nothing (all free)
-                # share it by units, or tax posted to the supplier reached no unit cost (#324 S27)
-                share = Decimal(amount) * Decimal(net_total) / Decimal(gross) if gross else \
-                    Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
                 base_qty = units[l["id"]]                       # bonus is free stock
-                unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
+                unit_cost = validation.allocated_unit_cost(amount, gross, net_total, base_qty, all_units)
                 price = l["public_price"] if may_price else None     # #448: no authority, stated price ignored
                 # No receipt price (no authority, or a net-price-only line): the boxes go to today's catalog price,
                 # never to an older priced lot or an older-priced untracked balance (Codex P1 on #451 + review).

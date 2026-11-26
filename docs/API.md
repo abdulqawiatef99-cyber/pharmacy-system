@@ -24,11 +24,18 @@ Optimistic locking: editing endpoints take the `version` you last read.
 `GET|POST /api/suppliers` · `GET /api/export/items.xlsx`
 
 **Purchases** — `POST /api/purchases/import` (multipart `file`, `supplier_id?`) · `POST /api/purchases`
-(manual) · `GET /api/purchases?status=` · `GET /api/purchases/{id}` → `{invoice, lines, issues, can_approve}` ·
+(manual) · `GET /api/purchases?status=` · `GET /api/purchases/{id}` → `{invoice, lines, issues, entry_order, can_approve}` ·
 `PATCH /api/purchases/{id}` `{changes, version}` · `POST …/lines` · `PATCH|DELETE …/lines/{line_id}`
 (`changes` may include `confirm_fields:[…]`) · `POST …/lines/{line_id}/new-item` ·
 `POST …/acknowledge` `{code, reason, line_id?, version}` · `POST …/approve {version}` · `POST …/cancel {reason, version}` ·
 `GET /api/files/{id}` (original document)
+
+`GET /api/purchases/{id}/scan?barcode=` resolves exact registered barcodes and GS1 codes. Each line's
+`stock_qty` is the current stock in base units in the receiving branch for users with `inventory.read`.
+`GET|PUT /api/settings/purchase-entry` requires `settings.manage`. It stores the field order and quantity
+and price thresholds per pharmacy. Quantity compares the invoice's paid plus bonus packs per item
+with the mean of up to 10 approved invoices in that branch. The price checks compare against public
+price and the last posted purchase cost. Approval requires a written acknowledgement of each outlier.
 
 **Data import** — `POST /api/imports` (multipart `file`, `kind=items|opening_stock`, `qty_unit=pack|base`,
 `mapping?` JSON, `header_row?`) → dry-run report · `GET /api/imports/{id}?action=` ·

@@ -447,11 +447,12 @@ class QA20261123(APICase):
 
     def test_manual_vat_modes_use_exact_payable_and_preserve_line_tax(self):
         purchasing = Purchasing(self.db, self.s)
+        item = catalog.create_item(self.db, self.ctx, {"name_en": "Synthetic VAT unit", "public_price": 101})
         for mode, expected in ((0, 607), (1, 606)):
             sid = purchasing.create_manual(self.ctx, supplier_id=self.supplier)
             purchasing.update_header(self.ctx, sid, {"invoice_no": f"QA-VAT-{mode}", "declared_total": expected}, None)
             purchase = purchasing.add_line(self.ctx, sid, {
-                "item_id": self.item, "qty": 10, "public_price": 101, "discount_bp": 4000,
+                "item_id": item, "qty": 10, "public_price": 101, "discount_bp": 4000,
                 "tax_amount": 1, "tax_included": mode, "batch_no": f"QA-VAT-{mode}", "expiry_date": self.expiry,
             }, None)
             self.assertEqual(purchase["invoice"]["computed_total"], expected)

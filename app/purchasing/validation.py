@@ -17,10 +17,25 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field as dc_field
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+
+from ..core.numbers import MAX_SAFE
 
 LOW_CONFIDENCE = 0.8
 ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch",
                   "short_expiry", "slow_before_expiry"}      # U2-22: approved only with a written reason
+UNUSUAL = {"unusual_qty", "unusual_public_price", "unusual_last_cost"}
+ACKNOWLEDGEABLE |= UNUSUAL
+NUMERIC_FIELDS = {
+    "qty": ("الكمية", 1, MAX_SAFE),
+    "bonus_qty": ("البونص", 0, MAX_SAFE),
+    "public_price": ("سعر الجمهور", 1, MAX_SAFE),
+    "unit_net_price": ("سعر الصيدلي", 1, MAX_SAFE),
+    "discount_bp": ("الخصم", 0, 10000),
+    "distributor_margin": ("هامش الموزع", 0, MAX_SAFE),
+    "tax_amount": ("الضريبة", 0, MAX_SAFE),
+    "line_total": ("إجمالي السطر", 0, MAX_SAFE),
+}
 
 MESSAGES = {
     "supplier_missing": "حدد المورد",
@@ -42,7 +57,7 @@ MESSAGES = {
     "net_above_public": "السعر الصافي أعلى من سعر الجمهور",
     "margin_too_large": "هامش الموزع أكبر من نص سعر الجمهور: مستحيل، راجع الهامش",
     "public_price_changed": "سعر الجمهور مختلف عن السعر المسجل للصنف",
-    "expired": "الصنف منتهي الصلاحية",
+    "expired": "الصنف منتهي الصلاحية: الصلاحية لازم تكون النهارده أو بعده",
     "short_expiry": "صلاحية قصيرة: اكتب سبب قبولها",
     "slow_before_expiry": "الكمية أكبر من اللي هيتباع قبل ما يقرب ينتهي: اكتب السبب",
     "expiry_missing": "تاريخ الصلاحية غير موجود",
@@ -55,6 +70,10 @@ MESSAGES = {
     "negative_total": "إجمالي الفاتورة بالسالب — راجع الخصم الإضافي وإجماليات الأسطر",
     "tax_above_total": "الضريبة المشمولة أكبر من إجمالي السطر",
     "negative_amount": "قيمة بالسالب (سعر أو ضريبة أو إجمالي) — صحّحها، ومرتجع المورد يُسجَّل من شاشة المرتجعات",
+    "positive_cost": "تكلفة السطر المدفوع لازم تكون أكبر من صفر؛ سجّل الكمية المجانية في البونص",
+    "unusual_qty": "إجمالي الكمية لهذا الصنف أعلى من المعتاد. راجع الكمية واكتب سبب قبولها",
+    "unusual_public_price": "فيه فرق سعر كبير عن سعر الجمهور. راجع السعر واكتب سبب قبوله",
+    "unusual_last_cost": "تكلفة الشراء مختلفة بشكل ملحوظ عن آخر تكلفة في الفرع. راجع السعر واكتب السبب",
 }
 
 
@@ -161,6 +180,39 @@ def computed_total(invoice: dict, lines: list[dict]) -> int | None:
     return sum(amounts) - (invoice.get("extra_discount") or 0) + (invoice.get("extra_tax") or 0)
 
 
+def allocated_unit_cost(amount: int, gross: int, total: int, units: int, all_units: int) -> Decimal:
+    """Supplier cost in EGP per received base unit, including invoice adjustments and free packs."""
+    share = Decimal(amount) * Decimal(total) / Decimal(gross) if gross else Decimal(total) * units / all_units
+    return (share / 100 / units).quantize(Decimal("0.000001"), ROUND_HALF_UP)
+
+
+def numeric_message(field: str) -> str:
+    label, minimum, maximum = NUMERIC_FIELDS[field]
+    if field == "discount_bp":
+        return f"{label} لازم يكون من 0% إلى 100%"
+    return f"{label} لازم يكون رقم صحيح من {minimum} إلى {maximum}"
+
+
+def impossible_line(line: dict, today: date, *, tax_only: bool = False):
+    """Cross-field refusals shared by the typed line and approval of imported or older drafts."""
+    public, net = line.get("public_price"), line.get("unit_net_price")
+    if public is not None and margin_of(line) * 2 > public and margin_of(line) > 0:
+        yield "margin_too_large", "distributor_margin", {"public_price", "distributor_margin"}
+    if line.get("tax_included") == 1 and line.get("line_total") is not None \
+            and (line.get("tax_amount") or 0) > line["line_total"]:
+        yield "tax_above_total", "tax_amount", {"tax_amount", "tax_included", "line_total", "qty", "unit_net_price",
+                                             "public_price", "discount_bp", "distributor_margin"}
+    if line.get("expiry_date") and date.fromisoformat(line["expiry_date"]) < today:
+        yield "expired", "expiry_date", {"expiry_date"}
+    sources = _j(line.get("field_sources"))
+    paid = effective_amount(line)
+    has_line_tax_cost = net == 0 and (line.get("tax_amount") or 0) > 0 and paid == line["tax_amount"]
+    if public == 0 or (not tax_only and (paid == 0 or
+            (net == 0 and sources.get("unit_net_price") != "inferred" and not has_line_tax_cost))):
+        yield "positive_cost", "unit_net_price", {"qty", "public_price", "unit_net_price", "discount_bp",
+                                                "tax_amount", "tax_included", "line_total", "distributor_margin"}
+
+
 def line_total_mismatch(line: dict) -> dict | None:
     total, net, qty = (line.get(k) for k in ("line_total", "unit_net_price", "qty"))
     if total is None or net is None or not qty:
@@ -200,6 +252,8 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
     if not lines:
         add("error", "no_lines")
 
+    # A tax-only invoice still pays a positive cost, allocated across the received units.
+    tax_only = (invoice.get("extra_tax") or 0) > 0 and all(effective_amount(line) == 0 for line in lines)
     seen: dict[str, list] = {}
     for l in lines:
         lid = l["id"]
@@ -232,9 +286,10 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         if net is None:
             add("error", "price_missing", lid, "unit_net_price")
         base = _base(pub, l)
-        if base is not None and base < 0 and margin_of(l) > 0:
-            add("error", "margin_too_large", lid, "distributor_margin", margin=margin_of(l), public=pub)
+        if base is not None and base < 0:
             base = None
+        for code, field, _ in impossible_line(l, today, tax_only=tax_only):
+            add("error", code, lid, field)
         if pub is not None and net is not None:
             if net + margin_of(l) > pub:      # the pack's cost (with the distributor's margin) above the public price
                 add("warning", "net_above_public", lid, "unit_net_price")
@@ -246,9 +301,6 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         mismatch = line_total_mismatch(l)
         if mismatch:
             add("error", "line_total_mismatch", lid, "line_total", **mismatch)
-        total = l.get("line_total")
-        if l.get("tax_included") == 1 and total is not None and (l.get("tax_amount") or 0) > total:
-            add("error", "tax_above_total", lid, "tax_amount")
         item = items.get(l.get("item_id") or "")
         if item and pub is not None and item.get("public_price") is not None \
                 and item["public_price"] != pub:
@@ -257,9 +309,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         exp_date = l.get("expiry_date")
         if exp_date:
             d = date.fromisoformat(exp_date)
-            if d < today:
-                add("error", "expired", lid, "expiry_date")
-            elif (d - today).days < short_expiry_days:
+            if 0 <= (d - today).days < short_expiry_days:
                 # details without the day count: an acceptance must not expire at midnight (independent review)
                 add("error", "short_expiry", lid, "expiry_date", expiry=exp_date, qty=qty)
                 issues[-1].message += f" ({(d - today).days} يوم)"
@@ -303,13 +353,17 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "total_mismatch", None, "declared_total", declared=declared,
                 computed=comp, difference=declared - comp)
 
-    # an acceptance covers the figures it accepted: a changed difference needs a new one (#324 S25)
+    apply_acknowledgements(invoice, issues)
+    return issues
+
+
+def apply_acknowledgements(invoice: dict, issues: list[Issue]) -> None:
+    # An acceptance covers the figures it accepted: a changed difference needs a new one (#324 S25).
     acks = {(a["code"], a.get("line_id") or "", json.dumps(a.get("details"), sort_keys=True)) for a in
             json.loads(invoice.get("acknowledged_issues") or "[]")}
     for i in issues:
         if i.code in ACKNOWLEDGEABLE and (i.code, i.line_id or "", json.dumps(i.details, sort_keys=True)) in acks:
             i.acknowledged = True
-    return issues
 
 
 def blocking(issues: list[Issue]) -> list[Issue]:
