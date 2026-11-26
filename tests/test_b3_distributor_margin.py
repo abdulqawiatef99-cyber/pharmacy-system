@@ -14,7 +14,7 @@ from pathlib import Path
 
 from app import config
 from app.catalog import service as cat
-from app.core.errors import ValidationFailed
+from app.core.errors import Conflict, ValidationFailed
 from app.db import MIGRATIONS_DIR, Database
 from app.procurement import returns
 from app.procurement.smart_order import real_discount_bp
@@ -150,8 +150,16 @@ class TestThePaper(Paper):
 
     def test_margin_above_half_the_public_price_blocks_approval(self):
         l = self.line("Margin one plus")
-        d = self.p.update_line(self.ctx, self.inv, l["id"], {"distributor_margin": 8000}, self.doc()["invoice"]["version"])
+        with self.assertRaises(ValidationFailed) as refused:
+            self.p.update_line(self.ctx, self.inv, l["id"], {"distributor_margin": 8000}, self.doc()["invoice"]["version"])
+        self.assertEqual(refused.exception.code, "margin_too_large")
+        # Old drafts can already contain a bad margin. They still cannot post.
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoice_lines SET distributor_margin=8000 WHERE id=?", (l["id"],))
+        d = self.doc()
         self.assertIn("margin_too_large", [i["code"] for i in d["issues"] if i["level"] == "error"])
+        with self.assertRaises(Conflict):
+            self.p.approve(self.ctx, self.inv, d["invoice"]["version"])
 
     def test_split_keeps_the_total(self):
         l = self.line("Margin four 40")
@@ -285,7 +293,7 @@ class TestScreen(__import__("tests.test_api", fromlist=["APICase"]).APICase):
         p = Purchasing(self.db, replace(config.load(), upload_dir=self.tmp / "u"))
         inv_id = p.create_manual(self.ctx)
         out = run_node(self, BROWSER, "owner", OWNER_PW, inv_id)
-        self.assertEqual(out["next"], "qaMargin")
+        self.assertEqual(out["next"], "qaNet")
         self.assertEqual((out["margin"], out["row"]), ("4.00", "80.00"))
         self.assertIn("هامشالموزع20.00", "".join(out["totals"].split()))
         self.assertEqual(p.get(self.ctx, inv_id)["invoice"]["computed_total"], 42000)

@@ -101,14 +101,16 @@ const { chromium } = require('playwright');
   const [base, user, pw, company, warehouse, barcode] = process.argv.slice(1);
 """ + LOGIN + r"""
   p.on('dialog', d => d.dismiss());
+  await p.evaluate(async () => {
+    const { organization, user } = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${organization.id}:${user.id}`, JSON.stringify({ all: 1 }));
+  });
   const active = () => p.evaluate(() => document.activeElement.id);
   const visibleOrder = () => p.locator('#qa [data-entry-field]:visible').evaluateAll(xs => xs.map(x => x.dataset.entryField));
   async function open(id) {
     await p.goto(base + '/#/purchases/' + id);
-    await p.waitForSelector('#qaQ');
+    await p.waitForSelector(`#qa[data-invoice="${id}"] #qaQ`);
     await p.locator('#supType .on').waitFor();
-    const tour = p.locator('#tourClose');
-    if (await tour.isVisible()) await tour.click();
   }
   await open(company);
   const standard = await visibleOrder();
@@ -127,11 +129,20 @@ const { chromium } = require('playwright');
     await p.keyboard.press('Enter');
     enter.push(await active());
   }
-  const completed = await p.waitForSelector('[data-purchase-line]');
+  await p.keyboard.press('Enter');
+  const completed = p.locator('[data-purchase-line]');
+  await completed.waitFor();
   await p.waitForFunction(() => document.activeElement.id === 'qaQ');
   const autocomplete = await p.locator('#qaQty, #qaBonus, #qaPrice, #qaDisc, #qaNet, #qaBatch, [data-h="invoice_no"], table.lines input').evaluateAll(xs => xs.every(x => x.autocomplete === 'off'));
   const stock = await completed.locator('[data-label="الرصيد"]').innerText();
   const help = await p.getByRole('button', {name: 'اشرح الشاشة دي'}).count();
+  await p.goto(base + '/#/purchases');
+  await p.locator('summary').filter({hasText: 'إعدادات إدخال الشراء'}).click();
+  await p.locator('[data-order-field="expiry"] [data-move="-1"]').click();
+  await p.fill('[name="qty_min"]', '25');
+  const saved = p.waitForResponse(r => r.url().endsWith('/api/settings/purchase-entry') && r.request().method() === 'PUT');
+  await p.getByRole('button', {name: 'حفظ إعدادات الشراء'}).click();
+  const setting = await (await saved).json();
   await open(warehouse);
   const custom = await visibleOrder();
   const bonusHidden = await p.locator('#qaBonusField').isHidden();
@@ -142,7 +153,8 @@ const { chromium } = require('playwright');
   await p.keyboard.press('Enter');
   await p.waitForFunction(() => document.activeElement.id === 'qaExp');
   const routed = await header.inputValue();
-  console.log(JSON.stringify({standard, custom, preserved, qty, enter, autocomplete, stock, help, bonusHidden, routed}));
+  console.log(JSON.stringify({standard, custom, preserved, qty, enter, autocomplete, stock, help, bonusHidden, routed,
+                              savedQtyMin: setting.qty_min}));
   await b.close();
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -161,16 +173,7 @@ class TestPurchaseEntryBrowser(APICase):
         purch = Purchasing(self.db, self.s)
         first = purch.create_manual(self.ctx, supplier_id=company)
         second = purch.create_manual(self.ctx, supplier_id=warehouse)
-        script = BROWSER.replace("  await open(warehouse);", """
-  await p.evaluate(async (order) => {
-    const result = await fetch('/api/settings/purchase-entry', {method: 'PUT',
-      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'pharm'},
-      body: JSON.stringify({field_order: order})});
-    if (!result.ok) throw new Error(await result.text());
-  }, ['expiry','qty','discount','bonus','batch','public_price','tax_margin']);
-  await open(warehouse);
-""")
-        out = run_node(self, script, "owner", OWNER_PW, first, second, BARCODE)
+        out = run_node(self, BROWSER, "owner", OWNER_PW, first, second, BARCODE)
         self.assertEqual(out["standard"], ORDER)
         self.assertEqual(out["custom"], ["expiry", "qty", "discount", "batch", "public_price", "tax_margin"])
         self.assertEqual(out["preserved"], "SYN-BATCH")
@@ -182,3 +185,74 @@ class TestPurchaseEntryBrowser(APICase):
         self.assertEqual(out["help"], 1)
         self.assertTrue(out["bonusHidden"])
         self.assertEqual(out["routed"], "")
+        self.assertEqual(out["savedQtyMin"], 25)
+
+
+BENCHMARK = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw, inv] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.evaluate(async () => {
+    const { organization, user } = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${organization.id}:${user.id}`, JSON.stringify({ all: 1 }));
+  });
+  await p.goto(base + '/#/purchases/' + inv);
+  await p.waitForSelector('#qaQ');
+  const samples = [];
+  for (let i = 1; i <= 21; i++) {
+    await p.keyboard.press('F12');
+    await p.keyboard.type(String(9880000000000 + i));
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(() => document.activeElement.id === 'qaQty');
+    await p.fill('#qaDisc', '25');
+    await p.focus('#qaTaxMode');
+    // Measure the final key event through the rendered line and restored item focus.
+    await p.evaluate(() => {
+      const form = document.querySelector('#qa');
+      window.addTiming = new Promise(resolve => {
+        form.addEventListener('keydown', () => {
+          const start = performance.now();
+          document.addEventListener('focusin', function ready(event) {
+            if (event.target.id !== 'qaQ' || form.isConnected) return;
+            document.removeEventListener('focusin', ready);
+            resolve(performance.now() - start);
+          });
+        }, {capture: true, once: true});
+      });
+    });
+    const response = p.waitForResponse(r => r.url().endsWith('/lines') && r.request().method() === 'POST');
+    await p.keyboard.press('Enter');
+    const result = await response;
+    if (!result.ok()) throw new Error(await result.text());
+    const elapsed = await p.evaluate(() => window.addTiming);
+    if (i > 1) samples.push(elapsed);
+  }
+  console.log(JSON.stringify(samples));
+  await b.close();
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestPurchaseEntryPerformance(APICase):
+    def test_keyboard_add_line_at_30000_items(self):
+        import statistics
+        company = catalog.create_supplier(self.db, self.ctx, name="Synthetic benchmark supplier", supplier_type="company")
+        purch = Purchasing(self.db, self.s)
+        invoice = purch.create_manual(self.ctx, supplier_id=company)
+        with self.db.transaction():
+            self.db.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<29999)"
+                " INSERT INTO items (id, org_id, name_en, name_norm, dedupe_key, public_price, is_drug)"
+                " SELECT 'pur-bench-'||x, ?, 'Synthetic bench '||x, 'synthetic bench '||x, 'pur-bench-'||x, 4000, 0"
+                " FROM n", (self.ctx.org_id,))
+            for n in range(1, 22):
+                catalog.add_barcode(self.db, self.ctx, f"pur-bench-{n}", str(9880000000000 + n))
+        self.assertEqual(self.db.one("SELECT count(*) n FROM items WHERE org_id=?", (self.ctx.org_id,))["n"], 30_000)
+        samples = run_node(self, BENCHMARK, "owner", OWNER_PW, invoice)
+        self.assertEqual(len(purch.get(self.ctx, invoice)["lines"]), 21)
+        p95 = sorted(samples)[18]
+        print(f"Purchase add-line at 30,000 items, 20 runs: median {statistics.median(samples):.1f} ms, "
+              f"p95 {p95:.1f} ms, max {max(samples):.1f} ms")
+        self.assertLess(p95, 300)
