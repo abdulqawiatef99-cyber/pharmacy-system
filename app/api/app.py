@@ -3418,12 +3418,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Always 200 with {"ok": ...}; see app/core/keyboard_layout.py."""
         from ..core import keyboard_layout
         try:
-            origin = req.headers.get("origin")
             if client_ip(req) not in ("127.0.0.1", "::1", "testclient"):
                 return J({"ok": False, "reason": "unsupported", "detail": "not_local"})
-            if (req.headers.get("x-requested-with") != "pharm"
-                    or origin is not None and origin != f"{req.url.scheme}://{req.url.netloc}"
-                    or req.headers.get("sec-fetch-site") not in (None, "none", "same-origin")):
+            try:
+                _auth_screen(req, screen_only=True)      # the sign-in screen's own rule, so the two cannot drift
+            except Unauthorized:
                 return J({"ok": False, "reason": "unsupported", "detail": "not_this_screen"})
             try:
                 b = json.loads(await req.body() or b"{}")

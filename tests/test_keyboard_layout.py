@@ -30,12 +30,6 @@ class FakeUser32:
     def GetForegroundWindow(self):
         return self.hwnd
 
-    def GetWindowThreadProcessId(self, hwnd, pid):
-        return 4242
-
-    def GetKeyboardLayout(self, thread):
-        assert thread == 4242
-        return self.current
 
     def PostMessageW(self, hwnd, msg, wparam, lparam):
         self.posted.append((hwnd, msg, wparam, lparam))
@@ -48,21 +42,23 @@ class TestSwitch(unittest.TestCase):
 
     def test_arabic_is_asked_with_the_installed_egyptian_layout(self):
         u = FakeUser32([EN_US, AR_EG], EN_US)
-        self.assertEqual(self.go("ar", u), {"ok": True, "changed": True})
+        self.assertEqual(self.go("ar", u), {"ok": True})
         self.assertEqual(u.posted, [(77, 0x0050, 0, AR_EG)])
 
     def test_english_from_arabic_and_the_usual_layout_first(self):
         u = FakeUser32([AR_EG, EN_GB, EN_US], AR_EG)
-        self.assertEqual(self.go("en", u), {"ok": True, "changed": True})
+        self.assertEqual(self.go("en", u), {"ok": True})
         self.assertEqual(u.posted, [(77, 0x0050, 0, EN_US)])
         u = FakeUser32([AR_EG, AR_SA, EN_US], EN_US)
         self.go("ar", u)
         self.assertEqual(u.posted[0][3], AR_SA)
 
-    def test_already_in_that_language_posts_nothing(self):
+    def test_it_asks_even_when_the_window_seems_to_type_that_language_already(self):
+        # the request is posted, not waited for: an earlier request for the other language may still be on
+        # its way, so "already Arabic" read now can be stale (review, 26/11)
         u = FakeUser32([EN_US, AR_EG], AR_EG)
-        self.assertEqual(self.go("ar", u), {"ok": True, "changed": False})
-        self.assertEqual(u.posted, [])
+        self.assertEqual(self.go("ar", u), {"ok": True})
+        self.assertEqual(u.posted, [(77, 0x0050, 0, AR_EG)])
 
     def test_a_language_that_is_not_installed_is_unsupported(self):
         u = FakeUser32([EN_US, FR], EN_US)
@@ -74,8 +70,10 @@ class TestSwitch(unittest.TestCase):
         # 64-bit Windows hands some layouts back sign-extended (0xFFFFFFFFF0C10C01)
         odd = 0xFFFFFFFFF0C10C01
         u = FakeUser32([EN_US, odd], EN_US)
-        self.assertEqual(self.go("ar", u), {"ok": True, "changed": True})
-        self.assertEqual(u.posted[0][3], odd & 0xFFFFFFFF)
+        self.assertEqual(self.go("ar", u), {"ok": True})
+        self.assertEqual(u.posted[0][3], odd)            # handed back exactly as Windows gave it (review, 26/11)
+        self.assertEqual(kl.pick("ar", [EN_US, odd, AR_EG]), AR_EG)             # the usual keyboard first
+        self.assertEqual(kl.pick("en", [0xFFFFFFFFF0020409, AR_EG]), 0xFFFFFFFFF0020409)
 
     def test_no_window_refused_post_and_bad_language(self):
         self.assertEqual(self.go("ar", FakeUser32([AR_EG], EN_US, hwnd=0))["detail"], "no_window")
@@ -98,9 +96,9 @@ class TestEndpoint(APICase):
     URL = "/api/system/keyboard-layout"
 
     def test_this_pc_without_a_session_gets_the_answer_of_the_switch(self):
-        with mock.patch.object(kl, "switch", return_value={"ok": True, "changed": True}) as sw:
+        with mock.patch.object(kl, "switch", return_value={"ok": True}) as sw:
             r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
-        self.assertEqual((r.status_code, r.json()), (200, {"ok": True, "changed": True}))
+        self.assertEqual((r.status_code, r.json()), (200, {"ok": True}))
         sw.assert_called_once_with("ar")
         r = self.c.post(self.URL, json={"lang": "en"}, headers=H)               # the real call, on Linux
         self.assertEqual((r.status_code, r.json()), (200, {"ok": False, "reason": "unsupported", "detail": "not_windows"}))
@@ -115,7 +113,11 @@ class TestEndpoint(APICase):
         with mock.patch.object(kl, "switch", side_effect=AssertionError("switched for another site")):
             for headers in ({"Content-Type": "application/json"},                              # no marker header
                             {**H, "Origin": "http://evil.example"},
-                            {**H, "Sec-Fetch-Site": "cross-site"}):
+                            {**H, "Origin": "null"},
+                            {**H, "Sec-Fetch-Site": "cross-site"},
+                            {**H, "Sec-Fetch-Site": "same-site"},
+                            {**H, "Sec-Fetch-Site": "same-origin"},                           # ... without an Origin
+                            {**H, "Content-Type": "text/plain"}):
                 r = self.c.post(self.URL, content=b'{"lang":"ar"}', headers=headers)
                 self.assertEqual((r.status_code, r.json()),
                                  (200, {"ok": False, "reason": "unsupported", "detail": "not_this_screen"}), headers)
@@ -129,15 +131,22 @@ class TestEndpoint(APICase):
         self.assertEqual((r.status_code, r.json()), (200, {"ok": False, "reason": "unsupported", "detail": "error"}))
         self.assertEqual(self.c.get(self.URL).status_code, 405)
 
+    def test_another_host_name_never_reaches_it(self):
+        with mock.patch.object(kl, "switch", side_effect=AssertionError("switched for another host")):
+            r = self.c.post(self.URL, json={"lang": "ar"}, headers={**H, "Host": "evil.example:8000"})
+        self.assertEqual(r.status_code, 403)
+
     def test_it_never_touches_the_database_and_answers_while_a_write_is_held(self):
-        with mock.patch.object(kl, "switch", return_value={"ok": True, "changed": False}), \
-                mock.patch.object(type(self.db), "conn", new_callable=mock.PropertyMock,
-                                  side_effect=AssertionError("database used")):
-            t = time.perf_counter()
-            r = self.c.post(self.URL, json={"lang": "ar"}, headers={**H, "Idempotency-Key": "k-1"})
-            took = (time.perf_counter() - t) * 1000
-        self.assertEqual((r.status_code, r.json()), (200, {"ok": True, "changed": False}))
-        self.assertLess(took, 50)
+        with self.db.transaction():                                    # a sale being written, on this thread
+            self.db.execute("UPDATE items SET min_stock=1 WHERE id=?", (self.pan,))
+            with mock.patch.object(kl, "switch", return_value={"ok": True}), \
+                    mock.patch.object(type(self.db), "conn", new_callable=mock.PropertyMock,
+                                      side_effect=AssertionError("database used")):
+                t = time.perf_counter()
+                r = self.c.post(self.URL, json={"lang": "ar"}, headers={**H, "Idempotency-Key": "k-1"})
+                took = (time.perf_counter() - t) * 1000
+        self.assertEqual((r.status_code, r.json()), (200, {"ok": True}))
+        self.assertLess(took, 500)                 # measured 2-15 ms; the bound only catches a wait on a lock
 
 
 if __name__ == "__main__":

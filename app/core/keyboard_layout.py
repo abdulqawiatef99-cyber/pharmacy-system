@@ -28,10 +28,6 @@ def _user32():
     u.GetForegroundWindow.restype = wintypes.HWND
     u.GetKeyboardLayoutList.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
     u.GetKeyboardLayoutList.restype = ctypes.c_int
-    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
-    u.GetWindowThreadProcessId.restype = wintypes.DWORD
-    u.GetKeyboardLayout.argtypes = [wintypes.DWORD]
-    u.GetKeyboardLayout.restype = ctypes.c_void_p
     u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_void_p]
     u.PostMessageW.restype = wintypes.BOOL
     return u
@@ -44,16 +40,18 @@ def _installed(u) -> list[int]:
         return []
     buf = (ctypes.c_void_p * n)()
     got = u.GetKeyboardLayoutList(n, buf)
-    return [int(h or 0) & 0xFFFFFFFF for h in buf[:got]]
+    return [int(h or 0) for h in buf[:got]]
 
 
 def pick(lang: str, installed: list[int]) -> int | None:
     """The installed layout to ask for: one of this language (its low word is the language id), the usual
-    one first. None when the language is not installed."""
+    one first. None when the language is not installed. The handle is returned exactly as Windows gave it:
+    on 64-bit Windows some are sign-extended (0xFFFFFFFFF0C10C01), and a cut one may not be recognised."""
     mine = [h for h in installed if h & 0x3FF == PRIMARY[lang] and h & 0xFFFF]
-    for h in PREFERRED[lang]:
-        if h in mine:
-            return h
+    for usual in PREFERRED[lang]:
+        for h in mine:
+            if h & 0xFFFFFFFF == usual:
+                return h
     return mine[0] if mine else None
 
 
@@ -62,7 +60,7 @@ def _no(detail: str) -> dict:
 
 
 def switch(lang, *, user32=None, platform: str | None = None) -> dict:
-    """{"ok": True} when the request was posted (or the window already types in that language), else
+    """{"ok": True} when the request was posted to the window in front (posted, not confirmed applied), else
     {"ok": False, "reason": "unsupported", "detail": why}. Never raises."""
     try:
         if not isinstance(lang, str) or lang not in PRIMARY:
@@ -76,11 +74,10 @@ def switch(lang, *, user32=None, platform: str | None = None) -> dict:
         hwnd = u.GetForegroundWindow()
         if not hwnd:
             return _no("no_window")
-        current = int(u.GetKeyboardLayout(u.GetWindowThreadProcessId(hwnd, None)) or 0) & 0xFFFFFFFF
-        if current & 0x3FF == PRIMARY[lang] and current & 0xFFFF:
-            return {"ok": True, "changed": False}
+        # always asked, never "it is Arabic already": an earlier request may still be on its way to the
+        # window, and asking for the language it already has changes nothing
         if not u.PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl):
             return _no("refused")
-        return {"ok": True, "changed": True}
+        return {"ok": True}
     except Exception:                    # a convenience must never break the screen that asked for it
         return _no("error")
