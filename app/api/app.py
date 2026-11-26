@@ -2070,6 +2070,23 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_items(req):
+        """The items an items-scope count covers, by name (Codex P2 on #418: the daily count's picks stay visible)."""
+        ctx = ctx_of(req)
+        ctx.require("inventory.count")
+        s = db.one("SELECT scope, scope_filter FROM count_sessions WHERE id=? AND org_id=?", (req.path_params["id"], ctx.org_id))
+        if not s:
+            raise NotFound("الجرد غير موجود")
+        ids = (json.loads(s["scope_filter"] or "{}").get("item_ids") or []) if s["scope"] == "items" else []
+        names = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            hide = "" if ctx.can("items.hidden") else " AND coalesce(hidden,0)=0"     # Codex P1 on #418
+            names += [dict(r) for r in db.all(f"SELECT id, coalesce(name_en, name_ar) name, location FROM items"
+                                              f" WHERE org_id=? AND id IN ({','.join('?' * len(part))}){hide}", (ctx.org_id, *part))]
+        return J({"items": names if len(ids) <= 50 else []})
+
+    @handler
     async def safety_rule_create(req):
         ctx = ctx_of(req)
         b = await body(req)
@@ -2142,9 +2159,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J([dict(r) for r in rows])
 
     @handler
+    async def counts_daily_pick(req):
+        return J({"items": counting.daily_pick(ctx_of(req), 10)})
+
+    @handler
     async def counts_create(req):
         ctx = ctx_of(req)
         b = await body(req)
+        if b.get("daily"):                  # U3-5: today's mini-count, picked by the program
+            sid = counting.create_daily(ctx, 10)
+            return J({"id": sid}, status_code=201)
         scope, ids = b.get("scope", "full"), b.get("item_ids")
         if scope == "category":            # count one section: its items, stored as an items-scope count
             cid = str(b.get("category_id") or "")
@@ -2853,6 +2877,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"threshold_ms": SLOW_MS, "requests": mine[::-1]})
 
     @handler
+    async def shift_owner_summary(req):
+        from ..reports.owner_summary import shift_summary
+        return J(shift_summary(db, ctx_of(req), req.path_params["id"]))
+
+    @handler
     async def cash_report(req):
         return J(CashDrawer(db).report(ctx_of(req), req.path_params["id"]))
 
@@ -3549,6 +3578,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/reports/hikma-claim", hikma_claim_api),
         Route("/api/settings/hikma-claim", hikma_settings_api, methods=["GET", "PUT"]),
         Route("/api/cash/shifts/{id}", cash_report),
+        Route("/api/cash/shifts/{id}/owner-summary", shift_owner_summary),
         Route("/api/cash/shifts/{id}/hunt", cash_hunt),
         Route("/api/cash/float-target", cash_float_target, methods=["GET", "POST"]),
         Route("/api/cash/float-preview", cash_float_preview, methods=["POST"]),
@@ -3569,9 +3599,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/opening-balances/{kind}/{id}", opening_correct_view, methods=["GET", "POST"]),
         Route("/shift-report/{id}", shift_report_page),
         Route("/api/counts", counts_list),
+        Route("/api/counts/daily-pick", counts_daily_pick),
         Route("/api/counts", counts_create, methods=["POST"]),
         Route("/api/counts/{id}/entries", counts_entry, methods=["POST"]),
         Route("/api/counts/{id}/variances", counts_variances),
+        Route("/api/counts/{id}/items", counts_items),
         Route("/api/counts/{id}/approve", counts_approve, methods=["POST"]),
         Route("/api/counts/{id}/cancel", counts_cancel, methods=["POST"]),
         Route("/api/recalls/extract", recall_extract, methods=["POST"]),

@@ -1,6 +1,6 @@
 # ليلة الإصدار الأول — #20 (`v0.4.0`)
 
-آخر تحديث: 2026-11-11 · Claude. المرجع: [#20](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/20)، وقرار [#104](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/104) (الخيار 1)، و`LAUNCH_PLAN.md` §2 خطوة 4.
+آخر تحديث: 2026-11-11 · Claude. المرجع: [#20](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/20)، وقرار [#104](https://github.com/abdulqawiatef99-cyber/pharmacy-system/issues/104) (الخيار 1)، و`archive/LAUNCH_PLAN.md` §2 خطوة 4.
 
 الخطوات المكتوبة بالعربي إنت اللي بتعملها أو بتوافق عليها. الأوامر بالإنجليزي اللي في المربعات أنا (Claude) اللي بشغّلها.
 **كل خطوة ليها علامة ✓ أو ✗. أي ✗ = وقّف، ومفيش خطوة بعدها لحد ما نقرر.**
