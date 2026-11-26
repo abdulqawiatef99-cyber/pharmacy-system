@@ -2307,7 +2307,7 @@ async function altPanel(itemId, box, onAdd = null) {
   };
   const all = [...r.similar, ...r.other_strength, ...r.alternatives];
   const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
-  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${esc(r.item.name_en || r.item.name_ar)}</h2>
+  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${bidi(upperEn(r.item.name_en || r.item.name_ar))}</h2>
       <button class="btn small secondary" data-aclose>✕ إغلاق</button></div>
     ${r.missing.includes("ingredient") ? `<p class="badge b-warn">⚠ المادة الفعالة غير مكتوبة في بطاقة هذا الصنف، لذلك لا يمكن العثور على المثيل. ${canW() ? `<a href="#/items/${esc(r.item.id)}/edit">أضِفها</a>` : "اطلب من المدير إضافتها."}</p>` : ""}
     ${r.missing.includes("strength") ? `<p class="badge b-warn">⚠ التركيز غير مكتوب، لذلك يُقارَن المثيل دون تركيز.</p>` : ""}
@@ -2602,7 +2602,7 @@ function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCrea
   };
   const newItem = () => {
     box.innerHTML = `<form><h3>صنف جديد</h3>
-      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(newName || "")}"></label>
+      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(upperEn(newName))}"></label>
       <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
     const form = $("form", box);
@@ -3188,7 +3188,7 @@ async function viewCountSession(id) {
   const chooseItem = (it) => {
     COUNT_ITEM = it;
     $("#cntPick").innerHTML = "";
-    $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
+    $("#cntItem").innerHTML = `<div class="panel"><b>${bidi(upperEn(it.name_en || it.name_ar))}</b>
       <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(unitName(it))} — موقع ${esc(it.location || "—")}</div>
       <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
       <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
@@ -5170,7 +5170,7 @@ async function renderQuick() {
     ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
         <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
@@ -5511,7 +5511,7 @@ async function posUsual() {
   if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
   const items = all.slice(0, 8);
   $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
-    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${bidi(upperEn(x.name_en || x.name_ar || ""))}
       <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
   $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
     const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
@@ -8132,20 +8132,24 @@ async function viewUser(id) {
 // lang="en" (barcode, English name, codes, item search) for the English one. Fire-and-forget and debounced: it never
 // waits, never shows an error, and turns itself off when the PC cannot switch (404 / not supported).
 function keyboardSwitcher(send, delay = 120) {
-  let timer = null, last = null, off = false;
+  let timer = null, last = null, off = false, busy = false, want = null;
+  const fire = (lang) => {
+    if (off || lang === last) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish goes after it
+    last = lang; busy = true; want = null;
+    Promise.resolve().then(() => send("/api/system/keyboard-layout", {
+      method: "POST", credentials: "same-origin",
+      ...(typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(1500) } : {}),
+      headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
+      body: JSON.stringify({ lang }),
+    })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
+      .catch(() => { last = null; })
+      .finally(() => { busy = false; if (want) fire(want); });
+  };
   return (lang) => {
     if (off || (lang !== "ar" && lang !== "en")) return;
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      if (lang === last) return;
-      last = lang;
-      Promise.resolve().then(() => send("/api/system/keyboard-layout", {
-        method: "POST", credentials: "same-origin",
-        headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
-        body: JSON.stringify({ lang }),
-      })).then((r) => { if (r && ((r.status >= 400 && r.status < 500) || r.status === 501)) off = true; else if (!r?.ok) last = null; })
-        .catch(() => { last = null; });
-    }, delay);
+    timer = setTimeout(() => fire(lang), delay);
   };
 }
 const KB_SWITCH = keyboardSwitcher((url, opts) => fetch(url, opts));
