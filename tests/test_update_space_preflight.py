@@ -116,9 +116,27 @@ class TestEachVolumeIsCheckedOnItsOwn(Base):
     def test_a_ready_compressed_archive_is_counted_at_its_real_size(self):
         before = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}
         sparse(self.data / backup.ARCHIVE_MEMBER, 60 * MB)
+        unmarked = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}
+        self.assertEqual(unmarked, before)                # no matching mark: the backup would compress again
+        mark = self.data / (backup.ARCHIVE_MEMBER + ".sha256")
+        mark.write_text("0" * 64, encoding="ascii")
+        self.assertEqual({n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}, before)
+        mark.write_text(backup._sha256(self.data / backup.ESTOCK_ARCHIVE), encoding="ascii")
         after = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}
         self.assertEqual(before["backup"] - after["backup"], self.ARCH - 60 * MB)
         self.assertLess(after["data"], before["data"])                # nothing new is compressed next to the data
+
+
+class TestAMissingDiskIsARefusalNotACrash(Base):
+    def test_backup_folder_on_a_drive_that_is_gone(self):
+        def gone(path):
+            if self.volume(path) == "backup":
+                raise FileNotFoundError(2, "The system cannot find the path specified (injected)")
+            return self.volume(path)
+        with mock.patch.object(su, "_volume", gone):
+            msg = self.refused()
+        self.assertIn("لم يتغير شيء", msg)
+        self.assertIn(str(self.backups), msg)
 
 
 class TestNoArchive(Base):
@@ -162,6 +180,23 @@ class TestRefusedBeforeTheCashierStops(Base):
         with mock.patch.object(su, "busy_reason", lambda *a, **k: None):
             su.trigger(self.s, db, in_flight=lambda: 0, exit=left.append)
         self.assertEqual(left, [75])
+        self.assertEqual(su.last_refusal(self.data), {})
+
+    def test_a_missing_backup_drive_drops_the_request_with_the_reason(self):
+        su.request(self.data, "now", "owner", settings=self.s)
+
+        def gone(path):
+            raise FileNotFoundError(2, "The system cannot find the path specified (injected)")
+        left = []
+        with mock.patch.object(su, "busy_reason", lambda *a, **k: None), mock.patch.object(su, "_volume", gone):
+            self.assertFalse(su.trigger(self.s, mock.MagicMock(), in_flight=lambda: 0, exit=left.append))
+        self.assertEqual((left, su.pending_request(self.data)), ([], {}))
+        self.assertTrue(su.last_refusal(self.data)["reason"])
+
+    def test_a_selected_update_clears_an_old_refusal(self):
+        releases.atomic_json(self.home / "apply-refused.json", {"release": "r0", "reason": "old"})
+        with mock.patch.object(releases, "activate"), mock.patch.object(releases, "log_event"):
+            su._select(self.data, self.home, {"release": "r1", "sha": "a" * 40, "channel": "main", "commit_time": 1})
         self.assertEqual(su.last_refusal(self.data), {})
 
     def test_apply_checks_space_before_the_backup_for_both_kinds(self):

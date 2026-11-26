@@ -728,6 +728,19 @@ def _tree_size(folder: Path) -> int:
     return total
 
 
+def _ready_xz(arch_file: Path) -> int:
+    """Size of the archive's compressed copy when the backup will really reuse it (the same test as
+    backup._archive_xz: its mark holds the archive's sha256), else 0: the backup compresses again."""
+    from . import backup
+    cache, mark = arch_file.with_name(backup.ARCHIVE_MEMBER), arch_file.with_name(backup.ARCHIVE_MEMBER + ".sha256")
+    try:
+        if cache.is_file() and mark.is_file() and mark.read_text(encoding="ascii").strip() == backup._sha256(arch_file):
+            return cache.stat().st_size
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
     """What the update writes, per disk: [{'volume', 'label', 'path', 'bytes'}]. Worst case on purpose
     (nothing is assumed to compress): a refusal here costs nothing, running out with the cashier stopped does.
@@ -742,7 +755,7 @@ def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
     db = _file_size(settings.db_path) + _file_size(Path(str(settings.db_path) + "-wal"))
     arch_file = Path(settings.db_path).parent / backup.ESTOCK_ARCHIVE
     arch = _file_size(arch_file)
-    cache = _file_size(arch_file.with_name(backup.ARCHIVE_MEMBER)) if arch else 0
+    cache = _ready_xz(arch_file) if arch else 0
     arch_xz = cache or arch
     uploads = _tree_size(Path(settings.upload_dir))
     wants = [("مجلد النسخ الاحتياطية", Path(backup_dir), db + arch_xz + uploads),
@@ -765,7 +778,12 @@ def check_space(settings, backup_dir: Path | None = None, *, needs_db: bool = Tr
     stopped for an update that then fails for lack of room (#461)."""
     backup_dir = Path(backup_dir) if backup_dir else settings.backup_path
     mb = lambda n: f"{-(-n // (1024 * 1024)):,}"
-    for n in space_needs(settings, backup_dir, needs_db=needs_db):
+    try:
+        needs = space_needs(settings, backup_dir, needs_db=needs_db)
+    except OSError as e:                        # a folder on a drive that is not there (a removed USB disk)
+        raise UpdateError(f"مش قادر أوصل لمجلد من مجلدات التحديث (النسخ الاحتياطية: {backup_dir}): "
+                          f"{e.strerror or e}؛ لم يتغير شيء")
+    for n in needs:
         try:
             free = _free(n["path"])
         except OSError:
@@ -822,6 +840,7 @@ def _select(legacy: Path, home: Path, p: dict) -> None:
                       expected_active=p.get("active"), coordinated=True)
     (home / "prepared.json").unlink(missing_ok=True)
     (home / "apply-request.json").unlink(missing_ok=True)
+    (home / "apply-refused.json").unlink(missing_ok=True)
     releases.log_event(home, step="select", ok=True, release=p["release"], needs_db=bool(p.get("needs_db")))
 
 
