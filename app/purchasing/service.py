@@ -1014,6 +1014,13 @@ class Purchasing:
                         (ctx.org_id, item["id"], (l["batch_no"] or "").strip().upper(), l["expiry_date"])):
                     # the batch already has priced lots: the boxes join the one at today's price, never an older one
                     price = item["public_price"]
+                elif (not may_price and item["public_price"] is not None
+                      and not (l["batch_no"] or "").strip() and not l["expiry_date"]
+                      and item["untracked_public_price"] is not None
+                      and item["untracked_public_price"] != item["public_price"]):
+                    # Codex P1 on #451: the untracked boxes still carry an older price; new boxes without a batch
+                    # or expiry go to their own lot at today's price instead of selling at the old one
+                    price = item["public_price"]
                 if price is not None and item["public_price"] is not None and price != item["public_price"]:
                     # Legacy lots without an explicit price can receive returns as well as hold old stock.
                     self.db.execute("UPDATE batches SET public_price=? WHERE org_id=? AND item_id=?"
