@@ -1,6 +1,14 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"الصنف اتضاف؛ دوّر عليه تاني عشان تحطه في الفاتورة": "The item was added; search for it again to put it on the invoice",
+"عدد الوحدات الصغيرة في العبوة": "Small units in the pack",
+"سعر الجمهور للعبوة (ج)": "Public price per pack (EGP)",
+"احفظ وحطه في الفاتورة": "Save and put it on the invoice",
+"✓ اتضاف الصنف": "✓ Item added",
+"اكتب اسم الصنف (عربي أو إنجليزي)": "Type the item name (Arabic or English)",
+"السعر للمالك والمدير؛ سعر الفاتورة بيتسجل مع الاعتماد": "Price is for the owner and manager; the invoice price is recorded at approval",
+"الصنف مش موجود؟ ضيفه من هنا وكمّل الفاتورة": "Item not found? Add it here and carry on with the invoice",
 "مرتجع نقدي": "Cash refund",
 "النهاردة:": "Today:",
 "الإلغاء والمرتجع النقدي في الشيفت": "Voids and cash refunds in the shift",
