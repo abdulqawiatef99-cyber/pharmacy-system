@@ -25,11 +25,13 @@ class TestReceipt(SalesCase):
         sid = self.s.create(self.ctx, cid)
         d = self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=1000)    # one box of 2 strips
         d = self.s.complete(self.ctx, sid, on_credit=d["total"], safety_decisions=self.ack_all(sid))
-        t = texts(escpos.receipt_lines("صيدلية تجربة", d, "اليوم", {"show_customer": True}, return_days=14))
+        rows = escpos.receipt_lines("صيدلية تجربة", d, "اليوم", {"show_customer": True}, return_days=14)
+        self.assertEqual([cells[1:3] for kind, _, cells in rows if kind == "item"], [("1 علبة", "38.00")])
+        t = texts(rows)
         self.assertIn(f"الرصيد السابق {0:.2f}", t)
         self.assertIn(f"الرصيد الحالي {d['total'] / 100:.2f}", t)
-        for part in ("كود 77", "العميل: عميل تجربة", "موبايل: 01000000000", "1 علبة ×", "خصم 10%", "آجل", "الرصيد السابق",
-                     "الرصيد الحالي", "إجمالي الكمية: 1 علبة", "المرتجع خلال 14 يومًا"):
+        for part in ("كود 77", "العميل: عميل تجربة", "موبايل: 01000000000", "خصم 10%", "آجل", "الرصيد السابق",
+                     "الرصيد الحالي", "عدد القطع: 1", "المرتجع خلال 14 يومًا"):
             self.assertIn(part, t)
 
 

@@ -2863,11 +2863,21 @@ async function viewCounts() {
       <label class="f">القسم <select name="cat"><option value="">—</option>${(await loadCats()).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label>
       <label class="f">المواقع (إذا كان النطاق مواقع) <input name="locations" placeholder="A1, A2"></label>
       <button class="btn" type="submit">بدء جرد</button></form>` : ""}
+    ${canManage ? `<div class="row mt"><button class="btn secondary" id="cntDaily">جرد يومي صغير (10 أصناف)</button>
+      <span class="muted">البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.</span></div>
+      <div id="cntPick" class="muted small"></div>` : ""}
   </section>
   <section class="panel"><table><thead><tr><th>الجرد</th><th>النطاق</th><th>الحالة</th><th>التاريخ</th></tr></thead>
     <tbody>${list.map((c) => `<tr><td><a href="#/counts/${esc(c.id)}">${esc(c.title)}</a></td><td>${{ full: "شامل", location: "مواقع", items: "أصناف / قسم" }[c.scope] || esc(c.scope)}</td>
       <td>${{ open: "مفتوح", approved: "معتمد", cancelled: "ملغي" }[c.status]}</td><td>${esc(dayOf(c.created_at))}</td></tr>`).join("")
       || `<tr><td colspan="4" class="muted">لا يوجد</td></tr>`}</tbody></table></section>`;
+  if (canManage) api("/api/counts/daily-pick").then(({ items }) => {
+    if ($("#cntPick")) $("#cntPick").innerHTML = items.length ? `هيتجرد: ${items.map((x) => `${esc(x.label)} (${esc(x.why)})`).join("، ")}` : "مفيش أصناف محتاجة جرد النهارده";
+  }).catch(() => {});
+  $("#cntDaily")?.addEventListener("click", async () => {
+    try { const r = await api("/api/counts", { method: "POST", body: { daily: true } }); location.hash = `#/counts/${r.id}`; }
+    catch (err) { toast(err.message, true); }
+  });
   $("#cntForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2883,6 +2893,9 @@ let COUNT_ITEM = null;
 
 async function viewCountSession(id) {
   const canManage = ME.permissions.includes("inventory.adjust");
+  setTimeout(() => api(`/api/counts/${id}/items`).then(({ items }) => {     // the items this count covers
+    if ($("#cntScope") && items.length) $("#cntScope").textContent = "الأصناف المطلوب جردها: " + items.map((x) => x.name + (x.location ? ` (${x.location})` : "")).join("، ");
+  }).catch(() => {}), 0);
   app.innerHTML = `
   <section class="panel">
     <div class="row between"><h1>تسجيل الجرد</h1><a href="#/counts">رجوع</a></div>
@@ -2891,6 +2904,7 @@ async function viewCountSession(id) {
       <label class="f grow">باركود أو اسم الصنف <input id="cntQ" autocomplete="off" autofocus></label>
       ${"BarcodeDetector" in window ? `<button class="btn secondary" id="cntCam" type="button">كاميرا</button>` : ""}
     </div>
+    <div id="cntScope" class="muted small"></div>
     <video id="cntVideo" playsinline hidden class="scanvideo"></video>
     <div id="cntPick"></div>
     <div id="cntItem" class="mt"></div>
@@ -3252,7 +3266,8 @@ async function renderReceiptCfg(c) {
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
     <label class="f">مقاس ورق الإيصال <select name="paper"><option value="80" ${c.paper === 80 ? "selected" : ""}>80 مم (الافتراضي)</option><option value="58" ${c.paper === 58 ? "selected" : ""}>58 مم</option></select></label>
-    <label class="f">مقدمة الفاتورة (أول سطر، اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
+    <label class="f">قالب الإيصال <select name="template">${[["detailed", "مفصّل"], ["compact", "مختصر"], ["large", "خط كبير"]].map(([v, label]) => `<option value="${v}" ${(c.template || "detailed") === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="f">مقدمة الفاتورة (اختياري) <input name="header" value="${esc(c.header || "")}" placeholder="مثال: يوجد خدمة توصيل للمنازل"></label>
     <label class="f">اسم الصيدلية على الفاتورة (فارغ = الاسم المسجل) <input name="title" value="${esc(c.title)}"></label>
     <label class="f">سطر 1 (العنوان) <input name="l0" value="${esc(c.lines[0] || "")}"></label>
     <label class="f">سطر 2 (الهاتف) <input name="l1" value="${esc(c.lines[1] || "")}"></label>
@@ -3275,7 +3290,7 @@ async function renderReceiptCfg(c) {
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
       <p class="muted">اختر طابعة الإيصال من القائمة (طابعات ويندوز على هذا الجهاز) أو اكتب tcp:IP:9100 لطابعة شبكة. مع الطباعة المباشرة يُفتح الدرج تلقائيًا مع أي تحصيل نقدي (حسب الإعداد فوق). browser = الإيصال يُطبع من المتصفح والدرج لا يُفتح.${pr.env !== "none" ? ` فارغ = إعداد الجهاز القديم (${esc(pr.env)}).` : " فارغ = من المتصفح."}</p>
-      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة. الحل: أعد التثبيت بآخر نسخة من المثبّت.</b></p>`}
+      ${pr.shaping ? "" : `<p><b>⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة.</b></p>`}
       <div class="row"><button type="button" class="btn small secondary" id="rcTest">اطبع صفحة تجربة</button><button type="button" class="btn small secondary" id="rcKick">افتح الدرج تجربة</button></div></fieldset>
     <fieldset class="lblp"><legend>شكل الملصق</legend>
       <label class="f">الباركود على الملصق <select name="label_barcode_source">
@@ -3311,18 +3326,22 @@ async function renderReceiptCfg(c) {
       <div class="row"><button type="button" class="btn small secondary lbRaw" id="lbCal">معايرة بكرة الملصقات</button>
         <button type="button" class="btn small secondary" id="lbTest">اطبع 3 ملصقات تجربة</button></div>
       <p class="muted">اسم طابعة ويندوز كما يظهر في "الأجهزة والطابعات". عند أي مشكلة في الطباعة المباشرة تُفتح صفحة الطباعة من المتصفح.</p></fieldset>
-    <fieldset class="lblp"><legend>اللوجو والكود المربع (QR) أعلى الإيصال</legend>
+    <fieldset class="lblp"><legend>اللوجو والأكواد المربعة (QR)</legend>
       <label class="f">صورة اللوجو (PNG أو JPG — الأفضل أبيض وأسود) <input type="file" id="rcLogoFile" accept="image/png,image/jpeg,image/webp"></label>
       <div class="lbprev"><img id="rcLogoPrev" alt="معاينة اللوجو" ${c.has_logo ? `src="/api/settings/receipt/logo?t=${Date.now()}"` : "hidden"}>
         <p class="muted small" id="rcLogoMsg">${c.has_logo ? "" : "لا يوجد لوجو"}</p>
         <button type="button" class="btn small secondary" id="rcLogoDel" ${c.has_logo ? "" : "hidden"}>احذف اللوجو</button></div>
       <p class="muted">في كل كود: اكتب <b>رقم الهاتف المحمول للصيدلية</b> (للواتساب — يحوّله البرنامج تلقائيًا)، أو الصق رابط صفحة الفيسبوك، أو رابط الموقع من خرائط جوجل (مشاركة ← نسخ الرابط)، أو رابط الدفع من تطبيق إنستاباي. تُكتب الكلمة التي تحت الكود تلقائيًا حسب الرابط، أو اكتبها بنفسك.</p>
-      <label class="f">الكود العلوي (بجانب اللوجو) <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
+      <label class="f">الكود الأول أسفل الإيصال <input name="qr_text" dir="ltr" maxlength="213" value="${esc(c.qr_text || "")}" placeholder="01xxxxxxxxx"></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr_caption" maxlength="40" value="${esc(c.qr_caption || "")}" placeholder="اطلب على واتساب"></label>
       <label class="f">كود ثانٍ أسفل الإيصال (اختياري) <input name="qr2_text" dir="ltr" maxlength="213" value="${esc(c.qr2_text || "")}" placeholder="https://maps.app.goo.gl/..."></label>
       <label class="f">الكلمة تحته (فارغ = تلقائي) <input name="qr2_caption" maxlength="40" value="${esc(c.qr2_caption || "")}" placeholder="موقعنا على الخريطة"></label>
       <p class="muted">تطبع الطابعة الحرارية بالأبيض والأسود فقط: يختفي الرمادي الفاتح ويصير الغامق أسود. بعد الحفظ اضغط «اطبع آخر فاتورة كتجربة» وجرّب قراءة الكود بالهاتف.</p></fieldset>
     <div>${chk("show_cashier", "اسم البائع")}${chk("show_customer", "اسم العميل")}${chk("show_expiry", "صلاحية كل صنف")}${chk("show_return_policy", "سياسة المرتجع (والأصناف التي لا يُقبل إرجاعها)")}${chk("show_item_count", "عدد الأصناف")}${chk("show_change", "المدفوع والباقي للعميل (وقت البيع)")}</div>
+    <fieldset class="lblp lbprev"><legend>معاينة الإيصال</legend>
+      <p id="rcPreviewMessage" class="muted" role="status"></p>
+      <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
+    </fieldset>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
   LABEL_CFG = c;
   RC_LOGO = undefined;
@@ -3331,15 +3350,56 @@ async function renderReceiptCfg(c) {
     try { RC_LOGO = await logoDataUrl(file); } catch { return toast("تعذر قراءة الصورة", true); }
     $("#rcLogoPrev").src = await printLook(RC_LOGO); $("#rcLogoPrev").hidden = false; $("#rcLogoDel").hidden = false;
     $("#rcLogoMsg").textContent = "هذا شكله على الورق تمامًا (أبيض وأسود). إذا اختفى جزء منه أو صار أسود، فارفع نسخة أبيض وأسود من اللوجو. يُحفظ عند الضغط على «احفظ»";
+    previewReceipt();
   });
   $("#rcLogoDel").addEventListener("click", () => {
     RC_LOGO = ""; $("#rcLogoPrev").hidden = true; $("#rcLogoDel").hidden = true; $("#rcLogoFile").value = "";
     $("#rcLogoMsg").textContent = "سيُحذف عند الضغط على «احفظ»";
+    previewReceipt();
   });
   const lf = $("#rcForm");
   const showCustom = () => { $("#lbCustom").hidden = lf.label_preset.value !== "custom"; };
   let prevT = null, prevUrl = null;
   const previewCurrent = onThisScreen();
+  const appearanceFields = ["title", "header", "footer", "tax_no", "cr_no", "time_format", "names",
+    "template", "qr_text", "qr_caption", "qr2_text", "qr2_caption"];
+  const appearanceChecks = ["show_cashier", "show_customer", "show_expiry", "show_return_policy",
+    "show_item_count", "show_change"];
+  const appearance = () => ({
+    paper: +lf.paper.value, lines: [lf.l0.value, lf.l1.value, ...c.lines.slice(2)],
+    ...Object.fromEntries(appearanceFields.map((key) => [key, lf.elements[key].value])),
+    ...Object.fromEntries(appearanceChecks.map((key) => [key, lf.elements[key].checked])),
+    ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}),
+  });
+  const receiptImage = $("#rcPreview"), receiptMessage = $("#rcPreviewMessage");
+  let receiptTimer, receiptRequest = 0;
+  const previewReceipt = () => {
+    clearTimeout(receiptTimer);
+    const seq = ++receiptRequest;
+    receiptTimer = setTimeout(async () => {
+      const current = () => previewCurrent() && lf.isConnected && seq === receiptRequest;
+      if (!current()) return;
+      try {
+        const res = await fetch("/api/settings/receipt", { method: "PUT",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "pharm" },
+          body: JSON.stringify({ ...appearance(), preview: true }) });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error?.message || "تعذرت المعاينة");
+        if (!current()) return;
+        receiptImage.src = "data:image/png;base64," + result.png;
+        receiptImage.hidden = false;
+        receiptMessage.textContent = "بيانات تجريبية";
+      } catch (error) {
+        if (!current()) return;
+        receiptImage.hidden = true;
+        receiptMessage.textContent = "تعذرت المعاينة" + (error.message ? " · " + error.message : "");
+      }
+    }, 300);
+  };
+  for (const key of ["paper", "l0", "l1", ...appearanceFields, ...appearanceChecks]) {
+    lf.elements[key].addEventListener("input", previewReceipt);
+  }
+  previewReceipt();
   const preview = () => { clearTimeout(prevT); prevT = setTimeout(async () => {
     if (!previewCurrent() || !lf.isConnected) return;
     try {
@@ -3374,15 +3434,10 @@ async function renderReceiptCfg(c) {
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
-      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { paper: +f.paper.value, title: f.title.value, lines: [f.l0.value, f.l1.value],
-      header: f.header.value, tax_no: f.tax_no.value, cr_no: f.cr_no.value, time_format: f.time_format.value, auto_receipt: f.auto_receipt.checked,
+      renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { ...appearance(), auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
-      footer: f.footer.value, names: f.names.value, label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
-      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim(), show_cashier: f.show_cashier.checked, show_customer: f.show_customer.checked,
-      show_expiry: f.show_expiry.checked, show_return_policy: f.show_return_policy.checked,
-      qr_text: f.qr_text.value.trim(), qr_caption: f.qr_caption.value.trim(), qr2_text: f.qr2_text.value.trim(),
-      qr2_caption: f.qr2_caption.value.trim(), show_item_count: f.show_item_count.checked, show_change: f.show_change.checked,
-      ...(RC_LOGO !== undefined ? { logo: RC_LOGO } : {}) } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
+      label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
+      label_dpi: +f.label_dpi.value, label_gap: +f.label_gap.value || 0, label_shift: +f.label_shift.value || 0, label_variant: f.label_variant.value, label_flip: f.label_flip.checked, label_rows: +f.label_rows.value, label_text_lang: f.label_text_lang.value, label_pharmacy_en: f.label_pharmacy_en.value.trim() } })); RC_LOGO = undefined; ME.time_format = f.time_format.value; toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
   $("#rcTry").addEventListener("click", async (e) => {
