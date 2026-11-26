@@ -1,3 +1,5 @@
+> Archived 26/11/2026: the queue now lives in the «Queue» section of `docs/HANDOFF.md` (OWNER_RULES §6).
+
 # QUEUE.md — the work chain's queue (OWNER_RULES §10)
 
 Take the first open item of your kind, finish it, tick it with the evidence (PR / issue comment), then start
