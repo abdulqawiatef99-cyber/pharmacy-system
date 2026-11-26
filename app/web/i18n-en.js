@@ -1,7 +1,6 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
-"(أقصى خصم لك 0%)": "(your maximum discount 0%)",
 "الخصم بالجنيه": "Discount in EGP",
 "الخصم بالنسبة": "Discount in percent",
 "الخصم بالجنيه (مثال 3)، أو نسبة (مثال 5%):": "Discount in EGP (e.g. 3), or a percent (e.g. 5%):",

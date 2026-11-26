@@ -108,6 +108,7 @@ const I18N_PATTERNS = [
   [new RegExp(`${NUM}\\s*(?:يوم|أيام)(?![\\u0600-\\u06FF])`, "g"), "$1 days"],
   [new RegExp(`${NUM}\\s*(?:وحدة|وحدات)(?![\\u0600-\\u06FF])`, "g"), "$1 units"],
   [new RegExp(`${NUM}\\s*(?:علبة|علب)(?![\\u0600-\\u06FF])`, "g"), "$1 packs"],
+  [new RegExp(`\\(أقصى خصم لك ${NUM}%\\)`, "g"), "(your maximum discount $1%)"],
   [new RegExp(`${NUM}\\s*(?:صنف|أصناف)(?![\\u0600-\\u06FF])`, "g"), "$1 items"],
   [new RegExp(`${NUM}\\s*(?:شهر|شهور)(?![\\u0600-\\u06FF])`, "g"), "$1 months"],
   [new RegExp(`${NUM}\\s*(?:ساعة|ساعات)(?![\\u0600-\\u06FF])`, "g"), "$1 hours"],
@@ -5516,10 +5517,14 @@ function discMode() {
 function setDiscMode(m) {
   try { if (DISC_MODES.includes(m)) localStorage.setItem(`discMode:${ME?.user?.id || ""}`, m); } catch { /* per-viewer only */ }
 }
+// a typed number as the screen reads it: Arabic digits, the Arabic decimal mark ٫ and «ز» (the "." key on the Arabic
+// keyboard) become a plain number; a trailing % or ج is the field's own sign (review of UX-27 PR2)
+const discText = (v) => String(v ?? "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+  .replace(/[٫ز]/g, ".").replace(/\s*(%|ج|جنيه)\s*$/, "");
 // what the other field shows while one is typed: the percent an EGP amount is of `gross`, or the EGP a percent
 // takes (the server's half-up discount_of). "" when the typed text is not a valid discount or there is no price.
 function discOther(mode, text, gross) {
-  const v = String(text ?? "").trim();
+  const v = discText(text);
   if (v === "" || !(gross > 0)) return "";
   const n = exactPiasters(v);                    // EGP -> piasters; percent -> basis points (same 2-decimal rule)
   if (n == null || n < 0) return "";
@@ -5528,7 +5533,7 @@ function discOther(mode, text, gross) {
 }
 // the body a typed discount sends: EGP exact to the piastre, percent exact to 0.01%; null when invalid
 function discBody(mode, text) {
-  const v = String(text ?? "").trim(), n = v === "" ? 0 : exactPiasters(v);
+  const v = discText(text), n = v === "" ? 0 : exactPiasters(v);
   if (n == null || n < 0 || (mode === "pct" && n > 10000)) return null;
   return mode === "egp" ? { discount_amount: n } : { discount_bp: n };
 }
@@ -5539,8 +5544,8 @@ function discAsk(v, mode = "pct") {
   if (!t) return null;
   const egp = /(ج|جنيه|egp)\s*$/i.test(t) || (mode === "egp" && !/%\s*$/.test(t)), num = t.replace(/(ج|جنيه|egp|%)\s*$/i, "").trim();
   if (egp) { const p = exactPiasters(num); return p == null || p < 0 ? (toast("مبلغ الخصم غير صحيح", true), null) : { discount_amount: p }; }
-  const bp = toBp(num);
-  return bp == null || Number.isNaN(bp) ? (toast("نسبة الخصم غير صحيحة", true), null) : { discount_bp: bp };
+  const bp = exactPiasters(num);              // exact to 0.01%, never rounded (review of UX-27 PR2)
+  return bp == null || bp < 0 || bp > 10000 ? (toast("نسبة الخصم غير صحيحة", true), null) : { discount_bp: bp };
 }
 
 async function patchLine(lineId, body) {
@@ -5552,7 +5557,7 @@ async function patchLine(lineId, body) {
     }
     catch (er) { toast(er.message, true); renderCart(); return false; }     // the controls show what is saved
   })();
-  await POS.saving;
+  return POS.saving;
 }
 
 // the two discount fields of a line, the person's last mode first; each shows what is saved
@@ -5561,8 +5566,8 @@ function discFields(l) {
   const per = l.discount_bp ? pct(l.discount_bp) : l.discount_amount ? discOther("egp", money(l.discount_amount), l.gross) : "";
   const most = ME.role === "owner" ? "" : ` (أقصى خصم لك ${pct(ME.max_discount_bp)}%)`;
   const f = {
-    egp: `<label class="dfield"><input class="narrow" data-damt="${esc(l.id)}" inputmode="decimal" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="الخصم بالجنيه" title="${esc("الخصم بالجنيه" + most)}"> ج</label>`,
-    pct: `<label class="dfield"><input class="narrow" data-disc="${esc(l.id)}" inputmode="decimal" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="الخصم بالنسبة" title="${esc("الخصم بالنسبة" + most)}"> %</label>`,
+    egp: `<label class="dfield"><input class="narrow" data-damt="${esc(l.id)}" inputmode="decimal" lang="en" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="الخصم بالجنيه" title="${esc("الخصم بالجنيه" + most)}"> ج</label>`,
+    pct: `<label class="dfield"><input class="narrow" data-disc="${esc(l.id)}" inputmode="decimal" lang="en" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="الخصم بالنسبة" title="${esc("الخصم بالنسبة" + most)}"> %</label>`,
   };
   const m = discMode();
   return `<span class="row nowrap disc2">${f[m]}${f[m === "egp" ? "pct" : "egp"]}</span>`;
@@ -5642,8 +5647,7 @@ function renderCart(findings = null) {
   const sendDisc = (id, mode, text) => {
     const body = discBody(mode, text);
     if (!body) { POS.saving = Promise.resolve(false); return toast(mode === "egp" ? "مبلغ الخصم غير صحيح" : "نسبة الخصم غير صحيحة", true); }
-    setDiscMode(mode);
-    return patchLine(id, body);
+    return patchLine(id, body).then((ok) => { if (ok) setDiscMode(mode); return ok; });
   };
   [["damt", "egp", "disc"], ["disc", "pct", "damt"]].forEach(([key, mode, other]) => {
     $("#posCart").querySelectorAll(`[data-${key}]`).forEach((inp) => {
@@ -5655,7 +5659,7 @@ function renderCart(findings = null) {
   $("#posCart").querySelectorAll("[data-askdisc]").forEach((b) => b.addEventListener("click", () => {
     const m = discMode();
     const v = discAsk(prompt(m === "egp" ? "الخصم بالجنيه (مثال 3)، أو نسبة (مثال 5%):" : "الخصم: نسبة (مثال 5) أو مبلغ بالجنيه (مثال 3ج):"), m);
-    if (v) { setDiscMode(v.discount_amount != null ? "egp" : "pct"); patchLine(b.dataset.askdisc, v); }
+    if (v) patchLine(b.dataset.askdisc, v).then((ok) => { if (ok) setDiscMode(v.discount_amount != null ? "egp" : "pct"); });
   }));
   $("#posCart").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
     SALE = await api(`/api/sales/${SALE.id}/lines/${b.dataset.rm}`, { method: "DELETE" }); renderCart(); renderSide();
@@ -5697,8 +5701,8 @@ function invDiscFields(s) {
   const amt = s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? money(share) : "";
   const per = s.invoice_discount_bp ? pct(s.invoice_discount_bp) : s.invoice_discount_amount ? discOther("egp", money(s.invoice_discount_amount), base) : "";
   const f = {
-    egp: `<label class="dfield"><input id="posInvAmt" class="narrow" inputmode="decimal" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالجنيه"> ج</label>`,
-    pct: `<label class="dfield"><input id="posInvDisc" class="narrow" inputmode="decimal" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالنسبة"> %</label>`,
+    egp: `<label class="dfield"><input id="posInvAmt" class="narrow" inputmode="decimal" lang="en" value="${esc(amt)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالجنيه"> ج</label>`,
+    pct: `<label class="dfield"><input id="posInvDisc" class="narrow" inputmode="decimal" lang="en" value="${esc(per)}" placeholder="0" autocomplete="off" aria-label="خصم الفاتورة بالنسبة"> %</label>`,
   };
   const m = discMode();
   return `<div class="row nowrap mt disc2" id="posInvDiscRow"><span class="f">خصم على الفاتورة</span>${f[m]}${f[m === "egp" ? "pct" : "egp"]}</div>`;
@@ -5808,12 +5812,11 @@ function renderSide() {
       return toast("الخصم غير صحيح", true);
     }
     const body = mode === "egp" ? { amount: typed.discount_amount } : { bp: typed.discount_bp };
-    setDiscMode(mode);
     POS.saving = (async () => {          // complete() waits for it; false = not saved, the sale waits (Codex #400)
       try { SALE = await api(`/api/sales/${SALE.id}/invoice-discount`, { method: "PUT", body }); renderCart(); renderSide(); return true; }
       catch (er) { toast(er.message, true); renderSide(); return false; }
     })();
-    await POS.saving;
+    if (await POS.saving) setDiscMode(mode);
   };
   [["#posInvAmt", "egp", "#posInvDisc"], ["#posInvDisc", "pct", "#posInvAmt"]].forEach(([sel, mode, other]) => {
     const inp = $(sel); if (!inp) return;
