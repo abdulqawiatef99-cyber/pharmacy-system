@@ -1,6 +1,10 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"افتح حساب مورد (للدفع أو كشف الحساب)": "Open a supplier's account (to pay or see the statement)",
+"اكتب اسم المورد أو تليفونه": "Type the supplier's name or phone",
+"اكتب اسم المورد": "Type the supplier's name",
+"مفيش مورد بالاسم ده": "No supplier by that name",
 "الصنف اتضاف؛ دوّر عليه تاني عشان تحطه في الفاتورة": "The item was added; search for it again to put it on the invoice",
 "عدد الوحدات الصغيرة في العبوة": "Small units in the pack",
 "سعر الجمهور للعبوة (ج)": "Public price per pack (EGP)",
