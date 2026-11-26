@@ -326,7 +326,8 @@ def _ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def name_similarity(q: ParsedName, p: ParsedName) -> float:
+def spelling_similarity(q: ParsedName, p: ParsedName) -> float:
+    """How close two names are as written (no consonant skeleton): the whole name or its words."""
     direct = _ratio(q.core, p.core)
     # token coverage: every query token should find a close token in the item
     if q.core_tokens and p.core_tokens:
@@ -335,8 +336,28 @@ def name_similarity(q: ParsedName, p: ParsedName) -> float:
         tokens = (cover + back) / 2
     else:
         tokens = 0.0
+    return max(direct, tokens)
+
+
+def name_similarity(q: ParsedName, p: ParsedName) -> float:
     skel = _ratio(q.skeleton, p.skeleton) * 0.95 if q.skeleton and p.skeleton else 0.0
-    return max(direct, tokens, skel)
+    return max(spelling_similarity(q, p), skel)
+
+
+_ARABIC_LETTER = re.compile(r"[\u0600-\u06ff]")
+
+
+def same_script_similarity(db: Database, org_id: str, raw_name: str, item_id: str) -> float:
+    """How close `raw_name` is, as written, to the item's name in the same script (0 when the item has no
+    name in that script). The consonant skeleton lets an Arabic and an English spelling meet; for text that
+    may be keyboard gibberish that is exactly the wrong test (search: a query typed on the other layout)."""
+    it = _index(db, org_id).items.get(item_id)
+    if it is None:
+        return 0.0
+    q = parse_name(raw_name)
+    arabic = bool(_ARABIC_LETTER.search(q.core))
+    return max((spelling_similarity(q, p) for p in it.parsed if bool(_ARABIC_LETTER.search(p.core)) == arabic),
+               default=0.0)
 
 
 def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
