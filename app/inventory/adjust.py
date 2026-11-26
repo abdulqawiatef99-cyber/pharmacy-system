@@ -101,6 +101,16 @@ def adjust(db: Database, ctx: Context, item_id: str, *, qty_delta: int | None = 
         if not isinstance(qty_delta, int) or isinstance(qty_delta, bool) or qty_delta == 0:
             raise ValidationFailed("لا يوجد تغيير في الرصيد")
         note = check_reason(reason, note, qty_delta > 0)
+        if qty_delta > 0 and not batch_id:
+            from ..sales.service import local_today
+            # #461 P0 through the adjust screen (review of #472): a surplus with no lot while the item has an expired
+            # or recalled lot would become sellable untracked stock. Same rule as the stocktake: add it by lot.
+            if db.one("SELECT 1 FROM batches b WHERE b.org_id=? AND b.item_id=?"
+                      " AND (b.expiry_date<? OR EXISTS (SELECT 1 FROM recall_matches m"
+                      " WHERE m.org_id=b.org_id AND m.batch_id=b.id AND m.status IN ('confirmed','handled')))"
+                      " LIMIT 1", (ctx.org_id, item_id, local_today().isoformat())):
+                raise Conflict(f"«{name}»: فيه تشغيلة منتهية أو مسحوبة؛ الزيادة لازم تتسجل على التشغيلة الفعلية",
+                               code="surplus_requires_batch")
         if qty_delta > 0:
             cost = avg_cost(db, ctx.org_id, ctx.branch_id, item_id)
             inv.post_movement(db, ctx, item_id=item_id, qty_delta=qty_delta, batch_id=batch_id, movement_type="adjustment",

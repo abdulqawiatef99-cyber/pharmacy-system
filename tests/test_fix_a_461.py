@@ -269,3 +269,28 @@ class TestSupplierReturnAPI(APICase, _Base):
         self.assertEqual(response.json()["error"]["code"], "return_value_exceeds")
         self.assertEqual(self.owed(supplier), 4500)
         self.assertEqual(self.qty(self.pan), 4)
+
+
+class TestManualAdjustSurplus(APICase):
+    """Independent review of #472 (P1): the same P0 through the adjust screen. A manual "found" adjustment with no
+    lot, while the item has an expired lot, posted untracked stock that checkout then sold with no lot or expiry."""
+
+    def test_found_without_a_lot_is_refused_while_an_expired_lot_exists(self):
+        from app.inventory import adjust
+        with self.db.transaction():
+            batch = inv.get_or_create_batch(self.db, self.ctx, self.pan, "QA461-ADJ",
+                                            (local_today() - timedelta(days=1)).isoformat())
+            inv.post_movement(self.db, self.ctx, item_id=self.pan, qty_delta=1, movement_type="purchase",
+                              batch_id=batch)
+        for kwargs in ({"qty_delta": 1}, {"set_to": 2}):
+            with self.subTest(**kwargs):
+                with self.assertRaises(Conflict) as refusal:
+                    adjust.adjust(self.db, self.ctx, self.pan, reason="found", **kwargs)
+                self.assertIn("التشغيلة", refusal.exception.message)
+        self.assertFalse(self.db.one("SELECT 1 FROM stock_movements WHERE item_id=? AND movement_type='adjustment'",
+                                     (self.pan,)))
+        sales = Sales(self.db)
+        with self.assertRaises(Conflict):
+            sales.add_line(self.ctx, sales.create(self.ctx), self.pan, units=1)
+        adjust.adjust(self.db, self.ctx, self.pan, qty_delta=1, batch_id=batch, reason="found")   # by lot: allowed
+        self.assertEqual(inv.batch_qty(self.db, self.ctx.org_id, self.ctx.branch_id, self.pan, batch), 2)
