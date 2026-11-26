@@ -30,6 +30,30 @@ const { chromium } = require('playwright');
   await p.locator('#qkTgl').click();
   await p.waitForSelector('#posQuick .qbtn');
   out.reopened = await p.locator('#posQuick .qbtn').count();
+  // review P1/P2 cases first: none of them may send /complete
+  let completes = 0;
+  p.on('request', (r) => { if (r.url().endsWith('/complete')) completes++; });
+  // a scanner sending CR+LF: the second Enter on the now empty search is not a person's Enter
+  await p.locator('#posQ').focus();
+  await p.keyboard.type(code, { delay: 2 }); await p.keyboard.press('Enter'); await p.keyboard.press('Enter');
+  await p.waitForFunction(() => /^2\b/.test(document.querySelector('table.cart tbody tr .qty b')?.innerText ?? ''));
+  out.afterCrLf = await p.evaluate(() => document.activeElement.id);
+  // a card sale: Enter held down on the empty search never clicks «إتمام البيع»
+  await p.locator('[data-m=card]').click();
+  await p.locator('#posQ').focus();
+  await p.waitForTimeout(200);
+  await p.keyboard.down('Enter'); await p.keyboard.down('Enter'); await p.keyboard.down('Enter'); await p.keyboard.up('Enter');
+  out.cardFocus = await p.evaluate(() => document.activeElement.id);
+  await p.waitForTimeout(400);
+  out.heldCompletes = completes;
+  await p.locator('[data-m=cash]').click();
+  // an amount that is not a number («5e» reads as empty) is refused, never taken as the exact amount
+  await p.locator('#payGiven').click();
+  await p.keyboard.type('5e', { delay: 60 });
+  await p.keyboard.press('Enter');
+  await p.waitForTimeout(400);
+  out.badCompletes = completes;
+  await p.locator('#payGiven').fill('');
   await p.locator('#posQ').focus();
   await p.keyboard.press('Enter');
   out.afterFirstEnter = await p.evaluate(() => document.activeElement.id);
@@ -63,6 +87,10 @@ class TestSaleLayout(APICase):
         self.assertEqual(out["rowTops"], 1)                                # one sideways row
         self.assertIn("افتح", out["shrunkLabel"])
         self.assertGreater(out["reopened"], 0)
+        self.assertEqual(out["afterCrLf"], "posQ")
+        self.assertEqual(out["cardFocus"], "posDone")
+        self.assertEqual(out["heldCompletes"], 0)
+        self.assertEqual(out["badCompletes"], 0)
         self.assertEqual(out["afterFirstEnter"], "payGiven")
         self.assertEqual(out["completed"], 200)
         self.assertTrue(out["openOnNext"])

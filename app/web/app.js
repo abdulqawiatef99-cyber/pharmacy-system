@@ -692,12 +692,12 @@ const TOUR = {
     ["#logout", "خروج", "لما تسيب الجهاز اعمل خروج، عشان محدش يشتغل باسمك."],
   ],
   pos: [
-    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة."],
+    ["#posQ", "البحث", "امسح الباركود هنا، أو اكتب أول حروف الصنف بالعربي أو الإنجليزي. Enter يضيف علبة، وEnter على البحث الفاضي يوديك للدفع."],
     ["#posRes [data-add]|#posQ", "علبة ولا شريط؟", "تحت البحث بيظهر زرار «علبة» وزرار الوحدة (شريط أو قرص). Shift+Enter يضيف وحدة بدل العلبة."],
     ["#posCart", "الفاتورة", "الأصناف اللي اتضافت. + و − يغيّروا الكمية، و✕ يشيل الصنف."],
     ["#posSide .paym|#posSide", "طريقة الدفع", "اختار نقدي أو بطاقة أو تحويل أو آجل (الآجل محتاج عميل). لو العميل دفع بطريقتين دوس «تقسيم الدفع»."],
     ["#posSide .rcpt", "الإيصال", "علّم هنا لو العميل عايز إيصال مطبوع. F4 بيعمل نفس الحاجة."],
-    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
+    ["#posDone", "إتمام البيع", "لما تخلص دوس هنا أو Enter في خانة «العميل دفع» أو F10 (أول مرة يروح للدفع، والتانية يحفظ) أو F9: الفاتورة تتسجل والمخزون يتخصم."],
     ["#posKick", "فتح الدرج (F8)", "محتاج تفتح الدرج من غير بيع (فكة مثلًا)؟ دوس F8 واختار السبب، وده بيتسجل باسمك.", "cash.manage"],
     ["#tabNew", "فاتورة جديدة", "عميل تاني جه وانت لسه ماخلصتش؟ افتح فاتورة جديدة (F2)، والأولى تفضل محفوظة."],
   ],
@@ -4689,9 +4689,11 @@ async function viewPos(afterCheckout = false) {
     }
     liveT = setTimeout(() => search(false, true).catch(() => {}), 250);
   });
+  let lastEnter = -Infinity;
   q.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.ctrlKey) return;          // Ctrl+Enter is a sale-screen key (U2-19), not a search
     e.preventDefault();
+    const prevEnter = lastEnter; lastEnter = e.timeStamp;
     clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
     if (first && !/^\d{3,5}$/.test(q.value.trim()) && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
@@ -4700,7 +4702,9 @@ async function viewPos(afterCheckout = false) {
     const v = q.value.trim();
     // U4-17: Enter on the empty search line goes to the payment («العميل دفع», or the done button);
     // Enter there finishes the sale. Scan, Enter, Enter = sold at the exact amount.
+    // Not on a held key, nor on the second Enter of a scanner that sends two (CR+LF) right after the code.
     if (!v) {
+      if (e.repeat || e.timeStamp - prevEnter < 150 || e.timeStamp - (POS.scanAt || -Infinity) < 150) return;
       if (SALE?.lines.length || pendingPosAdds(SALE?.id).length) ($("#payGiven:not([disabled])") || $("#posDone:not([disabled])"))?.focus();
       return;
     }
@@ -4753,7 +4757,7 @@ async function renderQuick() {
   const open = quickWide();
   box.dataset.wide = String(open);
   if (open && !QUICK) { try { QUICK = await api("/api/pos/quick"); } catch { QUICK = { items: [] }; } }
-  if (!$("#posQuick") || box.dataset.wide !== String(quickWide())) return;
+  if (!$("#posQuick") || box.dataset.wide !== String(open) || quickWide() !== open) return;   // a newer state draws itself
   const list = QUICK?.items || [];
   box.innerHTML = `<section class="panel qsale ${open ? "" : "shrunk"}"><div class="row between"><h2>⚡ البيع السريع</h2>
       <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl" aria-expanded="${open}">${open ? "صغّر ▴" : "افتح ▾"}</button></span></div>
@@ -4787,7 +4791,7 @@ async function newTab() {
 globalThis.PharmScan?.installScanDetector({
   active: () => location.hash.startsWith("#/pos") && !!POS.scan && !POS.completing && !document.querySelector("dialog[open]"),
   skip: (el) => el?.id === "posQ",
-  onScan: (code) => POS.scan(code),
+  onScan: (code, el, at) => { POS.scanAt = at; POS.scan(code); },
 });
 document.addEventListener("keydown", (e) => {
   // The pharmacy scanner (HH360) sends F12 with each barcode (#81): never open the browser's tools, and on the
@@ -5195,8 +5199,14 @@ function renderSide() {
   }));
   $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
   $("#payGiven")?.addEventListener("keydown", (e) => {      // U4-17: Enter here finishes the sale, like F9
-    if (e.key !== "Enter" || e.ctrlKey || e.repeat) return;
+    if (e.key !== "Enter" || e.ctrlKey) return;
     e.preventDefault();
+    if (e.repeat || e.timeStamp - (POS.scanAt || -Infinity) < 150) return;
+    if (e.target.validity?.badInput) {                       // «50..» reads as empty: never the exact amount
+      toast("المبلغ اللي العميل دفعه مش رقم صحيح. صحّحه أو امسحه", true);
+      e.target.select();
+      return;
+    }
     const confirmButton = $("#posConfirm");
     if (confirmButton) confirmButton.focus();
     else complete();
@@ -5246,6 +5256,9 @@ function renderSide() {
     if (s.kind === "delivery") { e.preventDefault(); return; }
     POS.rcpt[s.id] = e.target.checked;              // an explicit choice for this sale, kept when the total changes
     e.target.closest(".rcpt").querySelector(".muted")?.remove();
+  });
+  $("#posDone").addEventListener("keydown", (e) => {          // a held Enter (key repeat) never presses it (U4-17 review)
+    if ((e.key === "Enter" || e.key === " ") && (e.repeat || e.timeStamp - (POS.scanAt || -Infinity) < 150)) e.preventDefault();
   });
   $("#posDone").addEventListener("click", () => {
     const confirmButton = $("#posConfirm");

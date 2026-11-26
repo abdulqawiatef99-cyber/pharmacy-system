@@ -55,7 +55,7 @@ function giveBack(snap, text) {
 function createScanDetector({ active = () => true, onScan, skip = () => false,
   gap = SCAN_GAP_MS, shortGap = SCAN_SHORT_GAP_MS, longLength = SCAN_LONG_LENGTH, minLength = SCAN_MIN_LENGTH,
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  let buf = "", last = -Infinity, worst = 0, snap = null, holding = false, timer = null;
+  let buf = "", last = -Infinity, worst = 0, snap = null, holding = false, timer = null, scanEnd = -Infinity;
   const reset = () => { buf = ""; worst = 0; holding = false; snap = null; if (timer) clearTimer(timer); timer = null; };
   const flush = () => { if (holding) giveBack(snap, buf); reset(); };
   const swallow = (e) => { e.preventDefault(); e.stopImmediatePropagation?.(); };
@@ -74,8 +74,8 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
         worst = Math.max(worst, now - last);
         if (isScan()) {
           const code = buf;
-          swallow(e); restore(snap); reset(); last = -Infinity;
-          onScan(code, el);
+          swallow(e); restore(snap); reset(); last = -Infinity; scanEnd = now;
+          onScan(code, el, now);
           return;
         }
         flush(); last = -Infinity;          // not a scan after all: the characters go back, and Enter acts as usual
@@ -90,6 +90,7 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       return;
     }
     if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || (el && skip(el))) { flush(); last = -Infinity; return; }
+    if (e.key === "Enter" && now - scanEnd < 150) { swallow(e); return; }   // the LF of a scanner sending CR+LF
     if (e.key === "Enter") { flush(); last = -Infinity; return; }      // a person's Enter: it acts in the field as usual
     if (e.key == null || e.key.length !== 1) return;        // Shift (scanners send it for capitals), F12, arrows
     if (buf && fast && snap?.el === el) {
