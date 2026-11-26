@@ -60,14 +60,18 @@ def day_totals(db: Database, ctx: Context, day=None, branch_id: str | None = Non
     from ..sales.service import local_day_bounds, local_today
     lo, hi = local_day_bounds(day or local_today())
     branch = branch_id or ctx.branch_id
+    # a void is allowed on the sale's own day only, so completed_at bounds the read to an index range of the day
+    # (review P2: discarded draft tabs are 'voided' too and grow forever)
     v = db.one("SELECT count(*) n, coalesce(sum(total),0) t FROM sales WHERE org_id=? AND branch_id=?"
-               " AND status='voided' AND sale_no IS NOT NULL AND voided_at>=? AND voided_at<?",
-               (ctx.org_id, branch, lo, hi))
-    r = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM sale_returns r"
-               " JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' AND m.org_id=r.org_id"
-               " JOIN cash_shifts h ON h.id=m.shift_id AND h.org_id=m.org_id"
-               " WHERE r.org_id=? AND h.branch_id=? AND r.created_at>=? AND r.created_at<?",
-               (ctx.org_id, branch, lo, hi))
+               " AND status='voided' AND completed_at>=? AND completed_at<? AND sale_no IS NOT NULL"
+               " AND voided_at>=? AND voided_at<?", (ctx.org_id, branch, lo, hi, lo, hi))
+    # from the shifts open during the day to their refund movements (shift index), never every movement ever
+    # (review P1: cash_movements has no index on ref_id)
+    r = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t FROM cash_shifts h"
+               " JOIN cash_movements m ON m.shift_id=h.id AND m.kind='refund' AND m.org_id=h.org_id"
+               " JOIN sale_returns r ON r.id=m.ref_id AND r.org_id=h.org_id"
+               " WHERE h.org_id=? AND h.branch_id=? AND h.opened_at<? AND (h.closed_at IS NULL OR h.closed_at>=?)"
+               " AND r.created_at>=? AND r.created_at<?", (ctx.org_id, branch, hi, lo, lo, hi))
     return {"voids": v["n"], "voids_total": v["t"], "cash_refunds": r["n"], "cash_refunds_total": r["t"]}
 
 
@@ -111,7 +115,8 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     refunds = [{"return_id": x["id"], "sale_no": x["sale_no"], "amount": x["total"], "at": x["created_at"],
                 "by": x["by_name"], "sold_by": x["sold_by_name"], "reason": x["reason"]} for x in _cash_refunds_of(db, shift)]
     from ..sales.service import _local_date
-    day = day_totals(db, ctx, _local_date(shift["opened_at"]), shift["branch_id"])
+    the_day = _local_date(shift["opened_at"])
+    day = day_totals(db, ctx, the_day, shift["branch_id"])
 
     def who(e):
         return (e["by"] or "") + (f" (باعها {e['sold_by']})" if e["sold_by"] and e["sold_by"] != e["by"] else "")
@@ -124,11 +129,11 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
                          f" — السبب: {(e['reason'] or '').strip()}")
     else:
         lines.append("مفيش إلغاء ولا مرتجع نقدي في الشيفت ده")
-    lines.append(f"إجمالي اليوم (كل الشيفتات): إلغاء {day['voids']} فاتورة بـ {_egp(day['voids_total'])} ج · "
+    lines.append(f"إجمالي اليوم {the_day.isoformat()} (كل الشيفتات): إلغاء {day['voids']} فاتورة بـ {_egp(day['voids_total'])} ج · "
                  f"مرتجع نقدي {day['cash_refunds']} بـ {_egp(day['cash_refunds_total'])} ج")
     if out:
         lines.append("خلصوا (اتباعوا آخر 30 يوم): " + "، ".join(x["n"] for x in out))
     else:
         lines.append("مفيش أصناف خلصت من اللي بيتباع")
     return {"text": "\n".join(lines), "difference": diff, "out_of_stock": [x["n"] for x in out],
-            "voids": voids, "cash_refunds": refunds, "day": day}
+            "voids": voids, "cash_refunds": refunds, "day": day, "day_date": the_day.isoformat()}

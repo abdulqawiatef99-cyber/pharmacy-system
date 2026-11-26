@@ -6254,7 +6254,7 @@ function wireHunt() {
           ${ev.map((x) => `<tr><td><span class="badge ${x.kind === "إلغاء" ? "b-err" : "b-warn"}">${x.kind}</span></td><td>${x.sale_id ? `<a href="#/sales/${esc(x.sale_id)}">${esc(x.sale_no)}</a>` : esc(x.sale_no)}</td>
             <td class="num">${money(x.amount)}</td><td>${esc(stamp(x.at))}</td><td>${esc(x.by || "")}</td><td>${esc(x.sold_by || "")}</td><td>${esc(x.reason || "")}</td></tr>`).join("")}</tbody></table></div>`
           : `<p class="muted">مفيش إلغاء ولا مرتجع نقدي في الشيفت ده</p>`}
-          <p><b>إجمالي اليوم (كل الشيفتات):</b> إلغاء ${r.day.voids} فاتورة بـ ${money(r.day.voids_total)} ج · مرتجع نقدي ${r.day.cash_refunds} بـ ${money(r.day.cash_refunds_total)} ج</p></section>`;
+          <p><b>إجمالي اليوم ${esc(r.day_date)} (كل الشيفتات):</b> إلغاء ${r.day.voids} فاتورة بـ ${money(r.day.voids_total)} ج · مرتجع نقدي ${r.day.cash_refunds} بـ ${money(r.day.cash_refunds_total)} ج</p></section>`;
         $("#shSumCopy").addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }
         });

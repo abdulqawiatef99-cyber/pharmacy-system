@@ -197,3 +197,35 @@ class TestScreens(Base):
         self.assertIn("إجمالي اليوم", out["text"])
         self.assertIn("إلغاء 1 فاتورة", out["today"])
         self.assertIn("مرتجع نقدي 1", out["today"])
+
+
+class TestDayTotalsPlan(Base):
+    def test_old_shifts_movements_are_not_read(self):
+        # review P1: cash_movements has no index on ref_id; the day total goes from the day's shifts to their
+        # movements, so years of old shifts cost nothing. Counted in SQLite VM steps (no clock involved).
+        sid, d = self.sell(units=4)
+        self.s.return_items(self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="علبة مفتوحة")
+        with self.db.transaction():
+            for n in range(300):
+                sh = f"old-shift-{n}"
+                self.db.execute("INSERT INTO cash_shifts (id, org_id, branch_id, status, opening_cash, opened_by,"
+                                " opened_at, closed_at) VALUES (?,?,?,'closed',0,?,?,?)",
+                                (sh, self.ctx.org_id, self.ctx.branch_id, self.ctx.user_id,
+                                 f"2024-01-01T{n % 24:02d}:00:00.000000Z", f"2024-01-01T{n % 24:02d}:30:00.000000Z"))
+                self.db.conn.executemany(
+                    "INSERT INTO cash_movements (id, org_id, shift_id, amount, kind, ref_id, created_by)"
+                    " VALUES (?,?,?,?,?,?,?)", [(f"{sh}-{k}", self.ctx.org_id, sh, -100, "refund", f"old-ret-{n}-{k}",
+                                                 self.ctx.user_id) for k in range(20)])
+            self.db.execute("ANALYZE")
+        steps = [0]
+
+        def tick():
+            steps[0] += 1
+            return 0
+        self.db.conn.set_progress_handler(tick, 100)
+        try:
+            out = day_totals(self.db, self.ctx)
+        finally:
+            self.db.conn.set_progress_handler(None, 0)
+        self.assertEqual(out["cash_refunds"], 1)
+        self.assertLess(steps[0], 60, steps[0])     # 6,000 old movements read would be several hundred
