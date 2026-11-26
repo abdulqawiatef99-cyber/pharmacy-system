@@ -116,7 +116,22 @@ const numberBox = (value, keys, place, gapMs, enter) => {
 const caretBefore = numberBox("5", "6221043010366", 0, 4, true);
 const caretInside = numberBox("15", "6221043010366", 1, 4, true);
 const typedBefore = numberBox("5", "12", 0, 25, false);
-const out = { viaInstall, insertedBetween, overSelected, replacedFast, caretBefore, caretInside, typedBefore,
+// Codex P2 on #462 (e0bfcad): a list box keeps its own first-letter choice; a scan puts the old option back
+const listBox = (keys, gapMs, enter) => {
+  const sel = { tagName: "SELECT", selectedIndex: 0, isConnected: true, events: [], dispatchEvent(ev) { this.events.push(ev.type); } };
+  const scans = []; let fire = null;
+  const d = createScanDetector({ onScan: (c) => scans.push(c), setTimer: (fn) => { fire = fn; return 1; }, clearTimer: () => {} });
+  const passed = [];
+  [...keys].forEach((k, i) => { let prevented = false;
+    d.keydown({ key: k, timeStamp: 1000 + i * gapMs, target: sel, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    if (!prevented) { passed.push(k); sel.selectedIndex = 2; sel.events.push("change"); } });   // type-ahead moved it
+  if (enter) d.keydown({ key: "Enter", timeStamp: 1000 + keys.length * gapMs, target: sel, preventDefault() {}, stopImmediatePropagation() {} });
+  else fire?.();
+  return { scans, passed, index: sel.selectedIndex, events: sel.events };
+};
+const listTyped = listBox("ف", 0, false);
+const listScanned = listBox("6221043010366", 4, true);
+const out = { viaInstall, insertedBetween, overSelected, replacedFast, caretBefore, caretInside, typedBefore, listTyped, listScanned,
   scanInDiscount: run(burst("6223001234567"), new Field("5")),
   scanShortCode: run(burst("1234"), new Field("")),
   personTyping: run(typed("100"), new Field("")),
@@ -229,6 +244,13 @@ class TestScanDetector(unittest.TestCase):
         self.assertEqual(self.out["caretBefore"]["value"], "5")
         self.assertEqual(self.out["caretInside"]["value"], "15")
         self.assertEqual(self.out["typedBefore"]["value"], "125")   # a person's fast typing replayed where it went
+
+    def test_list_box_keeps_its_first_letter_choice_and_a_scan_puts_it_back(self):
+        t, sc = self.out["listTyped"], self.out["listScanned"]
+        self.assertEqual((t["passed"], t["index"]), (["ف"], 2))      # a person's letter chooses as usual
+        self.assertEqual(sc["scans"], ["6221043010366"])
+        self.assertEqual(sc["index"], 0)                             # the option chosen before the scan
+        self.assertEqual(sc["events"][-1], "change")                 # and the screen is told it is back
 
     def test_text_inserted_without_keys_is_never_taken(self):
         self.assertEqual(self.out["insertedBetween"], "شارع التجربة 7")

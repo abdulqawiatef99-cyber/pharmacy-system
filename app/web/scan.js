@@ -37,7 +37,8 @@ function restore(snap) {
     snap.el.value = snap.value;
     try { if (snap.start != null) snap.el.setSelectionRange(snap.start, snap.end); } catch { /* not selectable */ }
   } else if (snap.kind === "select" && snap.el.selectedIndex !== snap.index) {
-    snap.el.selectedIndex = snap.index;
+    snap.el.selectedIndex = snap.index;                 // the first letter chose another option: tell the screen
+    snap.el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 
@@ -131,9 +132,7 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e);
     } else {
       flush();
-      buf = e.key; last = now; snap = snapshot(el);
-      // a list box would jump to an option on the first letter: never let a character reach it
-      if (snap?.kind === "select") swallow(e);
+      buf = e.key; last = now; snap = snapshot(el);      // a list box chooses by its first letter as usual (Codex P2)
     }
     arm();                                  // a burst that stops without Enter is someone typing fast: give it back
   }
