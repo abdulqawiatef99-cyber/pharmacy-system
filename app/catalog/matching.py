@@ -10,7 +10,9 @@ or a modifier (Extra, XR, Forte...) disagrees or is missing.
 """
 from __future__ import annotations
 
+import heapq
 import re
+from itertools import islice
 import threading
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -52,25 +54,83 @@ class _IndexedItem:
     content: str | None
     pack_count: int | None
     modifiers: frozenset
+    grams: tuple = ()          # per parsed name: its letter groups (`_grams`), for the shortlist
+
+
+def _grams(p: ParsedName) -> frozenset:
+    """Letter groups of a parsed name: three letters in a row of every name word (with its start and end), and
+    two in a row of its consonant skeleton (the part an Arabic and an English spelling share). Two names that
+    are close share most of them; counting the shared ones costs a fraction of comparing the names."""
+    out = set()
+    for t in p.core_tokens:
+        w = f"^{t}$"
+        out.update(w[i:i + 3] for i in range(len(w) - 2))
+    for sk in p.skeleton.split():
+        w = f"#{sk}#"
+        out.update("~" + w[i:i + 2] for i in range(len(w) - 1))
+    return frozenset(out)
+
+
+def _attrs(it) -> tuple:
+    """Strength, form group and pack count of an item or of a parsed query."""
+    return it.strength, FORM_GROUP.get(it.form or "", it.form), it.pack_count
+
+
+def _keys(it: _IndexedItem) -> set[str]:
+    keys = set()
+    for p in it.parsed:
+        keys.update(tok[:3] for tok in p.core_tokens)
+        keys.update("#" + sk[:3] for sk in p.skeleton.split())
+    keys.discard("")
+    return keys
 
 
 class _OrgIndex:
     def __init__(self, items: list[_IndexedItem]):
         self.items = {i.item_id: i for i in items}
-        # answers already worked out for this catalog version (the index is rebuilt when any item changes,
-        # so an answer here can never be stale). The sale screen asks for the same names all day.
+        # answers already worked out for this catalog version (dropped as soon as any item changes, so an
+        # answer here can never be stale). The sale screen asks for the same names all day.
         self.memo: dict[tuple[str, int], list[Candidate]] = {}
+        self.changes = 0             # counts item changes: an answer worked out across a change is not remembered
         self.by_key: dict[str, set[str]] = {}
+        self.by_gram: dict[str, set[str]] = {}       # letter group -> items that have it (the shortlist)
+        self.by_size: dict[int, set[str]] = {}       # how many letter groups an item's names have -> items
+        self.by_attr: dict[tuple, set[str]] = {}     # (strength, form group, pack count) -> items
         for it in items:
-            for p in it.parsed:
-                for tok in p.core_tokens:
-                    self._add(tok[:3], it.item_id)
-                for sk in p.skeleton.split():
-                    self._add("#" + sk[:3], it.item_id)
+            self._add(it)
 
-    def _add(self, key: str, item_id: str):
-        if key:
-            self.by_key.setdefault(key, set()).add(item_id)
+    def _add(self, it: _IndexedItem) -> None:
+        for key in _keys(it):
+            self.by_key.setdefault(key, set()).add(it.item_id)
+        n = 0
+        for grams in it.grams:
+            n += len(grams)
+            for g in grams:
+                self.by_gram.setdefault(g, set()).add(it.item_id)
+        self.by_size.setdefault(n, set()).add(it.item_id)
+        self.by_attr.setdefault(_attrs(it), set()).add(it.item_id)
+
+    def _drop(self, it: _IndexedItem) -> None:
+        for table, keys in ((self.by_key, _keys(it)), (self.by_gram, set().union(*it.grams)),
+                            (self.by_size, (sum(map(len, it.grams)),)), (self.by_attr, (_attrs(it),))):
+            for key in keys:
+                ids = table.get(key)
+                if ids is not None:
+                    ids.discard(it.item_id)
+                    if not ids:
+                        del table[key]
+
+    def replace(self, item_id: str, it: "_IndexedItem | None") -> None:
+        """One item was added, edited or stopped: the index follows without being built again (a rebuild of
+        30,000 names cost the next search 0.3 s and more, #461)."""
+        old = self.items.pop(item_id, None)
+        if old is not None:
+            self._drop(old)
+        if it is not None:
+            self.items[item_id] = it
+            self._add(it)
+        self.changes += 1
+        self.memo = {}
 
     def candidates(self, q: ParsedName) -> set[str]:
         ids: set[str] = set()
@@ -102,13 +162,35 @@ def _parse_item(row, primary: ParsedName | None = None) -> _IndexedItem | None:
         content=next((p.content for p in parsed if p.content), None),
         pack_count=next((p.pack_count for p in parsed if p.pack_count), None),
         modifiers=frozenset().union(*(p.modifiers for p in parsed)),
+        grams=tuple(_grams(p) for p in parsed),
     )
 
 
+# connection -> pharmacy -> (what the connection had seen, the version read then). Bounded: a connection is
+# one per server thread; the tests open thousands.
+_seen: dict = {}
+SEEN_MAX = 64
+
+
 def _version(db: Database, org_id: str) -> str:
+    """Count and newest change of the active items. Reading it scans every item (6 ms for 30,000), and it is
+    asked on every question (31 times to open one purchase invoice), so a connection asks again only after
+    the database changed: SQLite's data_version moves when any other connection commits, total_changes when
+    this one writes. Both are read before the items, so a change in between is only ever seen as new."""
+    conn = db.conn
+    stamp = (conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes)
+    per = _seen.get(conn)
+    if per is None:
+        if len(_seen) >= SEEN_MAX:
+            _seen.clear()
+        per = _seen.setdefault(conn, {})
+    hit = per.get(org_id)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
     r = db.one("SELECT count(*) c, max(updated_at) u FROM items WHERE org_id=? AND status='active'",
                (org_id,))
-    return f"{r['c']}|{r['u']}"
+    per[org_id] = (stamp, f"{r['c']}|{r['u']}")
+    return per[org_id][1]
 
 
 def _index(db: Database, org_id: str) -> _OrgIndex:
@@ -154,6 +236,30 @@ def invalidate(org_id: str) -> None:
     """The catalog changed: the next question builds the index again (the parsed names are kept, see _index)."""
     with _cache_lock:
         _cache.pop(org_id, None)
+
+
+def item_changed(db: Database, org_id: str, item_id: str) -> None:
+    """One item was created or edited (after its transaction): the index is updated in place, so the next
+    search does not pay for a rebuild. Without an index yet there is nothing to do; if anything else changed
+    in the catalog meanwhile, the version no longer matches and the next question rebuilds as before."""
+    with _cache_lock:                            # one change at a time, in order; a read of one row is short
+        hit = _cache.get(org_id)
+        if hit is None:
+            return
+        idx = hit[1]
+        row = db.one("SELECT id, name_en, name_ar, strength_norm, dosage_form, status FROM items"
+                     " WHERE id=? AND org_id=?", (item_id, org_id))
+        known = _parsed.setdefault(org_id, {})
+        if row is None or row["status"] != "active":
+            idx.replace(item_id, None)
+            known.pop(item_id, None)
+        else:
+            key = (row["name_en"], row["name_ar"], row["strength_norm"], row["dosage_form"])
+            old = known.get(item_id)
+            it = old[1] if old is not None and old[0] == key else _parse_item(row)
+            idx.replace(item_id, it)
+            known[item_id] = (key, it)
+        _cache[org_id] = (_version(db, org_id), idx)
 
 
 def forget(org_id: str) -> None:
@@ -219,18 +325,104 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
     return Candidate(it.item_id, it.label, round(score, 4), reasons)
 
 
+SHORTLIST_MIN, SHORTLIST_MAX = 200, 400
+RANK_MAX = 2000        # at most this many candidates are ranked one by one (about 3 µs each)
+
+
+def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[_IndexedItem]:
+    """The `keep` candidates whose names share the most letter groups with the query; only these are compared
+    in full. A catalog where thousands of names start alike (one maker's prefix, «صنف ...») made every one of
+    them a candidate, and comparing 30,000 names took 1.3 s per search (#461). Ties go to the candidate whose
+    strength, form and pack agree with the query, so the right variant of one name is never the one left out.
+
+    Ranking 30,000 candidates one by one is itself too slow, so the pool is cut first with set operations:
+    candidates that share a letter group few items have (the telling ones) come first; when those are not
+    enough, the rest is narrowed by the common groups, the least common first."""
+    items = idx.items
+    if len(ids) <= keep:
+        return [it for it in map(items.get, ids) if it is not None]
+    qg = _grams(q)
+    posts = sorted(((len(p), g, p) for g in qg if (p := idx.by_gram.get(g))), key=lambda x: x[0])
+    rare_max = max(500, len(items) // 20)
+    pool: set[str] = set()
+    for n, _, post in posts:
+        if n > rare_max:
+            break
+        pool |= post
+    pool &= ids
+    if len(pool) < keep:
+        rest = ids - pool
+        need = keep - len(pool)
+        for n, _, post in posts:
+            if len(rest) <= RANK_MAX:
+                break
+            if rare_max < n < len(rest):         # a group at least as common as what is left tells nothing
+                cut = rest & post
+                if len(cut) >= need:
+                    rest = cut
+        if len(rest) > RANK_MAX:                 # still alike as far as the groups tell: the shortest names
+            short: set[str] = set()
+            for n in sorted(idx.by_size):
+                short.update(islice(idx.by_size[n] & rest, RANK_MAX - len(short)))
+                if len(short) >= RANK_MAX:
+                    break
+            rest = short
+        pool = pool.union(rest)
+    elif len(pool) > RANK_MAX:
+        # too many share a telling group: keep those sharing the most of them
+        count: dict[str, int] = {}
+        for n, _, post in posts:
+            if n > rare_max:
+                break
+            for i in post:
+                count[i] = count.get(i, 0) + 1
+        pool = set(heapq.nlargest(RANK_MAX, pool, key=count.__getitem__))
+    # a name that shares only the common words but has the asked strength, form and pack scores above a
+    # closer name without them (score_item's weights): those are ranked too, when they are few enough
+    same = idx.by_attr.get(_attrs(q))
+    if same and (q.strength or q.pack_count):
+        same = same & ids
+        if len(same) <= RANK_MAX:
+            pool |= same
+    found = [it for it in map(items.get, pool) if it is not None]
+    if len(found) <= keep:
+        return found
+    nq = len(qg)
+    qform = FORM_GROUP.get(q.form or "", q.form)
+
+    def rank(it: _IndexedItem) -> float:
+        best = 0.0
+        for g in it.grams:
+            n = len(g)
+            if n:
+                share = 2 * len(qg & g) / (nq + n)
+                if share > best:
+                    best = share
+        # the same weights as score_item: a name a little further with the asked strength, form and pack
+        # ends above a closer name without them, so it must not be cut here
+        for qv, iv, miss in ((q.strength, it.strength, 0.35), (qform, FORM_GROUP.get(it.form or "", it.form), 0.6),
+                             (q.content, it.content, 0.6), (q.pack_count, it.pack_count, 0.6)):
+            if qv != iv:
+                best *= miss if qv and iv else 0.94
+        return best if q.modifiers == it.modifiers else best * 0.7
+    return heapq.nlargest(keep, found, key=rank)
+
+
 def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5) -> list[Candidate]:
     idx = _index(db, org_id)
     key = (raw_name, limit)
     hit = idx.memo.get(key)
     if hit is None:
+        memo, changes = idx.memo, idx.changes
         q = parse_name(raw_name)
-        scored = [score_item(q, idx.items[i]) for i in idx.candidates(q)]
+        keep = min(max(SHORTLIST_MIN, 3 * limit), SHORTLIST_MAX)
+        scored = [score_item(q, it) for it in _shortlist(idx, q, idx.candidates(q), keep)]
         scored.sort(key=lambda c: c.score, reverse=True)
         hit = [c for c in scored if c.score >= SUGGEST_MIN * 0.6][:limit]
-        if len(idx.memo) >= MEMO_MAX:              # bounded: a long import of new names must not grow it forever
-            idx.memo.clear()
-        idx.memo[key] = hit
+        if idx.changes == changes:                 # an item changed while this was worked out: not remembered
+            if len(memo) >= MEMO_MAX:              # bounded: a long import of new names must not grow it forever
+                memo.clear()
+            memo[key] = hit
     # copies: a caller may change what it gets without changing the remembered answer
     return [Candidate(c.item_id, c.label, c.score, list(c.reasons)) for c in hit]
 

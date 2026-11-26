@@ -167,7 +167,7 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
             db.execute("INSERT INTO item_price_history (id, org_id, item_id, public_price, source, changed_by)"
                        " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, item_id, d["public_price"], source, ctx.user_id))
         audit.record(db, ctx, "item.create", "item", item_id, after=d)
-    matching.invalidate(ctx.org_id)
+    matching.item_changed(db, ctx.org_id, item_id)
     return item_id
 
 
@@ -240,7 +240,7 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
         audit.record(db, ctx, "item.update", "item", item_id,
                      before={k: before.get(k) for k in d if k != "updated_at"},
                      after={k: v for k, v in d.items() if k != "updated_at"})
-    matching.invalidate(ctx.org_id)
+    matching.item_changed(db, ctx.org_id, item_id)
     return get_item(db, ctx, item_id)
 
 

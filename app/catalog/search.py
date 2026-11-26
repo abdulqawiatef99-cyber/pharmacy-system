@@ -25,6 +25,7 @@ _EN_AR = {
 }
 _AR_EN = {v: k for k, v in _EN_AR.items() if len(v) == 1}
 _AR_EN.update({"ﻻ": "b", "ﻷ": "b", "ﻹ": "b", "ﻵ": "b", "أ": "h", "إ": "h", "آ": "h"})
+FUZZY_MAX = 60
 _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
@@ -91,11 +92,15 @@ def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | 
     other = [w for w in words if not _ARABIC.search(w)]          # a strength or a Latin word stays required (Codex #400)
     csql, cparams = _cat_sql(category)
     col = spelling_sql("coalesce(name_ar_norm,'')")
-    where = " AND ".join([f"{col} LIKE ?"] * len(ar)
-                         + ["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other))
-    params = [f"%{t}%" for t in ar]
+    # the spelling key of a column is ten replace() calls a row: on 30,000 names that alone was 60 ms (#461).
+    # Cheap tests first, so it runs only on rows that can match: the other words, then the letters of each
+    # Arabic word in their order with anything between them (what dropping the long vowels leaves).
+    where = " AND ".join(["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other)
+                         + ["name_ar_norm LIKE ?"] * len(ar) + [f"{col} LIKE ?"] * len(ar))
+    params = []
     for w in other:
         params += [f"%{w}%", f"%{w}%"]
+    params += ["%" + "%".join(t) + "%" for t in ar] + [f"%{t}%" for t in ar]
     rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
                   " ORDER BY length(coalesce(name_ar_norm,'')) LIMIT ?",
                   (org_id, *params, *cparams, limit + len(skip)))
@@ -165,10 +170,14 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
                 hint = {"kind": "layout", "query": alt}
     if not found and "%" not in q and not category:
         from . import matching
-        for c in matching.fuzzy_candidates(db, ctx.org_id, q, limit):
-            row = db.one("SELECT * FROM items WHERE id=?", (c.item_id,))
-            if row:
-                found.setdefault(c.item_id, dict(row))
+        # guesses: the closest FUZZY_MAX are enough even when the sale screen asks for 500 rows to sort by
+        # stock, and they are read in one query (500 single reads cost more than the search itself, #461)
+        ids = [c.item_id for c in matching.fuzzy_candidates(db, ctx.org_id, q, min(limit, FUZZY_MAX))]
+        rows = {r["id"]: dict(r) for r in db.all(
+            f"SELECT * FROM items WHERE org_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.org_id, *ids))} if ids else {}
+        for i in ids:
+            if i in rows:
+                found.setdefault(i, rows[i])
         if found:
             hint = {"kind": "fuzzy"}
     return {"items": list(found.values())[:limit], "hint": hint}
