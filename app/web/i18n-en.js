@@ -3377,6 +3377,7 @@ window.I18N_EN = {
 "جرد يومي صغير (10 أصناف)": "Small daily count (10 items)",
 "البرنامج بيختار أصناف قيمتها عالية أو بتتباع كتير أو كان فيها فرق قبل كده. البيع شغال عادي أثناء الجرد: الكمية المتوقعة بتتحسب بعد اللي اتباع.": "The program picks items of high value, fast sellers, or items that had a difference before. Selling goes on during the count: the expected quantity follows what was sold.",
 "هيتجرد: 0": "To count: 0",
+"هيتجرد": "To count",
 "مفيش أصناف محتاجة جرد النهارده": "No items need counting today",
 "قيمته عالية": "High value",
 "بيتباع كتير": "Sells a lot",
