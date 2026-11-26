@@ -193,7 +193,7 @@ def numeric_message(field: str) -> str:
     return f"{label} لازم يكون رقم صحيح من {minimum} إلى {maximum}"
 
 
-def impossible_line(line: dict, today: date):
+def impossible_line(line: dict, today: date, *, tax_only: bool = False):
     """Cross-field refusals shared by the typed line and approval of imported or older drafts."""
     public, net = line.get("public_price"), line.get("unit_net_price")
     if public is not None and margin_of(line) * 2 > public and margin_of(line) > 0:
@@ -205,7 +205,8 @@ def impossible_line(line: dict, today: date):
     if line.get("expiry_date") and date.fromisoformat(line["expiry_date"]) < today:
         yield "expired", "expiry_date", {"expiry_date"}
     sources = _j(line.get("field_sources"))
-    if public == 0 or (net == 0 and sources.get("unit_net_price") != "inferred") or effective_amount(line) == 0:
+    if public == 0 or (not tax_only and (
+            (net == 0 and sources.get("unit_net_price") != "inferred") or effective_amount(line) == 0)):
         yield "positive_cost", "unit_net_price", {"qty", "public_price", "unit_net_price", "discount_bp",
                                                 "tax_amount", "tax_included", "line_total", "distributor_margin"}
 
@@ -249,6 +250,8 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
     if not lines:
         add("error", "no_lines")
 
+    # A tax-only invoice still pays a positive cost, allocated across the received units.
+    tax_only = (invoice.get("extra_tax") or 0) > 0 and all(effective_amount(line) == 0 for line in lines)
     seen: dict[str, list] = {}
     for l in lines:
         lid = l["id"]
@@ -283,7 +286,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         base = _base(pub, l)
         if base is not None and base < 0:
             base = None
-        for code, field, _ in impossible_line(l, today):
+        for code, field, _ in impossible_line(l, today, tax_only=tax_only):
             add("error", code, lid, field)
         if pub is not None and net is not None:
             if net + margin_of(l) > pub:      # the pack's cost (with the distributor's margin) above the public price

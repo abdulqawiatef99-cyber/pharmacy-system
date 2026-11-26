@@ -653,7 +653,7 @@ class Purchasing:
             merged = {**line, **upd, "field_sources": src, "field_confidence": conf}
             validation.derive_line(merged)
             from ..sales.service import local_today
-            for code, _, related in validation.impossible_line(merged, local_today()):
+            for code, _, related in validation.impossible_line(merged, local_today(), tax_only=inv["extra_tax"] > 0):
                 if related.intersection(changes):
                     raise ValidationFailed(validation.MESSAGES[code], code=code)
             amount = validation.effective_amount(merged)
