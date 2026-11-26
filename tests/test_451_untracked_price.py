@@ -44,3 +44,28 @@ class TestUntrackedReceiptWithoutPriceAuthority(APICase):
                           " AND batch_key=''", (self.ctx.org_id, item))
         self.assertEqual(old["q"], 10)                    # the old boxes stay apart, at their own price
         self.assertEqual(self.db.one("SELECT untracked_public_price p FROM items WHERE id=?", (item,))["p"], 10000)
+
+    def test_line_without_a_public_price_also_goes_to_todays_price_with_authority(self):
+        """Review of the fix: an owner (with `items.price`) approving a net-price-only line left `price` None, so the
+        boxes joined the old-priced untracked balance the same way."""
+        item = catalog.create_item(self.db, self.ctx, {"name_en": "Synthetic Untracked 30TAB", "pack_size": 2,
+                                                       "public_price": 12000})
+        with self.db.transaction():
+            inventory.post_movement(self.db, self.ctx, item_id=item, qty_delta=10, movement_type="opening",
+                                    unit_cost=Decimal("20"))
+            self.db.execute("UPDATE items SET untracked_public_price=10000 WHERE id=?", (item,))
+        supplier = catalog.create_supplier(self.db, self.ctx, name="Synthetic Supplier 2", supplier_type="company")
+        p = Purchasing(self.db, self.s)
+        sid = p.create_manual(self.ctx, supplier_id=supplier)
+        p.update_header(self.ctx, sid, {"invoice_no": "SYN-NET-ONLY"}, None)
+        p.add_line(self.ctx, sid, {"item_id": item, "qty": 2, "unit_net_price": 9600}, None)
+        p.update_header(self.ctx, sid, {"declared_total": 19200}, None)
+        self.assertIsNone(p.get(self.ctx, sid)["lines"][0]["public_price"])
+        self.assertTrue(self.ctx.allowed("items.price"))
+        p.approve(self.ctx, sid, p.get(self.ctx, sid)["invoice"]["version"])
+        received = self.db.one("SELECT batch_id FROM stock_movements WHERE org_id=? AND item_id=?"
+                               " AND movement_type='purchase'", (self.ctx.org_id, item))
+        self.assertIsNotNone(received["batch_id"])
+        self.assertEqual(self.db.one("SELECT public_price FROM batches WHERE id=?",
+                                     (received["batch_id"],))["public_price"], 12000)
+        self.assertEqual(self.db.one("SELECT untracked_public_price p FROM items WHERE id=?", (item,))["p"], 10000)
