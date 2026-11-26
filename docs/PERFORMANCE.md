@@ -196,21 +196,21 @@ strengths, forms and Arabic names). Median / p95 in ms; before = develop `09e148
 
 | Request | prefix before | prefix after | varied before | varied after |
 |---|---:|---:|---:|---:|
-| Sale screen, misspelt name, first time (warm index) | 1318 / 1529 | 75 / 93 | 97 / 149 | 59 / 80 |
-| Same, asked again | 68 / 91 | 50 / 64 | 57 / 79 | 50 / 66 |
-| Same, right after an item was edited | 1580 / 1816 | 82 / 99 | 353 / 505 | 57 / 82 |
-| Purchase item search, misspelt name | 1293 / 1522 | 74 / 101 | 85 / 179 | 58 / 84 |
-| Purchase line, typed name matched to the catalog | 1377 / 1649 | 57 / 65 | 251 / 848 | 46 / 65 |
-| Purchase invoice opened, 31 lines | 109 / 151 | 20 / 24 | 115 / 154 | 18 / 22 |
-| Sale screen, Arabic name | 97 / 121 | 41 / 50 | 117 / 154 | 34 / 51 |
-| Sale screen, start of a name | 43 / 65 | 39 / 53 | 35 / 41 | 22 / 31 |
-| Sale screen, full name | 33 / 48 | 25 / 36 | 29 / 39 | 21 / 25 |
-| Sale screen, item code | 27 / 38 | 26 / 30 | 27 / 35 | 24 / 29 |
-| Purchase line, known item from the picker | 7.6 / 15 | 7.9 / 12 | 7.7 / 13 | 8.0 / 10 |
-| Name index built from nothing (once, background warm-up at start) | 3978 | 4644 | 3729 | 5238 |
+| Sale screen, misspelt name, first time (warm index) | 1318 / 1529 | 68 / 84 | 97 / 149 | 61 / 82 |
+| Same, asked again | 68 / 91 | 45 / 60 | 57 / 79 | 47 / 65 |
+| Same, right after an item was edited | 1580 / 1816 | 69 / 90 | 353 / 505 | 57 / 81 |
+| Purchase item search, misspelt name | 1293 / 1522 | 67 / 78 | 85 / 179 | 58 / 84 |
+| Purchase line, typed name matched to the catalog | 1377 / 1649 | 46 / 60 | 251 / 848 | 45 / 63 |
+| Purchase invoice opened, 31 lines | 109 / 151 | 18 / 30 | 115 / 154 | 16 / 17 |
+| Sale screen, Arabic name | 97 / 121 | 33 / 44 | 117 / 154 | 32 / 44 |
+| Sale screen, start of a name | 43 / 65 | 37 / 51 | 35 / 41 | 22 / 30 |
+| Sale screen, full name | 33 / 48 | 24 / 36 | 29 / 39 | 21 / 29 |
+| Sale screen, item code | 27 / 38 | 20 / 27 | 27 / 35 | 24 / 30 |
+| Purchase line, known item from the picker | 7.6 / 15 | 7.6 / 18 | 7.7 / 13 | 7.8 / 12 |
+| Name index built from nothing (once, background warm-up at start) | 3978 | 4751 | 3729 | 5024 |
 
-Run-to-run noise on this machine is about ±10 ms: the prefix purchase search measured p95 86, 94 and 101
-in three runs. The archive is not read on any of these paths.
+Run-to-run noise on this machine is about ±10 ms: across five runs the prefix catalog's misspelt-name rows
+measured p95 between 78 and 107. The archive is not read on any of these paths.
 
 What was slow and what changed (`app/catalog/matching.py`, `app/catalog/search.py`):
 - **Every item was a candidate.** Candidates are found by the first three letters of each name word; with
@@ -218,13 +218,21 @@ What was slow and what changed (`app/catalog/matching.py`, `app/catalog/search.p
   ~45 µs). Now only a shortlist is compared: candidates are ranked by the letter groups (trigrams of the
   name words, bigrams of the consonant skeleton) they share with the query, weighted like the full score
   for strength, form and pack; the pool is cut with set operations first, so 30,000 candidates cost ~15 ms.
+  The spelling and the skeleton are ranked apart, so a name in the other script (an Arabic invoice line
+  against an English-only item) is ranked by its skeleton and is not cut by same-script names.
   On 640 test questions against a full comparison the best answer was always the same, the first three in
   99.7%, and no answer in the first ten scored more than 0.05 lower (`tests/test_search_speed_461.py`).
+  When the letter groups cannot tell thousands of candidates apart (a bare shared prefix), 1,500 of the
+  shortest names are ranked; which of the equal ones is not fixed between program starts.
 - **One item edit rebuilt the index** (0.3-0.5 s for the next search). `catalog.create_item` and
-  `update_item` now update the index in place (`matching.item_changed`). Bulk paths (imports, purchase
-  approval) still invalidate it; a change nobody announced is still caught by the version check.
+  `update_item` now update the index in place (`matching.item_changed`), only when that is certain to equal
+  a rebuild: the index is at the version the write started from (read inside the write transaction) and the
+  write was not part of a bigger operation that can still roll back. Otherwise, and on bulk paths (imports,
+  purchase approval), the index is dropped and rebuilt as before. Searches on other threads read the index
+  while it is updated: its sets are replaced, never changed in place.
 - **The version check scanned every item on every question** (6 ms, 31 times to open one invoice). A
-  connection now reads it again only after the database changed (SQLite `data_version` / `total_changes`).
+  connection now reads it again only after the database changed (SQLite `data_version` / `total_changes`;
+  inside a write transaction the value is good for that transaction only).
 - **The sale screen asked for 500 fuzzy guesses** and read each with its own query: the closest 40 are
   kept and read in one query.
 - **Arabic spelling search** ran ten `replace()` calls on all 30,000 names: cheap tests now run first.

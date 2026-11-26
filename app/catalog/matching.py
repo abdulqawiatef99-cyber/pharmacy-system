@@ -54,21 +54,26 @@ class _IndexedItem:
     content: str | None
     pack_count: int | None
     modifiers: frozenset
-    grams: tuple = ()          # per parsed name: its letter groups (`_grams`), for the shortlist
+    grams: tuple = ()          # per parsed name: (word groups, skeleton groups) of `_grams`, for the shortlist
 
 
-def _grams(p: ParsedName) -> frozenset:
+def _grams(p: ParsedName) -> tuple[frozenset, frozenset]:
     """Letter groups of a parsed name: three letters in a row of every name word (with its start and end), and
-    two in a row of its consonant skeleton (the part an Arabic and an English spelling share). Two names that
-    are close share most of them; counting the shared ones costs a fraction of comparing the names."""
-    out = set()
+    two in a row of its consonant skeleton (the part an Arabic and an English spelling share), kept apart: a
+    name in the other script shares only the second kind. Two names that are close share most of them;
+    counting the shared ones costs a fraction of comparing the names."""
+    words, skel = set(), set()
     for t in p.core_tokens:
         w = f"^{t}$"
-        out.update(w[i:i + 3] for i in range(len(w) - 2))
+        words.update(w[i:i + 3] for i in range(len(w) - 2))
     for sk in p.skeleton.split():
         w = f"#{sk}#"
-        out.update("~" + w[i:i + 2] for i in range(len(w) - 1))
-    return frozenset(out)
+        skel.update("~" + w[i:i + 2] for i in range(len(w) - 1))
+    return frozenset(words), frozenset(skel)
+
+
+def _all_grams(it) -> set[str]:
+    return set().union(*(g for pair in it.grams for g in pair))
 
 
 def _attrs(it) -> tuple:
@@ -96,39 +101,37 @@ class _OrgIndex:
         self.by_gram: dict[str, set[str]] = {}       # letter group -> items that have it (the shortlist)
         self.by_size: dict[int, set[str]] = {}       # how many letter groups an item's names have -> items
         self.by_attr: dict[tuple, set[str]] = {}     # (strength, form group, pack count) -> items
-        for it in items:
-            self._add(it)
+        for it in items:                             # not shared yet: filled in place
+            for table, keys in self._where(it):
+                for key in keys:
+                    ids = table.get(key)
+                    if ids is None:
+                        table[key] = {it.item_id}
+                    else:
+                        ids.add(it.item_id)
 
-    def _add(self, it: _IndexedItem) -> None:
-        for key in _keys(it):
-            self.by_key.setdefault(key, set()).add(it.item_id)
-        n = 0
-        for grams in it.grams:
-            n += len(grams)
-            for g in grams:
-                self.by_gram.setdefault(g, set()).add(it.item_id)
-        self.by_size.setdefault(n, set()).add(it.item_id)
-        self.by_attr.setdefault(_attrs(it), set()).add(it.item_id)
-
-    def _drop(self, it: _IndexedItem) -> None:
-        for table, keys in ((self.by_key, _keys(it)), (self.by_gram, set().union(*it.grams)),
-                            (self.by_size, (sum(map(len, it.grams)),)), (self.by_attr, (_attrs(it),))):
-            for key in keys:
-                ids = table.get(key)
-                if ids is not None:
-                    ids.discard(it.item_id)
-                    if not ids:
-                        del table[key]
+    def _where(self, it: _IndexedItem):
+        return ((self.by_key, _keys(it)), (self.by_gram, _all_grams(it)),
+                (self.by_size, (sum(len(g) for pair in it.grams for g in pair),)), (self.by_attr, (_attrs(it),)))
 
     def replace(self, item_id: str, it: "_IndexedItem | None") -> None:
         """One item was added, edited or stopped: the index follows without being built again (a rebuild of
-        30,000 names cost the next search 0.3 s and more, #461)."""
+        30,000 names cost the next search 0.3 s and more, #461). Searches on other threads read these sets
+        while this runs, so a set is never changed in place: it is replaced by a new one."""
         old = self.items.pop(item_id, None)
         if old is not None:
-            self._drop(old)
+            for table, keys in self._where(old):
+                for key in keys:
+                    left = table.get(key, frozenset()) - {item_id}
+                    if left:
+                        table[key] = left
+                    else:
+                        table.pop(key, None)
         if it is not None:
+            for table, keys in self._where(it):
+                for key in keys:
+                    table[key] = table.get(key, frozenset()) | {item_id}
             self.items[item_id] = it
-            self._add(it)
         self.changes += 1
         self.memo = {}
 
@@ -179,6 +182,10 @@ def _version(db: Database, org_id: str) -> str:
     this one writes. Both are read before the items, so a change in between is only ever seen as new."""
     conn = db.conn
     stamp = (conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes)
+    if conn.in_transaction and not db.in_snapshot:
+        # inside a write, what this connection sees may be rolled back, and neither counter moves then: what
+        # is read here is good for this transaction only (nobody else can commit while it holds the write)
+        stamp = (*stamp, db.write_serial)
     per = _seen.get(conn)
     if per is None:
         if len(_seen) >= SEEN_MAX:
@@ -238,28 +245,42 @@ def invalidate(org_id: str) -> None:
         _cache.pop(org_id, None)
 
 
-def item_changed(db: Database, org_id: str, item_id: str) -> None:
-    """One item was created or edited (after its transaction): the index is updated in place, so the next
-    search does not pay for a rebuild. Without an index yet there is nothing to do; if anything else changed
-    in the catalog meanwhile, the version no longer matches and the next question rebuilds as before."""
-    with _cache_lock:                            # one change at a time, in order; a read of one row is short
+def before_change(db: Database, org_id: str, outer: bool) -> str | None:
+    """Called by the writer of one item inside its own transaction, before it writes: the catalog version the
+    change starts from, or None when the write is part of a bigger operation (`outer`: a transaction was
+    already open), which may still be rolled back."""
+    return None if outer else _version(db, org_id)
+
+
+def item_changed(db: Database, org_id: str, item_id: str, seen: str | None) -> None:
+    """One item was created or edited and its transaction committed: the index is updated in place, so the
+    next search does not pay for a rebuild. Only when that is certain to give the index a build would give:
+    the index must be at the version the write started from (`seen`, read inside the write transaction, when
+    nothing else can commit) and the item must be active. Anything else (a write inside a bigger operation
+    that may roll back, a change nobody announced, an index built meanwhile) drops the index, and the next
+    question builds it as before."""
+    if seen is None or db.conn.in_transaction:
+        return invalidate(org_id)
+    with _cache_lock:                            # one change at a time, in order; one row read by its key
         hit = _cache.get(org_id)
         if hit is None:
             return
-        idx = hit[1]
-        row = db.one("SELECT id, name_en, name_ar, strength_norm, dosage_form, status FROM items"
+        row = db.one("SELECT id, name_en, name_ar, strength_norm, dosage_form, status, updated_at FROM items"
                      " WHERE id=? AND org_id=?", (item_id, org_id))
-        known = _parsed.setdefault(org_id, {})
-        if row is None or row["status"] != "active":
-            idx.replace(item_id, None)
-            known.pop(item_id, None)
-        else:
-            key = (row["name_en"], row["name_ar"], row["strength_norm"], row["dosage_form"])
-            old = known.get(item_id)
-            it = old[1] if old is not None and old[0] == key else _parse_item(row)
-            idx.replace(item_id, it)
-            known[item_id] = (key, it)
-        _cache[org_id] = (_version(db, org_id), idx)
+        if hit[0] != seen or row is None or row["status"] != "active":
+            _cache.pop(org_id, None)
+            return
+        idx, known = hit[1], _parsed.setdefault(org_id, {})
+        key = (row["name_en"], row["name_ar"], row["strength_norm"], row["dosage_form"])
+        old = known.get(item_id)
+        it = old[1] if old is not None and old[0] == key else _parse_item(row)
+        idx.replace(item_id, it)
+        known[item_id] = (key, it)
+        # the version this one change leads to (`_version`: count and newest change of the active items);
+        # if anything else changed, the real one differs and the next question rebuilds
+        count, _, newest = seen.partition("|")
+        newest = row["updated_at"] if newest == "None" else max(newest, row["updated_at"])
+        _cache[org_id] = (f"{int(count) + (old is None)}|{newest}", idx)
 
 
 def forget(org_id: str) -> None:
@@ -341,7 +362,8 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
     items = idx.items
     if len(ids) <= keep:
         return [it for it in map(items.get, ids) if it is not None]
-    qg = _grams(q)
+    qw, qs = _grams(q)
+    qg = qw | qs
     posts = sorted(((len(p), g, p) for g in qg if (p := idx.by_gram.get(g))), key=lambda x: x[0])
     rare_max = max(500, len(items) // 20)
     pool: set[str] = set()
@@ -363,7 +385,7 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
         if len(rest) > RANK_MAX:                 # still alike as far as the groups tell: the shortest names
             short: set[str] = set()
             for n in sorted(idx.by_size):
-                short.update(islice(idx.by_size[n] & rest, RANK_MAX - len(short)))
+                short.update(islice(idx.by_size.get(n, frozenset()) & rest, RANK_MAX - len(short)))
                 if len(short) >= RANK_MAX:
                     break
             rest = short
@@ -376,7 +398,7 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
                 break
             for i in post:
                 count[i] = count.get(i, 0) + 1
-        pool = set(heapq.nlargest(RANK_MAX, pool, key=count.__getitem__))
+        pool = set(heapq.nlargest(RANK_MAX, pool, key=lambda i: count.get(i, 0)))
     # a name that shares only the common words but has the asked strength, form and pack scores above a
     # closer name without them (score_item's weights): those are ranked too, when they are few enough
     same = idx.by_attr.get(_attrs(q))
@@ -387,15 +409,20 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
     found = [it for it in map(items.get, pool) if it is not None]
     if len(found) <= keep:
         return found
-    nq = len(qg)
+    nw, ns = len(qw), len(qs)
     qform = FORM_GROUP.get(q.form or "", q.form)
 
     def rank(it: _IndexedItem) -> float:
+        # like name_similarity: the closer of the spelling and (at 0.95) the consonant skeleton, so a name in
+        # the other script, which shares no letters with the query, is ranked by what it does share
         best = 0.0
-        for g in it.grams:
-            n = len(g)
-            if n:
-                share = 2 * len(qg & g) / (nq + n)
+        for words, skel in it.grams:
+            if words and nw:
+                share = 2 * len(qw & words) / (nw + len(words))
+                if share > best:
+                    best = share
+            if skel and ns:
+                share = 1.9 * len(qs & skel) / (ns + len(skel))
                 if share > best:
                     best = share
         # the same weights as score_item: a name a little further with the asked strength, form and pack
