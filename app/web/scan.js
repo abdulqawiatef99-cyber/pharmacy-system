@@ -48,7 +48,10 @@ function giveBack(snap, text) {
   try {
     const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? s;
     el.setRangeText(text, s, e, "end");
-  } catch { el.value = (snap.replaced ? "" : snap.value ?? el.value) + text; }   // a number box: no caret there
+  } catch {                                             // a number box: no caret there, so the place found before
+    const v = snap.value ?? el.value, [i, j] = snap.place || [v.length, v.length];
+    el.value = v.slice(0, i) + text + v.slice(j);
+  }
   el.dispatchEvent(new Event("input", { bubbles: true }));
   if (typeof document === "undefined") return;
   // text put back by a script may not count as typed for the browser's own change event: make sure the field
@@ -72,9 +75,16 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
   const untouched = () => {
     if (snap?.kind !== "text") return true;
     const at = snap.start ?? snap.value.length, to = snap.end ?? at;
-    if (snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to)) return true;
-    // a number box shows no selection: its first key may have replaced a selected amount (Codex P2 on #462)
-    if (snap.start == null && snap.el.value === buf) { snap.replaced = true; return true; }
+    if (snap.start != null) return snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to);
+    // a number box shows no caret: find where its first key went (appended, before or inside the amount, or over a
+    // selected part of it), so a scan is still seen and a person's typing is replayed in the same place
+    // (Codex P2 on #462)
+    const v = snap.value, now = snap.el.value;
+    for (let i = v.length; i >= 0; i--) {
+      for (let j = i; j <= v.length; j++) {
+        if (v.slice(0, i) + buf + v.slice(j) === now) { snap.place = [i, j]; return true; }
+      }
+    }
     return false;
   };
   const arm = () => { if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; flush(); }, gap * 3); };
