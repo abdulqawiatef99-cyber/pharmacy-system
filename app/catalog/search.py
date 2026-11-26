@@ -206,12 +206,14 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         # is handed over for that (FUZZY_MAX at most, so an in-stock guess is not cut before its balance is
         # read, Codex on #483), and they are read in one query (500 single reads cost more than the search)
         most = min(limit, FUZZY_MAX)
-        cands = matching.fuzzy_candidates(db, ctx.org_id, q, most, compare=FUZZY_MAX)
+        guess = lambda text: matching.fuzzy_candidates(db, ctx.org_id, text, most, compare=FUZZY_MAX,   # noqa: E731
+                                                       sure_from=None)        # guesses for a person: no proof asked
+        cands = guess(q)
         hint = {"kind": "fuzzy"}
         if not cands or cands[0].score < FUZZY_SURE:
             # a misspelt name typed on the wrong layout: the guess of the mapped query wins when it is closer
             for alt in alts:
-                other = matching.fuzzy_candidates(db, ctx.org_id, alt, most, compare=FUZZY_MAX)
+                other = guess(alt)
                 if other and (not cands or other[0].score > cands[0].score):
                     cands, hint = other, {"kind": "layout", "query": alt, "guess": True}
         ids = [c.item_id for c in cands]

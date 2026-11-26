@@ -1,6 +1,7 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"التحديث ما بدأش والبرنامج ما اتقفلش": "The update did not start and the program was not stopped",
 "إعدادات إدخال الشراء": "Purchase entry settings",
 "الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.": "Item comes first. Move the remaining fields to change the order for Enter.",
 "الخصم / سعر الصيدلي": "Discount / purchase price",
@@ -1853,6 +1854,10 @@ window.I18N_EN = {
 "نقدي في الدرج": "Cash in the drawer",
 "نقدًا من الخزينة": "Cash from the drawer",
 "نقدًا من الدرج": "Cash from the drawer",
+"سطر خصم الأصناف": "Item discount line",
+"سطر خصم الفاتورة": "Invoice discount line",
+"سطر التقريب": "Rounding line",
+"لو خبّيت سطر خصم، الإيصال يطبع الأسعار بعد الخصم والإجمالي النهائي بس. اسم البائع = اللي عمل البيعة.": "If you hide a discount line, the receipt prints the prices after discount and the final total only. Seller name = the person who made the sale.",
 "مفيش علبة كاملة، اتنزل 0": "No full box left, added one 0",
 "مفيش علبة كاملة، اتنزل": "No full box left, added one",
 "يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.": "Cancels the sale as if it never happened: the items go back to stock and the cash leaves the drawer. Same day only and only with no return; after that, use a return.",

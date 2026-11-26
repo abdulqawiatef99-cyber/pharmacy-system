@@ -128,7 +128,7 @@ def receipt_preview(db: Database, ctx: Context, cfg: dict, logo_png: bytes | Non
     org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
     sample = {
         "sale_no": 12048, "kind": "store", "subtotal": 6250, "discount_total": 700,
-        "total": 5550, "paid_cash": 5550,
+        "total": 5550, "rounding": -50, "paid_cash": 5500,      # UX-26: a rounding, so its toggle shows in the preview
         "customer": {"name": "عميل تجريبي", "estock_code": 35, "phone": "01000000000"},
         "lines": [
             {"item": {"name": "Sample Relief 24 Tablets", "name_ar": "أقراص تجريبية",

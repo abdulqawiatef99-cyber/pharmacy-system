@@ -33,8 +33,9 @@ class ReceiptContentTests(unittest.TestCase):
                    seller="بائع تجريبي", cashier="أمين صندوق تجريبي", given=6000, return_days=14)
         self.assertEqual(out[0], ("title", "صيدلية المثال", ""))
         self.assertIn(("small", "فاتورة رقم 12048", "2026-11-23 14:05"), out)
-        for label in ("البائع: بائع تجريبي", "الكاشير: أمين صندوق تجريبي", "الدفع: كاش"):
+        for label in ("البائع: بائع تجريبي", "الدفع: كاش"):
             self.assertIn(("small", label, ""), out)
+        self.assertFalse(any(r[1].startswith("الكاشير") for r in out))      # UX-26: one name only
         self.assertIn(("item", "SAMPLE RELIEF 24 TABLETS", ("1", "1 علبة", "50.00", "50.00")), out)   # UX-26: capitals
         self.assertIn(("small", "عدد الأصناف: 1", ""), out)
         self.assertIn(("small", "عدد القطع: 1", ""), out)
@@ -65,7 +66,7 @@ class ReceiptContentTests(unittest.TestCase):
         sale = sample_sale()
         sale["lines"][0].update(discount_bp=1000, discount=900, invoice_share=400, line_total=4100)
         sale.update(discount_total=900, rounding=-10, total=4100, paid_cash=4090)
-        out = rows(sale)
+        out = rows(sale, {"show_rounding": True})                        # UX-26: the line is opt-in
         self.assertIn(("detail", "خصم 10% −5.00", ""), out)
         self.assertIn(("row", "الإجمالي قبل الخصم", "50.00"), out)
         self.assertIn(("row", "خصم الأصناف", "5.00"), out)
@@ -85,8 +86,8 @@ class ReceiptContentTests(unittest.TestCase):
         })
         out = rows(sale, {"show_customer": False})
         self.assertIn(("small", "الدفع: آجل", ""), out)
-        self.assertIn(("small", "العميل: عميل تجريبي (كود 35)", ""), out)
-        self.assertIn(("small", "موبايل: 01000000000", ""), out)
+        self.assertIn(("customer", "العميل: عميل تجريبي (كود 35)", ""), out)
+        self.assertIn(("customer", "موبايل: 01000000000", ""), out)
         self.assertIn(("center", "هذه الفاتورة على الحساب", ""), out)
         self.assertIn(("row", "الرصيد السابق", "12.00"), out)
         self.assertIn(("row", "الرصيد الحالي", "62.00"), out)
@@ -99,8 +100,8 @@ class ReceiptContentTests(unittest.TestCase):
                     payments=[{"method": "transfer", "channel": "محفظة تجربة", "amount": 5200}])
         out = rows(sale, {"show_customer": False})
         self.assertIn(("small", "الدفع: توصيل", ""), out)
-        self.assertIn(("small", "العنوان: عنوان التوصيل", ""), out)
-        self.assertIn(("small", "موبايل: 01000000001", ""), out)
+        self.assertIn(("customer", "العنوان: عنوان التوصيل", ""), out)
+        self.assertIn(("customer", "موبايل: 01000000001", ""), out)
         self.assertIn(("row", "رسوم التوصيل", "2.00"), out)
         self.assertIn(("row", "مدفوع محفظة · محفظة تجربة", "52.00"), out)
 

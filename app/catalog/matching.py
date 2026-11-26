@@ -10,6 +10,7 @@ or a modifier (Extra, XR, Forte...) disagrees or is missing.
 """
 from __future__ import annotations
 
+import gc
 import heapq
 import re
 from collections import Counter
@@ -245,6 +246,10 @@ def _index(db: Database, org_id: str) -> _OrgIndex:
         _cache[org_id] = (own or ver, idx)
         if own is None:
             _parsed[org_id] = seen       # only the items of this build: a stopped or deleted item is dropped
+    # 30,000 names are some 600,000 small objects that live as long as the program: left where they are,
+    # every full garbage collection walks them all (0.3 s, in the middle of some cashier's search). Frozen,
+    # they are skipped; they are still freed normally when a newer index replaces them (no reference cycles).
+    gc.freeze()
     return idx
 
 
@@ -365,6 +370,76 @@ def score_item(q: ParsedName, it: _IndexedItem) -> Candidate:
     return Candidate(it.item_id, it.label, round(score, 4), reasons)
 
 
+def _asked(q: ParsedName) -> tuple:
+    """What `_factor` needs of a query, worked out once."""
+    return q.strength, FORM_GROUP.get(q.form or "", q.form), q.content, q.pack_count, q.modifiers, _numbers(q)
+
+
+def _factor(asked: tuple, it: _IndexedItem) -> float:
+    """What score_item multiplies the name similarity by for this item: exactly its strength, form, pack
+    content, pack count, modifier and name-number rules, without the name comparison (which is the cost)."""
+    qs, qf, qc, qp, qm, qn = asked
+    f = 1.0
+    for qv, iv, miss in ((qs, it.strength, 0.35), (qf, FORM_GROUP.get(it.form or "", it.form), 0.6),
+                         (qc, it.content, 0.6), (qp, it.pack_count, 0.6)):
+        if qv and iv:
+            if qv != iv:
+                f *= miss
+        elif qv or iv:
+            f *= 0.94
+    if qm != it.modifiers:
+        f *= 0.7
+    if (qn or any(it.numbers)) and qn not in it.numbers:
+        f *= 0.35
+    return f
+
+
+def _closest(a: int, b: int) -> float:
+    """The most SequenceMatcher.ratio can be for two strings of these lengths (all of the shorter one matches)."""
+    return 2 * min(a, b) / (a + b) if a and b else 0.0
+
+
+def _bound(q: ParsedName, it: _IndexedItem) -> float:
+    """An upper bound of name_similarity(q, p) over the item's names, from lengths alone: never below the
+    real value, so a candidate whose bound is too low can be left out with certainty."""
+    best = 0.0
+    qt = [len(t) for t in q.core_tokens]
+    for p in it.parsed:
+        best = max(best, _closest(len(q.core), len(p.core)), 0.95 * _closest(len(q.skeleton), len(p.skeleton)))
+        pt = [len(t) for t in p.core_tokens]
+        if qt and pt:
+            cover = sum(max(_closest(a, b) for b in pt) for a in qt) / len(qt)
+            back = sum(max(_closest(b, a) for a in qt) for b in pt) / len(pt)
+            best = max(best, (cover + back) / 2)
+    return best
+
+
+def _complete(idx: _OrgIndex, q: ParsedName, left_out, sure_from: float) -> list[Candidate]:
+    """Every candidate the shortlist left out that scores `sure_from` or more. The shortlist ranks by an
+    approximation, so it cannot prove that nothing close was cut; a decision taken without a person (an
+    automatic purchase match, "no similar item exists") needs that proof. Each left-out candidate gets its
+    exact attribute factor and a real upper bound of its name similarity, and is compared in full only when
+    the two together can still reach the score."""
+    asked, floor, out = _asked(q), sure_from - 0.0001, []          # 0.0001: scores are rounded to 4 places
+    qn, numbers_decide = asked[5], floor > 0.35
+    for it in map(idx.items.get, left_out):
+        if it is None:
+            continue
+        if numbers_decide and (qn or any(it.numbers)) and qn not in it.numbers:
+            continue                       # the name-number rule alone (x0.35) puts it below the score
+        f = _factor(asked, it)
+        if f < floor or f * _bound(q, it) < floor:
+            continue
+        c = score_item(q, it)
+        if c.score >= sure_from:
+            out.append(c)
+    return out
+
+
+# No candidate scoring this or more is ever missing from an answer (unless the caller opts out): below the
+# lowest score anything is decided from without a person (import "similar item" 0.90, purchase match 0.92,
+# duplicate check 0.93).
+SURE_FROM = 0.9
 SHORTLIST_MIN, SHORTLIST_MAX = 120, 400
 SKEL_BUDGET, SKEL_KEEP = 60000, 400      # skeleton-group postings counted per question; candidates they add
 RANK_MAX = 1500        # at most this many candidates are ranked one by one (about 3 µs each)
@@ -444,8 +519,7 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
     if len(found) <= keep:
         return found
     nw, ns = len(qw), len(qs)
-    qform = FORM_GROUP.get(q.form or "", q.form)
-    qn = _numbers(q)
+    asked = _asked(q)
 
     def rank(it: _IndexedItem) -> float:
         # like name_similarity: the closer of the spelling and (at 0.95) the consonant skeleton, so a name in
@@ -460,36 +534,39 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
                 share = 1.9 * len(qs & skel) / (ns + len(skel))
                 if share > best:
                     best = share
-        # the same weights as score_item: a name a little further with the asked strength, form and pack
-        # ends above a closer name without them, so it must not be cut here
-        for qv, iv, miss in ((q.strength, it.strength, 0.35), (qform, FORM_GROUP.get(it.form or "", it.form), 0.6),
-                             (q.content, it.content, 0.6), (q.pack_count, it.pack_count, 0.6)):
-            if qv != iv:
-                best *= miss if qv and iv else 0.94
-        if (qn or any(it.numbers)) and qn not in it.numbers:
-            best *= 0.35                       # B12 against B1000: two hundred of those must not push B12's twin out
-        return best if q.modifiers == it.modifiers else best * 0.7
+        # times score_item's own weights: a name a little further with the asked strength, form and pack ends
+        # above a closer name without them, and B12 against B1000 ends far below B12's twin
+        return best * _factor(asked, it)
     return heapq.nlargest(keep, found, key=rank)
 
 
 def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5, *,
-                     compare: int | None = None) -> list[Candidate]:
+                     compare: int | None = None, sure_from: float | None = SURE_FROM) -> list[Candidate]:
     """The closest `limit` items. `compare`: how many shortlisted candidates are compared in full (default
-    three for every one asked, 120 to 400); the sale screen asks for more answers than that ratio gives."""
+    three for every one asked, 120 to 400); the sale screen asks for more answers than that ratio gives.
+    `sure_from`: a score from which no candidate may be missing (`_complete`). It is the default, because
+    callers decide things from the answer without a person (an automatic purchase match, "no similar item,
+    create it" in an import, the duplicate check); only a search that offers guesses to a person passes None."""
     idx = _index(db, org_id)
-    key = (raw_name, limit, compare)
+    key = (raw_name, limit, compare, sure_from)
     hit = idx.memo.get(key)
     if hit is None:
         memo, changes = idx.memo, idx.changes
         q = parse_name(raw_name)
         keep = max(limit, compare) if compare else min(max(SHORTLIST_MIN, 3 * limit), SHORTLIST_MAX)
-        scored = [score_item(q, it) for it in _shortlist(idx, q, idx.candidates(q), keep)]
+        ids = idx.candidates(q)
+        short = _shortlist(idx, q, ids, keep)
+        scored = [score_item(q, it) for it in short]
+        if sure_from is not None and len(ids) > len(short):
+            scored += _complete(idx, q, ids.difference(it.item_id for it in short), sure_from)
         scored.sort(key=lambda c: c.score, reverse=True)
         hit = [c for c in scored if c.score >= SUGGEST_MIN * 0.6][:limit]
         if idx.changes == changes:                 # an item changed while this was worked out: not remembered
             if len(memo) >= MEMO_MAX:              # bounded: a long import of new names must not grow it forever
                 memo.clear()
             memo[key] = hit
+            if sure_from is not None and len(memo) < MEMO_MAX:      # also the answer for a caller that needs
+                memo.setdefault((raw_name, limit, compare, None), hit)                         # no proof
     # copies: a caller may change what it gets without changing the remembered answer
     return [Candidate(c.item_id, c.label, c.score, list(c.reasons)) for c in hit]
 
@@ -534,6 +611,8 @@ def match_line(db: Database, org_id: str, *, raw_name: str, raw_code: str | None
                raw_barcode: str | None = None, supplier_id: str | None = None,
                limit: int = 5) -> MatchResult:
     warnings: list[str] = []
+    # automatic only when the best is 0.97 or more and nothing else is within 0.05 of it: so no candidate from
+    # 0.92 up may be missing from what the decision looks at (SURE_FROM, the default, is below that)
     cands = fuzzy_candidates(db, org_id, raw_name, limit) if raw_name else []
 
     def identified(item_id: str, method: str, score: float) -> MatchResult:

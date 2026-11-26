@@ -107,6 +107,91 @@ class TestNumbersInTheName(ReviewCase):
         self.assertIn(ids[0], [c.item_id for c in matching.fuzzy_candidates(self.db, self.ctx.org_id, "Omega 3 Plus", 5)])
 
 
+class TestNoCloseCandidateIsEverLeftOut(ReviewCase):
+    """Codex P1 on #483 (second pass): the shortlist ranks by an approximation, so it can never prove that no
+    close alternative was cut. A purchase match may only be automatic when that is proven: every candidate
+    that can still reach the deciding score is compared in full (`sure_from`), using a real upper bound."""
+
+    def test_a_dropped_spelling_twin_keeps_the_match_for_a_person(self):
+        rng = random.Random(42)
+        letters = "abcdefghijklmnopqrstuvwxyz"
+        names = [("Paracetamol", ""), ("Paraceamol", "")] + [
+            ("Paracetamol" + "".join(rng.sample(letters, 4)), "") for _ in range(200)]
+        ids = add_items(self.db, self.ctx.org_id, list(dict.fromkeys(names)))
+        self.assertEqual(self.full_status("Paracetamol"), "suggested")
+        r = matching.match_line(self.db, self.ctx.org_id, raw_name="Paracetamol")
+        self.assertEqual((r.status, r.warnings, r.item_id), ("suggested", ["ambiguous"], ids[0]))
+
+    def test_an_import_still_stops_at_a_similar_item(self):
+        # Codex P2 on #483: the import planner decides "create" from the same answer, and it asks without
+        # naming a score: the proof is the default, only the guess-only search opts out
+        from app.catalog.normalize import dedupe_key
+        from app.dataimport.service import DataImport
+        self.assertLessEqual(matching.SURE_FROM, 0.9)
+        rng = random.Random(42)
+        names = [("Paraceamol", "")] + [("Paracetamol" + "".join(rng.sample("bcdfghjklmnpqrstvwxz", 4)), "")
+                                        for _ in range(200)]
+        ids = add_items(self.db, self.ctx.org_id, list(dict.fromkeys(names)))
+        key = dedupe_key("Paracetamol", None, None, 1)
+        action, target, issues = DataImport(self.db)._plan_item(
+            self.ctx, {"_name": "Paracetamol", "_dedupe": key, "_dedupe_base": key})
+        self.assertEqual((action, target, [i["code"] for i in issues]), ("review", ids[0], ["similar_item_exists"]))
+        dup = cat.find_duplicates(self.db, self.ctx, "Paracetamol")
+        self.assertEqual([d["item_id"] for d in dup], [ids[0]])
+
+    def test_every_candidate_above_the_deciding_score_is_found(self):
+        rng = random.Random(11)
+        cons, vow = "bcdfgklmnprstvz", "aeiou"
+        word = lambda n: "".join(rng.choice(cons) + rng.choice(vow) for _ in range(n))     # noqa: E731
+        tails = ("", " 500mg 20 tab", " 10mg 30 cap", " 120ml syrup", " Forte 20 tab", " B12 30 tab", " B6 30 tab")
+        base = [word(rng.choice((2, 3))).capitalize() for _ in range(60)]
+        names = set()
+        while len(names) < 2500:                       # a few stems, many near-identical spellings and tails
+            w = rng.choice(base)
+            if rng.random() < 0.6:                     # one letter changed, dropped or doubled
+                i = rng.randrange(1, len(w))
+                w = rng.choice((w[:i] + rng.choice(cons + vow) + w[i + 1:], w[:i] + w[i + 1:], w[:i] + w[i] + w[i:]))
+            names.add(f"Zedmaker {w}{rng.choice(tails)}" if rng.random() < 0.5 else f"{w}{rng.choice(tails)}")
+        names = sorted(names)
+        add_items(self.db, self.ctx.org_id, [(n, "") for n in names])
+        idx = matching._index(self.db, self.ctx.org_id)
+        sure, differ, truncated = matching.AUTO_FUZZY_MIN - 0.05, [], 0
+        for line in rng.sample(names, 150):
+            q = parse_name(line)
+            ids = idx.candidates(q)
+            truncated += len(ids) > matching.SHORTLIST_MIN
+            want = sorted((c.item_id, c.score) for c in (matching.score_item(q, idx.items[i]) for i in ids) if c.score >= sure)
+            got = sorted((c.item_id, c.score) for c in matching.fuzzy_candidates(
+                self.db, self.ctx.org_id, line, 500, compare=matching.SHORTLIST_MIN, sure_from=sure) if c.score >= sure)
+            if got != want:
+                differ.append((line, len(want), len(got)))
+            r = matching.match_line(self.db, self.ctx.org_id, raw_name=line)
+            mine = "auto" if r.status == "auto" else "suggested"
+            if mine != self.full_status(line):
+                differ.append((line, "status", r.status, self.full_status(line)))
+        self.assertGreater(truncated, 100)               # the shortlist did cut candidates in most questions
+        self.assertEqual(differ, [])
+
+    def test_the_bound_is_never_below_the_score(self):
+        rng = random.Random(12)
+        names = [("Vitamin B12 30 tab", "فيتامين ب12 30 قرص"), ("Panadol Extra 500mg 24 tab", ""), ("", "بانادول اكسترا 24 قرص"),
+                 ("Omega 3 Plus 30 cap", ""), ("Zinc", ""), ("A", ""), ("Cream X 15g", "كريم 15 جم")]
+        names += [("".join(rng.choice("abcdeiklmnoprstuz") for _ in range(rng.randint(2, 12))).capitalize()
+                   + rng.choice(("", " 10mg", " 20 tab", " Forte", " 5 3")), "") for _ in range(300)]
+        add_items(self.db, self.ctx.org_id, names)
+        idx = matching._index(self.db, self.ctx.org_id)
+        items = list(idx.items.values())
+        for line in [n or a for n, a in names[:60]] + ["Panadol", "بانادول", "B12", "Vitamin B 12", "x"]:
+            q = parse_name(line)
+            for it in items:
+                real = matching.score_item(q, it).score
+                sim = max(matching.name_similarity(q, p) for p in it.parsed)
+                factor = matching._factor(matching._asked(q), it)
+                # the same product in another order: equal up to the last rounded place
+                self.assertAlmostEqual(real, sim * factor, delta=0.0001, msg=(line, it.label))
+                self.assertGreaterEqual(matching._bound(q, it) + 1e-9, sim, (line, it.label))
+
+
 class TestOtherScriptInALargeCatalog(ReviewCase):
     """Second review: at 12,000 items every skeleton letter group is common, so a name in the other script was
     cut before it was ranked. 60 planted pairs: an English item spelt one vowel short and an Arabic-only item

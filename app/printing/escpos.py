@@ -195,9 +195,9 @@ def render_receipt(lines: list[ReceiptRow], width: int = DOTS_80MM, font_path: s
         else:
             if kind == "detail" and right.startswith("خصم "):
                 right = f"خصم \u2066{right.removeprefix('خصم ')}\u2069"
-            n = {"title": size + 12, "total": size + 10, "small": size - 2,
+            n = {"title": size + 12, "total": size + 10, "small": size - 2, "customer": size + 2,
                  "center": size - 2, "detail": size - 3}.get(kind, size)
-            bold = kind in ("title", "total")
+            bold = kind in ("title", "total", "customer")     # UX-26: the customer's details bold and larger
             center = kind in ("title", "center")
             if left:
                 # The date and invoice number occupy the same row, even at 58 mm.
@@ -468,6 +468,45 @@ def public_price_rows(line: dict) -> list[tuple[str, int | None, int]]:
                 (qty_text(line), unit_price(line), line.get("gross", line["line_total"]))]
 
 
+def _spread(line: dict, rows: list[tuple[str, int | None, int]], off: int) -> list[tuple[str, int | None, int]]:
+    """UX-26: a hidden discount taken off the line's rows by their share of the gross (the sales rule: whole piastres,
+    largest remainders, never more than a row's amount), so the printed rows still add up to what was paid. The price
+    shown is the net one when it divides exactly, else the row's own public price (never a rounded price)."""
+    from ..sales.service import spread
+    counts = [r["qty"] for r in line.get("official_prices") or []]
+    if len(counts) != len(rows):
+        b, u, _, _ = qty_parts(line)
+        counts = [b if b and not u else b * max(1, line["item"].get("pack_size") or 1) + u]
+    cuts = spread(off, [g for _, _, g in rows])
+    out = []
+    for i, ((qty, price, gross), cut) in enumerate(zip(rows, cuts)):
+        net = gross - cut
+        n = counts[i] if i < len(counts) else 0
+        out.append((qty, net // n if n and net % n == 0 else price, net))
+    return out
+
+
+def discount_view(sale: dict, cfg: dict) -> dict:
+    """UX-26 (owner 26/11): what the receipt shows of the discounts. A hidden kind is folded into the lines, so the
+    customer sees net amounts that add up to the same final total. item/invoice = None when hidden."""
+    show_item, show_inv = cfg.get("show_item_discount", True), cfg.get("show_invoice_discount", True)
+    lines, hidden = [], 0
+    for line in sale["lines"]:
+        inv = line.get("invoice_share") or 0
+        item = (line["discount"] - inv if line.get("discount") is not None else line.get("discount_amount") or 0)
+        off = (0 if show_item else item) + (0 if show_inv else inv)
+        rows = public_price_rows(line)
+        if off and line.get("gross") is None and not line.get("official_prices"):
+            off = 0                       # an old line known only by its net total: nothing more to take off
+        lines.append((line, _spread(line, rows, off) if off else rows, item if show_item else 0))
+        hidden += off
+    inv_total = sum(line.get("invoice_share") or 0 for line in sale["lines"])
+    item_total = sale["discount_total"] - inv_total
+    shown = (item_total if show_item else 0) + (inv_total if show_inv else 0)
+    return {"lines": lines, "subtotal": (sale.get("subtotal") or 0) - hidden,
+            "item": item_total if show_item else None, "invoice": inv_total if show_inv else None, "shown": shown}
+
+
 def policy_text(n: int, restricted: bool) -> str:
     """The return-policy line, the same on the thermal and the browser receipt (B1)."""
     if n <= 0:
@@ -496,11 +535,9 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         if cfg.get(key):
             out.append(("small", f"{label}: {cfg[key]}", ""))
     out.extend([("rule", "", ""), ("small", f"فاتورة رقم {sale['sale_no']}", when)])
-    if cfg.get("show_cashier", True):
-        if seller:
-            out.append(("small", f"البائع: {seller}", ""))
-        if cashier:
-            out.append(("small", f"الكاشير: {cashier}", ""))
+    if cfg.get("show_cashier", True) and (seller or cashier):
+        # UX-26 (owner 26/11): one name, the person who made the sale (the one who completed it if unknown)
+        out.append(("small", f"البائع: {seller or cashier}", ""))
 
     customer, delivery = sale.get("customer") or {}, sale.get("delivery") or {}
     is_delivery = sale.get("kind") == "delivery"
@@ -509,13 +546,13 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         if customer.get("name"):
             code = customer.get("estock_code")
             suffix = f" (كود {code})" if code is not None else ""
-            out.append(("small", f"العميل: {customer['name']}{suffix}", ""))
+            out.append(("customer", f"العميل: {customer['name']}{suffix}", ""))
         phone = delivery.get("phone") or customer.get("phone")
         address = delivery.get("address") or customer.get("address1")
         if phone:
-            out.append(("small", f"موبايل: {phone}", ""))
+            out.append(("customer", f"موبايل: {phone}", ""))
         if address and (is_delivery or is_credit):
-            out.append(("small", f"العنوان: {address}", ""))
+            out.append(("customer", f"العنوان: {address}", ""))
 
     method_names = {"cash": "كاش", "card": "فيزا", "transfer": "محفظة", "credit": "آجل"}
     pays = sale.get("payments") or [
@@ -531,8 +568,9 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     out.extend([("rule", "", ""), ("columns", "الصنف", ("م", "الكمية", "السعر", "الإجمالي"))])
 
     lines = sale["lines"]
+    view = discount_view(sale, cfg)
     number = pieces = 0
-    for line in lines:
+    for line, prices, line_discount in view["lines"]:
         item = line["item"]
         if item.get("hide_on_receipt"):
             name = "—"
@@ -541,7 +579,6 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
         else:
             name = item.get("name_ar" if cfg.get("names") == "ar" else "name_en")
         name = upper_en(name or item["name"]) + (" ✱" if item.get("no_return") else "")
-        prices = public_price_rows(line)
         for qty, price, gross in prices:
             number += 1
             out.append(("item", name, (str(number), qty, amount(price) if price is not None else "—", amount(gross))))
@@ -556,8 +593,6 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
             if dates:
                 out.append(("detail", f"الصلاحية: {' / '.join(dates)}", ""))
         bp = line.get("discount_bp") or 0
-        line_discount = (line["discount"] - (line.get("invoice_share") or 0)
-                         if line.get("discount") is not None else line.get("discount_amount") or 0)
         if line_discount > 0 and cfg.get("template") != "compact":
             percent = f" {amount(bp).rstrip('0').rstrip('.')}%" if bp else ""
             out.append(("detail", f"خصم{percent} −{amount(line_discount)}", ""))
@@ -569,15 +604,16 @@ def receipt_lines(org_name: str, sale: dict, when: str, cfg: dict | None = None,
     if lines:
         out.append(("small", f"عدد القطع: {pieces}", ""))
     if sale.get("subtotal") is not None:
-        out.append(("row", "الإجمالي قبل الخصم", amount(sale["subtotal"])))
-    invoice_discount = sum(line.get("invoice_share") or 0 for line in lines)
-    total_discount = sale["discount_total"]
-    out.extend([("row", "خصم الأصناف", amount(total_discount - invoice_discount)),
-                ("row", "خصم الفاتورة", amount(invoice_discount))])
+        out.append(("row", "الإجمالي قبل الخصم", amount(view["subtotal"])))
+    if view["item"] is not None:
+        out.append(("row", "خصم الأصناف", amount(view["item"])))
+    if view["invoice"] is not None:
+        out.append(("row", "خصم الفاتورة", amount(view["invoice"])))
+    total_discount = view["shown"]
     if sale.get("delivery_fee"):
         out.append(("row", "رسوم التوصيل", amount(sale["delivery_fee"])))
     rounding = sale.get("rounding") or 0
-    if rounding:
+    if rounding and cfg.get("show_rounding", False):      # UX-26: hidden by default; the total is the final amount
         out.append(("row", "التقريب", ("+" if rounding > 0 else "") + amount(rounding)))
     out.extend([("rule", "", ""), ("total", "المطلوب", amount(sale["total"] + rounding)), ("rule", "", "")])
     for p in pays:

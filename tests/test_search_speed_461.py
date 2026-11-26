@@ -96,7 +96,7 @@ class TestShortlistKeepsTheAnswers(DBTestCase):
         with mock.patch.object(matching, "fuzzy_candidates", wraps=matching.fuzzy_candidates) as asked:
             r = search.search(self.db, self.ctx, "Zedmakr Lien", 500)
         self.assertEqual(r["hint"], {"kind": "fuzzy"})
-        self.assertEqual((asked.call_args.args[-1], asked.call_args.kwargs), (search.FUZZY_MAX, {"compare": search.FUZZY_MAX}))
+        self.assertEqual((asked.call_args.args[-1], asked.call_args.kwargs), (search.FUZZY_MAX, {"compare": search.FUZZY_MAX, "sure_from": None}))     # guesses for a person: no proof asked
         self.assertTrue(0 < len(r["items"]) <= search.FUZZY_MAX)
         # every guess that was compared reaches the caller's stock filter, not only the first few (Codex on #483)
         self.assertGreater(len(r["items"]), 100)
@@ -172,6 +172,14 @@ class TestIndexFollowsOneItem(DBTestCase):
         t.start()
         t.join()
         self.assertEqual(self.first("Elsewhere 2mg 10 tab"), self.ids[5])
+
+    def test_a_built_index_is_kept_out_of_garbage_collection_passes(self):
+        import gc
+        gc.unfreeze()
+        matching.forget(self.ctx.org_id)
+        matching._index(self.db, self.ctx.org_id)
+        self.assertGreater(gc.get_freeze_count(), 0)
+        gc.unfreeze()
 
     def test_the_version_is_not_read_again_while_nothing_changed(self):
         self.first("Brandix1 100mg 20 tab")
