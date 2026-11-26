@@ -469,21 +469,20 @@ def public_price_rows(line: dict) -> list[tuple[str, int | None, int]]:
 
 
 def _spread(line: dict, rows: list[tuple[str, int | None, int]], off: int) -> list[tuple[str, int | None, int]]:
-    """UX-26: a hidden discount taken off the line's rows by their share of the gross (whole piastres, the rest on
-    the last row), so the printed rows still add up to what was paid. The price shown is the net one only when it
-    divides exactly, else none (never a rounded price)."""
-    total = sum(g for _, _, g in rows)
+    """UX-26: a hidden discount taken off the line's rows by their share of the gross (the sales rule: whole piastres,
+    largest remainders, never more than a row's amount), so the printed rows still add up to what was paid. The price
+    shown is the net one when it divides exactly, else the row's own public price (never a rounded price)."""
+    from ..sales.service import spread
     counts = [r["qty"] for r in line.get("official_prices") or []]
     if len(counts) != len(rows):
         b, u, _, _ = qty_parts(line)
         counts = [b if b and not u else b * max(1, line["item"].get("pack_size") or 1) + u]
-    out, left = [], off
-    for i, (qty, _, gross) in enumerate(rows):
-        cut = left if i == len(rows) - 1 else (off * gross // total if total else 0)
-        left -= cut
+    cuts = spread(off, [g for _, _, g in rows])
+    out = []
+    for i, ((qty, price, gross), cut) in enumerate(zip(rows, cuts)):
         net = gross - cut
         n = counts[i] if i < len(counts) else 0
-        out.append((qty, net // n if n and net % n == 0 else None, net))
+        out.append((qty, net // n if n and net % n == 0 else price, net))
     return out
 
 
@@ -497,6 +496,8 @@ def discount_view(sale: dict, cfg: dict) -> dict:
         item = (line["discount"] - inv if line.get("discount") is not None else line.get("discount_amount") or 0)
         off = (0 if show_item else item) + (0 if show_inv else inv)
         rows = public_price_rows(line)
+        if off and line.get("gross") is None and not line.get("official_prices"):
+            off = 0                       # an old line known only by its net total: nothing more to take off
         lines.append((line, _spread(line, rows, off) if off else rows, item if show_item else 0))
         hidden += off
     inv_total = sum(line.get("invoice_share") or 0 for line in sale["lines"])

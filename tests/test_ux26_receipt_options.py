@@ -83,6 +83,25 @@ class TestThermalOptions(PlanCase):
         self.assertEqual(sum(cents), 4900)
         self.assertTrue(all(c >= 0 for c in cents))
 
+    def test_spread_never_prints_a_negative_row(self):
+        # review P2: a zero-price batch last; floor shares used to push the last row below zero
+        line = {**SALE["lines"][1], "discount": 101, "invoice_share": 101, "line_total": 7899, "gross": 8000,
+                "official_prices": [{"pack": True, "qty": 1, "price": 5000, "gross": 5000},
+                                    {"pack": True, "qty": 1, "price": 3000, "gross": 3000},
+                                    {"pack": True, "qty": 1, "price": 0, "gross": 0}]}
+        sale = {**SALE, "subtotal": 8000, "discount_total": 101, "total": 7899, "lines": [line]}
+        cents = [int(a.replace(".", "")) for a in item_amounts(rows({"show_invoice_discount": False}, sale))]
+        self.assertEqual(sum(cents), 7899)
+        self.assertTrue(all(c >= 0 for c in cents), cents)
+
+    def test_net_price_not_exact_shows_the_box_price(self):
+        # 3 boxes at 33.00 with 1.00 of invoice discount hidden: 98.00 / 3 is not a whole piaster price
+        line = {**SALE["lines"][1], "discount": 100, "invoice_share": 100, "line_total": 9800, "gross": 9900,
+                "official_prices": [{"pack": True, "qty": 3, "price": 3300, "gross": 9900}]}
+        sale = {**SALE, "subtotal": 9900, "discount_total": 100, "total": 9800, "lines": [line]}
+        items = [r[2] for r in rows({"show_invoice_discount": False}, sale) if r[0] == "item"]
+        self.assertEqual(items, [("1", "3 علبة", "33.00", "98.00")])
+
     def test_rounding_hidden_by_default_total_is_final(self):
         sale = {**SALE, "rounding": -25}
         m = money_rows(rows({}, sale))
