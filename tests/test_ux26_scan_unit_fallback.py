@@ -45,6 +45,13 @@ console.log(JSON.stringify([
         self.assertIn("scanAddQty(res[0], unit)", JS)
         self.assertIn("مفيش علبة كاملة، اتنزل", JS)
 
+    def test_the_note_joins_the_dispensing_warning_instead_of_replacing_it(self):
+        # Codex P2 on #478: a second toast overwrote «بوصفة طبية فقط» / «يُساء استخدامه»
+        body = re.search(r"\nasync function addPosLine\(.*?\n\}\n", JS, re.S).group(0)
+        self.assertIn("note].filter(Boolean)", body)
+        self.assertIn("else if (note) toast(note)", body)
+        self.assertNotIn("added.then(", JS)
+
 
 if __name__ == "__main__":
     unittest.main()

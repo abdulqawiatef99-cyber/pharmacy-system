@@ -218,12 +218,7 @@ class DataImport:
         ctx.require("items.import")
         if kind not in HEADERS_BY_KIND:
             raise ValidationFailed("نوع استيراد غير معروف")
-        if kind == "opening_stock":
-            ctx.require("inventory.adjust")
-        if kind == "suppliers":
-            ctx.require("suppliers.write")
-        if kind == "customers":
-            ctx.require("customers.manage")
+        _require_kind(ctx, kind)
         options = {"qty_unit": "pack", **(options or {})}
         if options["qty_unit"] not in ("pack", "base"):
             raise ValidationFailed("وحدة الكمية يجب أن تكون pack أو base")
@@ -657,6 +652,7 @@ class DataImport:
         run = self.db.one("SELECT * FROM import_runs WHERE id=? AND org_id=?", (run_id, ctx.org_id))
         if not run:
             raise NotFound("عملية الاستيراد غير موجودة")
+        _require_kind(ctx, run["kind"])
         q = "SELECT * FROM import_rows WHERE run_id=?"
         params: list = [run_id]
         if action:
@@ -681,6 +677,8 @@ class DataImport:
         run = self.db.one("SELECT * FROM import_runs WHERE id=? AND org_id=?", (run_id, ctx.org_id))
         if not run:
             raise NotFound("عملية الاستيراد غير موجودة")
+        # a row decision is consumed by a later authorized apply: it needs what analyze and apply need (#324 S7)
+        _require_kind(ctx, run["kind"])
         if run["status"] != "analyzed":
             raise Conflict("عملية الاستيراد مطبقة أو ملغاة")
         row = self.db.one("SELECT * FROM import_rows WHERE id=? AND run_id=?", (row_id, run_id))
@@ -717,14 +715,9 @@ class DataImport:
                               (run_id, ctx.org_id))
             if not run:
                 raise NotFound("عملية الاستيراد غير موجودة")
+            _require_kind(ctx, run["kind"])
             if run["status"] != "analyzed":
                 raise Conflict("عملية الاستيراد مطبقة أو ملغاة", code="already_applied")
-            if run["kind"] == "opening_stock":
-                ctx.require("inventory.adjust")
-            if run["kind"] == "suppliers":
-                ctx.require("suppliers.write")
-            if run["kind"] == "customers":
-                ctx.require("customers.manage")
             rows = [dict(r) for r in self.db.all(
                 "SELECT * FROM import_rows WHERE run_id=? ORDER BY row_no", (run_id,))]
             pending = [r["row_no"] for r in rows if r["action"] == "review" and not r["decision"]]
@@ -930,11 +923,26 @@ class DataImport:
     def discard(self, ctx: Context, run_id: str) -> None:
         ctx.require("items.import")
         with self.db.transaction():
+            run = self.db.one("SELECT kind FROM import_runs WHERE id=? AND org_id=?", (run_id, ctx.org_id))
+            if not run:
+                raise Conflict("لا يمكن إلغاء هذه العملية")
+            _require_kind(ctx, run["kind"])
             n = self.db.execute("UPDATE import_runs SET status='discarded' WHERE id=? AND org_id=?"
                                 " AND status='analyzed'", (run_id, ctx.org_id)).rowcount
             if not n:
                 raise Conflict("لا يمكن إلغاء هذه العملية")
             audit.record(self.db, ctx, "import.discard", "import_run", run_id)
+
+
+KIND_PERMISSION = {"opening_stock": "inventory.adjust", "suppliers": "suppliers.write", "customers": "customers.manage"}
+
+
+def _require_kind(ctx: Context, kind: str) -> None:
+    """What a run of this kind needs besides items.import, on EVERY entry point (analyze, read, decide,
+    apply, cancel): the file holds stock, supplier or customer data and its decisions end in that data."""
+    need = KIND_PERMISSION.get(kind)
+    if need:
+        ctx.require(need)
 
 
 # ---------------------------------------------------------------- export
