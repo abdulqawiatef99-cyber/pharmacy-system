@@ -190,6 +190,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     s = settings or config_mod.load()
     if db is None:
         s.data_dir.mkdir(parents=True, exist_ok=True)
+        from ..core import backup as _backup
+        _backup.finish_interrupted_restore(Path(s.db_path))   # a restore cut by a power loss: one whole set
         db = Database(s.db_path)
         db.migrate()
     accounts.sync_system_roles(db)
@@ -650,7 +652,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..core import smart_update as su, update_sign, updater
         import release_bootstrap as releases
         out = {"enabled": False, "prepared": su.prepared(s.data_dir) or None,
-               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None}
+               "request": su.pending_request(s.data_dir) or None, "result": su.last_result(s.data_dir) or None,
+               "refused": su.last_refusal(s.data_dir) or None}
         try:
             home = su.home_of(s.data_dir)
             legacy = releases.installer_root(upd_root)
@@ -733,7 +736,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if action == "schedule":
             when = b.get("when")
             try:
-                value = su.request(s.data_dir, when, ctx.user_id)
+                # off the event loop: the space check reads the whole E-Stock archive (its sha256)
+                value = await run_in_threadpool(su.request, s.data_dir, when, ctx.user_id, settings=s)
             except updater.UpdateError as e:
                 raise ValidationFailed(str(e), code="update_failed") from e
             with db.transaction():
@@ -1053,9 +1057,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def invoices_report(req):
         from ..reports import invoices
         qp = req.query_params
+        offset = qp.get("offset") or "0"
+        if not (offset.isascii() and offset.isdigit()) or len(offset) > 9:
+            raise ValidationFailed("رقم الصفحة غير صحيح")
         return J(await off_loop(invoices.report, db, ctx_of(req), date_from=qp.get("from", ""), date_to=qp.get("to", ""),
                                  types=[t for t in qp.get("types", "").split(",") if t], q=qp.get("q"),
-                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1"))
+                                 item_id=qp.get("item") or None, user_id=qp.get("user") or None, with_lines=qp.get("lines") == "1",
+                                 offset=int(offset), totals=qp.get("totals") != "0",
+                                 after=qp.get("after") or None, until=qp.get("until") or None))
 
     @handler
     async def owner_report(req):
@@ -3090,7 +3099,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def return_receipt(req):
         """Printed slip for a return: what came back, how much, how it was refunded, who and why."""
-        from ..printing import settings as rs
+        from ..printing import escpos as _esc, settings as rs
         ctx = ctx_of(req)
         x = Sales(db).return_receipt(ctx, req.path_params["id"])
         r, sale = x["return"], x["sale"]
@@ -3105,13 +3114,13 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"
         rows = "".join(f"<tr><td>{name(l['item'])}<br><small>{l['returned_now']} {e(l['item']['base_unit'] if l['item']['base_unit'] not in (None, 'unit') else 'وحدة')}</small></td><td></td></tr>"
                        for l in x["lines"])
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
-        MET = {"cash": "نقدًا من الخزينة", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -3146,25 +3155,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if it.get("hide_on_receipt"):       # the owner chose to keep this name off the paper
                 return "—"
             if cfg["names"] == "ar":
-                return e(it.get("name_ar") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it.get('name_ar') or it['name']))}</bdi>"
             if cfg["names"] == "both" and it.get("name_ar") and it.get("name_en"):
-                return f"{e(it['name_en'])}<br><small>{e(it['name_ar'])}</small>"
-            return e(it.get("name_en") or it["name"])
+                return f"<bdi>{e(_esc.upper_en(it['name_en']))}</bdi><br><small><bdi>{e(it['name_ar'])}</bdi></small>"
+            return f"<bdi>{e(_esc.upper_en(it.get('name_en') or it['name']))}</bdi>"   # UX-26: an English name reads left to right
 
         from ..printing import escpos as _esc
 
         rows = []
         restricted = False
-        for l in sale["lines"]:
+        view = _esc.discount_view(sale, cfg)            # UX-26: hidden discount kinds folded into the lines
+        for l, prices, item_off in view["lines"]:
             restricted |= bool(l["item"].get("no_return"))
             exp = ""
             if cfg["show_expiry"]:
                 exps = sorted({(a.get("expiry_date") or "")[:7] for a in l["allocations"] if a.get("expiry_date")})
                 exp = f" · صلاحية {' / '.join(exps)}" if exps else ""
-            disc = f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
+            disc = "" if not item_off else f" · خصم {l['discount_bp'] / 100:g}%" if l["discount_bp"] else \
                 f" · خصم {m(l['discount_amount'])} ج" if l.get("discount_amount") else ""
             star = " ✱" if l["item"].get("no_return") else ""
-            for i, (qty, price, gross) in enumerate(_esc.public_price_rows(l)):
+            for i, (qty, price, gross) in enumerate(prices):
                 title = f"{name(l['item'])}{star}<br>" if not i else ""
                 shown = e(qty) + (f" × {m(price)}" if price is not None else "")
                 details = exp + disc if not i else ""
@@ -3228,11 +3238,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             info.append(f"البائع: {e(cashier['full_name'])}")
         if cfg["show_customer"] and sale.get("customer"):
             cu = sale["customer"]
-            info.append(f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else ""))
+            # UX-26 (owner 26/11): the customer's name, phone and address bold and larger
+            info.append('<b class="cu">' + f"العميل: {e(cu['name'])}" + (f" (كود {e(str(cu['estock_code']))})" if cu.get("estock_code") is not None else "") + "</b>")
             if sale.get("on_credit") and sale.get("kind") != "delivery":   # U2-23 (a delivery prints its own line)
-                info += [f"{lbl}: {e(cu[k])}" for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
+                info += [f'<b class="cu">{lbl}: {e(cu[k])}</b>' for k, lbl in (("phone", "موبايل"), ("address1", "العنوان")) if cu.get(k)]
         if sale.get("kind") == "delivery":
-            info.append("توصيل: " + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)))
+            info.append('<b class="cu">توصيل: ' + e(" ".join(x for x in (d.get("address"), d.get("phone")) if x)) + "</b>")
         policy = ""
         if cfg["show_return_policy"]:
             # one text for both receipts (B1): Arabic number agreement, 0 days, the ✱ note
@@ -3242,10 +3253,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}{header}<h1>{e(cfg['title'] or org)}</h1>{head}<p>{'<br>'.join(info)}</p><hr>
 <table>{''.join(rows)}</table><hr><table>{count}
-<tr><td>الإجمالي</td><td>{m(sale['subtotal'])}</td></tr>
-<tr><td>الخصم</td><td>{m(sale['discount_total'])}</td></tr>
+<tr><td>الإجمالي</td><td>{m(view['subtotal'])}</td></tr>
+{f"<tr><td>الخصم</td><td>{m(view['shown'])}</td></tr>" if view['item'] is not None or view['invoice'] is not None else ""}
 {f"<tr><td>رسوم التوصيل</td><td>{m(sale['delivery_fee'])}</td></tr>" if sale.get('delivery_fee') else ""}
-{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') else ""}
+{f"<tr><td>التقريب</td><td>{'+' if sale['rounding'] > 0 else '-'}{m(abs(sale['rounding']))}</td></tr>" if sale.get('rounding') and cfg['show_rounding'] else ""}
 <tr class="t"><td>المطلوب</td><td>{m(sale['total'] + (sale.get('rounding') or 0))}</td></tr>{pay}</table>
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
@@ -3411,6 +3422,33 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"ok": True, "version": __version__, "schema": last, "boot_id": os.environ.get("PHARM_BOOT_ID"),
                   "web": _web_build()})
 
+    async def keyboard_layout(req):
+        """POST {"lang": "ar" | "en"}: the input language of the window in front, on the cashier PC itself.
+        No session and no database (it must answer while a sale is being written, and the sign-in screen
+        may ask too): only this PC's own screen may call it, and it can do nothing but switch the language.
+        It never raises. The body is always {"ok": ...} (app/core/keyboard_layout.py); the status is what the
+        screen reads (keyboardSwitcher): 200 asked; 503 could not just now (no window in front, refused): it
+        asks again on the next field; 501 this device can never switch (not Windows, language not installed,
+        not the cashier PC itself): it stops asking; 403 not this program's screen; 400 not "ar" / "en"."""
+        from ..core import keyboard_layout
+        no = lambda detail, status: J({"ok": False, "reason": "unsupported", "detail": detail}, status_code=status)  # noqa: E731
+        try:
+            if client_ip(req) not in ("127.0.0.1", "::1", "testclient"):
+                return no("not_local", 501)
+            try:
+                _auth_screen(req, screen_only=True)      # the sign-in screen's own rule, so the two cannot drift
+            except Unauthorized:
+                return no("not_this_screen", 403)
+            try:
+                b = json.loads(await req.body() or b"{}")
+            except ValueError:
+                b = {}
+            out = keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None)
+            status = 200 if out.get("ok") else {"not_windows": 501, "not_installed": 501, "bad_lang": 400}.get(out.get("detail"), 503)
+            return J(out, status_code=status)
+        except Exception:
+            return no("error", 503)
+
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
 
@@ -3426,6 +3464,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/system/update", system_update_run, methods=["POST"]),
         Route("/api/system/network", system_network, methods=["GET", "PUT"]),
         Route("/api/system/storage", system_storage),
+        Route("/api/system/keyboard-layout", keyboard_layout, methods=["POST"]),
         Route("/api/setup", setup_create, methods=["POST"]),
         Route("/api/setup/restore", setup_restore, methods=["POST"]),
         Route("/api/auth/logout", logout, methods=["POST"]),

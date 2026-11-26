@@ -149,7 +149,9 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
     item_id = new_id()
     d["id"], d["org_id"] = item_id, ctx.org_id
     cols = ", ".join(d)
+    outer = db.conn.in_transaction
     with db.transaction():
+        seen = matching.before_change(db, ctx.org_id, outer)
         try:
             db.execute(f"INSERT INTO items ({cols}) VALUES ({', '.join('?' * len(d))})",
                        tuple(d.values()))
@@ -167,7 +169,7 @@ def create_item(db: Database, ctx: Context, data: dict, *, barcodes: list[str] |
             db.execute("INSERT INTO item_price_history (id, org_id, item_id, public_price, source, changed_by)"
                        " VALUES (?,?,?,?,?,?)", (new_id(), ctx.org_id, item_id, d["public_price"], source, ctx.user_id))
         audit.record(db, ctx, "item.create", "item", item_id, after=d)
-    matching.invalidate(ctx.org_id)
+    matching.item_changed(db, ctx.org_id, item_id, seen)
     return item_id
 
 
@@ -225,7 +227,9 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
         d["name_ar_norm"] = normalize_text(d.get("name_ar")) or None
     d["updated_at"] = _now()
     sets = ", ".join(f"{k}=?" for k in d)
+    outer = db.conn.in_transaction
     with db.transaction():
+        seen = matching.before_change(db, ctx.org_id, outer)
         try:
             db.execute(f"UPDATE items SET {sets} WHERE id=? AND org_id=?",
                        (*d.values(), item_id, ctx.org_id))
@@ -240,7 +244,7 @@ def update_item(db: Database, ctx: Context, item_id: str, changes: dict) -> dict
         audit.record(db, ctx, "item.update", "item", item_id,
                      before={k: before.get(k) for k in d if k != "updated_at"},
                      after={k: v for k, v in d.items() if k != "updated_at"})
-    matching.invalidate(ctx.org_id)
+    matching.item_changed(db, ctx.org_id, item_id, seen)
     return get_item(db, ctx, item_id)
 
 

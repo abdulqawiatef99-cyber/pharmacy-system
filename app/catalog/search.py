@@ -24,22 +24,49 @@ _EN_AR = {
     ",": "و", ".": "ز", "/": "ظ", "`": "ذ",
 }
 _AR_EN = {v: k for k, v in _EN_AR.items() if len(v) == 1}
-_AR_EN.update({"ﻻ": "b", "ﻷ": "b", "ﻹ": "b", "ﻵ": "b", "أ": "h", "إ": "h", "آ": "h"})
+# with Shift: أ is H, إ is Y, آ is N, and the vowel marks sit on Q W E R A S X (tatweel on J)
+_AR_EN.update({"أ": "h", "إ": "y", "آ": "n", "َ": "q", "ً": "w", "ُ": "e", "ٌ": "r", "ِ": "a", "ٍ": "s", "ْ": "x", "ـ": "j"})
+# one key, two letters: B types «لا»; with Shift, B types «لآ», G «لأ» and T «لإ» (also as one-sign forms)
+_AR_PAIRS = (("ﻵ", "لآ"), ("ﻷ", "لأ"), ("ﻹ", "لإ"), ("ﻻ", "لا"))
+_AR_KEYS = (("لآ", "b"), ("لأ", "g"), ("لإ", "t"))
+FUZZY_MAX = 160
 _ARABIC = re.compile(r"[؀-ۿﭐ-﷿ﹰ-﻿]")
 _LATIN = re.compile(r"[a-z]", re.I)
 
 
-def swap_layout(q: str) -> str | None:
-    """The same keys typed with the other keyboard language, or None if mixed/not letters."""
+def layout_variants(q: str) -> list[str]:
+    """The same physical keys typed with the other keyboard language (Windows Arabic 101 <-> US QWERTY), most
+    likely reading first; empty if the query mixes both scripts or has no letters. The B key types «لا», two
+    letters that are also G then H: both readings are offered, B first."""
     s = q.strip()
     if not s:
-        return None
+        return []
     if _ARABIC.search(s) and not _LATIN.search(s):
-        out = "".join(_AR_EN.get(ch, ch) for ch in s)
-        return out if _LATIN.search(out) else None
+        for sign, letters in _AR_PAIRS:
+            s = s.replace(sign, letters)
+        for letters, key in _AR_KEYS:
+            s = s.replace(letters, key.upper())          # upper case marks "already a key" (the rest is Arabic)
+        out = []
+        for text in dict.fromkeys((s.replace("لا", "B"), s)):
+            alt = "".join(ch.lower() if "A" <= ch <= "Z" else _AR_EN.get(ch, ch) for ch in text)
+            if _LATIN.search(alt):
+                out.append(alt)
+        return out
     if _LATIN.search(s) and not _ARABIC.search(s):
-        return "".join(_EN_AR.get(ch, ch) for ch in s.lower())
-    return None
+        return ["".join(_EN_AR.get(ch, ch) for ch in s.lower())]
+    return []
+
+
+def swap_layout(q: str) -> str | None:
+    """The same keys typed with the other keyboard language, or None if mixed/not letters."""
+    return next(iter(layout_variants(q)), None)
+
+
+# a query meant in English but typed on the Arabic layout comes out as Arabic letters only: the keys that
+# give ك ط ج د ذ و ز ظ are punctuation in English, so a mapped query with ; ' [ ] ` , . / in it was Arabic
+_CLEAN_LATIN = re.compile(r"[a-z0-9\s%+-]+")
+LAYOUT_MIN_KEYS = 3    # fewer letters than this are not read as English ahead of an Arabic spelling guess
+LAYOUT_GUESS_MIN = 0.6  # a guess from the other layout must be this close, as written, to a name in that script
 
 
 def _patterns(q: str) -> list[str]:
@@ -91,11 +118,15 @@ def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | 
     other = [w for w in words if not _ARABIC.search(w)]          # a strength or a Latin word stays required (Codex #400)
     csql, cparams = _cat_sql(category)
     col = spelling_sql("coalesce(name_ar_norm,'')")
-    where = " AND ".join([f"{col} LIKE ?"] * len(ar)
-                         + ["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other))
-    params = [f"%{t}%" for t in ar]
+    # the spelling key of a column is ten replace() calls a row: on 30,000 names that alone was 60 ms (#461).
+    # Cheap tests first, so it runs only on rows that can match: the other words, then the letters of each
+    # Arabic word in their order with anything between them (what dropping the long vowels leaves).
+    where = " AND ".join(["(name_norm LIKE ? OR coalesce(name_ar_norm,'') LIKE ?)"] * len(other)
+                         + ["name_ar_norm LIKE ?"] * len(ar) + [f"{col} LIKE ?"] * len(ar))
+    params = []
     for w in other:
         params += [f"%{w}%", f"%{w}%"]
+    params += ["%" + "%".join(t) + "%" for t in ar] + [f"%{t}%" for t in ar]
     rows = db.all(f"SELECT * FROM items WHERE org_id=? AND status='active' AND {where}{csql}"
                   " ORDER BY length(coalesce(name_ar_norm,'')) LIMIT ?",
                   (org_id, *params, *cparams, limit + len(skip)))
@@ -105,8 +136,11 @@ def _by_spelling(db: Database, org_id: str, q: str, limit: int, category: str | 
 def _exact_code(db: Database, org_id: str, q: str) -> list[dict]:
     """The code typed in full comes first (launch day: «3796» found nothing): the item code as typed or in any
     letter case, and E<code> (an E-Stock item moved without a code of its own gets E + its E-Stock id)."""
-    return [dict(r) for r in db.all("SELECT * FROM items WHERE org_id=? AND status='active' AND"
-                                    " (lower(code)=lower(?) OR code=?) ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
+    # read from the code index alone (a third of the time of reading every item row, #461); an item without
+    # a code cannot match
+    return [dict(r) for r in db.all("SELECT * FROM items INDEXED BY ux_items_org_code WHERE org_id=? AND code IS NOT NULL"
+                                    " AND (lower(code)=lower(?) OR code=?) AND status='active'"
+                                    " ORDER BY code=? DESC", (org_id, q, f"E{q}", q))]
 
 
 def search(db: Database, ctx: Context, q: str, limit: int = 20, category: str | None = None) -> dict:
@@ -149,6 +183,21 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
     for row in _by_name(db, ctx.org_id, q, limit, category):
         found.setdefault(row["id"], row)
     hint = None
+    alts = layout_variants(q)
+    plain = [a for a in alts if _ARABIC.search(a) or _CLEAN_LATIN.fullmatch(a)]      # the mapped text can be a name
+    tried = set()
+    if not found:
+        # nothing as typed: the same keys on the other layout, before any guess by spelling. Only a mapped
+        # query that reads as plain English may go first, so «بكتول» (f;j,g) still gets its spelling guess,
+        # and only from three letters: «سا» is "sh", and two letters match too much to outrank a guess.
+        for alt in plain:
+            if _ARABIC.search(alt) or len(_LATIN.findall(alt)) < LAYOUT_MIN_KEYS:
+                continue
+            tried.add(alt)
+            for row in _by_name(db, ctx.org_id, alt, limit, category):
+                found.setdefault(row["id"], row)
+            if found:
+                return {"items": list(found.values())[:limit], "hint": {"kind": "layout", "query": alt}}
     if len(found) < limit and "%" not in q:
         exact = bool(found)
         for row in _by_spelling(db, ctx.org_id, q, limit - len(found), category, set(found)):
@@ -157,20 +206,43 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         if found and not exact:
             hint = {"kind": "spelling"}          # a guess by spelling: Enter on the sale screen never adds it alone
     if not found:
-        alt = swap_layout(q)
-        if alt:
+        for alt in alts:
+            if alt in tried:
+                continue
             for row in _by_name(db, ctx.org_id, alt, limit, category):
                 found.setdefault(row["id"], row)
             if found:
                 hint = {"kind": "layout", "query": alt}
+                break
     if not found and "%" not in q and not category:
         from . import matching
-        for c in matching.fuzzy_candidates(db, ctx.org_id, q, limit):
-            row = db.one("SELECT * FROM items WHERE id=?", (c.item_id,))
-            if row:
-                found.setdefault(c.item_id, dict(row))
-        if found:
-            hint = {"kind": "fuzzy"}
+        # guesses: the sale screen asks for 500 rows to sort and filter by stock. Every guess that was compared
+        # is handed over for that (FUZZY_MAX at most, so an in-stock guess is not cut before its balance is
+        # read, Codex on #483), and they are read in one query (500 single reads cost more than the search)
+        most = min(limit, FUZZY_MAX)
+        guess = lambda text: matching.fuzzy_candidates(db, ctx.org_id, text, most, compare=FUZZY_MAX,   # noqa: E731
+                                                       sure_from=None)        # guesses for a person: no proof asked
+        cands = guess(q)
+        hint = {"kind": "fuzzy"}
+        if not cands:
+            # a misspelt name typed on the wrong layout. Only when there is no guess as typed (a weak right
+            # guess is never replaced), and only guesses that are close, as written, to a name in the mapped
+            # query's own script: the keys of an ordinary English typo are Arabic gibberish whose consonants
+            # can resemble anything (review, 26/11: "banadol" must not become Lasix).
+            for alt in plain:
+                close = [c for c in guess(alt) if matching.same_script_similarity(
+                    db, ctx.org_id, alt, c.item_id) >= LAYOUT_GUESS_MIN]
+                if close:
+                    cands, hint = close, {"kind": "layout", "query": alt, "guess": True}
+                    break
+        ids = [c.item_id for c in cands]
+        rows = {r["id"]: dict(r) for r in db.all(
+            f"SELECT * FROM items WHERE org_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.org_id, *ids))} if ids else {}
+        for i in ids:
+            if i in rows:
+                found.setdefault(i, rows[i])
+        if not found:
+            hint = None
     return {"items": list(found.values())[:limit], "hint": hint}
 
 

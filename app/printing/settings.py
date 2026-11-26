@@ -30,7 +30,10 @@ DEFAULTS = {"paper": 80, "template": "detailed", "title": "", "lines": ["", ""],
             # #84: which fields go on a label, and the label's own pharmacy name / phone (blank = the receipt's)
             "label_fields": {}, "label_pharmacy": "", "label_phone": "", "label_a4": "6x24",
             # #100 (owner, 12/11): the label's words in English (default) or Arabic; the English pharmacy name
-            "label_text_lang": "en", "label_pharmacy_en": ""}
+            "label_text_lang": "en", "label_pharmacy_en": "",
+            # UX-26 (owner 26/11): discount lines can be hidden (the lines then show net amounts); the rounding line
+            # is hidden unless asked for (the total printed is the final amount)
+            "show_item_discount": True, "show_invoice_discount": True, "show_rounding": False}
 _KEEP = object()
 LABEL_SIZES = ("38x25", "50x30", "58x40")
 DRAWER_TIMINGS = ("before", "with", "after")
@@ -251,7 +254,7 @@ def save(db: Database, ctx: Context, data: dict) -> dict:
     if "logo" in data:              # data URL from the settings page; "" / null removes the logo
         png = logo.clean(data["logo"]) if data["logo"] else None
     for k in ("show_cashier", "show_customer", "show_expiry", "show_return_policy", "auto_receipt", "drawer_on_cash",
-              "show_item_count", "show_change"):
+              "show_item_count", "show_change", "show_item_discount", "show_invoice_discount", "show_rounding"):
         if k in data:
             new[k] = bool(data[k])
     if data.get("preview") is True:
