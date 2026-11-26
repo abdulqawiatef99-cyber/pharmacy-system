@@ -102,8 +102,8 @@ def receipt_image(org: str, sale: dict, when: str, cfg: dict, *, logo_png: bytes
     width = escpos.DOTS_58MM if cfg["paper"] == 58 else escpos.DOTS_80MM
     try:
         header = escpos.receipt_header(width, logo_png)
-    except (OSError, ValueError):
-        log.warning("Could not read the receipt logo")
+    except Exception:  # noqa: BLE001 — a broken logo never stops the receipt (or the drawer kick)
+        log.exception("Could not read the receipt logo")
         header = None
     codes = []
     for prefix in ("qr", "qr2"):
@@ -112,8 +112,8 @@ def receipt_image(org: str, sale: dict, when: str, cfg: dict, *, logo_png: bytes
             continue
         try:
             codes.append(escpos.receipt_footer_qr(width, text, qrlinks.caption(text, cfg[f"{prefix}_caption"])))
-        except (OSError, ValueError):
-            log.warning("Could not render receipt QR code")
+        except Exception:  # noqa: BLE001 — a broken QR never stops the receipt
+            log.exception("Could not render receipt QR code")
     lines = escpos.receipt_lines(org, sale, when, cfg, seller=seller, cashier=cashier,
                                  given=given, return_days=return_days)
     return escpos.render_receipt(lines, width, template=cfg["template"], header=header, footer_codes=tuple(codes))

@@ -166,3 +166,15 @@ class ReceiptSettingsTests(DBTestCase):
         self.assertLess(*previews)
         self.assertEqual(settings.get(self.db, self.ctx.org_id), before)
         self.assertEqual(self.db.one("SELECT count(*) FROM audit_log")[0], audits)
+
+
+class ReceiptHeaderFailureTests(DBTestCase):
+    def test_any_logo_or_qr_error_still_prints_the_receipt(self):
+        """A broken logo or QR (any error, e.g. PIL's DecompressionBombError) is skipped, never a failed print."""
+        from unittest import mock
+        from app.printing import service
+        cfg = dict(settings.get(self.db, self.ctx.org_id), qr_text="https://example.invalid")
+        with mock.patch.object(escpos, "receipt_header", side_effect=RuntimeError("bad logo")), \
+             mock.patch.object(escpos, "receipt_footer_qr", side_effect=RuntimeError("bad qr")):
+            image = service.receipt_image("صيدلية المثال", sample_sale(), "2026-11-23 14:05", cfg, logo_png=b"x")
+        self.assertGreater(image.height, 0)
