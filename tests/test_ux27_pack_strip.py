@@ -211,5 +211,51 @@ class TestScreen(PlanCase):
         self.assertEqual(row["total"], 30000)                      # the typed 3 boxes, not the 2 shown before
 
 
+
+SCRIPT_KEEP = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posQ');
+  for (const name of ['Trial Box', 'Panadol']) {
+    await p.fill('#posQ', name);
+    await p.waitForSelector('#posRes [data-add][data-kind=pack]');
+    await p.click('#posRes [data-add][data-kind=pack]');
+    await p.waitForFunction((n) => document.querySelectorAll('#posCart [data-qline]').length === n, name === 'Panadol' ? 2 : 1);
+  }
+  const ids = await p.$$eval('#posCart tbody tr', (rows) => rows.map((r) => ({ id: r.querySelector('[data-qline]').dataset.qline, name: r.textContent })));
+  const box = ids.find((l) => /Trial/i.test(l.name)), pan = ids.find((l) => /Panadol/i.test(l.name));
+  // typing on the box line (focus kept) while the Panadol line's save comes back and redraws the cart
+  await p.fill(`[data-qu="${box.id}"]`, '2');
+  const [r] = await Promise.all([p.waitForResponse((x) => x.url().includes(`/lines/${pan.id}`)),
+    p.evaluate((id) => document.querySelector(`[data-plus="${id}"]`).click(), pan.id)]);
+  await p.waitForTimeout(300);
+  const out = await p.evaluate((id) => ({ value: document.querySelector(`[data-qu="${id}"]`).value,
+    focused: document.activeElement === document.querySelector(`[data-qu="${id}"]`) }), box.id);
+  await p.press(`[data-qu="${box.id}"]`, 'Enter');
+  await p.waitForFunction((id) => /1 علبة \+ 2/.test(document.querySelector(`[data-qline="${id}"]`).closest('tr').querySelector('.qty b').textContent), box.id);
+  out.saved = await p.evaluate((id) => document.querySelector(`[data-qline="${id}"]`).closest('tr').querySelector('.qty b').textContent.trim(), box.id);
+  console.log(JSON.stringify(out));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestTypedSurvivesRedraw(PlanCase):
+    def setUp(self):
+        super().setUp()
+        from app.sales.cash import CashDrawer
+        CashDrawer(self.db).open(self.ctx, 10000)
+
+    def test_another_line_save_keeps_the_typed_number(self):
+        out = run_node(self, SCRIPT_KEEP, "owner", OWNER_PW)
+        self.assertEqual(out["value"], "2")
+        self.assertTrue(out["focused"])
+        self.assertEqual(out["saved"], "1 علبة + 2 وحدة")
+
+
 if __name__ == "__main__":
     unittest.main()
