@@ -431,9 +431,12 @@ def _undo_restore(db_path: Path, journal: dict) -> None:
         _force_unlink(live_arch)
     if aside is not None and journal.get("archive_readonly") and live_arch.exists():
         live_arch.chmod(0o444)
+    # only the side files THIS restore moved (its own name, from the journal): a leftover that an earlier,
+    # finished restore could not delete belongs to another database and must never come back (Codex P1)
+    mark = Path(str(journal.get("side_mark") or "")).name
     for suffix in ("-wal", "-shm"):
-        old = Path(str(db_path) + suffix + OLD_SIDE)
-        if old.exists():
+        old = Path(str(db_path) + suffix + mark)
+        if mark.startswith(OLD_SIDE) and old.exists():
             old.replace(Path(str(db_path) + suffix))
     live_arch.with_suffix(".part").unlink(missing_ok=True)
     (folder / RESTORE_JOURNAL).unlink(missing_ok=True)
@@ -448,7 +451,8 @@ def _restore_done(db_path: Path, journal: dict) -> None:
     indexer) is harmless: the side files are renamed out of SQLite's sight, the compressed-history cache is
     checked by sha256 before every use, and a journal without a staged database only means "finished"."""
     folder = db_path.parent
-    names = [RESTORE_JOURNAL] + [db_path.name + suffix + OLD_SIDE for suffix in ("-wal", "-shm")]
+    names = [RESTORE_JOURNAL] + [f.name for suffix in ("-wal", "-shm")       # this restore's and any older leftover
+                                 for f in folder.glob(db_path.name + suffix + OLD_SIDE + "*")]
     if journal.get("archive_aside") or journal.get("archive_new"):
         names += [ARCHIVE_MEMBER, ARCHIVE_MEMBER + ".sha256"]
     for name in names:
@@ -612,7 +616,12 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
                 while aside.exists():                       # never over an earlier kept history
                     aside = live_arch.with_name(f"{stamp}-{n}.sqlite")
                     n += 1
+            side_mark = f"{OLD_SIDE}-{datetime.now():%Y%m%d-%H%M%S}"
+            n = 1
+            while any(Path(str(db_path) + suffix + side_mark).exists() for suffix in ("-wal", "-shm")):
+                side_mark, n = f"{OLD_SIDE}-{datetime.now():%Y%m%d-%H%M%S}-{n}", n + 1
             journal = {"db": db_path.name, "staged": staged.name, "archive_aside": aside.name if aside else None,
+                       "side_mark": side_mark,
                        "archive_new": arch_part.exists(),
                        "archive_readonly": bool(aside and not live_arch.stat().st_mode & 0o200)}
             _write_journal(db_path, journal)
@@ -630,7 +639,7 @@ def restore(archive: Path, db_path: Path, upload_dir: Path, pre_restore_dir: Pat
             for suffix in ("-wal", "-shm"):             # the old database's own side files, out of SQLite's sight
                 side = Path(str(db_path) + suffix)
                 if side.exists():
-                    side.replace(Path(str(side) + OLD_SIDE))
+                    side.replace(Path(str(side) + side_mark))
             staged.replace(db_path)
         except BaseException:
             _undo_restore(db_path, journal)

@@ -271,10 +271,9 @@ class TestCleanupAfterAFinishedRestoreIsBestEffort(Base):
         return mock.patch.object(Path, "unlink", unlink)
 
     def test_a_held_leftover_does_not_fail_the_restore(self):
-        Path(str(self.db_path) + "-wal").write_bytes(b"")           # the old database's side file
         cache = self.arch.with_name(backup.ARCHIVE_MEMBER)
         cache.write_bytes(b"old cache")
-        with self.held(self.db_path.name + "-wal" + backup.OLD_SIDE, cache.name):
+        with self.held(cache.name):
             r = self.restore()
         self.assertEqual(r["manifest"]["problems"], [])
         self.assertFalse((self.db_path.parent / backup.RESTORE_JOURNAL).exists())
@@ -294,4 +293,46 @@ class TestCleanupAfterAFinishedRestoreIsBestEffort(Base):
         with mock.patch.object(backup, "_write_journal", full):
             with self.assertRaises(OSError):
                 self.restore()
+        self.assert_original_set()
+
+
+class TestSideFilesBelongToOneRestore(Base):
+    """Codex P1: a side file an earlier restore could not delete must never be put back as the current
+    database's -wal by a later restore that fails."""
+
+    def with_live_wal(self):
+        """The live database has a -wal at the moment the files are moved (a program that did not close)."""
+        real = backup._write_journal
+
+        def write(db_path, journal):
+            Path(str(db_path) + "-wal").write_bytes(b"LIVE WAL")
+            return real(db_path, journal)
+        return mock.patch.object(backup, "_write_journal", write)
+
+    def test_a_leftover_of_an_earlier_restore_is_never_put_back(self):
+        real = Path.unlink
+
+        def unlink(p, missing_ok=False):                              # antivirus holds the first restore's leftover
+            if backup.OLD_SIDE in Path(p).name and Path(p).exists():
+                raise PermissionError(13, "The process cannot access the file (injected)")
+            return real(p, missing_ok=missing_ok)
+        with mock.patch.object(Path, "unlink", unlink), self.with_live_wal():
+            self.restore()                                            # finished; the old -wal is left behind
+        left = [f for f in self.db_path.parent.iterdir() if backup.OLD_SIDE in f.name]
+        self.assertEqual(len(left), 1)
+        self.assertFalse(Path(str(self.db_path) + "-wal").exists())
+        with self.failing_replace(lambda s, t: t == self.db_path):    # the second restore fails
+            with mock.patch.object(Path, "unlink", unlink):
+                with self.assertRaises(OSError):
+                    self.restore()
+        self.assertFalse(Path(str(self.db_path) + "-wal").exists(), "a stale -wal was attached to the live database")
+        self.assertEqual(self.items(), 1)                             # still the first restore's database, whole
+
+    def test_this_restores_own_side_files_still_go_back(self):
+        wal = Path(str(self.db_path) + "-wal")
+        with self.failing_replace(lambda s, t: t == self.db_path), self.with_live_wal():
+            with self.assertRaises(OSError):
+                self.restore()
+        self.assertEqual(wal.read_bytes(), b"LIVE WAL")
+        wal.unlink()
         self.assert_original_set()
