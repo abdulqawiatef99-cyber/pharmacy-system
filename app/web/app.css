@@ -281,6 +281,11 @@ input.big { min-height: 54px; font-size: 1.25rem; border: 2px solid var(--brand)
 .cart tr.m-injection > td:first-child { box-shadow: inset -5px 0 0 #6b4fa0; }
 .qty { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qty .btn { min-width: 36px; justify-content: center; }
+.qty.mix { gap: 4px; margin-top: 4px; font-size: .9em; }
+.qty.mix .qn { width: 3.2em; min-width: 0; padding: 2px 4px; text-align: center; }
+.qtydlg input { width: 6em; }
+.qtydlg .plus { align-self: flex-end; padding-bottom: 8px; font-weight: bold; }
+.qbtn .qs { display: block; }
 td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; }
 .keys { font-size: .8125rem; color: var(--muted); }
 .pos-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 76px; }

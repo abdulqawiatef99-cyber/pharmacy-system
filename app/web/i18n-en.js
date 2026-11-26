@@ -1,6 +1,13 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"علبة + شريط مع بعض ·": "A box + a strip together ·",
+"علبة وشريط مع بعض (Alt+Enter)": "A box and a strip together (Alt+Enter)",
+"المتاح:": "Available:",
+"اكتب أرقام صحيحة (صفر أو أكتر)، والمجموع أكبر من صفر": "Enter whole numbers (zero or more), with a total above zero",
+"أكتر من المتاح (0)": "More than available (0)",
+"علبة + شريط": "Box + strip",
+"الكمية غير صحيحة: اكتب عدد العلب وعدد الشرايط أرقام صحيحة": "Invalid quantity: enter the boxes and strips as whole numbers",
 "التحديث ما بدأش والبرنامج ما اتقفلش": "The update did not start and the program was not stopped",
 "إعدادات إدخال الشراء": "Purchase entry settings",
 "الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.": "Item comes first. Move the remaining fields to change the order for Enter.",

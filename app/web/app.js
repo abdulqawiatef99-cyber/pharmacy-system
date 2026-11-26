@@ -8,14 +8,31 @@ let ME = null;
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (p) => (p == null ? "" : (p / 100).toFixed(2));
-const unitName = (it) => (!it.base_unit_name || it.base_unit_name === "unit" ? "وحدة" : it.base_unit_name);
-// stock in base units -> "15 علبة + 2 وحدة"
+// the item lists send base_unit_name / pack_unit_name, a sale line's item base_unit / pack_unit (UX-27: both read)
+const unitName = (it) => { const u = it.base_unit_name ?? it.base_unit; return !u || u === "unit" ? "وحدة" : u; };
+const packName = (it) => { const u = it.pack_unit_name ?? it.pack_unit; return !u || u === "pack" ? "علبة" : u; };
+// stock in base units -> "15 علبة + 2 شريط" (the item's own pack and unit names)
 const fmtStock = (q, it) => {
   if (q == null) return "";
   if (q === 0) return "0";
   const p = it.pack_size || 1, packs = Math.trunc(q / p), rest = q % p;
-  return [packs ? `${packs} علبة` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
+  if (p <= 1) return `${q} ${unitName(it)}`;
+  return [packs ? `${packs} ${packName(it)}` : "", rest ? `${rest} ${unitName(it)}` : ""].filter(Boolean).join(" + ");
 };
+// UX-27 (owner 26/11): one line carries boxes and strips, "1 علبة + 1 شريط" typed in one go -> base units.
+// Each part is a whole number (Arabic digits too, empty = 0); null when a part is not, or nothing is asked.
+// + / − on a line: a box when the line is whole boxes, else one strip
+const qtyStep = (q, ps) => (ps > 1 && q % ps === 0 ? ps : 1);
+function mixedQty(packs, units, ps) {
+  const whole = (v) => {
+    const t = String(v ?? "").trim().replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+    return t === "" ? 0 : /^\d{1,6}$/.test(t) ? Number(t) : null;
+  };
+  const p = whole(packs), u = whole(units);
+  if (p == null || u == null) return null;
+  const q = p * Math.max(1, ps || 1) + u;
+  return q > 0 && Number.isSafeInteger(q) ? q : null;
+}
 const toPiasters = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 100));
 // exact piasters from the typed text, never rounded: "475.5" -> 47550, "-20" -> -2000; "475.005" or "1e3" -> null
 // (Codex P1 on #394: a fraction of a piaster is refused, not rounded)
@@ -5031,9 +5048,8 @@ const METHODS = [["cash", "نقدي"], ["card", "فيزا"], ["transfer", "مح�
 // screenshot of the transfer, saved with the invoice for the owner to check (optional)
 const proofInput = (s) => `<label class="f mt proof">📎 صورة التحويل ${(s.attachments || []).length ? `<span class="badge b-ok">✓ ${(s.attachments || []).length} صورة</span>` : `<span class="muted">(اختياري — للمراجعة)</span>`}
   <input type="file" id="posProof" accept="image/*,application/pdf"></label>`;
-const qtyText = (q, it) => (it.pack_size > 1 && q % it.pack_size === 0 ? `${q / it.pack_size} ${esc(it.pack_unit && it.pack_unit !== "pack" ? it.pack_unit : "علبة")}`
-  : it.pack_size > 1 && q > it.pack_size ? `${Math.floor(q / it.pack_size)} علبة + ${q % it.pack_size} ${esc(unitName({ base_unit_name: it.base_unit }))}`
-  : `${q} ${esc(unitName({ base_unit_name: it.base_unit }))}`);
+// a line's quantity in the item's own names: «2 علبة», «3 شريط», «1 علبة + 1 شريط» (UX-27: one rule with the stock)
+const qtyText = (q, it) => esc(it.pack_size > 1 ? fmtStock(q, it) : `${q} ${unitName(it)}`);
 
 // launch day 21/11: the price shown is the price of the unit the line is sold in (1 box of a 3-strip item showed
 // the strip's 32.00 while the total was the box's); a line of boxes + strips shows both
@@ -5079,7 +5095,7 @@ async function viewPos(afterCheckout = false) {
       <div id="posRes" class="results"></div>
       <section class="panel" id="posCart"></section>
       <div id="posQuick"></div>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Alt+Enter</kbd> علبة + شريط مع بعض · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
@@ -5132,7 +5148,8 @@ async function viewPos(afterCheckout = false) {
           ${r.pack_size > 1 && r.next_unit_price != null && r.next_pack_price != null ? `<div class="muted small">${money(r.next_unit_price)} ج / ${esc(unitName(r))}</div>` : ""}
           ${r.price_stock?.length > 1 ? `<div class="muted small">${r.price_stock.map((p) => `${money(p.price) || "بدون سعر"} ج · ${esc(fmtStock(p.qty, r))}`).join(" / ")}</div>` : ""}</div>
         ${r.is_service || r.available_qty >= r.pack_size ? `<button class="btn small" data-add="${i}" data-kind="pack">علبة${i === 0 ? " ↵" : ""}</button>` : ""}
-        ${r.pack_size > 1 && !r.is_service && r.available_qty > 0 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>` : ""}
+        ${r.pack_size > 1 && !r.is_service && r.available_qty > 0 ? `<button class="btn small secondary" data-add="${i}" data-kind="unit">${esc(unitName(r))}</button>
+          <button class="btn small secondary" data-mix="${i}" title="علبة وشريط مع بعض (Alt+Enter)">${esc(packName(r))} + ${esc(unitName(r))}</button>` : ""}
         ${!r.is_service && !r.available_qty ? `<span class="badge b-err">✕ نفد</span>` : ""}
         ${r.pack_size === 1 && !r.is_service && canFixPack() ? `<button class="btn small secondary" data-search-pack="${i}">${PACK_QUESTION}</button>` : ""}
         ${r.is_service ? "" : `<button class="btn small ${r.stock_qty ? "secondary" : ""}" data-alt="${i}" title="المثيل والبديل">↔ مثيل / بديل</button>`}</div>`).join("")
@@ -5141,6 +5158,7 @@ async function viewPos(afterCheckout = false) {
     $("#posShowZero")?.addEventListener("click", (e) => { e.preventDefault(); $("#posAll").checked = true; $("#posAll").dispatchEvent(new Event("change")); });
     $("#posRes").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () =>
       addItem(res[+b.dataset.add], b.dataset.kind === "pack" ? 1 : 0, b.dataset.kind === "unit" ? 1 : 0)));
+    $("#posRes").querySelectorAll("[data-mix]").forEach((b) => b.addEventListener("click", () => addMixed(res[+b.dataset.mix])));
     $("#posRes").querySelectorAll("[data-search-pack]").forEach((button) => button.addEventListener("click", async () => {
       const item = res[+button.dataset.searchPack];
       if (await withBusy(button, () => packFix(item.id, null, true)) && q.isConnected) await search(false, true);
@@ -5166,7 +5184,9 @@ async function viewPos(afterCheckout = false) {
     clearTimeout(liveT); liveSeq++;
     const first = $("#posRes [data-add]");
     if (first && !/^\d{3,5}$/.test(q.value.trim()) && q.value.trim() === q.dataset.searched) {           // second Enter on the same text: add the first result
-      const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
+      const r = res[+first.dataset.add];
+      if (r && e.altKey && r.pack_size > 1 && !r.is_service) { addMixed(r); return; }       // UX-27: boxes + strips
+      if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
     const v = q.value.trim();
     // U4-17: Enter on the empty search line goes to the payment («العميل دفع», or the done button);
@@ -5233,7 +5253,7 @@ async function renderQuick() {
     ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${x.stock_qty != null && !x.is_service ? `<span class="qs muted small">${esc(fmtStock(x.stock_qty, x) || "0")}</span>` : ""}${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
         <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
@@ -5305,7 +5325,7 @@ function posLine() {
 }
 function posInvoiceCard(line) {
   const sid = SALE.id, active = document.activeElement;
-  const attr = ["data-pos-card", "data-disc", "data-dunit", "data-unit", "data-plus", "data-minus", "data-rm"]
+  const attr = ["data-pos-card", "data-disc", "data-dunit", "data-qp", "data-qu", "data-plus", "data-minus", "data-rm"]
     .find((name) => active.hasAttribute(name));
   showInvoiceItemCard(line.item_id, {
     restore: async () => {
@@ -5341,10 +5361,9 @@ document.addEventListener("keydown", async (e) => {
     const l = posLine();
     if (!l) return go(() => toast("مفيش صنف في الفاتورة", true));
     if (act === "branch_stock") return go(() => posBranchStock(l));
-    return go(() => {
-      const packs = l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0;
-      const v = typedWhole(prompt(packs ? "عدد العلب:" : "عدد الوحدات:", String(packs ? l.qty_base / l.item.pack_size : l.qty_base)) || "");
-      if (Number(v) > 0) patchLine(l.id, { qty_base: packs ? Number(v) * l.item.pack_size : Number(v) });
+    return go(async () => {
+      const r = await qtyDialog(l.item, l.qty_base);
+      if (r && r.qty !== l.qty_base) await patchLine(l.id, { qty_base: r.qty });
     });
   }
   if (act === "receipt") return go(() => $("#posRcpt")?.click());
@@ -5402,6 +5421,36 @@ function drawerDialog() {
   f.reason.focus();
 }
 
+// UX-27: the quantity in boxes and strips together («1 علبة + 1 شريط»). Resolves { packs, units, qty } or null.
+// An item sold by the unit only asks for one number. The stock shown is a guide; the server decides.
+function qtyDialog(it, qty = 0, title = "الكمية", avail = null) {
+  const ps = Math.max(1, it.pack_size || 1), mix = ps > 1 && !it.is_service;
+  return new Promise((done) => {
+    const d = document.createElement("dialog");
+    d.innerHTML = `<form method="dialog" class="formgrid qtydlg"><h2>${esc(title)}: ${itemHtml(it)}</h2>
+      <div class="row">${mix ? `<label class="f">${esc(packName(it))} <input name="p" inputmode="numeric" autocomplete="off" value="${Math.floor(qty / ps)}"></label>
+        <span class="plus">+</span>` : ""}
+        <label class="f">${esc(unitName(it))} <input name="u" inputmode="numeric" autocomplete="off" value="${mix ? qty % ps : qty}"></label></div>
+      ${avail != null ? `<p class="muted small">المتاح: <b>${esc(fmtStock(avail, it) || "0")}</b></p>` : ""}
+      <p class="err small" hidden></p>
+      <div class="row"><button class="btn" value="ok">تمام</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
+    document.body.append(d);
+    const f = d.querySelector("form"), err = d.querySelector(".err");
+    let out = null;
+    f.addEventListener("submit", (e) => {
+      if (e.submitter?.value === "cancel") return;
+      const q = mixedQty(mix ? f.p.value : 0, f.u.value, ps);
+      if (q == null) { e.preventDefault(); err.hidden = false; err.textContent = "اكتب أرقام صحيحة (صفر أو أكتر)، والمجموع أكبر من صفر"; return; }
+      if (avail != null && q > avail) { e.preventDefault(); err.hidden = false; err.textContent = `أكتر من المتاح (${fmtStock(avail, it) || "0"})`; return; }
+      out = { qty: q, packs: Math.floor(q / ps), units: q % ps };
+      if (!mix) out = { qty: q, packs: 0, units: q };
+    });
+    d.addEventListener("close", () => { d.remove(); done(out); $("#posQ")?.focus(); });
+    d.showModal();
+    (mix ? f.p : f.u).select();
+  });
+}
+
 function pendingPosAdds(sid) {
   return [...POS.adding].filter(([, saleId]) => saleId === sid).map(([work]) => work);
 }
@@ -5433,6 +5482,13 @@ function scanAddQty(r, unit) {
 
 // scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
 // note = a line for the cashier once the add succeeded (UX-26: a unit instead of a box), shown with any warning
+// UX-27: boxes and strips of one item in one add (one line, one request)
+async function addMixed(item) {
+  const want = (item.pack_size || 1) + 1, avail = item.available_qty ?? null;
+  const r = await qtyDialog(item, avail != null ? Math.max(1, Math.min(want, avail)) : want, "علبة + شريط", avail);
+  if (r) return addItem(item, r.packs, r.units);
+}
+
 function addItem(item, packs, units, scanned = false, note = "") {
   return trackPosAdd(addPosLine(item, packs, units, scanned, note));
 }
@@ -5464,14 +5520,37 @@ function discAsk(v) {
 
 async function patchLine(lineId, body) {
   POS.saving = (async () => {            // complete() waits for it (a discount typed, then F9); false = not saved
-    try { SALE = await api(`/api/sales/${SALE.id}/lines/${lineId}`, { method: "PATCH", body }); renderCart(); renderSide(); return true; }
+    try {
+      const sid = SALE.id, update = await api(`/api/sales/${sid}/lines/${lineId}`, { method: "PATCH", body });
+      if (SALE?.id !== sid || update.version < SALE.version) return true;       // a newer change already shown
+      SALE = update; renderCart(); renderSide(); return true;
+    }
     catch (er) { toast(er.message, true); renderCart(); return false; }     // the controls show what is saved
   })();
   await POS.saving;
 }
 
+// Codex on #490: a box/strip number being typed on one line survives a redraw caused by another line's save;
+// kept only while that line's saved quantity is still the one the fields were drawn from
+function keepTypedQty() {
+  const cart = $("#posCart"), active = document.activeElement, kept = [];
+  cart?.querySelectorAll("[data-qline]").forEach((box) => box.querySelectorAll("input").forEach((inp) => {
+    if (inp.value !== inp.defaultValue || inp === active)
+      kept.push({ line: box.dataset.qline, was: box.dataset.was, key: inp.hasAttribute("data-qp") ? "qp" : "qu",
+                  value: inp.value, focus: inp === active, at: inp.selectionStart });
+  }));
+  return () => kept.forEach((k) => {
+    const box = $(`[data-qline="${CSS.escape(k.line)}"]`, $("#posCart"));
+    if (!box || box.dataset.was !== k.was) return;
+    const inp = box.querySelector(`[data-${k.key}]`);
+    inp.value = k.value;
+    if (k.focus) { inp.focus(); try { inp.setSelectionRange(k.at, k.at); } catch { /* not a text field */ } }
+  });
+}
+
 function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
+  const restoreTyped = keepTypedQty();
   refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
   // U2-21: dispensing notes, shown once per invoice (a toast the first time) and kept as one line above the items
@@ -5479,7 +5558,8 @@ function renderCart(findings = null) {
   POS.dnSeen ||= {};
   const seen = (POS.dnSeen[s.id] ||= new Set());
   dn.filter((n) => !seen.has(n.ingredient)).forEach((n) => { seen.add(n.ingredient); toast(`📋 ${n.item}: ${n.rules.join(" · ")}`); });
-  $("#posCart").innerHTML = `
+  POS.redrawing = true;              // the old fields leave the page: their focusout is not the cashier leaving them
+  try { $("#posCart").innerHTML = `
     ${dn.length ? `<div class="badge b-info dnotes" role="note">${dn.map((n) => `📋 <b>${esc(n.item || n.ingredient)}</b>: ${esc(n.rules.join(" · "))}${n.source ? ` <span class="muted small">(${esc(n.source)})</span>` : ""}`).join("<br>")}</div>` : ""}
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف بترتيب إدخالها" : "الأصناف مرتبة أبجديًا A→Z (أسرع في التحضير)"} — آخر صنف مُضاف عليه علامة ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
     <div class="tablewrap"><table class="cart">
@@ -5489,12 +5569,12 @@ function renderCart(findings = null) {
           ${l.item.is_service ? `<span class="badge b-info">🛎 خدمة</span>` : ""}${l.item.hide_on_receipt ? `<span class="badge" title="لن يظهر اسمه في الإيصال">🙈</span>` : ""}${l.item.rx_required ? `<span class="badge b-err" title="يُصرف بوصفة طبية فقط">📋 وصفة طبية</span>` : ""}${l.item.misuse_risk ? `<span class="badge b-warn" title="يُساء استخدامه">⚠ سوء استخدام</span>` : ""}${l.item.sale_note ? `<span class="badge b-info" title="${esc(l.item.sale_note)}">📝 ${esc(l.item.sale_note.slice(0, 30))}</span>` : ""}
           ${l.problem ? `<span class="badge b-err">✕ ${l.problem === "no_price" ? "بدون سعر" : "الكمية غير متاحة"}</span>` : ""}
           ${invoiceCardButton("data-pos-card", l.id, posKey("item_card"))}
-          ${l.item.stock != null ? `<div class="muted small">الرصيد: ${esc(fmtStock(l.item.stock, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit }))}</div>` : ""}</td>
+          ${l.item.stock != null ? `<div class="muted small">الرصيد: ${esc(fmtStock(l.item.stock, l.item))}</div>` : ""}</td>
         <td><div class="qty"><button class="btn small secondary" data-minus="${esc(l.id)}" aria-label="نقص">−</button>
           <b>${qtyText(l.qty_base, l.item)}</b><button class="btn small secondary" data-plus="${esc(l.id)}" aria-label="زيادة">+</button></div>
-          ${l.item.pack_size > 1 && !l.item.is_service ? `<select class="small" data-unit="${esc(l.id)}" aria-label="الوحدة" title="غيّر الوحدة">
-            <option value="pack" ${l.qty_base % l.item.pack_size === 0 ? "selected" : ""}>${esc(l.item.pack_unit && l.item.pack_unit !== "pack" ? l.item.pack_unit : "علبة")}</option>
-            <option value="unit" ${l.qty_base % l.item.pack_size ? "selected" : ""}>${esc(unitName({ base_unit_name: l.item.base_unit }))}</option></select>` : ""}
+          ${l.item.pack_size > 1 && !l.item.is_service ? `<div class="qty mix" data-qline="${esc(l.id)}" data-was="${l.qty_base}">
+            <input class="qn" data-qp="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${Math.floor(l.qty_base / l.item.pack_size)}" aria-label="${esc(packName(l.item))}"> <span>${esc(packName(l.item))}</span> +
+            <input class="qn" data-qu="${esc(l.id)}" inputmode="numeric" autocomplete="off" value="${l.qty_base % l.item.pack_size}" aria-label="${esc(unitName(l.item))}"> <span>${esc(unitName(l.item))}</span></div>` : ""}
           ${l.item.pack_size === 1 && !l.item.is_service && canFixPack()
             ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
@@ -5505,6 +5585,8 @@ function renderCart(findings = null) {
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
+  } finally { POS.redrawing = false; }
+  restoreTyped();
   posMark();
   syncQuick();
   const line = (id) => s.lines.find((l) => l.id === id);
@@ -5512,23 +5594,31 @@ function renderCart(findings = null) {
     posInvoiceCard(line(button.dataset.posCard))));
   $("#posCart").querySelectorAll("[data-cart-pack]").forEach((button) => button.addEventListener("click", () =>
     withBusy(button, () => packFix(line(button.dataset.cartPack).item_id, null, true))));
-  const step = (l) => (l.item.pack_size > 1 && l.qty_base % l.item.pack_size === 0 ? l.item.pack_size : 1);
-  // U2-13: the same count in the other unit (1 box -> 1 strip, 2 strips -> 2 boxes); the server re-checks the stock
-  $("#posCart").querySelectorAll("[data-unit]").forEach((sel) => sel.addEventListener("change", () => {
-    const l = line(sel.dataset.unit), ps = l.item.pack_size, q = l.qty_base, isPack = q % ps === 0;
-    let want = q;
-    if (sel.value === "unit" && isPack) want = q / ps;                 // 2 boxes -> 2 strips
-    else if (sel.value === "pack" && !isPack) {
-      // a few strips -> the same number of boxes; a mixed line ("2 boxes + 1 strip") -> its whole boxes, never
-      // multiplied (5 strips became 5 boxes in the independent review)
-      want = q < ps ? q * ps : Math.floor(q / ps) * ps;
-      if (q > ps && !confirm(`السطر هيبقى ${want / ps} علبة بدل ${qtyText(q, l.item)}؟`)) { renderCart(); return; }
-    }
-    if (want !== q) patchLine(l.id, { qty_base: want });
-  }));
-  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); patchLine(l.id, { qty_base: l.qty_base + step(l) }); }));
+  const step = (l, q = l.qty_base) => qtyStep(q, l.item.pack_size);
+  // UX-27: boxes and strips of one line in two fields; saved once the cashier leaves the pair (or Enter), so typing
+  // the box then Tab to the strip is one change. The server re-checks the stock and refuses beyond it.
+  $("#posCart").querySelectorAll("[data-qline]").forEach((box) => {
+    const l = line(box.dataset.qline);
+    const save = (back) => {
+      const q = mixedQty(box.querySelector("[data-qp]").value, box.querySelector("[data-qu]").value, l.item.pack_size);
+      if (q == null) { POS.saving = Promise.resolve(false); toast("الكمية غير صحيحة: اكتب عدد العلب وعدد الشرايط أرقام صحيحة", true); renderCart(); }
+      else if (q !== l.qty_base) patchLine(l.id, { qty_base: q }).then(() => back && $("#posQ")?.focus());
+      else if (back) $("#posQ")?.focus();
+    };
+    box.addEventListener("focusout", (e) => { if (!POS.redrawing && !box.contains(e.relatedTarget) && box.isConnected) save(false); });
+    box.querySelectorAll("input").forEach((inp) => {
+      inp.addEventListener("focus", () => inp.select());
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); inp.blur(); $("#posQ")?.focus(); } });
+    });
+  });
+  // UX-27 review: a quantity typed in the line's fields and not saved yet is the base for + / −
+  const typedQty = (l) => {
+    const box = $(`[data-qline="${CSS.escape(l.id)}"]`, $("#posCart"));
+    return (box && mixedQty(box.querySelector("[data-qp]").value, box.querySelector("[data-qu]").value, l.item.pack_size)) || l.qty_base;
+  };
+  $("#posCart").querySelectorAll("[data-plus]").forEach((b) => b.addEventListener("click", () => { const l = line(b.dataset.plus); const q = typedQty(l); patchLine(l.id, { qty_base: q + step(l, q) }); }));
   $("#posCart").querySelectorAll("[data-minus]").forEach((b) => b.addEventListener("click", async () => {
-    const l = line(b.dataset.minus), n = l.qty_base - step(l);
+    const l = line(b.dataset.minus), q = typedQty(l), n = q - step(l, q);     // Codex on #490: the typed quantity's step
     if (n <= 0) { SALE = await api(`/api/sales/${SALE.id}/lines/${l.id}`, { method: "DELETE" }); renderCart(); renderSide(); }
     else patchLine(l.id, { qty_base: n });
   }));
@@ -5867,7 +5957,7 @@ async function complete(findings = null) {
     // A delivery field or discount still being typed must dispatch its change before the till is frozen.
     posScanStop?.flush?.();                       // typing held back by the scan detector goes back first
     const active = document.activeElement;
-    if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
+    if (active?.dataset?.dl || active?.dataset?.pa || active?.closest?.("[data-qline]") || isDiscField(active)) active.blur();
     app.inert = true;
     // A barcode can be resolving while the cart is still empty. Wait for work started before F9.
     const added = await Promise.all(pendingPosAdds(sid));
