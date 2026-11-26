@@ -150,6 +150,43 @@ class TestAMissingDiskIsARefusalNotACrash(Base):
         self.assertIn(str(self.backups), msg)
 
 
+class TestDatabaseOnAnotherDiskThanTheDataFolder(Base):
+    """Codex P2: with PHARM_DB_PATH elsewhere, the archive and its .xz cache live beside the database."""
+
+    def setUp(self):
+        super().setUp()
+        self.dbdisk = self.data.parent.parent / "dbdisk"
+        self.dbdisk.mkdir()
+        for name in ("pharmacy.db", backup.ESTOCK_ARCHIVE):
+            (self.data / name).replace(self.dbdisk / name)
+        self.s = replace(self.s, db_path=self.dbdisk / "pharmacy.db")
+        self.free["db"] = 10 ** 12
+
+    def volume(self, path) -> str:
+        p = Path(path).resolve()
+        if p == self.dbdisk or self.dbdisk in p.parents:
+            return "db"
+        return super().volume(path)
+
+    def test_the_cache_is_budgeted_where_it_is_written(self):
+        need = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=True)}
+        self.assertEqual(need["db"], self.ARCH)                # the .xz cache beside the archive
+        self.assertEqual(need["data"], 3 * self.DB)            # the migrated copy stays in the data folder
+        self.free["db"] = self.ARCH                            # no margin left on the database's disk
+        self.assertIn(str(self.dbdisk), self.refused())
+
+
+class TestSchedulingNeverBlocksTheTill(unittest.TestCase):
+    def test_the_space_check_runs_off_the_event_loop(self):
+        # Codex P2: the check hashes the whole E-Stock archive; inside the async handler it would hold every
+        # cashier request for that long
+        src = (Path(__file__).resolve().parents[1] / "app" / "api" / "app.py").read_text(encoding="utf-8")
+        at = src.index('if action == "schedule":')
+        body = src[at:src.index('if action == "cancel":', at)]
+        self.assertIn("await run_in_threadpool(su.request, s.data_dir, when, ctx.user_id, settings=s)", body)
+        self.assertNotIn("= su.request(", body)
+
+
 class TestNoArchive(Base):
     ARCH = 0
 
@@ -220,3 +257,22 @@ class TestRefusedBeforeTheCashierStops(Base):
                     su.apply_prepared(self.s, self.data, "r1", self.backups)
                 self.assertIn("النسخ الاحتياطية", str(e.exception))
                 made.assert_not_called()
+
+
+class TestScheduleRoute(__import__("tests.test_api", fromlist=["APICase"]).APICase):
+    """The schedule action end to end: refused with the reason on screen, accepted when there is room."""
+
+    def test_schedule_is_refused_for_space_then_accepted(self):
+        from tests.test_api import H
+        self.http_login()
+        home = su.home_of(self.s.data_dir)
+        releases.atomic_json(home / "prepared.json", {"release": "r1", "needs_db": True})
+        with mock.patch.object(su, "_free", lambda p: 10 * MB):
+            r = self.c.post("/api/system/update", json={"action": "schedule", "when": "now"}, headers=H)
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("المساحة", r.json()["error"]["message"] if isinstance(r.json().get("error"), dict) else r.text)
+        self.assertEqual(su.pending_request(self.s.data_dir), {})
+        with mock.patch.object(su, "_free", lambda p: 10 ** 12):
+            r = self.c.post("/api/system/update", json={"action": "schedule", "when": "now"}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(su.pending_request(self.s.data_dir)["release"], "r1")

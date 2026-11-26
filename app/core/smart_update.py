@@ -761,8 +761,13 @@ def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
     uploads = _tree_size(Path(settings.upload_dir))
     wants = [("مجلد النسخ الاحتياطية", Path(backup_dir), db + arch_xz + uploads),
              ("المجلد المؤقت للويندوز", Path(tempfile.gettempdir()), 2 * db + arch),
-             ("مجلد البيانات", Path(settings.data_dir), (3 * db if needs_db else 0) + (0 if cache else arch))]
+             ("مجلد البيانات", Path(settings.data_dir), 3 * db if needs_db else 0),
+             # the history's .xz is kept beside the history, which is beside the database (PHARM_DB_PATH may
+             # put that on another disk than the data folder)
+             ("مجلد قاعدة البيانات", arch_file.parent, 0 if cache else arch)]
     out: dict = {}
+    if not wants[-1][2]:                            # nothing is written beside the database: no claim on its disk
+        wants.pop()
     for label, path, need in wants:
         vol = _volume(path)
         if vol in out:                              # the same disk: the needs add up

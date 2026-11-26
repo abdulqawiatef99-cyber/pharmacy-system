@@ -736,7 +736,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if action == "schedule":
             when = b.get("when")
             try:
-                value = su.request(s.data_dir, when, ctx.user_id, settings=s)
+                # off the event loop: the space check reads the whole E-Stock archive (its sha256)
+                value = await run_in_threadpool(su.request, s.data_dir, when, ctx.user_id, settings=s)
             except updater.UpdateError as e:
                 raise ValidationFailed(str(e), code="update_failed") from e
             with db.transaction():
