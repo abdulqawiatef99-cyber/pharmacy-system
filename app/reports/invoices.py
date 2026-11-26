@@ -68,8 +68,14 @@ def _lines_and_allocations(db: Database, sale_ids: list[str]) -> tuple[dict, dic
 
 
 def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: list[str] | None = None,
-           q: str | None = None, item_id: str | None = None, user_id: str | None = None, with_lines: bool = False) -> dict:
+           q: str | None = None, item_id: str | None = None, user_id: str | None = None, with_lines: bool = False,
+           offset: int = 0, totals: bool = True) -> dict:
+    """One page of the matching invoices (MAX_ROWS from `offset`, newest first, a stable order) and the totals
+    of EVERY match, whatever the page (#461: the totals used to be those of the listed rows only, so a busy
+    period stopped at 3,000 invoices). `totals=False` skips the adding up, for the later pages of an export."""
     ctx.require("sales.totals")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValidationFailed("رقم الصفحة غير صحيح")
     lo, hi = _utc(date_from), _utc(date_to, end=True)
     if hi < lo:
         raise ValidationFailed("النهاية قبل البداية")
@@ -78,12 +84,13 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     types = [t for t in (types or []) if t in TYPES]
     drafts = "draft" in types
     when = "s.created_at" if drafts else "s.completed_at"
-    sql = ["SELECT s.id, s.sale_no, s.status, s.kind, s.subtotal, s.discount_total, s.total, s.delivery_fee, s.paid_cash, s.paid_card,"
-           " s.paid_transfer, s.on_credit, s.returned_total, s.created_at, s.completed_at, s.voided_at, s.void_reason, s.contract_id,"
-           " c.name customer, c.phone, u.full_name seller, k.name contract,"
-           " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
-           " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.created_by"
-           " LEFT JOIN contracts k ON k.id=s.contract_id",
+    head = ("SELECT s.id, s.sale_no, s.status, s.kind, s.subtotal, s.discount_total, s.total, s.delivery_fee, s.paid_cash, s.paid_card,"
+            " s.paid_transfer, s.on_credit, s.returned_total, s.created_at, s.completed_at, s.voided_at, s.void_reason, s.contract_id,"
+            " c.name customer, c.phone, u.full_name seller, k.name contract,"
+            " (SELECT count(*) FROM sale_lines l WHERE l.sale_id=s.id) lines"
+            " FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=s.created_by"
+            " LEFT JOIN contracts k ON k.id=s.contract_id")
+    sql = ["SELECT s.id FROM sales s LEFT JOIN customers c ON c.id=s.customer_id",
            f" WHERE s.org_id=? AND s.branch_id=? AND {when}>=? AND {when}<=?"]
     p: list = [ctx.org_id, ctx.branch_id, lo, hi]
     if drafts:
@@ -116,80 +123,106 @@ def report(db: Database, ctx: Context, *, date_from: str, date_to: str, types: l
     if user_id:
         sql.append(" AND s.created_by=?")
         p.append(user_id)
-    sql.append(f" ORDER BY {when} DESC LIMIT ?")
-    p.append(MAX_ROWS + 1)
-    rows = [dict(r) for r in db.all("".join(sql), tuple(p))]
-    truncated = len(rows) > MAX_ROWS
-    rows = rows[:MAX_ROWS]
+    # every match, in one stable order (the id settles equal times): the pages never overlap or skip
+    sql.append(f" ORDER BY {when} DESC, s.id DESC")
+    ids = [r["id"] for r in db.all("".join(sql), tuple(p))]
+    page_ids = set(ids[offset:offset + MAX_ROWS])
+    truncated = len(ids) > offset + MAX_ROWS
     show_cost = ctx.can("costs.read")
     hidden_ok = ctx.can("items.hidden")
-    lines_of, allocs_of = _lines_and_allocations(db, [r["id"] for r in rows])
-    # the returns of the invoices that have any: their profit uses what each line still holds, as a return does
-    history = returns_history(db, ctx.org_id, [sid for sid, ls in lines_of.items() if any(
-        a["returned_qty"] for l in ls for a in allocs_of.get(l["id"], []))]) if show_cost else {}
-    exact: dict[str, tuple[int, Decimal]] = {}
-    for r in rows:
-        r["item_discount"] = r["customer_discount"] = 0
-        r["profit"] = 0 if show_cost else None
-        r["unknown_cost"] = False
-        value_sum, cost_sum = 0, Decimal(0)
-        lines = []
-        for l in lines_of.get(r["id"], []):
-            allocs = allocs_of.get(l["id"], [])
-            gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"], line_fixed(l))
-            net = l["line_total"] if l["line_total"] is not None else gross
-            disc = gross - net
-            if l["discount_source"] == "contract":
-                share = min(disc, l["invoice_share"] or 0)          # the invoice discount: the person's, not the contract's
-                r["customer_discount"] += disc - share
-                r["item_discount"] += share
-            else:
-                r["item_discount"] += disc
-            returned = sum(a["returned_qty"] for a in allocs)
-            if show_cost and r["status"] == "completed":
-                kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-                value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
-                                          history.get(r["id"], []), fixed=line_fixed(l))
-                if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
-                    r["unknown_cost"] = True
-                value_sum += value
-                cost_sum += sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
-            if with_lines:
-                prices = official_prices(allocs)
-                if sum(p["gross"] for p in prices) != gross:
-                    prices = official_prices(allocs, per_batch=True)
-                lines.append({"item_id": l["item_id"], "name_en": l["name_en"], "name_ar": l["name_ar"], "pack_size": l["pack_size"],
-                              "base_unit_name": l["base_unit_name"], "pack_unit_name": l["pack_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,
-                              "discount_bp": l["discount_bp"], "invoice_share": l["invoice_share"] or 0,
-                              "official_prices": prices, "net": net, "contract": l["discount_source"] == "contract",
-                              "hidden": bool(l["hidden"]) and not hidden_ok})
-        if show_cost:
-            # exact costs are added up and rounded once, per invoice here and for the period below: rounding
-            # each line made two sales costing 5.005 each lose a piastre against Profit and Top Items (#324 R5)
-            r["profit"] = value_sum - int(cost_sum.to_integral_value(ROUND_HALF_UP))
-            exact[r["id"]] = (value_sum, cost_sum)
-        if r["status"] == "draft":           # not priced yet: what the open invoice would come to is shown on the cashier
-            r["item_discount"] = r["customer_discount"] = 0
-        r["net"] = r["total"] - r["returned_total"] if r["status"] == "completed" else 0
-        if with_lines:
-            for x in lines:
-                if x.pop("hidden"):
-                    x.update(name_en="—", name_ar=None)
-            r["items"] = lines
-        if not show_cost:
-            r.pop("profit"), r.pop("unknown_cost")
-    done = [r for r in rows if r["status"] == "completed"]
-    tot = {"n": len(rows)}
-    for k in ("subtotal", "item_discount", "customer_discount", "discount_total", "total", "returned_total", "net",
-              "paid_cash", "paid_card", "paid_transfer", "on_credit", "delivery_fee"):
-        tot[k] = sum(r[k] for r in done)
-    tot["returned_n"] = sum(1 for r in done if r["returned_total"])
-    tot["discounted_n"] = sum(1 for r in done if r["discount_total"])
+    money = ("subtotal", "item_discount", "customer_discount", "discount_total", "total", "returned_total", "net",
+             "paid_cash", "paid_card", "paid_transfer", "on_credit", "delivery_fee")
+    tot = {"n": len(ids), **{k: 0 for k in money}, "returned_n": 0, "discounted_n": 0}
+    value_all, cost_all, unknown_n = 0, Decimal(0), 0
+    rows: list[dict] = []
+    # the listed page is always worked out; the rest of the period only for its totals, a chunk at a time
+    # (nothing but the running sums is kept, so a year of invoices does not sit in memory)
+    todo = ids if totals else ids[offset:offset + MAX_ROWS]
+    for k in range(0, len(todo), _CHUNK):
+        part = todo[k:k + _CHUNK]
+        got = {r["id"]: dict(r) for r in db.all(
+            # +s.org_id: the rows are found by their ids; the pharmacy filter must not pick an org-wide index
+            f"{head} WHERE s.id IN ({','.join('?' * len(part))}) AND +s.org_id=?", (*part, ctx.org_id))}
+        chunk = [got[i] for i in part if i in got]
+        lines_of, allocs_of = _lines_and_allocations(db, [r["id"] for r in chunk])
+        # the returns of the invoices that have any: their profit uses what each line still holds, as a return does
+        history = returns_history(db, ctx.org_id, [sid for sid, ls in lines_of.items() if any(
+            a["returned_qty"] for l in ls for a in allocs_of.get(l["id"], []))]) if show_cost else {}
+        for r in chunk:
+            listed = r["id"] in page_ids
+            value_sum, cost_sum = _figures(r, lines_of, allocs_of, history, show_cost, hidden_ok, with_lines and listed)
+            if r["status"] == "completed":
+                for key in money:
+                    tot[key] += r[key]
+                tot["returned_n"] += 1 if r["returned_total"] else 0
+                tot["discounted_n"] += 1 if r["discount_total"] else 0
+                if show_cost:
+                    # exact costs are added up and rounded once for the period: rounding each invoice made two
+                    # sales costing 5.005 each lose a piastre against Profit and Top Items (#324 R5)
+                    value_all += value_sum
+                    cost_all += cost_sum
+                    unknown_n += 1 if r["unknown_cost"] else 0
+            if not show_cost:
+                r.pop("profit"), r.pop("unknown_cost")
+            if listed:
+                rows.append(r)
     if show_cost:
-        tot["profit"] = sum(exact[r["id"]][0] for r in done) - int(
-            sum((exact[r["id"]][1] for r in done), Decimal(0)).to_integral_value(ROUND_HALF_UP))
-        tot["unknown_cost_n"] = sum(1 for r in done if r["unknown_cost"])
+        tot["profit"] = value_all - int(cost_all.to_integral_value(ROUND_HALF_UP))
+        tot["unknown_cost_n"] = unknown_n
     sellers = [dict(u) for u in db.all("SELECT u.id, u.full_name name FROM memberships m JOIN users u ON u.id=m.user_id"
                                          " WHERE m.org_id=? ORDER BY u.full_name", (ctx.org_id,))]
-    return {"from": date_from, "to": date_to, "types": types, "rows": rows, "totals": tot, "truncated": truncated,
+    return {"from": date_from, "to": date_to, "types": types, "rows": rows, "totals": tot if totals else None,
+            "truncated": truncated, "total_rows": len(ids), "offset": offset, "page_size": MAX_ROWS,
             "show_cost": show_cost, "sellers": sellers}
+
+
+def _figures(r: dict, lines_of: dict, allocs_of: dict, history: dict, show_cost: bool, hidden_ok: bool,
+             with_lines: bool) -> tuple[int, Decimal]:
+    """Fill one invoice's worked-out columns in place (discount split, net, profit, its lines when asked).
+    Returns its exact (kept value, kept cost) for the period's profit."""
+    r["item_discount"] = r["customer_discount"] = 0
+    r["profit"] = 0 if show_cost else None
+    r["unknown_cost"] = False
+    value_sum, cost_sum = 0, Decimal(0)
+    lines = []
+    for l in lines_of.get(r["id"], []):
+        allocs = allocs_of.get(l["id"], [])
+        gross = line_gross_as_sold(allocs, l["discount_bp"], l["line_total"], line_fixed(l))
+        net = l["line_total"] if l["line_total"] is not None else gross
+        disc = gross - net
+        if l["discount_source"] == "contract":
+            share = min(disc, l["invoice_share"] or 0)          # the invoice discount: the person's, not the contract's
+            r["customer_discount"] += disc - share
+            r["item_discount"] += share
+        else:
+            r["item_discount"] += disc
+        returned = sum(a["returned_qty"] for a in allocs)
+        if show_cost and r["status"] == "completed":
+            kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+            value = outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["id"],
+                                      history.get(r["id"], []), fixed=line_fixed(l))
+            if any(a["unit_cost"] is None and kept[a["id"]] for a in allocs):
+                r["unknown_cost"] = True
+            value_sum += value
+            cost_sum += sum(Decimal(a["unit_cost"] or 0) * kept[a["id"]] * 100 for a in allocs)
+        if with_lines:
+            prices = official_prices(allocs)
+            if sum(p["gross"] for p in prices) != gross:
+                prices = official_prices(allocs, per_batch=True)
+            lines.append({"item_id": l["item_id"], "name_en": l["name_en"], "name_ar": l["name_ar"], "pack_size": l["pack_size"],
+                          "base_unit_name": l["base_unit_name"], "pack_unit_name": l["pack_unit_name"], "qty": l["qty_base"], "returned": returned, "gross": gross,
+                          "discount_bp": l["discount_bp"], "invoice_share": l["invoice_share"] or 0,
+                          "official_prices": prices, "net": net, "contract": l["discount_source"] == "contract",
+                          "hidden": bool(l["hidden"]) and not hidden_ok})
+    if show_cost:
+        # exact costs are added up and rounded once per invoice (and once for the period by the caller)
+        r["profit"] = value_sum - int(cost_sum.to_integral_value(ROUND_HALF_UP))
+    if r["status"] == "draft":           # not priced yet: what the open invoice would come to is shown on the cashier
+        r["item_discount"] = r["customer_discount"] = 0
+    r["net"] = r["total"] - r["returned_total"] if r["status"] == "completed" else 0
+    if with_lines:
+        for x in lines:
+            if x.pop("hidden"):
+                x.update(name_en="—", name_ar=None)
+        r["items"] = lines
+    return value_sum, cost_sum
