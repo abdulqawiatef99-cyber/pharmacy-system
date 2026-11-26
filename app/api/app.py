@@ -862,6 +862,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
         if req.method == "PUT":
+            ctx.require("settings.manage")
             b = await body(req)
             ml = b.get("manual_limit")
             if "manual_limit" in b and (isinstance(ml, bool) or not isinstance(ml, int) or not 0 <= ml <= rnd.MANUAL_MAX):
@@ -870,7 +871,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 rnd.set_step(db, ctx, b.get("step"))
             if "manual_limit" in b:
                 rnd.set_manual_limit(db, ctx, b.get("manual_limit"))
-            ctx.require("settings.manage")
             return J({"step": rnd.step(db, ctx.org_id), "manual_limit": rnd.manual_limit(db, ctx.org_id)})
         ctx.require("sales.read")
         return J({"step": rnd.step(db, ctx.org_id), "manual_limit": rnd.manual_limit(db, ctx.org_id)})

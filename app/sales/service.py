@@ -942,8 +942,9 @@ class Sales:
             rounding = 0
         if manual_rounding is not None:       # UX-27: the cashier's round button, in place of the automatic step
             from .rounding import check_manual, manual_limit
-            if not round_cash or not paid_cash:
-                raise ValidationFailed("التقريب اليدوي على جزء نقدي بس", code="manual_rounding_no_cash")
+            # one cash payment only, as the screen offers it (review P2): a split, a card or credit part is exact
+            if not round_cash or not paid_cash or paid_card or paid_transfer or on_credit:
+                raise ValidationFailed("التقريب اليدوي على الدفع النقدي لوحده بس", code="manual_rounding_no_cash")
             rounding = check_manual(manual_rounding, cash_due, manual_limit(self.db, ctx.org_id))
         if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",

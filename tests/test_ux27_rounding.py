@@ -46,7 +46,8 @@ class TestManualRound(Rounded):
 
     def test_refusals(self):
         sid, _ = self.sale(units=2, disc=20)                             # 37.80
-        for value, paid in ((-180, 3600), (-81, 3699), (1.5, 3780), (True, 3781), ("-80", 3700)):
+        for value, paid in ((-180, 3600), (-81, 3699), (1.5, 3780), (True, 3781), ("-80", 3700), (0, 3780),
+                            (120, 3900)):
             with self.assertRaises(ValidationFailed, msg=value):
                 self.pay(sid, paid_cash=paid, manual_rounding=value)
         with self.assertRaises(ValidationFailed):                        # paid must match total + manual
@@ -59,10 +60,24 @@ class TestManualRound(Rounded):
         self.assertEqual(e.exception.code, "manual_rounding_off")
         self.assertEqual(self.row(sid)["paid_cash"], 0)                  # still a draft
 
-    def test_split_rounds_only_the_cash_part(self):
-        sid, _ = self.sale(units=2, disc=20)                             # 37.80: 20.00 card + 17.80 cash -> 18.00
-        self.pay(sid, paid_card=2000, paid_cash=1800, manual_rounding=20)
-        self.assertEqual(tuple(self.row(sid)), (3780, 20, 1800, 2000, 0))
+    def test_only_the_pound_just_below_or_above(self):
+        # review P1: a bigger jump inside the limit would be a hidden discount / overcharge past the discount limit
+        rounding.set_manual_limit(self.db, self.ctx, 500)
+        sid, _ = self.sale(units=2, disc=20)                             # 37.80
+        for value, paid in ((-280, 3500), (220, 4000), (-180, 3600)):
+            with self.assertRaises(ValidationFailed, msg=value) as e:
+                self.pay(sid, paid_cash=paid, manual_rounding=value)
+            self.assertEqual(e.exception.code, "manual_rounding_whole")
+        a, _ = self.sale(units=2, disc=0)                                # 38.00: already a whole pound
+        for value, paid in ((-100, 3700), (100, 3900)):
+            with self.assertRaises(ValidationFailed):
+                self.pay(a, paid_cash=paid, manual_rounding=value)
+
+    def test_a_split_takes_no_manual_rounding(self):
+        sid, _ = self.sale(units=2, disc=20)                             # 37.80: 20.00 card + 17.80 cash
+        with self.assertRaises(ValidationFailed) as e:
+            self.pay(sid, paid_card=2000, paid_cash=1800, manual_rounding=20)
+        self.assertEqual(e.exception.code, "manual_rounding_no_cash")
 
     def test_full_return_after_a_manual_round_down_never_refunds_more(self):
         sid, d = self.sale(units=2, disc=20)
@@ -70,8 +85,8 @@ class TestManualRound(Rounded):
         self.pay(sid, paid_cash=3700, manual_rounding=-80)
         r1 = self.s.return_items(self.ctx, sid, {lid: 1}, refund_method="cash", reason="test")
         r2 = self.s.return_items(self.ctx, sid, {lid: 1}, refund_method="cash", reason="test")
+        self.assertEqual(r1["refund"], 1890)                            # a line value
         self.assertEqual(r1["refund"] + r2["refund"], 3700)              # exactly what he paid
-        self.assertLessEqual(r1["refund"], 3700)
 
     def test_full_return_after_a_manual_round_up(self):
         sid, d = self.sale(units=2, disc=20)
@@ -87,10 +102,20 @@ class TestManualRound(Rounded):
         self.assertEqual(self.cd.summary(self.ctx)["expected_cash"], start)
 
     def test_exchange_takes_no_manual_rounding(self):
-        with self.assertRaises(ValidationFailed):
-            sid, _ = self.sale(units=1, disc=0)
-            self.s.complete(self.ctx, sid, paid_cash=1800, manual_rounding=-100, round_cash=False,
+        sid, _ = self.sale(units=1, disc=10)                             # 18.90
+        with self.assertRaises(ValidationFailed) as e:
+            self.s.complete(self.ctx, sid, paid_cash=1800, manual_rounding=-90, round_cash=False,
                             safety_decisions=self.ack_all(sid))
+        self.assertEqual(e.exception.code, "manual_rounding_no_cash")
+
+
+class TestRoute(PlanCase):
+    def test_get_and_put(self):
+        self.assertEqual(self.call("GET", "/api/settings/rounding"), {"step": 0, "manual_limit": 100})
+        self.call("PUT", "/api/settings/rounding", 422, json={"step": 50, "manual_limit": 600})
+        self.assertEqual(self.call("GET", "/api/settings/rounding"), {"step": 0, "manual_limit": 100})  # nothing saved
+        self.assertEqual(self.call("PUT", "/api/settings/rounding", json={"manual_limit": 50}),
+                         {"step": 0, "manual_limit": 50})
 
 
 def _fn(name):

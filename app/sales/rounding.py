@@ -97,6 +97,9 @@ def check_manual(value, cash_due: int, limit: int) -> int:
                                details={"limit": limit})
     if cash_due <= 0 or cash_due + value <= 0:
         raise ValidationFailed("التقريب اليدوي على جزء نقدي بس", code="manual_rounding_no_cash")
-    if (cash_due + value) % 100:           # the button lands on a whole pound below or above, nothing else
+    # only the whole pound just below or just above (review P1: a bigger jump inside the limit would be a hidden
+    # discount or an overcharge that skips the discount limit); never 0, never the amount already round
+    below, above = cash_due // 100 * 100, -(-cash_due // 100) * 100
+    if value == 0 or cash_due + value not in (below, above):
         raise ValidationFailed("التقريب اليدوي لأقرب جنيه تحت أو فوق بس", code="manual_rounding_whole")
     return value
