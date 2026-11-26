@@ -303,7 +303,51 @@ def _arabic(line: str) -> str:
 SETTLE_CUSTOMERS = 50
 
 
-def write(path: Path, plan, rec: dict) -> Path:
+def _names_and_packs(plan) -> list[str]:
+    from ..catalog.normalize import normalize_text
+    from .estock_db import INTERNAL_MARK
+
+    customers = []
+    for customer in plan.customers:
+        name, alternate = customer["name"], customer.get("alt")
+        if customer.get("internal"):
+            name = name.removesuffix(INTERNAL_MARK)
+        if alternate and " ".join(name.split()).casefold() != " ".join(alternate.split()).casefold():
+            customers.append(f"  - {customer['code'] or customer['estock_id']} · العربي «{name}» · الإنجليزي «{alternate}»")
+    packs = []
+    for item in plan.items:
+        if item["pack_size"] != 1:
+            continue
+        hints = []
+        for name in (item["name_ar"], item["name_en"]):
+            if name:
+                # Require a count next to a unit. Age and omega variant numbers are part of the name.
+                text = normalize_text(re.sub(r"\d+\s*\+", " ", name).replace("×", " x "))
+                text = re.sub(r"\b(?:omega|اوميجا|اوميغا)\s*[369]\b", "", text)
+                cue = _UNIT_COUNT.search(text)
+                if cue:
+                    count = int(cue[1] or 1) * int(cue[2])
+                    if count > 1:
+                        hints.append(f"«{name}» ({count})")
+        if hints:
+            packs.append(f"  - {item['code']} · " + " / ".join(hints))
+    return [
+        "", f"٤. أسماء العملاء المختلفة بين العربي والإنجليزي ({len(customers)})",
+        *(customers or ["  مفيش."]),
+        "", f"٥. أصناف اسمها بيدل على أكتر من وحدة وعبوتها مسجلة بوحدة واحدة ({len(packs)})",
+        "  راجع عدد الوحدات في إي ستوك. الرقم اللي في الاسم للمراجعة.",
+        *(packs or ["  مفيش."]),
+    ]
+
+
+_UNIT_COUNT = re.compile(
+    r"(?<![\w./])(?:(\d{1,4})\s*x\s*)?(\d{1,4})\s*"
+    r"(?:tablets?|tabs?|capsules?|caps?|strips?|ampoules?|amps?|vials?|sachets?|suppositor(?:y|ies)|units?|pieces?|pcs|"
+    r"قرص|اقراص|اقرص|كبسوله|كبسولات|شريط|شرائط|امبول|امبولات|فيال|لبوس|كيس|اكياس|وحده|وحدات)\b"
+)
+
+
+def write(path: Path, plan, rec: dict, *, rehearsal: bool = False) -> Path:
     names = _names(plan)
     owner = [d for d in plan.dq if _for_owner(d)]
     rest = [d for d in plan.dq if not _for_owner(d)]
@@ -320,10 +364,15 @@ def write(path: Path, plan, rec: dict) -> Path:
         result = "النتيجة: كل حاجة اتنقلت والمطابقة 100% — اللي تحت محتاج تأكيدك بس"
     else:
         result = f"النتيجة: اتنقل لكن المطابقة فيها {len(rec.get('mismatches') or [])} فرق — شوف القسم ٢"
-    lines = ["تقرير نقل إي ستوك للمالك", result, ""]
+    lines = ["تقرير نقل إي ستوك للمالك"]
+    if rehearsal:
+        lines.append("دي تجربة على نسخة من قاعدة البرنامج. البيانات الأصلية زي ما هي.")
+    lines += [result, ""]
     entries = []
     for d in owner:
         what, ask, done = _ask(d)
+        if rehearsal and d["field"] == "table not read":
+            ask = "اقفل التسجيل في إي ستوك وارجع لشاشة النقل واعمل تجربة جديدة. لو الجدول فضل ناقص كلم الدعم."
         v = _value(d)
         entries.append({"what": f"{_who(d, names)} — {what}",
                         "estock": (f"{FIELD_AR[d['field']]} " if d.get("field") in FIELD_AR else "") + f"{d['estock_value']}"
@@ -393,5 +442,7 @@ def write(path: Path, plan, rec: dict) -> Path:
                          + (f" — القيمة {_money(v)} ج" if v else "") + f" — {_plain(d['action'])}")
         if len(doubt) > DOUBT_MAX:
             lines.append(f"    والباقي ({len(doubt) - DOUBT_MAX}) في data-quality.csv")
+    if rehearsal:
+        lines += _names_and_packs(plan)
     path.write_text("\n".join(_arabic(x) for x in lines) + "\n", encoding="utf-8-sig")
     return path
