@@ -30,6 +30,23 @@ console.log(JSON.stringify([upperEn("panadol extra 500mg"), upperEn("باناد�
   upperEn(""), upperEn(null), upperEn("Mix بانادول abc")]));""")
         self.assertEqual(out, ["PANADOL EXTRA 500MG", "بانادول", "VIT D 5µG", "", "", "MIX بانادول ABC"])
 
+    def test_keyboard_switch_one_at_a_time_and_403_does_not_turn_it_off(self):
+        out = self.node(_fn("keyboardSwitcher") + r"""
+const calls = []; let release = null, status = 200;
+const fakeFetch = (url, opts) => { calls.push(JSON.parse(opts.body).lang);
+  return status === "hang" ? new Promise((r) => { release = r; }) : Promise.resolve({ status, ok: status < 300 }); };
+const sw = keyboardSwitcher(fakeFetch, 10);
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  status = "hang"; sw("ar"); await wait(30);
+  sw("en"); await wait(30);                 // the first one still open: nothing more is sent yet
+  status = 200; release({ status: 200, ok: true }); await wait(10);   // then the newest wish goes
+  status = 403; sw("ar"); await wait(30);   // refused once (no permission / signed out)
+  status = 200; sw("ar"); await wait(30);   // not turned off: sent again
+  console.log(JSON.stringify(calls));
+})();""")
+        self.assertEqual(out, ["ar", "en", "ar", "ar"])
+
     def test_keyboard_switch_is_debounced_deduplicated_and_quiet(self):
         out = self.node(_fn("keyboardSwitcher") + r"""
 const calls = []; let mode = "ok";

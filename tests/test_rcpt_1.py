@@ -35,7 +35,7 @@ class ReceiptContentTests(unittest.TestCase):
         self.assertIn(("small", "فاتورة رقم 12048", "2026-11-23 14:05"), out)
         for label in ("البائع: بائع تجريبي", "الكاشير: أمين صندوق تجريبي", "الدفع: كاش"):
             self.assertIn(("small", label, ""), out)
-        self.assertIn(("item", "Sample Relief 24 tablets", ("1", "1 علبة", "50.00", "50.00")), out)
+        self.assertIn(("item", "SAMPLE RELIEF 24 TABLETS", ("1", "1 علبة", "50.00", "50.00")), out)   # UX-26: capitals
         self.assertIn(("small", "عدد الأصناف: 1", ""), out)
         self.assertIn(("small", "عدد القطع: 1", ""), out)
         self.assertIn(("total", "المطلوب", "50.00"), out)
