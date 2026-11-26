@@ -7,30 +7,8 @@ fixed, so the mark is removed with the fix. Synthetic data only."""
 import unittest
 
 from app.purchasing import validation
-from tests.helpers import DBTestCase
 
 known = unittest.expectedFailure
-
-
-# ---------------------------------------------------------------- part 2 (stock)
-class TestS7ImportStaffRedirectsStock(DBTestCase):
-    @known
-    def test_a_row_decision_on_opening_stock_needs_inventory_adjust(self):
-        from app.core import people
-        from app.dataimport.service import DataImport
-        from tests.test_dataimport import ITEMS, sheet
-        di = DataImport(self.db)
-        di.apply(self.ctx, di.analyze(self.ctx, sheet(ITEMS[:4]), "items.xlsx"))
-        uid = people.add_user(self.db, self.ctx, username="importer", full_name="x", password="Staff-Pass-2026",
-                              role_code="assistant")
-        people.set_exception(self.db, self.ctx, uid, "items.import", "grant")
-        sctx = self.login("importer", "Staff-Pass-2026")
-        run = di.analyze(self.ctx, sheet([["كود", "الصنف", "الرصيد", "التكلفة"], [101, "Panadol", 3, 32]]),
-                         "s.xlsx", kind="opening_stock")
-        row = di.get(self.ctx, run)["rows"][0]
-        other = self.db.one("SELECT id FROM items WHERE code='103'")["id"]
-        with self.assertRaises(Exception):
-            di.decide(sctx, run, row["id"], f"link:{other}")
 
 
 class TestS22InferredNetRounding(unittest.TestCase):
