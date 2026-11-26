@@ -17,22 +17,24 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field as dc_field
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+
+from ..core.numbers import MAX_SAFE
 
 LOW_CONFIDENCE = 0.8
 ACKNOWLEDGEABLE = {"total_mismatch", "line_total_mismatch", "net_price_mismatch",
                   "short_expiry", "slow_before_expiry"}      # U2-22: approved only with a written reason
 UNUSUAL = {"unusual_qty", "unusual_public_price", "unusual_last_cost"}
 ACKNOWLEDGEABLE |= UNUSUAL
-MAX_NUMBER = 2**53 - 1  # Exact across the browser, JSON and SQLite.
 NUMERIC_FIELDS = {
-    "qty": ("الكمية", 1, MAX_NUMBER),
-    "bonus_qty": ("البونص", 0, MAX_NUMBER),
-    "public_price": ("سعر الجمهور", 1, MAX_NUMBER),
-    "unit_net_price": ("سعر الصيدلي", 1, MAX_NUMBER),
+    "qty": ("الكمية", 1, MAX_SAFE),
+    "bonus_qty": ("البونص", 0, MAX_SAFE),
+    "public_price": ("سعر الجمهور", 1, MAX_SAFE),
+    "unit_net_price": ("سعر الصيدلي", 1, MAX_SAFE),
     "discount_bp": ("الخصم", 0, 10000),
-    "distributor_margin": ("هامش الموزع", 0, MAX_NUMBER),
-    "tax_amount": ("الضريبة", 0, MAX_NUMBER),
-    "line_total": ("إجمالي السطر", 0, MAX_NUMBER),
+    "distributor_margin": ("هامش الموزع", 0, MAX_SAFE),
+    "tax_amount": ("الضريبة", 0, MAX_SAFE),
+    "line_total": ("إجمالي السطر", 0, MAX_SAFE),
 }
 
 MESSAGES = {
@@ -176,6 +178,12 @@ def computed_total(invoice: dict, lines: list[dict]) -> int | None:
     if not lines or any(a is None for a in amounts):
         return None
     return sum(amounts) - (invoice.get("extra_discount") or 0) + (invoice.get("extra_tax") or 0)
+
+
+def allocated_unit_cost(amount: int, gross: int, total: int, units: int, all_units: int) -> Decimal:
+    """Supplier cost in EGP per received base unit, including invoice adjustments and free packs."""
+    share = Decimal(amount) * Decimal(total) / Decimal(gross) if gross else Decimal(total) * units / all_units
+    return (share / 100 / units).quantize(Decimal("0.000001"), ROUND_HALF_UP)
 
 
 def numeric_message(field: str) -> str:

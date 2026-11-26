@@ -1,5 +1,5 @@
 """Checks based on approved purchases in the receiving branch."""
-import hashlib
+from decimal import Decimal
 from fractions import Fraction
 
 from . import validation
@@ -9,8 +9,12 @@ def unusual_issues(db, inv, lines, items, settings):
     org, branch = inv["org_id"], inv["branch_id"]
     by_item = {}
     for line in lines:
-        if line["item_id"] in items and line["qty"] and line["qty"] > 0:
+        if line["item_id"] in items and line["qty"] and line["qty"] > 0 and (line["bonus_qty"] or 0) >= 0:
             by_item.setdefault(line["item_id"], []).append(line)
+    amounts = {line["id"]: validation.effective_amount(line) for line in lines}
+    gross = sum(amount for amount in amounts.values() if amount is not None)
+    total = gross - inv["extra_discount"] + inv["extra_tax"]
+    cost_check = gross > 0 and total >= 0 and all(amount is not None and amount > 0 for amount in amounts.values())
 
     def issue(code, line, field, **details):
         return validation.Issue("error", code, validation.MESSAGES[code], line["id"], field, details)
@@ -32,14 +36,13 @@ def unusual_issues(db, inv, lines, items, settings):
                                    max_qty=max(settings["qty_min"] - 1, usual_total * multiplier // len(recent)),
                                    item_id=item_id))
         last = db.one(
-            "SELECT m.unit_cost FROM stock_movements m JOIN purchase_invoices p"
+            "SELECT m.id, m.unit_cost FROM stock_movements m JOIN purchase_invoices p"
             " ON p.id=m.ref_id AND p.org_id=m.org_id AND p.status='approved'"
             " WHERE m.org_id=? AND m.branch_id=? AND m.item_id=? AND m.ref_type='purchase_invoice'"
             " AND m.movement_type='purchase' AND m.unit_cost IS NOT NULL"
-            " ORDER BY +m.rowid DESC LIMIT 1", (org, branch, item_id))
-        last_cost = Fraction(last["unit_cost"]) * 100 * item["pack_size"] if last else None
+            " ORDER BY +m.rowid DESC LIMIT 1", (org, branch, item_id)) if cost_check else None
         for line in group:
-            amount = validation.effective_amount(line)
+            amount = amounts[line["id"]]
             if amount is None or amount <= 0:
                 continue
             public, official = line["public_price"], item["public_price"]
@@ -47,11 +50,13 @@ def unusual_issues(db, inv, lines, items, settings):
                     public is not None and _far(public, official, settings["public_delta_pct"])):
                 found.append(issue("unusual_public_price", line, "public_price", public=public,
                                    official=official, amount=amount, qty=line["qty"], item_id=item_id))
-            received = line["qty"] + (line["bonus_qty"] or 0)
-            if _far(Fraction(amount, received), last_cost, settings["last_cost_delta_pct"]):
-                # Bind the reason to the comparison without returning the last cost to users who cannot see it.
-                snapshot = hashlib.sha256(f"{item_id}/{amount}/{received}/{last_cost}".encode()).hexdigest()
-                found.append(issue("unusual_last_cost", line, "unit_net_price", snapshot=snapshot))
+            received = (line["qty"] + (line["bonus_qty"] or 0)) * item["pack_size"]
+            if last and received > 0:
+                cost = validation.allocated_unit_cost(amount, gross, total, received, 0)
+                if _far(cost, Decimal(last["unit_cost"]), settings["last_cost_delta_pct"]):
+                    # A ledger entry identifies the reference without returning its restricted price.
+                    found.append(issue("unusual_last_cost", line, "unit_net_price", movement=last["id"],
+                                       cost=str(cost), received=received))
     validation.apply_acknowledgements(inv, found)
     return found
 

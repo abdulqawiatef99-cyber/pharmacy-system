@@ -270,8 +270,9 @@ const { chromium } = require('playwright');
   await p.click('[data-qa="0"]');
   await p.fill('#qaQty', '5'); await p.fill('#qaPrice', '108'); await p.fill('#qaDisc', '20');
   await p.focus('#qaDisc'); await p.keyboard.press('Enter');
-  const next = await p.evaluate(() => document.activeElement.id);        // Enter walks into the margin box
-  await p.keyboard.type('4');
+  const next = await p.evaluate(() => document.activeElement.id);
+  await p.focus('#qaMargin');
+  await p.keyboard.type('4'); await p.keyboard.press('Enter');
   await p.fill('#qaExp', '1230'); await p.fill('#qaBatch', 'M1');
   await p.click('#qaAdd');
   await p.waitForSelector('table.lines input[data-field="distributor_margin"]');

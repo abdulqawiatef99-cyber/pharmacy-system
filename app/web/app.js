@@ -1562,7 +1562,7 @@ function bindQuickAdd() {
   const q = $("#qaQ");
   if (!q) return;
   const picker = $("#qa"), price = $("#qaPrice");
-  let item = null;
+  let item = null, entryItemId;
   const warnPrice = () => showPurchasePriceWarning($("#qaPriceWarning", picker), item?.public_price, price.value);
   const showPicked = (it) => {
     $("#qaPicked").textContent = `العبوة ${it.pack_size} ${unitName(it)} · الرصيد الحالي ${fmtStock(it.stock_qty, it) || "0"}`;
@@ -1572,6 +1572,13 @@ function bindQuickAdd() {
     warnPrice();
   };
   const pick = (it) => {
+    if (entryItemId && entryItemId !== it.id) {
+      for (const [id, value] of Object.entries({
+        qaQty: "1", qaExp: "", qaNet: "", qaBonus: "0", qaBatch: "", qaMargin: "", qaTax: "", qaTaxMode: "0",
+      })) $(`#${id}`, picker).value = value;
+      $("#qaExpSee", picker).textContent = "";
+    }
+    entryItemId = it.id;
     item = it;
     $("#qaRes").innerHTML = "";
     q.value = itemText(it);
@@ -1607,7 +1614,10 @@ function bindQuickAdd() {
     const code = found.hint?.kind === "gs1" ? found.hint : null;
     const pickResult = (it) => {
       pick(it);
-      if (code?.expiry) { const [y, m] = code.expiry.split("-"); $("#qaExp").value = `${+m}-${y.slice(2)}`; }
+      if (code?.expiry) {
+        $("#qaExp").value = code.expiry;
+        $("#qaExpSee").textContent = "الصلاحية من الباركود";
+      }
       if (code?.batch) $("#qaBatch").value = code.batch;
     };
     if (scan || code) {
@@ -1672,6 +1682,12 @@ function bindQuickAdd() {
   });
   const add = async () => {
     if (!item) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    const bad = entryFields().find(field => field.validity.badInput);
+    if (bad) {
+      toast(`اكتب رقم صحيح في خانة ${bad.labels[0].firstChild.textContent.trim()}`, true);
+      bad.focus();
+      return;
+    }
     const qty = typedWhole($("#qaQty").value);
     if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
     const line = { item_id: item.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
@@ -1754,7 +1770,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && purchaseKeys &&
       (purchaseKeys.prefixed || /^\p{Nd}{8,}$/u.test(purchaseKeys.text) ||
-        /^(?:\]d2|\(01\)|01\d{14}.*\x1d)/i.test(purchaseKeys.text))) {
+        /^(?:\](?:d2|Q3|C1)|\(01\)|01\d{14}|https?:\/\/[^/]+\/.*01\/\d{8,14})/i.test(purchaseKeys.text))) {
     const barcode = purchaseKeys.text;
     purchaseKeys = null;
     clearTimeout(purchaseKeyTimer);
@@ -1772,7 +1788,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   // Start buffering on a digit or a GS1 introducer. Other text and keyboard shortcuts stay native.
-  if (!purchaseKeys && !/^[\p{Nd}(\]]$/u.test(e.key)) return;
+  if (!purchaseKeys && !/^[\p{Nd}(\]hH]$/u.test(e.key)) return;
   purchaseKeys ||= { target: e.target, prefixed: false, text: "" };
   purchaseKeys.text += separator ? "\x1d" : e.key;
   capture();
@@ -1819,7 +1835,8 @@ function renderLine(l) {
       </select></td>
     <td data-label="الإجمالي">${fieldInput(l, "line_total", money(l.line_total))}</td>
     <td data-label="التشغيلة">${fieldInput(l, "batch_no", l.batch_no ?? "", { type: "text" })}</td>
-    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_date ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : "", { type: "text" })}</td>
+    <td data-label="الصلاحية">${fieldInput(l, "expiry_date", l.expiry_precision === "month" && l.expiry_date
+      ? l.expiry_date.slice(5, 7) + "/" + l.expiry_date.slice(0, 4) : l.expiry_date || "", { type: "text" })}</td>
     <td>${draft ? `<button class="btn small secondary" data-del="${esc(l.id)}" aria-label="حذف السطر">حذف</button>
       ${l.item_id && l.qty > 1 ? `<button class="btn small secondary" data-split="${esc(l.id)}" title="جزء من الكمية بصلاحية تانية">+ صلاحية</button>` : ""}` : ""}</td>
   </tr>`;
@@ -1886,7 +1903,8 @@ async function purchaseTabs(curId) {
 }
 
 function purchaseDecimal(value) {
-  return value.trim() === "" ? null : exactPiasters(value) ?? { invalid: value };
+  const text = value.trim().replace(/^(-?)\./, (_, sign) => `${sign}0.`);
+  return text === "" ? null : exactPiasters(text) ?? { invalid: value };
 }
 
 const CONVERT = {
@@ -2055,6 +2073,10 @@ async function viewInvoice(id) {
 app.addEventListener("change", async (e) => {
   const t = e.target;
   if (!CUR) return;
+  if ((t.dataset.field || t.dataset.h) && t.validity?.badInput) {
+    toast("اكتب قيمة رقمية صحيحة", true);
+    return;
+  }
   const base = `/api/purchases/${CUR.invoice.id}`;
   if (t.dataset.taxmode) {
     await save(`${base}/lines/${t.dataset.taxmode}`, { changes: { tax_included: t.value === "" ? null : +t.value } });

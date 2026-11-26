@@ -14,7 +14,7 @@ import json
 import sqlite3
 from fractions import Fraction
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 
 from .. import config as config_mod
@@ -22,7 +22,7 @@ from ..catalog import gs1, matching, service as catalog
 from ..catalog.normalize import normalize_barcode, normalize_text
 from ..core import accounts, audit, notify
 from ..core.errors import Conflict, DomainError, NotFound, ValidationFailed
-from ..core.numbers import whole_number
+from ..core.numbers import MAX_SAFE, whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
@@ -237,7 +237,7 @@ class Purchasing:
             "SELECT * FROM purchase_invoice_lines WHERE invoice_id=? AND org_id=? ORDER BY line_no",
             (inv_id, ctx.org_id))]
         comp = validation.computed_total(inv, lines)
-        if comp is not None and abs(comp) > validation.MAX_NUMBER:
+        if comp is not None and abs(comp) > MAX_SAFE:
             raise ValidationFailed("إجمالي الفاتورة أكبر من الحد المسموح")
         # lines being typed may still lack qty/total: sort without comparing None to int
         h = hashlib.sha256(json.dumps(sorted(
@@ -656,11 +656,11 @@ class Purchasing:
                 if related.intersection(changes):
                     raise ValidationFailed(validation.MESSAGES[code], code=code)
             amount = validation.effective_amount(merged)
-            if amount is not None and abs(amount) > validation.MAX_NUMBER:
+            if amount is not None and abs(amount) > MAX_SAFE:
                 raise ValidationFailed("إجمالي السطر أكبر من الحد المسموح")
             if merged["item_id"] and merged["qty"]:
                 item = catalog.item_row(self.db, ctx, merged["item_id"])
-                if (merged["qty"] + merged["bonus_qty"]) * item["pack_size"] > validation.MAX_NUMBER:
+                if (merged["qty"] + merged["bonus_qty"]) * item["pack_size"] > MAX_SAFE:
                     raise ValidationFailed("الكمية مع البونص أكبر من الحد المسموح للصنف")
             for k in ("unit_net_price", "discount_bp", "line_total"):
                 upd[k] = merged[k]
@@ -1058,12 +1058,8 @@ class Purchasing:
                 # read again per line: an earlier line of the same item may have changed its public price
                 # (the preloaded row skipped the second change and logged a stale previous price, #336 review)
                 item = self.db.one("SELECT * FROM items WHERE id=? AND org_id=?", (l["item_id"], ctx.org_id))
-                # allocate invoice-level discount/tax proportionally to line value; lines worth nothing (all free)
-                # share it by units, or tax posted to the supplier reached no unit cost (#324 S27)
-                share = Decimal(amount) * Decimal(net_total) / Decimal(gross) if gross else \
-                    Decimal(net_total) * units[l["id"]] / all_units if all_units else Decimal(0)
                 base_qty = units[l["id"]]                       # bonus is free stock
-                unit_cost = (share / 100 / base_qty).quantize(Decimal("0.000001"), ROUND_HALF_UP)
+                unit_cost = validation.allocated_unit_cost(amount, gross, net_total, base_qty, all_units)
                 price = l["public_price"] if may_price else None     # #448: no authority, stated price ignored
                 if not may_price and item["public_price"] is not None and self.db.one(
                         "SELECT 1 FROM batches WHERE org_id=? AND item_id=? AND batch_no=? AND expiry_date IS ?"
