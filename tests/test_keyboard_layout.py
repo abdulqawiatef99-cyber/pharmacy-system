@@ -101,13 +101,21 @@ class TestEndpoint(APICase):
         self.assertEqual((r.status_code, r.json()), (200, {"ok": True}))
         sw.assert_called_once_with("ar")
         r = self.c.post(self.URL, json={"lang": "en"}, headers=H)               # the real call, on Linux
-        self.assertEqual((r.status_code, r.json()), (200, {"ok": False, "reason": "unsupported", "detail": "not_windows"}))
+        # 501: the sale screen (keyboardSwitcher in app.js) stops asking a PC that can never switch
+        self.assertEqual((r.status_code, r.json()), (501, {"ok": False, "reason": "unsupported", "detail": "not_windows"}))
+        with mock.patch.object(kl, "switch", return_value={"ok": False, "reason": "unsupported", "detail": "not_installed"}):
+            self.assertEqual(self.c.post(self.URL, json={"lang": "ar"}, headers=H).status_code, 501)
+        # a passing condition (no window in front, the window refused) is a 200: asked again on the next field
+        for detail in ("no_window", "refused", "error", "bad_lang"):
+            with mock.patch.object(kl, "switch", return_value={"ok": False, "reason": "unsupported", "detail": detail}):
+                r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
+            self.assertEqual((r.status_code, r.json()["detail"]), (200, detail))
 
     def test_another_device_is_refused_and_nothing_is_switched(self):
         phone = TestClient(self.app, client=("192.168.1.50", 50000))
         with mock.patch.object(kl, "switch", side_effect=AssertionError("switched for another device")):
             r = phone.post(self.URL, json={"lang": "ar"}, headers=H)
-        self.assertEqual((r.status_code, r.json()), (200, {"ok": False, "reason": "unsupported", "detail": "not_local"}))
+        self.assertEqual((r.status_code, r.json()), (501, {"ok": False, "reason": "unsupported", "detail": "not_local"}))
 
     def test_another_site_or_a_plain_form_is_refused(self):
         with mock.patch.object(kl, "switch", side_effect=AssertionError("switched for another site")):
@@ -120,11 +128,12 @@ class TestEndpoint(APICase):
                             {**H, "Content-Type": "text/plain"}):
                 r = self.c.post(self.URL, content=b'{"lang":"ar"}', headers=headers)
                 self.assertEqual((r.status_code, r.json()),
-                                 (200, {"ok": False, "reason": "unsupported", "detail": "not_this_screen"}), headers)
+                                 (403, {"ok": False, "reason": "unsupported", "detail": "not_this_screen"}), headers)
 
     def test_a_broken_body_or_a_broken_switch_still_answers(self):
-        for body in (b"", b"not json", b"[1,2]", b'"ar"', b'{"lang": 7}'):
-            r = self.c.post(self.URL, content=body, headers=H)
+        for body in (b"not json", b"[1,2]", b'"ar"', b'{"lang": 7}'):
+            with mock.patch.object(kl.sys, "platform", "win32"), mock.patch.object(kl, "_user32", side_effect=OSError):
+                r = self.c.post(self.URL, content=body, headers=H)
             self.assertEqual((r.status_code, r.json()["ok"], r.json()["reason"]), (200, False, "unsupported"), body)
         with mock.patch.object(kl, "switch", side_effect=RuntimeError("boom")):
             r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)

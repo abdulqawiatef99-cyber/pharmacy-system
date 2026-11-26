@@ -3417,22 +3417,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         """POST {"lang": "ar" | "en"}: the input language of the window in front, on the cashier PC itself.
         No session and no database (it must answer while a sale is being written, and the sign-in screen
         may ask too): only this PC's own screen may call it, and it can do nothing but switch the language.
-        Always 200 with {"ok": ...}; see app/core/keyboard_layout.py."""
+        It never raises. The body is always {"ok": ...} (app/core/keyboard_layout.py); the status tells the
+        screen whether to ask again: 200 asked (or could not just now), 501 this device can never switch
+        (not Windows, language not installed, not the cashier PC itself), 403 not this program's screen."""
         from ..core import keyboard_layout
+        no = lambda detail, status: J({"ok": False, "reason": "unsupported", "detail": detail}, status_code=status)  # noqa: E731
         try:
             if client_ip(req) not in ("127.0.0.1", "::1", "testclient"):
-                return J({"ok": False, "reason": "unsupported", "detail": "not_local"})
+                return no("not_local", 501)
             try:
                 _auth_screen(req, screen_only=True)      # the sign-in screen's own rule, so the two cannot drift
             except Unauthorized:
-                return J({"ok": False, "reason": "unsupported", "detail": "not_this_screen"})
+                return no("not_this_screen", 403)
             try:
                 b = json.loads(await req.body() or b"{}")
             except ValueError:
                 b = {}
-            return J(keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None))
+            out = keyboard_layout.switch(b.get("lang") if isinstance(b, dict) else None)
+            return J(out, status_code=501 if out.get("detail") in ("not_windows", "not_installed") else 200)
         except Exception:
-            return J({"ok": False, "reason": "unsupported", "detail": "error"})
+            return no("error", 200)
 
     async def index(req):
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
