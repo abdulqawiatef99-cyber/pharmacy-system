@@ -75,7 +75,7 @@ def _static_v(name: str) -> str:
 
 
 # Shell assets referenced by index.html; each gets its content hash in the URL (#85).
-SHELL_ASSETS = ("app.css", "app.js", "i18n-en.js", "manifest.json", "icon.svg")
+SHELL_ASSETS = ("app.css", "app.js", "scan.js", "i18n-en.js", "manifest.json", "icon.svg")
 
 
 def _web_build() -> str:

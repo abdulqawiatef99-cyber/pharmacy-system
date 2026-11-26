@@ -5101,6 +5101,17 @@ async function viewPos(afterCheckout = false) {
     q.dataset.searched = v;
     trackPosAdd(search(e.shiftKey));
   });
+  POS.scan = (code) => {
+    if (!q.isConnected || !SALE) return;
+    // a discount or amount typed in the focused field is saved first (its change event), then the item is added
+    const at = document.activeElement;
+    if (at && at !== q && at.matches?.("input, select, textarea")) at.blur();
+    trackPosAdd(Promise.resolve(POS.saving).then(() => search(false, false, code)).then((r) => {
+      // a code nobody has: show it in the search box with the results, so the cashier sees what was read
+      if (r === false && q.isConnected && !q.value) { q.value = code; q.focus(); q.select(); }
+      return r;
+    }));
+  };
   bindPosExtras();
 }
 
@@ -5143,6 +5154,14 @@ async function renderQuick() {
 async function newTab() {
   try { await openDraft(null); viewPos(); } catch (er) { toast(er.message, true); }
 }
+// U4-22: a scan while the focus is in any other field of the sale screen (discount, customer, payment, a button)
+// adds the item and never types into that field. The search box reads scans itself; dialogs keep their keys
+// (the item card's barcode field is scanned on purpose).
+const posScanStop = globalThis.PharmScan?.installScanDetector({
+  active: () => location.hash.startsWith("#/pos") && !!POS.scan && !POS.completing && !document.querySelector("dialog[open]"),
+  skip: (el) => el?.id === "posQ",
+  onScan: (code) => POS.scan(code),
+});
 document.addEventListener("keydown", (e) => {
   // The pharmacy scanner (HH360) sends F12 with each barcode (#81): never open the browser's tools, and on the
   // sales screen move to the search box so the code lands there wherever the focus was. Capture phase: first.
@@ -5266,7 +5285,7 @@ function drawerDialog() {
   const d = document.createElement("dialog");
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>فتح الدرج بدون بيع</h2>
     <label class="f">السبب <select name="reason"><option value="change">فكة</option><option value="cash_check">مراجعة النقدية</option><option value="other">أخرى</option></select></label>
-    <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»"></label>
+    <label class="f">التوضيح <input name="note" maxlength="200" placeholder="مطلوب مع «أخرى»" autocomplete="off"></label>
     <p class="muted small">يُسجَّل باسمك مع الشيفت والوقت والنتيجة. الطابعة لا تؤكد فتح الدرج فعليًا: المسجَّل هو «أمر فتح».</p>
     <div class="row"><button class="btn" value="ok">إرسال أمر الفتح</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -5369,7 +5388,7 @@ function renderCart(findings = null) {
             ? `<button type="button" class="btn small secondary" data-cart-pack="${esc(l.id)}">${PACK_QUESTION}</button>` : ""}</td>
         <td class="num">${linePrice(l)}</td>
         <td>${l.allocations.map((a) => `<span class="badge ${l.near_expiry ? "b-warn" : "b-ok"}">${l.near_expiry ? "⚠ " : ""}${esc((a.expiry_date || "—").slice(0, 7))}</span>`).join(" ")}</td>
-        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
+        <td>${l.discount_source === "contract" ? `<span class="chip" title="خصم التعاقد">🤝 ${pct(l.discount_bp)}%</span>` : canDisc ? `<span class="row nowrap"><input class="narrow" type="number" min="0" step="0.01" value="${l.discount_amount ? money(l.discount_amount) : l.discount_bp ? pct(l.discount_bp) : ""}" data-disc="${esc(l.id)}" placeholder="خصم" autocomplete="off"><select data-dunit="${esc(l.id)}" title="نسبة أو مبلغ"><option value="%" ${l.discount_amount ? "" : "selected"}>%</option><option value="egp" ${l.discount_amount ? "selected" : ""}>ج</option></select></span>`
           : l.discount_amount ? `${money(l.discount_amount)} ج` : l.discount_bp ? `${pct(l.discount_bp)}%` : `<button class="btn small secondary" data-askdisc="${esc(l.id)}">خصم</button>`}${l.invoice_share ? `<div class="muted small" title="نصيبه من الخصم على الفاتورة">+ ${money(l.invoice_share)}</div>` : ""}</td>
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
@@ -5470,13 +5489,13 @@ function renderSide() {
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}
         <div id="posUsual" class="usual"></div>` : `<p><a href="#" id="posCustNew">+ عميل جديد</a></p>`}
       ${s.kind === "delivery" ? `<div class="deliv">
-        <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}"></label>
-        <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}"></label>
-        <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}"></label>
-        <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}"></label></div>` : ""}
+        <label class="f">العنوان <input data-dl="address" value="${esc(d.address || "")}" autocomplete="off"></label>
+        <label class="f">الهاتف <input data-dl="phone" inputmode="tel" value="${esc(d.phone || "")}" autocomplete="off"></label>
+        <label class="f">مندوب التوصيل <input data-dl="courier" value="${esc(d.courier || "")}" autocomplete="off"></label>
+        <label class="f">رسوم التوصيل (ج) <input data-dl="fee" type="number" min="0" step="0.5" value="${s.delivery_fee ? money(s.delivery_fee) : ""}" autocomplete="off"></label></div>` : ""}
       <div class="sum"><span>الإجمالي</span><b>${money(s.subtotal)}</b></div>
       ${s.lines.length ? `<div class="row nowrap mt" id="posInvDiscRow"><label class="f">خصم على الفاتورة
-        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0"></label>
+        <input id="posInvDisc" class="narrow" type="number" min="0" step="0.01" value="${s.invoice_discount_amount ? money(s.invoice_discount_amount) : s.invoice_discount_bp ? pct(s.invoice_discount_bp) : ""}" placeholder="0" autocomplete="off"></label>
         <select id="posInvDiscU" title="نسبة أو مبلغ"><option value="%" ${s.invoice_discount_amount ? "" : "selected"}>%</option><option value="egp" ${s.invoice_discount_amount ? "selected" : ""}>ج</option></select></div>` : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
@@ -5487,7 +5506,7 @@ function renderSide() {
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
           <select data-pm="${i}">${METHODS.map(([m, t]) => `<option value="${m}" ${p.method === m ? "selected" : ""}>${t}</option>`).join("")}</select>
           ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
-          <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}">
+          <input class="narrow" type="number" step="0.01" min="0" data-pa="${i}" value="${money(p.amount)}" autocomplete="off">
           <button class="btn small secondary" data-prm="${i}" aria-label="إزالة">✕</button></div>`).join("")}
         ${POS.parts.some((p) => p.method === "transfer") ? proofInput(s) : ""}
         <button class="btn small secondary" id="partAdd">+ طريقة دفع</button>
@@ -5496,7 +5515,7 @@ function renderSide() {
       : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
         ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
         ${POS.method === "transfer" ? proofInput(s) : ""}
-        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'}></label>
+        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'} autocomplete="off"></label>
           <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
           ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
@@ -5679,7 +5698,7 @@ function renderFindings(findings) {
     ${findings.map((f, i) => `<div class="mt"><span class="badge ${SEV[f.severity][1]}">${{ item_rx: "📋 بوصفة طبية فقط", item_misuse: "⚠ يُساء استخدامه", item_note: "📝 ملاحظة", item_recall_pending: "⚠ منشور سحب لم يُراجَع" }[f.code] || SEV[f.severity][0]}</span> ${esc(f.message)}
       ${f.source ? `<div class="muted">المرجع: ${esc(f.source.name)} ${esc(f.source.version)} ${esc(f.source.ref || "")}</div>` : ""}
       ${f.basis === "heuristic" ? `<div class="muted">تنبيه مبني على تشابه الأسماء</div>` : ""}
-      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
+      ${needs(f) ? `<input class="mt" data-dec="${i}" placeholder="${f.requires === "acknowledge" ? "ملاحظة (اختياري) ثم تأكيد" : "اكتب سبب الاستمرار (يُسجَّل باسمك)"}" autocomplete="off">` : ""}</div>`).join("") || "<p>لا توجد تنبيهات</p>"}
     <button class="btn mt" id="posConfirm">تأكيد وإتمام البيع</button></div>`;
   $("#posConfirm").addEventListener("click", () => complete(findings));
   // Heikal PC 17/11 (S1): the panel opens under the cart; on a short window «إتمام البيع» seemed to do nothing.
@@ -5718,6 +5737,7 @@ async function complete(findings = null) {
   const sid = SALE.id;
   try {
     // A delivery field or discount still being typed must dispatch its change before the till is frozen.
+    posScanStop?.flush?.();                       // typing held back by the scan detector goes back first
     const active = document.activeElement;
     if (active?.dataset?.dl || active?.dataset?.pa || isDiscField(active)) active.blur();
     app.inert = true;
