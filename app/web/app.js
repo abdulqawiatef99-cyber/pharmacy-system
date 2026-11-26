@@ -1150,9 +1150,9 @@ function purchaseEntrySettingsHtml(setting) {
     <form id="puEntrySettings">
       <p>الصنف أول خانة. حرّك باقي الخانات لتغيير ترتيب الإدخال بزر Enter.</p>
       <ol id="puEntryOrder">${setting.field_order.map((field) => `<li data-order-field="${field}">
-        <span>${PURCHASE_ENTRY_FIELDS[field]}</span>
-        <button type="button" class="btn small secondary" data-move="-1" aria-label="قدّم ${PURCHASE_ENTRY_FIELDS[field]}">↑</button>
-        <button type="button" class="btn small secondary" data-move="1" aria-label="أخّر ${PURCHASE_ENTRY_FIELDS[field]}">↓</button>
+        <span id="puEntryField-${field}">${PURCHASE_ENTRY_FIELDS[field]}</span>
+        <button type="button" class="btn small secondary" data-move="-1" aria-label="قدّم" aria-describedby="puEntryField-${field}">↑</button>
+        <button type="button" class="btn small secondary" data-move="1" aria-label="أخّر" aria-describedby="puEntryField-${field}">↓</button>
       </li>`).join("")}</ol>
       <div class="row">${Object.entries(PURCHASE_ENTRY_LIMITS).map(([key, [label, max]]) => `<label class="f">${label}
         <input name="${key}" type="number" min="1" max="${max}" step="1" required autocomplete="off" value="${esc(setting[key])}">
