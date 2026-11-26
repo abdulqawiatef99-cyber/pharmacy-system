@@ -156,8 +156,13 @@ class World:
                           " ORDER BY qty DESC, batch_key LIMIT 1", (self.ctx.org_id, self.ctx.branch_id, item))
         if not row or row["qty"] < n:
             return
-        returns.create(self.db, self.ctx, self.case.sup, [{"item_id": item, "batch_id": row["batch_key"] or None,
-                                                           "qty_base": n, "reason": "overstock"}])
+        try:
+            returns.create(self.db, self.ctx, self.case.sup, [{"item_id": item, "batch_id": row["batch_key"] or None,
+                                                               "qty_base": n, "reason": "overstock"}])
+        except Conflict as error:  # the random lot may belong to the imported invoice's supplier
+            self.case.assertEqual(error.code, "return_supplier_mismatch")
+            self.tick("supplier_return_refused")
+            return
         self.model.add(item, -n)
         self.tick("supplier_return")
 

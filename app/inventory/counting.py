@@ -285,7 +285,7 @@ class Counting:
                     " LIMIT 1", (ctx.org_id, item_id, local_today().isoformat())):
                 r["problem"] = "surplus_requires_batch"
                 r["problem_message"] = (f"«{r['label']}»: فيه تشغيلة منتهية أو مسحوبة؛"
-                                        " سجّل الزيادة على التشغيلة الفعلية قبل الاعتماد")
+                                        " ألغِ الجرد ده وأعد العدّ بالتشغيلة الفعلية قبل الاعتماد")
             if expected_now < 0:
                 r["problem"] = "negative_after_sales"
             if r["last_seq"] > r["seq"] and self._moved_between(ctx, s["branch_id"], item_id, bk or None,

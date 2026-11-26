@@ -1113,7 +1113,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             return J(returns.create_from_invoice(db, ctx, str(b.get("supplier_id") or ""), str(b["invoice_id"]),
                                                  b.get("lines") or [], credit_note_no=b.get("credit_note_no"),
                                                  note=b.get("note"), partial_bonus_reason=b.get("partial_bonus_reason")))
-        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note")))
+        return J(returns.create(db, ctx, str(b.get("supplier_id") or ""), b.get("lines") or [], b.get("note"),
+                                explicit_unit_values=True))
 
     @handler
     async def supplier_return_page(req):

@@ -156,12 +156,14 @@ class TestSupplierLotReturn(_Base):
         self.assertEqual(self.owed(self.vendor) - before, 6413)
 
         line = returns.from_invoice(self.db, self.ctx, self.vendor, "VAT-461")["lines"][0]
-        first = returns.create(self.db, self.ctx, self.vendor, [{
-            "item_id": product, "batch_id": line["batch_id"], "qty_base": 1, "reason": "overstock",
-        }])
-        rest = returns.create_from_invoice(self.db, self.ctx, self.vendor, invoice_id, [{
-            "purchase_line_id": line["id"], "paid_units": 1, "bonus_units": 1, "reason": "overstock",
-        }])
+        lot_line = {"item_id": product, "batch_id": line["batch_id"], "qty_base": 1, "reason": "overstock"}
+        with self.assertRaises(Conflict) as refusal:
+            returns.create(self.db, self.ctx, self.vendor, [lot_line])
+        self.assertEqual(refusal.exception.code, "bonus_line_whole")
+        first = returns.create_from_invoice(self.db, self.ctx, self.vendor, invoice_id, [{
+            "purchase_line_id": line["id"], "paid_units": 1, "reason": "overstock",
+        }], partial_bonus_reason="Synthetic approved partial return")
+        rest = returns.create(self.db, self.ctx, self.vendor, [{**lot_line, "qty_base": 2}])
         self.assertEqual(first["total"] + rest["total"], 6413)
         self.assertEqual(first["tax_total"] + rest["tax_total"], 413)
         self.assertEqual([l["unit_value"] for l in rest["lines"] if l["is_bonus"]], [0])
@@ -178,3 +180,52 @@ class TestSupplierLotReturn(_Base):
         self.assertEqual(self.owed(self.vendor), 4500)
         self.assertEqual(self.qty(self.product), 4)
         self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))
+
+    def test_another_supplier_cannot_get_credit_against_these_receipts(self):
+        other = self.supplier("Synthetic supplier without a receipt for this lot")
+        with self.assertRaises(Conflict):
+            returns.create(self.db, self.ctx, other, [{
+                "item_id": self.product, "batch_id": self.batch, "qty_base": 1, "reason": "overstock",
+            }])
+        self.assertEqual(self.owed(other), 0)
+        self.assertEqual(self.qty(self.product), 2)
+        self.assertFalse(self.db.one("SELECT 1 FROM supplier_returns"))
+
+    def test_invoice_return_respects_the_remaining_lot_credit_after_a_legacy_overcredit(self):
+        from unittest.mock import patch
+
+        # Older versions credited the latest cost and left the purchase line unset.
+        with patch.object(returns, "_lot_return_rows", return_value=[(1, 2500, 0, None, 0)]):
+            self.lot_return(1)
+        line = returns.from_invoice(self.db, self.ctx, self.vendor, "INV-2")["lines"][0]
+        result = returns.create_from_invoice(self.db, self.ctx, self.vendor, self.second, [{
+            "purchase_line_id": line["id"], "paid_units": 1, "reason": "overstock",
+        }])
+        self.assertEqual(result["total"], 2000)
+        self.assertEqual(self.owed(self.vendor), 0)
+        self.assertEqual(self.qty(self.product), 0)
+
+    def test_explicit_zero_is_respected_even_when_the_latest_receipt_is_free(self):
+        self.buy(self.vendor, self.product, 1, 0)
+        self.assertEqual(returns.suggest_value(self.db, self.ctx, self.product, self.batch, self.vendor), 0)
+        self.assertEqual(self.lot_return(1, 0)["total"], 0)
+        self.assertEqual(self.owed(self.vendor), 4500)
+
+
+class TestSupplierReturnAPI(APICase, _Base):
+    def test_a_typed_price_equal_to_the_suggestion_still_gets_the_credit_limit(self):
+        self.http_login()
+        supplier = self.supplier("Synthetic QA461 supplier")
+        self.buy(supplier, self.pan, 1, 2000)
+        self.buy(supplier, self.pan, 1, 2500)
+        batch = self.lot(self.pan)
+        response = self.c.post("/api/supplier-returns", headers=H, json={
+            "supplier_id": supplier, "lines": [{
+                "item_id": self.pan, "batch_id": batch, "qty_base": 4,
+                "reason": "overstock", "unit_value": 1250,
+            }],
+        })
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "return_value_exceeds")
+        self.assertEqual(self.owed(supplier), 4500)
+        self.assertEqual(self.qty(self.pan), 4)
