@@ -122,6 +122,23 @@ class TestNoCloseCandidateIsEverLeftOut(ReviewCase):
         r = matching.match_line(self.db, self.ctx.org_id, raw_name="Paracetamol")
         self.assertEqual((r.status, r.warnings, r.item_id), ("suggested", ["ambiguous"], ids[0]))
 
+    def test_an_import_still_stops_at_a_similar_item(self):
+        # Codex P2 on #483: the import planner decides "create" from the same answer, and it asks without
+        # naming a score: the proof is the default, only the guess-only search opts out
+        from app.catalog.normalize import dedupe_key
+        from app.dataimport.service import DataImport
+        self.assertLessEqual(matching.SURE_FROM, 0.9)
+        rng = random.Random(42)
+        names = [("Paraceamol", "")] + [("Paracetamol" + "".join(rng.sample("bcdfghjklmnpqrstvwxz", 4)), "")
+                                        for _ in range(200)]
+        ids = add_items(self.db, self.ctx.org_id, list(dict.fromkeys(names)))
+        key = dedupe_key("Paracetamol", None, None, 1)
+        action, target, issues = DataImport(self.db)._plan_item(
+            self.ctx, {"_name": "Paracetamol", "_dedupe": key, "_dedupe_base": key})
+        self.assertEqual((action, target, [i["code"] for i in issues]), ("review", ids[0], ["similar_item_exists"]))
+        dup = cat.find_duplicates(self.db, self.ctx, "Paracetamol")
+        self.assertEqual([d["item_id"] for d in dup], [ids[0]])
+
     def test_every_candidate_above_the_deciding_score_is_found(self):
         rng = random.Random(11)
         cons, vow = "bcdfgklmnprstvz", "aeiou"

@@ -96,7 +96,7 @@ class TestShortlistKeepsTheAnswers(DBTestCase):
         with mock.patch.object(matching, "fuzzy_candidates", wraps=matching.fuzzy_candidates) as asked:
             r = search.search(self.db, self.ctx, "Zedmakr Lien", 500)
         self.assertEqual(r["hint"], {"kind": "fuzzy"})
-        self.assertEqual((asked.call_args.args[-1], asked.call_args.kwargs), (search.FUZZY_MAX, {"compare": search.FUZZY_MAX}))
+        self.assertEqual((asked.call_args.args[-1], asked.call_args.kwargs), (search.FUZZY_MAX, {"compare": search.FUZZY_MAX, "sure_from": None}))     # guesses for a person: no proof asked
         self.assertTrue(0 < len(r["items"]) <= search.FUZZY_MAX)
         # every guess that was compared reaches the caller's stock filter, not only the first few (Codex on #483)
         self.assertGreater(len(r["items"]), 100)

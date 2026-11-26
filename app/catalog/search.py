@@ -177,7 +177,7 @@ def _search(db: Database, ctx: Context, q: str, limit: int = 20, category: str |
         # is handed over for that (FUZZY_MAX at most, so an in-stock guess is not cut before its balance is
         # read, Codex on #483), and they are read in one query (500 single reads cost more than the search)
         ids = [c.item_id for c in matching.fuzzy_candidates(db, ctx.org_id, q, min(limit, FUZZY_MAX),
-                                                            compare=FUZZY_MAX)]
+                                                            compare=FUZZY_MAX, sure_from=None)]
         rows = {r["id"]: dict(r) for r in db.all(
             f"SELECT * FROM items WHERE org_id=? AND id IN ({','.join('?' * len(ids))})", (ctx.org_id, *ids))} if ids else {}
         for i in ids:

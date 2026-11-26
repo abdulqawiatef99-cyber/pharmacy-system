@@ -436,6 +436,10 @@ def _complete(idx: _OrgIndex, q: ParsedName, left_out, sure_from: float) -> list
     return out
 
 
+# No candidate scoring this or more is ever missing from an answer (unless the caller opts out): below the
+# lowest score anything is decided from without a person (import "similar item" 0.90, purchase match 0.92,
+# duplicate check 0.93).
+SURE_FROM = 0.9
 SHORTLIST_MIN, SHORTLIST_MAX = 120, 400
 SKEL_BUDGET, SKEL_KEEP = 60000, 400      # skeleton-group postings counted per question; candidates they add
 RANK_MAX = 1500        # at most this many candidates are ranked one by one (about 3 µs each)
@@ -537,11 +541,12 @@ def _shortlist(idx: _OrgIndex, q: ParsedName, ids: set[str], keep: int) -> list[
 
 
 def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5, *,
-                     compare: int | None = None, sure_from: float | None = None) -> list[Candidate]:
+                     compare: int | None = None, sure_from: float | None = SURE_FROM) -> list[Candidate]:
     """The closest `limit` items. `compare`: how many shortlisted candidates are compared in full (default
     three for every one asked, 120 to 400); the sale screen asks for more answers than that ratio gives.
-    `sure_from`: a score from which no candidate may be missing (`_complete`): given by every caller that
-    decides something from the answer without a person. A search that only offers guesses leaves it out."""
+    `sure_from`: a score from which no candidate may be missing (`_complete`). It is the default, because
+    callers decide things from the answer without a person (an automatic purchase match, "no similar item,
+    create it" in an import, the duplicate check); only a search that offers guesses to a person passes None."""
     idx = _index(db, org_id)
     key = (raw_name, limit, compare, sure_from)
     hit = idx.memo.get(key)
@@ -560,8 +565,8 @@ def fuzzy_candidates(db: Database, org_id: str, raw_name: str, limit: int = 5, *
             if len(memo) >= MEMO_MAX:              # bounded: a long import of new names must not grow it forever
                 memo.clear()
             memo[key] = hit
-            if sure_from is not None:              # also the answer for a caller that needs no proof (the
-                memo.setdefault((raw_name, limit, compare, None), hit)      # invoice screen's candidate list)
+            if sure_from is not None and len(memo) < MEMO_MAX:      # also the answer for a caller that needs
+                memo.setdefault((raw_name, limit, compare, None), hit)                         # no proof
     # copies: a caller may change what it gets without changing the remembered answer
     return [Candidate(c.item_id, c.label, c.score, list(c.reasons)) for c in hit]
 
@@ -607,8 +612,8 @@ def match_line(db: Database, org_id: str, *, raw_name: str, raw_code: str | None
                limit: int = 5) -> MatchResult:
     warnings: list[str] = []
     # automatic only when the best is 0.97 or more and nothing else is within 0.05 of it: so no candidate from
-    # 0.92 up may be missing from what the decision looks at
-    cands = fuzzy_candidates(db, org_id, raw_name, limit, sure_from=AUTO_FUZZY_MIN - 0.05) if raw_name else []
+    # 0.92 up may be missing from what the decision looks at (SURE_FROM, the default, is below that)
+    cands = fuzzy_candidates(db, org_id, raw_name, limit) if raw_name else []
 
     def identified(item_id: str, method: str, score: float) -> MatchResult:
         sim = _label_score(db, org_id, item_id, raw_name)
