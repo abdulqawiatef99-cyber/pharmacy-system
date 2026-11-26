@@ -205,8 +205,10 @@ def impossible_line(line: dict, today: date, *, tax_only: bool = False):
     if line.get("expiry_date") and date.fromisoformat(line["expiry_date"]) < today:
         yield "expired", "expiry_date", {"expiry_date"}
     sources = _j(line.get("field_sources"))
-    if public == 0 or (not tax_only and (
-            (net == 0 and sources.get("unit_net_price") != "inferred") or effective_amount(line) == 0)):
+    paid = effective_amount(line)
+    has_line_tax_cost = net == 0 and (line.get("tax_amount") or 0) > 0 and paid == line["tax_amount"]
+    if public == 0 or (not tax_only and (paid == 0 or
+            (net == 0 and sources.get("unit_net_price") != "inferred" and not has_line_tax_cost))):
         yield "positive_cost", "unit_net_price", {"qty", "public_price", "unit_net_price", "discount_bp",
                                                 "tax_amount", "tax_included", "line_total", "distributor_margin"}
 
