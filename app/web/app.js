@@ -2021,7 +2021,13 @@ function supPicker(sel) {
   const draw = () => {
     const q = inp.value === (sel.selectedOptions[0]?.value ? sel.selectedOptions[0].text : "") ? "" : inp.value;
     const b = blank();
-    rows = [...(b && !sel.required && !q.trim() ? [{ id: "", name: b.text }] : []), ...supRank(entries(), q).slice(0, 15)];
+    let ranked = supRank(entries(), q).slice(0, 15);
+    // Codex P2: with nothing typed the chosen supplier is always listed (first), even when 15 others rank above it
+    if (!q.trim() && sel.value && !ranked.some((r) => r.id === sel.value)) {
+      const cur = entries().find((r) => r.id === sel.value);
+      if (cur) ranked = [cur, ...ranked.slice(0, 14)];
+    }
+    rows = [...(b && !sel.required && !q.trim() ? [{ id: "", name: b.text }] : []), ...ranked];
     if (at < 0) at = Math.max(0, rows.findIndex((r) => r.id === sel.value));
     at = Math.max(0, Math.min(at, rows.length - 1));
     box.innerHTML = rows.length ? rows.map((r, i) => `<div class="spOpt${i === at ? " on" : ""}${r.inactive ? " muted" : ""}" role="option" data-i="${i}" aria-selected="${i === at}">
@@ -2037,16 +2043,19 @@ function supPicker(sel) {
     sync();
   };
   // review P1: the list opens on the supplier already chosen, so Enter with nothing typed keeps it
-  inp.addEventListener("focus", () => { inp.select(); at = -1; draw(); });
-  inp.addEventListener("input", () => { at = 0; draw(); });
+  let edited = false;          // Enter with nothing typed or moved keeps the chosen supplier, whatever is listed
+  inp.addEventListener("focus", () => { inp.select(); at = -1; edited = false; draw(); });
+  inp.addEventListener("input", () => { at = 0; edited = true; draw(); });
   inp.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       if (!open) { draw(); return; }
+      edited = true;
       at = (at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % Math.max(rows.length, 1); draw();
     } else if (e.key === "Enter") {
       if (!open) return;
       e.preventDefault(); e.stopPropagation();
+      if (!edited) { close(); sync(); return; }
       pick(rows[at]);
     } else if (e.key === "Escape") {
       if (open) { e.preventDefault(); e.stopPropagation(); }

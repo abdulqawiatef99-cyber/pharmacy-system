@@ -108,6 +108,20 @@ const { chromium } = require('playwright');
   await p.keyboard.press('Enter');
   await changed;
   out.filter = await p.evaluate(() => document.querySelector('#puSup').selectedOptions[0].text);
+  // Codex P2: the chosen supplier ranks below the first 15 (20 recent ones above it): Enter with nothing typed keeps it
+  await p.click('#puRep .spIn');
+  await p.fill('#puRep .spIn', 'اسيوط');
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => document.querySelector('#puSup').selectedOptions[0].text === 'أسيوط للأدوية');
+  await p.click('body');
+  await p.focus('#puRep .spIn');
+  out.listedFirstOnOpen = await p.textContent('#puRep .spOpt.on');
+  await p.keyboard.press('Enter');
+  out.keptLowRanked = await p.evaluate(() => document.querySelector('#puSup').selectedOptions[0].text);
+  await p.click('#puRep .spIn');
+  await p.fill('#puRep .spIn', 'pharma');
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => document.querySelector('#puSup').selectedOptions[0].text === 'Pharma Overseas');
   // Esc puts back what was chosen
   await p.click('#puRep .spIn');
   await p.fill('#puRep .spIn', 'xyz');
@@ -172,6 +186,9 @@ class TestScreen(APICase):
         cat.create_supplier(self.db, self.ctx, name="Pharma Overseas")
         with self.db.transaction():
             self.db.execute("UPDATE suppliers SET phone='01001234567' WHERE name='ابن سينا فارما'")
+        purch = Purchasing(self.db, self.s)
+        for n in range(20):                    # 20 recent suppliers rank above the chosen one
+            purch.create_manual(self.ctx, supplier_id=cat.create_supplier(self.db, self.ctx, name=f"Synthetic Recent {n:02d}"))
         cat.create_supplier(self.db, self.ctx, name="أسيوط للأدوية")
 
     def test_type_arrows_enter(self):
@@ -181,6 +198,8 @@ class TestScreen(APICase):
         self.assertEqual(out["manual"], "أسيوط للأدوية")
         self.assertEqual(out["shown"], "أسيوط للأدوية")
         self.assertEqual(out["filter"], "Pharma Overseas")
+        self.assertEqual(out["keptLowRanked"], "أسيوط للأدوية")
+        self.assertIn("أسيوط للأدوية", out["listedFirstOnOpen"])
         self.assertEqual(out["afterEsc"], "Pharma Overseas")
         self.assertTrue(out["focusAfterEmpty"])
         self.assertEqual(out["stillHere"], "#/purchases")
