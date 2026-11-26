@@ -4627,7 +4627,7 @@ async function posRevalidate(sid) {
   } catch { return; }                       // offline: what is shown stays; every change is checked by the server
   if (!current() || SALE?.id !== sid) return;
   const [rcfg, ui, tabs, sale] = got;
-  const key = (list) => JSON.stringify(list.map((d) => [d.id, d.kind, d.id === sid ? 0 : d.lines]));
+  const key = (list) => JSON.stringify(list.map((d) => [d.id, d.kind, d.lines]));
   const sameTabs = key(tabs) === key(POS.tabs || []);
   const sameSettings = JSON.stringify(rcfg) === JSON.stringify(RCFG) && JSON.stringify(ui) === JSON.stringify(ME.ui);
   RCFG = rcfg; ME.ui = ui; POS.tabs = tabs;
@@ -4638,8 +4638,26 @@ async function posRevalidate(sid) {
   if (sameTabs && sameSettings && !newer) return;
   const q = $("#posQ"), typing = (q && q.value) || (document.activeElement && document.activeElement !== q &&
     document.activeElement !== document.body && app.contains(document.activeElement));
-  if (busy || typing || sameSettings && sameTabs) { renderCart(); renderSide(); return; }
+  if (busy || typing) {                      // only a changed invoice is drawn, and the box being typed in keeps its text
+    if (newer) keepTyping(() => { renderCart(); renderSide(); });
+    return;
+  }
   drawPos(tabs);
+}
+// the focused box (an amount, a discount, the customer search) is found again after a redraw, with its text and caret
+function keepTyping(draw) {
+  const a = document.activeElement;
+  const attr = a && [...a.attributes].find((x) => x.name.startsWith("data-") && x.name !== "data-tour");
+  const sel = a?.id ? `#${CSS.escape(a.id)}` : attr ? `[${attr.name}="${CSS.escape(attr.value)}"]` : null;
+  const typed = a && "value" in a ? a.value : null;
+  let caret = null;
+  try { caret = [a.selectionStart, a.selectionEnd]; } catch { /* number boxes have no caret */ }
+  draw();
+  const b = sel && app.querySelector(sel);
+  if (!b || typed == null) return;
+  if (b.value !== typed) { b.value = typed; b.dispatchEvent(new Event("input", { bubbles: true })); }
+  b.focus();
+  try { if (caret?.[0] != null) b.setSelectionRange(...caret); } catch { /* not selectable */ }
 }
 
 function drawPos(tabs) {
@@ -4668,8 +4686,9 @@ function drawPos(tabs) {
   }));
   document.querySelectorAll("[data-close]").forEach((x) => x.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const d = tabs.find((t) => t.id === x.dataset.close);
-    if (d?.lines && !confirm("هذه الفاتورة بها أصناف. هل تغلقها دون بيع؟")) return;
+    const d = (POS.tabs || tabs).find((t) => t.id === x.dataset.close);
+    const n = x.dataset.close === SALE?.id ? SALE.lines.length : d?.lines;     // the open invoice: its real count
+    if ((n || n == null) && !confirm("هذه الفاتورة بها أصناف. هل تغلقها دون بيع؟")) return;
     try {
       await api(`/api/sales/${x.dataset.close}/discard`, { method: "POST", body: {} });
       if (POS.tabs) POS.tabs = POS.tabs.filter((t) => t.id !== x.dataset.close);
@@ -5360,6 +5379,8 @@ function newCustomerDialog() {
 
 function refreshTabLabel() {
   const t = document.querySelector(`.tab.on`);
+  const kept = SALE && POS.tabs?.find((d) => d.id === SALE.id);
+  if (kept) { kept.lines = SALE.lines.length; kept.kind = SALE.kind; }    // U4-24: the kept list stays true
   if (!t || !SALE) return;
   const n = (t.dataset.n ||= (t.firstChild.textContent.match(/\d+/) || ["1"])[0]);
   t.firstChild.textContent = `\n      فاتورة ${n}${SALE.kind === "delivery" ? " · توصيل" : ""} · ${SALE.lines.length ? `${SALE.lines.length} صنف` : "فارغة"}\n      `;

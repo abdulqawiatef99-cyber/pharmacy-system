@@ -21,6 +21,8 @@ const { chromium } = require('playwright');
   const H = { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' };
   await p.goto(base + '/#/pos');
   await p.waitForSelector('#posQ');
+  await p.waitForTimeout(700);                                 // the first-run tour: «تخطّي»
+  if (await p.locator('[data-tour-go=skip]').count()) await p.locator('[data-tour-go=skip]').click();
   const lines = (n) => p.waitForFunction((n) => document.querySelectorAll('table.cart [data-minus]').length === n, n, { timeout: 15000 });
   await p.locator('#posQ').focus();
   await p.keyboard.type(a, { delay: 2 }); await p.keyboard.press('Enter');
@@ -42,6 +44,41 @@ const { chromium } = require('playwright');
   await lines(2);                                             // the check with the server brings the other line
   out.linesAfterCheck = 2;
   out.sameInvoice = (await p.evaluate(() => document.querySelector('.tab.on')?.dataset.tab)) === sid;
+  // review P1-2: an amount typed in «العميل دفع» while the check answers (with a line added elsewhere) stays
+  await p.evaluate(() => { location.hash = '#/home'; });
+  await p.waitForFunction(() => !document.querySelector('#posQ'));
+  await p.evaluate(async ([sid, id, H]) => fetch(`/api/sales/${sid}/lines`, { method: 'POST', headers: H,
+      body: JSON.stringify({ item_id: id, packs: 1, units: 0, client_ref: 'elsewhere-2' }) }), [sid, bId, H]);
+  await p.evaluate(() => { location.hash = '#/pos'; });
+  await p.waitForSelector('#payGiven:not([disabled])');
+  await p.locator('#payGiven').click();
+  await p.keyboard.type('200', { delay: 80 });
+  await p.waitForFunction(() => /^2\b/.test([...document.querySelectorAll('table.cart tbody tr .qty b')].map((b) => b.innerText).join(' ').match(/\d+/g)?.slice(-1)[0] ?? ''), null, { timeout: 15000 });
+  out.givenAfterCheck = await p.locator('#payGiven').inputValue();
+  out.focusAfterCheck = await p.evaluate(() => document.activeElement.id);
+  await p.unrouteAll({ behavior: 'ignoreErrors' });
+  // review P1-1: closing an invoice with items after coming back still asks first
+  await p.locator('#payGiven').fill('');
+  // a new empty invoice gets an item, the cashier goes away and back while the check is late, then presses ✕
+  await p.locator('#tabNew').click();
+  await p.waitForFunction(() => document.querySelectorAll('[data-tab]').length === 2);
+  const nid = await p.evaluate(() => document.querySelector('.tab.on')?.dataset.tab);
+  await p.locator('#posQ').focus();
+  await p.keyboard.type(a, { delay: 2 }); await p.keyboard.press('Enter');
+  await lines(1);
+  let asked = null;
+  p.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
+  await p.route('**/api/sales/drafts', (r) => setTimeout(() => r.continue().catch(() => {}), 3000));   // the check is late
+  await p.evaluate(() => { location.hash = '#/home'; });
+  await p.waitForFunction(() => !document.querySelector('#posQ'));
+  await p.evaluate(() => { location.hash = '#/pos'; });
+  await p.waitForSelector('#posQ');
+  await p.locator(`[data-close="${nid}"]`).click();
+  await p.waitForTimeout(500);
+  out.askedBeforeClose = asked;
+  out.stillOpen = await p.locator(`[data-tab="${nid}"]`).count();
+  await p.locator(`[data-tab="${sid}"]`).click();              // back to the first invoice for the rest
+  await p.waitForFunction((sid) => document.querySelector('.tab.on')?.dataset.tab === sid, sid);
   await p.unrouteAll({ behavior: 'ignoreErrors' });
   // closed elsewhere while away: the screen moves to an open invoice, never stays on the closed one
   await p.evaluate(() => { location.hash = '#/home'; });
@@ -54,7 +91,7 @@ const { chromium } = require('playwright');
   await p.locator('#posQ').focus();
   await p.keyboard.type(bb, { delay: 2 }); await p.keyboard.press('Enter');
   await lines(1);
-  const late = (r) => setTimeout(() => r.continue().catch(() => {}), 700);
+  const late = (r) => setTimeout(() => r.continue().catch(() => {}), 1000);
   await p.route('**/api/sales/drafts', late);
   await p.route('**/api/sales', (r) => r.request().method() === 'POST' ? late(r) : r.continue());
   const [res] = await Promise.all([p.waitForResponse((r) => r.url().endsWith('/complete')), p.keyboard.press('F9')]);
@@ -86,7 +123,11 @@ class TestSaleScreenSpeed(APICase):
         self.assertLess(out["backMs"], 700, out)                 # the server answers 1.5 s late
         self.assertEqual(out["linesAtOnce"], 1)                  # what the screen kept, at once
         self.assertTrue(out["sameInvoice"])
+        self.assertEqual(out["givenAfterCheck"], "200")         # the check never takes what is being typed
+        self.assertEqual(out["focusAfterCheck"], "payGiven")
+        self.assertTrue(out["askedBeforeClose"])                 # «هذه الفاتورة بها أصناف ...»
+        self.assertEqual(out["stillOpen"], 1)
         self.assertTrue(out["leftClosed"])
         self.assertEqual(out["completed"], 200)
-        self.assertLess(out["nextMs"], 1300, out)                # two 0.7 s waits one after the other would be 1.4 s+
+        self.assertLess(out["nextMs"], 1800, out)                # two 1 s waits one after the other would be 2 s+
         self.assertEqual(out["tabs"], 1)
