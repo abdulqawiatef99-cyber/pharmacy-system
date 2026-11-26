@@ -748,7 +748,8 @@ def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
     - backups folder: the verified backup = database + E-Stock history (its ready .xz when there is one) +
       every attachment;
     - system TEMP: the backup is built there (snapshot + its .xz, and the history's .xz when none is ready),
-      then unpacked there again to be verified (database + history): the larger of the two;
+      then unpacked there again to be verified (database + history) while SQLite's checks spill their sort
+      files there too (up to about one more database): 2 x database + history covers both steps;
     - data folder: the history's .xz kept next to it when none is ready; with a database change also the
       migrated copy and its growth (3 x the database, the rule from before #461)."""
     from . import backup
@@ -759,7 +760,7 @@ def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
     arch_xz = cache or arch
     uploads = _tree_size(Path(settings.upload_dir))
     wants = [("مجلد النسخ الاحتياطية", Path(backup_dir), db + arch_xz + uploads),
-             ("المجلد المؤقت للويندوز", Path(tempfile.gettempdir()), max(2 * db + (0 if cache else arch), db + arch)),
+             ("المجلد المؤقت للويندوز", Path(tempfile.gettempdir()), 2 * db + arch),
              ("مجلد البيانات", Path(settings.data_dir), (3 * db if needs_db else 0) + (0 if cache else arch))]
     out: dict = {}
     for label, path, need in wants:

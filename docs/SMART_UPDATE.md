@@ -136,8 +136,8 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
 before the program leaves for the launcher, and again in the apply step, for code-only updates too (they
 take a verified backup as well). It counts, per disk and at worst case (nothing assumed to compress):
 - backups folder: database + E-Stock archive (its ready `.xz` when there is one) + all attachments;
-- system TEMP: the larger of building the backup (2 x database, + the archive when no `.xz` is ready) and
-  unpacking it for verification (database + archive);
+- system TEMP: 2 x database + archive (building the backup, then unpacking it for verification while
+  SQLite's checks write their sort files there);
 - data folder: the archive's `.xz` cache when none is ready; with a database change also 3 x the database.
 200 MB stay free on each disk; folders on one disk add up. A refusal names the folder, the need and the free
 space. If the disk filled after scheduling, the request is dropped (no retry loop), the program keeps

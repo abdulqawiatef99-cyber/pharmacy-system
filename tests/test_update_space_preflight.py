@@ -78,6 +78,17 @@ class TestEachVolumeIsCheckedOnItsOwn(Base):
         self.assertIn("لم يتغير شيء", msg)
         self.assertRegex(msg, r"\d+ ميجا")                            # how much is needed and how much is free
 
+    def test_temp_counts_the_sort_files_of_the_verification(self):
+        # Codex P2: verifying keeps the unpacked database and history in TEMP while SQLite's balance check
+        # spills its sort there too (234 MB measured on two million movements): one more database of room
+        need = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}
+        self.assertEqual(need["temp"], 2 * self.DB + self.ARCH)
+        sparse(self.data / backup.ARCHIVE_MEMBER, 60 * MB)
+        (self.data / (backup.ARCHIVE_MEMBER + ".sha256")).write_text(
+            backup._sha256(self.data / backup.ESTOCK_ARCHIVE), encoding="ascii")
+        need = {n["volume"]: n["bytes"] for n in su.space_needs(self.s, self.backups, needs_db=False)}
+        self.assertEqual(need["temp"], 2 * self.DB + self.ARCH)       # a ready .xz does not shrink the unpacking
+
     def test_temp_volume_too_small_to_unpack_the_backup_for_verification(self):
         self.free["temp"] = self.DB + self.ARCH - 1
         msg = self.refused()
