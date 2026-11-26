@@ -20,7 +20,10 @@ PERSONAL = {"/api/me", "/api/me/prefs", "/api/me/pin", "/api/me/password", "/api
             # harmless to anyone signed in: approver names for the approval box, fixed reason lists, screen
             # settings, and the home page (which shows only the person's own figures without permissions)
             "/api/approvers", "/api/stock/reasons", "/api/settings/sales", "/api/settings/receipt", "/api/home",
-            "/api/settings/staff-ui"}   # GET = only the signed-in person's own strip and hours (staff_ui.mine)
+            "/api/settings/staff-ui",   # GET = only the signed-in person's own strip and hours (staff_ui.mine)
+            # switches the input language of the cashier PC's own front window; no data, no session, this PC
+            # only (tests/test_keyboard_layout.py covers who may call it)
+            "/api/system/keyboard-layout"}
 
 
 class TestPermissionSweep(APICase):
