@@ -87,7 +87,19 @@ const overSelected = (() => {
   d.keydown({ key: "Enter", timeStamp: 1060, target: f, preventDefault() {}, stopImmediatePropagation() {} });
   return { scans, value: f.value };
 })();
-const out = { viaInstall, insertedBetween, overSelected,
+// Codex P2 on #462 (8d714e0): a person replacing a selected amount fast gets the replacement back, not appended
+const replacedFast = (() => {
+  const f = new Field("5", "number"); f.selectionStart = f.selectionEnd = null;
+  f.setSelectionRange = () => {}; f.setRangeText = () => { throw new Error("number box"); };
+  let fire = null;
+  const d = createScanDetector({ onScan: () => {}, setTimer: (fn) => { fire = fn; return 1; }, clearTimer: () => {} });
+  [["1", 1000], ["5", 1025]].forEach(([k, t], i) => { let prevented = false;
+    d.keydown({ key: k, timeStamp: t, target: f, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    if (!prevented) f.value = i === 0 ? k : f.value + k; });
+  fire?.();                                                       // the pause: the burst was a person
+  return f.value;
+})();
+const out = { viaInstall, insertedBetween, overSelected, replacedFast,
   scanInDiscount: run(burst("6223001234567"), new Field("5")),
   scanShortCode: run(burst("1234"), new Field("")),
   personTyping: run(typed("100"), new Field("")),
@@ -189,6 +201,9 @@ class TestScanDetector(unittest.TestCase):
         o = self.out["overSelected"]
         self.assertEqual(o["scans"], ["6221043010366"])
         self.assertEqual(o["value"], "5")
+
+    def test_a_fast_replacement_of_a_selected_amount_is_given_back_as_typed(self):
+        self.assertEqual(self.out["replacedFast"], "15")
 
     def test_text_inserted_without_keys_is_never_taken(self):
         self.assertEqual(self.out["insertedBetween"], "شارع التجربة 7")
