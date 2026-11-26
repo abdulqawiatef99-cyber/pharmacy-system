@@ -174,7 +174,11 @@ class ReceiptHeaderFailureTests(DBTestCase):
         from unittest import mock
         from app.printing import service
         cfg = dict(settings.get(self.db, self.ctx.org_id), qr_text="https://example.invalid")
+        # the raster itself is not under test (it needs raqm, missing on some runners): capture what reaches it
         with mock.patch.object(escpos, "receipt_header", side_effect=RuntimeError("bad logo")), \
-             mock.patch.object(escpos, "receipt_footer_qr", side_effect=RuntimeError("bad qr")):
+             mock.patch.object(escpos, "receipt_footer_qr", side_effect=RuntimeError("bad qr")), \
+             mock.patch.object(escpos, "render_receipt", return_value="image") as render:
             image = service.receipt_image("صيدلية المثال", sample_sale(), "2026-11-23 14:05", cfg, logo_png=b"x")
-        self.assertGreater(image.height, 0)
+        self.assertEqual(image, "image")
+        self.assertIsNone(render.call_args.kwargs["header"])
+        self.assertEqual(render.call_args.kwargs["footer_codes"], ())
