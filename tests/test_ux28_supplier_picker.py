@@ -122,6 +122,12 @@ const { chromium } = require('playwright');
   await p.fill('#puRep .spIn', 'pharma');
   await p.keyboard.press('Enter');
   await p.waitForFunction(() => document.querySelector('#puSup').selectedOptions[0].text === 'Pharma Overseas');
+  // Codex P2: retyping the chosen supplier's exact name is a search, and Enter keeps that supplier
+  await p.click('#puRep .spIn');
+  await p.keyboard.press('Control+A');
+  await p.keyboard.type('Pharma Overseas');
+  await p.keyboard.press('Enter');
+  out.retyped = await p.evaluate(() => document.querySelector('#puSup').selectedOptions[0].text);
   // Esc puts back what was chosen
   await p.click('#puRep .spIn');
   await p.fill('#puRep .spIn', 'xyz');
@@ -201,6 +207,7 @@ class TestScreen(APICase):
         self.assertEqual(out["keptLowRanked"], "أسيوط للأدوية")
         self.assertIn("أسيوط للأدوية", out["listedFirstOnOpen"])
         self.assertEqual(out["afterEsc"], "Pharma Overseas")
+        self.assertEqual(out["retyped"], "Pharma Overseas")
         self.assertTrue(out["focusAfterEmpty"])
         self.assertEqual(out["stillHere"], "#/purchases")
         sup = self.db.one("SELECT id FROM suppliers WHERE name='الشركة المتحدة'")["id"]

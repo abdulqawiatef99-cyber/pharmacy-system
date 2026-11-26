@@ -2020,7 +2020,7 @@ function supPicker(sel) {
   sel.setAttribute("aria-hidden", "true");
   const inp = wrap.querySelector(".spIn"), box = wrap.querySelector(".spList");
   inp.dataset.for = sel.dataset.h || sel.id || sel.name || "";
-  let rows = [], at = 0, open = false;
+  let rows = [], at = 0, open = false, typed = false;
   const blank = () => [...sel.options].find((o) => o.value === "");
   const entries = () => [...sel.options].filter((o) => o.value !== "").map((o) => {
     const m = SUP_META.get(o.value) || {};
@@ -2029,12 +2029,15 @@ function supPicker(sel) {
   const sync = () => {
     const o = sel.selectedOptions[0];
     inp.value = o && o.value !== "" ? o.text : "";
+    typed = false;                // the box shows the chosen name again: nothing typed
     inp.placeholder = blank()?.text.replace(/^—\s*|\s*—$/g, "") || "اكتب اسم المورد";
     inp.disabled = sel.disabled;
   };
   const close = () => { open = false; box.hidden = true; inp.setAttribute("aria-expanded", "false"); };
   const draw = () => {
-    const q = inp.value === (sel.selectedOptions[0]?.value ? sel.selectedOptions[0].text : "") ? "" : inp.value;
+    // Codex P2: the query is what was typed since the box got the focus, never inferred from the text matching
+    // the chosen name (a retyped name is a search like any other)
+    const q = typed ? inp.value : "";
     const b = blank();
     let ranked = supRank(entries(), q).slice(0, 15);
     // Codex P2: with nothing typed the chosen supplier is always listed (first), even when 15 others rank above it
@@ -2059,8 +2062,8 @@ function supPicker(sel) {
   };
   // review P1: the list opens on the supplier already chosen, so Enter with nothing typed keeps it
   let edited = false;          // Enter with nothing typed or moved keeps the chosen supplier, whatever is listed
-  inp.addEventListener("focus", () => { inp.select(); at = -1; edited = false; draw(); });
-  inp.addEventListener("input", () => { at = 0; edited = true; draw(); });
+  inp.addEventListener("focus", () => { inp.select(); at = -1; edited = false; typed = false; draw(); });
+  inp.addEventListener("input", () => { at = 0; edited = true; typed = true; draw(); });
   inp.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
