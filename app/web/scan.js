@@ -37,7 +37,8 @@ function restore(snap) {
     snap.el.value = snap.value;
     try { if (snap.start != null) snap.el.setSelectionRange(snap.start, snap.end); } catch { /* not selectable */ }
   } else if (snap.kind === "select" && snap.el.selectedIndex !== snap.index) {
-    snap.el.selectedIndex = snap.index;
+    snap.el.selectedIndex = snap.index;                 // the first letter chose another option: tell the screen
+    snap.el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 
@@ -65,7 +66,7 @@ function giveBack(snap, text) {
 function createScanDetector({ active = () => true, onScan, skip = () => false,
   gap = SCAN_GAP_MS, shortGap = SCAN_SHORT_GAP_MS, longLength = SCAN_LONG_LENGTH, minLength = SCAN_MIN_LENGTH,
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  let buf = "", last = -Infinity, worst = 0, snap = null, holding = false, timer = null;
+  let buf = "", last = -Infinity, worst = 0, snap = null, holding = false, timer = null, scanEnd = -Infinity;
   const reset = () => { buf = ""; worst = 0; holding = false; snap = null; if (timer) clearTimer(timer); timer = null; };
   const flush = () => { if (holding) giveBack(snap, buf); reset(); };
   const swallow = (e) => { e.preventDefault(); e.stopImmediatePropagation?.(); };
@@ -99,8 +100,8 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
         worst = Math.max(worst, now - last);
         if (isScan()) {
           const code = buf;
-          swallow(e); restore(snap); reset(); last = -Infinity;
-          onScan(code, el);
+          swallow(e); restore(snap); reset(); last = -Infinity; scanEnd = now;
+          onScan(code, el, now);
           return;
         }
         flush(); last = -Infinity;          // not a scan after all: the characters go back, and Enter acts as usual
@@ -116,6 +117,7 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       return;
     }
     if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || (el && skip(el))) { flush(); last = -Infinity; return; }
+    if (e.key === "Enter" && now - scanEnd < 150) { swallow(e); return; }   // the LF of a scanner sending CR+LF
     if (e.key === "Enter") { flush(); last = -Infinity; return; }      // a person's Enter: it acts in the field as usual
     if (e.key == null || e.key.length !== 1) {              // Shift (scanners send it for capitals), F12, arrows
       if (!/^(Control|Alt|Shift|AltGraph)$/.test(e.key || "")) { flush(); last = -Infinity; }
@@ -130,9 +132,7 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
       worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e);
     } else {
       flush();
-      buf = e.key; last = now; snap = snapshot(el);
-      // a list box would jump to an option on the first letter: never let a character reach it
-      if (snap?.kind === "select") swallow(e);
+      buf = e.key; last = now; snap = snapshot(el);      // a list box chooses by its first letter as usual (Codex P2)
     }
     arm();                                  // a burst that stops without Enter is someone typing fast: give it back
   }
