@@ -2619,7 +2619,14 @@ async function showNewItemCard(query, onCreated, scanned = null) {
     <div class="row mt"><button class="btn" type="submit">احفظ وحطه في الفاتورة</button></div></form>`;
   const form = $("form", d), error = $("[role=alert]", d);
   let busy = false;
-  const dismiss = () => { if (!d.open) return; d.close(); d.remove(); if (document.activeElement === document.body) focused?.focus?.(); };
+  const lifecycle = new AbortController();
+  const dismiss = () => {
+    if (!d.open) return;
+    d.close(); d.remove(); lifecycle.abort();
+    if (document.activeElement === document.body && focused?.isConnected) focused.focus();
+  };
+  // Codex P2: leaving the screen closes the card (as showInvoiceItemCard does): no item for an abandoned invoice
+  window.addEventListener("hashchange", dismiss, { signal: lifecycle.signal });
   $("[data-ni-close]", d).addEventListener("click", () => { if (!busy) dismiss(); });
   d.addEventListener("cancel", (e) => { e.preventDefault(); if (!busy) dismiss(); });
   form.addEventListener("submit", async (e) => {

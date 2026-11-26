@@ -198,7 +198,12 @@ const { chromium } = require('playwright');
   await p.waitForSelector('#qaRes [data-qa-new]');
   await p.click('#qaRes [data-qa-new]');
   out.reopened = await p.waitForSelector('dialog.new-item-card[open]', { timeout: 5000 }).then(() => true, () => false);
-  await p.keyboard.press('Escape');
+  // Codex P2: leaving the invoice (Back) closes the card, so no item is made for an abandoned invoice
+  await p.evaluate(() => { location.hash = '#/purchases'; });
+  await p.waitForSelector('#manForm');
+  out.closedOnLeave = await p.waitForSelector('dialog.new-item-card', { state: 'detached', timeout: 3000 }).then(() => true, () => false);
+  await p.evaluate((d) => { location.hash = '#/purchases/' + d; }, draft);
+  await p.waitForSelector('#qaQ');
   // the same box scanned again (another batch) now finds the item
   await p.evaluate(() => document.querySelector('#qa').dispatchEvent(new CustomEvent('purchase-scan', { detail: '01062212345678971729063010LOT8' })));
   await p.waitForFunction(() => document.querySelector('#qaQ').value.includes('SYNTHO GS1'));
@@ -261,6 +266,7 @@ class TestScreen(APICase):
         self.assertEqual(out["rescan"], "LOT8")
         self.assertEqual(out["alnum"], ["ABC12345", ""])
         self.assertTrue(out["reopened"])
+        self.assertTrue(out["closedOnLeave"])
 
     def test_no_button_without_items_write(self):
         inv = self.draft()
