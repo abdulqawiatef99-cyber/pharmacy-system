@@ -48,7 +48,7 @@ function giveBack(snap, text) {
   try {
     const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? s;
     el.setRangeText(text, s, e, "end");
-  } catch { el.value = (snap.value ?? el.value) + text; }
+  } catch { el.value = (snap.replaced ? "" : snap.value ?? el.value) + text; }   // a number box: no caret there
   el.dispatchEvent(new Event("input", { bubbles: true }));
   if (typeof document === "undefined") return;
   // text put back by a script may not count as typed for the browser's own change event: make sure the field
@@ -74,7 +74,8 @@ function createScanDetector({ active = () => true, onScan, skip = () => false,
     const at = snap.start ?? snap.value.length, to = snap.end ?? at;
     if (snap.el.value === snap.value.slice(0, at) + buf + snap.value.slice(to)) return true;
     // a number box shows no selection: its first key may have replaced a selected amount (Codex P2 on #462)
-    return snap.start == null && snap.el.value === buf;
+    if (snap.start == null && snap.el.value === buf) { snap.replaced = true; return true; }
+    return false;
   };
   const arm = () => { if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; flush(); }, gap * 3); };
 
