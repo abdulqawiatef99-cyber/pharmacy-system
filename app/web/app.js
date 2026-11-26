@@ -1081,7 +1081,7 @@ function viewSetup() {
     <label class="f">أعد كتابة كلمة المرور <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label><br>
     <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding" required><option value="">— اختار —</option>
       <option value="0">من غير تقريب</option><option value="25">ربع جنيه</option><option value="50">نص جنيه</option><option value="100">جنيه</option></select>
-      <span class="muted">التقريب بيظهر سطر لوحده في الفاتورة، وتقدر تغيّره بعدين من الإعدادات.</span></label><br>
+      <span class="muted">الإجمالي في الإيصال بيطلع بعد التقريب، وتقدر تظهر سطر التقريب من إعدادات الإيصال.</span></label><br>
     <button class="btn" type="submit">ابدأ</button>
     <p class="muted">احفظ كلمة المرور في مكان آمن، فبدونها لن تستطيع الدخول.</p>
   </form>
@@ -3565,7 +3565,8 @@ function printLook(dataUrl) {
 }
 async function renderReceiptCfg(c) {
   const order = (await api("/api/settings/sales")).line_order;
-  const rstep = ME.permissions.includes("settings.manage") ? (await api("/api/settings/rounding")).step : 0;
+  const rcfg = ME.permissions.includes("settings.manage") ? await api("/api/settings/rounding") : { step: 0, manual_limit: 0 };
+  const rstep = rcfg.step;
   const pr = await api("/api/print/printers").catch(() => ({ printers: [], shaping: true }));
   const chk = (k, t) => `<label class="chk"><input type="checkbox" name="${k}" ${c[k] ? "checked" : ""}> ${t}</label>`;
   $("#rcBox").innerHTML = `<form id="rcForm" class="formgrid">
@@ -3590,6 +3591,8 @@ async function renderReceiptCfg(c) {
     <label class="f">أسماء الأصناف <select name="names"><option value="en" ${c.names === "en" ? "selected" : ""}>إنجليزي</option><option value="ar" ${c.names === "ar" ? "selected" : ""}>عربي</option><option value="both" ${c.names === "both" ? "selected" : ""}>الاثنان</option></select></label>
     <label class="f">ترتيب الأصناف في الفاتورة (على الشاشة والحفظ والطباعة) <select name="line_order"><option value="alpha" ${order === "alpha" ? "selected" : ""}>أبجدي A→Z (الافتراضي — أسرع في التحضير)</option><option value="entry" ${order === "entry" ? "selected" : ""}>كما أُدخلت</option></select></label>
     <label class="f">تقريب إجمالي الفاتورة (لأقرب) <select name="rounding">${[[0, "من غير تقريب"], [25, "ربع جنيه"], [50, "نص جنيه"], [100, "جنيه"]].map(([v, t]) => `<option value="${v}" ${rstep === v ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+    <label class="f">أقصى تقريب يدوي عند الدفع (جنيه) <input name="manual_limit" inputmode="decimal" value="${money(rcfg.manual_limit)}" autocomplete="off">
+      <span class="muted">زرار «تقريب يدوي» في الدفع النقدي بيقرّب لأقرب جنيه تحت أو فوق، لحد المبلغ ده بس. صفر = الزرار مقفول. أقصى حاجة 5 جنيه.</span></label>
     <fieldset class="lblp"><legend>طابعة الإيصال والدرج</legend>
       <label class="f">الطابعة <input name="receipt_target" list="prnList" dir="ltr" value="${esc(c.receipt_target || "")}" placeholder="${pr.env !== "none" ? esc(pr.env) : "browser"}"></label>
       <datalist id="prnList"><option value="browser" label="من المتصفح (بدون طباعة مباشرة)">${pr.printers.map((n) => `<option value="win:${esc(n)}">`).join("")}</datalist>
@@ -3739,6 +3742,11 @@ async function renderReceiptCfg(c) {
     const f = e.target;
     try { await api("/api/settings/sales", { method: "PUT", body: { line_order: f.line_order.value } });
       if (f.rounding && +f.rounding.value !== rstep) await api("/api/settings/rounding", { method: "PUT", body: { step: +f.rounding.value } });
+      if (f.manual_limit) {
+        const ml = exactPiasters(f.manual_limit.value.trim() || "0");
+        if (ml == null || ml < 0 || ml > 500) throw new Error("أقصى تقريب يدوي من صفر لـ 5 جنيه");
+        if (ml !== rcfg.manual_limit) await api("/api/settings/rounding", { method: "PUT", body: { manual_limit: ml } });
+      }
       renderReceiptCfg(await api("/api/settings/receipt", { method: "PUT", body: { ...appearance(), auto_receipt: f.auto_receipt.checked,
       auto_receipt_min: toPiasters(f.auto_receipt_min.value) || 0, copies: +f.copies.value, drawer_on_cash: f.drawer_on_cash.checked, drawer_timing: f.drawer_timing.value,
       label_barcode_source: f.label_barcode_source.value, label_size: labelSize(f), label_fields: labelFields(f), label_pharmacy: f.label_pharmacy.value, label_phone: f.label_phone.value, label_a4: f.label_a4.value.trim(), label_lang: f.label_lang.value, label_target: f.label_target.value.trim(), receipt_target: f.receipt_target.value.trim(),
@@ -5720,8 +5728,11 @@ function renderSide() {
       ${s.lines.length ? invDiscFields(s) : ""}
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
-      ${rnd ? `<div class="sum"><span>تقريب النقدي</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
+      ${rnd ? `<div class="sum"><span>${posManual(s) != null ? "تقريب يدوي" : "تقريب النقدي"}</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
       <div class="sum due"><span>المطلوب</span><b>${money(dueNow(s))}</b></div>
+      ${!POS.split && POS.method === "cash" && s.lines.length && manualRoundChoices(s.total, s.manual_rounding_limit).length ? `<div class="row mround"><span class="muted small">تقريب يدوي:</span>
+        ${manualRoundChoices(s.total, s.manual_rounding_limit).map((d) => `<button type="button" class="btn small secondary ${posManual(s) === d ? "on" : ""}" data-mround="${d}">${money(s.total + d)} ج</button>`).join("")}
+        ${posManual(s) != null ? `<button type="button" class="btn small secondary" data-mround="off">رجّع التقريب العادي</button>` : ""}</div>` : ""}
     </section>
     <section class="panel">
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
@@ -5791,6 +5802,13 @@ function renderSide() {
   });
   $("#custClear")?.addEventListener("click", async (e) => { e.preventDefault(); SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { customer_id: null } }); if (POS.method === "credit") POS.method = "cash"; renderSide(); });
   $("#posCustNew")?.addEventListener("click", (e) => { e.preventDefault(); newCustomerDialog(); });
+  $("#posSide").querySelectorAll("[data-mround]").forEach((b) => b.addEventListener("click", () => {
+    POS.manual ||= {};
+    if (b.dataset.mround === "off") delete POS.manual[SALE.id];
+    else POS.manual[SALE.id] = { total: SALE.total, d: +b.dataset.mround };
+    renderSide();
+    $("#payGiven")?.focus();
+  }));
   const invDisc = async (mode) => {     // one discount on the whole invoice, spread over the lines (update 1)
     const typed = discBody(mode, $(mode === "egp" ? "#posInvAmt" : "#posInvDisc").value);
     if (!typed) {
@@ -5960,9 +5978,23 @@ function cashRoundingOf(s, parts) {
   const nonCash = parts.filter((p) => p.method !== "cash").reduce((t, p) => t + (p.amount || 0), 0);
   return roundNear(s.total - nonCash, s.rounding_step || 0);
 }
+// UX-27 PR3 (owner 26/11, final): the cashier's own rounding of a single cash payment to the whole pound below or
+// above, within the owner's small limit; the server checks it again. [] when off or nothing to round.
+function manualRoundChoices(total, limit) {
+  if (!(limit > 0) || !(total > 0)) return [];
+  const down = Math.floor(total / 100) * 100 - total, up = Math.ceil(total / 100) * 100 - total;
+  return [down, up].filter((d, i, a) => d !== 0 && Math.abs(d) <= limit && total + d > 0 && a.indexOf(d) === i);
+}
+// the chosen manual rounding, only while the invoice total is the one it was chosen for (a line changed: gone)
+function posManual(s) {
+  const m = POS.manual?.[s.id];
+  return m && m.total === s.total && !POS.split && POS.method === "cash" && manualRoundChoices(s.total, s.manual_rounding_limit).includes(m.d) ? m.d : null;
+}
 // what the customer is asked for with the chosen payment (a single cash payment: the rounded total)
 function dueNow(s) {
   if (POS.split) return s.total + cashRoundingOf(s, POS.parts);
+  const manual = posManual(s);
+  if (manual != null) return s.total + manual;
   return POS.method === "cash" ? s.total + roundNear(s.total, s.rounding_step || 0) : s.total;
 }
 function currentPayments() {
@@ -6044,6 +6076,7 @@ async function finishSale(findings, sid) {
   try {
     const done = await api(`/api/sales/${sid}/complete`, { method: "POST",
       body: { payments, safety_decisions: decisions, version: SALE.version, request_id: SALE.request_id, cash_given: given, keep_change: keepIt,
+              ...(posManual(SALE) != null ? { manual_rounding: posManual(SALE) } : {}),
               cost_reason: SALE.cost_reason || null, receipt: receiptWanted(SALE, RCFG, POS.rcpt[sid]), defer_devices: true } });
     delete POS.rcpt[sid]; POS.noCoinsAsked = false;
     try { sessionStorage.setItem("posLast", JSON.stringify({ id: done.id, no: done.sale_no })); } catch { /* this tab only */ }

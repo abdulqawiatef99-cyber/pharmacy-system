@@ -800,6 +800,8 @@ class Sales:
             r = nearest(s["total"], s["rounding_step"])
             s["cash_rounding"] = r if s["total"] + r > 0 else 0            # never rounded away to nothing
             s["cash_total"] = s["total"] + s["cash_rounding"]
+            from .rounding import manual_limit
+            s["manual_rounding_limit"] = manual_limit(self.db, ctx.org_id)      # UX-27: the payment's round button
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
@@ -861,7 +863,8 @@ class Sales:
                  on_credit: int = 0, safety_decisions: dict[int, str] | None = None,
                  version: int | None = None, request_id: str | None = None,
                  confirm_below_cost: bool = False, payments: list[dict] | None = None,
-                 cost_reason: str | None = None, round_cash: bool = True, change_to_credit: int = 0) -> dict:
+                 cost_reason: str | None = None, round_cash: bool = True, change_to_credit: int = 0,
+                 manual_rounding: int | None = None) -> dict:
         """request_id: generated once per 'complete' click. Retrying with the same
         id after a lost response returns the completed sale instead of failing,
         and can never complete it twice."""
@@ -937,6 +940,11 @@ class Sales:
         rounding = nearest(cash_due, step(self.db, ctx.org_id)) if cash_due > 0 and paid_cash > 0 and round_cash else 0
         if cash_due + rounding <= 0:          # review P2: no cash part rounded away (a card a little short)
             rounding = 0
+        if manual_rounding is not None:       # UX-27: the cashier's round button, in place of the automatic step
+            from .rounding import check_manual, manual_limit
+            if not round_cash or not paid_cash:
+                raise ValidationFailed("التقريب اليدوي على جزء نقدي بس", code="manual_rounding_no_cash")
+            rounding = check_manual(manual_rounding, cash_due, manual_limit(self.db, ctx.org_id))
         if paid_cash != cash_due + rounding or cash_due < 0:
             raise ValidationFailed("مجموع الدفع لا يساوي إجمالي الفاتورة", code="payment_mismatch",
                                    details={"total": preview["total"], "cash_due": max(0, cash_due),
@@ -1090,6 +1098,7 @@ class Sales:
                                  f"باقي فاتورة {no} اتساب رصيد", ctx.user_id))
             audit.record(self.db, ctx, "sale.complete", "sale", sid,
                          after={"no": no, "total": total, "rounding": rounding or None, "cash": paid_cash, "card": paid_card,
+                                "manual_rounding": True if manual_rounding is not None else None,
                                 "change_to_credit": change_to_credit or None,
                                 "transfer": paid_transfer, "credit": on_credit, "kind": s["kind"],
                                 "at_cost": at_cost or None, "cost_reason": cost_reason if at_cost else None})

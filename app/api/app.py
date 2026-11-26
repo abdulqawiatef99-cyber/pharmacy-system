@@ -862,9 +862,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..sales import rounding as rnd
         ctx = ctx_of(req)
         if req.method == "PUT":
-            return J({"step": rnd.set_step(db, ctx, (await body(req)).get("step"))})
+            b = await body(req)
+            ml = b.get("manual_limit")
+            if "manual_limit" in b and (isinstance(ml, bool) or not isinstance(ml, int) or not 0 <= ml <= rnd.MANUAL_MAX):
+                raise ValidationFailed("أقصى تقريب يدوي من صفر لـ 5 جنيه (بالقرش)")      # nothing saved
+            if "step" in b:
+                rnd.set_step(db, ctx, b.get("step"))
+            if "manual_limit" in b:
+                rnd.set_manual_limit(db, ctx, b.get("manual_limit"))
+            ctx.require("settings.manage")
+            return J({"step": rnd.step(db, ctx.org_id), "manual_limit": rnd.manual_limit(db, ctx.org_id)})
         ctx.require("sales.read")
-        return J({"step": rnd.step(db, ctx.org_id)})
+        return J({"step": rnd.step(db, ctx.org_id), "manual_limit": rnd.manual_limit(db, ctx.org_id)})
 
     @handler
     async def ui_settings_api(req):
@@ -2564,7 +2573,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                     confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
                                     payments=b.get("payments") if isinstance(b.get("payments"), list) else None,
                                     # «خليها رصيد للعميل»: the change he leaves, kept as his credit in the same posting
-                                    change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0)
+                                    change_to_credit=(given - cash_part) if b.get("keep_change") is True and given > cash_part else 0,
+                                    manual_rounding=b.get("manual_rounding"))
         receipt = b.get("receipt") is True
         kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
         if b.get("defer_devices") is True:

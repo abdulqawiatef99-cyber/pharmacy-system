@@ -1,6 +1,13 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"الإجمالي في الإيصال بيطلع بعد التقريب، وتقدر تظهر سطر التقريب من إعدادات الإيصال.": "The receipt total is printed after rounding; you can show the rounding line in the receipt settings.",
+"أقصى تقريب يدوي عند الدفع (جنيه)": "Maximum manual rounding at payment (EGP)",
+"زرار «تقريب يدوي» في الدفع النقدي بيقرّب لأقرب جنيه تحت أو فوق، لحد المبلغ ده بس. صفر = الزرار مقفول. أقصى حاجة 5 جنيه.": "The «manual rounding» button on a cash payment rounds to the whole pound below or above, up to this amount only. Zero = the button is off. At most 5 EGP.",
+"أقصى تقريب يدوي من صفر لـ 5 جنيه": "Maximum manual rounding is from zero to 5 EGP",
+"تقريب يدوي": "Manual rounding",
+"تقريب يدوي:": "Manual rounding:",
+"رجّع التقريب العادي": "Back to the usual rounding",
 "(أقصى خصم لك 0%)": "(your maximum discount 0%)",
 "الخصم بالجنيه": "Discount in EGP",
 "الخصم بالنسبة": "Discount in percent",
@@ -3482,7 +3489,6 @@ window.I18N_EN = {
 "خليها رصيد للعميل (الباقي يتسجل له في حسابه)": "Keep it as the customer's credit (the change goes on his account)",
 "تقريب إجمالي الفاتورة (لأقرب)": "Round the invoice total (to the nearest)",
 "من غير تقريب": "No rounding",
-"التقريب بيظهر سطر لوحده في الفاتورة، وتقدر تغيّره بعدين من الإعدادات.": "The rounding shows as its own line on the invoice; you can change it later in the settings.",
 "منها تقريب 00": "of which rounding 00",
 "التقريب (داخل المبيعات)": "Rounding (inside sales)",
 "التقريب": "Rounding",
