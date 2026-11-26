@@ -1,6 +1,11 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"مرتجع نقدي": "Cash refund",
+"النهاردة:": "Today:",
+"الإلغاء والمرتجع النقدي في الشيفت": "Voids and cash refunds in the shift",
+"مفيش إلغاء ولا مرتجع نقدي في الشيفت ده": "No voids or cash refunds in this shift",
+"إجمالي اليوم (كل الشيفتات):": "Day total (every shift):",
 "الإجمالي في الإيصال بيطلع بعد التقريب، وتقدر تظهر سطر التقريب من إعدادات الإيصال.": "The receipt total is printed after rounding; you can show the rounding line in the receipt settings.",
 "أقصى تقريب يدوي عند الدفع (جنيه)": "Maximum manual rounding at payment (EGP)",
 "زرار «تقريب يدوي» في الدفع النقدي بيقرّب لأقرب جنيه تحت أو فوق، لحد المبلغ ده بس. صفر = الزرار مقفول. أقصى حاجة 5 جنيه.": "The «manual rounding» button on a cash payment rounds to the whole pound below or above, up to this amount only. Zero = the button is off. At most 5 EGP.",

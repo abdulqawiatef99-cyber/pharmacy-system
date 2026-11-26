@@ -1718,8 +1718,12 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def notifications_list(req):
         ctx = await run_in_threadpool(ctx_of, req)
-        return J(await off_loop(notify.listing, db, ctx, unread_only=req.query_params.get("unread") == "1",
-                                limit=_qlimit(req, 50, 200)))
+        out = await off_loop(notify.listing, db, ctx, unread_only=req.query_params.get("unread") == "1",
+                             limit=_qlimit(req, 50, 200))
+        if ctx.can("cash.see_expected") and req.query_params.get("unread") != "1":
+            from ..reports.owner_summary import day_totals    # UX-28: today's voids and cash refunds, every shift
+            out["today"] = await off_loop(day_totals, db, ctx)
+        return J(out)
 
     @handler
     async def notifications_read(req):
