@@ -4711,7 +4711,11 @@ async function viewPos(afterCheckout = false) {
     // a discount or amount typed in the focused field is saved first (its change event), then the item is added
     const at = document.activeElement;
     if (at && at !== q && at.matches?.("input, select, textarea")) at.blur();
-    trackPosAdd(Promise.resolve(POS.saving).then(() => search(false, false, code)));
+    trackPosAdd(Promise.resolve(POS.saving).then(() => search(false, false, code)).then((r) => {
+      // a code nobody has: show it in the search box with the results, so the cashier sees what was read
+      if (r === false && q.isConnected && !q.value) { q.value = code; q.focus(); q.select(); }
+      return r;
+    }));
   };
   bindPosExtras();
 }

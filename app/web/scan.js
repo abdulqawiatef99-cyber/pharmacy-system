@@ -8,11 +8,14 @@
 //   const stop = PharmScan.installScanDetector({ active: () => onSaleScreen, onScan: (code) => addByCode(code),
 //                                      skip: (el) => el.id === "posQ" });
 //
-// Timings are in ms. GAP: the longest pause between two keys of one scan. MIN: the shortest code
-// (the shop's own labels carry 3-5 digit item codes). Loaded as a classic script before app.js.
+// Timings are in ms. GAP: the longest pause between two keys of a long code (8+ characters). A shorter code
+// (the shop's own labels carry 3-5 digit item codes) must come at SHORT_GAP, faster than any hand. MIN: the
+// shortest code. Loaded as a classic script before app.js.
 (() => {
 const SCAN_GAP_MS = 35;
 const SCAN_MIN_LENGTH = 3;
+const SCAN_SHORT_GAP_MS = 12;      // codes shorter than SCAN_LONG_LENGTH: a hand cannot keep this pace
+const SCAN_LONG_LENGTH = 8;
 
 const isText = (el) => !!el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" &&
   !["checkbox", "radio", "button", "submit", "reset", "file", "range", "color"].includes((el.type || "text").toLowerCase())));
@@ -45,43 +48,62 @@ function giveBack(snap, text) {
   try {
     const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? s;
     el.setRangeText(text, s, e, "end");
-  } catch { el.value += text; }
+  } catch { el.value = (snap.value ?? el.value) + text; }
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function createScanDetector({ active = () => true, onScan, skip = () => false,
-  gap = SCAN_GAP_MS, minLength = SCAN_MIN_LENGTH, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-  let buf = "", last = -Infinity, snap = null, holding = false, timer = null;
-  const reset = () => { buf = ""; holding = false; snap = null; if (timer) clearTimer(timer); timer = null; };
+  gap = SCAN_GAP_MS, shortGap = SCAN_SHORT_GAP_MS, longLength = SCAN_LONG_LENGTH, minLength = SCAN_MIN_LENGTH,
+  setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  let buf = "", last = -Infinity, worst = 0, snap = null, holding = false, timer = null;
+  const reset = () => { buf = ""; worst = 0; holding = false; snap = null; if (timer) clearTimer(timer); timer = null; };
   const flush = () => { if (holding) giveBack(snap, buf); reset(); };
   const swallow = (e) => { e.preventDefault(); e.stopImmediatePropagation?.(); };
+  // a long code (product barcode, GS1) may come at the normal scanner pace; a short one (the shop's 3-5 digit
+  // labels) only at a pace no hand reaches, so an amount rolled fast on the number pad stays an amount
+  const isScan = () => buf.length >= minLength && worst <= (buf.length >= longLength ? gap : shortGap);
+  const arm = () => { if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; flush(); }, gap * 3); };
 
   function keydown(e) {
-    const now = e.timeStamp ?? Date.now(), el = e.target;
-    if (!active() || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) { flush(); return; }
-    if (el && skip(el)) { flush(); return; }
-    if (e.key === "Enter") {
-      const fast = now - last <= gap;
-      if (holding && fast && buf.length >= minLength) {
-        const code = buf;
-        swallow(e); restore(snap); reset(); last = -Infinity;
-        onScan(code, el);
+    const now = e.timeStamp ?? Date.now(), el = e.target, fast = now - last <= gap;
+    if (!active() || e.isComposing) { flush(); return; }
+    // while a scan is held it keeps going even if the focus moves (an added item focuses the search box), and the
+    // modifier a scanner sends for the GS1 separator (Ctrl+], Alt codes) does not end it
+    if (holding && fast) {
+      if (e.key === "Enter") {
+        worst = Math.max(worst, now - last);
+        if (isScan()) {
+          const code = buf;
+          swallow(e); restore(snap); reset(); last = -Infinity;
+          onScan(code, el);
+          return;
+        }
+        flush(); last = -Infinity;          // not a scan after all: the characters go back, and Enter acts as usual
         return;
       }
-      flush(); last = -Infinity;          // a person's Enter: it acts in the field as usual
+      if (e.ctrlKey || e.altKey || e.metaKey || e.key == null || e.key.length !== 1) {
+        if (e.key?.length === 1 || /^(Control|Alt|Shift|AltGraph)$/.test(e.key || "")) { swallow(e); last = now; arm(); }
+        return;
+      }
+      if (e.repeat) { flush(); return; }
+      worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e); arm();
       return;
     }
+    if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || (el && skip(el))) { flush(); last = -Infinity; return; }
+    if (e.key === "Enter") { flush(); last = -Infinity; return; }      // a person's Enter: it acts in the field as usual
     if (e.key == null || e.key.length !== 1) return;        // Shift (scanners send it for capitals), F12, arrows
-    if (buf && now - last <= gap && snap?.el === el) {
-      if (!holding) { holding = true; restore(snap); }      // the first character already landed: take it back
-      buf += e.key; last = now; swallow(e);
+    if (buf && fast && snap?.el === el) {
+      holding = true;
+      restore(snap);                        // the first character already landed: take it back, and tell the field
+      if (snap?.kind === "text") snap.el.dispatchEvent(new Event("input", { bubbles: true }));
+      worst = Math.max(worst, now - last); buf += e.key; last = now; swallow(e);
     } else {
       flush();
       buf = e.key; last = now; snap = snapshot(el);
+      // a list box would jump to an option on the first letter: never let a character reach it
+      if (snap?.kind === "select") swallow(e);
     }
-    if (timer) clearTimer(timer);
-    // a burst that stops without Enter is someone typing fast: give the characters back
-    timer = setTimer(() => { timer = null; flush(); }, gap * 3);
+    arm();                                  // a burst that stops without Enter is someone typing fast: give it back
   }
   return { keydown, reset, get pending() { return buf; } };
 }
@@ -94,5 +116,5 @@ function installScanDetector(opts, target = window) {
 }
 
 // a classic script (the screen's CSP allows no inline import map): app.js reads it from here
-globalThis.PharmScan = { SCAN_GAP_MS, SCAN_MIN_LENGTH, createScanDetector, installScanDetector };
+globalThis.PharmScan = { SCAN_GAP_MS, SCAN_SHORT_GAP_MS, SCAN_LONG_LENGTH, SCAN_MIN_LENGTH, createScanDetector, installScanDetector };
 })();
