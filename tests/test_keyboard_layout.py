@@ -133,7 +133,7 @@ class TestEndpoint(APICase):
     def test_a_broken_body_or_a_broken_switch_still_answers(self):
         for body in (b"not json", b"[1,2]", b'"ar"', b'{"lang": 7}'):
             with mock.patch.object(kl.sys, "platform", "win32"), mock.patch.object(kl, "_user32", side_effect=OSError):
-                r = self.c.post(self.URL, content=body, headers=H)
+                r = self.c.post(self.URL, content=body, headers={**H, "Content-Type": "application/json"})
             self.assertEqual((r.status_code, r.json()["ok"], r.json()["reason"]), (200, False, "unsupported"), body)
         with mock.patch.object(kl, "switch", side_effect=RuntimeError("boom")):
             r = self.c.post(self.URL, json={"lang": "ar"}, headers=H)
