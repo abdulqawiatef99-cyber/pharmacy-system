@@ -123,7 +123,9 @@ class TestNames(unittest.TestCase):
 class TestEstockImport(DBTestCase):
     def test_catalog_then_stock_end_to_end(self):
         di = DataImport(self.db)
-        run = di.analyze(self.ctx, xlsx(CATALOG), "c.xlsx", kind="items", source_system="estock")
+        # the E-Stock move's own steps: packs are confirmed after the catalog (as estock_job does)
+        run = di.analyze(self.ctx, xlsx(CATALOG), "c.xlsx", kind="items", source_system="estock",
+                         packs_set_later=True)
         self.assertEqual(di.get(self.ctx, run)["report"]["counts"], {"create": 4})
         di.apply(self.ctx, run)
         run = di.analyze(self.ctx, xlsx(stock_rows()), "s.xlsx", kind="opening_stock",
@@ -153,12 +155,13 @@ if __name__ == "__main__":
 
 class TestMakers(DBTestCase):
     def test_same_generic_two_makers_are_two_items(self):
-        rows = [["الكود", "الاسم الانجليزي", "الشركة"],
-                [1, "AMPICILLIN 500 MG 12 CAP", "ايبيكو"],
-                [2, "AMPICILLIN 500mg 12 cap", "مصر"],          # other maker -> separate item
-                [3, "Ampicillin 500 mg 12 caps", None],          # maker unknown -> human decides
-                [4, "BETAVAL 15g OINT", "ادكو"],
-                [5, "BETAVAL C 15g OINT", "ادكو"]]               # 'C' is part of the name
+        # the pack layout is given: a counted item without one waits for a decision (QA-007)
+        rows = [["الكود", "الاسم الانجليزي", "الشركة", "عدد الوحدات"],
+                [1, "AMPICILLIN 500 MG 12 CAP", "ايبيكو", 1],
+                [2, "AMPICILLIN 500mg 12 cap", "مصر", 1],       # other maker -> separate item
+                [3, "Ampicillin 500 mg 12 caps", None, 1],       # maker unknown -> human decides
+                [4, "BETAVAL 15g OINT", "ادكو", 1],
+                [5, "BETAVAL C 15g OINT", "ادكو", 1]]            # 'C' is part of the name
         di = DataImport(self.db)
         run = di.analyze(self.ctx, xlsx(rows), "m.xlsx", kind="items")
         acts = {r["data"]["code"]: r["action"] for r in di.get(self.ctx, run)["rows"]}
@@ -174,7 +177,7 @@ class TestMakers(DBTestCase):
 class TestBatches(DBTestCase):
     def test_two_batches_of_one_item_are_not_duplicates(self):
         di = DataImport(self.db)
-        run = di.analyze(self.ctx, xlsx([["الكود", "الاسم الانجليزي"], [1, "Panadol 500mg 24 tab"]]),
+        run = di.analyze(self.ctx, xlsx([["الكود", "الاسم الانجليزي", "عدد الوحدات"], [1, "Panadol 500mg 24 tab", 2]]),
                          "i.xlsx", kind="items")
         di.apply(self.ctx, run)
         stock = [["الكود", "الكمية", "التكلفة", "الصلاحية"], [1, 2, 30, "05/2027"], [1, 3, 32, "09/2028"],

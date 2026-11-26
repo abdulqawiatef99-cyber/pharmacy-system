@@ -199,9 +199,15 @@ document.addEventListener("mouseup", (e) => {   // the click that focused it wou
   zeroPick = null;
 });
 // item names as the person chose: both (English + Arabic under it), English only, Arabic only
-const itemText = (it) => (PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "";
+// UX-26 (owner 26/11): English letters in capitals on screen; what is stored is not rewritten
+function upperEn(t) {
+  return String(t ?? "").replace(/[a-z]+/g, (w) => w.toUpperCase());
+}
+const itemText = (it) => upperEn((PREFS.names === "ar" ? it.name_ar || it.name_en : it.name_en || it.name_ar) || "");
+// UX-26 (owner 26/11): each name in its own direction, so an English name reads left to right in Arabic screens
+const bidi = (t) => `<bdi>${esc(t)}</bdi>`;
 const itemHtml = (it) => (PREFS.names === "both" && it.name_en && it.name_ar
-  ? `${esc(it.name_en)}<span class="iname-ar">${esc(it.name_ar)}</span>` : esc(itemText(it)));
+  ? `${bidi(upperEn(it.name_en))}<span class="iname-ar">${bidi(it.name_ar)}</span>` : bidi(itemText(it)));
 // search: English or Arabic name, code, barcode, pieces, %, wrong keyboard language
 async function findItems(q, limit = 8, stock = "", settleAfterNavigation = false) {
   const sale = stock && location.hash === "#/pos" ? SALE?.id : null;
@@ -641,7 +647,7 @@ const HELP = {
   "customer-name-review": ["راجع أسماء نفس الحساب في إي ستوك وتاريخ البيع.", ["اختار الاسم اللي هيظهر في البرنامج واضغط اعتمد الاسم."]],
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
   pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "أسرع بيع: امسح الأصناف، ثم Enter على البحث الفاضي يوديك لخانة «العميل دفع»، وEnter تاني يتمم البيع بالمبلغ بالظبط (أو اكتب المبلغ اللي دفعه الأول). المسح من أي خانة في الشاشة بيضيف الصنف ومبيكتبش في الخانة.", "البيع السريع صف واحد تحت الفاتورة: بيصغر بعد أول صنف، وزرار «افتح ▾» يفتحه.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
-  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
+  sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها.", "«إلغاء الفاتورة» يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
   "items/1": ["بطاقة الصنف: الرصيد والتشغيلات والأسعار والحركة والمثيل والبديل.", ["التسوية تحتاج إلى سبب، وتظهر في تقرير خسائر المخزون.", "المثيل يظهر عند كتابة المادة الفعالة والتركيز والشكل في تعديل الصنف."]],
@@ -1861,7 +1867,7 @@ function renderLine(l) {
   const hasErr = iss.some((i) => i.level === "error" && !i.acknowledged);
   let match;
   if (l.item_id && l.match_status !== "suggested") {
-    match = `<div><span data-line-item>${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
+    match = `<div><span data-line-item dir="auto">${esc(itemLabel(l.item))}</span> <span class="badge b-ok">${l.match_status === "confirmed" ? "مؤكد" : "تلقائي"}</span></div>
       <div class="muted small" data-line-item-info>${esc(purchaseItemInfo(l.item))}</div>`;
   } else {
     const c = l.candidates || [];
@@ -2301,7 +2307,7 @@ async function altPanel(itemId, box, onAdd = null) {
   };
   const all = [...r.similar, ...r.other_strength, ...r.alternatives];
   const sec = (title, list, empty) => `<h3 class="mt">${title} <span class="muted">(${list.length})</span></h3>${list.map(row).join("") || `<p class="muted">${empty}</p>`}`;
-  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${esc(r.item.name_en || r.item.name_ar)}</h2>
+  box.innerHTML = `<div class="panel alts"><div class="row between"><h2>المثيل والبديل لـ ${bidi(upperEn(r.item.name_en || r.item.name_ar))}</h2>
       <button class="btn small secondary" data-aclose>✕ إغلاق</button></div>
     ${r.missing.includes("ingredient") ? `<p class="badge b-warn">⚠ المادة الفعالة غير مكتوبة في بطاقة هذا الصنف، لذلك لا يمكن العثور على المثيل. ${canW() ? `<a href="#/items/${esc(r.item.id)}/edit">أضِفها</a>` : "اطلب من المدير إضافتها."}</p>` : ""}
     ${r.missing.includes("strength") ? `<p class="badge b-warn">⚠ التركيز غير مكتوب، لذلك يُقارَن المثيل دون تركيز.</p>` : ""}
@@ -2342,7 +2348,7 @@ async function viewItems() {
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
       <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
-      <input id="q" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
+      <input id="q" lang="en" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
       <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">بدون قسم</option>
         ${cats.filter((c) => c.is_active).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.items})</option>`).join("")}</select></label></div>
   </section>
@@ -2596,7 +2602,7 @@ function showInvoiceItemCard(id, { purchase, query = "", newName, onPick, onCrea
   };
   const newItem = () => {
     box.innerHTML = `<form><h3>صنف جديد</h3>
-      <label class="f">اسم الصنف<input name="name_en" required value="${esc(newName || "")}"></label>
+      <label class="f">اسم الصنف<input name="name_en" lang="en" data-upper dir="ltr" required value="${esc(upperEn(newName))}"></label>
       <label class="f">عدد الوحدات في العبوة<input name="pack_size" type="number" min="1" step="1" value="1" required></label>
       <div class="row"><button class="btn">احفظ</button><button type="button" class="btn secondary" data-card-back>رجوع</button></div></form>`;
     const form = $("form", box);
@@ -2676,14 +2682,14 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     : `<div class="row between"><div><a href="${id ? `#/items/${esc(id)}` : "#/items"}">← رجوع</a>
       <h1>${id ? "تعديل صنف" : "صنف جديد"}</h1></div></div>`}
     <div class="formgrid">
-      <label class="f">الاسم بالإنجليزي <input name="name_en" dir="ltr" value="${esc(it.name_en || "")}"></label>
-      <label class="f">الاسم بالعربي <input name="name_ar" value="${esc(it.name_ar || "")}"></label>
+      <label class="f">الاسم بالإنجليزي <input name="name_en" lang="en" data-upper dir="ltr" value="${esc(it.name_en || "")}"></label>
+      <label class="f">الاسم بالعربي <input name="name_ar" lang="ar" value="${esc(it.name_ar || "")}"></label>
       <label class="f">الشركة <input name="manufacturer" value="${esc(it.manufacturer || "")}"></label>
       <label class="f">المادة الفعالة <input name="active_ingredient" dir="ltr" value="${esc(it.active_ingredient || "")}" placeholder="Amoxicillin + Clavulanic acid">
         <span class="muted">بالإنجليزية كما على العلبة، ومنها يُعثر على المثيل.</span></label>
       <label class="f">التركيز <input name="strength" dir="ltr" value="${esc(it.strength || it.strength_norm || "")}" placeholder="500 mg"></label>
       <label class="f">الشكل <select name="dosage_form"><option value="">—</option>${(it.dosage_form && !FORMS.some((x) => x[0] === it.dosage_form) ? [[it.dosage_form, it.dosage_form], ...FORMS] : FORMS).map(([c, t]) => `<option value="${esc(c)}" ${c === it.dosage_form ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
-      <label class="f">الكود الداخلي <input name="code" value="${esc(it.code || "")}"></label>
+      <label class="f">الكود الداخلي <input name="code" lang="en" dir="ltr" value="${esc(it.code || "")}"></label>
       <label class="f">القسم <select name="category_id"><option value="">— بدون قسم —</option>${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === it.category_id ? "selected" : ""}>${esc(c.name)}${c.no_return ? " (لا يُقبل إرجاعه)" : ""}</option>`).join("")}</select></label>
       <label class="f">سعر الجمهور للعبوة (ج) <input name="public_price" type="number" step="0.01" min="0" value="${it.public_price != null ? money(it.public_price) : ""}" ${canPrice ? "" : "disabled"}>
         ${canPrice ? "" : `<span class="muted">تحديث السعر للمالك والمدير فقط</span>`}</label>
@@ -2710,7 +2716,7 @@ function renderItemEdit(root, id, it, categories, modal = null) {
     <p class="muted">امسح هنا الباركود أو الكود المربع الموجود على العلبة. يُحفظ الكود المربع بالكود الدولي الذي بداخله.</p>
     <ul class="plain" id="bcList">${(it.barcodes || []).map((b) => `<li><bdi dir="ltr">${esc(b.code)}</bdi> ${b.gtin ? `<span class="badge b-ok">✓ دولي</span>` : ""}
       ${id ? `<button type="button" class="btn small secondary" data-rm="${esc(b.code)}">إزالة</button>` : ""}</li>`).join("")}</ul>
-    <div class="row"><input id="bcNew" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
+    <div class="row"><input id="bcNew" lang="en" dir="ltr" placeholder="امسح هنا" autocomplete="off"><button type="button" class="btn small secondary" id="bcAdd">أضف</button></div>
     <div class="row mt"><button class="btn">احفظ</button></div></form>`;
   const newCodes = new Set(), removedCodes = new Set();
   const perform = modal ? modal.run : async (action) => {
@@ -2968,6 +2974,14 @@ const ISSUE_AR = {
   same_name_exists: "عميل بنفس الاسم موجود", duplicate_in_file: "مكرر في الملف", invalid_phone: "رقم هاتف غير صحيح",
   invalid_balance: "رصيد غير صحيح", invalid_credit_limit: "حد ائتمان غير صحيح",
   unknown_is_imported: "محلي/مستورد غير مفهوم", unknown_is_drug: "دواء/غير دواء غير مفهوم",
+  unknown_pack_layout: "عدد الشرائط في العلبة غير معروف — حدده",
+};
+// QA-007: the choices for a counted item whose file gives no pack layout (never guessed as "whole box")
+const packLayoutOptions = (x) => {
+  const lay = x.issues.find((i) => i.code === "unknown_pack_layout");
+  if (!lay) return "";
+  return (lay.suggest || []).filter((n) => n > 1 && n < lay.count).map((n) => `<option value="pack:${n}">${n} شريط × ${lay.count / n}</option>`).join("")
+    + `<option value="pack:${lay.count}">بالواحدة: ${lay.count} في العلبة</option><option value="pack:1">علبة كاملة فقط</option><option value="pack:?">عدد آخر في العلبة…</option>`;
 };
 const ACTION_AR = { create: "إضافة", update: "تحديث", link: "ربط", skip: "تجاهل", review: "مراجعة", error: "خطأ" };
 
@@ -3044,14 +3058,20 @@ async function viewImportRun(id) {
       <td>${open ? `<select data-dec="${esc(x.id)}">
         <option value="">${x.decision ? esc(x.decision) : "— اختر —"}</option>
         <option value="skip">تجاهل السطر</option>
-        ${x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : ""}
+        ${packLayoutOptions(x) || (x.action === "review" ? `<option value="create">${r.kind === "items" ? "إضافة كصنف جديد" : "تسجيل الرصيد"}</option>` : "")}
         ${x.target_id && r.kind === "items" ? `<option value="link:${esc(x.target_id)}">ربط بالصنف الموجود</option>` : ""}
       </select>` : esc(x.decision || "")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">لا يوجد</td></tr>`}</tbody>
   </table></div></section>`;
   app.querySelectorAll("[data-dec]").forEach((s) => s.addEventListener("change", async () => {
     if (!s.value) return;
-    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision: s.value } }); toast("تم الحفظ"); }
-    catch (e) { toast(e.message, true); }
+    let decision = s.value;
+    if (decision === "pack:?") {
+      const n = prompt("عدد وحدات البيع (الشرائط) في العلبة");
+      if (n === null || !/^[0-9]+$/.test(n.trim())) { s.value = ""; return; }
+      decision = `pack:${Number(n.trim())}`;
+    }
+    try { await api(`/api/imports/${id}/decide`, { method: "POST", body: { row_id: s.dataset.dec, decision } }); toast("تم الحفظ"); }
+    catch (e) { s.value = ""; toast(e.message, true); }
   }));
   $("#impApply")?.addEventListener("click", async () => {
     if (!confirm("تطبيق الاستيراد؟ العملية تتم مرة واحدة بالكامل أو لا شيء.")) return;
@@ -3182,7 +3202,7 @@ async function viewCountSession(id) {
   const chooseItem = (it) => {
     COUNT_ITEM = it;
     $("#cntPick").innerHTML = "";
-    $("#cntItem").innerHTML = `<div class="panel"><b>${esc(it.name_en || it.name_ar)}</b>
+    $("#cntItem").innerHTML = `<div class="panel"><b>${bidi(upperEn(it.name_en || it.name_ar))}</b>
       <div class="muted">${esc(it.strength_norm || "")} ${esc(it.dosage_form || "")} — العبوة ${it.pack_size} ${esc(unitName(it))} — موقع ${esc(it.location || "—")}</div>
       <div class="row mt"><label class="f">الكمية <input id="cntQty" type="number" min="0" step="1" inputmode="numeric"></label>
       <label class="f">الموقع <input id="cntLoc" value="${esc(it.location || "")}"></label>
@@ -3991,7 +4011,7 @@ async function viewSalesAdvanced() {
     const box = document.createElement("div");
     if (mode === "full") {
       box.innerHTML = rows.map((r) => `<section class="inv-print"><h3>فاتورة ${r.sale_no ?? "معلقة"} — ${esc(dayOf(r.completed_at || r.created_at))} ${hhmm(r.completed_at || r.created_at)} — ${esc(r.customer || "بدون عميل")} — ${esc(r.seller || "")}</h3>
-        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${esc(x.name_en || x.name_ar)}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
+        <table><thead><tr><th>الصنف</th><th>الكمية</th><th>المُرتجع</th><th>بعد الخصم</th></tr></thead><tbody>${(r.items || []).map((x) => `<tr><td>${bidi(upperEn(x.name_en || x.name_ar))}</td><td>${esc(fmtStock(x.qty, x))}</td><td>${x.returned ? esc(fmtStock(x.returned, x)) : ""}</td><td class="num">${money(x.net)}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="3">الإجمالي${r.returned_total ? ` · مرتجع ${money(r.returned_total)} · الصافي ${money(r.net)}` : ""}</td><td class="num"><b>${money(r.total)}</b></td></tr></tfoot></table></section>`).join("");
     } else {
       const copy = $("#iBox").cloneNode(true);
@@ -4090,7 +4110,7 @@ function cashRefundRoom(s) {
 
 function refundOptions(s, includeWallet = false) {
   const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
-  const cash = !room ? "نقدًا من الخزينة — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الخزينة (حتى ${money(room)} ج)` : "نقدًا من الخزينة";
+  const cash = !room ? "نقدًا من الدرج — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الدرج (حتى ${money(room)} ج)` : "نقدًا من الدرج";
   const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
     ...(includeWallet && s.paid_transfer ? [["transfer", "رجّع للمحفظة الأصلية", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
@@ -4133,7 +4153,7 @@ async function viewExchange() {
   const drawDraft = () => {
     // the replacement changed: decisions typed for the old findings never carry over (Codex P1 on #396)
     findings = []; if ($("#exSafe")) $("#exSafe").innerHTML = "";
-    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${esc(l.item.name)}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
+    $("#exNew").innerHTML = draft && draft.lines.length ? `<table><tbody>${draft.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td><td>${l.qty_base}</td><td class="num">${money(l.net)}</td>
       <td><button class="btn small secondary" data-xdel="${esc(l.id)}">✕</button></td></tr>`).join("")}</tbody></table>` : H("مفيش أصناف استبدال لسه");
     $("#exNew").querySelectorAll("[data-xdel]").forEach((b) => b.addEventListener("click", async () => {
       try { draft = await api(`/api/sales/${draft.id}/lines/${b.dataset.xdel}`, { method: "DELETE" }); drawDraft(); totals(); } catch (e) { toast(e.message, true); }
@@ -4145,7 +4165,7 @@ async function viewExchange() {
     $("#exSale").innerHTML = `<section class="panel"><div class="row between"><h2>فاتورة ${sale.sale_no} — ${esc(sale.customer || "بدون عميل")}</h2>
       ${sale.in_window ? `<span class="badge b-ok">في مدة المرتجع (المدة: ${sale.window_days})</span>` : `<span class="badge b-warn">⚠ بعد مدة المرتجع (${sale.age_days} يوم) — محتاج موافقة</span>`}</div>
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
-      ${sale.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
+      ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
       <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
@@ -4253,7 +4273,7 @@ async function viewSale(id) {
     ${s.status !== "voided" && can("sales.create") ? `<label class="f mt">أضف صورة التحويل <input type="file" id="proofUp" accept="image/*,application/pdf"></label>` : ""}</section>` : ""}
   <section class="panel"><h2>الأصناف</h2><div class="tablewrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الجمهور</th><th>قبل الخصم</th><th>الخصم</th><th>الصافي</th>
     <th>التشغيلات</th>${s.status === "completed" && can("sales.return") ? "<th>كمية المرتجع (بالوحدة)</th>" : ""}</tr></thead><tbody>
-    ${s.lines.map((l) => `<tr><td>${esc(l.item.name)}</td>
+    ${s.lines.map((l) => `<tr><td>${bidi(upperEn(l.item.name))}</td>
       <td>${l.official_prices.map((p) => salePriceQty(p, l.item)).join("<br>") || esc(fq(l.qty_base, l))}</td>
       <td class="num">${l.official_prices.map((p) => money(p.price)).join("<br>")}</td>
       <td class="num">${l.official_prices.map((p) => money(p.gross)).join("<br>")}</td>
@@ -4268,10 +4288,11 @@ async function viewSale(id) {
       ${wallets.length ? `<label id="rWalletChoice" class="f" hidden>المحفظة الأصلية<select id="rWallet">
         ${wallets.map(([id, name]) => `<option value="${esc(id || "")}">${esc(name || "تحويل من غير قناة مسجلة")}</option>`).join("")}
       </select><small class="muted">الرد في حدود التحويل المؤكد وصوله</small></label>` : ""}
-      <label class="f grow">سبب المرتجع<input id="rReason" placeholder="مثال: العميل غيّر رأيه"></label>
+      <label class="f grow">سبب المرتجع<input id="rReason" lang="ar" placeholder="مثال: العميل غيّر رأيه"></label>
       <button class="btn" id="rGo">تسجيل المرتجع</button></div>` : ""}
     ${s.status === "completed" && can("sales.void") && !s.returned_total && !(s.returns || []).length ? `<div class="row mt"><label class="f grow">إلغاء الفاتورة (في اليوم نفسه فقط) — السبب
-      <input id="vReason"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button></div>` : ""}
+      <input id="vReason" lang="ar"></label><button class="btn danger" id="vGo">إلغاء الفاتورة</button>
+      <small class="muted void-why">يلغي البيعة كأنها ماحصلتش: الأصناف ترجع والنقدي يطلع من الدرج. في نفس اليوم بس ولو مفيش مرتجع؛ بعد كده استخدم المرتجع.</small></div>` : ""}
   </section>`;
   // owner 18/11: the field started at 0 and typing 3 gave 30; it starts empty and a click selects what is there
   app.querySelectorAll("[data-ret]").forEach((i) => i.addEventListener("focus", () => i.select()));
@@ -5001,7 +5022,7 @@ async function viewPos(afterCheckout = false) {
   <div class="pos">
     <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
-        <input id="posQ" class="big" autocomplete="off" autofocus></label>
+        <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
       <section class="panel" id="posCart"></section>
@@ -5048,7 +5069,8 @@ async function viewPos(afterCheckout = false) {
     const sellable = (r) => r.is_service || r.stock_qty == null || r.stock_qty > 0;     // out of stock: show it, with its similar items
     const exactShort = !short || res[0]?.code === v || res[0]?.code === `E${v}`;
     if (!live && res.length === 1 && sellable(res[0]) && exactShort && (scanned || !found.hint)) {
-      return addItem(res[0], unit ? 0 : 1, unit ? 1 : 0, given != null);
+      const [packs, units, partial] = scanAddQty(res[0], unit);
+      return addItem(res[0], packs, units, given != null, partial ? `مفيش علبة كاملة، اتنزل ${unitName(res[0])}` : "");
     }
     $("#posRes").innerHTML = (found.hint?.kind === "gs1" && !res.length
       ? `<p class="badge b-warn">⚠ هذا الكود المربع غير مسجل على أي صنف. افتح بطاقة الصنف وامسحه في خانة الباركود.</p>` : hintHtml(found.hint))
@@ -5159,7 +5181,7 @@ async function renderQuick() {
     ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
         <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
@@ -5348,19 +5370,30 @@ function trackPosAdd(work) {
   return pending;
 }
 
-// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
-function addItem(item, packs, units, scanned = false) {
-  return trackPosAdd(addPosLine(item, packs, units, scanned));
+// UX-26 (owner 26/11): a scan of an item with no full box left but some strips/units adds one unit
+// instead of being refused. [packs, units, partial]; with nothing left it stays a box and the server refuses.
+function scanAddQty(r, unit) {
+  if (unit) return [0, 1, false];
+  if (r.is_service || r.pack_size <= 1 || r.available_qty == null || r.available_qty >= r.pack_size || r.available_qty <= 0)
+    return [1, 0, false];
+  return [0, 1, true];
 }
 
-async function addPosLine(item, packs, units, scanned) {
+// scanned = the field was already freed for the next scan: clearing it now would cut a barcode being typed
+// note = a line for the cashier once the add succeeded (UX-26: a unit instead of a box), shown with any warning
+function addItem(item, packs, units, scanned = false, note = "") {
+  return trackPosAdd(addPosLine(item, packs, units, scanned, note));
+}
+
+async function addPosLine(item, packs, units, scanned, note = "") {
   const sid = SALE.id;
   const update = await api(`/api/sales/${sid}/lines`, { method: "POST", body: { item_id: item.id, packs, units, client_ref: newKey() } });
   if (SALE?.id !== sid || !$("#posCart") || update.version < SALE.version) return;
   SALE = update;
   const added = SALE.lines.find((l) => l.item_id === item.id);
   if (added && (added.item.rx_required || added.item.misuse_risk || added.item.sale_note))
-    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`].filter(Boolean).join(" · "), true);
+    toast([added.item.rx_required && "📋 بوصفة طبية فقط", added.item.misuse_risk && "⚠ يُساء استخدامه", added.item.sale_note && `📝 ${added.item.sale_note}`, note].filter(Boolean).join(" · "), true);
+  else if (note) toast(note);          // Codex P2 on #478: never replaces a dispensing warning
   $("#posRes").innerHTML = "";
   if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
   $("#posQ").focus();
@@ -5491,7 +5524,7 @@ async function posUsual() {
   if (SALE?.customer_id !== cid || SALE?.id !== sale || !$("#posUsual")) return;
   const items = all.slice(0, 8);
   $("#posUsual").innerHTML = items.length ? `<p class="muted small">أدويته المعتادة (آخر 6 شهور):</p>${items.map((x, i) =>
-    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${esc(x.name_en || x.name_ar || "")}
+    `<button class="btn small secondary" data-usual="${i}" ${x.in_stock ? "" : "disabled title=\"مش متوفر\""}>＋ ${bidi(upperEn(x.name_en || x.name_ar || ""))}
       <span class="muted">${esc(fmtStock(x.last_qty || 1, x))}${x.in_stock && x.add_qty < (x.last_qty || 1) ? ` · المتاح ${esc(fmtStock(x.add_qty, x))}` : ""}${x.refill_days_left != null ? ` · ميعاده ${x.refill_days_left <= 0 ? "دلوقتي" : `بعد ${x.refill_days_left} يوم`}` : ""}</span></button>`).join("")}` : "";
   $("#posUsual").querySelectorAll("[data-usual]").forEach((b) => b.addEventListener("click", () => {
     const x = items[+b.dataset.usual], q = x.add_qty || x.last_qty || 1, ps = x.pack_size || 1;   // no more than in stock
@@ -5693,10 +5726,10 @@ function newCustomerDialog() {
   const saleId = SALE.id;                          // the invoice this form belongs to, even if the save is slow
   const d = document.createElement("dialog"); d.id = "custNewDlg";
   d.innerHTML = `<form method="dialog" class="formgrid"><h2>عميل جديد</h2>
-    <label class="f">اسم العميل <input name="name" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
+    <label class="f">اسم العميل <input name="name" lang="ar" maxlength="120" required autocomplete="off" value="${isPhone ? "" : esc(typed)}"></label>
     <label class="f">الموبايل (اختياري) <input name="phone" inputmode="tel" maxlength="20" autocomplete="off" value="${isPhone ? esc(typed) : ""}"></label>
     <label class="f">رقم تاني (اختياري) <input name="phone2" inputmode="tel" maxlength="20" autocomplete="off"></label>
-    <label class="f">العنوان (اختياري) <input name="address1" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
+    <label class="f">العنوان (اختياري) <input name="address1" lang="ar" maxlength="200" autocomplete="off" value="${esc(SALE?.kind === "delivery" ? SALE.delivery?.address || "" : "")}"></label>
     <p class="badge b-err" data-err hidden></p>
     <div class="row"><button class="btn" value="ok">حفظ واختيار العميل</button><button class="btn secondary" value="cancel" formnovalidate>إلغاء</button></div></form>`;
   document.body.append(d);
@@ -6678,7 +6711,7 @@ const LEDGER_KIND = { opening: "رصيد أول المدة", purchase: "فاتو
 async function viewSuppliers() {
   const list = (await api("/api/suppliers/all")).suppliers, showBal = list.length && "balance" in list[0];
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الموردون</h1>
-    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" placeholder="اسم المورد" required>
+    ${ME.permissions.includes("suppliers.write") ? `<form id="supNew" class="row"><input name="name" lang="ar" placeholder="اسم المورد" required>
       <select name="t"><option value="company">شركة</option><option value="warehouse" selected>مخزن</option></select><button class="btn small">أضف موردًا</button></form>` : ""}</div>
     <table><thead><tr><th>المورد</th><th>النوع</th><th>آخر فاتورة</th>${showBal ? "<th>مستحق له علينا</th>" : ""}</tr></thead><tbody>
     ${list.map((x) => `<tr class="clickable" data-go="${esc(x.id)}"><td><b>${esc(x.name)}</b>${x.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}</td>
@@ -7060,10 +7093,10 @@ async function viewCustomers(filter = "") {
     <table class="mt"><thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>عليه</th><th>الطلب الشهري</th></tr></thead><tbody id="cuBody"></tbody></table><p id="cuSum"></p></section>
   ${canM ? `<section class="panel" id="cuDup" hidden></section>` : ""}
   ${ME.permissions.includes("contracts.manage") || ME.permissions.includes("sales.totals") ? `<section class="panel" id="ktBox"></section>` : ""}
-  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" required></label>
+  ${canM ? `<form class="panel row" id="cuNew"><h2 class="grow">عميل جديد</h2><label class="f">الاسم بالعربي <input name="name" lang="ar" required></label>
     <label class="f">اسم آخر (بالإنجليزية أو اسم الزوجة) <input name="name_alt"></label>
     <label class="f">الهاتف <input name="phone" inputmode="tel"></label><label class="f">هاتف 2 <input name="phone2" inputmode="tel"></label>
-    <label class="f">العنوان <input name="address1"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
+    <label class="f">العنوان <input name="address1" lang="ar"></label><label class="f">حد الآجل (ج) <input name="lim" type="number" min="0" value="0" class="narrow"></label>
     <button class="btn">أضف</button></form>` : ""}`;
   const today = isoDay(new Date());
   let cur = { list: [], f: "" };
@@ -8107,6 +8140,47 @@ async function viewUser(id) {
   $("#uPin").addEventListener("submit", (e) => { e.preventDefault(); post("pin", { pin: e.target.pin.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
   $("#uPw")?.addEventListener("submit", (e) => { e.preventDefault(); post("password", { password: e.target.password.value, ...(mine ? { current_password: e.target.current.value } : {}) }); });
 }
+
+// UX-26 (owner 26/11): the keyboard follows the field. A field marked lang="ar" asks the PC for the Arabic layout,
+// lang="en" (barcode, English name, codes, item search) for the English one. Fire-and-forget and debounced: it never
+// waits, never shows an error, and turns itself off when the PC cannot switch (404 / not supported).
+function keyboardSwitcher(send, delay = 120) {
+  let timer = null, last = null, off = false, busy = false, want = null;
+  const fire = (lang) => {
+    if (off) return;
+    if (busy) { want = lang; return; }                // one request at a time; the newest wish (even = last) goes after it
+    if (lang === last) return;
+    last = lang; busy = true; want = null;
+    Promise.resolve().then(() => send("/api/system/keyboard-layout", {
+      method: "POST", credentials: "same-origin",
+      ...(typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(1500) } : {}),
+      headers: { "X-Requested-With": "pharm", "Content-Type": "application/json" },     // no Idempotency-Key: no DB write
+      body: JSON.stringify({ lang }),
+    })).then((r) => { if (r && [404, 405, 501].includes(r.status)) off = true; else if (!r?.ok) last = null; })
+      .catch(() => { last = null; })
+      .finally(() => { busy = false; const next = want; want = null; if (next) fire(next); });
+  };
+  return (lang) => {
+    if (off || (lang !== "ar" && lang !== "en")) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => fire(lang), delay);
+  };
+}
+const KB_SWITCH = keyboardSwitcher((url, opts) => fetch(url, opts));
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (el?.matches?.("input:not([type=checkbox]):not([type=radio]):not([type=number]), textarea")) KB_SWITCH(el.getAttribute("lang"));
+});
+// English-name fields write capitals as they are typed (data-upper); the cursor stays where it was
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el?.matches?.("input[data-upper]") || e.isComposing) return;
+  const up = upperEn(el.value);
+  if (up === el.value) return;
+  const a = el.selectionStart, b = el.selectionEnd;
+  el.value = up;
+  try { el.setSelectionRange(a, b); } catch { /* not a text field */ }
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 route();

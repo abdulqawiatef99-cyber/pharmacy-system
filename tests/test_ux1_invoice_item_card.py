@@ -175,7 +175,7 @@ const { chromium } = require('playwright');
   await card.locator('[name="name_en"]').fill('Brand New Fixture Item');
   await card.getByRole('button', {name:'احفظ', exact:true}).click();
   await card.waitFor({state:'hidden'});
-  await newLine.getByText('Brand New Fixture Item', {exact:true}).waitFor();
+  await newLine.getByText('BRAND NEW FIXTURE ITEM', {exact:true}).waitFor();
 
   const approval = p.getByRole('dialog').filter({hasText:'سعر الرصيد الحالي'});
   p.once('dialog', d => d.accept());
@@ -212,7 +212,7 @@ const { chromium } = require('playwright');
   const focus = await search.evaluate(el => el === document.activeElement);
   await search.fill(second);
   await search.press('Enter');
-  await p.getByText('Synthetic Service Fixture', {exact:true}).first().waitFor();
+  await p.getByText('SYNTHETIC SERVICE FIXTURE', {exact:true}).first().waitFor();
   const button = line.getByRole('button', {name:'كارت الصنف', exact:true});
   await button.focus();
   await p.keyboard.press('F3');
