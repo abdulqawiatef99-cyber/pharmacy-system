@@ -18,7 +18,8 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
 - Agent-to-agent text (sessions, Codex, sub-agents, PRs, Issues, commits, agent docs) is short English.
 
 ## 2. Needs the owner first (everything else: decide, record, continue)
-- Sending anything in his name; deleting anything not reproducible; paying or any new recurring cost.
+- Sending anything in his name; deleting anything (data, files, Issues, unmerged branches); paying or any new
+  recurring cost.
 - Installing anything on the pharmacy PC: only after he says «نزّله» (the manager does it).
 - Building an installer.
 - Touching or migrating real data outside the program's own update path.
@@ -29,12 +30,13 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
 ## 3. Places, hours and data
 - The owner is at the pharmacy about 13:00–24:00 Cairo: device tests run inside that window, without
   asking whether he is there. Cloud work (coding, review, merging) runs any time, mostly 00:00–13:00.
+  Anything that needs him is timed inside 13:00–24:00 with a phone alarm or reminder for him.
 - The program is the pharmacy's live cashier since 21/11 (v0.4.0). E-Stock stays as read-only history.
 - Two PCs: cashier `desktop-5jvh3qd` (live); Heikal `desktop-gqgl6uf` = test machine, synthetic data
   only, its own E-Stock data never touched. Every device chat reads the device name first.
 - Never take full-screen control of a PC while the owner works. WhatsApp: read only, never send. Never
   open «اكونتات الشركات» or any note with passwords or codes.
-- Sign-in on a PC: never stop to ask him. Read the test login file in Notepad (open by path), sign in,
+- Sign-in on a PC: never stop to ask him. Read the test login file in Notepad (open by path), sign in in the browser pane,
   close Notepad, release the screen. Never write a password in chat, commits or Issues.
 - Real pharmacy, patient or customer data never leaves the pharmacy PC and never enters the repo. Cloud
   tests use synthetic data at the same scale. Repository: public for now (free CI); private again later.
@@ -46,6 +48,8 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
 - Claude Code sessions: implement and lead technically (`AGENTS.md`). Codex: independent reviewer and
   selected tasks; it never grades its own work and is never the manager.
 - «إحنا فين؟»: at most 5 lines from `STATUS.md`, `HANDOFF.md` and GitHub; no new work started.
+- Daily ~13:00: before anything else, the manager reviews what was merged since its last review and tells
+  the owner in plain words.
 - Weekly (after the Thursday usage reset): 5 lines on what moved against the `STATUS.md` gates, what is
   stuck, and the week's plan.
 - Model per task, named before the task starts (the cheapest that does it well; a chat cannot change its
@@ -55,7 +59,7 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
   free, intensify now with parallel sessions on separate claimed files instead of waiting for the night.
 
 ## 5. Merging and releasing
-- `develop` = integration; `main` = the pharmacy's update channel («تحديث» installs what is on `main`).
+- `develop` = integration and test PCs; `main` = the pharmacy's update channel («تحديث» installs what is on `main`).
   Work goes through branches and PRs only; never a direct or force push to `develop` or `main`.
 - Merge into `develop` when: the full suite passed locally on the merge with current `develop`; an
   independent review ran first (§7); `CI / linux` is green on the PR's latest head; Codex reviewed with
@@ -64,7 +68,7 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
   working day (or at its usage limit): merge on green CI + the independent review, and write
   "no Codex review" on the PR.
 - Release: ONE combined PR `develop` → `main` per batch, merged when linux AND windows are green on its
-  head. Then check the update bundle built; the owner presses «تحديث» on the cashier PC only after «نزّله».
+  head and no Codex P0/P1 is unresolved on what it carries. Then check the update bundle built; the owner presses «تحديث» on the cashier PC only after «نزّله».
 - Migrations and `requirements.txt` changes ship through the signed smart update (`docs/SMART_UPDATE.md`),
   not an installer. A new migration takes the next free number (never two files with one number again).
 - GitHub minutes (2,000 free a month, Windows counts double; target under 1,000): full suite locally
@@ -76,7 +80,8 @@ comments and Issues: §4 → §5, §12 → §7, §13 → §8 (old text: `docs/ar
 - One goal per session (one outcome, e.g. "PR queue clean"); tasks are steps toward it. Stop when it is
   reached, when the usage limit is near, or on signs of drift (contradicting a decision, re-asking a
   settled question, forgetting a rule).
-- Start: `AGENTS.md`, this file, `docs/STATUS.md`, `docs/HANDOFF.md` (top), last comments on #113.
+- Start: `AGENTS.md`, this file, `docs/STATUS.md`, `docs/HANDOFF.md` (top), last comments on #113 (and on
+  the device Issue, e.g. #18, for device work).
 - Parallel sessions: before starting, write on #113 which files each owns. Two sessions never touch the
   same file. A session that needs another's file stops and notes it on #113.
 - The queue is the «Queue» section of `docs/HANDOFF.md`. Only the session that claimed `HANDOFF.md`
@@ -114,7 +119,7 @@ verified with a failing test before any fix, small PRs, a 5-line Arabic summary 
 | Rhythm | What | Who |
 |---|---|---|
 | Every merge | the PR | §7 reviews + full suite |
-| Weekly | full suite, speed run (`scripts/perf/scale.py`), dependency scan, new owner findings | Claude Code, Sonnet |
+| Weekly | full suite, speed run (`scripts/perf/scale.py`, on the Heikal PC), dependency scan, new owner findings | Claude Code, Sonnet |
 | Every 2 weeks | Arabic/English text proofreading of changes, screen-by-screen test plan | Opus |
 | Monthly (first week) | full audit: structure, money and stock paths, security, speed, dead code, dependencies, competitors and `MARKET_RESEARCH.md` / `FEATURE_GAP.md`, proven pharmacy skills → `FUTURE_REQUIREMENTS.md` | money + security: strongest model + Codex; rest: Opus |
 | Every 3 months | deep security review (sign-in, permissions, backup, updates, network) | strongest model and Codex, separately, then compared |

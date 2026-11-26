@@ -1,7 +1,7 @@
 # AGENTS.md — shared rules for every coding agent (Claude Code accounts, Codex, others)
 
 This file is the permanent memory of the project's working rules. Chat history is not.
-If something here conflicts with an older document, this file wins.
+If something here conflicts with an older document, this file wins (except `docs/OWNER_RULES.md`, which wins over it).
 
 ## 1. Start of every session (in this order, nothing else first)
 1. `git fetch origin` and read `docs/OWNER_RULES.md` (the owner's standing rules; they win over this file
@@ -22,7 +22,7 @@ If something here conflicts with an older document, this file wins.
   independent review, `CI / linux` green on the latest head, no unresolved Codex P0/P1), with the
   acceptance criteria met and no conflicts. Merge commits, no force-push on shared branches.
 - Never close or overwrite another agent's open PR without checking its content is preserved elsewhere.
-- GitHub Free has no branch protection for this private repo, so `.github/workflows/branch-guard.yml`
+- GitHub Free has no branch protection for this repo, so `.github/workflows/branch-guard.yml`
   stands in for it: `main` and `develop` change only by merging a PR whose `CI / linux` is green, never by
   direct or force push. A violation opens an Issue (force push: old tip kept as `guard/<branch>-<sha>`),
   and an unverified push to `main` does not build or publish `installer-latest`. Limit: a force push back
