@@ -94,3 +94,29 @@ class TestSaleLayout(APICase):
         self.assertEqual(out["afterFirstEnter"], "payGiven")
         self.assertEqual(out["completed"], 200)
         self.assertTrue(out["openOnNext"])
+
+
+SERVICES_ONLY = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.goto(base + '/#/pos');
+  await p.waitForSelector('#posQuick h2');
+  await p.waitForTimeout(500);
+  const svc = await p.locator('#posQuick [data-svc]').count();
+  console.log(JSON.stringify({ svc }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestServicesWithoutQuickItems(APICase):
+    """Codex P2 on #468: services stay on the quick row when no item is pinned or sold yet."""
+    def test_services_shown_with_an_empty_item_list(self):
+        cat.create_item(self.db, self.ctx, {"name_en": "Blood pressure check", "name_ar": "قياس ضغط",
+                                            "public_price": 500, "is_service": 1})
+        CashDrawer(self.db).open(self.ctx, 0)
+        out = run_node(self, SERVICES_ONLY, "owner", OWNER_PW)
+        self.assertEqual(out["svc"], 1)
