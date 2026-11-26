@@ -2865,6 +2865,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
 
     @handler
+    async def customer_usual(req):
+        from ..sales import customers as cu
+        return J({"items": await off_loop(cu.usual_items, db, ctx_of(req), req.path_params["id"])})
+
+    @handler
     async def hikma_claim_api(req):
         from ..reports import hikma_claim as hk
         ctx, q = ctx_of(req), req.query_params
@@ -3572,6 +3577,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/customers/phone-doubles", customers_phone_doubles),
         Route("/api/customers/{id}", customer_profile, methods=["GET", "PATCH"]),
         Route("/api/customers/{id}/refills", customer_refill, methods=["POST"]),
+        Route("/api/customers/{id}/usual", customer_usual),
         Route("/receipt/{id}", receipt),
         Route("/return-receipt/{id}", return_receipt),
         Route("/labels", labels_page),
