@@ -583,7 +583,7 @@ const HELP = {
   "pack-review": ["راجع العبوات المنقولة اللي اسمها فيه عدد والبرنامج مسجلها علبة واحدة.", ["راجع العلبة نفسها، واكتب عدد الوحدات اللي بتتباع وسبب اختيارك."]],
   "customer-name-review": ["راجع أسماء نفس الحساب في إي ستوك وتاريخ البيع.", ["اختار الاسم اللي هيظهر في البرنامج واضغط اعتمد الاسم."]],
   home: ["الصفحة الرئيسية: ملخص اليوم وما يحتاج إلى انتباهك.", ["اضغط على أي تنبيه لفتح الشاشة الخاصة به.", "يسجّل الموظف حضوره وانصرافه من هنا."]],
-  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
+  pos: ["امسح الباركود أو اكتب أول حروف الصنف، ثم اختر طريقة الدفع وأتمم البيع.", ["Enter يضيف علبة، وShift+Enter يضيف وحدة. F1 البحث، و↑ ↓ تختار صنف من الفاتورة: F2 رصيده في الفروع، F3 كارته، F6 كميته، Delete يشيله. F10 يروح للدفع والمرة التانية يحفظ (وF9 يحفظ على طول)، F4 الإيصال، F11 (أو F8) يفتح الدرج بسبب لمن له صلاحية الخزينة، F7 مرتجع واستبدال، Insert فاتورة جديدة، Ctrl+Tab الفاتورة اللي بعدها، Ctrl+Delete إلغاء الفاتورة.", "الدرج يُفتح تلقائيًا مع أي مبلغ نقدي حتى بدون إيصال (مع الطابعة المباشرة فقط). \"اطبع إيصال آخر فاتورة\" يعيد الطباعة بدون فتح الدرج.", "أسرع بيع: امسح الأصناف، ثم Enter على البحث الفاضي يوديك لخانة «العميل دفع»، وEnter تاني يتمم البيع بالمبلغ بالظبط (أو اكتب المبلغ اللي دفعه الأول). المسح من أي خانة في الشاشة بيضيف الصنف ومبيكتبش في الخانة.", "البيع السريع صف واحد تحت الفاتورة: بيصغر بعد أول صنف، وزرار «افتح ▾» يفتحه.", "إذا كان الصنف ناقصًا اضغط \"↔ مثيل / بديل\".", "مسح الصنف نفسه مرة أخرى يزيد كميته في السطر نفسه.", "تحذيرات الأصناف يجب تأكيدها قبل البيع، ويُسجَّل التأكيد باسمك."]],
   sales: ["فواتير البيع: ابحث وصفِّ واطبع، واضغط على أي فاتورة لعرض أصنافها.", ["يمكن اختيار أكثر من نوع فاتورة معًا.", "الرقم القصير يُبحث به كرقم فاتورة، والأطول كرقم هاتف أيضًا.", "اختر فواتير بعلامة ✓ ثم \"🖨 المحدد\" لطباعتها وحدها."]],
   purchases: ["فواتير الشراء: ارفع ملف الفاتورة أو أدخلها يدويًا، وراجعها ثم اعتمدها.", ["لا يتغير المخزون إلا بعد الاعتماد.", "الخانات المنقطة تحتاج إلى مراجعة قبل الاعتماد."]],
   items: ["الأصناف: ابحث بالاسم العربي أو الإنجليزي أو الكود أو الباركود.", ["حدد أصنافًا بعلامة ✓ لنقلها إلى قسم أو وضع علامة عليها أو تثبيتها في البيع السريع.", "اضغط على الصنف لفتح بطاقته."]],
@@ -4609,14 +4609,14 @@ async function viewPos(afterCheckout = false) {
         <input id="posQ" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
-      <div id="posQuick"></div>
       <section class="panel" id="posCart"></section>
-      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · ${posKeysHtml()}</p>
+      <div id="posQuick"></div>
+      <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
     </section>
     <aside class="pos-side" id="posSide"></aside>
   </div>
   <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>`;
-  renderCart(); renderSide(); renderQuick();
+  renderCart(); renderSide();                    // renderCart draws the quick row too (syncQuick)
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
     if (e.target.dataset.close) return;
     await openDraft(b.dataset.tab); viewPos();
@@ -4698,6 +4698,12 @@ async function viewPos(afterCheckout = false) {
       const r = res[+first.dataset.add]; if (r) addItem(r, e.shiftKey ? 0 : 1, e.shiftKey ? 1 : 0); return;
     }
     const v = q.value.trim();
+    // U4-17: Enter on the empty search line goes to the payment («العميل دفع», or the done button);
+    // Enter there finishes the sale. Scan, Enter, Enter = sold at the exact amount.
+    if (!v) {
+      if (SALE?.lines.length || pendingPosAdds(SALE?.id).length) ($("#payGiven:not([disabled])") || $("#posDone:not([disabled])"))?.focus();
+      return;
+    }
     if (/^\d{3,}$/.test(v) || /^01\d{14}/.test(v)) {                  // a scan: free the field at once for the next one
       q.value = ""; delete q.dataset.searched;
       trackPosAdd(search(e.shiftKey, false, v));
@@ -4727,24 +4733,40 @@ window.addEventListener("pageshow", (e) => {
 // أزرار البيع السريع: اللي الصاحب ثبّتها، وبعدها الأكتر بيعًا آخر 30 يوم
 let QUICK = null;
 const quickOpen = () => { try { return localStorage.getItem("posQuick") !== "0"; } catch { return true; } };
+// U4-17 (owner 17/11): one compact sideways row under the invoice. Open while the invoice is empty, shrunk to its
+// title after the first item; its button opens or shrinks it for this invoice. On an empty invoice the button is
+// also remembered on this PC, as the old «إخفاء» was.
+const quickWide = () => {
+  const mine = SALE && POS.quickWide?.[SALE.id];
+  return mine ?? (!(SALE?.lines.length) && quickOpen());
+};
+function syncQuick() {
+  const box = $("#posQuick");
+  if (box && box.dataset.wide !== String(quickWide())) renderQuick();
+}
 async function renderQuick() {
   const box = $("#posQuick"); if (!box) return;
-  const open = quickOpen();
+  const open = quickWide();
+  box.dataset.wide = String(open);
   if (open && !QUICK) { try { QUICK = await api("/api/pos/quick"); } catch { QUICK = { items: [] }; } }
-  if (!$("#posQuick")) return;
+  if (!$("#posQuick") || box.dataset.wide !== String(quickWide())) return;
   const list = QUICK?.items || [];
-  box.innerHTML = `<section class="panel qsale"><div class="row between"><h2>⚡ البيع السريع</h2>
-      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl">${open ? "إخفاء" : "إظهار"}</button></span></div>
-    ${open ? (list.length ? `<div class="qgrid">${list.map((x, i) => {
+  box.innerHTML = `<section class="panel qsale ${open ? "" : "shrunk"}"><div class="row between"><h2>⚡ البيع السريع</h2>
+      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl" aria-expanded="${open}">${open ? "صغّر ▴" : "افتح ▾"}</button></span></div>
+    ${open ? (list.length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
-        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}</div>
+        ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${esc(x.name_en || x.name_ar)}</b><span class="qp">${money(x.public_price)} ج</span>${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
+        <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
       : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
-    ${open && (QUICK?.services || []).length ? `<h3>🛎 خدمات</h3><div class="qgrid">${QUICK.services.map((x, i) => `<button class="qbtn" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
-        <b class="qn">${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>` : ""}
     ${open && canW() && (QUICK?.suggested_services || []).length ? `<p class="muted small">🛎 خدمات مقترحة تعملها من شاشة الأصناف (علّم «خدمة» وحط السعر): ${QUICK.suggested_services.map((x) => `<span class="chip">${esc(x)}</span>`).join(" ")}</p>` : ""}</section>`;
-  $("#qkTgl").addEventListener("click", () => { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } renderQuick(); });
+  $("#qkTgl").addEventListener("click", () => {
+    if (!SALE) return;
+    (POS.quickWide ||= {})[SALE.id] = !open;
+    if (!SALE.lines.length) { try { localStorage.setItem("posQuick", open ? "0" : "1"); } catch { /* per-viewer only */ } }
+    renderQuick();
+  });
   $("#qkRef")?.addEventListener("click", () => { QUICK = null; renderQuick(); });
   box.querySelectorAll("[data-svc]").forEach((b) => b.addEventListener("click", () => addItem(QUICK.services[+b.dataset.svc], 0, 1)));
   box.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => {
@@ -4996,6 +5018,7 @@ function renderCart(findings = null) {
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
     </table></div><div id="posSafety"></div>`;
   posMark();
+  syncQuick();
   const line = (id) => s.lines.find((l) => l.id === id);
   $("#posCart").querySelectorAll("[data-pos-card]").forEach((button) => button.addEventListener("click", () =>
     posInvoiceCard(line(button.dataset.posCard))));
@@ -5167,6 +5190,13 @@ function renderSide() {
     POS.method = b.dataset.m; POS.channel = CHANNELS.find((c) => c.kind === POS.method)?.id || null; renderSide();
   }));
   $("#posSide [data-ch]")?.addEventListener("change", (e) => { POS.channel = e.target.value; });
+  $("#payGiven")?.addEventListener("keydown", (e) => {      // U4-17: Enter here finishes the sale, like F9
+    if (e.key !== "Enter" || e.ctrlKey || e.repeat) return;
+    e.preventDefault();
+    const confirmButton = $("#posConfirm");
+    if (confirmButton) confirmButton.focus();
+    else complete();
+  });
   $("#payGiven")?.addEventListener("input", (e) => {
     const g = toPiasters(e.target.value), ch = g - dueNow(s);
     $("#changeBox").hidden = !(g >= dueNow(s)); $("#changeV").textContent = money(ch);
