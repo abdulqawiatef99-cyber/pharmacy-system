@@ -99,7 +99,24 @@ const replacedFast = (() => {
   fire?.();                                                       // the pause: the burst was a person
   return f.value;
 })();
-const out = { viaInstall, insertedBetween, overSelected, replacedFast,
+// Codex P2 on #462 (d8d3e13): the caret before or inside an amount in a number box
+const numberBox = (value, keys, place, gapMs, enter) => {
+  const f = new Field(value, "number"); f.selectionStart = f.selectionEnd = null;
+  f.setSelectionRange = () => {}; f.setRangeText = () => { throw new Error("number box"); };
+  let fire = null; const scans = [];
+  const d = createScanDetector({ onScan: (c) => scans.push(c), setTimer: (fn) => { fire = fn; return 1; }, clearTimer: () => {} });
+  let at = place;
+  [...keys].forEach((k, i) => { let prevented = false;
+    d.keydown({ key: k, timeStamp: 1000 + i * gapMs, target: f, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    if (!prevented) { f.value = f.value.slice(0, at) + k + f.value.slice(at); at += 1; } });
+  if (enter) d.keydown({ key: "Enter", timeStamp: 1000 + keys.length * gapMs, target: f, preventDefault() {}, stopImmediatePropagation() {} });
+  else fire?.();
+  return { scans, value: f.value };
+};
+const caretBefore = numberBox("5", "6221043010366", 0, 4, true);
+const caretInside = numberBox("15", "6221043010366", 1, 4, true);
+const typedBefore = numberBox("5", "12", 0, 25, false);
+const out = { viaInstall, insertedBetween, overSelected, replacedFast, caretBefore, caretInside, typedBefore,
   scanInDiscount: run(burst("6223001234567"), new Field("5")),
   scanShortCode: run(burst("1234"), new Field("")),
   personTyping: run(typed("100"), new Field("")),
@@ -204,6 +221,14 @@ class TestScanDetector(unittest.TestCase):
 
     def test_a_fast_replacement_of_a_selected_amount_is_given_back_as_typed(self):
         self.assertEqual(self.out["replacedFast"], "15")
+
+    def test_scan_with_the_caret_before_or_inside_an_amount(self):
+        for case in ("caretBefore", "caretInside"):
+            o = self.out[case]
+            self.assertEqual(o["scans"], ["6221043010366"], case)
+        self.assertEqual(self.out["caretBefore"]["value"], "5")
+        self.assertEqual(self.out["caretInside"]["value"], "15")
+        self.assertEqual(self.out["typedBefore"]["value"], "125")   # a person's fast typing replayed where it went
 
     def test_text_inserted_without_keys_is_never_taken(self):
         self.assertEqual(self.out["insertedBetween"], "شارع التجربة 7")
