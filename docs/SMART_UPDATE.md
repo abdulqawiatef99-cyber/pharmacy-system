@@ -107,6 +107,8 @@ then it is offered nothing. The first update from `main` records `ref = main`, s
    kept and **no program starts** (retried at the next start; the old program could otherwise create an
    empty database).
 7. **First start** (stage 0): health check with boot id (existing). OK → confirm, journal `done`.
+   During a database update, the candidate serves only the health probe until its release is confirmed
+   and its journal reaches `done`. The cashier API returns a retryable 503 during this interval.
    Fail → stop the process, move the new DB (+ `-wal`/`-shm`) aside, put the previous DB back, roll the
    pointer back, journal `rolled_back`, start the old version. A power cut at any step is resumed from
    the journal state on the next start.

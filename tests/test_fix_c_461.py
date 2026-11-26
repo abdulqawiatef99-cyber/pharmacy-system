@@ -95,7 +95,7 @@ class TestRefundDate(PlanCase):
 
 
 class TestPendingDatabaseUpdate(PlanCase):
-    def test_cashier_refused_during_candidate_health_check(self):
+    def candidate(self):
         sale = self.draft()
         draft = self.line(sale, self.pan, units=1)
         s = replace(self.s, db_path=self.tmp / "cashier.db")
@@ -122,16 +122,23 @@ class TestPendingDatabaseUpdate(PlanCase):
 
         with patch.object(manage, "_db", return_value=db), patch("uvicorn.run") as run:
             manage.cmd_serve(SimpleNamespace(host="127.0.0.1", port=8000), s)
+        client = TestClient(run.call_args.args[0], cookies=self.c.cookies)
+        self.addCleanup(client.close)
+        checkout = {
+            "payments": [{"method": "cash", "amount": 2000}], "version": draft["version"],
+            "request_id": "pending-checkout", "receipt": True, "safety_decisions": {"0": "تمت المراجعة"},
+        }
+        return home, release_id, db, client, sale, checkout
+
+    def test_cashier_refused_during_candidate_health_check(self):
+        home, release_id, db, client, sale, checkout = self.candidate()
         with patch("app.printing.service.checkout_devices", return_value={"receipt": "printed"}) as devices:
-            client = TestClient(run.call_args.args[0], cookies=self.c.cookies)
             self.assertTrue(client.get("/api/health").json()["ok"])
             opening = client.post("/api/cash/open", headers=H, json={"opening_cash": 10000})
-            checkout = client.post(f"/api/sales/{sale}/complete", headers=H, json={
-                "payments": [{"method": "cash", "amount": 2000}], "version": draft["version"],
-                "request_id": "pending-checkout", "receipt": True, "safety_decisions": {"0": "تمت المراجعة"},
-            })
+            closing_sale = client.post(f"/api/sales/{sale}/complete", headers=H, json=checkout)
             with self.subTest(operation="no cashier writes"):
-                self.assertEqual((opening.status_code, checkout.status_code), (503, 503), checkout.text)
+                self.assertEqual((opening.status_code, closing_sale.status_code), (503, 503), closing_sale.text)
+                self.assertEqual(opening.json()["error"]["code"], "update_pending")
                 self.assertEqual(db.one("SELECT status FROM sales WHERE id=?", (sale,))["status"], "draft")
                 self.assertIsNone(db.one("SELECT 1 FROM cash_shifts"))
                 devices.assert_not_called()
@@ -139,3 +146,21 @@ class TestPendingDatabaseUpdate(PlanCase):
             releases.recover_failed_start(home, release_id)
             self.assertEqual(releases.read_journal(home)["state"], "rolled_back")
             self.assertIsNone(db.one("SELECT 1 FROM cash_shifts"))
+            self.assertEqual(db.one("SELECT status FROM sales WHERE id=?", (sale,))["status"], "draft")
+            self.assertEqual(client.get(f"/receipt/{sale}").status_code, 503)
+
+    def test_checkout_can_retry_after_same_candidate_is_committed(self):
+        home, release_id, db, client, sale, checkout = self.candidate()
+        headers = {**H, "Idempotency-Key": "first-checkout"}
+        with patch("app.printing.service.checkout_devices", return_value={"receipt": "printed"}) as devices:
+            self.assertEqual(client.post(f"/api/sales/{sale}/complete", headers=headers, json=checkout).status_code, 503)
+            releases.confirm(home, release_id)
+            opening = {"opening_cash": 10000}
+            self.assertEqual(client.post("/api/cash/open", headers=H, json=opening).status_code, 503)
+            releases.finish_journal(home, release_id)
+            self.assertEqual(client.post("/api/cash/open", headers=H, json=opening).status_code, 201)
+            done = client.post(f"/api/sales/{sale}/complete", headers=headers, json=checkout)
+            self.assertEqual(done.status_code, 200, done.text)
+            self.assertEqual(done.json()["status"], "completed")
+            self.assertEqual(db.one("SELECT status FROM sales WHERE id=?", (sale,))["status"], "completed")
+            devices.assert_called_once()

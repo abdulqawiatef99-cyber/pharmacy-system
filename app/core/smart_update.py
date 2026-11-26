@@ -635,6 +635,44 @@ def due(settings, db) -> dict | None:
     return {**req, "needs_db": bool(p.get("needs_db"))}
 
 
+class UpdateAdmission:
+    """Keep cashier requests out of the candidate until the installed launcher commits the swap."""
+
+    def __init__(self, app, home: Path):
+        self.app = app
+        self.home = home
+        state = releases.read_state(home)
+        active = state.get("active") or {}
+        journal = releases.read_journal(home)
+        self.pending_release = None
+        if journal.get("state") in ("ready", "swapped", "undoing"):
+            self.pending_release = journal["release"]
+        elif state.get("pending") and active.get("needs_db"):
+            self.pending_release = active["id"]
+
+    def _committed(self) -> bool:
+        try:
+            journal = releases.read_journal(self.home)
+            if journal.get("state") != "done" or journal.get("release") != self.pending_release:
+                return False
+            state = releases.read_state(self.home)
+            return not state.get("pending") and (state.get("active") or {}).get("id") == self.pending_release
+        except (OSError, releases.ReleaseError):
+            return False
+
+    async def __call__(self, scope, receive, send):
+        if (self.pending_release and scope["type"] == "http"
+                and (scope["method"], scope["path"]) != ("GET", "/api/health")):
+            if not self._committed():
+                from starlette.responses import JSONResponse
+                response = JSONResponse({"error": {"code": "update_pending",
+                                                   "message": "تحديث قاعدة البيانات لسه بيخلص. حاول تاني بعد لحظات."}},
+                                        status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "1"})
+                return await response(scope, receive, send)
+            self.pending_release = None
+        return await self.app(scope, receive, send)
+
+
 class InFlight:
     """ASGI middleware: how many HTTP requests are being handled right now (the update never cuts one)."""
     count = 0
