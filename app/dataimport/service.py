@@ -1004,7 +1004,7 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     # three questions for the whole catalog (QA-29): one barcode and one stock question per item scanned the
     # barcode table once per item (it has no item_id index), 89.9 s at 30,000 items
     bcs: dict[str, list[str]] = {}
-    for r in db.all("SELECT item_id, barcode FROM item_barcodes WHERE org_id=? ORDER BY item_id, barcode", (ctx.org_id,)):
+    for r in db.all("SELECT item_id, barcode FROM item_barcodes WHERE org_id=? ORDER BY item_id, rowid", (ctx.org_id,)):
         bcs.setdefault(r["item_id"], []).append(r["barcode"])
     stock = {r["item_id"]: r["q"] for r in db.all(
         "SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? GROUP BY item_id", (ctx.org_id,))} if stock_ok else {}

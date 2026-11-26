@@ -942,7 +942,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def item_health_api(req):
         from ..reports.item_health import item_health
         return J(await off_loop(item_health, db, ctx_of(req), key=req.query_params.get("key") or None,
-                                limit=_qlimit(req, 200, 50_000)))
+                                limit=_qlimit(req, 200, 1_000_000)))
 
     @handler
     async def item_pack_preview(req):
@@ -2419,7 +2419,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def proc_health(req):
-        return J(await off_loop(Procurement(db).stock_health, ctx_of(req), limit=_qlimit(req, 200, 50_000)))
+        return J(await off_loop(Procurement(db).stock_health, ctx_of(req), limit=_qlimit(req, 200, 1_000_000)))
 
     @handler
     async def proc_supplier_costs(req):

@@ -179,6 +179,23 @@ class TestPurchaseListTotals(APICase):
         self.assertEqual(d["totals"], {"count": 1, "approved_count": 1, "approved_total": 1000})
         self.assertFalse(d["capped"])
 
+    def test_cancelled_null_computed_and_other_pharmacy(self):
+        self._inv(2, "approved", 1000)
+        self._inv(1, "cancelled", 7000)
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoices SET computed_total=NULL WHERE id='pi-approved-2026-03-10-1'")
+        from app.core import accounts
+        other = accounts.create_organization(self.db, name="Synthetic Other", owner_username="other", owner_full_name="Other",
+                                             owner_password="Other-Pass-2026")
+        with self.db.transaction():
+            self.db.execute("INSERT INTO purchase_invoices (id, org_id, branch_id, status, source_type, invoice_date,"
+                            " computed_total) VALUES ('x-org', ?, ?, 'approved', 'manual', '2026-03-10', 55555)",
+                            (other["org_id"], other["branch_id"]))
+        self.http_login()
+        d = self.c.get("/api/purchases?from=2026-03-01&to=2026-03-31&totals=1", headers=H).json()
+        # 1000 + the declared 1001 of the one with no computed total; the cancelled one counts as a row only
+        self.assertEqual(d["totals"], {"count": 3, "approved_count": 2, "approved_total": 2001})
+
     def test_plain_list_keeps_its_shape(self):
         self._inv(1, "draft", 500)
         self.http_login()
