@@ -206,7 +206,19 @@ class TestSupplierLotReturn(_Base):
         self.assertEqual(self.qty(self.product), 0)
 
     def test_explicit_zero_is_respected_even_when_the_latest_receipt_is_free(self):
-        self.buy(self.vendor, self.product, 1, 0)
+        invoice = self.p.create_manual(self.ctx, supplier_id=self.vendor)
+        draft = self.p.add_line(self.ctx, invoice, {
+            "item_id": self.product, "qty": 1, "unit_net_price": 2000,
+            "batch_no": "L1", "expiry_date": "12/2029",
+        }, None)
+        draft = self.p.update_header(self.ctx, invoice, {
+            "invoice_no": "FREE-461", "invoice_date": local_today().isoformat(),
+            "declared_total": 0, "extra_discount": 2000,
+        }, draft["invoice"]["version"])
+        draft = self.p.acknowledge(self.ctx, invoice, "unusual_last_cost",
+                                   "Synthetic fully discounted receipt", draft["lines"][0]["id"],
+                                   draft["invoice"]["version"])
+        self.p.approve(self.ctx, invoice, draft["invoice"]["version"])
         self.assertEqual(returns.suggest_value(self.db, self.ctx, self.product, self.batch, self.vendor), 0)
         self.assertEqual(self.lot_return(1, 0)["total"], 0)
         self.assertEqual(self.owed(self.vendor), 4500)
