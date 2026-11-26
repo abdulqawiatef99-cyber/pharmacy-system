@@ -214,7 +214,7 @@ class DataImport:
     # ------------------------------------------------------------ analyze
     def analyze(self, ctx: Context, data: bytes, filename: str, *, kind: str = "items",
                 mapping: dict[int, str] | None = None, source_system: str = "generic",
-                options: dict | None = None) -> str:
+                options: dict | None = None, packs_set_later: bool = False) -> str:
         ctx.require("items.import")
         if kind not in HEADERS_BY_KIND:
             raise ValidationFailed("نوع استيراد غير معروف")
@@ -310,6 +310,14 @@ class DataImport:
                             action = "review"
                     else:
                         store[key] = idx
+            # QA-007: a counted product with no pack layout in the file is never created as "whole box
+            # only" by silence. Only the E-Stock move is exempt (packs_set_later: it sets packs from its own
+            # reviewed file right after); never by the source name, which the import screen sends.
+            if kind == "items" and not packs_set_later and action in ("create", "review"):
+                layout = _unknown_layout(d)
+                if layout:
+                    issues.append(layout)
+                    action = "review"
             if any(i["code"].startswith("missing_") or i["code"].startswith("invalid_")
                    for i in issues) and action != "skip":
                 action = "error" if not d.get("_name") and not d.get("code") else (
@@ -691,8 +699,19 @@ class DataImport:
             if not self.db.one(f"SELECT 1 FROM {target_table} WHERE id=? AND org_id=?",
                                (decision[5:], ctx.org_id)):
                 raise NotFound("السجل المراد الربط به غير موجود")
+        elif decision.startswith("pack:"):
+            layout = next((i for i in json.loads(row["issues"]) if i["code"] == "unknown_pack_layout"), None)
+            if run["kind"] != "items" or not layout:
+                raise ValidationFailed("هذا السطر لا يحتاج إلى تحديد عدد الشرائط")
+            n = decision[5:]
+            if not (n.isascii() and n.isdigit()) or int(n) < 1 or layout["count"] % int(n):
+                raise ValidationFailed(f"عدد الوحدات في العلبة لازم يكون رقمًا صحيحًا يقسم {layout['count']}"
+                                       " بالتساوي (أو 1 لو الصنف بيتباع علبة كاملة فقط)")
         elif decision not in ("create", "skip"):
             raise ValidationFailed("قرار غير صحيح")
+        if decision == "create" and any(i["code"] == "unknown_pack_layout" for i in json.loads(row["issues"])):
+            raise ValidationFailed("عدد الشرائط في العلبة غير معروف لهذا الصنف؛ حدده أولًا"
+                                   " (أو اختر «علبة كاملة فقط»)")
         if run["kind"] == "opening_stock" and decision == "create" and row["action"] == "review":
             issues = {i["code"] for i in json.loads(row["issues"])}
             if "item_has_history" in issues:
@@ -756,10 +775,19 @@ class DataImport:
                     action, target = "link", r["decision"][5:]
                 elif r["decision"] == "create":
                     action = "create"
+                elif r["decision"] and r["decision"].startswith("pack:") and run["kind"] == "items":
+                    action, d["pack_size"] = "create", int(r["decision"][5:])     # the layout a person confirmed
                 if run["kind"] == "items":
-                    dup = r["decision"] == "create" and any(
+                    dup = action == "create" and bool(r["decision"]) and any(
                         i["code"] in ("duplicate_item_in_file", "same_item_exists", "duplicate_code_in_file")
                         for i in json.loads(r["issues"]))
+                    if action == "create" and (r["decision"] or "").startswith("pack:") and not dup:
+                        # the confirmed layout can make this the same item as an existing one (the analysis
+                        # compared with pack 1): the person chose a separate item, so it is kept apart
+                        key = dedupe_key(d.get("_name") or "", d.get("strength"), d.get("dosage_form"),
+                                         d["pack_size"], d.get("manufacturer"))
+                        dup = bool(self.db.one("SELECT 1 FROM items WHERE org_id=? AND dedupe_key=?",
+                                               (ctx.org_id, key)))
                     self._apply_item(ctx, d, action, target, run_id, done,
                                      keep_duplicate=d.get("code") or r["row_no"] if dup else None)
                 elif run["kind"] in ("suppliers", "customers"):
@@ -932,6 +960,20 @@ class DataImport:
             if not n:
                 raise Conflict("لا يمكن إلغاء هذه العملية")
             audit.record(self.db, ctx, "import.discard", "import_run", run_id)
+
+
+def _unknown_layout(d: dict) -> dict | None:
+    """The issue for an item row whose name says "N tablets" (a counted form) while the file gives no pack
+    layout: N cannot be split by guessing, so a person says how many strips, or "whole box only"."""
+    if d.get("pack_size") is not None or not d.get("_name"):
+        return None
+    from ..reports.item_health import _COUNTED_FORMS, strip_suggestions
+    p = parse_name(d["_name"])
+    if not p.form and d.get("dosage_form"):         # the form in its own column: read the name with it
+        p = parse_name(f"{d['_name']} {d['dosage_form']}")
+    if not p.pack_count or p.pack_count < 2 or p.form not in _COUNTED_FORMS:
+        return None
+    return {"code": "unknown_pack_layout", "count": p.pack_count, "suggest": strip_suggestions(p.pack_count)}
 
 
 KIND_PERMISSION = {"opening_stock": "inventory.adjust", "suppliers": "suppliers.write", "customers": "customers.manage"}
