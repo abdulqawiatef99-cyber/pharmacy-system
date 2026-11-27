@@ -11,9 +11,10 @@ from datetime import datetime
 from PIL import Image
 
 from ..core import accounts, audit
-from ..core.errors import DomainError, ValidationFailed
+from ..core.errors import Conflict, DomainError, ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
+from ..sales import registers
 from ..sales.service import Sales
 from . import escpos
 
@@ -38,6 +39,34 @@ def printer_target(db: Database | None = None, org_id: str | None = None) -> str
     return os.environ.get("PHARM_PRINTER", "none").strip() or "none"
 
 
+def _receipt_destination(db: Database, ctx: Context, register) -> str:
+    if not register:
+        return "none"
+    target = register["receipt_printer"]
+    return "none" if target == "browser" else target or printer_target(db, ctx.org_id)
+
+
+def _drawer_kick_available(db: Database, ctx: Context, register) -> bool:
+    rid = register["id"]
+    enabled = register["drawer_kick"] != 0 if rid == 1 else bool(register["drawer_kick"])
+    return enabled and registers.drawer_printer_allowed(db, ctx, rid, register["receipt_printer"])
+
+
+def label_config(db: Database, ctx: Context, cfg: dict | None = None) -> dict:
+    from . import settings as rs
+
+    cfg = rs.get(db, ctx.org_id) if cfg is None else dict(cfg)
+    register = registers.current(db, ctx)
+    if not register and cfg["label_lang"] not in ("browser", "a4"):
+        cfg["label_lang"] = "browser"
+    elif register and register["label_printer"]:
+        target = register["label_printer"]
+        cfg["label_target"] = target
+        if cfg["label_lang"] in ("browser", "a4") or (cfg["label_lang"] == "driver" and target.startswith("tcp:")):
+            cfg["label_lang"] = "driver" if target.startswith("win:") else "tspl"
+    return cfg
+
+
 def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool = False,
                   target: str | None = None, given: int = 0) -> dict:
     """open_drawer is the automatic checkout pulse only (checkout_devices); a reprint never opens the drawer."""
@@ -51,7 +80,7 @@ def print_receipt(db: Database, ctx: Context, sale_id: str, *, open_drawer: bool
     from . import settings as rs
     cfg = rs.get(db, ctx.org_id)
     when = rs.fmt_when(accounts.parse_iso(sale["completed_at"]).astimezone(), cfg["time_format"])
-    dest = target or printer_target(db, ctx.org_id)
+    dest = target or _receipt_destination(db, ctx, registers.current(db, ctx))
     if dest == "none":                      # browser printing chosen: not an error to show the cashier
         raise PrintFailed("لم تُختر طابعة الإيصال (البرنامج ← طابعة الإيصال والدرج)", code="no_printer")
     rendered = False
@@ -171,12 +200,19 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, give
     States: receipt none|sent|browser|failed; drawer none|sent|failed|unsupported (browser printing)."""
     from . import settings as rs
     ctx.require("sales.create")            # outside the try below: refused, never reported as a printer failure
-    cfg = rs.get(db, ctx.org_id)
     delivery = sale.get("kind") == "delivery"
-    want_drawer = bool(cfg["drawer_on_cash"]) and (sale.get("paid_cash") or 0) > 0 and not delivery
     want_receipt = bool(receipt) or delivery
     out = {"receipt": "none", "drawer": "none", "message": None}
-    dest = printer_target(db, ctx.org_id)
+    # Read permission to pulse and the actual destination from the same configuration snapshot.
+    with db.read_snapshot():
+        cfg = rs.get(db, ctx.org_id)
+        register = registers.current(db, ctx)
+        want_drawer = (
+            bool(register) and (sale.get("paid_cash") or 0) > 0 and not delivery
+            and (register["drawer_kick"] is not None or cfg["drawer_on_cash"])
+            and _drawer_kick_available(db, ctx, register)
+        )
+        dest = _receipt_destination(db, ctx, register)
     if dest == "none":
         out["receipt"] = "browser" if want_receipt else "none"
         out["drawer"] = "unsupported" if want_drawer else "none"
@@ -223,8 +259,12 @@ def open_drawer(db: Database, ctx: Context, reason: str, target: str | None = No
     else:
         label = reason
     from ..sales import cash
-    shift = cash.open_shift_id(db, ctx)
-    dest = target or printer_target(db, ctx.org_id)
+    with db.read_snapshot():
+        register = registers.require_current(db, ctx)
+        shift = cash.require_open_shift(db, ctx)
+        if not _drawer_kick_available(db, ctx, register):
+            raise Conflict("فتح الدرج متوقف على الجهاز ده", code="drawer_kick_disabled")
+        dest = target or _receipt_destination(db, ctx, register)
     error = None
     try:
         if dest == "none":
@@ -251,7 +291,7 @@ def print_test(db: Database, ctx: Context, target: str | None = None) -> dict:
     """A short Arabic test receipt on the printer being set up (no sale, no drawer)."""
     from . import settings as rs
     ctx.require("settings.manage")
-    dest = rs.check_target(target, allow_browser=True) if target else printer_target(db, ctx.org_id)
+    dest = rs.check_target(target, allow_browser=True) if target else _receipt_destination(db, ctx, registers.current(db, ctx))
     dest = "none" if dest == "browser" else dest
     try:
         img = escpos.render_receipt([("title", "اختبار الطابعة", ""), ("row", "سطر عربي", "12.50"),
@@ -429,9 +469,9 @@ def _driver_labels(cfg: dict, wanted: list[tuple[dict, int]], dropped: set | Non
 def print_labels(db: Database, ctx: Context, wanted: list[tuple[str, int]], *, size: str | None = None,
                  target: str | None = None) -> dict:
     """Barcode labels straight to the label printer (TSPL for Xprinter/TSC, ZPL for Zebra)."""
-    from . import labels as lb, settings as rs
+    from . import labels as lb
     ctx.require("items.read")
-    cfg = rs.get(db, ctx.org_id)
+    cfg = label_config(db, ctx)
     if cfg["label_lang"] in ("browser", "a4"):
         raise ValidationFailed("طابعة الملصقات مضبوطة على الطباعة من المتصفح", code="labels_in_browser")
     w, h = label_size(cfg, size)
@@ -477,7 +517,7 @@ def _variant(cfg: dict) -> str:
 def _label_cfg(db: Database, ctx: Context, data: dict) -> dict:
     """The saved label settings with the screen's unsaved values on top, each one validated (#100)."""
     from . import labels as lb, settings as rs
-    cfg = rs.get(db, ctx.org_id)
+    cfg = label_config(db, ctx)
     if "label_lang" in data:
         if data["label_lang"] not in lb.LANGS:
             raise ValidationFailed("نوع طابعة الملصقات غير صحيح")
