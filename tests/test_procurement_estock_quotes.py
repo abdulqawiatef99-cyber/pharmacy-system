@@ -52,10 +52,12 @@ class TestArchiveQuotes(PlanBase):
             con.execute("INSERT INTO e_Vendor VALUES ('84', 'ابن سينا'), ('85', 'مورد تجريبي قديم')")
             con.execute("INSERT INTO e_Products VALUES ('901', 'E-901', '100.00')")
 
-    def old_buy(self, inv, *, days_ago=4, vendor="84", price="100.00", net="85.00", qty="10", bonus="2"):
+    def old_buy(self, inv, *, days_ago=4, entered_days_ago=None, vendor="84", price="100.00",
+                net="85.00", qty="10", bonus="2"):
         at = (TODAY - timedelta(days=days_ago)).isoformat() + " 18:00:00"
+        entered = at if entered_days_ago is None else (TODAY - timedelta(days=entered_days_ago)).isoformat()
         with closing(sqlite3.connect(self.path)) as con, con:
-            con.execute("INSERT INTO e_Purchase_header VALUES (?, ?, ?, ?)", (inv, vendor, at, at))
+            con.execute("INSERT INTO e_Purchase_header VALUES (?, ?, ?, ?)", (inv, vendor, at, entered))
             con.execute("INSERT INTO e_Purchase_details VALUES (?, ?, '901', ?, ?, ?, ?)",
                         (inv, inv, qty, bonus, price, net))
 
@@ -72,9 +74,12 @@ class TestArchiveQuotes(PlanBase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_invoice_day_latest_across_sources_and_live_wins_a_tie(self):
-        self.old_buy("1", days_ago=7, net="70")
-        self.old_buy("2", days_ago=4, net="85")
-        self.buy(self.it, self.ibn, days_ago=4, public=10000, net=9000)
+        self.old_buy("1", days_ago=7, entered_days_ago=1, net="70")
+        self.old_buy("2", days_ago=4, entered_days_ago=3, net="85")
+        live = self.buy(self.it, self.ibn, days_ago=4, public=10000, net=9000)
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoices SET approved_at=? WHERE id=?",
+                            (TODAY.isoformat() + "T12:00:00.000Z", live))
         best = self.rows()[self.it]["best"]
         self.assertEqual(best["discount_bp"], 1000)
         self.assertEqual(best["prev_bp"], 2917)
@@ -100,11 +105,32 @@ class TestArchiveQuotes(PlanBase):
             self.assertIsNone(row["suppliers"][0][key])
             self.assertNotIn(key, row["last"])
 
+    def test_redacted_quotes_with_the_same_name_do_not_reveal_discount_order(self):
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("INSERT INTO e_Vendor SELECT '86', vendor_name_ar FROM e_Vendor WHERE vendor_id='85'")
+        self.old_buy("1", vendor="85", net="90")
+        self.old_buy("2", vendor="86", net="60")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        quotes = self.plan(ctx=staff)["rows"][0]["suppliers"]
+        self.assertEqual([s["estock_supplier_id"] for s in quotes], ["85", "86"])
+
+    def test_redacted_match_warnings_do_not_reveal_the_cheapest_supplier(self):
+        self.buy(self.it, self.s1, days_ago=10, public=10000, net=8000, raw="Check me", match="suggested")
+        self.old_buy("1", net="95", bonus="0")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        before = self.plan(ctx=staff)
+        self.old_buy("2", days_ago=3, net="60", bonus="0")
+        after = self.plan(ctx=staff)
+        self.assertEqual(before["check_names"], after["check_names"])
+        self.assertEqual(before["rows"][0]["flags"], after["rows"][0]["flags"])
+
     def test_archive_is_limited_to_its_org_branch_and_purchase_window(self):
         self.old_buy("1", days_ago=366)
         self.old_buy("2", days_ago=-1)
         self.assertEqual(self.rows()[self.it]["suppliers"], [])
         self.old_buy("3", days_ago=10, price=None, qty="2.50", bonus="0.50", net="90.0000")
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("UPDATE e_Purchase_details SET product_id=' 901.0 ' WHERE details_id='3'")
         self.assertEqual(self.rows()[self.it]["best"]["discount_bp"], 2500)
         self.assertEqual(self.plan(ctx=replace(self.ctx, branch_id="other"))["rows"][0]["suppliers"], [])
         with closing(sqlite3.connect(self.path)) as con, con:
@@ -116,6 +142,7 @@ class TestPlanAtArchiveScale(APICase):
     def test_first_get_with_30k_items_and_full_archive(self):
         self.http_login()
         supplier = cat.create_supplier(self.db, self.ctx, name="ابن سينا")
+        today = date.today()
         with self.db.transaction():
             self.db.execute("""
                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?)
@@ -124,11 +151,26 @@ class TestPlanAtArchiveScale(APICase):
             """, (FULL["items"], self.ctx.org_id))
             self.db.execute("""
                 INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty)
-                SELECT org_id, ?, id, '', 8 FROM items WHERE org_id=? AND id NOT LIKE 'scale-%'
-                    OR org_id=? AND CAST(substr(id,7) AS INTEGER)>420
-            """, (self.ctx.branch_id, self.ctx.org_id, self.ctx.org_id))
+                SELECT org_id, ?, id, '', 8 FROM items
+                WHERE org_id=? AND (id NOT LIKE 'scale-%' OR CAST(substr(id,7) AS INTEGER)>420)
+            """, (self.ctx.branch_id, self.ctx.org_id))
 
-        today = date.today()
+            # A live overlay also exercises the approved-invoice lookup at scale.
+            self.db.execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+                INSERT INTO purchase_invoices (
+                    id, org_id, branch_id, supplier_id, invoice_date, status, source_type, approved_at, created_at
+                )
+                SELECT 'live-'||x, ?, ?, ?, ?, 'approved', 'manual', ?, ? FROM n
+            """, (self.ctx.org_id, self.ctx.branch_id, supplier, today.isoformat(), today.isoformat(), today.isoformat()))
+            self.db.execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<12000)
+                INSERT INTO purchase_invoice_lines (
+                    id, invoice_id, org_id, line_no, raw_name, item_id, qty, bonus_qty, public_price, unit_net_price
+                )
+                SELECT 'live-line-'||x, 'live-'||(1 + (x-1)/12), ?, 1 + (x-1)%12, 'Synthetic', 'scale-'||(x+420), 10, 0, 10000, 8500
+                FROM n
+            """, (self.ctx.org_id,))
         month = today.replace(day=1)
         months = []
         for _ in range(12):
@@ -146,7 +188,7 @@ class TestPlanAtArchiveScale(APICase):
                             ((1 + i % FULL["sales"], 1 + i % 420 if i < 5040 else 421 + i % 29580,
                               "2.50", "0.50") for i in range(FULL["sale_lines"])))
             con.executemany("INSERT INTO e_Purchase_header VALUES (?,'84',?,?)",
-                            ((i, months[i % 12], months[i % 12]) for i in range(1, FULL["purchases"] + 1)))
+                            ((i, months[i // 100 % 12], months[i // 100 % 12]) for i in range(1, FULL["purchases"] + 1)))
             con.executemany("INSERT INTO e_Purchase_details VALUES (?,?,?,'10','2','100.00','85.00')",
                             ((i, 1 + i % FULL["purchases"], 1 + i % 420 if i < 8400 else 421 + i % 29580)
                              for i in range(FULL["purchase_lines"])))
@@ -158,5 +200,6 @@ class TestPlanAtArchiveScale(APICase):
         self.assertEqual(response.status_code, 200, response.text[:200])
         rows = response.json()["rows"]
         self.assertEqual(len(rows), 420)
-        self.assertTrue(all((row["best"] or {}).get("discount_bp") == 2917 for row in rows))
+        missing = [row["item_id"] for row in rows if (row["best"] or {}).get("discount_bp") != 2917]
+        self.assertFalse(missing, f"{len(missing)} missing quotes: {missing[:10]}")
         self.assertLess(elapsed, 5.0, "first request with a full archive exceeded the CI timing budget")
