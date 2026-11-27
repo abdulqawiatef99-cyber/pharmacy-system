@@ -151,7 +151,7 @@ def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
         rows = db.all("SELECT review,confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
                       (org, sale_id))
     fresh = _state(rows, fresh_total)
-    by_channel, unavailable = {}, {}
+    by_channel, by_payment = {}, {}
     carried_problem = False
     for p in offsets:
         amount = p["exchange_offset"]
@@ -169,7 +169,7 @@ def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
                 received = amount if original["received"] == source_total[0] else verified
         if received < amount:
             carried_problem = True
-            unavailable[p["id"]] = amount - received
+        by_payment[p["id"]] = {"total": amount, "verified": verified, "received": received}
         channel = by_channel.setdefault(p["channel_id"], {"total": 0, "verified": 0, "received": 0})
         for key, value in (("total", amount), ("verified", verified), ("received", received)):
             channel[key] += value
@@ -182,7 +182,7 @@ def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
     else:
         state = "pending" if offsets and fresh["state"] == "ok" else fresh["state"]
     result = {"verified": verified, "received": received, "state": state, "offsets": by_channel,
-              "unavailable_offsets": unavailable,
+              "offsets_by_payment": by_payment,
               "fresh_total": fresh_total, "fresh_verified": fresh["verified"], "fresh_received": fresh["received"]}
     known[sale_id] = result
     return result

@@ -1737,14 +1737,14 @@ class Sales:
             else:
                 primary = payments[0]
             verified_wallet = {}
-            if _exchange and rules["refund_unreviewed_wallet"] and any(p["method"] == "transfer" for p in payments):
+            if rules["refund_unreviewed_wallet"] and any(p["method"] == "transfer" for p in payments):
                 verified_wallet = dict(refunds.original_capacity(self.db, ctx, s, 0, rules=rules, verified_only=True))
             rid, created_at = new_id(), _now()
             if refund_method == "cash" or any(p["method"] == "cash" and p["amount"] for p in payments):
                 acting_shift = cash.require_open_shift(self.db, ctx, s["branch_id"])
             else:
                 acting_shift = self._acting_shift(ctx, s)
-            electronic = {}
+            electronic, verified_parts = {}, {}
             for part in (primary, *(p for p in payments if p is not primary)):
                 pay_id = rid if part is primary else new_id()
                 method, channel, amount = part["method"], part["channel_id"], part["amount"]
@@ -1764,8 +1764,14 @@ class Sales:
                         cash.record(self.db, ctx, -amount, "refund", pay_id, reason, branch_id=s["branch_id"])
                 if method in money.METHODS and amount:
                     note = f"مرتجع فاتورة {s['sale_no']}"
+                    confirmed = None
+                    if method == "transfer":
+                        confirmed = min(amount, verified_wallet.get((method, channel), 0)) if (
+                            rules["refund_unreviewed_wallet"]) else amount
+                        verified_parts[pay_id] = confirmed
                     electronic[pay_id] = money.refund_tender(self.db, ctx, sid, method, channel, amount,
-                                                            return_id=pay_id, note=note, deferred=_exchange)
+                                                            return_id=pay_id, note=note, deferred=_exchange,
+                                                            verified_amount=confirmed)
             # The sale stores the unrounded value of the returned items.
             self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=? AND org_id=?",
                             (refund - rounding_back, sid, ctx.org_id))
@@ -1795,9 +1801,7 @@ class Sales:
         result = {"return_id": rid, "refund": refund, "change_back": change_back, "refund_payments": payments}
         if _exchange:
             result["_electronic"] = electronic
-            result["_verified_wallet"] = {p["id"]: (min(p["amount"], verified_wallet.get(("transfer", p["channel_id"]), 0))
-                                                   if rules["refund_unreviewed_wallet"] else p["amount"])
-                                          for p in payments if p["method"] == "transfer"}
+            result["_verified_wallet"] = verified_parts
         return result
 
     def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:

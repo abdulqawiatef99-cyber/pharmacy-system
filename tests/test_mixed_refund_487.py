@@ -574,3 +574,21 @@ class TestMixedRefund(WiringCase):
         self.call("POST", f"/api/attachments/{aid}/review", json={"ok": False, "note": "التحويل لم يصل"})
         self.assertEqual(self.split(self.refund(replacement)), [("transfer", 2000)])
         self.assertEqual((self.bal(self.wallet), self.bal(fresh_account)), (0, 0))
+
+    def test_verified_top_up_uses_its_own_account_with_pending_carried_wallet(self):
+        path = "/api/settings/sales"
+        self.call("PUT", path, json={"refund_unreviewed_wallet": True})
+        original = self.sale(cash=0, wallet=2000)
+        fresh_account = self.call("POST", "/api/money/accounts", 201,
+                                  json={"name": "محفظة مثبتة", "kind": "wallet"})["id"]
+        self.call("PATCH", f"/api/payment-channels/{self.tr_ch}", json={"account_id": fresh_account})
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        replacement = self.call("POST", f"/api/sales/{original['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {original["lines"][0]["id"]: 1}, "refund_method": "original",
+            "pay_method": "transfer", "channel_id": self.tr_ch, "reason": "استبدال تجربة"})["sale"]
+        self.verify_wallet(replacement)
+
+        self.call("PUT", path, json={"refund_unreviewed_wallet": False})
+        self.assertEqual(self.split(self.refund(replacement)), [("transfer", 2000)])
+        self.assertEqual((self.bal(self.wallet), self.bal(fresh_account)), (2000, 0))

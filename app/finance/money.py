@@ -827,24 +827,27 @@ def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id,
                                              "exchange_offset": True, "payment_id": payment_id})
 
 
-def _unavailable_wallet_offsets(db, org, sale_id):
+def _unavailable_wallet_offsets(db, org, sale_id, *, verified_only=False):
     row = db.one("SELECT s.paid_transfer FROM sales s WHERE s.org_id=? AND s.id=? AND s.paid_transfer>0"
                  " AND EXISTS (SELECT 1 FROM sale_payments p WHERE p.sale_id=s.id AND p.org_id=s.org_id"
                  " AND p.wallet_source_sale IS NOT NULL)", (org, sale_id))
     if not row:
         return {}
     from ..sales.attachments import transfer_state
-    return transfer_state(db, org, sale_id, row["paid_transfer"])["unavailable_offsets"]
+    policy = "verified" if verified_only else "received"
+    offsets = transfer_state(db, org, sale_id, row["paid_transfer"])["offsets_by_payment"]
+    return {pid: p["total"] - p[policy] for pid, p in offsets.items() if p[policy] < p["total"]}
 
 
-def _tender_account_history(db, org, sale_id, method):
+def _tender_account_history(db, org, sale_id, method, *, verified_only=False):
     """Original account balances by channel, including the allocation of channel-less refunds."""
     sources = db.all(
         "SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=?"
         " AND kind='sale' AND ref_type='sale' AND json_extract(meta, '$.method')=? ORDER BY rowid",
         (org, sale_id, method))
     balances = {}
-    unavailable = _unavailable_wallet_offsets(db, org, sale_id) if method == "transfer" else {}
+    unavailable = (_unavailable_wallet_offsets(db, org, sale_id, verified_only=verified_only)
+                   if method == "transfer" else {})
     for row in sources:
         meta = json.loads(row["meta"])
         source_channel = meta.get("channel_id")
@@ -887,28 +890,43 @@ def legacy_card_channel_debits(db, org, sale_id):
     return _tender_account_history(db, org, sale_id, "card")[2]
 
 
-def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, note, deferred=False):
-    """Allocate a refund to the original accounts of the chosen channel."""
+def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, note, deferred=False,
+                  verified_amount=None):
+    """Allocate to original accounts, using verified wallet funds before provisional funds."""
     org = ctx.org_id
-    balances, has_sources, _ = _tender_account_history(db, org, sale_id, method)
     posted = []
-    left = amount
-    for (channel, account), balance in balances.items():
-        if channel != channel_id:
-            continue
-        take = min(left, balance)
-        if take:
-            posted.append((account, take))
-            left -= take
-    if left:
-        # An unrouted payment is still recorded in sale_returns, with its original channel.
-        account = None
+    assigned = {}
+
+    def take_from(balances, left, fallback=None):
+        for (channel, account), balance in balances.items():
+            if channel != channel_id:
+                continue
+            take = min(left, max(0, balance - assigned.get(account, 0)))
+            if take:
+                posted.append((account, take))
+                assigned[account] = assigned.get(account, 0) + take
+                left -= take
+        if left:
+            posted.append((fallback, left))
+            assigned[fallback] = assigned.get(fallback, 0) + left
+
+    if method == "transfer":
+        if verified_amount:
+            verified, _, _ = _tender_account_history(db, org, sale_id, method, verified_only=True)
+            take_from(verified, verified_amount)
+        pending = amount - (verified_amount or 0)
+        if pending:
+            received, _, _ = _tender_account_history(db, org, sale_id, method)
+            take_from(received, pending)
+    else:
+        balances, has_sources, _ = _tender_account_history(db, org, sale_id, method)
+        fallback = None
         if method == "card" and not has_sources:
-            account = (route_for(db, org, method, channel_id) if channel_id
-                       else _card_refund_account(db, ctx, sale_id))
-        posted.append((account, left))
+            fallback = (route_for(db, org, method, channel_id) if channel_id
+                        else _card_refund_account(db, ctx, sale_id))
+        take_from(balances, amount, fallback)
     if not deferred:
-        for account, take in posted:
+        for account, take in assigned.items():
             post_tender_refund(db, ctx, sale_id, method, channel_id, account, take, return_id=return_id, note=note)
     return posted
 
