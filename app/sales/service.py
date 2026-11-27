@@ -1975,16 +1975,23 @@ class Sales:
         return {**self.get(ctx, sid), "change_back": change_back}
 
     def _acting_shift(self, ctx: Context, sale) -> str | None:
-        """Attribute a void or non-cash refund to the acting shift, then the sale's still-open shift.
-
-        With neither shift available, the report can use its existing branch time window.
-        """
+        """Attribute a void or non-cash refund to the acting shift, then the sale's still-open shift."""
         current = cash.open_shift_id(self.db, ctx, sale["branch_id"])
-        if current or not sale["shift_id"]:
+        if current:
             return current
-        original = self.db.one("SELECT id FROM cash_shifts WHERE id=? AND org_id=? AND branch_id=? AND status='open'",
-                               (sale["shift_id"], ctx.org_id, sale["branch_id"]))
-        return original["id"] if original else None
+        scope = (ctx.org_id, sale["branch_id"])
+        if sale["shift_id"]:
+            original = self.db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND id=? AND status='open'",
+                                   (*scope, sale["shift_id"]))
+            if original:
+                return original["id"]
+        # The existing time-window attribution covers MAIN. If only a secondary shift is open,
+        # record its ID explicitly so the event appears there without attributing it twice.
+        active = self.db.all("SELECT id, register_id FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'"
+                             " ORDER BY register_id LIMIT 2", scope)
+        if len(active) == 1 and active[0]["register_id"] != 1:
+            return active[0]["id"]
+        return None
 
     def kept_change(self, ctx: Context, sid: str) -> int:
         """The change of this sale left as the customer's credit and not yet given back (0 if none)."""

@@ -264,7 +264,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         peer = client_ip(req)
         # A local reverse proxy can present a remote browser over a loopback connection.
         local = (peer in ("127.0.0.1", "::1")
-                 and not any(h in req.headers for h in ("forwarded", "x-forwarded-for", "x-real-ip")))
+                 and not any(h in ("forwarded", "via", "x-real-ip") or h.startswith("x-forwarded-") for h in req.headers))
         ctx = registers.for_request(db, ctx, req.cookies.get(registers.COOKIE), local=local)
         req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
