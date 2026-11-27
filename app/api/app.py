@@ -1912,8 +1912,20 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def purchases_manual(req):
         ctx = ctx_of(req)
         b = await body(req)
-        inv_id = purch.create_manual(ctx, supplier_id=b.get("supplier_id"))
         head = {k: b[k] for k in ("invoice_no", "invoice_date") if b.get(k)}
+        sid = b.get("supplier_id") or None
+        # QA-29: a refused number never leaves a cancelled empty draft behind, and a second start is the first draft
+        dup = purch.duplicate_of(ctx, sid, head.get("invoice_no"))
+        if dup:
+            raise Conflict("توجد فاتورة بالرقم نفسه من المورد نفسه مسجلة من قبل", code="duplicate_invoice",
+                           details={"invoice_id": dup})
+        if not head.get("invoice_no"):
+            same = purch.open_empty_manual(ctx, sid)
+            if same:
+                if head:
+                    purch.update_header(ctx, same, head, None)
+                return J(purch.get(ctx, same), status_code=201)
+        inv_id = purch.create_manual(ctx, supplier_id=sid)
         if head:
             try:
                 purch.update_header(ctx, inv_id, head, purch.get(ctx, inv_id)["invoice"]["version"])

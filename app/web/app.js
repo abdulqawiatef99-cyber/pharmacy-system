@@ -242,6 +242,41 @@ const toBp = (v) => (v === "" || v == null ? null : Math.round(parseFloat(v) * 1
 // the server's discount_of: integer basis points, half up, never through a float percentage (#348)
 const discountOf = (gross, bp) => (bp ? Math.floor((gross * bp + 5000) / 10000) : 0);
 
+// QA-29: the browser's own field messages are English («Please fill out this field») on Arabic screens. Every
+// form check says it in Arabic instead: the field turns red, the first one gets the focus and the message shows.
+function fieldMessage(el) {
+  const v = el.validity, n = (x) => String(x).replace(/\.0+$/, "");
+  if (v.valueMissing) return el.tagName === "SELECT" || el.type === "radio" ? "اختار من القايمة، الخانة دي مطلوبة" : "الخانة دي مطلوبة";
+  if (v.badInput) return "اكتب رقم صحيح";
+  if (v.rangeUnderflow) return `أقل قيمة مسموحة ${n(el.min)}`;
+  if (v.rangeOverflow) return `أكبر قيمة مسموحة ${n(el.max)}`;
+  if (v.stepMismatch) return el.step === "1" || !el.step ? "اكتب رقم صحيح من غير كسور" : "الرقم فيه كسور أكتر من المسموح";
+  if (v.tooShort) return `أقل عدد حروف ${el.minLength}`;
+  if (v.tooLong) return `أقصى عدد حروف ${el.maxLength}`;
+  if (v.typeMismatch) return el.type === "email" ? "اكتب بريد إلكتروني صحيح" : "القيمة مش في الشكل الصحيح";
+  if (v.patternMismatch) return el.title || "القيمة مش في الشكل الصحيح";
+  return el.validationMessage;
+}
+let FIELD_MSG_AT = 0;
+document.addEventListener("invalid", (e) => {
+  const el = e.target;
+  if (I18N.on || !el.matches?.("input, select, textarea")) return;            // English screens keep the browser's text
+  e.preventDefault();                                                            // no English bubble
+  const msg = fieldMessage(el);
+  el.setAttribute("aria-invalid", "true");
+  el.title = msg;
+  const clear = () => { el.removeAttribute("aria-invalid"); if (el.title === msg) el.removeAttribute("title"); };
+  el.addEventListener("input", clear, { once: true });
+  el.addEventListener("change", clear, { once: true });
+  if (Date.now() - FIELD_MSG_AT < 300) return;                                   // one message per submit: the first field
+  FIELD_MSG_AT = Date.now();
+  const label = el.closest("label")?.firstChild?.textContent?.trim();
+  toast(label ? `${label}: ${msg}` : msg, true);
+  // a hidden select behind a search box (supplier picker): the box the person sees gets the focus
+  const shown = el.classList.contains("spHide") ? el.parentElement?.querySelector(".spIn") || el : el;
+  shown.focus?.();
+}, true);
+
 function toast(msg, isError = false, ms = 0) {
   const t = $("#toast");
   t.textContent = msg;
@@ -882,12 +917,12 @@ function tourDraw() {
     ring = document.createElement("div"); ring.id = "tourRing"; ring.className = "tour-ring noprint";
     bub = document.createElement("div"); bub.id = "tourBub"; bub.className = "tour-bub noprint";
     bub.setAttribute("role", "dialog"); bub.setAttribute("aria-modal", "false"); bub.setAttribute("aria-labelledby", "tourT");
-    // sale screen: pressing a tour button never takes the focus from the search box (the next scan lands there)
-    bub.addEventListener("mousedown", (e) => { if (location.hash.startsWith("#/pos")) e.preventDefault(); });
+    // QA-29: pressing a tour button never takes the focus from the box being typed in, on any screen
+    bub.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
     bub.addEventListener("click", (e) => {
       const b = e.target.closest("[data-tour-go]");
       if (!b) return;
-      if (b.dataset.tourGo === "skip") tourSkip(); else tourGo(+b.dataset.tourGo);
+      if (b.dataset.tourGo === "skip") tourSkip(); else if (b.dataset.tourGo === "close") tourClose(true); else tourGo(+b.dataset.tourGo);
     });
     document.body.append(ring, bub);
   }
@@ -895,14 +930,15 @@ function tourDraw() {
   const last = !r.steps.slice(r.i + 1).some((s) => tourTarget(s));
   const more = el.matches(TOUR_MORE) && step[0] !== TOUR_MORE ? "موجودة تحت «المزيد». " : "";
   bub.innerHTML = `<span class="tour-arrow" aria-hidden="true"></span>
+    <button type="button" class="link tour-x" data-tour-go="close" title="اقفل الشرح (Esc)" aria-label="اقفل الشرح">✕</button>
     <p class="tour-n muted small">${at} من ${n}</p><h3 id="tourT">${esc(step[1])}</h3><p>${esc(more + step[2])}</p>
     <div class="row tour-btns"><button type="button" class="btn small" data-tour-go="1">${last ? (r.then ? "التالي" : "تمام، فهمت") : "التالي"}</button>
       <button type="button" class="btn small secondary" data-tour-go="-1" ${at > 1 ? "" : "disabled"}>السابق</button>
       <button type="button" class="link" data-tour-go="skip">تخطّي</button></div>`;
   el.scrollIntoView({ block: "nearest", inline: "nearest" });
   tourPlace();
-  // keyboard: on the sale screen the focus stays where it is (the scanner types into the search box)
-  if (!location.hash.startsWith("#/pos")) bub.querySelector("[data-tour-go='1']").focus({ preventScroll: true });
+  // QA-29: the tour never takes the focus (it opened while a person typed and Enter pressed «التالي»);
+  // the mouse or Esc closes it, and «اشرح الشاشة دي» replays it
 }
 function tourPlace() {
   const r = TOUR_RUN, bub = $("#tourBub"), ring = $("#tourRing");
@@ -912,11 +948,20 @@ function tourPlace() {
   const t = el.getBoundingClientRect(), W = innerWidth, H = innerHeight, gap = 12;
   Object.assign(ring.style, { top: `${t.top - 4}px`, left: `${t.left - 4}px`, width: `${t.width + 8}px`, height: `${t.height + 8}px` });
   const bw = bub.offsetWidth, bh = bub.offsetHeight;
-  let top, side;
-  if (t.bottom + gap + bh <= H - 8) { top = t.bottom + gap; side = "up"; }               // under the control, arrow up
-  else if (t.top - gap - bh >= 8) { top = t.top - gap - bh; side = "down"; }             // over it, arrow down
-  else { top = Math.max(8, H - bh - 8); side = "none"; }                                   // a tall control: bottom of the window
-  const left = Math.min(Math.max(8, t.left + t.width / 2 - bw / 2), Math.max(8, W - bw - 8));
+  let left = Math.min(Math.max(8, t.left + t.width / 2 - bw / 2), Math.max(8, W - bw - 8));
+  // QA-29: never over the box being typed in or a search box (the sale search, the invoice item search)
+  const keep = [document.activeElement, ...document.querySelectorAll("#posQ, #qaQ, #q")]
+    .filter((x) => x && x !== document.body && x.matches?.("input, select, textarea") && tourVisible(x)).map((x) => x.getBoundingClientRect());
+  const free = (tp, lf) => keep.every((k) => lf + bw <= k.left || k.right <= lf || tp + bh <= k.top || k.bottom <= tp);
+  const tries = [];
+  if (t.bottom + gap + bh <= H - 8) tries.push([t.bottom + gap, "up"]);                    // under the control, arrow up
+  if (t.top - gap - bh >= 8) tries.push([t.top - gap - bh, "down"]);                        // over it, arrow down
+  tries.push([Math.max(8, H - bh - 8), "none"], [8, "none"]);                                // bottom, then top of the window
+  let [top, side] = tries.find(([tp]) => free(tp, left)) || tries[0];
+  if (!free(top, left)) {                                                                    // still covering: the other side
+    const other = left < W / 2 ? Math.max(8, W - bw - 8) : 8;
+    if (free(top, other)) { left = other; side = "none"; }
+  }
   Object.assign(bub.style, { top: `${top}px`, left: `${left}px` });
   bub.dataset.side = side;
   bub.style.setProperty("--ax", `${Math.min(Math.max(16, t.left + t.width / 2 - left), bw - 16)}px`);
@@ -1399,12 +1444,17 @@ async function viewPurchases() {
   });
   $("#manForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const f = new FormData(e.target);
+    const f = new FormData(e.target), go = e.target.querySelector("button[type=submit]");
+    if (go.disabled) return;
+    go.disabled = true;                                 // QA-29: a double click sent two creates
     try {
       const d = await api("/api/purchases", { method: "POST", body: { supplier_id: f.get("supplier_id"),
         invoice_no: f.get("invoice_no"), invoice_date: f.get("invoice_date") || null } });
       location.hash = `#/purchases/${d.invoice.id}`;
-    } catch (err) { toast(err.message, true); }
+    } catch (err) {
+      toast(err.message, true);
+      if (err.code === "duplicate_invoice" && err.details?.invoice_id) location.hash = `#/purchases/${err.details.invoice_id}`;
+    } finally { go.disabled = false; }
   });
   $("#upForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1509,7 +1559,7 @@ function renderInvoice(keepPicker = true) {
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
       <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" autocomplete="off" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
         <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
-        ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق بالقرش</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${Math.abs(diff)} قرش (${money(diff)} ج)</small>`}</label>
+        ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق تمامًا</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${money(Math.abs(diff))} ج</small>`}</label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" autocomplete="off" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
       <label class="f">طريقة الدفع <select data-h="pay_source" id="paySrc" ${draft ? "" : "disabled"}></select>
         <small class="muted">${inv.pay?.default ? "الافتراضي حسب نوع المورد" : ""}</small></label>
@@ -1527,7 +1577,7 @@ function renderInvoice(keepPicker = true) {
       ${lines.some((l) => l.distributor_margin) ? `<div title="مجموع (الكمية × هامش الموزع)، بيتزوّد على مجموع الأسطر زي آخر ورقة الموزع">هامش الموزع<b>${money(lines.reduce((a, l) => a + (l.qty || 0) * (l.distributor_margin || 0), 0))}</b></div>` : ""}
       <div>عدد الأصناف<b>${lines.length}</b></div>
     </div>
-    <h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة يجب حلها قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
+    ${draft ? `<h2 class="mt">${errs.length ? `⛔ ${errs.length} مشكلة يجب حلها قبل الاعتماد` : "✅ لا توجد مشكلات تمنع الاعتماد"}</h2>
     <ul class="issues">
       ${errs.map((i) => `<li class="${i.code.startsWith("unusual_") ? "warn" : "err"}">${i.line_id ? `سطر ${lineNo[i.line_id]}: ` : ""}${esc(i.message)}
         ${i.details?.difference != null ? ` (الفرق ${money(i.details.difference)} ج)` : ""}
@@ -1540,7 +1590,7 @@ function renderInvoice(keepPicker = true) {
         ${i.details?.mergeable && draft ? `<button class="btn small secondary" data-merge="${esc(i.details.other_line)}" data-mergewith="${esc(i.line_id)}">دمج السطرين</button>` : ""}
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
 </li>`).join("")}
-    </ul>
+    </ul>` : ""}
     <div class="row">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && (ME.permissions.includes("purchases.approve") || ME.permissions.includes("purchases.edit")) ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>
         ${fileUrl ? `<button class="btn secondary" id="addLine">إضافة سطر ناقص من الملف</button>` : ""}` : ""}
@@ -1649,6 +1699,7 @@ function quickAddHtml() {
       ${order.map(key => `<div class="row" data-entry-field="${key}" ${key === "bonus" && warehouse ? "hidden" : ""}>${fields[key]}</div>`).join("")}
       <button class="btn" id="qaAdd" type="button">إضافة</button>
     </div>
+    <p id="qaErr" class="t-err" role="alert"></p>
     <div id="qaRes" class="cands"></div><div id="qaPicked" class="muted"></div></section>`;
 }
 
@@ -1788,16 +1839,34 @@ function bindQuickAdd() {
     const result = e.target.closest("[data-qa]")?.dataset.qa;
     openCard(e.target.closest("[data-qa-card]") || $(`[data-qa-card="${result ?? "picked"}"]`, picker));
   });
+  // QA-29: a box the line cannot do without is marked red next to the row, with what is missing; nothing is added
+  const need = (missing) => {
+    picker.querySelectorAll("[aria-invalid=true]").forEach((x) => x.removeAttribute("aria-invalid"));
+    $("#qaErr", picker).textContent = missing.length ? `ناقص: ${missing.map(([, t]) => t).join("، ")}` : "";
+    missing.forEach(([els]) => els.forEach((x) => x.setAttribute("aria-invalid", "true")));
+    if (missing.length) missing[0][0].find((x) => !x.disabled)?.focus();
+    return missing.length > 0;
+  };
+  picker.addEventListener("input", (e) => {
+    if (e.target.getAttribute("aria-invalid") !== "true") return;
+    const pair = { qaDisc: "#qaNet", qaNet: "#qaDisc" }[e.target.id];
+    [e.target, pair && $(pair, picker)].forEach((x) => x?.removeAttribute("aria-invalid"));
+    if (!picker.querySelector("[aria-invalid=true]")) $("#qaErr", picker).textContent = "";
+  });
   const add = async () => {
-    if (!item) { toast("اختر الصنف أولًا", true); q.focus(); return; }
+    if (!item) { need([[[q], "الصنف"]]); return; }
     const bad = entryFields().find(field => field.validity.badInput);
     if (bad) {
       toast(`اكتب رقم صحيح في خانة ${bad.labels[0].firstChild.textContent.trim()}`, true);
       bad.focus();
       return;
     }
-    const qty = typedWhole($("#qaQty").value);
-    if (!(Number(qty) > 0)) { toast("اكتب الكمية", true); $("#qaQty").focus(); return; }
+    const qty = typedWhole($("#qaQty").value), missing = [];
+    if (!(Number(qty) > 0)) missing.push([[$("#qaQty")], "الكمية"]);
+    // the cost: the pharmacist's price, or the public price and a discount (0 when there is none)
+    if ($("#qaNet").value === "" && ($("#qaDisc").value === "" || $("#qaPrice").value === ""))
+      missing.push([[$("#qaDisc"), $("#qaNet")], $("#qaPrice").value === "" ? "سعر الجمهور والخصم، أو سعر الصيدلي" : "الخصم % (اكتب 0 لو مفيش) أو سعر الصيدلي"]);
+    if (need(missing)) return;
     const line = { item_id: item.id, qty, bonus_qty: $("#qaBonus").disabled ? 0 : typedWhole($("#qaBonus").value) ?? 0 };
     if ($("#qaPrice").value !== "") line.public_price = CONVERT.public_price($("#qaPrice").value);
     if ($("#qaNet").value !== "") line.unit_net_price = CONVERT.unit_net_price($("#qaNet").value);
@@ -2398,11 +2467,18 @@ app.addEventListener("click", async (e) => {
       payNow ? `هيتدفع للمورد دلوقتي ${money(payNow)} ج: ${$("#paySrc")?.selectedOptions[0]?.textContent || ""}` + (payNow < (CUR.invoice.computed_total || 0) ? "، والباقي على حسابه." : ".")
         : "الفاتورة كلها على حساب المورد (آجل)."].join("\n"))) return;
     const invoice = CUR.invoice;
+    // QA-29: approved (or changed) from another tab: this screen reloads and says so, never stays «مسودة»
+    const elsewhere = async () => {
+      await viewInvoice(invoice.id);
+      if (CUR?.invoice?.status === "approved") toast("الفاتورة دي معتمدة بالفعل (اتعتمدت من شاشة تانية)");
+      else if (CUR?.invoice?.status === "cancelled") toast("الفاتورة دي اتلغت من شاشة تانية", true);
+      else toast("الفاتورة اتعدلت من شاشة تانية: راجعها واعتمد تاني", true);
+    };
     t.disabled = true;
     try {
       const review = await api(`${base}/approve`);
       if (!t.isConnected || review.version !== invoice.version) {
-        if (t.isConnected) await viewInvoice(invoice.id);
+        if (t.isConnected) await elsewhere();
         return;
       }
       const decisions = await choosePurchasePrices(review);
@@ -2417,8 +2493,9 @@ app.addEventListener("click", async (e) => {
       purchaseLabels(CUR);
     } catch (err) {
       if (!t.isConnected) return;
+      if (["not_draft", "stale_version"].includes(err.code)) { await elsewhere(); return; }
       toast(err.message, true);
-      if (["stale_version", "has_blocking_issues"].includes(err.code)) await viewInvoice(invoice.id);
+      if (err.code === "has_blocking_issues") await viewInvoice(invoice.id);
     } finally { t.disabled = false; }
   } else if (t.id === "invLabels") {
     purchaseLabels(CUR);

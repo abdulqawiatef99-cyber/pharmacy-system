@@ -134,6 +134,25 @@ class Purchasing:
         file_id, _ = self._store_file(ctx, data, filename, mime)
         return self._create_from_extraction(ctx, extracted, kind, file_id, supplier_id)
 
+    def open_empty_manual(self, ctx: Context, supplier_id: str | None) -> str | None:
+        """QA-29: a second «ابدأ الفاتورة» (double click, back and again) gives the same empty draft instead of a
+        second one: this person's own manual draft for the same supplier, with no lines and no number yet."""
+        ctx.require("purchases.create")
+        r = self.db.one(
+            "SELECT pi.id FROM purchase_invoices pi WHERE pi.org_id=? AND pi.branch_id=? AND pi.status='draft'"
+            " AND pi.source_type='manual' AND pi.created_by=? AND pi.supplier_id IS ? AND pi.invoice_no IS NULL"
+            " AND NOT EXISTS (SELECT 1 FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id)"
+            " ORDER BY pi.created_at DESC LIMIT 1", (ctx.org_id, ctx.branch_id, ctx.user_id, supplier_id))
+        return r["id"] if r else None
+
+    def duplicate_of(self, ctx: Context, supplier_id: str | None, invoice_no: str | None) -> str | None:
+        """The live invoice already holding this supplier's number, if any (the check update_header makes)."""
+        if not supplier_id or not invoice_no:
+            return None
+        r = self.db.one("SELECT id FROM purchase_invoices WHERE org_id=? AND supplier_id=? AND invoice_no=?"
+                        " AND status<>'cancelled'", (ctx.org_id, supplier_id, str(invoice_no).strip()))
+        return r["id"] if r else None
+
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
         from ..sales.service import local_today       # update 1 (owner): the supplier invoice date starts as today
