@@ -3274,7 +3274,7 @@ function viewImport() {
       for (;;) {
         j = await api(`/api/imports/jobs/${encodeURIComponent(job)}`);
         if (j.status !== "running" || !form.isConnected) break;
-        go.textContent = j.total ? `بيحلل… ${j.done.toLocaleString("en")} من ${j.total.toLocaleString("en")} سطر` : "بيقرا الملف…";
+        go.textContent = j.total ? `بيحلل… ${j.done} من ${j.total} سطر` : "بيقرا الملف…";
         await new Promise((res) => setTimeout(res, 1000));
       }
       if (!form.isConnected) return;
