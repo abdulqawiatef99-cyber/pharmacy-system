@@ -1285,7 +1285,8 @@ class Sales:
             after["reason"] = reason
         audit.record(self.db, ctx, action, "cash_shift" if shift else "sale", shift or s["id"], after=after)
         if action == "sale.tab_discarded":
-            who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))
+            who = self.db.one("SELECT u.full_name FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
+                              " WHERE u.id=?", (ctx.org_id, ctx.user_id))
             notify.emit(self.db, ctx, "tab_discarded", "warning",
                         f"تبويب بيع اتقفل وفيه {v['items']} صنف بـ {egp(v['value'])} ج",
                         f"قفله {who['full_name'] if who else ''}" + registers.alert_suffix(self.db, ctx, s["branch_id"]),

@@ -50,7 +50,8 @@ def tab_losses_of(db: Database, s) -> list[dict]:
     (audit rows on the shift, read through the entity index)."""
     rows = db.all(
         "SELECT a.user_id, u.full_name, a.action, count(*) n, coalesce(sum(json_extract(a.after_json,'$.value')),0) v"
-        " FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.entity_type='cash_shift'"
+        " FROM audit_log a LEFT JOIN memberships m ON m.user_id=a.user_id AND m.org_id=a.org_id"
+        " LEFT JOIN users u ON u.id=m.user_id WHERE a.org_id=? AND a.entity_type='cash_shift'"
         " AND a.entity_id=? AND a.action IN ('sale.tab_discarded','sale.line_removed','sale.line_reduced') GROUP BY a.user_id, a.action",
         (s["org_id"], s["id"]))
     out: dict = {}
