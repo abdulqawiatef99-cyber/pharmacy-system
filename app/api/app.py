@@ -3570,7 +3570,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         def run():
             from ..printing import settings as rs
             ctx.require("items.read")                  # before the check names an item (review P2)
-            cfg = rs.get(db, ctx.org_id)
+            cfg = ps.label_config(db, ctx, rs.get(db, ctx.org_id))    # this device's own label printer wins
             if cfg["label_lang"] not in ("browser", "a4"):          # QA-29: refused with a reason, before the printer
                 for iid, _n in wanted:
                     it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
