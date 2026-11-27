@@ -145,7 +145,9 @@ tender amounts. A setting change also applies to the return side of exchanges.
 
 - Wallet refunds default to confirmed amounts. The owner can allow an unreviewed transfer to
   fund a refund. Rejected amounts and any unconfirmed remainder after a partial approval stay
-  excluded. A wallet offset carried into a replacement preserves only its verified portion as verified.
+  excluded. An unreviewed wallet offset follows the original invoice's proof status. A replacement
+  invoice's proof covers its own top-up. An original partial review cannot confirm an unreviewed
+  carried amount without identifying its tender, so it stays outside the carried refund limit.
 - An explicit store-credit refund on a mixed sale defaults to the original credit part less earlier
   refunds on account. The owner can turn off the cap to allow the full value on the customer's
   account, as in ADR-018. Original-tender refunds still credit only the original credit part.

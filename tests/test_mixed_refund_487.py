@@ -464,3 +464,64 @@ class TestMixedRefund(WiringCase):
         self.assertEqual(drawer.report(self.ctx, sale["shift_id"])["returns_count"], 0)
         report = drawer.report(sub, secondary)
         self.assertEqual((report["returns_count"], report["returns_total"], report["expected_cash"]), (1, 2000, 9000))
+
+    def test_approval_of_exchange_top_up_does_not_confirm_the_carried_wallet(self):
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": True})
+        sale = self.sale(cash=0, wallet=2000)
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        exchange = self.call("POST", f"/api/sales/{sale['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+            "pay_method": "transfer", "channel_id": self.tr_ch, "reason": "استبدال تجربة"})
+        replacement = exchange["sale"]
+        self.verify_wallet(replacement)
+        from app.sales.attachments import transfer_state
+        self.assertEqual(transfer_state(self.db, self.ctx.org_id, sid, 4000)["verified"], 2000)
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": False})
+        self.assertEqual(self.refund(replacement, qty=2, status=409)["error"]["details"]["max_transfer"], 2000)
+
+    def test_rejected_original_wallet_cannot_fund_replacement_refund(self):
+        from io import BytesIO
+
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": True})
+        sale = self.sale(cash=0, wallet=2000)
+        attachment = self.call("POST", f"/api/sales/{sale['id']}/attachments",
+                               files={"file": ("pending.png", BytesIO(PNG), "image/png")})["attachments"][0]["id"]
+        sid = self.draft()
+        self.line(sid, self.pan, units=1)
+        replacement = self.call("POST", f"/api/sales/{sale['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+            "reason": "استبدال تجربة"})["sale"]
+        self.call("POST", f"/api/attachments/{attachment}/review", json={"ok": False, "note": "التحويل لم يصل"})
+        self.assertEqual(self.refund(replacement, status=409)["error"]["details"]["max_transfer"], 0)
+        self.assertEqual(self.bal(self.wallet), 0)
+        self.call("POST", f"/api/attachments/{attachment}/review", json={"ok": True})
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": False})
+        self.assertEqual(self.split(self.refund(replacement)), [("transfer", 2000)])
+        self.assertEqual(self.bal(self.wallet), 0)
+
+    def test_final_zero_value_return_with_negative_rounding_does_not_use_cash(self):
+        from app.catalog import service
+        from app.sales.rounding import set_step
+
+        set_step(self.db, self.ctx, 100)
+        larger = service.create_item(self.db, self.ctx, {"name_en": "Rounding large", "pack_size": 1, "public_price": 1000})
+        tiny = service.create_item(self.db, self.ctx, {"name_en": "Rounding small", "pack_size": 1, "public_price": 49})
+        self.stock(larger, 4, "5")
+        self.stock(tiny, 4, "0.10")
+        sid = self.draft()
+        first = self.line(sid, larger, units=1)["lines"][0]["id"]
+        last = self.line(sid, tiny, units=1)["lines"][1]["id"]
+        sale = self.complete(sid, [{"method": "cash", "amount": 100},
+                                   {"method": "card", "amount": 900, "channel_id": self.card_ch}])
+
+        def return_line(lid):
+            return self.call("POST", f"/api/sales/{sid}/return", json={
+                "lines": {lid: 1}, "refund_method": "original", "reason": "مرتجع تجربة"})
+        return_line(first)
+        final = return_line(last)
+        self.assertEqual(final["refund"], 0)
+        self.assertFalse(any(p["method"] == "cash" for p in final["refund_payments"]))
+        shift = CashDrawer(self.db).report(self.ctx, sale["shift_id"])
+        self.assertEqual(shift["returns_by_method"]["cash"]["count"], 1)
+        self.assertEqual(shift["rounding_total"], 0)

@@ -810,12 +810,12 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
     return out
 
 
-def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, note, *, verified):
+def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, note):
     """Keep an exchange offset on the account from which the original refund was posted."""
     if account_id:
         _post(db, ctx, account_id, amount, "sale", ref_type="sale", ref_id=sale_id, note=note,
               check=False, active=False, meta={"method": method, "channel_id": channel_id,
-                                             "exchange_offset": True, "verified_offset": verified})
+                                             "exchange_offset": True})
 
 
 def _tender_account_history(db, org, sale_id, method):
@@ -946,7 +946,7 @@ def legacy_wallet_refund_reserve(db: Database, ctx: Context, sale_id: str) -> tu
     return by_channel, uncertain + sum(by_id.values()), wallet_paid
 
 
-def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: int) -> int:
+def settle_transfer_review(db: Database, ctx: Context, sale_id: str, fresh_received: int) -> int:
     """After a transfer proof review: the sale's routed transfer money that did not come is taken back off its
     account(s), and given back if a later review confirms it (Codex on #381). One correction movement per change,
     kind 'sale' with ref_type 'transfer_review', so the account's net for the sale is what was confirmed and a
@@ -959,19 +959,20 @@ def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: i
     for r in db.all("SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
                     " AND ref_type='sale' ORDER BY rowid", (ctx.org_id, sale_id)):
         meta = json.loads(r["meta"] or "{}")
-        if meta.get("method") == "transfer":
-            reviewable = r["amount"] - meta.get("verified_offset", 0)
-            if reviewable:
-                got[r["account_id"]] = got.get(r["account_id"], 0) + reviewable
+        if meta.get("method") == "transfer" and not meta.get("exchange_offset"):
+            got[r["account_id"]] = got.get(r["account_id"], 0) + r["amount"]
     routed = sum(got.values())
     if not routed:
         return 0
     fixed = {r["account_id"]: r["t"] for r in db.all(
         "SELECT account_id, sum(amount) t FROM money_movements WHERE org_id=? AND ref_id=? AND ref_type='transfer_review'"
         " GROUP BY account_id", (ctx.org_id, sale_id))}
-    short = max(0, min(routed, s["paid_transfer"] - max(0, received)))      # what should be off the accounts
+    fresh = db.one("SELECT coalesce(sum(amount-exchange_offset),0), count(*) FROM sale_payments"
+                   " WHERE org_id=? AND sale_id=? AND method='transfer'", (ctx.org_id, sale_id))
+    fresh_total = fresh[0] if fresh[1] else s["paid_transfer"]
+    short = max(0, min(routed, fresh_total - fresh_received))      # what should be off the accounts
     delta = -short - sum(fixed.values())                                     # < 0: take more off; > 0: give back
-    posted, note = 0, f"تحويل فاتورة {s['sale_no']}: المؤكد وصوله {received / 100:,.2f} ج"
+    posted, note = 0, f"تحويل فاتورة {s['sale_no']}: المؤكد وصوله {fresh_received / 100:,.2f} ج"
     for acc, amt in (got.items() if delta < 0 else reversed(list(got.items()))):
         if not delta:
             break
@@ -981,13 +982,13 @@ def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: i
             step = min(delta, -fixed.get(acc, 0))
         if step:
             _post(db, ctx, acc, step, "sale", ref_type="transfer_review", ref_id=sale_id, note=note,
-                  meta={"method": "transfer", "received": received}, check=False, active=False)
+                  meta={"method": "transfer", "received": fresh_received}, check=False, active=False)
             fixed[acc] = fixed.get(acc, 0) + step
             delta -= step
             posted += step
     if posted:
         audit.record(db, ctx, "money.transfer_review", "sale", sale_id,
-                     after={"received": received, "posted": posted, "off_accounts": -sum(fixed.values())})
+                     after={"received": fresh_received, "posted": posted, "off_accounts": -sum(fixed.values())})
     return posted
 
 

@@ -861,11 +861,11 @@ class Sales:
             s["manual_rounding_limit"] = manual_limit(self.db, ctx.org_id)      # UX-27: the payment's round button
         d = self.db.one("SELECT * FROM sale_deliveries WHERE sale_id=?", (sid,))
         s["delivery"] = dict(d) if d else None
-        from .attachments import listing as att_listing
+        from .attachments import listing as att_listing, transfer_state
         s["attachments"] = att_listing(self.db, ctx, sid)
-        s["verified_wallet_offset"] = self.db.one(
-            "SELECT coalesce(sum(verified_exchange_offset),0) FROM sale_payments WHERE sale_id=? AND org_id=?"
-            " AND method='transfer' AND verified_exchange_offset>0", (sid, ctx.org_id))[0] if s["paid_transfer"] else 0
+        s["verified_wallet_offset"] = sum(
+            p["verified"] for p in transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])["offsets"].values()
+        ) if s["paid_transfer"] else 0
         s["returns"] = [dict(r) for r in self.db.all(
             "SELECT r.id, r.part_of, r.total, r.refund_method, r.channel_id, c.name channel, r.reason, r.created_at,"
             " u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
@@ -1137,12 +1137,12 @@ class Sales:
                 carried = "source_account" in p
                 verified = p.get("verified_exchange_offset", 0)
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount,"
-                                " exchange_offset, verified_exchange_offset) VALUES (?,?,?,?,?,?,?,?)",
+                                " exchange_offset, verified_exchange_offset, pending_wallet_source) VALUES (?,?,?,?,?,?,?,?,?)",
                                 (new_id(), ctx.org_id, sid, p["method"], p["channel_id"], p["amount"],
-                                 p.get("exchange_offset", 0), verified))
+                                 p.get("exchange_offset", 0), verified, p.get("pending_wallet_source")))
                 if carried:
                     money.carry_sale_payment(self.db, ctx, p["method"], p["channel_id"], p["amount"],
-                                             p["source_account"], sid, note=f"استبدال فاتورة {no}", verified=verified)
+                                             p["source_account"], sid, note=f"استبدال فاتورة {no}")
                 elif p["method"] in money.METHODS:
                     money.receive(self.db, ctx, p["method"], p["channel_id"], p["amount"], "sale",
                                   ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
@@ -1154,7 +1154,7 @@ class Sales:
             if paid_transfer:   # a proof already reviewed on the draft counts now the transfer is on its account (#348)
                 from .attachments import transfer_state
                 money.settle_transfer_review(self.db, ctx, sid,
-                                             transfer_state(self.db, ctx.org_id, sid, paid_transfer)["received"])
+                                             transfer_state(self.db, ctx.org_id, sid, paid_transfer)["fresh_received"])
             if on_credit:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'credit_sale', ?, ?)",
@@ -1716,8 +1716,11 @@ class Sales:
                                              rules=rules, only="card" if refund_method == "card" else None)
                 # A zero-value return still needs an event and its stock history.
                 if not payments:
-                    payments = [{"method": "cash" if refund_method == "original" else refund_method,
-                                 "channel_id": None, "amount": 0}]
+                    method = "cash" if refund_method == "original" else refund_method
+                    if refund_method == "original" and rounding_back < 0:
+                        method = next((m for m, paid in (("card", s["paid_card"]), ("transfer", s["paid_transfer"]),
+                                                        ("credit", s["on_credit"])) if paid), method)
+                    payments = [{"method": method, "channel_id": None, "amount": 0}]
             else:
                 payments = [{"method": refund_method, "channel_id": channel_id, "amount": refund}]
 
@@ -1952,7 +1955,8 @@ class Sales:
                             if kept:
                                 verified = min(kept, verified_left)
                                 offsets.append({"method": method, "channel_id": channel, "amount": kept,
-                                                "source_account": account, "verified_exchange_offset": verified})
+                                                "source_account": account, "verified_exchange_offset": verified,
+                                                "pending_wallet_source": sid if method == "transfer" and kept > verified else None})
                                 verified_left -= verified
                                 remaining -= kept
                     elif take:

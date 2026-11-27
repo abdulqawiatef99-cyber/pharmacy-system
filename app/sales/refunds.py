@@ -89,15 +89,14 @@ def original_capacity(db, ctx, sale, rounding_left, *, rules, verified_only=Fals
 
     if wallets:
         state = transfer_state(db, org, sid, sale["paid_transfer"])
-        eligible = state["received"] if rules["refund_unreviewed_wallet"] and not verified_only else state["verified"]
+        eligibility = "received" if rules["refund_unreviewed_wallet"] and not verified_only else "verified"
         # A partial review does not identify which fresh wallet was confirmed.
-        short = sale["paid_transfer"] - eligible
-        offsets = {r["channel_id"]: r["amount"] for r in db.all(
-            "SELECT channel_id, sum(verified_exchange_offset) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
-            " AND method='transfer' GROUP BY channel_id", (org, sid))}
+        short = state["fresh_total"] - state[f"fresh_{eligibility}"]
         for key in wallets:
-            caps[key] = max(0, caps[key] - min(short, received[key] - offsets.get(key[1], 0))
-                            - wallet_history.get(key[1], 0) - unknown_history)
+            offset = state["offsets"].get(key[1], {})
+            fresh = received[key] - offset.get("total", 0)
+            unavailable = min(short, fresh) + offset.get("total", 0) - offset.get(eligibility, 0)
+            caps[key] = max(0, caps[key] - unavailable - wallet_history.get(key[1], 0) - unknown_history)
             reserved = min(caps[key], cash_other)
             caps[key] -= reserved
             cash_other -= reserved
