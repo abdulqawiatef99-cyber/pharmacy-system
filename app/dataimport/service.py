@@ -207,6 +207,10 @@ def _read(data: bytes, filename: str, import_kind: str | None = None) -> list[li
     raise ValidationFailed("استيراد البيانات يقبل ملفات Excel (.xlsx) أو CSV فقط")
 
 
+# same normalized name, any maker: the bare key, or any key "<base>|m:<maker>" (the range ":" .. ";" holds them all)
+SAME_NAME_ANY_MAKER = ("SELECT id FROM items WHERE org_id=? AND (dedupe_key=? OR (dedupe_key>=? AND dedupe_key<?))"
+                       " LIMIT 1")
+
 class DataImport:
     def __init__(self, db: Database):
         self.db = db
@@ -214,7 +218,8 @@ class DataImport:
     # ------------------------------------------------------------ analyze
     def analyze(self, ctx: Context, data: bytes, filename: str, *, kind: str = "items",
                 mapping: dict[int, str] | None = None, source_system: str = "generic",
-                options: dict | None = None, packs_set_later: bool = False) -> str:
+                options: dict | None = None, packs_set_later: bool = False, progress=None) -> str:
+        """`progress(done, total)` (QA-29): called as rows are planned, for the background job's screen."""
         ctx.require("items.import")
         if kind not in HEADERS_BY_KIND:
             raise ValidationFailed("نوع استيراد غير معروف")
@@ -257,7 +262,12 @@ class DataImport:
         seen_code: dict[str, int] = {}
         seen_bc: dict[str, int] = {}
         seen_key: dict[str, int] = {}
-        for idx, r in enumerate(rows[header_row + 1:], start=header_row + 2):
+        body_rows = rows[header_row + 1:]
+        if progress:
+            progress(0, len(body_rows))
+        for idx, r in enumerate(body_rows, start=header_row + 2):
+            if progress and (idx - header_row - 1) % 200 == 0:
+                progress(idx - header_row - 2, len(body_rows))
             raw = {cmap[j]: (r[j] if j < len(r) else None) for j in cmap}
             if all(v in (None, "") for v in raw.values()):
                 continue
@@ -577,8 +587,8 @@ class DataImport:
             dup = self.db.one("SELECT id FROM items WHERE org_id=? AND (dedupe_key=? OR dedupe_key=?)",
                               (ctx.org_id, full, base))
         else:                 # unknown maker: any maker
-            dup = self.db.one("SELECT id FROM items WHERE org_id=? AND (dedupe_key=? OR"
-                              " substr(dedupe_key, 1, ?)=?)", (ctx.org_id, base, len(base) + 3, base + "|m:"))
+            # a key range on the (org_id, dedupe_key) index: substr() scanned every item for each row (QA-29)
+            dup = self.db.one(SAME_NAME_ANY_MAKER, (ctx.org_id, base, base + "|m:", base + "|m;"))
         if dup:
             return "review", dup["id"], [{"code": "same_item_exists", "item_id": dup["id"]}]
         cands = [c for c in matching.fuzzy_candidates(self.db, ctx.org_id, d["_name"], 3)
@@ -1001,16 +1011,19 @@ def export_catalog(db: Database, ctx: Context) -> bytes:
     ws.append(["id", "code", "name_en", "name_ar", "active_ingredient", "strength", "dosage_form",
                "manufacturer", "pack_size", "public_price_egp", "barcodes"] + (["stock_base_units"] if stock_ok else [])
               + ["status"])
+    # three questions for the whole catalog (QA-29): one barcode and one stock question per item scanned the
+    # barcode table once per item (it has no item_id index), 89.9 s at 30,000 items
+    bcs: dict[str, list[str]] = {}
+    for r in db.all("SELECT item_id, barcode FROM item_barcodes WHERE org_id=? ORDER BY item_id, rowid", (ctx.org_id,)):
+        bcs.setdefault(r["item_id"], []).append(r["barcode"])
+    stock = {r["item_id"]: r["q"] for r in db.all(
+        "SELECT item_id, sum(qty) q FROM stock_balances WHERE org_id=? GROUP BY item_id", (ctx.org_id,))} if stock_ok else {}
     for it in db.all("SELECT * FROM items WHERE org_id=? AND (hidden=0 OR ?) ORDER BY coalesce(name_en,name_ar)",
                      (ctx.org_id, int(hidden_ok))):
-        bcs = ",".join(r["barcode"] for r in db.all(
-            "SELECT barcode FROM item_barcodes WHERE org_id=? AND item_id=?", (ctx.org_id, it["id"])))
-        q = db.one("SELECT coalesce(sum(qty),0) q FROM stock_balances WHERE org_id=? AND item_id=?",
-                   (ctx.org_id, it["id"]))["q"] if stock_ok else None
         ws.append([it["id"], it["code"], it["name_en"], it["name_ar"], it["active_ingredient"],
                    it["strength"], it["dosage_form"], it["manufacturer"], it["pack_size"],
                    (it["public_price"] or 0) / 100 if it["public_price"] is not None else None,
-                   bcs] + ([q] if stock_ok else []) + [it["status"]])
+                   ",".join(bcs.get(it["id"], ()))] + ([stock.get(it["id"], 0)] if stock_ok else []) + [it["status"]])
     from ..core.xlsx_safe import as_text
     as_text(wb)
     buf = io.BytesIO()

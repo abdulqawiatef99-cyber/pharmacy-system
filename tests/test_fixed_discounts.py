@@ -359,8 +359,9 @@ class CodexKeyboardCompletion(unittest.TestCase):
         handler = _JS[submit:submit + 550]
         self.assertIn("const saved = await POS.saving;", handler)
         self.assertIn("if (saved === false) { POS.saving = null; return; }", handler)
-        self.assertIn('const isDiscField = (el) => !!(el?.dataset?.disc || el?.id === "posInvDisc");', _JS)
-        for fn in (r"\nasync function patchLine\(", r"const invDisc = async \(\) =>"):
+        # UX-27 PR2: the EGP fields (line and invoice) are discount fields too
+        self.assertIn('const isDiscField = (el) => !!(el?.dataset?.disc || el?.dataset?.damt || el?.id === "posInvDisc" || el?.id === "posInvAmt");', _JS)
+        for fn in (r"\nasync function patchLine\(", r"const invDisc = async \(mode\) =>"):
             block = _JS[_re.search(fn, _JS).start():][:900]
             self.assertIn("POS.saving = (async () =>", block, fn)
             self.assertIn("return false; }", block, fn)                       # a failed save stops the sale
@@ -384,6 +385,6 @@ class CodexReview400Round5(FixedCase):
         self.assertGreaterEqual(g[other.user_id]["approved_lines"], 1)
 
     def test_p2_an_invalid_discount_stops_f9(self):
-        for pat in (r"const invDisc = async \(\) =>", r"const sendDisc = \(id\) =>"):
+        for pat in (r"const invDisc = async \(mode\) =>", r"const sendDisc = \(id, mode, text\) =>"):
             block = _JS[_re.search(pat, _JS).start():][:900]
             self.assertIn("POS.saving = Promise.resolve(false)", block, pat)
