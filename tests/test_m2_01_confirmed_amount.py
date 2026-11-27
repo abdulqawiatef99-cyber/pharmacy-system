@@ -2,6 +2,8 @@
 approving one proof for 6,000 says only 6,000 came: the transfers report counts 6,000 as verified, not 10,000,
 and only what was confirmed funds a cash or card refund. Needs the `confirmed_amount` column of 0038.
 Synthetic data only."""
+from dataclasses import replace
+
 from app.core import notify
 from app.core.errors import Conflict, ValidationFailed
 from app.sales import attachments as att
@@ -15,6 +17,8 @@ class TestConfirmedAmount(Base):
     def setUp(self):
         super().setUp()
         self.cd.open(self.ctx, 10000)
+        self.approved = replace(self.ctx, approver_id="manager-fixture",
+                                approver_permissions=frozenset({"sales.refund_other_method"}))
         self.sale = transfer_sale(self, units=4)                     # 8,000 by transfer (4 units of 20.00)
         self.aid = att.attach(self.db, self.tmp, self.ctx, self.sale["id"], PNG)["attachments"][0]["id"]
 
@@ -32,7 +36,7 @@ class TestConfirmedAmount(Base):
     def test_only_what_was_confirmed_funds_a_refund(self):
         att.review(self.db, self.ctx, self.aid, True, amount=2000)  # one unit's worth came
         line = self.sale["lines"][0]["id"]
-        self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
+        self.s.return_items(self.approved, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
         with self.assertRaises(Conflict) as e:
             self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
         self.assertEqual(e.exception.details["max_cash"], 0)
@@ -42,7 +46,7 @@ class TestConfirmedAmount(Base):
         t = self.report()
         self.assertEqual((t["rows"][0]["verified"], t["rows"][0]["state"], t["totals"]["ok"]), (8000, "ok", 8000))
         line = self.sale["lines"][0]["id"]
-        self.s.return_items(self.ctx, self.sale["id"], {line: 4}, refund_method="cash", reason="مرتجع عميل")
+        self.s.return_items(self.approved, self.sale["id"], {line: 4}, refund_method="cash", reason="مرتجع عميل")
 
     def test_two_proofs_add_up(self):
         att.review(self.db, self.ctx, self.aid, True, amount=5000)
@@ -85,7 +89,7 @@ class TestCodexReview342c(TestConfirmedAmount):
         att.review(self.db, self.ctx, self.aid, True, amount=2000)
         att.attach(self.db, self.tmp, self.ctx, self.sale["id"], PNG + b"3")          # waits for review
         line = self.sale["lines"][0]["id"]
-        self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
+        self.s.return_items(self.approved, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
         with self.assertRaises(Conflict):
             self.s.return_items(self.ctx, self.sale["id"], {line: 1}, refund_method="cash", reason="مرتجع عميل")
         self.assertEqual(self.report()["rows"][0]["state"], "pending")              # the report still waits

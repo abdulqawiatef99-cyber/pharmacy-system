@@ -178,7 +178,7 @@ class TestHuntKeepsLaterVoids(SalesCase):
         cd = CashDrawer(self.db)
         shift = cd.summary(self.ctx)["id"]
         cd.close(self.ctx, counted_cash=0, note="عدّ تجربة", float_left=0)
-        cd.open(self.ctx, 0)
+        cd.open(self.ctx, d["total"])
         self.s.void(self.ctx, sid, "غلط في الفاتورة")
         with self.db.transaction():
             self.db.execute("UPDATE sales SET paid_cash=paid_cash+1, total=total+1 WHERE id=?", (sid,))
