@@ -149,14 +149,14 @@ def line_tolerance(expected: int, qty: int | None) -> int:
     return max(5, (qty or 0), round(abs(expected) * 0.005))
 
 
-def effective_amount(line: dict) -> int | None:
+def effective_amount(line: dict, *, draft: bool = False) -> int | None:
     """What the pharmacy pays for the line (piasters): the line's amount + qty x the distributor's margin (B3)."""
-    amount = line_amount(line)
+    amount = line_amount(line, draft=draft)
     return None if amount is None else amount + (line.get("qty") or 0) * margin_of(line)
 
 
-def line_amount(line: dict) -> int | None:
-    """The line as the paper prints it (tax included), without the distributor's margin."""
+def line_amount(line: dict, *, draft: bool = False) -> int | None:
+    """Amount with VAT and before margin. Posted lines keep the rules used to charge the supplier."""
     net, qty, tax, total = (line.get("unit_net_price"), line.get("qty"),
                             line.get("tax_amount") or 0, line.get("line_total"))
     included = line.get("tax_included")
@@ -169,12 +169,19 @@ def line_amount(line: dict) -> int | None:
         # printed total excludes tax: it is within tolerance of the pre-tax amount and closer to it than to the
         # taxed one (a small tax inside the tolerance of both was dropped from the invoice, #324 S26)
         if abs(total - pre) <= line_tolerance(pre, qty) and abs(total - pre) < abs(total - (pre + tax)):
+            if draft:
+                sources = _j(line.get("field_sources"))
+                # Inference rounds once across the line and has already added VAT. The rounded display
+                # price times quantity can coincidentally equal that tax-inclusive total.
+                if sources.get("line_total") == "inferred" and total == _line_net(line, net, qty, sources) + tax:
+                    return total
             return total + tax
     return total
 
 
 def computed_total(invoice: dict, lines: list[dict]) -> int | None:
-    amounts = [effective_amount(l) for l in lines]
+    draft = invoice.get("status", "draft") == "draft"
+    amounts = [effective_amount(l, draft=draft) for l in lines]
     if not lines or any(a is None for a in amounts):
         return None
     return sum(amounts) - (invoice.get("extra_discount") or 0) + (invoice.get("extra_tax") or 0)
@@ -193,7 +200,7 @@ def numeric_message(field: str) -> str:
     return f"{label} لازم يكون رقم صحيح من {minimum} إلى {maximum}"
 
 
-def impossible_line(line: dict, today: date, *, tax_only: bool = False):
+def impossible_line(line: dict, today: date, *, tax_only: bool = False, draft: bool = False):
     """Cross-field refusals shared by the typed line and approval of imported or older drafts."""
     public, net = line.get("public_price"), line.get("unit_net_price")
     if public is not None and margin_of(line) * 2 > public and margin_of(line) > 0:
@@ -205,7 +212,7 @@ def impossible_line(line: dict, today: date, *, tax_only: bool = False):
     if line.get("expiry_date") and date.fromisoformat(line["expiry_date"]) < today:
         yield "expired", "expiry_date", {"expiry_date"}
     sources = _j(line.get("field_sources"))
-    paid = effective_amount(line)
+    paid = effective_amount(line, draft=draft)
     has_line_tax_cost = net == 0 and (line.get("tax_amount") or 0) > 0 and paid == line["tax_amount"]
     if public == 0 or (not tax_only and (paid == 0 or
             (net == 0 and sources.get("unit_net_price") != "inferred" and not has_line_tax_cost))):
@@ -253,7 +260,8 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         add("error", "no_lines")
 
     # A tax-only invoice still pays a positive cost, allocated across the received units.
-    tax_only = (invoice.get("extra_tax") or 0) > 0 and all(effective_amount(line) == 0 for line in lines)
+    draft = invoice.get("status", "draft") == "draft"
+    tax_only = (invoice.get("extra_tax") or 0) > 0 and all(effective_amount(line, draft=draft) == 0 for line in lines)
     seen: dict[str, list] = {}
     for l in lines:
         lid = l["id"]
@@ -288,7 +296,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
         base = _base(pub, l)
         if base is not None and base < 0:
             base = None
-        for code, field, _ in impossible_line(l, today, tax_only=tax_only):
+        for code, field, _ in impossible_line(l, today, tax_only=tax_only, draft=draft):
             add("error", code, lid, field)
         if pub is not None and net is not None:
             if net + margin_of(l) > pub:      # the pack's cost (with the distributor's margin) above the public price
@@ -338,7 +346,7 @@ def validate(invoice: dict, lines: list[dict], *, items: dict[str, dict], today:
             add("error", "negative_amount", None, f)
     comp = computed_total(invoice, lines)
     if comp is not None:      # a negative total would give a negative supplier balance and unit cost
-        lines_amount = sum(effective_amount(l) for l in lines)
+        lines_amount = sum(effective_amount(l, draft=draft) for l in lines)
         if (invoice.get("extra_discount") or 0) > lines_amount:
             add("error", "extra_discount_too_large", None, "extra_discount",
                 extra_discount=invoice.get("extra_discount"), lines_amount=lines_amount)
