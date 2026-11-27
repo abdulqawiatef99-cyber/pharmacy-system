@@ -281,10 +281,10 @@ document.addEventListener("invalid", (e) => {
   shown.focus?.();
 }, true);
 
-function toast(msg, isError = false, ms = 0) {
+function toast(msg, isError = false, ms = 0) {   // isError: true = red failure, "warn" = yellow note (QA-29)
   const t = $("#toast");
   t.textContent = msg;
-  t.className = isError ? "error" : "";
+  t.className = isError === "warn" ? "warn" : isError ? "error" : "";
   t.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (t.hidden = true), ms || (isError ? 7000 : 3000));
@@ -2595,7 +2595,12 @@ let LABEL_CFG = null;
 const labelSize = (f) => (f.label_preset.value === "custom" ? `${+f.label_w.value}x${+f.label_h.value}` : f.label_preset.value);
 const labelFields = (f) => Object.fromEntries([...f.querySelectorAll("[data-lf]")].map((x) => [x.dataset.lf, x.checked]));
 async function printLabels(list) {
-  const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
+  const q = list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",");
+  // QA-29: the page is asked first (check=1 prints and records nothing), so a refusal is said, not lost in the frame
+  const page = async () => {
+    try { await api(`/labels?items=${q}&check=1`); } catch (er) { toast(er.message, true); return; }
+    printInFrame(`/labels?items=${q}`);
+  };
   try { LABEL_CFG = await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   const mode = LABEL_CFG.device_label_lang || LABEL_CFG.label_lang;
   if (mode === "browser" || mode === "a4") return page();
@@ -3586,18 +3591,24 @@ async function viewCountSession(id) {
     $("#cntSave").addEventListener("click", () => save(false));
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
-  const save = async (recount) => {
+  let saving = false;
+  const save = async (recount, confirmRepeat = false) => {
     const qty = typedWhole($("#cntQty").value);
     if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
+    if (saving && !recount && !confirmRepeat) return;      // QA-29: a double click sends one entry
+    saving = true;
     try {
-      await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
-        location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
-      toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${qty}`);
+      const r = await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
+        location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount, confirm_repeat: confirmRepeat } });
+      // the running total after an «إضافة», not only the number typed
+      toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${r.qty ?? qty}`);
       $("#cntItem").innerHTML = ""; q.value = ""; q.focus();
     } catch (err) {
-      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) return save(true);
+      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) { saving = false; return await save(true); }
+      // QA-29: the same +N within 2 s (double click or a double scanner read) is asked, never added silently
+      if (err.code === "repeat_add") { saving = false; if (confirm(err.message)) return await save(recount, true); toast("ماتضافش تاني"); return; }
       toast(err.message, true);
-    }
+    } finally { saving = false; }
   };
   const lookup = async () => {
     const v = q.value.trim();
@@ -6613,8 +6624,9 @@ function checkoutDeviceNotice(sale, receipt, drawer, message) {
   if (drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
   if (drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»");
   if (receipt === "unknown" || drawer === "unknown") warn.push("حفظ البيع تم، لكن نتيجة أمر الطباعة أو فتح الدرج غير متاحة");
-  if (warn.length) toast(`فاتورة ${sale.sale_no}
-${warn.join("\n")}`, true, 15000);
+  // QA-29: the sale IS saved: say that first; a printer or drawer problem is a yellow note, not a red failure
+  if (warn.length) toast(`✓ اتحفظ البيع — فاتورة ${sale.sale_no}
+${warn.join("\n")}`, "warn", 15000);
   else if (receipt === "sent" || drawer === "sent") toast(`فاتورة ${sale.sale_no}`
     + (receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
 }

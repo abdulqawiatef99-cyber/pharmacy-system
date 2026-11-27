@@ -1,5 +1,6 @@
-"""#98 on the sale screen: receipt printer switched off, cash sale with a receipt. The screen must show ONE red
-warning that names both the receipt and the drawer (each toast replaced the last one, so the receipt warning
+"""#98 on the sale screen: receipt printer switched off, cash sale with a receipt. The screen must show ONE
+warning that names both the receipt and the drawer. QA-29: the sale WAS saved, so the notice says that first
+(«✓ اتحفظ البيع») and is a yellow warning, not a red failure (each toast replaced the last one, so the receipt warning
 was hidden under the drawer one), never "sent", and the Windows queue must be empty afterwards."""
 import json
 import shutil
@@ -41,12 +42,13 @@ const { chromium } = require('playwright');
   const out = { receiptOn: await p.locator('#posRcpt').isChecked() };
   await p.keyboard.press('F9');
   await p.waitForFunction(() => document.querySelectorAll('table.cart [data-minus]').length === 0, null, { timeout: 15000 });
-  await p.waitForSelector('#toast.error:not([hidden])', { timeout: 10000 });
+  await p.waitForSelector('#toast.warn:not([hidden])', { timeout: 10000 });
   await p.waitForTimeout(300);
   out.toast = await p.locator('#toast').innerText();
   out.printFrame = await p.locator('#printFrame').count();                 // the browser receipt was offered
   await p.waitForTimeout(8000);                                             // past the normal 7 s error toast
-  out.stillShown = await p.locator('#toast.error:not([hidden])').count();
+  out.stillShown = await p.locator('#toast.warn:not([hidden])').count();
+  out.red = await p.locator('#toast.error').count();
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -90,6 +92,8 @@ class TestPrinterOffWarningInBrowser(APICase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertTrue(out["receiptOn"])
+        self.assertTrue(out["toast"].startswith("✓ اتحفظ البيع"), out["toast"])     # success first (QA-29)
+        self.assertEqual(out["red"], 0)
         self.assertIn("الإيصال لم يُطبع مباشرة", out["toast"])
         self.assertIn("لا تستجيب", out["toast"])
         self.assertIn("أمر فتح الدرج لم يصل للطابعة", out["toast"])
