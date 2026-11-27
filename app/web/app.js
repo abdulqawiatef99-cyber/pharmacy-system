@@ -3353,12 +3353,34 @@ function viewImport() {
       <label class="f">الملف (Excel / CSV) <input type="file" name="file" required accept=".xlsx,.csv"></label>
       <button class="btn" type="submit">تحليل الملف</button>
     </form>
+    <p class="muted small">ملف كبير (آلاف الأسطر) بياخد دقايق في التحليل، والبيع شغال عادي في الوقت ده.</p>
   </section>`;
   $("#impForm").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const form = e.target, go = form.querySelector("button[type=submit]");
+    if (go.disabled) return;
     try {
-      const r = await api("/api/imports", { method: "POST", form: new FormData(e.target) });
-      location.hash = `#/import/${r.id}`;
+      // QA-29: the file is analysed as a background job: the rest of the program (the sale screen too) keeps
+      // working, and this screen shows how far it got
+      const fd = new FormData(form); fd.set("background", "1");
+      go.disabled = true;
+      let job;
+      try { ({ job } = await api("/api/imports", { method: "POST", form: fd })); }
+      catch (er) { if (er.code === "import_running" && er.details?.job) job = er.details.job; else throw er; }   // follow the running one
+      let j, misses = 0;
+      for (;;) {
+        try { j = await api(`/api/imports/jobs/${encodeURIComponent(job)}`); misses = 0; }
+        catch (er) {                                   // a dropped poll never loses the job: try again (review P2)
+          if (er.code || ++misses > 30) throw er;     // a server answer (gone, refused) ends it; no answer is retried
+          await new Promise((res) => setTimeout(res, 2000)); continue;
+        }
+        if (j.status !== "running" || !form.isConnected) break;
+        go.textContent = j.total ? `بيحلل… ${j.done} من ${j.total} سطر` : "بيقرا الملف…";
+        await new Promise((res) => setTimeout(res, 1000));
+      }
+      if (!form.isConnected) return;
+      if (j.status === "failed") throw Object.assign(new Error(j.error.message), { code: j.error.code, details: j.error.details });
+      location.hash = `#/import/${j.run_id}`;
     } catch (err) {
       toast(err.message, true);
       if (err.code === "missing_columns") {
@@ -3372,7 +3394,7 @@ function viewImport() {
           ${err.details.preview.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</table></div>
           <p class="muted">أسماء الأعمدة غير معروفة. أرسل هذا الملف إلى المطوّر ليضيف هذه الأسماء.</p></section>`);
       }
-    }
+    } finally { go.disabled = false; go.textContent = "تحليل الملف"; }
   });
 }
 
