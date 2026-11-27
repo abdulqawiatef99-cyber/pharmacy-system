@@ -41,7 +41,7 @@ from ..core import accounts, approvals, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..core.numbers import whole_number
 from ..finance import money, reconcile
-from ..db import Database
+from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
@@ -262,11 +262,6 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
         req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
-        approver = req.headers.get("x-approver", "").strip()
-        if approver and req.url.path == "/api/approvals/check":
-            # the PIN is typed once and checked here only; every other request carries the approval token (#137)
-            approver_limiter.check(ctx.user_id)
-            ctx = accounts.with_approval(db, ctx, approver[:64], req.headers.get("x-approver-pin", "")[:6])
         for prefix, feature in FEATURE_PREFIXES:
             if req.url.path.startswith(prefix):
                 accounts.require_feature(db, ctx, feature)
@@ -1639,17 +1634,26 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def approvers_list(req):
-        return J({"approvers": people.approvers(db, ctx_of(req))})
+        ctx = ctx_of(req)
+        own_pin = ctx.can(approvals.CASH_REFUND) and approvals.cash_refund_challenge_pending(ctx, req.state.session_token)
+        return J({"approvers": people.approvers(db, ctx, include_self=own_pin)})
 
     @handler
     async def approval_check(req):
         """The approver typed his PIN: confirm it before the screen retries the action."""
         ctx = await run_in_threadpool(ctx_of, req)
-        if not ctx.approver_id:
+        approver = req.headers.get("x-approver", "").strip()[:64]
+        if not approver:
             raise ValidationFailed("اختر من سيوافق")
         b = await body(req)
         perm, path = str(b.get("permission", "")), str(b.get("path", "")).split("?")[0]
         method = str(b.get("method") or "GET").upper()
+        # A written cash-refund exception requires fresh PIN verification even for an acting owner/manager.
+        own_pin = (perm == approvals.CASH_REFUND and method == "POST"
+                   and re.fullmatch(r"/api/sales/[^/]+/(?:return|exchange)", path) is not None)
+        approver_limiter.check(ctx.user_id)
+        ctx = await run_in_threadpool(accounts.with_approval, db, ctx, approver,
+                                      req.headers.get("x-approver-pin", "")[:6], allow_self=own_pin)
         ok = approvals.eligible(ctx, perm) and (
             ctx.allowed(perm) if perm in accounts.PERMISSIONS else perm == approvals.DISCOUNT)
         out = {"ok": ok, "discount_limit_bp": ctx.discount_limit_bp}
@@ -2072,9 +2076,65 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if mapping is not None and not (isinstance(mapping, dict) and all(
                 k.isdigit() and isinstance(v, str) for k, v in mapping.items())):
             raise ValidationFailed("قيم غير صحيحة")
-        run = dimp.analyze(ctx, data, name, kind=fields.get("kind") or "items", mapping=mapping,
-                           source_system=fields.get("source_system") or "generic", options=options)
-        return J(dimp.get(ctx, run), status_code=201)
+        kwargs = dict(kind=fields.get("kind") or "items", mapping=mapping,
+                      source_system=fields.get("source_system") or "generic", options=options)
+        if fields.get("background") == "1":     # QA-29: a job with progress; the screen asks for it
+            # the permissions first, here: a refusal inside the job never reached the approval dialog (Codex P2)
+            from ..dataimport import service as dimp_service
+            ctx.require("items.import")
+            dimp_service._require_kind(ctx, kwargs["kind"])
+            return J({"job": _start_import_job(ctx, data, name, kwargs)}, status_code=202)
+        # QA-29: in a worker thread; on the event loop a 20,000-row file stopped every request for 164 s
+        run = await run_in_threadpool(lambda: dimp.analyze(ctx, data, name, **kwargs))
+        return J(await run_in_threadpool(dimp.get, ctx, run), status_code=201)
+
+    # QA-29: background analysis jobs, in memory (an analysis writes nothing until its end, so a restart only
+    # loses the job, never half a run). One running job per person; a finished job is kept for an hour.
+    import_jobs: dict[str, dict] = {}
+    import_jobs_lock = threading.Lock()
+    # two reused workers (Codex P2 on #501): a thread per job opened a SQLite connection per job, never closed
+    from concurrent.futures import ThreadPoolExecutor
+    import_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="import")
+
+    def _start_import_job(ctx, data: bytes, name: str, kwargs: dict) -> str:
+        now = time.monotonic()
+        with import_jobs_lock:
+            for k in [k for k, j in import_jobs.items() if j["status"] != "running" and now - j["at"] > 3600]:
+                import_jobs.pop(k)
+            running = next((k for k, j in import_jobs.items() if j["status"] == "running"
+                            and j["org_id"] == ctx.org_id and j["user_id"] == ctx.user_id), None)
+            if running:      # the screen follows that job instead (review P2)
+                raise Conflict("فيه ملف لسه بيتحلل، استنى لما يخلص", code="import_running", details={"job": running})
+            job_id = new_id()
+            job = import_jobs[job_id] = {"org_id": ctx.org_id, "user_id": ctx.user_id, "status": "running",
+                                         "done": 0, "total": None, "run_id": None, "error": None, "at": now}
+
+        def progress(done, total):
+            job["done"], job["total"] = done, total
+
+        def run():
+            try:
+                rid = dimp.analyze(ctx, data, name, progress=progress, **kwargs)
+                job.update(run_id=rid, status="done", done=job["total"] or 0)
+            except DomainError as e:
+                job.update(status="failed", error={"code": e.code, "message": e.message, "details": e.details})
+            except Exception:
+                log.exception("import analysis failed")
+                job.update(status="failed", error={"code": "internal", "message": "حدث خطأ غير متوقع", "details": {}})
+            finally:
+                job["at"] = time.monotonic()
+        # not tied to the request's event loop (nor waited for when that loop ends)
+        import_pool.submit(run)
+        return job_id
+
+    @handler
+    async def import_job(req):
+        ctx = ctx_of(req)
+        ctx.require("items.import")
+        job = import_jobs.get(req.path_params["id"])
+        if not job or job["org_id"] != ctx.org_id or job["user_id"] != ctx.user_id:
+            raise NotFound("المهمة غير موجودة")
+        return J({k: job[k] for k in ("status", "done", "total", "run_id", "error")})
 
     @handler
     async def import_get(req):
@@ -2090,7 +2150,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def import_apply(req):
         ctx = ctx_of(req)
-        return J(dimp.apply(ctx, req.path_params["id"]))
+        return J(await run_in_threadpool(dimp.apply, ctx, req.path_params["id"]))      # QA-29: off the loop
 
     @handler
     async def import_discard(req):
@@ -2658,7 +2718,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
         return J(Sales(db).return_items(ctx, req.path_params["id"], lines,
                                         refund_method=str(b.get("refund_method", "")),
-                                        reason=str(b.get("reason", "")), channel_id=b.get("channel_id")))
+                                        reason=b.get("reason", ""), channel_id=b.get("channel_id")))
 
     @handler
     async def sales_exchange(req):
@@ -2681,7 +2741,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
                                   refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
-                                  reason=str(b.get("reason", "")), channel_id=b.get("channel_id") or None,
+                                  reason=b.get("reason", ""), channel_id=b.get("channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                   safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
@@ -3647,6 +3707,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/files/{id}", file_get),
         Route("/api/imports", import_analyze, methods=["POST"]),
         Route("/api/imports/templates/{kind}.xlsx", import_template),
+        Route("/api/imports/jobs/{id}", import_job),
         Route("/api/imports/{id}", import_get),
         Route("/api/imports/{id}/decide", import_decide, methods=["POST"]),
         Route("/api/imports/{id}/apply", import_apply, methods=["POST"]),

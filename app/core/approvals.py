@@ -18,6 +18,7 @@ TTL_SECONDS = 90
 CHALLENGE_TTL = 300
 MAX_GRANTS = 500
 DISCOUNT = "discount"
+CASH_REFUND = "sales.refund_other_method"
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Challenge:
     permission: str
     intent: Intent
     until: float
+    pin_confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,15 @@ def eligible(ctx: Context, perm: str) -> bool:
     return ctx.auth_method != "pin" or perm not in PASSWORD_SESSION_PERMISSIONS
 
 
+def cash_refund_challenge_pending(ctx: Context, session: str) -> bool:
+    subject, now = _subject(ctx, session), time.monotonic()
+    with _lock:
+        for entry in reversed(_challenges.values()):
+            if entry.subject == subject and entry.until > now:
+                return entry.permission == CASH_REFUND and not entry.pin_confirmed
+    return False
+
+
 def issue(ctx: Context, session: str, approver_id: str, action: str, perm: str, *,
           challenge_token: str = "", previous: str | None = None) -> tuple[str, int]:
     now = time.monotonic()
@@ -106,6 +117,8 @@ def issue(ctx: Context, session: str, approver_id: str, action: str, perm: str, 
             perms |= old.perms
             del _grants[key]
         grant = Grant(subject, approver_id, action, frozenset(perms), now + TTL_SECONDS, intent)
+        if intent is not None and perm == CASH_REFUND:
+            _challenges[_digest(challenge_token)] = replace(origin, pin_confirmed=True)
         return _store(_grants, grant, now), TTL_SECONDS
 
 

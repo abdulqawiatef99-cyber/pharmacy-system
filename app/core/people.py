@@ -87,14 +87,14 @@ def quick_users(db: Database) -> list[dict]:
         " AND r.code IN (?,?) ORDER BY u.full_name", (orgs[0]["id"], *PIN_LOGIN_ROLES))]
 
 
-def approvers(db: Database, ctx: Context) -> list[dict]:
-    """Who can approve on this screen: active owner/managers with a PIN, except me."""
+def approvers(db: Database, ctx: Context, *, include_self: bool = False) -> list[dict]:
+    """Active owner and managers with a PIN. A cash refund exception can require the actor's own PIN."""
     marks = ",".join("?" * len(APPROVER_ROLES))
     return [dict(r) for r in db.all(
         "SELECT u.id, u.full_name, r.name role_name FROM memberships m JOIN users u ON u.id=m.user_id"
         f" JOIN roles r ON r.id=m.role_id WHERE m.org_id=? AND r.code IN ({marks}) AND m.is_active=1"
-        " AND u.is_active=1 AND u.pin_hash IS NOT NULL AND u.id<>? ORDER BY r.code='owner' DESC, u.full_name",
-        (ctx.org_id, *APPROVER_ROLES, ctx.user_id))]
+        " AND u.is_active=1 AND u.pin_hash IS NOT NULL AND (? OR u.id<>?) ORDER BY r.code='owner' DESC, u.full_name",
+        (ctx.org_id, *APPROVER_ROLES, include_self, ctx.user_id))]
 
 
 # -------------------------------------------------------------------------- owner: users screen
