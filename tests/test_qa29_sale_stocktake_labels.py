@@ -8,6 +8,7 @@
 11. Label print with an Arabic item code and no barcode failed silently: the label page answered 500 inside the
     hidden print frame (Code 128 is ASCII only). Now a clear Arabic message, before anything prints, on both paths.
 """
+import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -134,3 +135,11 @@ class TestArabicCodeLabels(APICase):
     def test_screen_checks_before_the_print_frame(self):
         part = APP_JS[APP_JS.index("async function printLabels(list)"):][:1500]
         self.assertTrue("check=1" in part, "the browser path asks first, so a refusal is shown, not swallowed")
+
+
+class TestRepeatAddOrgScope(unittest.TestCase):
+    def test_the_predecessor_lookup_filters_by_org(self):          # Codex P1 on #506 (AGENTS.md: every query by org)
+        import inspect
+        from app.inventory import counting
+        src = inspect.getsource(counting._repeat_add)
+        self.assertIn("superseded_by=? AND org_id=?", src)
