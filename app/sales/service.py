@@ -45,7 +45,7 @@ def _void_drawer_message(ctx: Context, already_out: int):
         message = (f"الدرج مفيهوش نقدية كفاية علشان ترجّع {egp(owed)} ج للعميل. الأول حوّل المبلغ من الخزنة للدرج"
                    " (الخزنة والحسابات ← تحويل بين الحسابات)، أو اطلب ده من المدير، وبعدين ألغِ الفاتورة تاني.")
         if "balance" in details:
-            message += f" النقدية في الدرج دلوقتي {egp(max(0, details['balance']))} ج."
+            message += f" النقدية في الدرج دلوقتي {egp(max(0, details['balance'] + already_out))} ج."
         raise Conflict(message, code="drawer_negative", details=details) from None
 
 
