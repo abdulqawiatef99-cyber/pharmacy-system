@@ -107,6 +107,8 @@ then it is offered nothing. The first update from `main` records `ref = main`, s
    kept and **no program starts** (retried at the next start; the old program could otherwise create an
    empty database).
 7. **First start** (stage 0): health check with boot id (existing). OK → confirm, journal `done`.
+   During a database update, the candidate serves only the health probe until its release is confirmed
+   and its journal reaches `done`. The cashier API returns a retryable 503 during this interval.
    Fail → stop the process, move the new DB (+ `-wal`/`-shm`) aside, put the previous DB back, roll the
    pointer back, journal `rolled_back`, start the old version. A power cut at any step is resumed from
    the journal state on the next start.
@@ -130,3 +132,15 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
   The Windows installer workflow is manual and publishes review builds only.
 - The installer records its commit time. A healthy signed update raises the per-channel version floor,
   which also applies to offline updates and survives a compatible rollback.
+
+## Space check before the program stops (#461)
+`smart_update.check_space` runs when the update is scheduled (the refusal is shown on screen), again just
+before the program leaves for the launcher, and again in the apply step, for code-only updates too (they
+take a verified backup as well). It counts, per disk and at worst case (nothing assumed to compress):
+- backups folder: database + E-Stock archive (its ready `.xz` when there is one) + all attachments;
+- system TEMP: 2 x database + archive (building the backup, then unpacking it for verification while
+  SQLite's checks write their sort files there);
+- data folder: the archive's `.xz` cache when none is ready; with a database change also 3 x the database.
+200 MB stay free on each disk; folders on one disk add up. A refusal names the folder, the need and the free
+space. If the disk filled after scheduling, the request is dropped (no retry loop), the program keeps
+running and the update screen shows why.

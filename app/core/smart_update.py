@@ -573,12 +573,15 @@ def prepared(data_dir: Path) -> dict:
 
 
 # --------------------------------------------------------------------------- request and trigger
-def request(data_dir: Path, when: str, by: str) -> dict:
+def request(data_dir: Path, when: str, by: str, settings=None) -> dict:
     if when not in WHEN:
         raise UpdateError("اختار: دلوقتي أو بعد قفل الوردية")
     p = prepared(data_dir)
     if not p.get("release"):
         raise UpdateError("التحديث لسه ما اتجهزش")
+    if settings is not None:                    # refused here, with the reason on screen, not after the stop
+        check_space(settings, needs_db=bool(p.get("needs_db")))
+    (home_of(data_dir) / "apply-refused.json").unlink(missing_ok=True)
     value = {"release": p["release"], "when": when, "by": by,
              "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     releases.atomic_json(home_of(data_dir) / "apply-request.json", value)
@@ -632,6 +635,65 @@ def due(settings, db) -> dict | None:
     return {**req, "needs_db": bool(p.get("needs_db"))}
 
 
+class UpdateAdmission:
+    """Keep cashier requests out of the candidate until the installed launcher commits the swap."""
+
+    def __init__(self, app, home: Path):
+        self.app = app
+        self.home = home
+        state = releases.read_state(home)
+        active = state.get("active") or {}
+        journal = releases.read_journal(home)
+        self.pending_release = None
+        if journal.get("state") in ("ready", "swapped", "undoing"):
+            self.pending_release = journal["release"]
+        elif state.get("pending") and active.get("needs_db"):
+            self.pending_release = active["id"]
+        self.journal_name = releases.journal_path(home).name
+        self.start_version = self._journal_version() if self.pending_release else None
+
+    def _journal_version(self):
+        # Windows directory enumeration provides size and timestamps without opening the
+        # file. The atomic transition from "swapped" to "done" changes its size as well.
+        with os.scandir(self.home) as entries:
+            for entry in entries:
+                if entry.name == self.journal_name:
+                    stat = entry.stat(follow_symlinks=False)
+                    return stat.st_size, stat.st_mtime_ns, stat.st_ino
+        return None
+
+    def _committed(self) -> bool:
+        try:
+            # Keep the journal and pointer closed while the installed launcher is replacing them.
+            if self._journal_version() in (None, self.start_version):
+                return False
+            journal = releases.read_journal(self.home)
+            if journal.get("state") != "done" or journal.get("release") != self.pending_release:
+                return False
+            state = releases.read_state(self.home)
+            return not state.get("pending") and (state.get("active") or {}).get("id") == self.pending_release
+        except (OSError, releases.ReleaseError):
+            return False
+
+    async def __call__(self, scope, receive, send):
+        if (self.pending_release and scope["type"] == "http"
+                and (scope["method"], scope["path"]) != ("GET", "/api/health")):
+            if not self._committed():
+                from starlette.responses import HTMLResponse, JSONResponse
+                message = "تحديث قاعدة البيانات لسه بيخلص. حاول تاني بعد لحظات."
+                headers = {"Cache-Control": "no-store", "Retry-After": "1"}
+                if (scope["method"], scope["path"]) == ("GET", "/"):
+                    response = HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8">'
+                                            '<meta http-equiv="refresh" content="1"><title>تحديث قاعدة البيانات</title>'
+                                            f"<p>{message}</p></html>", status_code=503, headers=headers)
+                else:
+                    response = JSONResponse({"error": {"code": "update_pending", "message": message}},
+                                            status_code=503, headers=headers)
+                return await response(scope, receive, send)
+            self.pending_release = None
+        return await self.app(scope, receive, send)
+
+
 class InFlight:
     """ASGI middleware: how many HTTP requests are being handled right now (the update never cuts one)."""
     count = 0
@@ -660,6 +722,15 @@ def trigger(settings, db, in_flight=lambda: InFlight.count, exit=os._exit) -> bo
     home = home_of(settings.data_dir)
     if not req or bootstrap_level(home) < releases.BOOTSTRAP:
         return False
+    try:                                        # the disk may have filled since the update was scheduled
+        check_space(settings, needs_db=bool(req.get("needs_db")))
+    except UpdateError as e:
+        # not retried every 30 s: the request is dropped and the reason kept for the update screen
+        (home / "apply-request.json").unlink(missing_ok=True)
+        releases.atomic_json(home / "apply-refused.json", {"release": req["release"], "reason": str(e),
+                                                           "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        releases.log_event(home, step="trigger", ok=False, release=req["release"], reason=str(e)[:500])
+        return False
     with db._write_lock:
         if busy_reason(db, req.get("when", "now")) or in_flight() > 0:
             return False
@@ -678,11 +749,119 @@ def _verified_backup(db, settings, backup_dir: Path) -> Path:
     return out
 
 
-def _space_ok(settings) -> None:
-    size = settings.db_path.stat().st_size if settings.db_path.exists() else 0
-    free = shutil.disk_usage(settings.data_dir).free
-    if free < 3 * size + 200 * 1024 * 1024:
-        raise UpdateError("المساحة الفاضية على الجهاز مش كفاية للتحديث؛ لم يتغير شيء")
+SPACE_MARGIN = 200 * 1024 * 1024     # kept free on every disk the update writes to
+
+
+def _existing(path) -> Path:
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return p
+
+
+def _volume(path):
+    """Which disk a folder is on (the nearest existing parent decides)."""
+    return os.stat(_existing(path)).st_dev
+
+
+def _free(path) -> int:
+    return shutil.disk_usage(_existing(path)).free
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _tree_size(folder: Path) -> int:
+    total = 0
+    if folder.is_dir():
+        for f in folder.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _ready_xz(arch_file: Path) -> int:
+    """Size of the archive's compressed copy when the backup will really reuse it (the same test as
+    backup._archive_xz: its mark holds the archive's sha256), else 0: the backup compresses again."""
+    from . import backup
+    cache, mark = arch_file.with_name(backup.ARCHIVE_MEMBER), arch_file.with_name(backup.ARCHIVE_MEMBER + ".sha256")
+    try:
+        if cache.is_file() and mark.is_file() and mark.read_text(encoding="ascii").strip() == backup._sha256(arch_file):
+            return cache.stat().st_size
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def space_needs(settings, backup_dir: Path, *, needs_db: bool) -> list[dict]:
+    """What the update writes, per disk: [{'volume', 'label', 'path', 'bytes'}]. Worst case on purpose
+    (nothing is assumed to compress): a refusal here costs nothing, running out with the cashier stopped does.
+
+    - backups folder: the verified backup = database + E-Stock history (its ready .xz when there is one) +
+      every attachment;
+    - system TEMP: the backup is built there (snapshot + its .xz, and the history's .xz when none is ready),
+      then unpacked there again to be verified (database + history) while SQLite's checks spill their sort
+      files there too (up to about one more database): 2 x database + history covers both steps;
+    - data folder: the history's .xz kept next to it when none is ready; with a database change also the
+      migrated copy and its growth (3 x the database, the rule from before #461)."""
+    from . import backup
+    db = _file_size(settings.db_path) + _file_size(Path(str(settings.db_path) + "-wal"))
+    arch_file = Path(settings.db_path).parent / backup.ESTOCK_ARCHIVE
+    arch = _file_size(arch_file)
+    cache = _ready_xz(arch_file) if arch else 0
+    arch_xz = cache or arch
+    uploads = _tree_size(Path(settings.upload_dir))
+    wants = [("مجلد النسخ الاحتياطية", Path(backup_dir), db + arch_xz + uploads),
+             ("المجلد المؤقت للويندوز", Path(tempfile.gettempdir()), 2 * db + arch),
+             ("مجلد البيانات", Path(settings.data_dir), 3 * db if needs_db else 0),
+             # the history's .xz is kept beside the history, which is beside the database (PHARM_DB_PATH may
+             # put that on another disk than the data folder)
+             ("مجلد قاعدة البيانات", arch_file.parent, 0 if cache else arch)]
+    out: dict = {}
+    if not wants[-1][2]:                            # nothing is written beside the database: no claim on its disk
+        wants.pop()
+    for label, path, need in wants:
+        vol = _volume(path)
+        if vol in out:                              # the same disk: the needs add up
+            out[vol]["bytes"] += need
+            out[vol]["label"] += " + " + label
+        else:
+            out[vol] = {"volume": vol, "label": label, "path": str(path), "bytes": need}
+    return list(out.values())
+
+
+def check_space(settings, backup_dir: Path | None = None, *, needs_db: bool = True) -> None:
+    """Refuse, saying which disk and how much, when the verified backup or the migrated copy cannot fit.
+    Called when the update is scheduled and again just before the program stops, so the cashier is never
+    stopped for an update that then fails for lack of room (#461)."""
+    backup_dir = Path(backup_dir) if backup_dir else settings.backup_path
+    mb = lambda n: f"{-(-n // (1024 * 1024)):,}"
+    try:
+        needs = space_needs(settings, backup_dir, needs_db=needs_db)
+    except OSError as e:                        # a folder on a drive that is not there (a removed USB disk)
+        raise UpdateError(f"مش قادر أوصل لمجلد من مجلدات التحديث (النسخ الاحتياطية: {backup_dir}): "
+                          f"{e.strerror or e}؛ لم يتغير شيء")
+    for n in needs:
+        try:
+            free = _free(n["path"])
+        except OSError:
+            raise UpdateError(f"مش قادر أقرأ المساحة الفاضية في {n['label']} ({n['path']})؛ لم يتغير شيء")
+        need = n["bytes"] + SPACE_MARGIN
+        if free < need:
+            raise UpdateError(f"المساحة الفاضية مش كفاية للتحديث في {n['label']} ({n['path']}): محتاج {mb(need)} ميجا"
+                              f" والفاضي {mb(free)} ميجا. فضّي مساحة وجرّب تاني؛ لم يتغير شيء")
+
+
+def last_refusal(data_dir: Path) -> dict:
+    """Why the last scheduled update did not start ({} when it did, or was never refused)."""
+    return _json(home_of(data_dir) / "apply-refused.json")
 
 
 def select_code_only(settings, legacy: Path, backup_dir: Path) -> dict:
@@ -694,6 +873,7 @@ def select_code_only(settings, legacy: Path, backup_dir: Path) -> dict:
         raise UpdateError("التحديث ده محتاج يتطبق والبرنامج مقفول")
     _verify_prepared(settings, legacy, home, p)
     if settings.db_path.exists():
+        check_space(settings, backup_dir, needs_db=False)      # a code-only update takes a verified backup too
         db = Database(settings.db_path)
         try:
             _verified_backup(db, settings, backup_dir)
@@ -725,6 +905,7 @@ def _select(legacy: Path, home: Path, p: dict) -> None:
                       expected_active=p.get("active"), coordinated=True)
     (home / "prepared.json").unlink(missing_ok=True)
     (home / "apply-request.json").unlink(missing_ok=True)
+    (home / "apply-refused.json").unlink(missing_ok=True)
     releases.log_event(home, step="select", ok=True, release=p["release"], needs_db=bool(p.get("needs_db")))
 
 
@@ -744,7 +925,7 @@ def apply_prepared(settings, legacy: Path, release_id: str, backup_dir: Path, ru
             return select_code_only(settings, legacy, backup_dir)
         if releases.read_journal(home).get("state") in ("ready", "swapped", "undoing"):
             raise UpdateError("فيه تحديث سابق لسه ما خلصش")
-        _space_ok(settings)
+        check_space(settings, backup_dir, needs_db=True)
         for f in [copy, Path(str(copy) + "-wal"), Path(str(copy) + "-shm")]:
             f.unlink(missing_ok=True)
         db = Database(settings.db_path)

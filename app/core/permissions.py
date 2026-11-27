@@ -129,6 +129,9 @@ class Context:
     approver_permissions: frozenset[str] = field(default_factory=frozenset)
     approver_discount_bp: int = 0
     auth_method: str = "password"
+    register_id: int | None = 1                 # internal calls use the main register unless scoped explicitly
+    register_device_hash: str | None = field(default=None, repr=False)
+    register_legacy_local: bool = False
 
     @property
     def is_owner(self) -> bool:

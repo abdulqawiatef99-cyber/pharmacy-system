@@ -75,6 +75,7 @@ tr.has-err { background: var(--err-bg); }
 input.low { border: 2px dashed var(--warn); background: var(--warn-bg); }
 input.inferred { font-style: italic; }
 input.ai { border-color: var(--ai); }
+[aria-invalid="true"], [aria-invalid="true"]:focus { border: 2px solid var(--err) !important; background: var(--err-bg); }
 .review { display: grid; grid-template-columns: minmax(280px, 38%) 1fr; gap: 16px; align-items: start; }
 .doc { position: sticky; top: 70px; height: calc(100vh - 100px); overflow: auto; }
 .doc img { width: 100%; height: auto; display: block; }
@@ -281,6 +282,14 @@ input.big { min-height: 54px; font-size: 1.25rem; border: 2px solid var(--brand)
 .cart tr.m-injection > td:first-child { box-shadow: inset -5px 0 0 #6b4fa0; }
 .qty { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qty .btn { min-width: 36px; justify-content: center; }
+.qty.mix { gap: 4px; margin-top: 4px; font-size: .9em; }
+.qty.mix .qn { width: 3.2em; min-width: 0; padding: 2px 4px; text-align: center; }
+.qtydlg input { width: 6em; }
+.qtydlg .plus { align-self: flex-end; padding-bottom: 8px; font-weight: bold; }
+.qbtn .qs { display: block; }
+.disc2 { gap: 6px; align-items: center; }
+.disc2 .dfield { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.disc2 .dfield input { width: 4.5em; min-width: 0; }
 td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; }
 .keys { font-size: .8125rem; color: var(--muted); }
 .pos-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 76px; }
@@ -428,6 +437,7 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .tour-bub .tour-n { margin: 0; }
 .tour-bub .tour-btns { gap: 8px; align-items: center; flex-wrap: wrap; }
 .tour-bub .tour-btns .link { margin-inline-start: auto; }
+.tour-bub .tour-x { position: absolute; top: 4px; inset-inline-end: 8px; font-size: 1rem; text-decoration: none; }
 .tour-arrow { position: absolute; left: var(--ax, 50%); width: 14px; height: 14px; margin-left: -7px; background: var(--panel);
   border: 2px solid var(--brand); transform: rotate(45deg); }
 .tour-bub[data-side="up"] .tour-arrow { top: -9px; border-right: 0; border-bottom: 0; }
@@ -447,3 +457,14 @@ th[data-sort]::after { content: " " attr(data-dir); }
 
 #estockMove progress { inline-size: min(100%, 28rem); margin-block-end: .75rem; }
 #estockMoveReport { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
+/* UX-28: supplier search box over the hidden <select> (the select keeps the value) */
+.spHide { position: absolute !important; opacity: 0; width: 1px !important; min-width: 0 !important; height: 1px; min-height: 0;
+  padding: 0; border: 0; pointer-events: none; }
+.sp { position: relative; display: inline-block; min-width: 14em; }
+.sp .spIn { width: 100%; }
+.spList { position: absolute; inset-inline: 0; top: 100%; z-index: 30; max-height: 22em; overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, .15); color: var(--ink); }
+.spOpt { padding: 6px 10px; cursor: pointer; font-size: .875rem; }
+.spOpt small { color: var(--muted); }
+.spOpt.on, .spOpt:hover { background: var(--line-soft); }
+.spNone { padding: 6px 10px; font-size: .875rem; }

@@ -56,7 +56,7 @@ def _when(iso: str | None, time_format: str = "12") -> str:
 def lines(org: str, r: dict, time_format: str = "12") -> list[tuple]:
     k = r["cash_by_kind"]
     _when_tf = lambda iso: _when(iso, time_format)  # noqa: E731
-    out: list[tuple] = [("title", org), ("text", "تقرير إغلاق الشيفت"),
+    out: list[tuple] = [("title", org), ("text", "تقرير إغلاق الشيفت" + (f" — {r['register_name']}" if r.get("register_name") else "")),
                         ("small", f"من {_when_tf(r['opened_at'])} ({r['opened_by_name'] or ''})"),
                         ("small", f"إلى {_when_tf(r['closed_at'])} ({r['closed_by_name'] or ''})")]
     if r.get("closed_at") and r.get("opened_at"):                                          # U2-28

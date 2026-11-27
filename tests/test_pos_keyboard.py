@@ -18,7 +18,7 @@ const { chromium } = require('playwright');
   const [base, user, pw, a, bb] = process.argv.slice(1);
 """ + LOGIN + r"""
   const out = {};
-  p.on('dialog', (d) => d.accept('3'));                     // F6 asks the quantity
+  p.on('dialog', (d) => d.accept());
   await p.goto(base + '/#/pos');
   await p.waitForSelector('#posQ');
   out.legend = await p.locator('p.keys').innerText();
@@ -40,6 +40,11 @@ const { chromium } = require('playwright');
   await p.locator('table.cart').click({ position: { x: 1, y: 1 } }).catch(() => {});
   await p.keyboard.press('ArrowUp'); await p.keyboard.press('ArrowUp');
   await p.keyboard.press('F6');
+  await p.waitForSelector('dialog .qtydlg');                 // UX-27: boxes and strips in one dialog
+  const mix = await p.locator('dialog [name=p]').count();
+  await p.fill(mix ? 'dialog [name=p]' : 'dialog [name=u]', '3');
+  if (mix) await p.fill('dialog [name=u]', '0');
+  await p.keyboard.press('Enter');
   await p.waitForFunction(() => /^3\b/.test(document.querySelector('table.cart tbody tr .qty b')?.innerText ?? ''));
   out.qty = await p.locator('table.cart tbody tr .qty b').first().innerText();
   await p.keyboard.press('Delete');

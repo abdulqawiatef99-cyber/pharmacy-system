@@ -157,29 +157,63 @@ def _drawer_expected(db: Database, ctx: Context, shift_id: str) -> int:
     return s["opening_cash"] + m["t"]
 
 
+def _register_balance(db: Database, ctx: Context, register) -> dict:
+    scope = (ctx.org_id, ctx.branch_id, register["id"])
+    row = db.one("SELECT id, status FROM cash_shifts WHERE org_id=? AND branch_id=? AND register_id=?"
+                 " AND status='open'", scope)
+    if not row:
+        row = db.one("SELECT id, status, counted_cash, float_left FROM cash_shifts"
+                     " WHERE org_id=? AND branch_id=? AND register_id=? AND status='closed'"
+                     " ORDER BY closed_at DESC LIMIT 1", scope)
+    opened = bool(row and row["status"] == "open")
+    if opened:
+        balance = _drawer_expected(db, ctx, row["id"])
+    elif row:
+        balance = row["float_left"] if row["float_left"] is not None else (row["counted_cash"] or 0)
+    else:
+        balance = 0
+    return {"shift_id": row["id"] if row else None, "open": opened, "balance": balance,
+            "register_id": register["id"], "register_name": register["name"], "active": bool(register["active"])}
+
+
 def drawer_balance(db: Database, ctx: Context) -> dict:
-    """What the drawer holds now: the open shift's expected cash, else the float the last close left."""
-    from ..sales import cash
-    sid = cash.open_shift_id(db, ctx)
-    if sid:
-        return {"shift_id": sid, "open": True, "balance": _drawer_expected(db, ctx, sid)}
-    last = db.one("SELECT id, counted_cash, float_left FROM cash_shifts WHERE org_id=? AND branch_id=?"
-                  " AND status='closed' ORDER BY closed_at DESC LIMIT 1", (ctx.org_id, ctx.branch_id))
-    if not last:
-        return {"shift_id": None, "open": False, "balance": 0}
-    left = last["float_left"] if last["float_left"] is not None else (last["counted_cash"] or 0)
-    return {"shift_id": last["id"], "open": False, "balance": left}
+    """The requesting register's open balance, or the float left in its drawer."""
+    from ..sales import registers
+
+    register = registers.current(db, ctx)
+    if register:
+        return _register_balance(db, ctx, register)
+    return {"shift_id": None, "open": False, "balance": 0, "register_id": None, "register_name": None,
+            "active": False}
+
+
+def drawer_totals(db: Database, ctx: Context) -> dict:
+    """Management view of every register, including float that must still be accounted for."""
+    from ..sales import registers
+
+    ctx.require("cash.see_expected")
+    if not registers.can_manage(ctx):
+        return {}
+    with db.read_snapshot():
+        rows = db.all("SELECT id, name, active FROM registers WHERE org_id=? AND branch_id=? ORDER BY id",
+                      (ctx.org_id, ctx.branch_id))
+        balances = [_register_balance(db, ctx, row) for row in rows]
+    return {"registers": balances, "balance": sum(row["balance"] for row in balances)}
 
 
 def drawer_check(db: Database, ctx: Context, amount: int, branch_id: str | None = None) -> str:
-    """Refuse a drawer payout that would take the open shift's cash below zero (inside the caller's
-    transaction, before the payout row is written by its own service)."""
+    """Refuse a cash outflow that would take the open drawer below zero."""
     from ..sales import cash
     sid = cash.require_open_shift(db, ctx, branch_id)
     now = _drawer_expected(db, ctx, sid)
     if now - amount < 0:
-        raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
-                       details={"balance": now, "amount": amount})
+        details = {"amount": amount}
+        message = "النقدية في الدرج لا تكفي. سجّل إيداع في الدرج قبل الصرف"
+        if ctx.can("cash.see_expected"):
+            details["balance"] = now
+            whole, fraction = divmod(max(0, now), 100)
+            message = f"النقدية في الدرج لا تكفي. الحد الأقصى المتاح {whole:,}.{fraction:02d} ج"
+        raise Conflict(message, code="drawer_negative", details=details)
     return sid
 
 
@@ -245,7 +279,8 @@ def accounts(db: Database, ctx: Context, *, include_inactive: bool = False) -> l
                   + " ORDER BY a.kind<>'treasury', a.is_active DESC, a.sort, a.name", (ctx.org_id,))
     d = drawer_balance(db, ctx)
     out = [{"id": DRAWER, "kind": "drawer", "name": DRAWER_NAME, "balance": d["balance"], "shift_open": d["open"],
-            "allow_negative": 0, "is_active": 1}]
+            "allow_negative": 0, "is_active": 1, "register_id": d["register_id"],
+            "register_name": d["register_name"]}]
     if not find_treasury(db, ctx.org_id):              # made on its first write; shown empty until then
         out.append({"id": "treasury", "kind": "treasury", "name": TREASURY_NAME, "kind_label": ACCOUNT_KINDS["treasury"],
                     "balance": 0, "allow_negative": 0, "is_active": 1})

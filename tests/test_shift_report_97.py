@@ -132,6 +132,11 @@ class TestReportLines(ShiftBase):
         self.assertEqual((two["منها مرتجع للمحفظة"], two["تحويل — إنستاباي"], two["مرتجع على نفس المحفظة"]),
                          ("15.00", "35.00", "15.00"))
 
+    def test_title_names_the_register(self):
+        r = self.close({"10000": 1})
+        self.assertTrue(r.get("register_name"))
+        self.assertIn(("text", f"تقرير إغلاق الشيفت — {r['register_name']}"), self.lines(r))
+
     def test_open_shift_has_no_result_rows(self):
         r = self.cd.report(self.ctx, self.cd.summary(self.ctx)["id"])
         two, _ = rows(self.lines(r))

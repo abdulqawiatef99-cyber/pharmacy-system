@@ -8,8 +8,8 @@ from ..core import notify
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
-from ..sales.service import (cost_piasters, line_fixed, local_day_bounds, local_today, outstanding_value, retail_value,
-                             returns_history)
+from ..sales.service import (RETURN_ACTIVITY, cost_piasters, kept_at, line_fixed, local_day_bounds, local_today,
+                             outstanding_value, retail_value, returns_history)
 
 
 def _period(date_from: str, date_to: str) -> tuple[date, date, str, str]:
@@ -44,25 +44,33 @@ def sales_report(db: Database, ctx: Context, date_from: str, date_to: str) -> di
     # local day/hour: completed_at is UTC and the offset of each moment is its own (daylight saving time), so the
     # sums come per UTC quarter-hour and are put on their local day and hour here (R7, 16/11)
     cols = ("count(*) n, sum(s.total) total, sum(s.paid_cash) cash, sum(s.paid_card) card, sum(s.paid_transfer) transfer,"
-            " sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.returned_total) returns, sum((coalesce(s.rounding,0) - coalesce((SELECT sum(r.rounding) FROM sale_returns r WHERE r.sale_id=s.id AND r.org_id=s.org_id),0))) rounding")
+            " sum(s.on_credit) credit, sum(s.discount_total) discount, sum(s.rounding) rounding")
+    refund_cols = "sum(r.total) refund_total, sum(r.total-r.rounding) returns, -sum(r.rounding) rounding"
+    day_columns = ("n", "total", "cash", "card", "transfer", "credit", "discount", "returns", "refund_total", "rounding")
     days: dict = {}
     hours: dict = {}
-    for when, r in local_buckets(db, "s.completed_at", cols, base, p):
-        d = days.setdefault(when.date().isoformat(), {"day": when.date().isoformat(), **{k: 0 for k in r}})
-        h = hours.setdefault(when.hour, {"hour": when.hour, "n": 0, "total": 0})
-        for k, v in r.items():
+
+    def add_day(when, amounts):
+        day = when.date().isoformat()
+        d = days.setdefault(day, {"day": day, **dict.fromkeys(day_columns, 0)})
+        for k, v in amounts.items():
             d[k] += v or 0
+
+    for when, r in local_buckets(db, "s.completed_at", cols, base, p):
+        add_day(when, r)
+        h = hours.setdefault(when.hour, {"hour": when.hour, "n": 0, "total": 0})
         h["n"] += r["n"]
         h["total"] += r["total"] or 0
+    for when, r in local_buckets(db, "r.created_at", refund_cols, RETURN_ACTIVITY, p):
+        add_day(when, r)
     daily = [days[k] for k in sorted(days)]
     by_hour = [hours[k] for k in sorted(hours)]
     by_user = [dict(r) for r in db.all(
         f"SELECT u.full_name name, count(*) n, sum(s.total) total, sum(s.discount_total) discount{base.replace('FROM sales s', 'FROM sales s JOIN users u ON u.id=s.created_by')}"
         " GROUP BY s.created_by ORDER BY 3 DESC", p)]
     top = _top_items(db, ctx, p)
-    t = db.one(f"SELECT count(*) n, coalesce(sum(s.total),0) total, coalesce(sum(s.returned_total),0) returns,"
-               f" coalesce(sum(s.discount_total),0) discount, coalesce(sum((coalesce(s.rounding,0) - coalesce((SELECT sum(r.rounding) FROM sale_returns r WHERE r.sale_id=s.id AND r.org_id=s.org_id),0))),0) rounding{base}", p)
-    return {"from": d1.isoformat(), "to": d2.isoformat(), "totals": dict(t), "daily": daily, "by_user": by_user,
+    totals = {k: sum(d[k] for d in daily) for k in ("n", "total", "returns", "refund_total", "discount", "rounding")}
+    return {"from": d1.isoformat(), "to": d2.isoformat(), "totals": totals, "daily": daily, "by_user": by_user,
             "by_hour": by_hour, "top_items": top}
 
 
@@ -79,9 +87,10 @@ _RETURNED = ("(s.returned_total > 0 OR EXISTS (SELECT 1 FROM sale_returns r WHER
 
 
 def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[dict]:
-    """Best-selling items: what the customers kept and what it brought in, priced the way each line was
-    sold (#145). A line nothing was returned from is worth exactly its recorded total; a line with returns
-    is valued like the return screen values it (`outstanding_value`), so the items add up to the invoices.
+    """Items sold in the period, net of their returns through the period end.
+
+    A line with returns uses `outstanding_value`; refunds of earlier sales appear in the financial
+    totals for the refund day and are outside this ranking of the period's own invoices.
 
     The database adds up per item (#304 B11: one row per sale line was a million rows for a year of a large
     pharmacy). Only the lines of invoices with a return, and lines from before `line_total` was recorded, are
@@ -110,7 +119,7 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
         legacy = legacy or bool(r["no_total"])
     # 3. line by line: the invoices with a return, and (rare, sales from before 0.4) lines without a recorded total
     cols = ("l.id line_id, l.sale_id, l.item_id, l.discount_bp, l.discount_amount, l.invoice_share, l.line_total, a.id, a.rowid rid, a.qty_base,"
-            " a.returned_qty, a.unit_price, a.pack_price, a.pack_size")
+            " a.returned_qty, a.unit_price, a.pack_price, a.pack_size, a.unit_cost")
     one_by_one = [f" AND {_RETURNED}"] + ([f" AND NOT {_RETURNED} AND l.line_total IS NULL"] if legacy else [])
     lines: dict[str, list[dict]] = {}
     for where in one_by_one:
@@ -118,15 +127,24 @@ def _top_items(db: Database, ctx: Context, p: tuple, limit: int = 50) -> list[di
             lines.setdefault(a["line_id"], []).append(dict(a))
     partial = [allocs for allocs in lines.values()
                if allocs[0]["line_total"] is None or any(a["returned_qty"] for a in allocs)]
-    history = returns_history(db, ctx.org_id, {allocs[0]["sale_id"] for allocs in partial}) if partial else {}
+    history = returns_history(db, ctx.org_id, {allocs[0]["sale_id"] for allocs in partial}, dated=True)
+    end = p[-1]
     for allocs in lines.values():
         l = allocs[0]
+        item = of(l["item_id"])
         if l["line_total"] is not None and not any(a["returned_qty"] for a in allocs):
-            of(l["item_id"])["revenue"] += l["line_total"]     # an untouched line of an invoice with a return
+            item["revenue"] += l["line_total"]     # an untouched line of an invoice with a return
             continue
-        kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
-        of(l["item_id"])["revenue"] += outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["line_id"],
-                                                         history.get(l["sale_id"], []), fixed=line_fixed(l))
+        events = history.get(l["sale_id"], [])
+        kept = kept_at(allocs, l["line_id"], events, end)
+        for a in allocs:
+            restored = kept[a["id"]] - (a["qty_base"] - a["returned_qty"])
+            if restored:
+                item["qty"] += restored
+                if a["unit_cost"] is not None:
+                    item["costs"].append((a["unit_cost"], restored))
+        item["revenue"] += outstanding_value(allocs, kept, l["discount_bp"], l["line_total"], l["line_id"],
+                                             [r for r in events if r["returned_at"] < end], fixed=line_fixed(l))
     # equal money: by item id, so the fiftieth place does not depend on the order the database answered in
     ranked = sorted(by_item.values(), key=lambda d: (-d["revenue"], d["item_id"]))[:limit]
     names = {r["id"]: dict(r) for r in db.all(
@@ -208,7 +226,8 @@ def home(db: Database, ctx: Context) -> dict:
         y_lo, y_hi = local_day_bounds(today - timedelta(days=7))
         out["sales_week_ago"] = db.one("SELECT coalesce(sum(total),0) t FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
                                        " AND completed_at>=? AND completed_at<?", (ctx.org_id, ctx.branch_id, y_lo, y_hi))["t"]
-    sh = db.one("SELECT id, opened_at FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'", (ctx.org_id, ctx.branch_id))
+    from ..sales import cash
+    sh = cash.open_shift_id(db, ctx)
     out["shift_open"] = bool(sh)
     if not sh:
         out["alerts"].append({"level": "warning", "text": "لا يوجد شيفت مفتوح — البيع النقدي متوقف", "link": "#/shift"})

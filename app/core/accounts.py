@@ -346,11 +346,11 @@ def sync_system_roles(db: Database) -> int:
     return changed
 
 
-def with_approval(db: Database, ctx: Context, approver_id: str, pin: str) -> Context:
+def with_approval(db: Database, ctx: Context, approver_id: str, pin: str, *, allow_self: bool = False) -> Context:
     """The owner or a manager typed his PIN on this screen: the request may use his
     permissions. Visibility (ctx.can) stays the actor's own."""
     from . import people
-    if approver_id == ctx.user_id:
+    if approver_id == ctx.user_id and not allow_self:
         raise ValidationFailed("يجب أن تكون الموافقة من شخص آخر")
     access = effective_access(db, ctx.org_id, approver_id)
     if access["role_code"] not in APPROVER_ROLES:

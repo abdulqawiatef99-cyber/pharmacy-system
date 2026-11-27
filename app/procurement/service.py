@@ -200,7 +200,9 @@ class Procurement:
 
     # ------------------------------------------------------------ risk lists
     def stock_health(self, ctx: Context, *, slow_days: int = 90, overstock_days: int = 180,
-                     expiry_days: int = 180) -> dict:
+                     expiry_days: int = 180, limit: int | None = None) -> dict:
+        """`limit` (QA-29): each list keeps its first `limit` rows, worst first, and `counts` tells the full size;
+        at 30,000 items every slow mover at once was 3.9 MB for a panel nobody reads to the end."""
         ctx.require("inventory.read")
         slow, over, expiring = [], [], []
         d = self._all_items(ctx, slow_days)
@@ -239,7 +241,13 @@ class Procurement:
                                  "units_at_risk": at_risk,
                                  "action": "مرتجع للموزع/تبديل/عرض" if at_risk else "متوقع يتباع قبل الانتهاء"})
         expiring.sort(key=lambda e: (e["days_left"], -e["units_at_risk"]))
-        return {"slow_movers": slow, "overstock": over, "near_expiry": expiring}
+        slow.sort(key=lambda e: -e["on_hand"])                    # the most stock tied up first
+        over.sort(key=lambda e: -e["days_of_cover"])
+        out = {"slow_movers": slow, "overstock": over, "near_expiry": expiring}
+        counts = {k: len(v) for k, v in out.items()}
+        if limit is not None:
+            out = {k: v[:limit] for k, v in out.items()}
+        return {**out, "counts": counts, "limit": limit}
 
     # ------------------------------------------------------------ suppliers
     def supplier_costs(self, ctx: Context, item_id: str) -> list[dict]:
