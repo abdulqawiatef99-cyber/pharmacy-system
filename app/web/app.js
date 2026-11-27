@@ -6854,7 +6854,12 @@ async function viewShift(opts = {}) {
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
     if ((keeps || e.target.ho.checked) && Object.keys(den).length) {     // QA-31: say what stays and what moves before saving
+      const countKey = () => JSON.stringify([...document.querySelectorAll("[data-d]")].map((i) => +i.value || 0))
+        + `|${e.target.fl?.value}|${e.target.ho?.checked}`;
+      const key = countKey();
       clearTimeout(splitT); if (!lastSplit) await showSplit();
+      // Codex P2: a count edited while the preview loaded is never saved with the old numbers
+      if (countKey() !== key) { toast("العدد اتغيّر وانت بتأكد. راجع الأرقام واضغط إغلاق الشيفت تاني", true); return; }
       if (lastSplit && !confirm(`هيفضل في الدرج ${money(lastSplit.float_left)} ج، ويتحوّل للخزنة ${money(lastSplit.to_treasury)} ج. تكمّل التقفيل؟`)) return;
     }
     try {
