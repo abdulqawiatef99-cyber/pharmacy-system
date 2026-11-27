@@ -138,6 +138,7 @@ const { chromium } = require('playwright');
   out.focus = await p.evaluate(() => document.activeElement.id);
   await p.fill('#qaQty', '3');
   await p.fill('#qaExp', expiry);
+  await p.fill('#qaDisc', '0');                              // QA-29: the line's cost is required to add it
   const added = p.waitForResponse((r) => r.url().endsWith('/lines') && r.request().method() === 'POST');
   await p.click('#qaAdd');
   out.line = JSON.parse((await added).request().postData()).line;
