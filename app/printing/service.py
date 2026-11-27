@@ -200,17 +200,19 @@ def checkout_devices(db: Database, ctx: Context, sale: dict, receipt: bool, give
     States: receipt none|sent|browser|failed; drawer none|sent|failed|unsupported (browser printing)."""
     from . import settings as rs
     ctx.require("sales.create")            # outside the try below: refused, never reported as a printer failure
-    cfg = rs.get(db, ctx.org_id)
     delivery = sale.get("kind") == "delivery"
-    register = registers.current(db, ctx)
-    want_drawer = (
-        bool(register) and (sale.get("paid_cash") or 0) > 0 and not delivery
-        and (register["drawer_kick"] is not None or cfg["drawer_on_cash"])
-        and _drawer_kick_available(db, ctx, register)
-    )
     want_receipt = bool(receipt) or delivery
     out = {"receipt": "none", "drawer": "none", "message": None}
-    dest = _receipt_destination(db, ctx, register)
+    # Read permission to pulse and the actual destination from the same configuration snapshot.
+    with db.read_snapshot():
+        cfg = rs.get(db, ctx.org_id)
+        register = registers.current(db, ctx)
+        want_drawer = (
+            bool(register) and (sale.get("paid_cash") or 0) > 0 and not delivery
+            and (register["drawer_kick"] is not None or cfg["drawer_on_cash"])
+            and _drawer_kick_available(db, ctx, register)
+        )
+        dest = _receipt_destination(db, ctx, register)
     if dest == "none":
         out["receipt"] = "browser" if want_receipt else "none"
         out["drawer"] = "unsupported" if want_drawer else "none"

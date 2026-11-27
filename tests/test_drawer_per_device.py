@@ -1,4 +1,5 @@
 """Synthetic browser/device and upgrade acceptance for drawer isolation."""
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 import shutil
@@ -257,6 +258,27 @@ class TestDrawerPerDevice(Base):
                 self.assertEqual(sale["devices"]["drawer"], "none")
                 self.error(client, "/api/print/drawer", {"reason": "cash_check"}, "drawer_kick_disabled")
             send.assert_not_called()
+
+    def test_checkout_uses_one_snapshot_when_the_default_printer_changes(self):
+        from app.printing import settings as printing_settings
+        from app.sales import registers
+
+        printing_settings.save(self.db, self.ctx, {"receipt_target": "win:Fixture Main"})
+        self.add_sub(receipt_printer="win:Fixture Sub", drawer_kick=True)
+        self.open(self.main)
+        verify = registers.drawer_printer_allowed
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            def switch_after_validation(db, ctx, rid, target):
+                allowed = verify(db, ctx, rid, target)
+                pool.submit(printing_settings.save, db, self.ctx, {"receipt_target": "win:Fixture Sub"}).result(5)
+                return allowed
+
+            with patch.object(registers, "drawer_printer_allowed", side_effect=switch_after_validation), \
+                 patch("app.printing.service.escpos.send") as send:
+                sale = self.sell_browser(self.main)
+                self.assertEqual(sale["devices"]["drawer"], "sent")
+                self.assertEqual(send.call_args.args[0], "win:Fixture Main")
 
     def test_shift_drawer_totals_and_lan_guide_identify_register(self):
         self.open(self.main, 10000)
