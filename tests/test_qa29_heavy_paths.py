@@ -22,7 +22,8 @@ from app.procurement import purchase_plan, smart_order
 from app.procurement import service as proc
 from app.purchasing import service as purch_svc
 from app.reports import item_health as ih
-from tests.helpers import DBTestCase
+from tests.helpers import OWNER_PW, DBTestCase, needs_browser
+from tests.pos_browser import LOGIN, run_node
 from tests.test_api import APICase, H
 
 APP_JS = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
@@ -241,3 +242,34 @@ class TestHealthListsCapped(APICase):
     def test_screens_offer_more_instead_of_everything(self):
         self.assertTrue("/api/procurement/health?limit=" in APP_JS, "/api/procurement/health?limit=")
         self.assertTrue("/api/reports/item-health?" in APP_JS, "/api/reports/item-health?")
+
+
+LATE = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, user, pw] = process.argv.slice(1);
+""" + LOGIN + r"""
+  await p.route(/item-health\?.*key=no_public_price/, async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.continue(); });
+  await p.goto(base + '/#/item-health');
+  await p.waitForSelector('#ihChips [data-k="no_public_price"]');
+  await p.click('#ihChips [data-k="no_public_price"]');                  // slow answer
+  await p.click('#ihChips [data-k="negative_stock"]');                   // the newer choice, fast answer
+  await p.waitForTimeout(2500);
+  const kinds = await p.$$eval('#ihOut tbody tr .badge', (x) => [...new Set(x.map((b) => b.textContent.trim()))]);
+  console.log(JSON.stringify({ kinds, ok: await p.$$eval('#ihOut .t-ok', (x) => x.length) }));
+  await b.close();
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@needs_browser
+class TestItemHealthLateAnswer(APICase):
+    def test_a_late_answer_never_replaces_the_newer_chip(self):
+        cat.create_item(self.db, self.ctx, {"name_en": "QA29 No Price", "pack_size": 1, "public_price": 0})
+        neg = cat.create_item(self.db, self.ctx, {"name_en": "QA29 Negative", "pack_size": 1, "public_price": 1000})
+        with self.db.transaction():
+            self.db.execute("INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty) VALUES (?,?,?,'',-2)",
+                            (self.ctx.org_id, self.ctx.branch_id, neg))
+        o = run_node(self, LATE, "owner", OWNER_PW)
+        self.assertEqual(o["kinds"], ["رصيد بالسالب"], o)
+        self.assertEqual(o["ok"], 0)
