@@ -60,3 +60,13 @@ class TestEmptyFloatPreview(PlanCase):
     def test_screen_previews_the_emptied_box_and_confirms_before_saving(self):
         for text in ("empty_float: true", "هيفضل في الدرج", "ويتحوّل للخزنة"):
             self.assertTrue(text in JS, text)
+
+
+class TestCountChangedWhileConfirming(PlanCase):
+    """Codex P2 on #505: a note count edited while the preview loads must not be saved with the old count."""
+
+    def test_submit_rechecks_the_count_after_the_preview(self):
+        at = JS.index("if (!lastSplit) await showSplit();")
+        after = JS[at:at + 700]
+        self.assertTrue("countKey() !== key" in after, after)
+        self.assertTrue("العدد اتغيّر" in after, after)
