@@ -2092,6 +2092,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # loses the job, never half a run). One running job per person; a finished job is kept for an hour.
     import_jobs: dict[str, dict] = {}
     import_jobs_lock = threading.Lock()
+    # two reused workers (Codex P2 on #501): a thread per job opened a SQLite connection per job, never closed
+    from concurrent.futures import ThreadPoolExecutor
+    import_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="import")
 
     def _start_import_job(ctx, data: bytes, name: str, kwargs: dict) -> str:
         now = time.monotonic()
@@ -2120,8 +2123,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 job.update(status="failed", error={"code": "internal", "message": "حدث خطأ غير متوقع", "details": {}})
             finally:
                 job["at"] = time.monotonic()
-        # its own thread: never tied to the request's event loop (nor waited for when that loop ends)
-        threading.Thread(target=run, name=f"import-{job_id[:8]}", daemon=True).start()
+        # not tied to the request's event loop (nor waited for when that loop ends)
+        import_pool.submit(run)
         return job_id
 
     @handler

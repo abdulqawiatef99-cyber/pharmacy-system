@@ -102,6 +102,24 @@ class TestImportOffTheLoop(APICase):
             self.wait(first)
         self.assertEqual(self.post(csv(2, start=20), background="1").status_code, 202)
 
+    def test_jobs_reuse_a_bounded_set_of_worker_threads(self):
+        """Codex P2 on #501: a fresh thread per job opened a fresh SQLite connection that was never closed."""
+        import threading
+        names = set()
+        real = dimp_svc.DataImport.analyze
+
+        def spy(obj, *a, **kw):
+            names.add(threading.current_thread())            # each worker that ever ran an analysis (kept alive here)
+            return real(obj, *a, **kw)
+        dimp_svc.DataImport.analyze = spy
+        try:
+            self.http_login()
+            for k in range(5):
+                self.wait(self.post(csv(2, start=100 + 10 * k), background="1").json()["job"])
+        finally:
+            dimp_svc.DataImport.analyze = real
+        self.assertLessEqual(len(names), 2, f"each job ran on a new thread with a new connection: {names}")
+
     def test_a_job_is_read_only_by_whoever_started_it(self):
         self.http_login()
         job = self.post(csv(3), background="1").json()["job"]
