@@ -70,6 +70,8 @@ class TestShiftSummary(Base):
         out = shift_summary(self.db, self.ctx, shift)
         self.assertEqual((out["voids"], out["cash_refunds"]), ([], []))
         self.assertIn("مفيش إلغاء ولا مرتجع نقدي", out["text"])
+        self.assertEqual([(r["method"], r["amount"]) for r in out["refund_payments"]], [("card", 1900)])
+        self.assertIn("بطاقة — 19.00", out["text"])
 
     def test_day_total_covers_every_shift_of_the_day(self):
         cd = CashDrawer(self.db)

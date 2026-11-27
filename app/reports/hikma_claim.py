@@ -200,9 +200,11 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     back_rows = []
     pv = {owner: [0, Decimal(0)] for owner in OWNERS}
     period = [dict(r) for r in db.all(
-        "SELECT r.id, r.total-r.rounding total, r.created_at, s.id sid, s.sale_no, s.completed_at FROM sale_returns r"
+        "SELECT coalesce(r.part_of,r.id) id, sum(r.total-r.rounding) total, r.created_at,"
+        " s.id sid, s.sale_no, s.completed_at FROM sale_returns r"
         " JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id WHERE r.org_id=? AND s.customer_id=?"
-        " AND r.created_at>=? AND r.created_at<? AND s.completed_at<?", (org, cid, lo, hi, lo))]
+        " AND r.created_at>=? AND r.created_at<? AND s.completed_at<?"
+        " GROUP BY coalesce(r.part_of,r.id), r.created_at, s.id", (org, cid, lo, hi, lo))]
     in_period = {r["id"]: r for r in period}
     # each sale's returns are replayed oldest first, from before the period too, so a lot taken by an earlier return
     # is never taken again (Codex P1 on #416); only the returns inside the period are counted
@@ -214,7 +216,8 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     for sid in prior_sales:
         consumed: dict = {}
         totals = {x["id"]: x["total"] for x in db.all(
-            "SELECT id, total-rounding total FROM sale_returns WHERE org_id=? AND sale_id=?", (org, sid))}
+            "SELECT coalesce(part_of,id) id, sum(total-rounding) total FROM sale_returns"
+            " WHERE org_id=? AND sale_id=? GROUP BY 1", (org, sid))}
         for after in hist.get(sid, []):
             if after["returned_at"] < hi:
                 replay.append((after, consumed, totals.get(after.get("return_id"), 0)))

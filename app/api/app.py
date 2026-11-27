@@ -1797,35 +1797,60 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_settings(req):
+        from ..sales.refunds import ALLOCATION_POLICIES, METHODS, RULE_DEFAULTS, allocation_policy, rule_settings
         from ..sales.service import LINE_ORDERS, line_order, return_window_days
         ctx = ctx_of(req)
         if req.method == "PUT":
             ctx.require("settings.manage")
             b = await body(req)
-            if "line_order" in b:
-                if b["line_order"] not in LINE_ORDERS:
-                    raise ValidationFailed("اختر ترتيب الأصناف")
-                with db.transaction():
-                    before = line_order(db, ctx.org_id)
-                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'line_order', ?)"
-                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, b["line_order"]))
-                    audit.record(db, ctx, "settings.line_order", "organization", ctx.org_id,
-                                 before={"order": before}, after={"order": b["line_order"]})
-                if "return_window_days" not in b:
-                    return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
-            try:
-                days = whole_number(b.get("return_window_days"))
-            except (TypeError, ValueError):
-                raise ValidationFailed("اكتب عدد الأيام")
-            if not 0 <= days <= 365:
-                raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
+            rules = RULE_DEFAULTS.keys() & b.keys()
+            if (rules or "refund_allocation" in b) and not ctx.is_owner:
+                raise Forbidden("إعدادات رد المدفوعات للمالك فقط")
+            if "line_order" in b and b["line_order"] not in LINE_ORDERS:
+                raise ValidationFailed("اختر ترتيب الأصناف")
+            if "refund_allocation" in b and b["refund_allocation"] not in ALLOCATION_POLICIES:
+                raise ValidationFailed("اختر طريقة توزيع المرتجع")
+            if "refund_order" in rules:
+                order = b["refund_order"]
+                if (not isinstance(order, list) or len(order) != len(METHODS)
+                        or not all(m in METHODS for m in order) or len(set(order)) != len(METHODS)):
+                    raise ValidationFailed("اختار ترتيب فيه كل وسيلة رد مرة واحدة")
+            for key in rules - {"refund_order"}:
+                if type(b[key]) is not bool:
+                    raise ValidationFailed("اختار تشغيل أو إيقاف لقاعدة المرتجع")
+            days = None
+            if "return_window_days" in b or not (rules or {"line_order", "refund_allocation"}.intersection(b)):
+                try:
+                    days = whole_number(b.get("return_window_days"))
+                except (TypeError, ValueError):
+                    raise ValidationFailed("اكتب عدد الأيام")
+                if not 0 <= days <= 365:
+                    raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
             with db.transaction():
-                before = return_window_days(db, ctx.org_id)
-                db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
-                           " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, str(days)))
-                audit.record(db, ctx, "settings.return_window", "organization", ctx.org_id,
-                             before={"days": before}, after={"days": days})
-        return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
+                previous = rule_settings(db, ctx.org_id)
+                changes = [
+                    ("line_order", line_order(db, ctx.org_id), b.get("line_order"), "order"),
+                    ("return_window_days", return_window_days(db, ctx.org_id), days, "days"),
+                    ("refund_allocation", allocation_policy(db, ctx.org_id), b.get("refund_allocation"), "allocation"),
+                    *((key, previous[key], b[key], "value") for key in RULE_DEFAULTS if key in rules),
+                ]
+                for key, before, value, field in changes:
+                    if value is None:
+                        continue
+                    if isinstance(value, bool):
+                        stored = "1" if value else "0"
+                    elif isinstance(value, list):
+                        stored = ",".join(value)
+                    else:
+                        stored = str(value)
+                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, ?, ?)"
+                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value",
+                               (ctx.org_id, key, stored))
+                    action = "settings.return_window" if key == "return_window_days" else f"settings.{key}"
+                    audit.record(db, ctx, action, "organization", ctx.org_id,
+                                 before={field: before}, after={field: value})
+        return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id),
+                  "refund_allocation": allocation_policy(db, ctx.org_id), **rule_settings(db, ctx.org_id)})
 
     # ------------------------------------------------------------- catalog
     @handler
@@ -2771,29 +2796,25 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not isinstance(raw, dict) or not raw:
             raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
-        if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
-            sales = Sales(db)
-            if b.get("new_sale_id"):          # both totals in one simulation, the returned units back first
-                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines, new_sid=str(b["new_sale_id"]),
-                                                      refund_method=str(b.get("refund_method", "")))
-            else:
-                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines,
-                                                      refund_method=str(b.get("refund_method", ""))), 0
-            return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
+        if b.get("preview"):
+            return J(Sales(db).return_value(ctx, req.path_params["id"], lines,
+                                            new_sid=str(b["new_sale_id"]) if b.get("new_sale_id") else None,
+                                            refund_method=str(b.get("refund_method", "")),
+                                            channel_id=b.get("refund_channel_id"), quote=True))
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
                                   refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
                                   reason=b.get("reason", ""), channel_id=b.get("channel_id") or None,
+                                  refund_channel_id=b.get("refund_channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                   safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
+                                  expected_refund_due=b.get("expected_refund_due"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
             sale = done["sale"]
-            if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
-                    done["settled"]["refund"] and done["refund_method"] == "cash"):
-                sale = {**sale, "paid_cash": 0}
+            sale = {**sale, "paid_cash": abs(done["cash_delta"])}
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, sale, b.get("receipt") is True, 0)
         return J(done)
 
@@ -3279,6 +3300,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
         MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        exchange = x["exchange"]
+        parts = exchange["refund_due"] if exchange else x["refund_payments"]
+        total_back = exchange["settled"]["refund"] if exchange else r["total"]
+        tenders = "".join(
+            f"<tr><td>{MET.get(p['method'], '')}{' · ' + e(p['channel']) if p['channel'] else ''}</td>"
+            f"<td>{m(p['amount'])}</td></tr>" for p in parts)
+        exchange_value = (f"<tr><td>قيمة الأصناف المرتجعة في الاستبدال</td><td>{m(r['total'])}</td></tr>"
+                          if exchange else "")
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -3289,7 +3318,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}{' · ' + e(r['channel']) if r['channel'] else ''}</td></tr></table>
+{exchange_value}<tr class="t"><td>المبلغ المرتجع</td><td>{m(total_back)}</td></tr>{tenders}</table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -3339,7 +3368,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 rows.append(f"<tr><td>{title}<small>{shown}{details}</small></td><td>{m(gross)}</td></tr>")
         MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
         pays = sale.get("payments") or []
-        pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
+        pay = "".join(f"<tr><td>{MET.get(p['method'], '')}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
                       for p in pays)
         if not pays:
             pay = "".join(f"<tr><td>{lbl}</td><td>{m(sale[k])}</td></tr>" for k, lbl in

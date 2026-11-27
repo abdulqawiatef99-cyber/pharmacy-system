@@ -38,7 +38,7 @@ def _voids_of(db: Database, s) -> list[dict]:
 def _cash_refunds_of(db: Database, s) -> list[dict]:
     """Cash refunds paid from this shift's drawer (found through their drawer movement, as the shift report)."""
     return [dict(r) for r in db.all(
-        "SELECT r.id, r.sale_id, x.sale_no, r.total, r.created_at, r.reason, u.full_name by_name, c.full_name sold_by_name"
+        "SELECT coalesce(r.part_of,r.id) id, r.sale_id, x.sale_no, r.total, r.created_at, r.reason, u.full_name by_name, c.full_name sold_by_name"
         " FROM sale_returns r JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' AND m.org_id=r.org_id"
         " JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id LEFT JOIN users u ON u.id=r.created_by"
         " LEFT JOIN users c ON c.id=x.created_by WHERE m.shift_id=? AND m.org_id=? ORDER BY r.created_at",
@@ -130,15 +130,19 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
 
     def who(e):
         return (e["by"] or "") + (f" (باعها {e['sold_by']})" if e["sold_by"] and e["sold_by"] != e["by"] else "")
-    if voids or refunds:
-        for e in voids:
-            lines.append(f"• إلغاء فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
-                         f" — السبب: {(e['reason'] or '').strip()}")
-        for e in refunds:
-            lines.append(f"• مرتجع نقدي فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
-                         f" — السبب: {(e['reason'] or '').strip()}")
-    else:
+    if not (voids or refunds):
         lines.append("مفيش إلغاء ولا مرتجع نقدي في الشيفت ده")
+    for e in voids:
+        lines.append(f"• إلغاء فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
+                     f" — السبب: {(e['reason'] or '').strip()}")
+    for e in refunds:
+        lines.append(f"• مرتجع نقدي فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
+                     f" — السبب: {(e['reason'] or '').strip()}")
+    labels = {"card": "بطاقة", "transfer": "محفظة", "credit": "على حساب العميل"}
+    for p in r["refund_payments"]:
+        if p["method"] in labels:
+            channel = f" · {p['channel']}" if p["channel"] else ""
+            lines.append(f"• مرتجع فاتورة {p['sale_no']} — {labels[p['method']]}{channel} — {_egp(p['amount'])} ج")
     losses = tab_losses_of(db, shift)
     for e in losses:
         parts = []
@@ -154,5 +158,5 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     else:
         lines.append("مفيش أصناف خلصت من اللي بيتباع")
     return {"text": "\n".join(lines), "difference": diff, "out_of_stock": [x["n"] for x in out],
-            "voids": voids, "cash_refunds": refunds, "tab_losses": losses, "day": day, "day_date": the_day.isoformat(),
-            "register_name": r["register_name"]}
+            "voids": voids, "cash_refunds": refunds, "refund_payments": r["refund_payments"],
+            "tab_losses": losses, "day": day, "day_date": the_day.isoformat(), "register_name": r["register_name"]}

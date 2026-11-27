@@ -128,8 +128,29 @@ Rule: `docs/OWNER_RULES.md` §8. Tests: `tests/test_u2_0_refusals.py`.
   supplier payment above the balance (advance = exception); negative drawer counts; supplier invoice dated after
   today; expired expiry at purchase approval (an expiry before the invoice date is always already expired);
   the same supplier invoice number twice. A refund to the customer's own account (store credit) stays allowed
-  whatever the invoice was paid with: no money leaves the pharmacy. The supplier advance and the cash refund of
+  whatever the invoice was paid with under this rule. ADR-019 adds an owner setting for mixed payments.
+  No money leaves the pharmacy. The supplier advance and the cash refund of
   a card invoice can be approved on the screen by the owner or a manager (PIN), with the reason.
 - Pending (needs a migration or a later item): an exception path for a genuinely repeated supplier invoice
   number (today always refused), returnable expired goods with permission (today always refused), sale price
   above the public price (the screen cannot type a price; it comes from the batch), a unit change on a line (U2-13).
+
+
+## ADR-019 Mixed-tender refunds (owner 27/11, #487 and #503)
+
+The owner asked for three organization settings with the #487 recommendations as defaults.
+An original-tender refund defaults to card, original wallet channels, cash, then the customer's
+account. The owner can reorder the methods or choose proportional distribution across remaining
+tender amounts. A setting change also applies to the return side of exchanges.
+
+- Wallet refunds default to confirmed amounts. The owner can allow an unreviewed transfer to
+  fund a refund. Rejected amounts and any unconfirmed remainder after a partial approval stay
+  excluded. A wallet offset follows the original invoice's proof, even across successive exchanges.
+  A replacement's proof covers its own top-up. If the original review reduces the amount accepted
+  when the offset was recorded, the affected offset is held until the source proof covers it again.
+  This avoids assigning the same partially verified amount to several replacement invoices.
+- An explicit store-credit refund on a mixed sale defaults to the original credit part less earlier
+  refunds on account. The owner can turn off the cap to allow the full value on the customer's
+  account, as in ADR-018. Original-tender refunds still credit only the original credit part.
+- The recorded acting shift is shared by every tender row. Migration 0052 preserves the
+  register attribution and index from 0050 and ships through the signed in-app update.
