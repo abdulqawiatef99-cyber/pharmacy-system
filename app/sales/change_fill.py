@@ -12,6 +12,7 @@ from decimal import Decimal
 from ..core.errors import ValidationFailed
 from ..core.permissions import Context
 from ..db import Database
+from . import registers
 
 MIN_PRICE, MAX_PRICE = 100, 1000         # piasters: 1 to 10 EGP
 LIMIT = 5
@@ -78,8 +79,9 @@ def suggestions(db: Database, ctx: Context, change: int, sale_id: str | None = N
                                  -sold.get(x[0]["id"], 0), x[0]["name"] or ""))
         items = [{"id": r["id"], "name": r["name"], "name_en": r["name_en"], "price": price, "expiry": exp}
                  for r, price, exp, _ in cand[:LIMIT]]
-    last = db.one("SELECT counted_detail FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='closed'"
-                  " ORDER BY closed_at DESC LIMIT 1", (o, b))
+    register = registers.current(db, ctx)
+    last = db.one("SELECT counted_detail FROM cash_shifts WHERE org_id=? AND branch_id=? AND register_id=?"
+                  " AND status='closed' ORDER BY closed_at DESC LIMIT 1", (o, b, register["id"])) if register else None
     no_coins = False
     if last and last["counted_detail"]:
         try:

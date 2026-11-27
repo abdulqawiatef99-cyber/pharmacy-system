@@ -52,8 +52,10 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
                        " branch_id=? AND created_at>=? AND created_at<?", (o, b, lo, hi)))
     # a shift belongs to the day it opened (one closed at 00:30 holds the evening's sales)
     shifts = [dict(r) for r in db.all(
-        "SELECT s.id, s.opened_at, s.closed_at, s.expected_cash, s.counted_cash, s.difference, u.full_name closed_by"
-        " FROM cash_shifts s LEFT JOIN users u ON u.id=s.closed_by WHERE s.org_id=? AND s.branch_id=?"
+        "SELECT s.id, s.opened_at, s.closed_at, s.expected_cash, s.counted_cash, s.difference, u.full_name closed_by,"
+        " r.name register_name FROM cash_shifts s LEFT JOIN users u ON u.id=s.closed_by"
+        " JOIN registers r ON r.org_id=s.org_id AND r.branch_id=s.branch_id AND r.id=s.register_id"
+        " WHERE s.org_id=? AND s.branch_id=?"
         " AND s.status='closed' AND s.opened_at>=? AND s.opened_at<? ORDER BY s.opened_at", (o, b, lo, hi))]
     collected = db.one("SELECT coalesce(-sum(amount),0) t FROM customer_ledger WHERE org_id=? AND kind='payment'"
                        " AND created_at>=? AND created_at<?", (o, lo, hi))["t"]

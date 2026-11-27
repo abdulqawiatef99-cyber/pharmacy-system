@@ -24,7 +24,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..safety.engine import Finding, SafetyEngine
-from . import cash
+from . import cash, registers
 
 NEAR_EXPIRY_DAYS = 30
 KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
@@ -990,8 +990,8 @@ class Sales:
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
         # every store sale belongs to a shift, card, transfer or credit too: a sale with no shift appears in no
         # shift report, so its card and credit amounts escaped the close (final review P2-2)
-        if not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
+        if not delivery:
+            cash.require_open_shift(self.db, ctx, preview["branch_id"])
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
         # U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded
@@ -1724,17 +1724,21 @@ class Sales:
             else:
                 primary = payments[0]
             rid, created_at = new_id(), _now()
-            shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
+            if refund_method == "cash" or any(p["method"] == "cash" and p["amount"] for p in payments):
+                acting_shift = cash.require_open_shift(self.db, ctx, s["branch_id"])
+            else:
+                acting_shift = self._acting_shift(ctx, s)
             electronic = {}
             for part in (primary, *(p for p in payments if p is not primary)):
                 pay_id = rid if part is primary else new_id()
                 method, channel, amount = part["method"], part["channel_id"], part["amount"]
                 part["id"] = pay_id
                 self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
-                                " created_by, created_at, channel_id, part_of, shift_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                " created_by, created_at, channel_id, part_of, acting_shift_id, register_recorded)"
+                                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                 (pay_id, ctx.org_id, sid, amount, rounding_back if part is primary else 0,
                                  method, reason.strip(), ctx.user_id, created_at, channel,
-                                 None if part is primary else rid, shift))
+                                 None if part is primary else rid, acting_shift, int(acting_shift is not None)))
                 if method == "credit" and amount:
                     self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                     " created_by) VALUES (?,?,?,?, 'return', ?, ?)",
@@ -1769,7 +1773,8 @@ class Sales:
                         f"مرتجع {_REFUND_WORD.get(refund_method, '')}{egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
-                        + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
+                        + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else "")
+                        + registers.alert_suffix(self.db, ctx, s["branch_id"]), "sale", sid)
         # Codex P1: the kept change paid back with it, shown to the cashier on its own (not goods value)
         result = {"return_id": rid, "refund": refund, "change_back": change_back, "refund_payments": payments}
         if _exchange:
@@ -2030,13 +2035,34 @@ class Sales:
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
             change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
+            acting_shift = self._acting_shift(ctx, s)
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
-                            " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
+                            " void_shift_id=?, void_register_recorded=?, version=version+1 WHERE id=?",
+                            (ctx.user_id, _now(), reason, acting_shift, int(acting_shift is not None), sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
-                        f"السبب: {reason.strip()}", "sale", sid)
+                        f"السبب: {reason.strip()}" + registers.alert_suffix(self.db, ctx, s["branch_id"]), "sale", sid)
         # Codex P1: the kept change paid back with the void, shown to the cashier on its own
         return {**self.get(ctx, sid), "change_back": change_back}
+
+    def _acting_shift(self, ctx: Context, sale) -> str | None:
+        """Attribute a void or non-cash refund to the acting shift, then the sale's still-open shift."""
+        current = cash.open_shift_id(self.db, ctx, sale["branch_id"])
+        if current:
+            return current
+        scope = (ctx.org_id, sale["branch_id"])
+        if sale["shift_id"]:
+            original = self.db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND id=? AND status='open'",
+                                   (*scope, sale["shift_id"]))
+            if original:
+                return original["id"]
+        # The existing time-window attribution covers MAIN. If only a secondary shift is open,
+        # record its ID explicitly so the event appears there without attributing it twice.
+        active = self.db.all("SELECT id, register_id FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'"
+                             " ORDER BY register_id LIMIT 2", scope)
+        if len(active) == 1 and active[0]["register_id"] != 1:
+            return active[0]["id"]
+        return None
 
     def kept_change(self, ctx: Context, sid: str) -> int:
         """The change of this sale left as the customer's credit and not yet given back (0 if none)."""

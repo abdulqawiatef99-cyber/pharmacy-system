@@ -26,22 +26,13 @@ def _local(utc_iso: str | None, time_format: str) -> str:
 
 
 def _voids_of(db: Database, s) -> list[dict]:
-    """The completed sales voided while the shift was open: the same two reads as the shift report's voided count
-    (its own sales voided before its close, and the same-day voids of an earlier shift's sales made while it was
-    open), so the list and the count always agree."""
-    from ..sales.service import _local_date, local_day_bounds
-    day0 = local_day_bounds(_local_date(s["opened_at"]))[0]
+    from ..sales.cash import shift_void_filters
+
     cols = ("SELECT x.id, x.sale_no, x.total, x.paid_cash, x.voided_at, x.void_reason, v.full_name voided_by_name,"
             " c.full_name sold_by_name FROM sales x LEFT JOIN users v ON v.id=x.voided_by"
             " LEFT JOIN users c ON c.id=x.created_by")
-    own = db.all(cols + " WHERE x.org_id=? AND x.shift_id=? AND x.status='voided' AND x.sale_no IS NOT NULL"
-                 " AND (? IS NULL OR x.voided_at<?)", (s["org_id"], s["id"], s["closed_at"], s["closed_at"]))
-    other = db.all(cols + " WHERE x.org_id=? AND x.branch_id=? AND x.status='voided' AND x.completed_at>=?"
-                   " AND x.completed_at<? AND x.sale_no IS NOT NULL AND (x.shift_id IS NULL OR x.shift_id<>?)"
-                   " AND x.voided_at>=? AND (? IS NULL OR x.voided_at<?)",
-                   (s["org_id"], s["branch_id"], day0, s["closed_at"] or "9999-12-31", s["id"], s["opened_at"],
-                    s["closed_at"], s["closed_at"]))
-    return sorted((dict(r) for r in [*own, *other]), key=lambda r: r["voided_at"] or "")
+    rows = [dict(r) for where, args in shift_void_filters(s) for r in db.all(f"{cols} WHERE {where}", args)]
+    return sorted(rows, key=lambda r: r["voided_at"] or "")
 
 
 def _cash_refunds_of(db: Database, s) -> list[dict]:
@@ -98,7 +89,7 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
         "   AND m.branch_id=? AND m.movement_type='sale' AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))"
         " ORDER BY n LIMIT 15", (ctx.org_id, r["branch_id"], r["branch_id"]))
     lines = [
-        f"ملخص شيفت {org}",
+        f"ملخص شيفت {org} — {r['register_name']}",
         f"من {_local(r['opened_at'], tf)} لـ {_local(r['closed_at'], tf)} — قفله {r.get('closed_by_name') or ''}",
         f"المبيعات: {_egp(r['sales_total'])} ج ({r['sales_count']} فاتورة)",
         f"نقدي: {_egp(cash_sales)} ج" + (f" (رجع منه {_egp(cash_back)} ج مرتجع وإلغاء)" if cash_back else "") + f" · بطاقة: {_egp(r['card_total'])} ج · تحويل: {_egp(r['transfer_total'])} ج",
@@ -140,4 +131,5 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     else:
         lines.append("مفيش أصناف خلصت من اللي بيتباع")
     return {"text": "\n".join(lines), "difference": diff, "out_of_stock": [x["n"] for x in out],
-            "voids": voids, "cash_refunds": refunds, "refund_payments": r["refund_payments"], "day": day, "day_date": the_day.isoformat()}
+            "voids": voids, "cash_refunds": refunds, "day": day, "day_date": the_day.isoformat(),
+            "register_name": r["register_name"], "refund_payments": r["refund_payments"]}
