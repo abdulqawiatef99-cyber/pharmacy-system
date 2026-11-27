@@ -74,7 +74,7 @@ def _row(it, key: str, status: str, text: str, **extra) -> dict:
             "key": key, "status": status, "text": text, **extra}
 
 
-def item_health(db: Database, ctx: Context) -> dict:
+def item_health(db: Database, ctx: Context, *, key: str | None = None, limit: int | None = None) -> dict:
     ctx.require("items.price")              # owner and manager by default (U3-1)
     org = ctx.org_id
     costs = ctx.can("costs.read")
@@ -146,7 +146,15 @@ def item_health(db: Database, ctx: Context) -> dict:
     counts: dict[str, int] = {}
     for r in out:
         counts[r["key"]] = counts.get(r["key"], 0) + 1
-    return {"rows": out, "counts": counts, "items_checked": len(items), "costs": costs}
+    # QA-29: the screen gets the first `limit` rows (of one kind with `key`) and the full counts, not every row
+    total = len(out)
+    if key:
+        out = [r for r in out if r["key"] == key]
+    shown = len(out)
+    if limit is not None:
+        out = out[:limit]
+    return {"rows": out, "counts": counts, "total": total, "matching": shown, "items_checked": len(items),
+            "costs": costs}
 
 
 def open_credit_sales(db: Database, ctx: Context, item_id: str) -> int:

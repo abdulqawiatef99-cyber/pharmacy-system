@@ -1333,7 +1333,7 @@ async function viewPurchases() {
     finally { select.disabled = false; }
   });
   if (entrySetting) bindPurchaseEntrySettings();
-  let rows = list, sub = "";
+  let rows = list, sub = "", totals = null, capped = false;   // QA-29: totals of every match come from the server
   const puSorted = (xs) => {
     const k = PU_SORT.k; if (!k) return xs;
     const val = (i) => (k === "total" ? amt(i) ?? 0 : k === "serial_no" ? i.serial_no ?? 0 : String(i[k] ?? ""));
@@ -1361,23 +1361,30 @@ async function viewPurchases() {
         <td><span class="badge ${STATUS[i.status][1]}">${STATUS[i.status][0]}</span></td>
         <td>${esc(i.source_type)}</td></tr>`).join("") ||
         `<tr><td colspan="9" class="muted">لا توجد فواتير بعد</td></tr>`}</tbody>
-    </table></div>${ok.length ? `<p><b>المعتمد: ${ok.length} فاتورة — ${money(ok.reduce((a, i) => a + (amt(i) || 0), 0))} ج</b></p>` : ""}`;
+    </table></div>${(() => {
+      // QA-29: with no text search the line counts every invoice of the period (server), never only the rows shown
+      const all = totals && !purchaseQuery(), n = all ? totals.approved_count : ok.length;
+      const sum = all ? totals.approved_total : ok.reduce((a, i) => a + (amt(i) || 0), 0);
+      return (n ? `<p><b>المعتمد: ${n} فاتورة — ${money(sum)} ج</b></p>` : "")
+        + (capped ? `<p class="t-warn">⚠ معروض أول ${rows.length} فاتورة من ${totals.count}${all ? "، والإجمالي فوق محسوب على كل الفواتير" : "، والبحث بيدوّر في المعروض بس: ضيّق المدة"}.</p>` : "");
+    })()}`;
     $("#puBox").querySelectorAll("[data-sk]").forEach((h) => h.addEventListener("click", () => {
       PU_SORT = { k: h.dataset.sk, desc: PU_SORT.k === h.dataset.sk ? !PU_SORT.desc : true }; drawList();
     }));
     // U4: E-Stock's purchases of the same period under ours; only with all / approved shown, no text search, and a
     // full (uncapped) program list is added up
     if (asked && !purchaseQuery() && (!asked.st || asked.st === "approved")) {
-      estockPurchasesBelow($("#puBox"), asked.f, asked.t, asked.sup, rows.length >= 5000 ? null : ok.reduce((a, i) => a + (amt(i) || 0), 0)).catch(() => {});
+      estockPurchasesBelow($("#puBox"), asked.f, asked.t, asked.sup, totals ? totals.approved_total : ok.reduce((a, i) => a + (amt(i) || 0), 0)).catch(() => {});
     } else { ES_PSEQ++; document.querySelector("#esPur")?.remove(); }
   };
   let asked = null, lseq = 0;                          // the request the list answers (not the live controls)
   const loadList = async (f, t) => {
     const qs = new URLSearchParams({ from: f, to: t }); if ($("#puSup").value) qs.set("supplier", $("#puSup").value); if ($("#puSt").value) qs.set("status", $("#puSt").value);
     const a = { f, t, sup: $("#puSup").value, st: $("#puSt").value }, n = ++lseq;
+    qs.set("totals", "1");
     const got = await api(`/api/purchases?${qs}`);
     if (n !== lseq) return;                            // a late answer never replaces a newer choice (review P2)
-    rows = got; sub = rangeText(f, t); asked = a; drawList();
+    rows = got.rows; totals = got.totals; capped = got.capped; sub = rangeText(f, t); asked = a; drawList();
   };
   const getRange = wireRange("puRange", (f, t) => loadList(f, t).catch((e) => toast(e.message, true)));
   ["#puSup", "#puSt"].forEach((id) => $(id).addEventListener("change", () => loadList(...getRange()).catch((e) => toast(e.message, true))));
@@ -2519,7 +2526,9 @@ async function viewItems() {
       <div class="row">${canW() ? `<a class="btn" href="#/items/new">+ صنف جديد</a><a class="btn secondary" href="#/categories">الأقسام</a>` : ""}${ME.permissions.includes("settings.manage") ? `<a class="btn secondary" href="#/dispensing-notes">ملاحظات الصرف</a>` : ""}${ME.permissions.includes("items.price") ? `<a class="btn secondary" href="#/item-health">فحص بيانات الأصناف</a>` : ""}
       ${ME.role === "owner" ? `<a class="btn secondary" href="#/pack-review">${PACK_REVIEW_TITLE}</a>` : ""}
       <a class="btn secondary" href="#/groups">المجموعات العلاجية (البدائل)</a>
-      <a href="/api/export/items.xlsx">تصدير Excel</a></div></div>
+      <details class="cols"><summary class="btn secondary">المزيد ▾</summary><div class="menu">
+        <a class="btn secondary" href="/api/export/items.xlsx">تصدير كل الأصناف Excel</a>
+        <span class="muted small">بياخد وقت مع كتالوج كبير (ممكن دقيقة)، والبيع شغال عادي في الوقت ده.</span></div></details></div></div>
     <div class="row"><label class="f grow">بحث بالاسم (عربي أو إنجليزي) أو الكود أو الباركود
       <input id="q" lang="en" placeholder="مثال: panadol أو بنادول أو asp%cid أو 622..." autocomplete="off"></label>
       <label class="f">القسم <select id="qCat"><option value="">كل الأقسام</option><option value="none">بدون قسم</option>
@@ -4929,22 +4938,28 @@ async function viewItemHealth() {
   app.innerHTML = `<section class="panel"><div class="row between"><h1>فحص بيانات الأصناف</h1><button class="btn secondary" id="ihRe">افحص تاني</button></div>
     <p class="muted">البرنامج بيدوّر على الأخطاء في بيانات الأصناف ومبيغيّرش حاجة لوحده. «صحّح» بيفتح بطاقة الصنف وانت اللي بتقرر.</p>
     <div id="ihChips" class="row"></div><div id="ihOut" class="muted">بيفحص…</div></section>`;
-  let only = "";
+  let only = "", limit = 200, seq = 0;  // QA-29: the first 200 rows (of the chosen kind) and the full counts
   const load = async () => {
-    const r = await api("/api/reports/item-health");
+    const n = ++seq, kind = only;
+    const r = await api(`/api/reports/item-health?${new URLSearchParams({ limit: String(limit), ...(kind ? { key: kind } : {}) })}`);
+    if (n !== seq || !$("#ihOut")) return;              // a late answer never replaces a newer choice (Codex P2)
     const draw = () => {
-      $("#ihChips").innerHTML = `<button class="btn small ${only ? "secondary" : ""}" data-k="">الكل (${r.rows.length})</button>`
+      $("#ihChips").innerHTML = `<button class="btn small ${only ? "secondary" : ""}" data-k="">الكل (${r.total ?? r.rows.length})</button>`
         + Object.entries(r.counts).map(([k, n]) => `<button class="btn small ${only === k ? "" : "secondary"}" data-k="${esc(k)}">${esc(IH_KEYS[k] || k)} (${n})</button>`).join("");
-      const rows = r.rows.filter((x) => !only || x.key === only);
+      const rows = r.rows.filter((x) => !kind || x.key === kind), all = r.matching ?? rows.length;
       $("#ihOut").className = "";
       $("#ihOut").innerHTML = rows.length ? `<table><thead><tr><th>الصنف</th><th>المشكلة</th><th>التفاصيل</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td>${esc(x.name)}${x.code ? ` <span class="muted small">${esc(x.code)}</span>` : ""}</td>
           <td><span class="badge ${x.status === "bad" ? "b-err" : "b-warn"}">${esc(IH_KEYS[x.key] || x.key)}</span></td>
           <td>${esc(x.text)}${x.open_credit ? `<div class="t-warn small">⚠ ${x.open_credit} فاتورة آجل لعملاء عليهم رصيد اتباع فيها بالعبوة دي</div>` : ""}</td>
           <td class="row"><a class="btn small" href="#/items/${esc(x.item_id)}/edit">صحّح</a>${x.key === "pack_vs_name" && ME.permissions.includes("inventory.adjust") && ME.permissions.includes("items.write")
-            ? `<button class="btn small secondary" data-fix="${esc(x.item_id)}" data-s="${esc((x.suggest || [])[0] || "")}">صحّح العبوة</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+            ? `<button class="btn small secondary" data-fix="${esc(x.item_id)}" data-s="${esc((x.suggest || [])[0] || "")}">صحّح العبوة</button>` : ""}</td></tr>`).join("")}</tbody></table>
+        ${all > rows.length ? `<p><button class="btn secondary" id="ihMore">اعرض أكتر (${rows.length} من ${all})</button></p>` : ""}`
         : `<p class="t-ok">مفيش مشاكل${only ? " من النوع ده" : ""} في ${r.items_checked} صنف.</p>`;
-      document.querySelectorAll("#ihChips [data-k]").forEach((b) => b.addEventListener("click", () => { only = b.dataset.k; draw(); }));
+      document.querySelectorAll("#ihChips [data-k]").forEach((b) => b.addEventListener("click", () => {
+        only = b.dataset.k; limit = 200; load().catch((er) => toast(er.message, true));
+      }));
+      $("#ihMore")?.addEventListener("click", () => { limit += 200; load().catch((er) => toast(er.message, true)); });
       document.querySelectorAll("#ihOut [data-fix]").forEach((b) => b.addEventListener("click", async () => {
         if (await packFix(b.dataset.fix, b.dataset.s)) load().catch((er) => toast(er.message, true));
       }));
@@ -5245,16 +5260,24 @@ async function viewProcurement() {
   $("#prForm").addEventListener("submit", (e) => { e.preventDefault(); load().catch((er) => toast(er.message, true)); });
   load().catch((er) => toast(er.message, true));
   drawTrack().catch(() => { $("#prTrack").textContent = "—"; });
-  api("/api/procurement/health").then((h) => {
+  // QA-29: the first 200 of each list and the full counts; «اعرض أكتر» asks for 200 more
+  let hLimit = 200;
+  const more = (shown, all) => (all > shown ? ` <button class="btn small secondary" data-hmore>اعرض أكتر (${shown} من ${all})</button>` : "");
+  const loadHealth = () => api(`/api/procurement/health?limit=${hLimit}`).then((h) => {
+    const c = h.counts || {};
     $("#prHealth").className = "";
     $("#prHealth").innerHTML = `
-      <h3>قرب انتهاء الصلاحية (${h.near_expiry.length})</h3>
+      <h3>قرب انتهاء الصلاحية (${c.near_expiry ?? h.near_expiry.length})${more(h.near_expiry.length, c.near_expiry)}</h3>
       <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>التشغيلة</th><th>الصلاحية</th><th>الكمية</th><th>المتوقع بيعه</th><th>معرض للانتهاء</th><th>الإجراء</th></tr></thead>
       <tbody>${h.near_expiry.map((e) => `<tr class="${e.units_at_risk ? "has-err" : ""}"><td>${esc(e.label)}</td><td>${esc(e.batch_no)}</td><td>${esc(e.expiry_date)}</td>
         <td>${e.qty}</td><td>${e.expected_to_sell}</td><td>${e.units_at_risk}</td><td>${esc(e.action)}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">لا يوجد</td></tr>`}</tbody></table></div>
-      <h3>راكد (${h.slow_movers.length})</h3><p>${h.slow_movers.map((s) => `${esc(s.label)} (${s.on_hand})`).join("، ") || "لا يوجد"}</p>
-      <h3>مخزون زائد (${h.overstock.length})</h3><p>${h.overstock.map((s) => `${esc(s.label)} (${s.days_of_cover} يوم)`).join("، ") || "لا يوجد"}</p>`;
-  }).catch(() => {});
+      <h3>راكد (${c.slow_movers ?? h.slow_movers.length})${more(h.slow_movers.length, c.slow_movers)}</h3><p>${h.slow_movers.map((x) => `${esc(x.label)} (${x.on_hand})`).join("، ") || "لا يوجد"}</p>
+      <h3>مخزون زائد (${c.overstock ?? h.overstock.length})${more(h.overstock.length, c.overstock)}</h3><p>${h.overstock.map((x) => `${esc(x.label)} (${x.days_of_cover} يوم)`).join("، ") || "لا يوجد"}</p>`;
+    $("#prHealth").querySelectorAll("[data-hmore]").forEach((btn) => btn.addEventListener("click", () => {
+      hLimit += 200; btn.disabled = true; loadHealth().catch((er) => toast(er.message, true));
+    }));
+  });
+  loadHealth().catch(() => {});
   $("#consForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
